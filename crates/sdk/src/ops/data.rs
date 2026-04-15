@@ -803,7 +803,7 @@ impl LedgerClient {
     ///
     /// # Returns
     ///
-    /// Returns a [`HistoricalRead`] containing the value and any requested proofs.
+    /// Returns a [`crate::HistoricalRead`] containing the value and any requested proofs.
     ///
     /// # Errors
     ///
@@ -905,7 +905,7 @@ impl LedgerClient {
     ///
     /// # Returns
     ///
-    /// Returns a [`Block`] containing the header and all transactions.
+    /// Returns a [`crate::Block`] containing the header and all transactions.
     ///
     /// # Errors
     ///
@@ -1059,7 +1059,7 @@ impl LedgerClient {
     ///
     /// # Returns
     ///
-    /// Returns a [`ChainTip`] with the current block height, block hash, and state root.
+    /// Returns a [`crate::ChainTip`] with the current block height, block hash, and state root.
     ///
     /// # Errors
     ///

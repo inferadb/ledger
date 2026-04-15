@@ -11,3 +11,6 @@ protobuf = "29"
 
 # Buf CLI for proto linting and breaking change detection
 buf = "1"
+
+# Shell script linter (used by `just validate` Phase 10)
+shellcheck = "0.10"

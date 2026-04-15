@@ -269,7 +269,7 @@ impl Transaction {
 
 /// A complete block including its header and all transactions.
 ///
-/// Returned by [`LedgerClient::get_block`] and [`LedgerClient::get_block_range`].
+/// Returned by [`crate::LedgerClient::get_block`] and [`crate::LedgerClient::get_block_range`].
 /// Contains the full transaction set committed in a single Raft round.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -292,7 +292,7 @@ impl Block {
 
 /// Result of a historical read at a specific block height.
 ///
-/// Returned by [`LedgerClient::historical_read`]. Contains the value at the
+/// Returned by [`crate::LedgerClient::historical_read`]. Contains the value at the
 /// requested height, and optionally Merkle and chain proofs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -311,7 +311,7 @@ pub struct HistoricalRead {
 
 /// Current chain tip information for a vault.
 ///
-/// Returned by [`LedgerClient::get_tip`]. Contains the latest committed block
+/// Returned by [`crate::LedgerClient::get_tip`]. Contains the latest committed block
 /// height and its cryptographic commitments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

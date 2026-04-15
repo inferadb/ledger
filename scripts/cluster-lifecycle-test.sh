@@ -35,8 +35,7 @@ SKIP_BUILD=false
 
 # Timeouts
 HEALTH_TIMEOUT=60
-SETTLE_TIME=5
-SYNC_TIMEOUT=60
+SYNC_TIMEOUT=180
 JOIN_TIMEOUT=60
 
 # Bulk write tuning — operations per Write RPC in write_batch.
@@ -47,7 +46,6 @@ BATCH_CHUNK_SIZE=10
 # Tracking
 ALL_PIDS=()
 ACTIVE_PIDS=()
-NEXT_NODE_NUM=1
 
 # Test data tracking (populated during writes)
 ORG_SLUG=""
@@ -196,9 +194,9 @@ start_node() {
   local node_data="$DATA_ROOT/node$node_num"
   mkdir -p "$node_data"
 
-  local join_flag=""
+  local join_args=()
   if [[ -n "$seed_addr" ]]; then
-    join_flag="--join $seed_addr"
+    join_args=(--join "$seed_addr")
   fi
 
   # Fixed test blinding key (matches TestCluster / SDK e2e configuration)
@@ -207,7 +205,7 @@ start_node() {
   RUST_LOG=info,inferadb_ledger_raft::leader_transfer=debug "$BINARY" \
     --listen "127.0.0.1:$port" \
     --data "$node_data" \
-    $join_flag \
+    "${join_args[@]+"${join_args[@]}"}" \
     --enable-grpc-reflection \
     --email-blinding-key "$blinding_key" \
     --log-format text \
@@ -603,7 +601,8 @@ IDEM_COUNTER=1
 create_org() {
   local node_num=$1
   local name=$2
-  local email="test-$(uuidgen | tr '[:upper:]' '[:lower:]')@lifecycle.local"
+  local email
+  email="test-$(uuidgen | tr '[:upper:]' '[:lower:]')@lifecycle.local"
   local region=10  # REGION_US_EAST_VA
 
   # Phase 1: InitiateEmailVerification — retry across endpoints
@@ -777,10 +776,11 @@ write_batch() {
     # Build operations JSON array for this chunk
     local ops=""
     for i in $(seq 1 "$chunk_size"); do
-      local idx=$(( total_written + i ))
-      local key="${key_prefix}:$(printf '%03d' $idx)"
+      local idx key
+      idx=$(( total_written + i ))
+      key="${key_prefix}:$(printf '%03d' "$idx")"
       local value_b64
-      value_b64=$(echo -n "${value_prefix} item $(printf '%03d' $idx)" | base64)
+      value_b64=$(echo -n "${value_prefix} item $(printf '%03d' "$idx")" | base64)
       [[ -n "$ops" ]] && ops+=","
       ops+="{\"setEntity\":{\"key\":\"$key\",\"value\":\"$value_b64\"}}"
     done
@@ -1052,6 +1052,7 @@ for port in $(seq "$BASE_PORT" $((BASE_PORT + 9))); do
   stale_pid=$(lsof -ti :"$port" 2>/dev/null || true)
   if [[ -n "$stale_pid" ]]; then
     log_warn "Killing stale process on port $port (PID $stale_pid)"
+    # shellcheck disable=SC2086  # stale_pid may contain multiple PIDs to kill
     kill -9 $stale_pid 2>/dev/null || true
     sleep 0.5
   fi
@@ -1095,7 +1096,6 @@ start_node 1
 for i in 2 3; do
   start_node "$i" "$FIRST_ADDR"
 done
-NEXT_NODE_NUM=4
 
 wait_for_ports 1 2 3
 

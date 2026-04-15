@@ -6,3 +6,4 @@ build_rs_cov.profraw
 fuzz/artifacts/
 fuzz/corpus/
 fuzz/target/
+.claude/scheduled_tasks.lock

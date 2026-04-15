@@ -60,9 +60,37 @@ test-stress-ff:
 test-external:
     cargo +{{rust}} test -p inferadb-ledger-server --test external -- --test-threads=1 --nocapture
 
-# Start a local cluster and run external tests against it.
+# Start a local cluster and run server external tests against it.
 test-external-cluster:
-    ./scripts/run-server-integration-tests.sh
+    ./scripts/run-integration-tests.sh server
+
+# Start a local cluster and run SDK e2e tests against it.
+test-sdk-cluster:
+    ./scripts/run-integration-tests.sh sdk
+
+# Stress: smoke-level throughput tests (~1 min).
+stress-quick:
+    ./scripts/stress-quick.sh
+
+# Stress: throughput measurement against advisory targets.
+stress-throughput:
+    ./scripts/stress-throughput.sh
+
+# Stress: scale-correctness tests (state root parity, snapshot determinism, watch).
+stress-correctness:
+    ./scripts/stress-correctness.sh
+
+# End-to-end cluster lifecycle test (bootstrap, join, transfer, shutdown, rebuild).
+cluster-lifecycle:
+    ./scripts/cluster-lifecycle-test.sh
+
+# Binary-level crash recovery drill: SIGKILL a node mid-write, verify convergence.
+crash-recovery:
+    ./scripts/crash-recovery.sh
+
+# gRPC channel caching regression test (TIME_WAIT accumulation).
+check-port-consumption:
+    ./scripts/check-port-consumption.sh
 
 # Run crash recovery tests — dual-slot commit protocol verification in the store crate.
 test-recovery:
