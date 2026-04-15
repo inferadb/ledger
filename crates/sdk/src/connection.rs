@@ -90,9 +90,15 @@ impl ConnectionPool {
             .circuit_breaker()
             .map(|cb_config| crate::circuit_breaker::CircuitBreaker::new(cb_config.clone()));
 
-        let region_cache = config
-            .preferred_region()
-            .map(|r| Arc::new(crate::region_resolver::RegionLeaderCache::new(r)));
+        let region_cache = config.preferred_region().map(|r| {
+            let cache = Arc::new(crate::region_resolver::RegionLeaderCache::with_ttls(
+                r,
+                config.region_leader_soft_ttl(),
+                config.region_leader_hard_ttl(),
+            ));
+            cache.set_metrics(Arc::clone(config.metrics()));
+            cache
+        });
 
         Self {
             channel: Arc::new(RwLock::new(None)),
@@ -114,9 +120,15 @@ impl ConnectionPool {
             .circuit_breaker()
             .map(|cb_config| crate::circuit_breaker::CircuitBreaker::new(cb_config.clone()));
 
-        let region_cache = config
-            .preferred_region()
-            .map(|r| Arc::new(crate::region_resolver::RegionLeaderCache::new(r)));
+        let region_cache = config.preferred_region().map(|r| {
+            let cache = Arc::new(crate::region_resolver::RegionLeaderCache::with_ttls(
+                r,
+                config.region_leader_soft_ttl(),
+                config.region_leader_hard_ttl(),
+            ));
+            cache.set_metrics(Arc::clone(config.metrics()));
+            cache
+        });
 
         Self {
             channel: Arc::new(RwLock::new(None)),
@@ -302,20 +314,34 @@ impl ConnectionPool {
     /// server can handle routing via forwarding.
     async fn get_region_channel(
         &self,
-        cache: &crate::region_resolver::RegionLeaderCache,
+        cache: &Arc<crate::region_resolver::RegionLeaderCache>,
     ) -> Result<Channel> {
-        // Check if cached leader is still valid
-        if cache.cached_endpoint().is_some() {
-            // Cache valid — return existing channel or reconnect
+        let region_label = cache.region().to_string();
+        let metrics = self.config.metrics();
+        // Check if cached leader is still usable (fresh or stale-but-usable).
+        if let Some((cached, freshness)) = cache.cached_endpoint_with_freshness() {
+            metrics.leader_cache_hit(&region_label);
+            // On stale-but-usable, opportunistically trigger a background
+            // refresh — but only if the gateway channel is already warm.
+            // If it isn't, skip the refresh; the next full resolve will
+            // reinitialize it.
+            if freshness == crate::region_resolver::CacheFreshness::StaleButUsable
+                && let Some(gateway) = self.gateway_channel.read().clone()
+            {
+                metrics.region_resolve_stale_served(&region_label);
+                cache.spawn_background_refresh(gateway);
+            }
             let existing = self.channel.read().clone();
             if let Some(channel) = existing {
                 return Ok(channel);
             }
-            // Cache valid but channel dropped — resolve again to get endpoint
-            // (cached_endpoint() was Some so resolve should populate quickly)
+            let channel = self.connect_to_endpoint(cached.as_ref()).await?;
+            *self.channel.write() = Some(channel.clone());
+            return Ok(channel);
         }
 
         // Cache miss/expired — resolve via gateway
+        metrics.leader_cache_miss(&region_label);
         let gateway = self.get_or_create_gateway_channel().await?;
         match cache.resolve(&gateway).await {
             Ok(endpoint) => {
@@ -372,6 +398,48 @@ impl ConnectionPool {
         if let Some(ref cache) = self.region_cache {
             cache.invalidate();
             *self.channel.write() = None;
+        }
+    }
+
+    /// On a `NotLeader`-like error, applies the server-provided leader hint
+    /// (if any) to the regional cache. Falls back to invalidating the cache
+    /// when the server provided no hint.
+    ///
+    /// Called by the retry loop before attempting a retry so the next attempt
+    /// targets the newly-known leader without a separate resolve round-trip.
+    pub fn apply_region_leader_hint_or_invalidate(&self, err: &SdkError) {
+        let Some(ref cache) = self.region_cache else {
+            return;
+        };
+        let hint = err.server_error_details().and_then(|d| d.leader_hint());
+        match hint {
+            Some(ref h) if h.leader_endpoint.is_some() => {
+                cache.apply_hint(h);
+                *self.channel.write() = None;
+            },
+            _ => {
+                cache.invalidate();
+                *self.channel.write() = None;
+            },
+        }
+    }
+
+    /// Returns the currently cached region leader endpoint, if any.
+    #[cfg(test)]
+    pub(crate) fn region_cached_endpoint(&self) -> Option<Arc<str>> {
+        self.region_cache.as_ref().and_then(|c| c.cached_endpoint())
+    }
+
+    /// Seeds the region leader cache with an endpoint for testing purposes.
+    #[cfg(test)]
+    pub(crate) fn seed_region_cache_for_test(&self, endpoint: &str) {
+        if let Some(ref cache) = self.region_cache {
+            let hint = crate::error::LeaderHint {
+                leader_id: Some(1),
+                leader_endpoint: Some(endpoint.to_owned()),
+                term: Some(1),
+            };
+            cache.apply_hint(&hint);
         }
     }
 
@@ -555,6 +623,19 @@ mod tests {
             .compression(true)
             .build()
             .expect("valid test config with compression")
+    }
+
+    fn test_config_with_region(region: inferadb_ledger_types::Region) -> ClientConfig {
+        ClientConfig::builder()
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
+            .client_id("test-client")
+            .preferred_region(region)
+            .build()
+            .expect("valid test config with region")
+    }
+
+    fn test_config_without_region() -> ClientConfig {
+        test_config()
     }
 
     fn test_config_with_custom_timeouts() -> ClientConfig {
@@ -796,6 +877,93 @@ mod tests {
         pool.reset();
         pool.reset();
         assert!(pool.channel.read().is_none());
+    }
+
+    #[test]
+    fn apply_region_leader_hint_or_invalidate_applies_hint_when_present() {
+        use inferadb_ledger_types::Region;
+        use tonic::Code;
+
+        use crate::error::ServerErrorDetails;
+
+        // Construct a ConnectionPool with region_cache enabled.
+        let config = test_config_with_region(Region::US_EAST_VA);
+        let pool = ConnectionPool::new(config);
+        assert!(pool.region_cached_endpoint().is_none(), "cache starts empty");
+
+        // Build an SdkError with leader hint error_details.
+        let details = ServerErrorDetails {
+            error_code: "2000".into(),
+            is_retryable: true,
+            retry_after_ms: None,
+            context: std::collections::HashMap::from([
+                ("leader_id".to_owned(), "42".to_owned()),
+                ("leader_endpoint".to_owned(), "http://10.0.2.5:5000".to_owned()),
+                ("leader_term".to_owned(), "7".to_owned()),
+            ]),
+            suggested_action: None,
+        };
+        let err = SdkError::Rpc {
+            code: Code::Unavailable,
+            message: "not leader".into(),
+            request_id: None,
+            trace_id: None,
+            error_details: Some(Box::new(details)),
+        };
+
+        pool.apply_region_leader_hint_or_invalidate(&err);
+
+        assert_eq!(
+            pool.region_cached_endpoint().as_deref(),
+            Some("http://10.0.2.5:5000"),
+            "hint should have been applied"
+        );
+    }
+
+    #[test]
+    fn apply_region_leader_hint_or_invalidate_falls_back_to_invalidate() {
+        use inferadb_ledger_types::Region;
+        use tonic::Code;
+
+        let config = test_config_with_region(Region::US_EAST_VA);
+        let pool = ConnectionPool::new(config);
+
+        // Seed cache directly.
+        pool.seed_region_cache_for_test("http://old:5000");
+        assert_eq!(pool.region_cached_endpoint().as_deref(), Some("http://old:5000"),);
+
+        // SdkError without hint (error_details = None).
+        let err = SdkError::Rpc {
+            code: Code::Unavailable,
+            message: "no hint".into(),
+            request_id: None,
+            trace_id: None,
+            error_details: None,
+        };
+
+        pool.apply_region_leader_hint_or_invalidate(&err);
+
+        assert!(pool.region_cached_endpoint().is_none(), "cache should have been invalidated");
+    }
+
+    #[test]
+    fn apply_region_leader_hint_or_invalidate_noop_when_no_region_cache() {
+        use tonic::Code;
+
+        // Pool without a preferred region has region_cache = None.
+        let config = test_config_without_region();
+        let pool = ConnectionPool::new(config);
+
+        let err = SdkError::Rpc {
+            code: Code::Unavailable,
+            message: "x".into(),
+            request_id: None,
+            trace_id: None,
+            error_details: None,
+        };
+
+        // Must not panic.
+        pool.apply_region_leader_hint_or_invalidate(&err);
     }
 
     #[test]

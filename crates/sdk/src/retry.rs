@@ -178,7 +178,7 @@ where
                 if let SdkError::Rpc { code: tonic::Code::Unavailable, .. } = &err
                     && let Some(p) = pool
                 {
-                    p.invalidate_region_leader();
+                    p.apply_region_leader_hint_or_invalidate(&err);
                 }
 
                 // Record this attempt in the history

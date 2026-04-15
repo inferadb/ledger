@@ -1,1 +1,1 @@
-// Tests for WAL checkpoint functionality
+//! Tests for WAL checkpoint functionality.

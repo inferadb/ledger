@@ -264,6 +264,39 @@ ledger_determinism_bug_total > 0
 | ----------------------------- | ------- | ----------------------------- | ---------------- |
 | `ledger_quota_exceeded_total` | Counter | `organization_id`, `resource` | Quota violations |
 
+## SDK Region Leader Cache
+
+Metrics emitted by the SDK's regional leader cache, which routes requests
+directly to the regional Raft leader to avoid gateway-side forwarding. The
+cache implements stale-while-revalidate with soft/hard TTLs (30s/120s by
+default) and single-flight coalescing for concurrent miss resolutions.
+
+| Metric                                                   | Type    | Labels   | Description                                                                                                                    |
+| -------------------------------------------------------- | ------- | -------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `ledger_sdk_leader_cache_hits_total`                     | Counter | `region` | Region-leader lookups that returned a fresh or stale-but-usable cached entry without triggering a resolve.                     |
+| `ledger_sdk_leader_cache_misses_total`                   | Counter | `region` | Lookups where the cache was empty or past `hard_ttl`, forcing a `ResolveRegionLeader` RPC before the request could proceed.    |
+| `ledger_sdk_leader_cache_flaps_total`                    | Counter | `region` | Resolves that returned a different leader endpoint than the previously cached one — indicates a leader change.                 |
+| `ledger_sdk_region_resolve_singleflight_coalesced_total` | Counter | `region` | Concurrent resolvers that joined an in-flight resolve instead of launching their own RPC (thundering-herd defense).            |
+| `ledger_sdk_region_resolve_stale_served_total`           | Counter | `region` | Stale-but-usable entries served to a caller while a background refresh was kicked off.                                         |
+
+**Labels:**
+
+- `region`: Region identifier the cache entry belongs to
+
+### Key Indicators
+
+```promql
+# Cache hit ratio (target: > 0.95 in steady state)
+rate(ledger_sdk_leader_cache_hits_total[5m]) /
+(rate(ledger_sdk_leader_cache_hits_total[5m]) + rate(ledger_sdk_leader_cache_misses_total[5m]))
+
+# Leader flap rate (any sustained non-zero rate is actionable)
+rate(ledger_sdk_leader_cache_flaps_total[5m])
+```
+
+See the [leader cache diagnosis runbook](runbooks/leader-cache-diagnosis.md)
+for symptom-to-cause mapping.
+
 ## Alert Recommendations
 
 ### Critical (Page)

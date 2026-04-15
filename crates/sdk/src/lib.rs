@@ -93,7 +93,7 @@ pub use config::{
 };
 pub use connection::ConnectionPool;
 pub use discovery::{DiscoveryResult, DiscoveryService, PeerInfo};
-pub use error::{Result, SdkError};
+pub use error::{LeaderHint, Result, SdkError, ServerErrorDetails};
 // Re-export commonly used types from inferadb-ledger-types
 pub use inferadb_ledger_types::{
     AppId, AppSlug, ClientAssertionId, InviteSlug, OrganizationId, OrganizationSlug, Region,

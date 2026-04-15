@@ -127,6 +127,53 @@ pub struct ServerErrorDetails {
     pub suggested_action: Option<String>,
 }
 
+/// A hint about the current Raft leader for a region, extracted from server
+/// `ErrorDetails` on a `NotLeader` response.
+///
+/// Any field may be `None` if the server did not know (or did not include) it.
+/// Returned by [`ServerErrorDetails::leader_hint`].
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_sdk::{LeaderHint, SdkError};
+/// fn redirect_from_error(err: &SdkError) -> Option<LeaderHint> {
+///     err.server_error_details().and_then(|d| d.leader_hint())
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaderHint {
+    /// Leader node ID if known.
+    pub leader_id: Option<u64>,
+    /// Leader endpoint URI if known (e.g. `"http://10.0.2.5:5000"`).
+    pub leader_endpoint: Option<String>,
+    /// Raft term the leader was last observed in, if known.
+    pub term: Option<u64>,
+}
+
+impl ServerErrorDetails {
+    /// Extracts a leader hint from the `context` map if any of the well-known
+    /// keys (`leader_id`, `leader_endpoint`, `leader_term`) are present and
+    /// parseable.
+    ///
+    /// Empty-string endpoints are treated as absent to prevent dialing an
+    /// empty URI.
+    ///
+    /// Returns `None` when no hint fields are present or parseable.
+    #[must_use]
+    pub fn leader_hint(&self) -> Option<LeaderHint> {
+        let leader_id = self.context.get("leader_id").and_then(|s| s.parse().ok());
+        let leader_endpoint =
+            self.context.get("leader_endpoint").filter(|s| !s.is_empty()).cloned();
+        let term = self.context.get("leader_term").and_then(|s| s.parse().ok());
+
+        if leader_id.is_none() && leader_endpoint.is_none() && term.is_none() {
+            return None;
+        }
+        Some(LeaderHint { leader_id, leader_endpoint, term })
+    }
+}
+
 /// SDK error types with context-rich error messages.
 ///
 /// Each variant carries diagnostic context (correlation IDs, retry history)
@@ -1362,5 +1409,87 @@ mod tests {
                 "{label}: expected is_cas_conflict={expected}"
             );
         }
+    }
+
+    #[test]
+    fn server_error_details_leader_hint_all_fields() {
+        let details = ServerErrorDetails {
+            error_code: "2000".into(),
+            is_retryable: true,
+            retry_after_ms: None,
+            context: std::collections::HashMap::from([
+                ("leader_id".to_owned(), "42".to_owned()),
+                ("leader_endpoint".to_owned(), "http://10.0.2.5:5000".to_owned()),
+                ("leader_term".to_owned(), "7".to_owned()),
+            ]),
+            suggested_action: None,
+        };
+        let hint = details.leader_hint().unwrap();
+        assert_eq!(hint.leader_id, Some(42));
+        assert_eq!(hint.leader_endpoint.as_deref(), Some("http://10.0.2.5:5000"));
+        assert_eq!(hint.term, Some(7));
+    }
+
+    #[test]
+    fn server_error_details_leader_hint_partial() {
+        let details = ServerErrorDetails {
+            error_code: "2000".into(),
+            is_retryable: true,
+            retry_after_ms: None,
+            context: std::collections::HashMap::from([("leader_id".to_owned(), "42".to_owned())]),
+            suggested_action: None,
+        };
+        let hint = details.leader_hint().unwrap();
+        assert_eq!(hint.leader_id, Some(42));
+        assert_eq!(hint.leader_endpoint, None);
+        assert_eq!(hint.term, None);
+    }
+
+    #[test]
+    fn server_error_details_leader_hint_absent() {
+        let details = ServerErrorDetails {
+            error_code: "3204".into(),
+            is_retryable: false,
+            retry_after_ms: None,
+            context: std::collections::HashMap::new(),
+            suggested_action: None,
+        };
+        assert!(details.leader_hint().is_none());
+    }
+
+    #[test]
+    fn server_error_details_leader_hint_malformed_ids_ignored() {
+        let details = ServerErrorDetails {
+            error_code: "2000".into(),
+            is_retryable: true,
+            retry_after_ms: None,
+            context: std::collections::HashMap::from([(
+                "leader_id".to_owned(),
+                "not-a-number".to_owned(),
+            )]),
+            suggested_action: None,
+        };
+        // Returns None overall if all three fields are unparseable/absent.
+        assert!(details.leader_hint().is_none());
+    }
+
+    #[test]
+    fn server_error_details_leader_hint_empty_endpoint_treated_as_absent() {
+        // Server guards against emitting empty endpoints (per error_details.rs),
+        // but an adversarial/malformed response could still send one. Treat it
+        // as absent to avoid dialing an empty URI.
+        let details = ServerErrorDetails {
+            error_code: "2000".into(),
+            is_retryable: true,
+            retry_after_ms: None,
+            context: std::collections::HashMap::from([
+                ("leader_endpoint".to_owned(), String::new()),
+                ("leader_id".to_owned(), "42".to_owned()),
+            ]),
+            suggested_action: None,
+        };
+        let hint = details.leader_hint().unwrap();
+        assert_eq!(hint.leader_id, Some(42));
+        assert_eq!(hint.leader_endpoint, None); // empty string filtered to None
     }
 }

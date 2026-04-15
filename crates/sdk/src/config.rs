@@ -61,6 +61,18 @@ pub struct ClientConfig {
     /// SDK-side metrics collector.
     pub(crate) metrics: std::sync::Arc<dyn crate::metrics::SdkMetrics>,
 
+    /// Soft TTL for the region leader cache: past this threshold the cache
+    /// returns stale entries while triggering a background refresh.
+    ///
+    /// Default: 30 seconds. Must be less than or equal to `region_leader_hard_ttl`.
+    pub(crate) region_leader_soft_ttl: Duration,
+
+    /// Hard TTL for the region leader cache: past this threshold the cache
+    /// returns None and the next request blocks on a fresh resolve.
+    ///
+    /// Default: 120 seconds. Must be greater than or equal to `region_leader_soft_ttl`.
+    pub(crate) region_leader_hard_ttl: Duration,
+
     /// Preferred data residency region for this client.
     ///
     /// When set, the SDK discovers the leader node for this region via the
@@ -144,6 +156,8 @@ impl ClientConfig {
             dyn crate::metrics::SdkMetrics,
         >,
         preferred_region: Option<Region>,
+        #[builder(default = Duration::from_secs(30))] region_leader_soft_ttl: Duration,
+        #[builder(default = Duration::from_secs(120))] region_leader_hard_ttl: Duration,
     ) -> Result<Self> {
         // Validate static endpoints
         if let ServerSource::Static(ref endpoints) = servers {
@@ -168,6 +182,11 @@ impl ClientConfig {
         if connect_timeout.is_zero() {
             return Err(SdkError::Config { message: "connect_timeout cannot be zero".to_owned() });
         }
+        if region_leader_hard_ttl < region_leader_soft_ttl {
+            return Err(SdkError::Config {
+                message: "region_leader_hard_ttl must be >= region_leader_soft_ttl".to_owned(),
+            });
+        }
 
         Ok(Self {
             servers,
@@ -182,6 +201,8 @@ impl ClientConfig {
             circuit_breaker,
             metrics,
             preferred_region,
+            region_leader_soft_ttl,
+            region_leader_hard_ttl,
         })
     }
 }
@@ -261,6 +282,18 @@ impl ClientConfig {
     #[must_use]
     pub fn preferred_region(&self) -> Option<Region> {
         self.preferred_region
+    }
+
+    /// Returns the soft TTL for the region leader cache.
+    #[must_use]
+    pub fn region_leader_soft_ttl(&self) -> Duration {
+        self.region_leader_soft_ttl
+    }
+
+    /// Returns the hard TTL for the region leader cache.
+    #[must_use]
+    pub fn region_leader_hard_ttl(&self) -> Duration {
+        self.region_leader_hard_ttl
     }
 }
 
@@ -1032,6 +1065,37 @@ mod tests {
         assert!(pem_str.contains("-----BEGIN CERTIFICATE-----"));
         assert!(pem_str.contains("SGVsbG8sIFdvcmxkIQ=="));
         assert!(pem_str.contains("-----END CERTIFICATE-----"));
+    }
+
+    #[test]
+    fn hard_ttl_less_than_soft_ttl_fails_validation() {
+        let result = ClientConfig::builder()
+            .servers(ServerSource::from_static(["http://localhost:5000"]))
+            .client_id("test-client")
+            .region_leader_soft_ttl(Duration::from_secs(60))
+            .region_leader_hard_ttl(Duration::from_secs(30))
+            .build();
+        let err = result.expect_err("hard < soft must fail validation");
+        match err {
+            SdkError::Config { message } => {
+                assert!(
+                    message.contains("region_leader_hard_ttl"),
+                    "message should mention region_leader_hard_ttl: {message}",
+                );
+            },
+            other => panic!("expected Config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn region_leader_ttls_default_values() {
+        let config = ClientConfig::builder()
+            .servers(ServerSource::from_static(["http://localhost:5000"]))
+            .client_id("test-client")
+            .build()
+            .expect("valid config");
+        assert_eq!(config.region_leader_soft_ttl(), Duration::from_secs(30));
+        assert_eq!(config.region_leader_hard_ttl(), Duration::from_secs(120));
     }
 
     #[test]

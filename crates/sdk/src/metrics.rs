@@ -109,6 +109,22 @@ pub trait SdkMetrics: Send + Sync + fmt::Debug {
     fn record_connection(&self, endpoint: &str, event: ConnectionEvent) {
         let _ = (endpoint, event);
     }
+
+    /// Called when a region leader cache read returns a fresh or stale-but-usable entry.
+    fn leader_cache_hit(&self, _region: &str) {}
+
+    /// Called when a region leader cache read needed a resolve (entry absent or past `hard_ttl`).
+    fn leader_cache_miss(&self, _region: &str) {}
+
+    /// Called when a successful resolve returned a different endpoint than
+    /// what was previously cached — indicates a leader change.
+    fn leader_cache_flap(&self, _region: &str) {}
+
+    /// Called when a resolve coalesced onto an in-flight future (single-flight win).
+    fn region_resolve_coalesced(&self, _region: &str) {}
+
+    /// Called when a stale-but-usable entry was served while a background refresh was triggered.
+    fn region_resolve_stale_served(&self, _region: &str) {}
 }
 
 /// No-op metrics implementation with zero overhead.
@@ -142,6 +158,18 @@ mod metric_names {
     pub const CIRCUIT_TRANSITIONS_TOTAL: &str = "ledger_sdk_circuit_transitions_total";
     /// Connection lifecycle events.
     pub const CONNECTIONS_TOTAL: &str = "ledger_sdk_connections_total";
+    /// Region leader cache hits (fresh or stale-but-usable).
+    pub const LEADER_CACHE_HITS_TOTAL: &str = "ledger_sdk_leader_cache_hits_total";
+    /// Region leader cache misses (absent or past hard_ttl).
+    pub const LEADER_CACHE_MISSES_TOTAL: &str = "ledger_sdk_leader_cache_misses_total";
+    /// Region leader cache flaps (resolve returned a different endpoint).
+    pub const LEADER_CACHE_FLAPS_TOTAL: &str = "ledger_sdk_leader_cache_flaps_total";
+    /// Region resolves coalesced onto an in-flight future.
+    pub const REGION_RESOLVE_SINGLEFLIGHT_COALESCED_TOTAL: &str =
+        "ledger_sdk_region_resolve_singleflight_coalesced_total";
+    /// Stale-but-usable entries served while a background refresh ran.
+    pub const REGION_RESOLVE_STALE_SERVED_TOTAL: &str =
+        "ledger_sdk_region_resolve_stale_served_total";
 }
 
 impl SdkMetrics for MetricsSdkMetrics {
@@ -176,6 +204,37 @@ impl SdkMetrics for MetricsSdkMetrics {
             metric_names::CONNECTIONS_TOTAL,
             "endpoint" => endpoint.to_owned(),
             "event" => event.to_string(),
+        )
+        .increment(1);
+    }
+
+    fn leader_cache_hit(&self, region: &str) {
+        metrics::counter!(metric_names::LEADER_CACHE_HITS_TOTAL, "region" => region.to_owned())
+            .increment(1);
+    }
+
+    fn leader_cache_miss(&self, region: &str) {
+        metrics::counter!(metric_names::LEADER_CACHE_MISSES_TOTAL, "region" => region.to_owned())
+            .increment(1);
+    }
+
+    fn leader_cache_flap(&self, region: &str) {
+        metrics::counter!(metric_names::LEADER_CACHE_FLAPS_TOTAL, "region" => region.to_owned())
+            .increment(1);
+    }
+
+    fn region_resolve_coalesced(&self, region: &str) {
+        metrics::counter!(
+            metric_names::REGION_RESOLVE_SINGLEFLIGHT_COALESCED_TOTAL,
+            "region" => region.to_owned(),
+        )
+        .increment(1);
+    }
+
+    fn region_resolve_stale_served(&self, region: &str) {
+        metrics::counter!(
+            metric_names::REGION_RESOLVE_STALE_SERVED_TOTAL,
+            "region" => region.to_owned(),
         )
         .increment(1);
     }
