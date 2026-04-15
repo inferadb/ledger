@@ -28,7 +28,7 @@ Ledger is InferaDB's storage layer—a blockchain database for cryptographically
 
 ## Hierarchy
 
-```
+```text
 _system organization (global)
 ├── Users (global accounts)
 ├── Organization routing table
@@ -132,7 +132,7 @@ Ledger uses **leader-assigned sequential IDs**. The leader assigns IDs during bl
 
 **Sequence counters** stored in `_system` organization:
 
-```
+```text
 _meta:seq:organization    → next OrganizationId (starts at 1; 0 = _system)
 _meta:seq:vault           → next VaultId (internal)
 _meta:seq:user            → next UserId
@@ -240,7 +240,7 @@ At target scale (<50K ops/sec per cluster), the ~0.3ms overhead is negligible co
 
 ### Serialization
 
-```
+```text
 Client Request
     ↓
 [1] Proto → Internal Types (gRPC decode)

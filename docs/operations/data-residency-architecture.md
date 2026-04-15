@@ -112,7 +112,7 @@ The multi-Raft routing infrastructure is fully implemented:
 
 ### Request Flow
 
-```
+```text
 Service handler
     │
     ├─ GLOBAL request ──▶ propose_request() ──▶ Organization's GLOBAL Raft

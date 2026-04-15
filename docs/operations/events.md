@@ -75,14 +75,14 @@ Credential operations (create, update, delete credentials; TOTP verification; re
 
 | Event Type                         | Action                      | Emission    | Trigger                  | Details                                         |
 | ---------------------------------- | --------------------------- | ----------- | ------------------------ | ----------------------------------------------- |
-| `ledger.vault.created`             | `vault_created`             | Apply-phase | CreateVault RPC          | `vault_slug`, `vault_name`                      |
-| `ledger.vault.deleted`             | `vault_deleted`             | Apply-phase | DeleteVault RPC          | `vault_slug`                                    |
+| `ledger.vault.created`             | `vault_created`             | Apply-phase | CreateVault RPC          | `vault`, `vault_name`                      |
+| `ledger.vault.deleted`             | `vault_deleted`             | Apply-phase | DeleteVault RPC          | `vault`                                    |
 | `ledger.write.committed`           | `write_committed`           | Apply-phase | Write RPC commit         | `block_height`, `operations_count`              |
 | `ledger.write.batch_committed`     | `batch_write_committed`     | Apply-phase | BatchWrite RPC commit    | `block_height`, `operations_count`              |
 | `ledger.entity.expired`            | `entity_expired`            | Apply-phase | TTL GC during apply      | `key`                                           |
-| `ledger.vault.health_updated`      | `vault_health_updated`      | Apply-phase | VaultHealth Raft command | `vault_slug`, `status`                          |
-| `ledger.integrity.checked`         | `integrity_checked`         | Handler     | CheckIntegrity RPC       | `vault_slug`, `issues_found`, `full_check`      |
-| `ledger.vault.recovered`           | `vault_recovered`           | Handler     | RecoverVault RPC         | `vault_slug`, `recovery_method`, `final_height` |
+| `ledger.vault.health_updated`      | `vault_health_updated`      | Apply-phase | VaultHealth Raft command | `vault`, `status`                          |
+| `ledger.integrity.checked`         | `integrity_checked`         | Handler     | CheckIntegrity RPC       | `vault`, `issues_found`, `full_check`      |
+| `ledger.vault.recovered`           | `vault_recovered`           | Handler     | RecoverVault RPC         | `vault`, `recovery_method`, `final_height` |
 | `ledger.request.rate_limited`      | `request_rate_limited`      | Handler     | Rate limiter rejection   | `level`, `reason`                               |
 | `ledger.request.validation_failed` | `request_validation_failed` | Handler     | Validation rejection     | `field`, `reason`                               |
 | `ledger.request.quota_exceeded`    | `quota_exceeded`            | Handler     | Quota check rejection    | `quota_type`, `current`, `limit`                |
@@ -146,7 +146,7 @@ histogram_quantile(0.99, rate(ledger_events_gc_cycle_duration_seconds_bucket[5m]
 
 Typical event entry: ~200 bytes (postcard encoded). At 100 events/second with 90-day retention:
 
-```
+```text
 100 events/sec × 86,400 sec/day × 90 days × 200 bytes ≈ 155 GB
 ```
 

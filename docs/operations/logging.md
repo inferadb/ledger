@@ -13,7 +13,7 @@ export INFERADB__LEDGER__LOG_FORMAT=json
 
 Query errors in your log aggregation system:
 
-```
+```text
 outcome:"error" AND service:"WriteService"
 ```
 
@@ -160,7 +160,7 @@ Queries organized by operational problem. Each section shows equivalent queries 
 <details>
 <summary>Datadog</summary>
 
-```
+```bash
 service:inferadb-ledger outcome:error
 ```
 
@@ -205,7 +205,7 @@ sum by (error_code) (
 <details>
 <summary>Datadog</summary>
 
-```
+```bash
 service:inferadb-ledger outcome:error | group by error_code | count()
 ```
 
@@ -235,7 +235,7 @@ index=inferadb outcome=error | stats count by error_code
 <details>
 <summary>Datadog</summary>
 
-```
+```bash
 service:inferadb-ledger outcome:rate_limited | group by client_id | count()
 ```
 
@@ -281,7 +281,7 @@ service:inferadb-ledger outcome:rate_limited | group by client_id | count()
 <details>
 <summary>Datadog</summary>
 
-```
+```bash
 service:inferadb-ledger method:write @duration_ms:>100 | group by organization | avg(@duration_ms)
 ```
 
@@ -314,7 +314,7 @@ quantile_over_time(0.95,
 <details>
 <summary>Datadog</summary>
 
-```
+```bash
 service:inferadb-ledger | group by service | percentile(@duration_ms, 0.95)
 ```
 
@@ -335,7 +335,7 @@ service:inferadb-ledger | group by service | percentile(@duration_ms, 0.95)
 <details>
 <summary>Datadog</summary>
 
-```
+```bash
 service:inferadb-ledger method:write outcome:success
 | group by node_id | percentile(@raft_latency_ms, 0.95)
 ```
@@ -377,7 +377,7 @@ service:inferadb-ledger method:write outcome:success
 <details>
 <summary>Datadog</summary>
 
-```
+```bash
 service:inferadb-ledger @client_id:"api_acme_corp"
 ```
 
@@ -408,7 +408,7 @@ topk(10,
 <details>
 <summary>Datadog</summary>
 
-```
+```bash
 service:inferadb-ledger | group by client_id | count() | top 10
 ```
 
@@ -432,7 +432,7 @@ topk(10,
 <details>
 <summary>Datadog</summary>
 
-```
+```bash
 service:inferadb-ledger | timeseries count() by organization
 ```
 
@@ -509,7 +509,7 @@ sum(count_over_time({job="inferadb-ledger"} | json | method="write" [1h]))
 <details>
 <summary>Datadog</summary>
 
-```
+```bash
 service:inferadb-ledger service:AdminService
 ```
 
@@ -558,7 +558,7 @@ Request logging uses **tail sampling**: the decision to emit or suppress an even
 
 ### Sampling Decision Flow
 
-```
+```text
 Request completes
        │
        ▼

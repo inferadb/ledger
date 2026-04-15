@@ -6,7 +6,7 @@ Regions are geographic data residency zones. Each region maps 1:1 to a Raft cons
 
 ## Overview
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                              Cluster                                    │
 │                                                                         │
@@ -61,7 +61,7 @@ Proto enum values use geographic range prefixes: North America (10-19), South Am
 
 Each region gets isolated database files under a dedicated directory. The GLOBAL control plane uses its own top-level directory:
 
-```
+```text
 {data_dir}/
 ├── node_id                          # node identity
 ├── global/                          # GLOBAL Raft group (control plane)
@@ -214,7 +214,7 @@ If version <= 41, response is empty (use cached data). If version > 41, response
 
 In multi-region deployments, the `WriteService` transparently forwards writes to the correct region's leader. Clients can send write requests to **any node** in the cluster — if the target organization lives in a different region, the receiving node forwards the request to that region's leader via `RegionResolver`.
 
-```
+```text
 Client --> Node A (us-east-va) --> RegionResolver(org) --> ie-east-dublin Leader --> Response --> Node A --> Client
 ```
 

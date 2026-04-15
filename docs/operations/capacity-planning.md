@@ -35,7 +35,7 @@ Storage grows with:
 
 Formula (per vault):
 
-```
+```text
 Storage = (entities × avg_entity_size) +
           (relationships × ~100 bytes) +
           (blocks × avg_block_size) +
@@ -63,7 +63,7 @@ Memory usage:
 
 Rough sizing:
 
-```
+```text
 Memory = base (200 MB) +
          state_cache (entities × 0.5 KB) +
          raft_buffer (max_proposals × 10 KB) +
@@ -123,7 +123,7 @@ Throughput per core (approximate):
 
 Network bandwidth between nodes:
 
-```
+```text
 Bandwidth = (writes/sec × avg_write_size × replication_factor) +
             (heartbeat_rate × heartbeat_size × nodes)
 ```
@@ -160,7 +160,7 @@ When to add regions:
 
 Within an organization, use multiple vaults to parallelize:
 
-```
+```text
 Throughput = vaults × per_vault_throughput
 ```
 
@@ -239,7 +239,7 @@ Track these trends:
 
 ### Capacity Runway
 
-```
+```text
 Runway (days) = (available_capacity - current_usage) / daily_growth_rate
 ```
 
@@ -286,7 +286,7 @@ Add:
 
 ### Total Cost Model
 
-```
+```text
 Monthly Cost = (nodes × instance_cost) +
                (storage_gb × storage_rate) +
                (egress_gb × egress_rate) +

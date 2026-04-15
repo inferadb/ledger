@@ -216,7 +216,7 @@ Follow platform-specific patterns:
 
 Filter by client:
 
-```
+```bash
 # Loki
 {job="inferadb-ledger"} | json | client_id="api_acme_corp"
 
@@ -229,7 +229,7 @@ client_id:"api_acme_corp"
 
 Show slow writes:
 
-```
+```bash
 # Loki
 {job="inferadb-ledger"} | json | method="write" | duration_ms > 100
 
@@ -320,7 +320,7 @@ New fields are additive; old dashboards continue working with newer Ledger versi
 
 **Loki**: Ensure JSON parsing is working:
 
-```
+```json
 {job="inferadb-ledger"} | json | __error__=""
 ```
 

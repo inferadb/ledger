@@ -8,7 +8,7 @@ Guidance for deploying Ledger across multiple geographic regions.
 
 Each region operates an independent Ledger cluster. Organizations are assigned to regions based on data locality requirements.
 
-```
+```text
 ┌────────────────────────────────────────────────────────────────────┐
 │                          Global Control                             │
 │              (Organization → Region routing table)                     │
@@ -148,7 +148,7 @@ aws s3 sync s3://ledger-us-east/snapshots/ s3://ledger-us-west-dr/snapshots/
 
 Each regional cluster is isolated. No direct Ledger-to-Ledger communication across regions.
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────┐
 │                            Control Plane                             │
 │                                                                     │
@@ -298,7 +298,7 @@ grpcurl -plaintext ledger:50051 \
 
 Estimate total multi-region cost:
 
-```
+```text
 Total = Σ (regions) × (compute + storage + backup)
 ```
 

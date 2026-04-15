@@ -14,7 +14,7 @@ Importantly, a diverged vault is **isolated** from other vaults in the same regi
 
 ## Vault Health States
 
-```
+```text
 ┌─────────┐     divergence     ┌───────────┐     recovery      ┌─────────────┐
 │ Healthy │ ──────────────────►│ Diverged  │ ─────────────────►│ Recovering  │
 └─────────┘                    └───────────┘                   └─────────────┘
@@ -39,7 +39,7 @@ When a follower applies a block, it:
 
 If they don't match:
 
-```
+```yaml
 CRITICAL: state_root_divergence{vault_id=123, region="us-east", height=45678}  # internal vault_id in metrics
   expected: 0x7a3f...
   computed: 0x8b2e...
@@ -77,7 +77,7 @@ The recovery process:
 
 After 3 failed attempts:
 
-```
+```text
 CRITICAL: vault_recovery_exhausted{vault_id=123}  # internal vault_id in metrics
 ```
 
@@ -217,14 +217,14 @@ Note: Vault health status is queried via `HealthService.Check()` RPC, not Promet
 
 **Alert: `VaultDiverged`**
 
-```
+```text
 severity: critical
 action: Page on-call, begin investigation
 ```
 
 **Alert: `VaultRecoveryExhausted`**
 
-```
+```text
 severity: critical
 action: Manual intervention required
 runbook: See "Manual Recovery" section above

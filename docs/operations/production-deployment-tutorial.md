@@ -408,7 +408,7 @@ grpcurl -plaintext \
 
 Services within the cluster connect to:
 
-```
+```text
 ledger.inferadb.svc.cluster.local:50051
 ```
 

@@ -105,7 +105,7 @@ chmod 0400 data/keys/*/v1.key
 
 **Directory structure:**
 
-```
+```text
 data/keys/
   global/
     v1.key
@@ -138,7 +138,7 @@ data/keys/
 
 If a required version is missing, startup fails with a clear error:
 
-```
+```text
 RMK v1 for region global is listed as Deprecated but failed to load.
 Provision this key version before joining the cluster.
 ```
@@ -156,7 +156,7 @@ Before triggering `RotateRegionKey`:
 
 The `rmk_provisioning` dependency health check reports loaded versions per region:
 
-```
+```text
 rmk_versions: {global: [v1, v2], us-east-va: [v1], us-west-or: [v1]}
 ```
 

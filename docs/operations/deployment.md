@@ -187,7 +187,7 @@ The node will:
 
 The `data_dir` contains all persistent state:
 
-```
+```text
 /var/lib/ledger/
 ├── node_id           # Node identity (preserve for same-node restore)
 ├── state.db          # Current state

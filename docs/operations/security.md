@@ -8,7 +8,7 @@ Ledger is designed to run **within a secure network perimeter**. It does not aut
 
 ### Trust Model
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                    Secure Network Boundary                  │
 │                  (WireGuard, VPC, or similar)               │
@@ -216,7 +216,7 @@ These properties are verified by 22 Byzantine fault tests in `crates/services/sr
 
 ### Security Boundaries
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                         _system organization                       │
 │   ┌─────────────────────────────────────────────────────────┐   │
