@@ -107,7 +107,7 @@ Ledger uses Raft consensus to ensure linearizable writes [5]—a strong consiste
 
 ### Component Overview
 
-Ledger consists of four primary layers:
+Ledger consists of five primary layers:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -134,7 +134,7 @@ Ledger consists of four primary layers:
 
 **gRPC Services** expose the public API. Fourteen services are defined in protobuf; thirteen have server-side implementations. They cover authorization operations (ReadService, WriteService), entity management (OrganizationService, VaultService, UserService, AppService), invitations (InvitationService), authentication token issuance (TokenService), administration (AdminService), observability (EventsService, HealthService), and cluster coordination (SystemDiscoveryService, RaftService). SchemaService is proto-defined as a placeholder for future schema-registry functionality.
 
-**Consensus Layer** is a purpose-built multi-shard Raft engine (`inferadb-ledger-consensus`). It is designed around a determinism boundary: the engine is a single-task event-driven `Reactor` that takes events and returns `Action`s rather than performing I/O directly, which makes it simulation-testable. Non-determinism (time, randomness, disk, network) is injected through trait abstractions, and the crate ships a simulation harness that replays Raft invariants with seeded RNG and virtual time. Core components include `Shard` (single Raft instance), `Reactor` (event loop across shards), `SharedWal` (per-vault segmented WAL with AES-256-GCM encryption), `LeaderLease` (leader-lease read optimization), and `ClosedTimestampTracker` (bounded-staleness reads). All writes are proposed to the leader, replicated to followers, and committed only after majority acknowledgment.
+**Consensus Layer** is a purpose-built multi-shard Raft engine (`inferadb-ledger-consensus`). It is designed around a determinism boundary: the engine is a single-task event-driven `Reactor` that takes events and returns `Action`s rather than performing I/O directly, which makes it simulation-testable. Non-determinism (time, randomness, disk, network) is injected through trait abstractions, and the crate ships a simulation harness that replays Raft invariants with seeded RNG and virtual time. Core components include `Shard` (single Raft instance), `Reactor` (event loop across shards), `WalBackend` (pluggable WAL trait with segmented, encrypted, in-memory, and io_uring backends — the production backend writes per-vault AES-256-GCM-encrypted segments), `LeaderLease` (leader-lease read optimization), and `ClosedTimestampTracker` (bounded-staleness reads). All writes are proposed to the leader, replicated to followers, and committed only after majority acknowledgment.
 
 **Raft Operationalization** (`inferadb-ledger-raft`) wraps the consensus engine with the app-layer concerns that don't belong in the engine itself: apply-phase parallelism via `ApplyPool`/`ApplyWorker` (per-shard state-machine apply), a batching layer that aggregates multiple client requests into single Raft proposals, the `SagaOrchestrator` for cross-region distributed transactions, graceful shutdown with leader transfer, rate limiting, hot-key detection, and ~20 background jobs (compaction, retention, token maintenance, events GC, etc.).
 

@@ -36,9 +36,9 @@ Fields are categorized by requirement level:
 | `method`            | Required    | String | -                           | gRPC method name                              | `"write"`                                |
 | `client_id`         | Conditional | String | When provided               | Idempotency client identifier (max 128 chars) | `"api_acme_corp"`                        |
 | `sequence`          | Conditional | u64    | When provided               | Per-client sequence number                    | `42`                                     |
-| `organization_slug` | Conditional | i64    | When targeting organization | Target organization                           | `1001`                                   |
-| `vault_slug`        | Conditional | u64    | When targeting vault        | Target vault (0 for organization-level ops)   | `7180591718400`                          |
-| `actor`             | Conditional | String | When authenticated          | Identity performing operation                 | `"user:123"`                             |
+| `organization` | Conditional | i64    | When targeting organization | Target organization                           | `1001`                                   |
+| `vault`        | Conditional | u64    | When targeting vault        | Target vault (0 for organization-level ops)   | `7180591718400`                          |
+| `caller`            | Conditional | u64    | When caller slug provided   | User slug (external Snowflake) of the acting user; `0` for system-initiated requests | `302670195593552897`                     |
 
 ### System Context
 
@@ -48,7 +48,6 @@ Fields are categorized by requirement level:
 | `is_leader` | Required | bool   | -         | Raft leadership status at request time | `true`       |
 | `raft_term` | Required | u64    | -         | Current Raft term                      | `15`         |
 | `region`    | Required | string | -         | Data residency region                  | `US_EAST_VA` |
-| `is_vip`    | Required | bool   | -         | VIP organization indicator             | `false`      |
 
 ### Write Operation Fields
 
@@ -228,7 +227,7 @@ index=inferadb outcome=error | stats count by error_code
 
 ```logql
 {job="inferadb-ledger"} | json | outcome="rate_limited"
-| line_format "{{.client_id}}: {{.organization_slug}}"
+| line_format "{{.client_id}}: {{.organization}}"
 ```
 
 </details>
@@ -261,7 +260,7 @@ service:inferadb-ledger outcome:rate_limited | group by client_id | count()
   },
   "aggs": {
     "by_organization": {
-      "terms": { "field": "organization_slug" },
+      "terms": { "field": "organization" },
       "aggs": { "avg_duration": { "avg": { "field": "duration_ms" } } }
     }
   }
@@ -283,7 +282,7 @@ service:inferadb-ledger outcome:rate_limited | group by client_id | count()
 <summary>Datadog</summary>
 
 ```
-service:inferadb-ledger method:write @duration_ms:>100 | group by organization_slug | avg(@duration_ms)
+service:inferadb-ledger method:write @duration_ms:>100 | group by organization | avg(@duration_ms)
 ```
 
 </details>
@@ -293,7 +292,7 @@ service:inferadb-ledger method:write @duration_ms:>100 | group by organization_s
 
 ```spl
 index=inferadb method=write duration_ms>100
-| table _time client_id organization_slug duration_ms raft_latency_ms storage_latency_ms
+| table _time client_id organization duration_ms raft_latency_ms storage_latency_ms
 | sort -duration_ms
 ```
 
@@ -424,7 +423,7 @@ service:inferadb-ledger | group by client_id | count() | top 10
 
 ```logql
 topk(10,
-  sum by (organization_slug) (count_over_time({job="inferadb-ledger"} | json [1h]))
+  sum by (organization) (count_over_time({job="inferadb-ledger"} | json [1h]))
 )
 ```
 
@@ -434,7 +433,7 @@ topk(10,
 <summary>Datadog</summary>
 
 ```
-service:inferadb-ledger | timeseries count() by organization_slug
+service:inferadb-ledger | timeseries count() by organization
 ```
 
 </details>

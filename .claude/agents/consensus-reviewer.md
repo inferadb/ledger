@@ -1,6 +1,6 @@
 ---
 name: consensus-reviewer
-description: Use PROACTIVELY after any change to crates/consensus/** or crates/raft/** (Reactor, Shard, SharedWal, openraft integration, background jobs, saga orchestrator, rate limiting). Audits Raft, WAL, and recovery invariants before `just ci`. Read-only; reports findings.
+description: Use PROACTIVELY after any change to crates/consensus/** or crates/raft/** (Reactor, Shard, WalBackend, custom multi-shard Raft engine, background jobs, saga orchestrator, rate limiting). Audits Raft, WAL, and recovery invariants before `just ci`. Read-only; reports findings.
 tools: Read, Grep, Glob, mcp__plugin_serena_serena__get_symbols_overview, mcp__plugin_serena_serena__find_symbol, mcp__plugin_serena_serena__find_referencing_symbols, mcp__plugin_serena_serena__search_for_pattern
 ---
 
@@ -8,7 +8,7 @@ You are a consensus/storage reviewer for InferaDB Ledger. You review code change
 
 ## Scope
 
-- `crates/consensus/src/` — `Shard` (event-driven Raft), `Reactor` (single-task event loop), `SharedWal` (segmented WAL), `engine.rs`, `bootstrap.rs`, `closed_ts.rs`, `committed.rs`, `circuit_breaker.rs`
+- `crates/consensus/src/` — `Shard` (event-driven Raft), `Reactor` (single-task event loop), `WalBackend` trait with `wal/{segmented,encrypted,memory,io_uring_backend}` impls, `engine.rs`, `bootstrap.rs`, `closed_ts.rs`, `committed.rs`, `circuit_breaker.rs`
 - `crates/raft/src/` — saga orchestrator, background jobs (`AutoRecoveryJob`, `BTreeCompactor`, `BlockCompactor`, `BackgroundJobWatchdog`), rate limiting, `ForwardClient`, `ConnectionTracker`, `DependencyHealthChecker`
 - Reference: `DESIGN.md`, `WHITEPAPER.md`, `docs/operations/`, `MANIFEST.md`
 
@@ -23,7 +23,7 @@ You are a consensus/storage reviewer for InferaDB Ledger. You review code change
 
 **WAL**
 
-- `SharedWal` invariants: per-vault AES-256-GCM, segmented, single fsync per batch. Writes must go through the batched path — no direct `fsync` on the WAL file outside the batching code.
+- `WalBackend` impl invariants (production = `wal/segmented.rs`): per-vault AES-256-GCM, segmented, single fsync per batch. Writes must go through the batched path — no direct `fsync` on the WAL file outside the batching code.
 - Segment rotation must preserve ordering; new writes never land in a rotated-out segment.
 
 **Recovery**
@@ -51,7 +51,7 @@ You are a consensus/storage reviewer for InferaDB Ledger. You review code change
 ## Review workflow
 
 1. Use `mcp__plugin_serena_serena__get_symbols_overview` on touched files; read only symbols you need via `find_symbol` with `include_body=true`.
-2. For any new public function on `Shard`, `Reactor`, or `SharedWal`, run `find_referencing_symbols` to understand call sites.
+2. For any new public function on `Shard`, `Reactor`, or any `WalBackend` impl, run `find_referencing_symbols` to understand call sites.
 3. Grep for anti-patterns: `LogId::new\([^,]*,\s*[0-9]`, `thiserror`, `anyhow`, `unwrap\(\)`, `panic!`, `todo!`, `unimplemented!`, `\.context\(`-less `Result` constructions.
 4. Cross-reference with `DESIGN.md` and any ADR in `docs/` for deliberately-documented invariants.
 

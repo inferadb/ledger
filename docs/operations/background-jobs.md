@@ -12,29 +12,34 @@ InferaDB Ledger runs several background jobs that maintain data integrity, manag
 
 ### Label Values
 
-**`job`**: `gc`, `compaction`, `integrity_scrub`, `auto_recovery`, `backup`, `dek_rewrap`, `orphan_cleanup`, `saga_orchestrator`, `token_maintenance`, `ttl_gc`, `learner_refresh`, `organization_purge`, `user_retention`, `events_gc`, `resource_metrics`
+**`job`**: `auto_recovery`, `backup`, `block_compaction`, `btree_compaction`, `dek_rewrap`, `dependency_health`, `events_gc`, `hot_key_detector`, `integrity_scrub`, `invite_maintenance`, `learner_refresh`, `organization_purge`, `orphan_cleanup`, `post_erasure_compaction`, `resource_metrics`, `saga_orchestrator`, `state_root_verifier`, `token_maintenance`, `ttl_gc`, `user_retention` (20 jobs)
 
 **`result`**: `success`, `failure`
 
 ### Items Processed per Job
 
-| Job                  | Item Meaning                               |
-| -------------------- | ------------------------------------------ |
-| `gc`                 | Blocks compacted (retention mode)          |
-| `compaction`         | B-tree pages merged                        |
-| `integrity_scrub`    | Pages checked (checksum + structural)      |
-| `auto_recovery`      | Vaults successfully recovered              |
-| `backup`             | Backups created                            |
-| `dek_rewrap`         | Pages re-wrapped with new RMK              |
-| `orphan_cleanup`     | Orphaned membership records removed        |
-| `saga_orchestrator`  | Sagas processed per cycle                  |
-| `token_maintenance`  | Expired tokens deleted + keys transitioned |
-| `ttl_gc`             | Expired entities removed                   |
-| `learner_refresh`    | Learner nodes refreshed                    |
-| `organization_purge` | Organizations purged after retention       |
-| `user_retention`     | Users reaped after retention expiry        |
-| `events_gc`          | Expired audit events removed               |
-| `resource_metrics`   | Metric collection cycles completed         |
+| Job                       | Item Meaning                                                                 |
+| ------------------------- | ---------------------------------------------------------------------------- |
+| `auto_recovery`           | Vaults successfully recovered from Diverged state                            |
+| `backup`                  | Backups created                                                              |
+| `block_compaction`        | Transaction bodies reclaimed from blocks in vaults with `COMPACTED` retention |
+| `btree_compaction`        | B-tree leaf pages merged                                                     |
+| `dek_rewrap`              | Per-page DEK sidecars re-wrapped to a newer RMK version                      |
+| `dependency_health`       | Dependency checks performed (disk, peers, Raft lag)                          |
+| `events_gc`               | Expired events.db entries removed                                            |
+| `hot_key_detector`        | Detector ticks (Count-Min Sketch windows rotated)                            |
+| `integrity_scrub`         | Pages checked (checksum + structural)                                        |
+| `invite_maintenance`      | Invitations expired/reaped                                                   |
+| `learner_refresh`         | Learner nodes refreshed                                                      |
+| `organization_purge`      | Organizations purged after retention                                         |
+| `orphan_cleanup`          | Orphaned membership / token records removed                                  |
+| `post_erasure_compaction` | Proactive Raft snapshots triggered after crypto-shredding                    |
+| `resource_metrics`        | Metric collection cycles completed                                           |
+| `saga_orchestrator`       | Sagas processed per cycle                                                    |
+| `state_root_verifier`     | State-root verification rounds (detects divergence)                          |
+| `token_maintenance`       | Expired refresh tokens deleted + signing keys transitioned                   |
+| `ttl_gc`                  | Expired entities removed                                                     |
+| `user_retention`          | Users reaped after retention expiry                                          |
 
 ## Jobs
 
@@ -171,6 +176,42 @@ Drives multi-step distributed workflows (sagas) to completion. Each cycle scans 
 
 - **Default interval**: Configurable
 - **Leader only**: Yes
+
+### Hot Key Detector
+
+Maintains a Count-Min Sketch over incoming write/read keys to surface hot spots to Prometheus. The "job" tick rotates the detector's sliding window rather than performing I/O.
+
+- **Default interval**: Window-rotation cadence (seconds)
+- **Leader only**: No (runs on every node that serves data-plane RPCs)
+
+### State Root Verifier
+
+Recomputes state roots and cross-checks them against committed block headers to detect silent divergence (non-determinism bugs, disk corruption, timestamp drift). Complements apply-time verification: catches cases where a node applied "successfully" but produced a root that disagrees with the cluster.
+
+- **Default interval**: Configurable
+- **Leader only**: No (runs on all nodes so divergence is detected wherever it occurs)
+
+### Dependency Health
+
+Periodically probes external dependencies (disk writability, peer reachability, Raft replication lag) and caches the results for the `HealthService` readiness probe. Cached with a short TTL so aggressive probe intervals don't storm the checks.
+
+- **Default interval**: Configurable (`dependency_check_timeout_secs`, default `2`); cache TTL `health_cache_ttl_secs` (default `5`)
+- **Leader only**: No
+
+### Invite Maintenance
+
+Two-phase invitation lifecycle management. Phase 1 expires `Pending` invitations whose `expires_at` has passed. Phase 2 reaps terminal invitations (Accepted/Declined/Expired/Revoked) past a 90-day retention window.
+
+- **Default interval**: Configurable
+- **Leader only**: Yes
+- **Per-cycle bounds**: 200 expirations, 100 reaps; scans up to 5000 email-hash index entries per cycle
+
+### Post-Erasure Compaction
+
+After crypto-shredding removes a `UserShredKey` or `OrgShredKey`, sealed plaintext in prior Raft log entries is already unreadable — but still occupies disk. This job triggers proactive Raft snapshots to evict those ciphertext entries from the log, completing the erasure at the storage layer.
+
+- **Default interval**: `check_interval_secs` (default `300`); retention window `max_log_retention_secs` (default `3600`)
+- **Leader only**: No (runs on GLOBAL + all regional groups; per-group tracking of last snapshot time)
 
 ## Alerting
 

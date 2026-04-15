@@ -2,7 +2,15 @@
 
 Guides for deploying, configuring, monitoring, and maintaining InferaDB Ledger.
 
-## Understanding Ledger
+## Architecture (repo root)
+
+For design rationale, correctness proofs, and internal layout, see the root-level docs:
+
+- [DESIGN.md](../DESIGN.md) — canonical system design (write/read paths, consensus, data residency, encryption, invariants)
+- [WHITEPAPER.md](../WHITEPAPER.md) — public-facing architecture summary + performance characteristics
+- [MANIFEST.md](../MANIFEST.md) — per-crate file inventory with rationale for every module
+
+## Understanding Ledger (operator-focused)
 
 - [Architecture overview](overview.md) — what Ledger is, how its components fit together
 - [FAQ](faq.md) — trust model, Raft consensus, organizations, vaults
@@ -42,6 +50,8 @@ Guides for deploying, configuring, monitoring, and maintaining InferaDB Ledger.
 - [Disaster recovery](operations/runbooks/disaster-recovery.md)
 - [Key provisioning](operations/runbooks/key-provisioning.md)
 - [Scaling](operations/runbooks/scaling.md)
+- [Leader cache diagnosis](operations/runbooks/leader-cache-diagnosis.md)
+- [Consensus transport backpressure](operations/runbooks/consensus-transport-backpressure.md)
 
 ## Quick reference
 

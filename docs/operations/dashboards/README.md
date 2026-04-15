@@ -51,12 +51,12 @@ pipeline_stages:
         service: service
         method: method
         outcome: outcome
-        organization_slug: organization_slug
+        organization: organization
   - labels:
       service:
       method:
       outcome:
-      organization_slug:
+      organization:
 ```
 
 Alternatively, use Loki's JSON parser in queries (already configured in the dashboard).
@@ -102,8 +102,8 @@ PUT _index_template/inferadb-logging
         "request_id": { "type": "keyword" },
         "client_id": { "type": "keyword" },
         "sequence": { "type": "long" },
-        "organization_slug": { "type": "long" },
-        "vault_id": { "type": "long" },
+        "organization": { "type": "long" },
+        "vault": { "type": "long" },
         "service": { "type": "keyword" },
         "method": { "type": "keyword" },
         "node_id": { "type": "long" },
@@ -118,7 +118,7 @@ PUT _index_template/inferadb-logging
         "batch_size": { "type": "integer" },
         "batch_coalesced": { "type": "boolean" },
         "idempotency_hit": { "type": "boolean" },
-        "is_vip": { "type": "boolean" },
+        
         "trace_id": { "type": "keyword" },
         "span_id": { "type": "keyword" }
       }
@@ -169,7 +169,7 @@ Create facets for efficient filtering. In Datadog Logs → Configuration → Fac
 | Method          | `@method`            | String  |
 | Outcome         | `@outcome`           | String  |
 | Client ID       | `@client_id`         | String  |
-| Organization ID | `@organization_slug` | Integer |
+| Organization ID | `@organization` | Integer |
 | Duration        | `@duration_ms`       | Double  |
 | Error Code      | `@error_code`        | String  |
 | Trace ID        | `@trace_id`          | String  |

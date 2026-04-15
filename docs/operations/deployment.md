@@ -290,11 +290,13 @@ Configuration can be set via CLI arguments or environment variables. CLI argumen
 
 ### Core Options
 
-| CLI         | Environment Variable        | Default           | Description                                             |
-| ----------- | --------------------------- | ----------------- | ------------------------------------------------------- |
-| `--listen`  | `INFERADB__LEDGER__LISTEN`  | `127.0.0.1:50051` | Host and port to accept connections                     |
-| `--data`    | `INFERADB__LEDGER__DATA`    | (ephemeral)       | Where to store data                                     |
-| `--metrics` | `INFERADB__LEDGER__METRICS` | (disabled)        | Expose Prometheus metrics at this address               |
+| CLI                     | Environment Variable                    | Default           | Description                                                                                 |
+| ----------------------- | --------------------------------------- | ----------------- | ------------------------------------------------------------------------------------------- |
+| `--listen`              | `INFERADB__LEDGER__LISTEN`              | `127.0.0.1:50051` | Host and port to accept connections                                                         |
+| `--data`                | `INFERADB__LEDGER__DATA`                | (ephemeral)       | Where to store data                                                                         |
+| `--metrics`             | `INFERADB__LEDGER__METRICS`             | (disabled)        | Expose Prometheus metrics at this address                                                   |
+| `--email-blinding-key`  | `INFERADB__LEDGER__EMAIL_BLINDING_KEY`  | (required)        | Hex-encoded 32-byte key for HMAC-based email hashing. Required for user onboarding RPCs     |
+| `--enable-grpc-reflection` | `INFERADB__LEDGER__ENABLE_GRPC_REFLECTION` | `false` | Enable gRPC reflection (needed for `grpcurl` and other dynamic clients; test/dev scripts assume on) |
 
 ### Bootstrap Mode
 

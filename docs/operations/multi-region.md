@@ -258,7 +258,7 @@ Use the `MigrateOrganization` RPC on AdminService to move the organization to th
 grpcurl -plaintext ledger:50051 \
   -d '{
     "slug": {"slug": 7890123456},
-    "target_region": "REGION_US_WEST_OR"
+    "targetRegion": "REGION_US_WEST_OR"
   }' \
   ledger.v1.AdminService/MigrateOrganization
 ```
@@ -269,7 +269,7 @@ If the source region is a protected region (mandatory in-country storage), you m
 grpcurl -plaintext ledger:50051 \
   -d '{
     "slug": {"slug": 7890123456},
-    "target_region": "REGION_US_WEST_OR",
+    "targetRegion": "REGION_US_WEST_OR",
     "acknowledge_residency_downgrade": true
   }' \
   ledger.v1.AdminService/MigrateOrganization

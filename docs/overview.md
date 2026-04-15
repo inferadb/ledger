@@ -100,8 +100,8 @@ struct RegionBlock {
 }
 
 struct VaultEntry {
-    organization_slug: OrganizationSlug,
-    vault_id: VaultId,
+    organization: OrganizationId,
+    vault: VaultId,
     vault_height: u64,
     previous_vault_hash: Hash,
     transactions: Vec<Transaction>,
@@ -153,7 +153,7 @@ _meta:seq:refresh_token   → next RefreshTokenId
 
 ## Key Patterns
 
-### In `_system` (organization_slug = 0)
+### In `_system` (organization = 0)
 
 | Entity Type          | Key Pattern                               | Example                                |
 | -------------------- | ----------------------------------------- | -------------------------------------- |

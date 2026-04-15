@@ -89,8 +89,8 @@ inferadb-ledger-proto          â€" Protobuf codegen, From/TryFrom conversions
 
 - `ConsensusEngine` (consensus/lib.rs) â€" multi-shard Raft: propose/read_index/membership
 - `Reactor` (consensus/reactor.rs) â€" single-task event loop, batches WAL writes and network sends
-- `Shard` (consensus/core.rs) â€" single Raft instance, event-driven (returns `Action`, no I/O)
-- `SharedWal` (consensus/wal.rs) â€" segmented WAL, per-vault AES-256-GCM, single fsync
+- `Shard` (consensus/shard.rs) â€" single Raft instance, event-driven (returns `Action`, no I/O)
+- `WalBackend` trait (consensus/wal_backend.rs + consensus/wal/{segmented,encrypted,memory,io_uring_backend}.rs) â€" pluggable WAL; production uses per-vault AES-256-GCM segmented WAL with single fsync per batch
 - `StorageEngine` (state/engine.rs) â€" store wrapper with transaction helpers
 - `StateLayer` (state/state.rs) â€" `StateMachine` impl, applies blocks, computes state roots
 - `LedgerServer` (services/server.rs) â€" gRPC server, all 13 services + consensus

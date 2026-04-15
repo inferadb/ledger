@@ -201,7 +201,7 @@ RUST_LOG=debug inferadb-ledger --single
 RUST_LOG=inferadb_ledger_raft=debug,inferadb_ledger_state=info inferadb-ledger
 
 # Raft consensus
-RUST_LOG=openraft=debug inferadb-ledger
+RUST_LOG=inferadb_ledger_consensus=debug,inferadb_ledger_raft=debug inferadb-ledger
 ```
 
 ### Where are the logs?

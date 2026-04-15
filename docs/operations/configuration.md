@@ -211,15 +211,17 @@ Request logging emits one comprehensive JSON event per request for queryable obs
 
 ### Log Format
 
+`auto` is the default — the server detects whether stdout is a TTY and picks `text` for interactive runs, `json` otherwise. Set explicitly when you need one format regardless of context (e.g., containerized deployments that pipe logs to a collector).
+
 ```bash
-# JSON format for production (default when non-TTY)
+# Auto-detect: text when stdout is a TTY, JSON otherwise (default)
+INFERADB__LEDGER__LOG_FORMAT=auto
+
+# Force JSON (production / log-collector deployments)
 INFERADB__LEDGER__LOG_FORMAT=json
 
-# Text format for development (default when TTY)
+# Force text (local development, readable tailing)
 INFERADB__LEDGER__LOG_FORMAT=text
-
-# Auto-detect based on terminal
-INFERADB__LEDGER__LOG_FORMAT=auto
 ```
 
 ### Core Settings

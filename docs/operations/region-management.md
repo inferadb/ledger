@@ -139,7 +139,7 @@ Response:
 
 ### Region Migration
 
-Organizations can be migrated between regions via `MigrateOrganization`:
+Organizations can be migrated between regions via `MigrateOrganization` (executed by `MigrateOrgSaga` in the state-machine saga orchestrator; per-user residency moves are executed by `MigrateUserSaga`):
 
 ```bash
 grpcurl -plaintext \

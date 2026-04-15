@@ -193,7 +193,7 @@
                 "data_source": "logs",
                 "search": { "query": "service:inferadb-ledger @outcome:error" },
                 "indexes": ["*"],
-                "group_by": [{ "facet": "@organization_slug", "limit": 10, "sort": { "aggregation": "count", "order": "desc" } }],
+                "group_by": [{ "facet": "@organization", "limit": 10, "sort": { "aggregation": "count", "order": "desc" } }],
                 "compute": { "aggregation": "count" }
               }
             ],
@@ -349,7 +349,7 @@
     {
       "id": 11,
       "definition": {
-        "title": "VIP Organization Traffic",
+        "title": "Successful Requests by Method",
         "title_size": "16",
         "title_align": "left",
         "show_legend": true,
@@ -363,7 +363,7 @@
               {
                 "name": "query1",
                 "data_source": "logs",
-                "search": { "query": "service:inferadb-ledger @is_vip:true" },
+                "search": { "query": "service:inferadb-ledger @outcome:success" },
                 "indexes": ["*"],
                 "group_by": [{ "facet": "@method", "limit": 10, "sort": { "aggregation": "count", "order": "desc" } }],
                 "compute": { "aggregation": "count" }
@@ -437,7 +437,7 @@
     },
     {
       "name": "organization",
-      "prefix": "@organization_slug",
+      "prefix": "@organization",
       "available_values": [],
       "default": "*"
     },

@@ -58,6 +58,7 @@ All metrics follow the pattern: `ledger_{subsystem}_{name}_{unit}`
 | `inferadb_ledger_raft_commit_index`          | Gauge     | -      | Current commit index           |
 | `inferadb_ledger_raft_term`                  | Gauge     | -      | Current Raft term              |
 | `inferadb_ledger_raft_is_leader`             | Gauge     | -      | 1 if leader, 0 otherwise       |
+| `inferadb_ledger_raft_proposal_timeouts_total` | Counter | -      | Proposals that exceeded the deadline |
 
 ### Key Indicators
 
@@ -71,6 +72,55 @@ inferadb_ledger_raft_proposals_pending > 50
 # Term changes (high = election instability)
 rate(inferadb_ledger_raft_term[5m])
 ```
+
+## Leader Transfer
+
+Emitted by `AdminService.TransferLeadership` and the graceful-shutdown path.
+
+| Metric                                    | Type      | Labels    | Description                                              |
+| ----------------------------------------- | --------- | --------- | -------------------------------------------------------- |
+| `ledger_leader_transfers_total`           | Counter   | `status`  | Transfer attempts (`success`, `failed`, `timeout`)       |
+| `ledger_leader_transfer_latency_seconds`  | Histogram | -         | End-to-end leader-transfer duration                      |
+| `ledger_trigger_elections_total`          | Counter   | `result`  | `TriggerElection` RPCs (`accepted`, `rejected`)          |
+
+## Events
+
+Emitted by `EventsService` and the event writer pipeline.
+
+| Metric                                    | Type      | Labels                        | Description                                         |
+| ----------------------------------------- | --------- | ----------------------------- | --------------------------------------------------- |
+| `ledger_event_writes_total`               | Counter   | `emission`, `scope`, `action` | Events written to events.db                         |
+| `ledger_events_ingest_total`              | Counter   | `source`                      | IngestEvents RPC calls accepted                     |
+| `ledger_events_ingest_duration_seconds`   | Histogram | -                             | IngestEvents end-to-end latency                     |
+| `ledger_events_ingest_rate_limited`       | Counter   | `source`                      | Ingestion requests rejected by rate limiter        |
+| `ledger_events_ingest_batch_size`         | Histogram | -                             | Events per IngestEvents call                        |
+| `ledger_events_gc_cycles_total`           | Counter   | -                             | `EventsGarbageCollector` cycles                     |
+| `ledger_events_gc_entries_deleted`        | Counter   | -                             | Expired events deleted                              |
+| `ledger_events_gc_cycle_duration_seconds` | Histogram | -                             | Per-cycle GC duration                               |
+
+## Onboarding Lifecycle
+
+Counters around the user-onboarding state machine (email verification → registration).
+
+| Metric                                          | Type    | Labels   | Description                                      |
+| ----------------------------------------------- | ------- | -------- | ------------------------------------------------ |
+| `ledger_onboarding_initiation_total`            | Counter | `status` | `InitiateEmailVerification` outcomes             |
+| `ledger_onboarding_verification_total`          | Counter | `status` | `VerifyEmailCode` outcomes                       |
+| `ledger_onboarding_registration_total`          | Counter | `status` | `CompleteRegistration` outcomes                  |
+| `ledger_onboarding_verification_codes_gc_total` | Counter | -        | Expired verification codes garbage-collected     |
+| `ledger_onboarding_accounts_gc_total`           | Counter | -        | Expired onboarding accounts garbage-collected    |
+| `ledger_totp_challenges_gc_total`               | Counter | -        | Expired TOTP challenges garbage-collected        |
+
+## Organization Purge + Post-Erasure Compaction
+
+Background jobs that reclaim soft-deleted organizations and evict plaintext from Raft logs after crypto-shredding.
+
+| Metric                                               | Type    | Labels   | Description                                                              |
+| ---------------------------------------------------- | ------- | -------- | ------------------------------------------------------------------------ |
+| `ledger_org_purge_regional_failures_total`           | Counter | `region` | Purge retries that hit a regional Raft failure                           |
+| `ledger_org_purge_global_failures_total`             | Counter | -        | Purge retries that hit the GLOBAL Raft failure path                      |
+| `ledger_org_purge_retry_exhausted_total`             | Counter | -        | Organizations left in the retry set after exponential backoff            |
+| `ledger_post_erasure_compaction_triggered_total`     | Counter | `region` | Proactive snapshot triggers after crypto-shredding, per Raft group       |
 
 ## State Machine
 
@@ -222,7 +272,7 @@ ledger_determinism_bug_total > 0
 
 **Labels:**
 
-- `job`: `gc`, `compaction`, `integrity_scrub`, `auto_recovery`, `backup`, `dek_rewrap`, `orphan_cleanup`, `saga_orchestrator`, `token_maintenance`, `ttl_gc`, `learner_refresh`, `organization_purge`, `user_retention`, `events_gc`, `resource_metrics`
+- `job`: `auto_recovery`, `backup`, `block_compaction`, `btree_compaction`, `dek_rewrap`, `dependency_health`, `events_gc`, `hot_key_detector`, `integrity_scrub`, `invite_maintenance`, `learner_refresh`, `organization_purge`, `orphan_cleanup`, `post_erasure_compaction`, `resource_metrics`, `saga_orchestrator`, `state_root_verifier`, `token_maintenance`, `ttl_gc`, `user_retention` (20 jobs)
 - `result`: `success`, `failure`
 
 ## Resource Saturation
@@ -248,7 +298,7 @@ ledger_determinism_bug_total > 0
 
 | Metric                            | Type    | Labels     | Description                |
 | --------------------------------- | ------- | ---------- | -------------------------- |
-| `ledger_hot_key_detections_total` | Counter | `vault_id` | Hot key detection events   |
+| `ledger_hot_key_detected_total` | Counter | `vault_id` | Hot key detection events   |
 | `ledger_hot_key_current_count`    | Gauge   | -          | Currently tracked hot keys |
 
 ## Rate Limiting

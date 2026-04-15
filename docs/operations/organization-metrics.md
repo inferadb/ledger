@@ -2,6 +2,8 @@
 
 Per-organization resource accounting for capacity planning and tenant billing.
 
+> See [metrics-reference.md](metrics-reference.md) for the full Prometheus metric catalog. This page focuses on the per-tenant subset operators use for billing and quota enforcement.
+
 ## Metrics
 
 | Metric                                 | Type      | Labels                         | Description                        |
