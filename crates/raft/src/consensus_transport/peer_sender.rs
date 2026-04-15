@@ -6,7 +6,7 @@
 //! heartbeats because retries arrive on the next heartbeat cycle.
 //!
 //! The drain task holds one long-lived bidirectional gRPC stream
-//! (`ForwardConsensusStream`) per peer and feeds the queue's contents into
+//! (`ConsensusStream`) per peer and feeds the queue's contents into
 //! it. A concurrent ack-reader discards server responses to keep the
 //! HTTP/2 flow-control window open. On any stream error we tear the stream
 //! down and reconnect with exponential backoff (100ms → cap 5s), resetting
@@ -164,6 +164,17 @@ const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 /// Maximum reconnect backoff cap.
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
 
+/// Applies equal-jitter to a backoff value before sleeping. Breaks client
+/// synchronization when many peers reconnect after a shared upstream event
+/// (e.g. a server restart). The backoff progression itself remains
+/// deterministic — only the actual sleep for any given attempt is randomized
+/// within `[0.5 * d, 1.5 * d)`.
+fn jittered(d: Duration) -> Duration {
+    use rand::RngExt;
+    let factor = rand::rng().random_range(0.5_f64..1.5);
+    Duration::from_secs_f64(d.as_secs_f64() * factor)
+}
+
 /// Build a protobuf request for a single outbound consensus message.
 ///
 /// Returns `None` if postcard serialization fails — the message is
@@ -174,9 +185,9 @@ fn build_consensus_request(
     from_node: u64,
     from_address: &str,
     region: inferadb_ledger_types::Region,
-) -> Option<inferadb_ledger_proto::proto::ConsensusForwardRequest> {
+) -> Option<inferadb_ledger_proto::proto::ConsensusEnvelope> {
     match postcard::to_allocvec(&msg.msg) {
-        Ok(payload) => Some(inferadb_ledger_proto::proto::ConsensusForwardRequest {
+        Ok(payload) => Some(inferadb_ledger_proto::proto::ConsensusEnvelope {
             shard_id: msg.shard.0,
             from_node,
             region: Some(inferadb_ledger_proto::proto::Region::from(region) as i32),
@@ -240,11 +251,11 @@ async fn run_drain_loop(
             channel.clone(),
         );
         let (req_tx, req_rx) = tokio::sync::mpsc::channel::<
-            inferadb_ledger_proto::proto::ConsensusForwardRequest,
+            inferadb_ledger_proto::proto::ConsensusEnvelope,
         >(inner.capacity);
         let req_stream = ReceiverStream::new(req_rx);
 
-        let ack_stream = match client.forward_consensus_stream(req_stream).await {
+        let ack_stream = match client.consensus_stream(req_stream).await {
             Ok(resp) => resp.into_inner(),
             Err(e) => {
                 tracing::debug!(
@@ -260,7 +271,7 @@ async fn run_drain_loop(
                 // add head-of-line latency once we do reconnect, since
                 // those messages reference an older term/log window.
                 drop_queue(&inner, "stream_open_failed");
-                if wait_with_shutdown(&inner, backoff).await {
+                if wait_with_shutdown(&inner, jittered(backoff)).await {
                     break 'outer;
                 }
                 backoff = (backoff * 2).min(MAX_BACKOFF);
@@ -389,7 +400,7 @@ async fn run_drain_loop(
         drop_queue(&inner, "stream_broken");
 
         crate::metrics::record_peer_stream_reconnect(inner.peer_id);
-        if wait_with_shutdown(&inner, backoff).await {
+        if wait_with_shutdown(&inner, jittered(backoff)).await {
             break 'outer;
         }
         backoff = (backoff * 2).min(MAX_BACKOFF);
@@ -421,6 +432,15 @@ mod tests {
 
     fn sample_msg(shard: u64) -> OutboundMessage {
         OutboundMessage { to: NodeId(42), shard: ShardId(shard), msg: Message::TimeoutNow }
+    }
+
+    #[test]
+    fn jitter_stays_within_bounds() {
+        for _ in 0..100 {
+            let d = jittered(Duration::from_secs(10));
+            assert!(d >= Duration::from_secs(5));
+            assert!(d < Duration::from_secs(15));
+        }
     }
 
     #[test]

@@ -35,6 +35,14 @@ struct CachedLeader {
     resolved_at: Instant,
     soft_ttl: Duration,
     hard_ttl: Duration,
+    /// Raft term associated with this leader, when known.
+    ///
+    /// `None` indicates the write came from a term-unaware source (e.g. a
+    /// cold-start signal or a server that pre-dates term propagation).
+    /// Term-gating treats `None` as only acceptable when the cache itself
+    /// has no term — once a term is observed, subsequent writes must
+    /// carry a term at least as large as the cached one.
+    term: Option<u64>,
 }
 
 impl CachedLeader {
@@ -133,8 +141,15 @@ impl RegionLeaderCache {
     ///
     /// Uses the default TTLs. Empty endpoint is treated as a no-op —
     /// a leaderless update does not overwrite a usable cached entry.
-    pub(crate) fn apply_watch_update(&self, endpoint: &str) {
+    /// Writes are gated on term monotonicity: a stale-term update (one
+    /// with `raft_term` less than the cached term) is rejected to defend
+    /// against reordered messages.
+    pub(crate) fn apply_watch_update(&self, endpoint: &str, raft_term: u64) {
         if endpoint.is_empty() {
+            return;
+        }
+        if !self.should_accept_write(Some(raft_term)) {
+            self.metrics().leader_stale_term_rejected(&self.region_label(), "watch");
             return;
         }
         *self.cached.write() = Some(CachedLeader {
@@ -142,7 +157,26 @@ impl RegionLeaderCache {
             resolved_at: Instant::now(),
             soft_ttl: self.default_soft_ttl,
             hard_ttl: self.default_hard_ttl,
+            term: Some(raft_term),
         });
+    }
+
+    /// Returns `true` if a cache write carrying the given term should be
+    /// accepted under term-monotonicity rules.
+    ///
+    /// Rules:
+    /// - Cache empty -> accept any term (including `None`).
+    /// - Incoming term > cached term -> accept (newer leader).
+    /// - Incoming term == cached term -> accept (same-term re-assert).
+    /// - Incoming term < cached term -> reject (stale, likely reordered).
+    /// - Incoming `None` against a cached term -> reject (untrusted signal).
+    fn should_accept_write(&self, incoming_term: Option<u64>) -> bool {
+        let guard = self.cached.read();
+        match (guard.as_ref().and_then(|c| c.term), incoming_term) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(cached), Some(incoming)) => incoming >= cached,
+        }
     }
 
     /// Returns the cached leader endpoint if usable (fresh OR stale-but-usable).
@@ -196,11 +230,16 @@ impl RegionLeaderCache {
         let Some(endpoint) = hint.leader_endpoint.as_deref() else {
             return;
         };
+        if !self.should_accept_write(hint.term) {
+            self.metrics().leader_stale_term_rejected(&self.region_label(), "hint");
+            return;
+        }
         *self.cached.write() = Some(CachedLeader {
             endpoint: Arc::from(endpoint),
             resolved_at: Instant::now(),
             soft_ttl: self.default_soft_ttl,
             hard_ttl: self.default_hard_ttl,
+            term: hint.term,
         });
     }
 
@@ -302,6 +341,7 @@ impl RegionLeaderCache {
             resolved_at: Instant::now(),
             soft_ttl,
             hard_ttl,
+            term: Some(resp.raft_term),
         });
 
         if let Some(prev) = previous_endpoint
@@ -380,6 +420,17 @@ const WATCHER_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 /// Maximum reconnect backoff for the leader watcher.
 const WATCHER_MAX_BACKOFF: Duration = Duration::from_secs(30);
 
+/// Applies equal-jitter to a backoff value before sleeping. Breaks client
+/// synchronization when many watchers reconnect after a shared upstream
+/// event (e.g. gateway restart). The backoff progression itself remains
+/// deterministic — only the actual sleep for any given attempt is
+/// randomized within `[0.5 * d, 1.5 * d)`.
+fn jittered(d: Duration) -> Duration {
+    use rand::RngExt;
+    let factor = rand::rng().random_range(0.5_f64..1.5);
+    Duration::from_secs_f64(d.as_secs_f64() * factor)
+}
+
 /// Spawns a background task that streams leader updates from the gateway and
 /// applies them to the given cache. The task runs until the provided
 /// cancellation token is triggered. On stream error or EOF, it reconnects
@@ -427,7 +478,7 @@ pub(crate) fn spawn_leader_watcher(
                                 match item {
                                     Ok(Some(update)) => {
                                         metrics.leader_watch_update(&label);
-                                        cache.apply_watch_update(&update.endpoint);
+                                        cache.apply_watch_update(&update.endpoint, update.raft_term);
                                     },
                                     // Server closed or stream error — fall through to reconnect.
                                     Ok(None) | Err(_) => break,
@@ -445,7 +496,7 @@ pub(crate) fn spawn_leader_watcher(
 
             tokio::select! {
                 _ = cancel.cancelled() => return,
-                () = tokio::time::sleep(backoff) => {},
+                () = tokio::time::sleep(jittered(backoff)) => {},
             }
             backoff = (backoff * 2).min(WATCHER_MAX_BACKOFF);
         }
@@ -496,6 +547,10 @@ mod tests {
         fn leader_watch_reconnect(&self, region: &str) {
             self.bump("watch_reconnect", region);
         }
+        fn leader_stale_term_rejected(&self, region: &str, source: &'static str) {
+            let key = format!("stale_term:{source}");
+            self.bump(&key, region);
+        }
     }
 
     #[test]
@@ -505,6 +560,7 @@ mod tests {
             resolved_at: Instant::now(),
             soft_ttl: Duration::from_secs(30),
             hard_ttl: Duration::from_secs(120),
+            term: None,
         };
         assert!(entry.is_fresh());
         assert!(!entry.is_stale_but_usable());
@@ -517,6 +573,7 @@ mod tests {
             resolved_at: Instant::now() - Duration::from_secs(60),
             soft_ttl: Duration::from_secs(30),
             hard_ttl: Duration::from_secs(120),
+            term: None,
         };
         assert!(!entry.is_fresh());
         assert!(entry.is_stale_but_usable());
@@ -529,6 +586,7 @@ mod tests {
             resolved_at: Instant::now() - Duration::from_secs(200),
             soft_ttl: Duration::from_secs(30),
             hard_ttl: Duration::from_secs(120),
+            term: None,
         };
         assert!(!entry.is_fresh());
         assert!(!entry.is_stale_but_usable());
@@ -542,6 +600,7 @@ mod tests {
             resolved_at: Instant::now() - Duration::from_secs(30),
             soft_ttl: Duration::from_secs(30),
             hard_ttl: Duration::from_secs(120),
+            term: None,
         };
         assert!(!entry.is_fresh(), "age == soft_ttl must not be fresh");
         assert!(entry.is_stale_but_usable(), "age == soft_ttl must be stale-but-usable");
@@ -555,6 +614,7 @@ mod tests {
             resolved_at: Instant::now() - Duration::from_secs(120),
             soft_ttl: Duration::from_secs(30),
             hard_ttl: Duration::from_secs(120),
+            term: None,
         };
         assert!(!entry.is_fresh());
         assert!(!entry.is_stale_but_usable(), "age == hard_ttl must be expired");
@@ -572,6 +632,7 @@ mod tests {
             resolved_at: Instant::now() - Duration::from_millis(500),
             soft_ttl: Duration::from_millis(1),
             hard_ttl: Duration::from_secs(10),
+            term: None,
         });
         assert!(cache.cached_endpoint().is_some());
     }
@@ -588,6 +649,7 @@ mod tests {
             resolved_at: Instant::now() - Duration::from_secs(60),
             soft_ttl: Duration::from_millis(1),
             hard_ttl: Duration::from_millis(10),
+            term: None,
         });
         assert!(cache.cached_endpoint().is_none());
     }
@@ -600,6 +662,7 @@ mod tests {
             resolved_at: Instant::now(),
             soft_ttl: Duration::from_secs(30),
             hard_ttl: Duration::from_secs(120),
+            term: None,
         });
         let (_ep, freshness) = cache.cached_endpoint_with_freshness().expect("cache populated");
         assert_eq!(freshness, CacheFreshness::Fresh);
@@ -609,6 +672,7 @@ mod tests {
             resolved_at: Instant::now() - Duration::from_secs(60),
             soft_ttl: Duration::from_secs(30),
             hard_ttl: Duration::from_secs(120),
+            term: None,
         });
         let (_ep, freshness) = cache.cached_endpoint_with_freshness().expect("cache populated");
         assert_eq!(freshness, CacheFreshness::StaleButUsable);
@@ -618,6 +682,7 @@ mod tests {
             resolved_at: Instant::now() - Duration::from_secs(300),
             soft_ttl: Duration::from_secs(30),
             hard_ttl: Duration::from_secs(120),
+            term: None,
         });
         assert!(cache.cached_endpoint_with_freshness().is_none());
     }
@@ -630,6 +695,7 @@ mod tests {
             resolved_at: Instant::now(),
             soft_ttl: Duration::from_secs(30),
             hard_ttl: Duration::from_secs(120),
+            term: None,
         });
         assert!(cache.cached_endpoint().is_some());
         cache.invalidate();
@@ -680,6 +746,7 @@ mod tests {
             resolved_at: Instant::now(),
             soft_ttl: Duration::from_secs(30),
             hard_ttl: Duration::from_secs(120),
+            term: None,
         });
 
         let hint = LeaderHint {
@@ -813,6 +880,7 @@ mod tests {
             resolved_at: Instant::now(),
             soft_ttl: Duration::from_secs(30),
             hard_ttl: Duration::from_secs(120),
+            term: None,
         });
 
         // Fresh snapshot — no gateway call needed. Dummy channel is fine
@@ -836,6 +904,7 @@ mod tests {
             resolved_at: Instant::now() - Duration::from_secs(60),
             soft_ttl: Duration::from_secs(30),
             hard_ttl: Duration::from_secs(120),
+            term: None,
         });
 
         let dummy = Channel::from_static("http://127.0.0.1:1").connect_lazy();
@@ -859,6 +928,7 @@ mod tests {
             resolved_at: Instant::now(),
             soft_ttl: Duration::from_secs(30),
             hard_ttl: Duration::from_secs(120),
+            term: None,
         });
 
         cache.apply_hint(&crate::error::LeaderHint {
@@ -875,7 +945,7 @@ mod tests {
         let cache = RegionLeaderCache::new(Region::US_EAST_VA);
         assert!(cache.cached_endpoint().is_none());
 
-        cache.apply_watch_update("http://leader:5000");
+        cache.apply_watch_update("http://leader:5000", 1);
 
         let got = cache.cached_endpoint().expect("cache populated by watch update");
         assert_eq!(got.as_ref(), "http://leader:5000");
@@ -890,9 +960,10 @@ mod tests {
             resolved_at: Instant::now(),
             soft_ttl: Duration::from_secs(30),
             hard_ttl: Duration::from_secs(120),
+            term: None,
         });
 
-        cache.apply_watch_update("");
+        cache.apply_watch_update("", 1);
 
         let got = cache.cached_endpoint().expect("cache preserved");
         assert_eq!(got.as_ref(), "http://existing:5000");
@@ -906,11 +977,121 @@ mod tests {
             resolved_at: Instant::now(),
             soft_ttl: Duration::from_secs(30),
             hard_ttl: Duration::from_secs(120),
+            term: None,
         });
 
-        cache.apply_watch_update("http://new:5000");
+        cache.apply_watch_update("http://new:5000", 1);
 
         let got = cache.cached_endpoint().expect("cache populated");
         assert_eq!(got.as_ref(), "http://new:5000");
+    }
+
+    fn seed_with_term(cache: &RegionLeaderCache, endpoint: &str, term: Option<u64>) {
+        *cache.cached.write() = Some(CachedLeader {
+            endpoint: Arc::from(endpoint),
+            resolved_at: Instant::now(),
+            soft_ttl: Duration::from_secs(30),
+            hard_ttl: Duration::from_secs(120),
+            term,
+        });
+    }
+
+    #[test]
+    fn term_gating_accepts_same_term() {
+        use crate::error::LeaderHint;
+        let cache = RegionLeaderCache::new(Region::US_EAST_VA);
+        seed_with_term(&cache, "http://old:5000", Some(5));
+        let hint = LeaderHint {
+            leader_id: Some(1),
+            leader_endpoint: Some("http://same:5000".to_owned()),
+            term: Some(5),
+        };
+        cache.apply_hint(&hint);
+        assert_eq!(cache.cached_endpoint().as_deref(), Some("http://same:5000"));
+    }
+
+    #[test]
+    fn term_gating_accepts_higher_term() {
+        use crate::error::LeaderHint;
+        let cache = RegionLeaderCache::new(Region::US_EAST_VA);
+        seed_with_term(&cache, "http://old:5000", Some(5));
+        let hint = LeaderHint {
+            leader_id: Some(1),
+            leader_endpoint: Some("http://new:5000".to_owned()),
+            term: Some(7),
+        };
+        cache.apply_hint(&hint);
+        assert_eq!(cache.cached_endpoint().as_deref(), Some("http://new:5000"));
+    }
+
+    #[test]
+    fn term_gating_rejects_lower_term() {
+        use crate::error::LeaderHint;
+        let metrics = Arc::new(CountingTestMetrics::default());
+        let cache = RegionLeaderCache::new(Region::US_EAST_VA);
+        cache.set_metrics(Arc::clone(&metrics) as Arc<dyn crate::metrics::SdkMetrics>);
+        seed_with_term(&cache, "http://old:5000", Some(7));
+        let hint = LeaderHint {
+            leader_id: Some(1),
+            leader_endpoint: Some("http://stale:5000".to_owned()),
+            term: Some(5),
+        };
+        cache.apply_hint(&hint);
+        assert_eq!(cache.cached_endpoint().as_deref(), Some("http://old:5000"));
+        assert_eq!(metrics.get("stale_term:hint", "us-east-va"), 1);
+    }
+
+    #[test]
+    fn term_gating_rejects_watch_update_with_lower_term() {
+        let metrics = Arc::new(CountingTestMetrics::default());
+        let cache = RegionLeaderCache::new(Region::US_EAST_VA);
+        cache.set_metrics(Arc::clone(&metrics) as Arc<dyn crate::metrics::SdkMetrics>);
+        seed_with_term(&cache, "http://old:5000", Some(7));
+        cache.apply_watch_update("http://stale:5000", 5);
+        assert_eq!(cache.cached_endpoint().as_deref(), Some("http://old:5000"));
+        assert_eq!(metrics.get("stale_term:watch", "us-east-va"), 1);
+    }
+
+    #[test]
+    fn term_gating_accepts_any_when_cache_empty() {
+        use crate::error::LeaderHint;
+        let cache = RegionLeaderCache::new(Region::US_EAST_VA);
+        let hint = LeaderHint {
+            leader_id: Some(1),
+            leader_endpoint: Some("http://first:5000".to_owned()),
+            term: None,
+        };
+        cache.apply_hint(&hint);
+        assert_eq!(cache.cached_endpoint().as_deref(), Some("http://first:5000"));
+        // The cached entry has term None so that a subsequent termed write
+        // is still accepted under the None-cache rule.
+        let guard = cache.cached.read();
+        assert_eq!(guard.as_ref().and_then(|c| c.term), None);
+    }
+
+    #[test]
+    fn jitter_stays_within_bounds() {
+        for _ in 0..100 {
+            let d = jittered(Duration::from_secs(10));
+            assert!(d >= Duration::from_secs(5));
+            assert!(d < Duration::from_secs(15));
+        }
+    }
+
+    #[test]
+    fn term_gating_rejects_none_term_when_cache_has_term() {
+        use crate::error::LeaderHint;
+        let metrics = Arc::new(CountingTestMetrics::default());
+        let cache = RegionLeaderCache::new(Region::US_EAST_VA);
+        cache.set_metrics(Arc::clone(&metrics) as Arc<dyn crate::metrics::SdkMetrics>);
+        seed_with_term(&cache, "http://old:5000", Some(5));
+        let hint = LeaderHint {
+            leader_id: Some(1),
+            leader_endpoint: Some("http://untrusted:5000".to_owned()),
+            term: None,
+        };
+        cache.apply_hint(&hint);
+        assert_eq!(cache.cached_endpoint().as_deref(), Some("http://old:5000"));
+        assert_eq!(metrics.get("stale_term:hint", "us-east-va"), 1);
     }
 }

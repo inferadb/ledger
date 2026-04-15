@@ -133,6 +133,11 @@ pub trait SdkMetrics: Send + Sync + fmt::Debug {
 
     /// Called when the leader watch stream reconnects after an error or EOF.
     fn leader_watch_reconnect(&self, _region: &str) {}
+
+    /// Called when a cache write was rejected because the incoming term is
+    /// stale relative to the currently-cached term. `source` is one of
+    /// `"hint"` or `"watch"`.
+    fn leader_stale_term_rejected(&self, _region: &str, _source: &'static str) {}
 }
 
 /// No-op metrics implementation with zero overhead.
@@ -182,6 +187,9 @@ mod metric_names {
     pub const LEADER_WATCH_UPDATES_TOTAL: &str = "ledger_sdk_leader_watch_updates_total";
     /// Leader watch stream reconnect attempts.
     pub const LEADER_WATCH_RECONNECTS_TOTAL: &str = "ledger_sdk_leader_watch_reconnects_total";
+    /// Cache writes rejected for carrying a stale term.
+    pub const LEADER_STALE_TERM_REJECTED_TOTAL: &str =
+        "ledger_sdk_leader_stale_term_rejected_total";
 }
 
 impl SdkMetrics for MetricsSdkMetrics {
@@ -263,6 +271,15 @@ impl SdkMetrics for MetricsSdkMetrics {
         metrics::counter!(
             metric_names::LEADER_WATCH_RECONNECTS_TOTAL,
             "region" => region.to_owned(),
+        )
+        .increment(1);
+    }
+
+    fn leader_stale_term_rejected(&self, region: &str, source: &'static str) {
+        metrics::counter!(
+            metric_names::LEADER_STALE_TERM_REJECTED_TOTAL,
+            "region" => region.to_owned(),
+            "source" => source,
         )
         .increment(1);
     }

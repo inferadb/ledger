@@ -17,7 +17,7 @@ use std::{
 };
 
 use inferadb_ledger_proto::proto::{
-    BatchRaftRequest, BatchRaftResponse, ConsensusForwardRequest, ConsensusForwardResponse,
+    BatchRaftRequest, BatchRaftResponse, ConsensusAck, ConsensusEnvelope,
     ForwardRegionalProposalRequest, ForwardRegionalProposalResponse, RaftAppendEntriesRequest,
     RaftAppendEntriesResponse, RaftInstallSnapshotRequest, RaftInstallSnapshotResponse,
     RaftVoteRequest, RaftVoteResponse, ReadIndexRequest, ReadIndexResponse, TriggerElectionRequest,
@@ -97,13 +97,13 @@ impl RaftService for MinimalRaftService {
     ) -> Result<Response<BatchRaftResponse>, Status> {
         Err(Status::unimplemented("BatchSend not supported in mock"))
     }
-    type ForwardConsensusStreamStream = ReceiverStream<Result<ConsensusForwardResponse, Status>>;
+    type ConsensusStreamStream = ReceiverStream<Result<ConsensusAck, Status>>;
 
-    async fn forward_consensus_stream(
+    async fn consensus_stream(
         &self,
-        _request: Request<tonic::Streaming<ConsensusForwardRequest>>,
-    ) -> Result<Response<Self::ForwardConsensusStreamStream>, Status> {
-        Err(Status::unimplemented("ForwardConsensusStream not supported in mock"))
+        _request: Request<tonic::Streaming<ConsensusEnvelope>>,
+    ) -> Result<Response<Self::ConsensusStreamStream>, Status> {
+        Err(Status::unimplemented("ConsensusStream not supported in mock"))
     }
     async fn forward_regional_proposal(
         &self,
@@ -334,14 +334,13 @@ fn test_majority_partition_continues_operating() {
         ) -> Result<Response<BatchRaftResponse>, Status> {
             Err(Status::unimplemented("BatchSend not supported in mock"))
         }
-        type ForwardConsensusStreamStream =
-            ReceiverStream<Result<ConsensusForwardResponse, Status>>;
+        type ConsensusStreamStream = ReceiverStream<Result<ConsensusAck, Status>>;
 
-        async fn forward_consensus_stream(
+        async fn consensus_stream(
             &self,
-            _request: Request<tonic::Streaming<ConsensusForwardRequest>>,
-        ) -> Result<Response<Self::ForwardConsensusStreamStream>, Status> {
-            Err(Status::unimplemented("ForwardConsensusStream not supported in mock"))
+            _request: Request<tonic::Streaming<ConsensusEnvelope>>,
+        ) -> Result<Response<Self::ConsensusStreamStream>, Status> {
+            Err(Status::unimplemented("ConsensusStream not supported in mock"))
         }
         async fn forward_regional_proposal(
             &self,
@@ -626,14 +625,13 @@ fn test_intermittent_connectivity() {
         ) -> Result<Response<BatchRaftResponse>, Status> {
             Err(Status::unimplemented("BatchSend not supported in mock"))
         }
-        type ForwardConsensusStreamStream =
-            ReceiverStream<Result<ConsensusForwardResponse, Status>>;
+        type ConsensusStreamStream = ReceiverStream<Result<ConsensusAck, Status>>;
 
-        async fn forward_consensus_stream(
+        async fn consensus_stream(
             &self,
-            _request: Request<tonic::Streaming<ConsensusForwardRequest>>,
-        ) -> Result<Response<Self::ForwardConsensusStreamStream>, Status> {
-            Err(Status::unimplemented("ForwardConsensusStream not supported in mock"))
+            _request: Request<tonic::Streaming<ConsensusEnvelope>>,
+        ) -> Result<Response<Self::ConsensusStreamStream>, Status> {
+            Err(Status::unimplemented("ConsensusStream not supported in mock"))
         }
         async fn forward_regional_proposal(
             &self,

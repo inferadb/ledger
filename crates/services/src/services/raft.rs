@@ -4,13 +4,13 @@
 //! The legacy openraft RPC methods (vote, append_entries, install_snapshot)
 //! are retained for proto compatibility but return `UNIMPLEMENTED`.
 //! Active consensus messaging uses the bidirectional streaming
-//! `forward_consensus_stream` RPC — one long-lived stream per peer with
+//! `consensus_stream` RPC — one long-lived stream per peer with
 //! HTTP/2 flow-controlled backpressure.
 
 use std::{str::FromStr, sync::Arc};
 
 use inferadb_ledger_proto::proto::{
-    BatchRaftRequest, BatchRaftResponse, ConsensusForwardRequest, ConsensusForwardResponse,
+    BatchRaftRequest, BatchRaftResponse, ConsensusAck, ConsensusEnvelope,
     ForwardRegionalProposalRequest, ForwardRegionalProposalResponse, RaftAppendEntriesRequest,
     RaftAppendEntriesResponse, RaftInstallSnapshotRequest, RaftInstallSnapshotResponse,
     RaftVoteRequest, RaftVoteResponse, ReadIndexRequest, ReadIndexResponse, TriggerElectionRequest,
@@ -145,12 +145,12 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
         Ok(Response::new(ReadIndexResponse { committed_index, leader_term: handle.current_term() }))
     }
 
-    type ForwardConsensusStreamStream = ReceiverStream<Result<ConsensusForwardResponse, Status>>;
+    type ConsensusStreamStream = ReceiverStream<Result<ConsensusAck, Status>>;
 
-    async fn forward_consensus_stream(
+    async fn consensus_stream(
         &self,
-        request: Request<tonic::Streaming<ConsensusForwardRequest>>,
-    ) -> Result<Response<Self::ForwardConsensusStreamStream>, Status> {
+        request: Request<tonic::Streaming<ConsensusEnvelope>>,
+    ) -> Result<Response<Self::ConsensusStreamStream>, Status> {
         let mut inbound = request.into_inner();
         // Bounded ack channel — bidi backpressure prevents unbounded fan-out.
         // Capacity mirrors the peer-sender queue capacity (1024) so an active
@@ -166,7 +166,7 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
                 let ack = match msg {
                     Ok(req) => handle_consensus_message(&manager, peer_liveness.as_ref(), req)
                         .await
-                        .map(|_| ConsensusForwardResponse {}),
+                        .map(|_| ConsensusAck {}),
                     Err(e) => {
                         tracing::debug!(error = %e, "Consensus stream inbound error; closing");
                         break;
@@ -244,7 +244,7 @@ async fn handle_consensus_message(
     peer_liveness: Option<
         &Arc<parking_lot::RwLock<std::collections::HashMap<u64, std::time::Instant>>>,
     >,
-    req: ConsensusForwardRequest,
+    req: ConsensusEnvelope,
 ) -> Result<(), Status> {
     // Resolve the target region from the request — None means GLOBAL,
     // Some(invalid) is an error.
@@ -330,9 +330,8 @@ mod tests {
 
     use inferadb_ledger_consensus::Message;
     use inferadb_ledger_proto::proto::{
-        ConsensusForwardRequest, RaftAppendEntriesRequest, RaftInstallSnapshotRequest,
-        RaftVoteRequest, Region as ProtoRegion,
-        raft_service_server::RaftService as RaftServiceProto,
+        ConsensusEnvelope, RaftAppendEntriesRequest, RaftInstallSnapshotRequest, RaftVoteRequest,
+        Region as ProtoRegion, raft_service_server::RaftService as RaftServiceProto,
     };
     use inferadb_ledger_raft::{RaftManager, RaftManagerConfig, RegionConfig};
     use inferadb_ledger_test_utils::TestDir;
@@ -418,7 +417,7 @@ mod tests {
         let result = handle_consensus_message(
             &manager,
             None,
-            ConsensusForwardRequest {
+            ConsensusEnvelope {
                 shard_id: 0,
                 from_node: 1,
                 region: Some(ProtoRegion::Global as i32),
@@ -440,7 +439,7 @@ mod tests {
         let result = handle_consensus_message(
             &manager,
             None,
-            ConsensusForwardRequest {
+            ConsensusEnvelope {
                 shard_id: 0,
                 from_node: 99,
                 region: Some(ProtoRegion::Global as i32),
@@ -461,7 +460,7 @@ mod tests {
         let result = handle_consensus_message(
             &manager,
             None,
-            ConsensusForwardRequest {
+            ConsensusEnvelope {
                 shard_id: 0,
                 from_node: 0,
                 region: Some(ProtoRegion::Global as i32),
@@ -483,7 +482,7 @@ mod tests {
         let result = handle_consensus_message(
             &manager,
             None,
-            ConsensusForwardRequest {
+            ConsensusEnvelope {
                 shard_id: 0,
                 from_node: 1,
                 region: Some(ProtoRegion::Global as i32),
@@ -505,7 +504,7 @@ mod tests {
         let result = handle_consensus_message(
             &manager,
             None,
-            ConsensusForwardRequest {
+            ConsensusEnvelope {
                 shard_id: 0,
                 from_node: 1,
                 region: Some(ProtoRegion::Global as i32),
@@ -531,7 +530,7 @@ mod tests {
         let result = handle_consensus_message(
             &manager,
             None,
-            ConsensusForwardRequest {
+            ConsensusEnvelope {
                 shard_id: 0,
                 from_node: 1,
                 region: Some(ProtoRegion::Global as i32),

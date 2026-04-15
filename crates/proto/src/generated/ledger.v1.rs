@@ -4057,9 +4057,10 @@ pub mod batch_raft_entry_response {
         AppendEntries(super::RaftAppendEntriesResponse),
     }
 }
-/// Request to forward a consensus engine message.
+/// Envelope wrapping a consensus-engine message sent between peers over
+/// the ConsensusStream bidirectional RPC.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ConsensusForwardRequest {
+pub struct ConsensusEnvelope {
     /// Shard (consensus group) this message targets.
     #[prost(uint64, tag = "1")]
     pub shard_id: u64,
@@ -4069,7 +4070,7 @@ pub struct ConsensusForwardRequest {
     /// Region the shard belongs to.
     #[prost(enumeration = "Region", optional, tag = "3")]
     pub region: ::core::option::Option<i32>,
-    /// Postcard-serialized consensus Message.
+    /// Postcard-serialized consensus Message (the inner protocol payload).
     #[prost(bytes = "vec", tag = "4")]
     pub payload: ::prost::alloc::vec::Vec<u8>,
     /// gRPC address of the sender (e.g. "127.0.0.1:50051").
@@ -4082,9 +4083,11 @@ pub struct ConsensusForwardRequest {
     #[prost(uint64, tag = "6")]
     pub cluster_id: u64,
 }
-/// Empty response for fire-and-forget consensus message forwarding.
+/// Per-envelope acknowledgement. Empty; clients discard these since the
+/// transport is fire-and-forget — presence merely keeps HTTP/2 flow control
+/// flowing in both directions.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ConsensusForwardResponse {}
+pub struct ConsensusAck {}
 /// Request to forward a regional proposal to the data region leader.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ForwardRegionalProposalRequest {
@@ -19556,18 +19559,17 @@ pub mod raft_service_client {
                 .insert(GrpcMethod::new("ledger.v1.RaftService", "BatchSend"));
             self.inner.unary(req, path, codec).await
         }
-        /// Forward consensus engine messages to a peer node.
-        ///
-        /// Bidirectional stream: the client sends consensus messages and the server
-        /// acknowledges each one. The stream is long-lived (one per peer) to amortize
+        /// Bidirectional consensus-message transport between peers. Carries Raft
+        /// protocol messages (vote, append-entries, heartbeat, etc.) serialized in
+        /// the envelope payload. The stream is long-lived (one per peer) to amortize
         /// connection setup and enable HTTP/2 flow-controlled backpressure.
-        pub async fn forward_consensus_stream(
+        /// Fire-and-forget — the server acknowledges each envelope but the client
+        /// discards the acks.
+        pub async fn consensus_stream(
             &mut self,
-            request: impl tonic::IntoStreamingRequest<
-                Message = super::ConsensusForwardRequest,
-            >,
+            request: impl tonic::IntoStreamingRequest<Message = super::ConsensusEnvelope>,
         ) -> std::result::Result<
-            tonic::Response<tonic::codec::Streaming<super::ConsensusForwardResponse>>,
+            tonic::Response<tonic::codec::Streaming<super::ConsensusAck>>,
             tonic::Status,
         > {
             self.inner
@@ -19580,13 +19582,11 @@ pub mod raft_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/ledger.v1.RaftService/ForwardConsensusStream",
+                "/ledger.v1.RaftService/ConsensusStream",
             );
             let mut req = request.into_streaming_request();
             req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("ledger.v1.RaftService", "ForwardConsensusStream"),
-                );
+                .insert(GrpcMethod::new("ledger.v1.RaftService", "ConsensusStream"));
             self.inner.streaming(req, path, codec).await
         }
         /// Forward a regional proposal to the data region leader.
@@ -19687,25 +19687,23 @@ pub mod raft_service_server {
             tonic::Response<super::BatchRaftResponse>,
             tonic::Status,
         >;
-        /// Server streaming response type for the ForwardConsensusStream method.
-        type ForwardConsensusStreamStream: tonic::codegen::tokio_stream::Stream<
-                Item = std::result::Result<
-                    super::ConsensusForwardResponse,
-                    tonic::Status,
-                >,
+        /// Server streaming response type for the ConsensusStream method.
+        type ConsensusStreamStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<super::ConsensusAck, tonic::Status>,
             >
             + std::marker::Send
             + 'static;
-        /// Forward consensus engine messages to a peer node.
-        ///
-        /// Bidirectional stream: the client sends consensus messages and the server
-        /// acknowledges each one. The stream is long-lived (one per peer) to amortize
+        /// Bidirectional consensus-message transport between peers. Carries Raft
+        /// protocol messages (vote, append-entries, heartbeat, etc.) serialized in
+        /// the envelope payload. The stream is long-lived (one per peer) to amortize
         /// connection setup and enable HTTP/2 flow-controlled backpressure.
-        async fn forward_consensus_stream(
+        /// Fire-and-forget — the server acknowledges each envelope but the client
+        /// discards the acks.
+        async fn consensus_stream(
             &self,
-            request: tonic::Request<tonic::Streaming<super::ConsensusForwardRequest>>,
+            request: tonic::Request<tonic::Streaming<super::ConsensusEnvelope>>,
         ) -> std::result::Result<
-            tonic::Response<Self::ForwardConsensusStreamStream>,
+            tonic::Response<Self::ConsensusStreamStream>,
             tonic::Status,
         >;
         /// Forward a regional proposal to the data region leader.
@@ -20067,15 +20065,15 @@ pub mod raft_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/ledger.v1.RaftService/ForwardConsensusStream" => {
+                "/ledger.v1.RaftService/ConsensusStream" => {
                     #[allow(non_camel_case_types)]
-                    struct ForwardConsensusStreamSvc<T: RaftService>(pub Arc<T>);
+                    struct ConsensusStreamSvc<T: RaftService>(pub Arc<T>);
                     impl<
                         T: RaftService,
-                    > tonic::server::StreamingService<super::ConsensusForwardRequest>
-                    for ForwardConsensusStreamSvc<T> {
-                        type Response = super::ConsensusForwardResponse;
-                        type ResponseStream = T::ForwardConsensusStreamStream;
+                    > tonic::server::StreamingService<super::ConsensusEnvelope>
+                    for ConsensusStreamSvc<T> {
+                        type Response = super::ConsensusAck;
+                        type ResponseStream = T::ConsensusStreamStream;
                         type Future = BoxFuture<
                             tonic::Response<Self::ResponseStream>,
                             tonic::Status,
@@ -20083,16 +20081,12 @@ pub mod raft_service_server {
                         fn call(
                             &mut self,
                             request: tonic::Request<
-                                tonic::Streaming<super::ConsensusForwardRequest>,
+                                tonic::Streaming<super::ConsensusEnvelope>,
                             >,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as RaftService>::forward_consensus_stream(
-                                        &inner,
-                                        request,
-                                    )
-                                    .await
+                                <T as RaftService>::consensus_stream(&inner, request).await
                             };
                             Box::pin(fut)
                         }
@@ -20103,7 +20097,7 @@ pub mod raft_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = ForwardConsensusStreamSvc(inner);
+                        let method = ConsensusStreamSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

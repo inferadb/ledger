@@ -2,7 +2,7 @@
 //!
 //! Implements [`NetworkTransport`] by serializing consensus messages to
 //! postcard bytes and shipping them over a long-lived bidirectional stream
-//! (`ForwardConsensusStream`) per peer. The stream amortizes connection
+//! (`ConsensusStream`) per peer. The stream amortizes connection
 //! setup across every message and leverages HTTP/2 flow control for
 //! transport-level backpressure.
 

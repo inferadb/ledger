@@ -3467,12 +3467,13 @@ service RaftService {
   // reducing per-message overhead for multi-group deployments.
   rpc BatchSend(BatchRaftRequest) returns (BatchRaftResponse);
 
-  // Forward consensus engine messages to a peer node.
-  //
-  // Bidirectional stream: the client sends consensus messages and the server
-  // acknowledges each one. The stream is long-lived (one per peer) to amortize
+  // Bidirectional consensus-message transport between peers. Carries Raft
+  // protocol messages (vote, append-entries, heartbeat, etc.) serialized in
+  // the envelope payload. The stream is long-lived (one per peer) to amortize
   // connection setup and enable HTTP/2 flow-controlled backpressure.
-  rpc ForwardConsensusStream(stream ConsensusForwardRequest) returns (stream ConsensusForwardResponse);
+  // Fire-and-forget — the server acknowledges each envelope but the client
+  // discards the acks.
+  rpc ConsensusStream(stream ConsensusEnvelope) returns (stream ConsensusAck);
 
   // Forward a regional proposal to the data region leader.
   // Called when a node receives a write for a data region it doesn't lead.
@@ -3631,15 +3632,16 @@ message BatchRaftEntryResponse {
   }
 }
 
-// Request to forward a consensus engine message.
-message ConsensusForwardRequest {
+// Envelope wrapping a consensus-engine message sent between peers over
+// the ConsensusStream bidirectional RPC.
+message ConsensusEnvelope {
   // Shard (consensus group) this message targets.
   uint64 shard_id = 1;
   // Node ID of the sender.
   uint64 from_node = 2;
   // Region the shard belongs to.
   optional Region region = 3;
-  // Postcard-serialized consensus Message.
+  // Postcard-serialized consensus Message (the inner protocol payload).
   bytes payload = 4;
   // gRPC address of the sender (e.g. "127.0.0.1:50051").
   // Enables the receiver to auto-register a return transport channel
@@ -3650,8 +3652,10 @@ message ConsensusForwardRequest {
   uint64 cluster_id = 6;
 }
 
-// Empty response for fire-and-forget consensus message forwarding.
-message ConsensusForwardResponse {}
+// Per-envelope acknowledgement. Empty; clients discard these since the
+// transport is fire-and-forget — presence merely keeps HTTP/2 flow control
+// flowing in both directions.
+message ConsensusAck {}
 
 // Request to forward a regional proposal to the data region leader.
 message ForwardRegionalProposalRequest {
