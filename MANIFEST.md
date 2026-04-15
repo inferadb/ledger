@@ -5,11 +5,13 @@
 InferaDB Ledger is a blockchain database for cryptographically verifiable authorization, built in Rust with a layered architecture:
 
 ```
-gRPC Services (14 proto-defined, 13 implemented): Read, Write, Organization, Vault, Schema (proto only), Admin, User, Invitation, App, Token, Events, Health, Discovery, Raft
+gRPC Services (14 proto-defined, 13 implemented): Read, Write, Organization, Vault, Schema (proto only), Admin, User, Invitation, App, Token, Events, Health, SystemDiscovery, Raft
  ↓
  services — gRPC service implementations, JWT engine, server assembly
  ↓
- raft — openraft consensus, batching, rate limiting, multi-region
+ raft — openraft integration, apply-phase parallelism, saga orchestrator, background jobs, rate limiting, multi-region
+ ↓
+ consensus — purpose-built multi-shard Raft engine, event-driven Reactor, segmented WAL, pipelined replication
  ↓
  state — domain model, vaults, entities, relationships, state roots
  ↓
@@ -21,6 +23,7 @@ gRPC Services (14 proto-defined, 13 implemented): Read, Write, Organization, Vau
 Supporting crates:
 
 - **proto**: gRPC/protobuf definitions and conversions
+- **consensus**: Purpose-built multi-shard Raft engine (Reactor, Shard, WAL backends, state-machine abstraction)
 - **sdk**: Enterprise client library with retry, circuit breaker, metrics
 - **server**: Binary with bootstrap, config, discovery, integration tests
 - **test-utils**: Shared testing infrastructure (strategies, assertions, crash injection)
@@ -43,7 +46,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Key Types/Functions**:
 - Public modules: `codec`, `config`, `email_hash`, `error`, `events`, `hash`, `merkle`, `onboarding`, `snowflake`, `token`, `types`, `validation`
 - Re-exports: `OrganizationId`, `OrganizationSlug`, `OrganizationUsage`, `VaultId`, `VaultSlug`, `UserId`, `UserSlug`, `UserCredentialId`, `CredentialType`, `TotpAlgorithm`, `PrimaryAuthMethod`, `PasskeyCredential`, `TotpCredential`, `RecoveryCodeCredential`, `CredentialData`, `UserCredential`, `PendingTotpChallenge`, `InviteId`, `InviteSlug`, `InvitationStatus`, `InviteEmailEntry`, `InviteIndexEntry`, `OrganizationInvitation`, `BlockHeader`, `Transaction`, `Entity`, `Relationship`, `Operation`, `EmailBlindingKey`, `compute_email_hmac`, `normalize_email`, `TokenVersion`, `TokenType`, `TokenSubject`, `UserSessionClaims`, `VaultTokenClaims`, `ValidatedToken`, `TokenError`, `SigningKeyEnvelope`, etc.
-- Note: `ShardId` is defined in `types.rs` but NOT re-exported from lib.rs. `TokenPair` exists in the SDK and proto crates but NOT in the types crate. `compute_code_hash` exists in `email_hash.rs` but is NOT re-exported from lib.rs.
+- Note: `TokenPair` exists in the SDK and proto crates but NOT in the types crate. `compute_code_hash` exists in `email_hash.rs` but is NOT re-exported from lib.rs.
 - **Insights**: Clean public API surface, excellent organization
 
 #### `codec.rs`
@@ -108,34 +111,21 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `MerkleProof::verify()`: Verify proof against root
 - **Insights**: Power-of-2 leaf count limitation documented (rs_merkle constraint). Adequate for block-level Merkle trees.
 
-#### `types.rs`
+#### `types/` module
 
-- **Purpose**: Core domain types (blocks, transactions, operations, entities, relationships)
+- **Purpose**: Core domain types organized into 7 submodules by concern (identifiers, blocks, credentials, enums, region, usage, retention)
+- **Submodules**:
+  - `types/ids.rs` — ID/slug newtypes via `define_id!` and `define_string_id!` macros. All `define_id!`-generated types: `OrganizationId`, `VaultId`, `UserId`, `SigningKeyId`, `RefreshTokenId`, `UserCredentialId`, `InviteId`, `TeamId`, `AppId`, `ClientAssertionId`, `EmailVerifyTokenId`, `UserEmailId`. Hand-implemented `u64` Snowflake slugs (no prefix): `OrganizationSlug`, `VaultSlug`, `UserSlug`, `InviteSlug`, `TeamSlug`, `AppSlug`. `TokenVersion(u64)` manual (needs `Default` + `increment()`). `NodeId`, `ClientId` via `define_string_id!`.
+  - `types/block.rs` — `BlockHeader` (height, organization, vault, previous_hash, tx_merkle_root, state_root, timestamp, term, committed_index), `VaultBlock`, `RegionBlock`, `Transaction` (fallible builder, max 1000 ops / 100 MB payload), `Entity` (key, value, expires_at, version), `Relationship` (resource, relation, subject), `Operation` (5 variants: CreateRelationship, DeleteRelationship, SetEntity, DeleteEntity, ExpireEntity).
+  - `types/credentials.rs` — `CredentialType` enum (Passkey/Totp/RecoveryCode, Display impl for key encoding), `TotpAlgorithm` (Sha1/Sha256/Sha512), `PasskeyCredential`, `TotpCredential` (secret in `Zeroizing<Vec<u8>>`, manual Debug redacts as `[REDACTED]`, custom serde), `RecoveryCodeCredential`, `CredentialData` enum (externally-tagged for postcard), `UserCredential`, `PendingTotpChallenge`.
+  - `types/enums.rs` — `UserStatus`, `UserRole`, `OrganizationMemberRole`, `PrimaryAuthMethod` (EmailCode/Passkey — not a `CredentialType`, used for TOTP challenge audit trail).
+  - `types/region.rs` — `Region` enum (data-residency tier).
+  - `types/usage.rs` — `OrganizationUsage` (per-org resource accounting).
+  - `types/retention.rs` — `BlockRetentionPolicy`, `BlockRetentionMode`.
 - **Key Types/Functions**:
-- `define_id!` macro: Generates `i64`-based newtypes with derives, Display (prefixed), FromStr, serde
-- `define_string_id!` macro: Generates `String`-based newtypes (`NodeId`, `ClientId`) with derives, Display, FromStr, serde
-- `OrganizationId(i64)`: Internal storage key (display `"org:42"`), generated via `define_id!`
-- `OrganizationSlug(u64)`: External Snowflake identifier (display raw number), hand-implemented (not `define_id!` — `u64` not `i64`, no prefix)
-- `VaultSlug(u64)`: External Snowflake identifier for vaults (same hand-implemented pattern as `OrganizationSlug`)
-- `VaultId`, `UserId`, `ShardId`, `SigningKeyId`, `RefreshTokenId`, `UserCredentialId`, `InviteId`: Newtype IDs via `define_id!` (replaced type aliases)
-- `InviteSlug(u64)`: External Snowflake identifier for invitations (hand-implemented, same pattern as `OrganizationSlug`)
-- `TeamSlug(u64)`, `AppSlug(u64)`: External Snowflake identifiers for teams and apps (hand-implemented, same pattern as `OrganizationSlug`)
-- `TokenVersion(u64)`: Monotonic counter for forced session invalidation (manual impl, not `define_id!` — needs `Default` and `increment()`)
-- `BlockHeader`: height, organization, vault, previous_hash, tx_merkle_root, state_root, timestamp, term, committed_index
-- `Transaction`: id, client_id, sequence, actor, operations, timestamp (fallible builder with validation)
-- `Operation`: 5 variants (CreateRelationship, DeleteRelationship, SetEntity, DeleteEntity, ExpireEntity)
-- `Entity`: key, value, expires_at (0 = never), version
-- `Relationship`: resource, relation, subject (authorization tuple)
-- `CredentialType` enum: `Passkey`, `Totp`, `RecoveryCode` (with `Display` impl for storage key encoding)
-- `TotpAlgorithm` enum: `Sha1` (default, widest compat), `Sha256`, `Sha512`
-- `PrimaryAuthMethod` enum: `EmailCode`, `Passkey` — distinguishes primary auth for TOTP challenge audit trail (email-code is NOT a `CredentialType`)
-- `PasskeyCredential` struct: credential_id, public_key, sign_count, transports, backup_eligible, backup_state, attestation_format, aaguid
-- `TotpCredential` struct: secret (`Zeroizing<Vec<u8>>`), algorithm, digits, period — manual `Debug` impl redacts secret as `[REDACTED]`, custom serde module for `Zeroizing` wrapper
-- `RecoveryCodeCredential` struct: code_hashes (`Vec<Vec<u8>>`), total_generated
-- `CredentialData` enum: `Passkey(PasskeyCredential)` | `Totp(TotpCredential)` | `RecoveryCode(RecoveryCodeCredential)` — externally-tagged serde (required for postcard in `EncryptedUserSystemRequest`)
-- `UserCredential` struct: id, user_id, credential_type, name, enabled, created_at, last_used_at, data — `credential_type` intentionally redundant with `CredentialData` discriminant (needed for type index scans without deserialization)
-- `PendingTotpChallenge` struct: nonce (`[u8; 32]`), expires_at, attempts, primary_method — stores both UserId and UserSlug (state machine needs UserId for keys, session creation needs UserSlug for JWT)
-- **Insights**: Dual-ID architecture for both organizations and vaults: internal sequential IDs (`OrganizationId`/`VaultId`, `i64`) for B+ tree key density, external Snowflake IDs (`OrganizationSlug`/`VaultSlug`, `u64`) for API-facing use. Fallible Transaction builder validates constraints (max 1000 ops, max 100MB batch payload). `BlockHeader` includes `organization`/`vault` scope and Raft consensus fields (`term`, `committed_index`). Credential types use externally-tagged serde for postcard compatibility (internally-tagged enums fail postcard deserialization). `TotpCredential` derives `Zeroize` on secret field for secure memory cleanup. `UserCredentialId` follows the single-ID pattern (like `SigningKeyId`, `RefreshTokenId`) — no slug needed since credentials are always accessed under a user context.
+  - `define_id!` macro: Generates `i64`-based newtypes with derives, Display (prefixed like `"org:42"`), FromStr, serde.
+  - `define_string_id!` macro: Generates `String`-based newtypes with derives, Display, FromStr, serde.
+- **Insights**: Well-factored into 7 semantic groups rather than a monolithic `types.rs`. Dual-ID architecture: internal sequential `i64` IDs for B+ tree key density, external Snowflake `u64` slugs for API-facing use. Externally-tagged serde on `CredentialData` is required for postcard compatibility (internally-tagged enums fail postcard deserialization). `TotpCredential` derives `Zeroize` on secret field for secure memory cleanup. `UserCredentialId` follows the single-ID pattern (like `SigningKeyId`, `RefreshTokenId`) — no slug since credentials are always accessed under a user context.
 
 #### `invitation.rs`
 
@@ -379,16 +369,22 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `ScrubError`: Error for integrity check failures
 - **Insights**: Uses XXH3-64 (not CRC32) for page checksum verification. Background `IntegrityScrubberJob` in raft crate wraps this for periodic scrubbing.
 
-#### `db.rs`
+#### `db/` module
 
-- **Purpose**: Database layer with ACID transactions, multiple B+ trees (tables), and comprehensive tests
+- **Purpose**: Database layer with ACID transactions, multiple B+ trees (tables), and comprehensive tests — split into 4 submodules for clarity
+- **Submodules**:
+  - `db/mod.rs` — `Database<B: Backend>` struct and open/read/write entry points.
+  - `db/transactions.rs` — `ReadTransaction` / `WriteTransaction` implementations (snapshot isolation, dirty tracking, commit/rollback), `TableTransaction<T: Table>` for type-safe table access.
+  - `db/iterator.rs` — `TableIterator` with streaming range queries and resume-key support. `DEFAULT_BUFFER_SIZE` constant; buffers decoded KV pairs with background refill to amortize page cache access.
+  - `db/page_providers.rs` — Transaction-layer page providers (`CachingReadPageProvider`, `BufferedWritePageProvider`, `BufferedReadPageProvider`) that sit between transactions and the page manager.
+  - `db/tests.rs` — Comprehensive inline tests covering the full Database API.
 - **Key Types/Functions**:
-- `Database::<FileBackend>::open<P: AsRef<Path>>(path: P) -> Result<Self>`: Open file-based database
-- `Database::<InMemoryBackend>::open_in_memory() -> Result<Self>`: Create in-memory database
-- `read() -> Result<ReadTransaction<'_, B>>`: Start read transaction
-- `write() -> Result<WriteTransaction<'_, B>>`: Start write transaction
-- Tables initialize implicitly on first write (no explicit open_table method needed)
-- **Insights**: Multiple tables share same PageManager. Dual-slot commit protocol (commit bit + sync) ensures atomicity. Large file primarily due to extensive inline test coverage.
+  - `Database::<FileBackend>::open<P: AsRef<Path>>(path: P) -> Result<Self>`: Open file-based database
+  - `Database::<InMemoryBackend>::open_in_memory() -> Result<Self>`: Create in-memory database
+  - `read() -> Result<ReadTransaction<'_, B>>`: Start read transaction
+  - `write() -> Result<WriteTransaction<'_, B>>`: Start write transaction
+  - Tables initialize implicitly on first write (no explicit open_table method needed)
+- **Insights**: Multiple tables share the same PageManager. Dual-slot commit protocol (commit bit + sync) ensures atomicity. Page-provider indirection lets write transactions buffer dirty pages in memory without copying them back to the cache until commit.
 
 #### `error.rs`
 
@@ -401,13 +397,14 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 #### `transaction.rs`
 
-- **Purpose**: Read and write transactions with cursor-based iteration
+- **Purpose**: Snapshot state and MVCC bookkeeping (the transaction _types_ — `ReadTransaction` / `WriteTransaction` structs live in `db/transactions.rs`)
 - **Key Types/Functions**:
-- `ReadTransaction`: Snapshot isolation, read-only operations
-- `WriteTransaction`: Read-write, dirty tracking, commit/rollback
-- `TableTransaction<T: Table>`: Type-safe table access
-- `iter() -> TableIterator`: Streaming iterator with resume-key support
-- **Insights**: Excellent design. Type-safe table access via phantom types. Cursor-based iteration prevents OOM on large tables.
+- `CommittedState`: Per-commit snapshot metadata
+- `TransactionTracker`: Active-reader tracking for MVCC garbage collection
+- `SnapshotId`: Monotonic snapshot identifier
+- `PendingFrees`: Page-free list pending safe reclamation once no snapshot references remain
+- `TrackerState`: Internal tracker state machine
+- **Insights**: This file holds the state-tracking primitives. The executable transaction types (`ReadTransaction`, `WriteTransaction`) are in `db/transactions.rs` — the separation keeps MVCC accounting isolated from transaction operations.
 
 #### `tables.rs`
 
@@ -427,8 +424,10 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `UserSlugIndex` (18): User slug→internal ID mapping (`u64` → `i64`)
 - `TeamSlugIndex` (19): Team slug→internal ID mapping (`u64` → `i64`)
 - `AppSlugIndex` (20): App slug→internal ID mapping (`u64` → `i64`)
+- `StringDictionary` (21): Interned string `id → bytes` (component string deduplication for relationship tuples)
+- `StringDictionaryReverse` (22): Reverse `bytes → id` lookup for the string dictionary
 - `TableEntry`: Encoded (table_id, key, value) triple for snapshot streaming
-- **Insights**: Phantom types prevent mixing keys/values from different tables. Compile-time table ID assignment. 21 tables total. Tables 15-17 use composite byte keys for externalized `AppliedState` persistence.
+- **Insights**: Phantom types prevent mixing keys/values from different tables. Compile-time table ID assignment. 23 tables total. Tables 15-17 use composite byte keys for externalized `AppliedState` persistence. Tables 21-22 implement string interning for relationship components, reducing duplicate string storage across the relationship table.
 
 #### `types.rs`
 
@@ -585,6 +584,31 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `get_subjects()`, `get_resources()`: Query indexes
 - **Insights**: Index keys include all tuple components to support efficient lookups. Consistent with relationship key encoding.
 
+#### `binary_keys.rs`
+
+- **Purpose**: Binary key encoding for relationship tuples using interned component strings
+- **Key Types/Functions**:
+- `InternId` newtype: Compact integer identifier for an interned component string
+- `InternCategory` enum: Distinguishes which dictionary space a string belongs to (resource type, relation, etc.)
+- `encode_relationship_local_key()`, `decode_relationship_local_key()`: Binary encoding of `(resource, relation, subject)` tuples using `InternId`s
+- **Insights**: Binary tuple keys compress common component strings into `InternId`s looked up through the per-vault dictionary (`dictionary.rs`). Reduces relationship-table storage by a large constant factor when applications reuse a small set of resource types and relations.
+
+#### `dictionary.rs`
+
+- **Purpose**: Per-vault string-interning dictionary with deduplication (`VaultDictionary`)
+- **Key Types/Functions**:
+- `VaultDictionary` struct: In-memory cache backed by `StringDictionary` / `StringDictionaryReverse` tables (store tables 21-22)
+- Intern/lookup methods keyed by `InternCategory` + string bytes
+- **Insights**: Dictionary sits between relationship encoding and the store. The reverse table gives O(log N) `bytes → id` lookup so the service layer can intern new strings without full-scan probes. This is the source of the "string interning" feature referenced in the store crate.
+
+#### `relationship_index.rs`
+
+- **Purpose**: In-memory hash index for O(1) relationship existence checks
+- **Key Types/Functions**:
+- `RelationshipIndex` struct: In-memory map keyed by relationship tuple, rebuilt from the persisted relationship table on startup
+- Insert/remove/contains methods
+- **Insights**: Optimization for read-heavy authorization workloads — check-permission paths avoid a B+ tree lookup. Index lives in-memory and is rebuilt deterministically from the underlying table, so it never affects state-root computation.
+
 #### `bucket.rs`
 
 - **Purpose**: VaultCommitment with 256 buckets, dirty tracking, incremental state root computation
@@ -657,9 +681,18 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `SystemRole` enum: `Voter`, `Learner` — per-region role for each node
 - **Insights**: `GroupMembership` maps `(node_id, region)` → `SystemRole`, enabling per-region voter/learner assignments. `ClusterMembership` composes `GroupMembership` with `NodeInfo` registry.
 
-#### `system/saga.rs`
+#### `system/saga/`
 
-- **Purpose**: Distributed transaction orchestration (saga pattern)
+- **Purpose**: Distributed transaction orchestration (saga pattern). Multi-file module with per-saga submodules.
+- **Submodules**:
+  - `saga/mod.rs` — `Saga` enum, `SagaStep`, `SagaExecutor`, `SagaLockKey` variants, shared saga plumbing.
+  - `saga/create_organization.rs` — `CreateOrganizationSaga`: organization creation across GLOBAL registry + REGIONAL profile.
+  - `saga/create_signing_key.rs` — `CreateSigningKeySaga`: 5-state saga auto-bootstrapping signing keys.
+  - `saga/create_user.rs` — `CreateUserSaga`: full user creation (invitation-driven).
+  - `saga/create_onboarding_user.rs` — `CreateOnboardingUserSaga`: 3-step self-service user registration (PII-free saga state).
+  - `saga/delete_user.rs` — `DeleteUserSaga`: cascading user deletion + crypto-shredding.
+  - `saga/migrate_org.rs` — `MigrateOrgSaga`: cross-region organization migration.
+  - `saga/migrate_user.rs` — `MigrateUserSaga`: user region transfer.
 - **Key Types/Functions**:
 - `Saga`: Multi-step distributed transaction — includes `CreateSigningKey`, `CreateOrganization`, `CreateUser`, `CreateOnboardingUser` variants
 - `SagaStep`: Individual step with compensating action
@@ -672,9 +705,23 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `SagaLockKey::SigningKeyScope(SigningKeyScope)`, `SagaLockKey::Email(String)`: Lock key variants for concurrent saga prevention
 - **Insights**: Saga pattern for cross-region transactions. Compensating actions ensure eventual consistency. `CreateOnboardingUserSaga` uses `target_region()` for GLOBAL→regional→GLOBAL multi-group routing — PII (email, name, org_name) only appears in the regional step 1 Raft log. PII is passed in-memory via `SagaSubmission.pii`, not persisted in saga state.
 
-#### `system/service.rs`
+#### `system/service/`
 
-- **Purpose**: `SystemOrganizationService` — organization CRUD with slug-based lookup, vault slug storage, user directory management, email hash indexing, onboarding CRUD, credential CRUD, TOTP challenge management, invitation CRUD
+- **Purpose**: `SystemOrganizationService` — organization CRUD with slug-based lookup, vault slug storage, user directory management, email hash indexing, onboarding CRUD, credential CRUD, TOTP challenge management, invitation CRUD. Multi-file module split by concern.
+- **Submodules**:
+  - `service/mod.rs` — `SystemOrganizationService` struct, core types, re-exports.
+  - `service/organizations.rs` — Organization registration, lookup, status, region assignment.
+  - `service/users.rs` — User directory management, email hash indexing.
+  - `service/credentials.rs` — Credential CRUD (one-TOTP, one-recovery-code, passkey uniqueness), TOTP challenge lifecycle, recovery-code consumption (constant-time via `hash_eq()`).
+  - `service/email.rs` — Email HMAC indexing, blinding-key version tracking.
+  - `service/invitations.rs` — Invitation CRUD with CAS-enforced state transitions (Pending-only updates).
+  - `service/onboarding.rs` — `PendingEmailVerification` / `OnboardingAccount` CRUD under `_tmp:` prefix.
+  - `service/erasure.rs` — User and organization erasure (crypto-shredding backstop).
+  - `service/migration.rs` — Cross-region migration helpers.
+  - `service/nodes.rs` — Node registry membership / heartbeat.
+  - `service/audit.rs` — Compliance erasure records (`_audit:` prefix).
+  - `service/user_directory.rs` — User directory scans and migrations.
+  - `service/vault_slugs.rs` — Vault slug index (entity-storage pattern: `_idx:vault:slug:{slug}` → `VaultId`).
 - **Key Types/Functions**:
 - `register_organization()`, `get_organization()`, `get_organization_by_slug()`, `list_organizations()`
 - `update_organization_status()`, `assign_organization_to_region()`
@@ -777,7 +824,8 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 #### `convert/` (directory module)
 
 - **Purpose**: From/TryFrom trait implementations for domain↔proto conversions
-- **Structure**: `convert/mod.rs` (re-exports), `convert/domain.rs` (events), `convert/identifiers.rs` (ID newtypes), `convert/operations.rs` (entities/relationships), `convert/credentials.rs` (credential types), `convert/tokens.rs` (JWT types), `convert/statuses.rs` (invitation/event statuses), `convert/raft.rs` (Raft types), `convert/tests.rs` (unit + proptests)
+- **Structure**: `convert/mod.rs` (re-exports), `convert/domain.rs` (events), `convert/identifiers.rs` (ID newtypes), `convert/operations.rs` (entities/relationships), `convert/credentials.rs` (credential types), `convert/tokens.rs` (JWT types), `convert/statuses.rs` (invitation/event statuses), `convert/tests.rs` (unit + proptests)
+  Note: Raft proto types have no dedicated conversion module — the raft-layer transport handles Raft proto types directly without going through `From`/`TryFrom`.
 - **Key Types/Functions**:
 - `impl From<types::Entity> for proto::Entity`: Infallible domain→proto
 - `impl TryFrom<proto::Entity> for types::Entity`: Fallible proto→domain (validation)
@@ -796,7 +844,8 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Purpose**: prost-generated Rust code from proto definitions
 - **Key Types/Functions**:
 - All gRPC message types: ReadRequest, WriteRequest, CreateVaultRequest, VaultSlug, etc.
-- Service traits (14 total): ReadService, WriteService, OrganizationService, VaultService, SchemaService, AdminService, UserService, InvitationService, AppService, TokenService, EventsService, HealthService, SystemDiscoveryService, RaftService
+- Service traits (14 proto-defined): ReadService, WriteService, OrganizationService, VaultService, SchemaService, AdminService, UserService, InvitationService, AppService, TokenService, EventsService, HealthService, SystemDiscoveryService, RaftService
+- Implementations present in `inferadb-ledger-services` (13): ReadService, WriteService, OrganizationService, VaultService, AdminService, UserService, InvitationService, AppService, TokenService (via `TokenServiceImpl`), EventsService, HealthService, DiscoveryService (satisfies `SystemDiscoveryService` trait), RaftService. **SchemaService is proto-only** (no impl) — placeholder for future schema registry.
 - TokenService RPCs: `CreateUserSession`, `ValidateToken`, `CreateVaultToken`, `RefreshToken`, `RevokeToken`, `RevokeAllUserSessions`, `RevokeAllAppSessions`, `CreateSigningKey`, `RotateSigningKey`, `RevokeSigningKey`, `GetPublicKeys`
 - OrganizationService RPCs: `GetOrganizationTeam`, `AddTeamMember`, `RemoveTeamMember`
 - Organization team messages: `GetOrganizationTeamRequest/Response`, `AddTeamMemberRequest/Response`, `RemoveTeamMemberRequest/Response`
@@ -821,9 +870,11 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 ## Crate: `inferadb-ledger-raft`
 
-- **Purpose**: Raft consensus infrastructure with openraft, batching, rate limiting, background jobs, and 30+ production features. gRPC services live in `inferadb-ledger-services`.
-- **Dependencies**: `types`, `store`, `state`, `proto`, `openraft`, `tonic`
+- **Purpose**: Operationalization layer on top of the consensus engine. Provides openraft integration (`RaftLogStore` implementing `RaftStorage`), apply-phase parallelism, saga orchestration, background jobs, rate limiting, hot-key detection, batching, graceful shutdown, leader transfer, and 30+ production features. The actual Raft engine (Reactor, Shard, WAL) lives in `inferadb-ledger-consensus`; this crate is the glue between that engine and the rest of the app. gRPC services live in `inferadb-ledger-services`.
+- **Dependencies**: `types`, `store`, `state`, `proto`, `consensus`, `openraft`, `tonic`
 - **Quality Rating**: ★★★★☆
+
+**Two-layer consensus architecture**: `inferadb-ledger-consensus` owns Raft correctness (election, replication, WAL, snapshotting) as a pure event-driven engine. `inferadb-ledger-raft` (this crate) owns operationalization: apply-phase workers, job scheduling, sagas, rate limiting, leader transfer orchestration, backup/restore, runtime reconfiguration. The split keeps the engine simulation-testable while letting operational concerns evolve independently.
 
 ### Core Files
 
@@ -1086,7 +1137,22 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `services/region_resolver.rs`: Organization→region routing
 - `services/error_details.rs`: ErrorDetails proto builder
 
-### Features (40+ files)
+### Features (51 files)
+
+#### Consensus Interaction
+
+These files sit between this crate's openraft integration and the multi-shard consensus engine. They handle the "how do we actually commit and apply entries efficiently" question.
+
+- `consensus_handle.rs`: `ConsensusHandle` — the typed handle higher layers use to propose, read-index, and query membership. Wraps the `ConsensusEngine` from the consensus crate behind a Raft-crate-owned API so the rest of the app doesn't depend on consensus-crate types directly.
+- `consensus_transport.rs`: Network transport shim bridging the consensus crate's `NetworkTransport` trait to the app's gRPC-based `RaftService`. Routes `Message`s to the correct peer and surfaces delivery errors back to the reactor.
+- `apply_pool.rs`: `ApplyPool` — pool of apply workers that parallelize state-machine application across shards. Each shard has its own applier to keep state deterministic per shard while letting different shards apply concurrently.
+- `apply_worker.rs`: `ApplyWorker` — per-shard apply loop. Pulls committed batches from the consensus engine, calls the state machine's `apply()`, and updates `AppliedState` / `AppliedStateCore` / client idempotency tracking.
+- `read_index.rs`: Read-index protocol implementation on top of `ConsensusHandle`. Used by follower reads that need linearizability without a full round-trip to the leader.
+- `leader_lease.rs`: Leader-lease wrapper used by the raft crate to gate reads without a round-trip when the lease is valid. Composes the consensus crate's `LeaderLease` type with raft-crate policy (safety check on clock skew, lease refresh cadence).
+- `message_outbox.rs`: Per-peer message batching buffer. Coalesces multiple reactor-generated messages into a single network send when the peer is slow or disconnected.
+- `peer_address_map.rs`: Address mapping from `NodeId` to current peer address. Updated by discovery/membership changes so the transport always sends to the current endpoint even after a node rebinds.
+- `peer_tracker.rs`: Per-peer connection state, heartbeat tracking, and "last-seen" metadata for health/telemetry.
+- `file_lock.rs`: Advisory lock on the data directory to prevent two ledger processes from opening the same WAL + state.
 
 #### Core Features
 
@@ -1141,8 +1207,188 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `token_maintenance.rs`: Background job for token lifecycle maintenance. Three-phase cycle: (1) proposes `DeleteExpiredRefreshTokens` through Raft (handles expired token cleanup + poisoned family GC), (2) scans for rotated signing keys past grace period via `list_rotated_keys_past_grace()`, proposes `TransitionSigningKeyRevoked` for each, (3) proposes `CleanupExpiredOnboarding` to each regional Raft group via `RaftManager` (scans `_tmp:onboard_verify:*`, `_tmp:onboard_account:*`, and `_tmp:totp_challenge:*`). `manager: Option<Arc<RaftManager>>` field for regional proposal access. `MaintenanceResult` accumulates `onboarding_codes_deleted`, `onboarding_accounts_deleted`, and `totp_challenges_deleted`. Configurable interval (default 300s).
 - `dek_rewrap.rs`: Background job for re-wrapping Data Encryption Key sidecar metadata after Region Master Key rotation. `RewrapProgress` (AtomicU64 fields for lock-free admin queries), `DekRewrapJob<B>` (bon builder, periodic cycles, leader-only). Idempotent — pages already at target RMK version are skipped. Unit tests.
 - `region_storage.rs`: Per-region database file layout and lifecycle management. `RegionStorage` (holds raw database handles for state, blocks, events per region), `RegionStorageManager` (HashMap of open regions, directory layout enforcement: `global/` for GLOBAL Raft group, `regions/{name}/` for data regions). TOCTOU-safe region opening, legacy layout detection, 16KB page size. Unit tests.
-- `file_lock.rs`: Data directory locking
-- `peer_tracker.rs`: Peer connection state
+
+---
+
+## Crate: `inferadb-ledger-consensus`
+
+- **Purpose**: Purpose-built multi-shard Raft consensus engine. Event-driven Reactor with pluggable WAL backends, pipelined replication, leader leases, and a trait-based state-machine abstraction. Designed around determinism: the Reactor is a single-task event loop that returns `Action`s rather than performing I/O directly, which makes the engine simulation-testable.
+- **Dependencies**: `aes-gcm`, `crc32fast`, `parking_lot`, `rand`, `rkyv`, `seahash`, `serde`, `snafu`, `tokio`, `tracing`
+- **Quality Rating**: ★★★★★
+
+### Core types (re-exported from `lib.rs`)
+
+- `ConsensusEngine` — top-level multi-shard engine
+- `Reactor` — single-task event loop driving all shards
+- `Shard` — single Raft instance (state machine + log)
+- `Action` — output of the reactor (e.g., `SendMessage`, `ApplyEntry`, `Fsync`)
+- `Clock` / `SystemClock` — abstract time source for deterministic testing
+- `RngSource` / `SystemRng` — abstract randomness source (seedable in simulation, `thread_rng`-backed in production)
+- `ClosedTimestampTracker` — tracks the highest timestamp below which reads are safe
+- `CommittedBatch`, `CommittedEntry` — outputs of commit
+- `LeaderLease` — leader-lease based read optimization
+- `Message` — Raft wire-format message envelope
+- `ShardConfig`, `ShardState`
+- `StateMachine` trait, `ApplyResult`, `NoopStateMachine`, `SnapshotError`
+- `WalBackend` trait, `FsyncPhase` — WAL backend abstraction
+- `InMemoryTransport`, `NetworkTransport` — transport abstraction
+- Zero-copy helpers: `ZeroCopyError`, `access_archived`, `from_archived_bytes`, `to_archived_bytes`
+
+### Files
+
+#### `lib.rs`
+
+- **Purpose**: Public API surface and re-exports
+- **Insights**: Clean, narrow public surface. Consumers use `ConsensusEngine`, `Shard`, `StateMachine`, `WalBackend`, and the message types; everything else is accessible under `pub mod` submodules.
+
+#### `reactor.rs` (1637 lines)
+
+- **Purpose**: Single-task event loop that multiplexes across all shards
+- **Key Responsibilities**:
+- Receives `ReactorEvent`s (Propose, ProposeBatch, HandleMessage, Timer, etc.)
+- Drives each `Shard` forward without performing I/O directly
+- Batches WAL writes and network sends across shards for amortized fsync/syscall cost
+- Returns `Action`s for the driver to execute
+- **Insights**: The reactor is the determinism boundary. All non-determinism (time, I/O, randomness) is injected via `Clock`, `WalBackend`, and `RngSource`. This makes the reactor simulation-testable via the `simulation/` harness.
+
+#### `shard.rs` (2795 lines)
+
+- **Purpose**: Single Raft instance — leader election, log replication, commit index tracking, snapshot lifecycle
+- **Insights**: Largest file in the crate. Event-driven (returns `Action`s, never performs I/O). Implements leader-lease optimization, closed-timestamp tracking, pipelined replication.
+
+#### `engine.rs` (568 lines)
+
+- **Purpose**: `ConsensusEngine` — top-level multi-shard engine, coordinates `Reactor` + shard lifecycle + router
+- **Insights**: The public entry point for higher layers (raft crate wraps this). Holds the shard registry and exposes propose/read-index/membership operations.
+
+#### `action.rs`
+
+- **Purpose**: `Action` enum — the set of side-effects the reactor can request (send message, fsync WAL, apply entry, schedule timer, etc.)
+- **Insights**: Central to the determinism model — the reactor _describes_ what needs to happen; the driver _does_ it.
+
+#### `state_machine.rs` (194 lines)
+
+- **Purpose**: `StateMachine` trait, `ApplyResult`, `NoopStateMachine`, snapshot interface
+- **Key Types**: `StateMachine` (apply + snapshot contract), `SnapshotError`
+- **Insights**: The consensus engine is state-machine-agnostic. InferaDB's `StateLayer` (in `inferadb-ledger-state`) implements this trait.
+
+#### `wal/` module
+
+- **Purpose**: Write-ahead log backends. Pluggable so different deployments can trade durability, throughput, and encryption guarantees.
+- **Submodules**:
+  - `wal/mod.rs` — Module wiring + shared types
+  - `wal/segmented.rs` (1136 lines) — Segmented WAL implementation (the production backend). Per-vault AES-256-GCM, single fsync per batch
+  - `wal/encrypted.rs` — Envelope-encrypted WAL wrapper (wraps another backend)
+  - `wal/memory.rs` — In-memory WAL (tests, simulation)
+  - `wal/io_uring_backend.rs` — io_uring-based backend (Linux, behind `io-uring` feature)
+- **Insights**: The segmented backend is what production uses. The `io-uring` feature is off by default; builds on non-Linux platforms fall back to the synchronous segmented writer without feature drift.
+
+#### `wal_backend.rs`
+
+- **Purpose**: `WalBackend` trait, `FsyncPhase` enum — the abstraction every WAL impl satisfies
+- **Insights**: Phase enum lets the reactor batch writes across shards and fsync once per batch rather than once per append.
+
+#### `leadership.rs`
+
+- **Purpose**: Leader election state machine, `ShardState` (follower/candidate/leader)
+
+#### `lease.rs`
+
+- **Purpose**: `LeaderLease` — leader-lease based read optimization (local reads without round-trip when lease is valid)
+
+#### `closed_ts.rs`
+
+- **Purpose**: `ClosedTimestampTracker` — tracks the highest timestamp below which reads are safe without coordinating with the leader
+- **Insights**: Enables bounded-staleness reads on followers.
+
+#### `recovery.rs`
+
+- **Purpose**: WAL replay and snapshot-install recovery paths
+
+#### `snapshot_crypto.rs`, `snapshot_utils.rs`
+
+- **Purpose**: Snapshot envelope encryption and streaming helpers
+
+#### `crypto.rs`
+
+- **Purpose**: AES-GCM wrapper used by WAL + snapshot encryption
+
+#### `transport.rs`
+
+- **Purpose**: `NetworkTransport` trait plus `InMemoryTransport` for tests
+
+#### `network_outbox.rs`
+
+- **Purpose**: Per-peer outbox for batched message sends
+- **Insights**: Pipelines AppendEntries / Heartbeat messages to keep the network hot between rounds.
+
+#### `router.rs`
+
+- **Purpose**: Shard routing — maps `(ShardId, key)` to the appropriate shard instance inside the engine
+
+#### `split.rs`
+
+- **Purpose**: Shard split logic (splitting a hot shard into two)
+
+#### `bootstrap.rs`
+
+- **Purpose**: First-boot shard initialization (node 1 single-voter seed, plus subsequent-node join helpers)
+
+#### `config.rs`
+
+- **Purpose**: `ShardConfig` — per-shard tunables (heartbeat intervals, election timeouts, batch sizes, lease durations)
+
+#### `clock.rs`, `rng.rs`
+
+- **Purpose**: Abstract `Clock` / `RngSource` traits with production (`SystemClock`, `SystemRng`) and deterministic test implementations
+- **Insights**: Injected into the reactor — the simulation harness plugs in virtual time / seeded RNG for replayable tests.
+
+#### `timer.rs`
+
+- **Purpose**: Logical timer wheel for election/heartbeat/lease timeouts. Driven by the reactor, not by real `tokio::time`.
+
+#### `message.rs`, `types.rs`
+
+- **Purpose**: Raft wire types — `Message`, `AppendEntries`, `RequestVote`, shard IDs, node IDs
+
+#### `committed.rs`
+
+- **Purpose**: `CommittedEntry` / `CommittedBatch` — outputs handed to the state machine
+
+#### `idempotency.rs`
+
+- **Purpose**: Per-shard idempotency bookkeeping for client-retry safety
+
+#### `circuit_breaker.rs`
+
+- **Purpose**: Per-peer circuit breaker to avoid hammering unreachable nodes
+
+#### `buggify.rs`
+
+- **Purpose**: FoundationDB-style fault injection hook — deterministic "buggify" points inject rare conditions into simulation runs
+- **Insights**: Used by `simulation/harness.rs` to exercise edge cases (partial fsyncs, reordered messages, GC timing) without manual test construction.
+
+#### `zero_copy.rs`
+
+- **Purpose**: rkyv-backed zero-copy decode helpers — `access_archived`, `from_archived_bytes`, `to_archived_bytes`
+- **Insights**: WAL entries and snapshots are rkyv-archived so replay avoids deserialization allocation.
+
+#### `error.rs`
+
+- **Purpose**: `ConsensusError` — snafu-based error taxonomy for the crate
+
+#### `simulation/` module
+
+- **Submodules**: `mod.rs`, `harness.rs` (driver), `multi_raft.rs` (multi-shard scenarios), `network.rs` (simulated network with drops/delays/reorder)
+- **Purpose**: Deterministic simulation testbed for Raft invariants. Pluggable into the reactor via the abstract `Clock`, `RngSource`, `NetworkTransport`, and `WalBackend`.
+- **Insights**: This is how we catch Byzantine-esque edge cases (leader lease violations, commit-gap races) without flaky integration tests. Tests are replayable given the seed.
+
+### Insights
+
+- **Determinism is the load-bearing architectural choice.** The reactor is a pure function of `(state, event) → (new_state, Action[])`. All non-determinism (time, randomness, I/O) flows through injected traits. This is what makes `simulation/` worth the complexity: failing runs are reproducible.
+- **Two-layer consensus architecture.** `inferadb-ledger-consensus` is the multi-shard engine; `inferadb-ledger-raft` wraps it with openraft compatibility, background jobs, saga orchestration, and the glue that talks to the rest of the app. The raft crate owes this layering: consensus cares only about Raft correctness and durability; raft cares about operationalization.
+- **WAL backend pluggability is real.** Segmented is the production backend; in-memory supports tests; encrypted is a composable wrapper; io_uring is a Linux-only performance backend. Each satisfies `WalBackend + FsyncPhase`; the reactor doesn't know which it's calling.
+- **Snapshot + WAL share the same crypto path.** `snapshot_crypto` and `wal/encrypted` both sit on `crypto.rs` (AES-GCM). Key management lives in the store crate; this crate just wraps.
 
 ---
 
@@ -1274,6 +1520,26 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - Prefix: `ledger_sdk_` for all metrics
 - **Insights**: Dynamic dispatch (Arc<dyn SdkMetrics>) avoids type param infection. Noop default ensures zero overhead when disabled.
 
+#### `proto_util.rs`
+
+- **Purpose**: Proto↔SDK conversion helpers (timestamps, enums, user info)
+- **Key Types/Functions**:
+- `proto_timestamp_to_system_time()`, `system_time_to_proto_timestamp()` — protobuf Timestamp ↔ `std::time::SystemTime`
+- `region_from_proto_i32()`, `region_to_proto_i32()` — `Region` enum ↔ proto i32
+- `user_status_from_proto_i32()`, `user_role_from_proto_i32()` — proto enum (i32) → domain enum
+- `user_info_from_proto()`, `user_email_info_from_proto()` — proto `User` / `UserEmail` → SDK domain types
+- `non_empty()`, `missing_response_field()` — small guards used across handlers
+- **Insights**: Internal utility module reducing boilerplate across the 40+ SDK client methods. All conversions return SDK error types on invalid input rather than panicking.
+
+#### `region_resolver.rs`
+
+- **Purpose**: Region leader caching with TTL expiry
+- **Key Types/Functions**:
+- `RegionLeaderCache` — thread-safe cache keyed by `Region`, stores resolved leader with TTL
+- `CachedLeader` — cached entry metadata
+- `DEFAULT_TTL_SECS` (300s)
+- **Insights**: Wraps `ResolveRegionLeader` RPC results so region-aware operations don't hit discovery on every call. TTL eviction keeps the cache from pinning stale leaders indefinitely after leadership transfer.
+
 #### `streaming.rs`
 
 - **Purpose**: WatchBlocksStream with auto-reconnection
@@ -1372,6 +1638,22 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `generate_runtime_config_schema()`: JSON Schema export for RuntimeConfig (used by `config schema` subcommand)
 - Env var overrides: `INFERADB__LEDGER__<FIELD>` convention
 - **Insights**: CLI args + env vars (no config file). Runtime reconfiguration via `UpdateConfig` RPC (JSON). JSON Schema export for validation.
+
+#### `cluster_id.rs`
+
+- **Purpose**: Cluster ID generation and persistence
+- **Key Types/Functions**:
+- Generates a unique cluster identifier during `init` and persists it to the data directory so all nodes in the cluster agree on the same ID
+- Loaded on subsequent startups to detect cluster-identity mismatches (e.g., a node being pointed at the wrong data dir)
+- **Insights**: Cluster ID is set once, via `init` against a seed node, and replicated to joining nodes. Used to reject nodes that belong to a different cluster at the membership level.
+
+#### `dr_scheduler.rs`
+
+- **Purpose**: TiKV-style data region membership scheduler (checker/scheduler separation)
+- **Key Types/Functions**:
+- Background task that observes data region membership state and proposes membership changes to keep regions within their replication targets
+- Separates _checkers_ (detect drift from desired state) from _schedulers_ (emit concrete membership-change proposals) so policies can evolve independently
+- **Insights**: This is the component that drives post-join / post-restart data-region rehydration. The 60-second delay for a newly-added node to serve reads (surfaced by the cluster-lifecycle and crash-recovery scripts) is governed by this scheduler's cadence + how quickly proposed membership changes commit through the global Raft log.
 
 #### `coordinator.rs`
 
@@ -1638,10 +1920,10 @@ Two previously identified large-file concerns have been resolved:
 
 InferaDB Ledger is a **production-grade blockchain database** with exceptional engineering quality:
 
-- **9 crates** of Rust (excluding generated code), 90%+ test coverage target
-- **Zero `unsafe` code**, comprehensive error handling (snafu), structured error taxonomy
+- **10 crates** of Rust (excluding generated code), 90%+ test coverage target
+- **Zero `unsafe` code**, comprehensive error handling (snafu on server crates, thiserror on SDK), structured error taxonomy
 - **Custom B+ tree engine** with ACID transactions, crash recovery, compaction
-- **Raft consensus** via openraft, batching, idempotency, multi-region horizontal scaling
+- **Two-layer consensus**: purpose-built multi-shard Raft engine in `inferadb-ledger-consensus` (event-driven `Reactor`, segmented WAL, pluggable backends) + operationalization in `inferadb-ledger-raft` (openraft integration, apply-phase parallelism, saga orchestrator, background jobs). Simulation-testable via the engine's abstract `Clock`/`RngSource`/`NetworkTransport`/`WalBackend` traits.
 - **Enterprise features**: JWT token authentication (EdDSA, refresh token theft detection, signing key auto-bootstrap, cascade revocation), multi-credential authentication (passkeys, TOTP, recovery codes with Ledger-authoritative verification), organization invitations (privacy-preserving lifecycle with four-check rate limiting, multi-email HMAC matching, CAS state machine, partial failure recovery), graceful shutdown with leader transfer (Draining phase, best-effort handoff before election timeout), circuit breaker, rate limiting, hot key detection, quota enforcement, backup/restore, tiered storage with multipart upload, API versioning, deadline propagation, dependency health checks, runtime reconfiguration, organization-scoped event logging, externalized state persistence, streaming snapshots, automatic write forwarding, and many more
 - **Excellent observability**: OpenTelemetry tracing, Prometheus metrics, canonical log lines, structured request logging, SDK-side metrics, queryable event audit trails via gRPC EventsService
 - **Comprehensive testing**: Unit tests, property-based tests (proptest), crash recovery tests, chaos tests, integration tests

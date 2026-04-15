@@ -4,7 +4,7 @@
 | ------- | ------------------------------------------------------- |
 | Status  | Living                                                  |
 | Created | 2026-01-09                                              |
-| Updated | 2026-03-03                                              |
+| Updated | 2026-04-15                                              |
 | Source  | [DESIGN.md](DESIGN.md) (canonical, checked into `main`) |
 
 ---
@@ -84,8 +84,8 @@ Ledger resolves the performance-verifiability tension through **separation of co
                                 │
                                 ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│                    Raft Consensus (OpenRaft)                         │
-│              Strong consistency, automatic leader election           │
+│            Raft Consensus (Purpose-Built Multi-Shard Engine)         │
+│     Event-driven Reactor · per-vault segmented WAL · leader lease    │
 └───────────────────────────────┬──────────────────────────────────────┘
                                 │
           ┌─────────────────────┴─────────────────────┐
@@ -169,6 +169,8 @@ Each vault maintains its own blockchain. A corruption in Vault A cannot affect V
 | **Relationship**           | Authorization tuple: `(resource, relation, subject)`. Used by Engine for permission checks.                                                                                              |
 | **Region**                 | Geographic zone mapped 1:1 to a Raft consensus group. Organizations declare a region at creation for data residency. See [Scaling Architecture: Regions](#scaling-architecture-regions). |
 | **`_system` organization** | Global control plane replicated to all nodes: org registry, sequences, node discovery. See [Discovery & Coordination](#system-organization-_system--global-control-plane).               |
+| **Consensus engine**       | Purpose-built multi-shard Raft implementation in `crates/consensus/` — event-driven `Reactor`, per-vault segmented WAL, `LeaderLease`, `ClosedTimestampTracker`, `StateMachine` trait. Determinism-first: the Reactor returns `Action`s rather than performing I/O, which makes the engine simulation-testable. |
+| **Raft operationalization** | Wrapping layer in `crates/raft/` — openraft-compatible `RaftLogStore`, `ApplyPool` / `ApplyWorker` for parallel state-machine apply across shards, `SagaOrchestrator`, background jobs (compaction, retention, events GC), rate limiting, hot-key detection, `LeaderTransfer`, `RaftManager` for region groups. |
 
 ### Block Structure
 
@@ -268,14 +270,20 @@ Client Request (with idempotency_key)
 [11] Majority acknowledgment commits
     │
     ▼
-[12] State layer assigns sequence + applies transactions + computes state_root
+[12] ApplyPool dispatches committed batch to per-shard ApplyWorker
     │
     ▼
-[13] Response to client with assigned_sequence + state_root hash
+[13] Worker applies transactions, assigns sequences, computes state_root,
+     updates AppliedState + client idempotency tracking
+    │
+    ▼
+[14] Response to client with assigned_sequence + state_root hash
      (includes x-request-id, x-trace-id, x-ledger-api-version headers)
 ```
 
 **Target latency**: <50ms at p99 under normal load.
+
+**Consensus layering**: Steps 10–11 run inside `inferadb-ledger-consensus` (event-driven `Reactor` returns `Action`s: WAL fsync, peer sends, commit). Steps 12–13 run in `inferadb-ledger-raft`'s `ApplyPool` — one `ApplyWorker` per shard parallelizes state-machine application across shards while keeping each shard's apply deterministic.
 
 ### Read Path
 
@@ -285,9 +293,20 @@ Client Request
     ▼
 [1] Any node receives request
     │
-    ├── Linearizable read: confirm leadership or forward
+    ├── Linearizable read:
+    │     │
+    │     ├── Leader: serve directly if LeaderLease is valid (no RPC)
+    │     │             (lease from last majority-ack heartbeat)
+    │     │
+    │     └── Follower: issue ReadIndex RPC to leader, wait for
+    │                   local apply index to reach returned index,
+    │                   then serve from local state
     │
-    └── Eventually consistent: serve from local state
+    ├── Bounded-staleness (closed-timestamp reads):
+    │     serve from local state at or below the closed timestamp
+    │     (ClosedTimestampTracker)
+    │
+    └── Eventually consistent: serve from local state immediately
     │
     ▼
 [2] Storage layer retrieves from B+ tree indexes
@@ -297,6 +316,8 @@ Client Request
 ```
 
 **Target latency**: <2ms at p99.
+
+**Why three read modes**: `LeaderLease` avoids round-trips on the leader by treating the lease window as proof the leader is still authoritative — a round-trip savings that dominates the <2ms target. `ReadIndex` gives followers linearizability without serving stale data. `ClosedTimestampTracker` lets followers serve reads at bounded staleness (useful for high-QPS read workloads that can tolerate milliseconds of lag).
 
 ### State Layer: Hybrid Storage
 
@@ -659,7 +680,7 @@ Each region's databases use embedded single-file ACID B-trees with copy-on-write
 
 `inferadb-ledger-store` provides:
 
-- B+ tree engine with page-level management (19 compile-time tables)
+- B+ tree engine with page-level management (23 compile-time tables: domain data, block storage, Raft log, metadata, slug indexes for org/vault/user/team/app, vault height/hash/health maps, and the string-interning dictionary)
 - ACID transactions with copy-on-write pages
 - Configurable backends (file-based, memory for testing)
 - Streaming `TableIterator` with resume-key pattern for memory-efficient traversal
@@ -822,7 +843,7 @@ This "current policy is authoritative" design avoids stale scope grants and ensu
 
 **kid validation**: UUID format check before state lookup prevents cache pollution from arbitrary strings. Unknown and revoked kids return identical `UNAUTHENTICATED` (no key existence leakage).
 
-**Timing side channels**: Refresh token hash comparison (SHA-256) is not constant-time. Practical risk is low: 256-bit entropy input and Raft consensus noise dwarf timing signal.
+**Timing side channels**: Refresh token hash comparison uses the constant-time `hash_eq()` helper in `crates/types/src/hash.rs` (built on `subtle::ConstantTimeEq`). The same helper gates recovery-code consumption, email-verification-code checks, and state-root verification. No hash equality check on a security-sensitive path uses variable-time comparison.
 
 ---
 
@@ -891,10 +912,37 @@ ledger_snapshot_disk_bytes
 
 # Rate limiting & hot keys
 ledger_rate_limit_exceeded_total
-ledger_hot_keys_detected_total
+ledger_hot_key_detected_total
 
-# Raft proposals
-ledger_raft_proposal_timeouts_total
+# Raft proposals (note: inferadb_ledger_ prefix for legacy Raft-layer metrics)
+inferadb_ledger_raft_proposals_total
+inferadb_ledger_raft_proposal_timeouts_total
+
+# Leader transfer
+ledger_leader_transfers_total{status}
+ledger_leader_transfer_latency_seconds
+ledger_trigger_elections_total{result}
+
+# Events (organization audit trail)
+ledger_event_writes_total{emission, scope, action}
+ledger_events_ingest_total
+ledger_events_ingest_duration_seconds
+ledger_events_gc_cycles_total
+ledger_events_gc_entries_deleted
+
+# Onboarding lifecycle
+ledger_onboarding_initiation_total{status}
+ledger_onboarding_verification_total{status}
+ledger_onboarding_registration_total{status}
+ledger_onboarding_verification_codes_gc_total
+ledger_onboarding_accounts_gc_total
+ledger_totp_challenges_gc_total
+
+# Organization purge + post-erasure compaction
+ledger_org_purge_regional_failures_total{region}
+ledger_org_purge_global_failures_total
+ledger_org_purge_retry_exhausted_total
+ledger_post_erasure_compaction_triggered_total{region}
 
 # SDK-side metrics (optional, ledger_sdk_ prefix)
 ledger_sdk_request_duration_seconds{method}
@@ -1272,7 +1320,7 @@ Key destruction is a single Raft-committed operation. Once the per-subject key i
 | Write throughput    | 5,000 tx/sec    | **11K tx/sec**   | 3-node cluster              |
 | Read throughput     | 100,000 req/sec | **952K req/sec** | Eventually consistent reads |
 
-Benchmarks run on Apple M3 (8-core), 24GB RAM, APFS SSD. See [WHITEPAPER.md](WHITEPAPER.md#6-performance-characteristics) for full methodology and latency distributions.
+Benchmarks run on Apple M3 (8-core), 24GB RAM, APFS SSD. See [WHITEPAPER.md](WHITEPAPER.md#7-performance-characteristics) for full methodology and latency distributions.
 
 ### Correctness Invariants
 
@@ -1556,6 +1604,7 @@ Key design decisions and their rationale:
 
 | Date       | Change                                                                                                     |
 | ---------- | ---------------------------------------------------------------------------------------------------------- |
+| 2026-04-15 | Extracted `inferadb-ledger-consensus` crate (event-driven Reactor, purpose-built multi-shard engine, segmented WAL). Operationalization concerns (apply-phase parallelism, saga orchestration, background jobs) remain in `inferadb-ledger-raft`. Metric name corrections (`ledger_hot_key_detected_total`, `inferadb_ledger_raft_proposal_timeouts_total`). Added metrics for leader transfer, events, onboarding, organization purge, post-erasure compaction. Table count 19 → 23 (added slug indexes, vault-scoped tables, string dictionary). Constant-time hash comparison (`hash_eq`) now covers all security-sensitive paths. |
 | 2026-03-10 | JWT token architecture: EdDSA signing keys, refresh token families, envelope encryption, TokenService, cascade revocation, token maintenance |
 | 2026-03-03 | Document hygiene: metadata block, audience guide, deduplicated invariants, expanded references             |
 | 2026-03-01 | Regional data residency, multi-region architecture, cross-region saga orchestration                        |
@@ -1574,7 +1623,7 @@ Key design decisions and their rationale:
 
 1. [Zanzibar: Google's Consistent, Global Authorization System](https://research.google/pubs/pub48190/) — USENIX ATC 2019
 2. [Raft: In Search of an Understandable Consensus Algorithm](https://raft.github.io/raft.pdf) — USENIX ATC 2014
-3. [OpenRaft](https://github.com/datafuselabs/openraft) — Rust Raft implementation
+3. [OpenRaft](https://github.com/datafuselabs/openraft) — Rust Raft reference implementation (historical inspiration; Ledger's consensus layer is a purpose-built multi-shard engine in `crates/consensus/`, not an openraft dependency)
 4. [QMDB: Quick Merkle Database](https://github.com/LayerZero-Labs/qmdb) — Append-only log with O(1) merkleization
 5. [SeiDB](https://docs.sei.io/learn/seidb) — Separates state commitment from storage
 6. [OWASP Top 10](https://owasp.org/Top10/) — Web application security risks
