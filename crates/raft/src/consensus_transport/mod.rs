@@ -19,8 +19,9 @@ use crate::types::LedgerNodeId;
 
 /// gRPC-based network transport for consensus messages.
 ///
-/// Each peer gets a dedicated [`PeerSender`] that owns a bounded outbound
-/// queue and a single drain task. `send_batch` enqueues messages to the
+/// Each peer gets a dedicated `PeerSender` (see the `peer_sender` submodule)
+/// that owns a bounded outbound queue and a single drain task. `send_batch`
+/// enqueues messages to the
 /// per-peer queue (drop-oldest on overflow); the drain task serializes and
 /// ships them via the `ForwardConsensus` RPC. Messages are fire-and-forget
 /// — the consensus engine handles retries via heartbeats.

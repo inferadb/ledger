@@ -1,6 +1,6 @@
 # InferaDB Ledger: A Cryptographically Verifiable Authorization Database
 
-**Last Updated**: March 2026
+**Last Updated**: April 2026
 
 ---
 
@@ -112,11 +112,17 @@ Ledger consists of four primary layers:
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      gRPC Services                          │
-│  Read | Write | Admin | Organization | Vault | User          │
-│  App | Token | Events | Health | Discovery | Raft            │
+│  Read | Write | Organization | Vault | Admin | User         │
+│  Invitation | App | Token | Events | Health | Discovery    │
+│  Raft  (Schema is proto-defined; not yet implemented)       │
 ├─────────────────────────────────────────────────────────────┤
 │                    Consensus Layer                          │
-│         Raft (OpenRaft) + Batching + RaftService            │
+│   Custom Multi-Shard Raft Engine                            │
+│   Event-driven Reactor · Segmented WAL · Leader lease       │
+├─────────────────────────────────────────────────────────────┤
+│                 Raft Operationalization                     │
+│   ApplyPool/ApplyWorker · Batching · Saga Orchestrator      │
+│   Background Jobs · Leader Transfer                         │
 ├─────────────────────────────────────────────────────────────┤
 │                     State Layer                             │
 │     Entity Store | Relationship Store | State Roots         │
@@ -126,9 +132,11 @@ Ledger consists of four primary layers:
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**gRPC Services** expose the public API. Twelve services cover authorization operations (ReadService, WriteService), entity management (OrganizationService, VaultService, UserService, AppService), authentication token issuance (TokenService), administration (AdminService), observability (EventsService, HealthService), and cluster coordination (SystemDiscoveryService, RaftService).
+**gRPC Services** expose the public API. Fourteen services are defined in protobuf; thirteen have server-side implementations. They cover authorization operations (ReadService, WriteService), entity management (OrganizationService, VaultService, UserService, AppService), invitations (InvitationService), authentication token issuance (TokenService), administration (AdminService), observability (EventsService, HealthService), and cluster coordination (SystemDiscoveryService, RaftService). SchemaService is proto-defined as a placeholder for future schema-registry functionality.
 
-**Consensus Layer** implements Raft using the OpenRaft library (v0.9+) [9]. All writes are proposed to the leader, replicated to followers, and committed only after majority acknowledgment. A batching layer aggregates multiple client requests into single Raft proposals, amortizing consensus overhead.
+**Consensus Layer** is a purpose-built multi-shard Raft engine (`inferadb-ledger-consensus`). It is designed around a determinism boundary: the engine is a single-task event-driven `Reactor` that takes events and returns `Action`s rather than performing I/O directly, which makes it simulation-testable. Non-determinism (time, randomness, disk, network) is injected through trait abstractions, and the crate ships a simulation harness that replays Raft invariants with seeded RNG and virtual time. Core components include `Shard` (single Raft instance), `Reactor` (event loop across shards), `SharedWal` (per-vault segmented WAL with AES-256-GCM encryption), `LeaderLease` (leader-lease read optimization), and `ClosedTimestampTracker` (bounded-staleness reads). All writes are proposed to the leader, replicated to followers, and committed only after majority acknowledgment.
+
+**Raft Operationalization** (`inferadb-ledger-raft`) wraps the consensus engine with the app-layer concerns that don't belong in the engine itself: apply-phase parallelism via `ApplyPool`/`ApplyWorker` (per-shard state-machine apply), a batching layer that aggregates multiple client requests into single Raft proposals, the `SagaOrchestrator` for cross-region distributed transactions, graceful shutdown with leader transfer, rate limiting, hot-key detection, and ~20 background jobs (compaction, retention, token maintenance, events GC, etc.).
 
 **State Layer** maintains the domain model. Entities store key-value data with versioning and TTL support. Relationships store authorization tuples. The StateLayer applies blocks and computes state roots.
 
@@ -277,7 +285,7 @@ A naive MPT implementation updating internal nodes would require approximately 1
 
 The bucket approach sacrifices proof size for computation efficiency. Proving a single key's inclusion requires:
 
-1. The key's bucket contents (or a sub-proof)
+1. The key's bucket contents
 2. All 255 other bucket hashes
 3. The state root
 
@@ -392,7 +400,7 @@ Key asymmetry governs replication: non-protected region data replicates to all c
 
 ### Key Lifecycle
 
-RMK versions progress through three states: **Active** → **Decrypt-only** → **Destroyed**. Active versions encrypt new writes (highest version wins during brief multi-version overlap). Decrypt-only versions remain loadable for reading existing data but do not encrypt new pages. Destroyed versions are permanently unloadable—all data must have been re-wrapped to a newer version first.
+RMK versions progress through three states: **Active** → **Deprecated** → **Decommissioned**. Active versions encrypt new writes (highest version wins during brief multi-version overlap). Deprecated versions remain loadable for reading existing data but do not encrypt new pages. Decommissioned versions are permanently unloadable—all data must have been re-wrapped to a newer version first.
 
 Multiple versions coexist at runtime for seamless rotation. A background DEK re-wrapping job updates sidecar metadata to reference the new RMK version without touching encrypted page bodies—a metadata-only operation that preserves ciphertext integrity. The job runs on the leader, processes pages in configurable batches, and is resumable across restarts.
 
@@ -426,7 +434,7 @@ All benchmarks run on Apple M3 (8-core), 24GB RAM, APFS SSD. Storage layer measu
 | Read throughput              | **952K ops/sec** | > 100K ops/sec | **9.5x** |
 | Write throughput (batch 100) | **11K ops/sec**  | > 5K ops/sec   | **2.2x** |
 
-**Methodology**: Criterion.rs benchmarks with 1000+ samples per measurement. Storage layer measurements isolated from network overhead.
+**Methodology**: Custom stress-test harness with 1000+ samples per measurement, capturing latency histograms via atomic counters. Storage layer measurements isolated from network overhead. See `crates/server/tests/stress_test.rs` for configuration and `scripts/stress-throughput.sh` to reproduce.
 
 **Encryption overhead**: When encryption at rest is enabled, writes incur one AES-256-GCM encryption and one AES-KWP key wrap per page. Reads hit the DEK cache on most requests, reducing overhead to a single AES-256-GCM decryption. With a 714x margin on read latency, encryption adds negligible impact to end-to-end authorization checks.
 
@@ -598,7 +606,7 @@ To get started, see the [documentation](https://docs.inferadb.com), explore the 
 
 [8] Hyperledger Foundation. "Hyperledger Fabric: Enterprise-Grade Permissioned Distributed Ledger." https://www.hyperledger.org/projects/fabric
 
-[9] DatafuseLabs. "OpenRaft: Advanced Raft Consensus in Async Rust." https://github.com/datafuselabs/openraft
+[9] DatafuseLabs. "OpenRaft: Advanced Raft Consensus in Async Rust." https://github.com/datafuselabs/openraft (Historical inspiration; Ledger's consensus layer is a purpose-built multi-shard engine in `crates/consensus/`, not an openraft dependency.)
 
 [10] Shomroni, I., et al. "QMDB: Quick Merkle Database for Blockchain State Storage." arXiv:2501.05262, 2025.
 
