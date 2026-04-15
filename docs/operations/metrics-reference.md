@@ -264,6 +264,27 @@ ledger_determinism_bug_total > 0
 | ----------------------------- | ------- | ----------------------------- | ---------------- |
 | `ledger_quota_exceeded_total` | Counter | `organization_id`, `resource` | Quota violations |
 
+## Consensus Transport
+
+Metrics emitted by the per-peer bounded send queue in Raft consensus transport.
+Each registered peer has a queue of capacity 1024; on overflow, the oldest
+message is dropped (Raft retransmits on the next heartbeat, so dropped
+heartbeats are self-healing).
+
+| Metric                             | Type      | Labels            | Description                                                                                                                        |
+| ---------------------------------- | --------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `ledger_peer_send_queue_depth`     | Gauge     | `peer`            | Current outbound queue depth for the peer.                                                                                         |
+| `ledger_peer_send_drops_total`     | Counter   | `peer`, `reason`  | Messages dropped from the queue. `reason` ∈ `queue_full` (capacity overflow), `task_shutdown` (peer removed or replaced). |
+| `ledger_peer_send_latency_seconds` | Histogram | `peer`            | Per-message send latency (enqueue-to-wire, dominated by gRPC call time).                                                            |
+
+**Labels:**
+
+- `peer`: Raw node ID (numeric string); cardinality bounded by cluster size
+- `reason`: `queue_full` or `task_shutdown`
+
+See the [consensus transport backpressure runbook](runbooks/consensus-transport-backpressure.md)
+for symptom-to-cause mapping.
+
 ## SDK Region Leader Cache
 
 Metrics emitted by the SDK's regional leader cache, which routes requests

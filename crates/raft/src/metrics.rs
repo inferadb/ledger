@@ -1376,6 +1376,40 @@ pub fn record_totp_gc_challenges(count: u64) {
     counter!(TOTP_CHALLENGES_GC_TOTAL).increment(count);
 }
 
+// =============================================================================
+// Per-Peer Consensus Transport Metrics
+// =============================================================================
+
+/// Records a peer consensus-message send completion. Called by the per-peer
+/// drain task in `consensus_transport::peer_sender`.
+#[inline]
+pub fn record_peer_send_latency(peer: u64, latency_secs: f64) {
+    histogram!("ledger_peer_send_latency_seconds", "peer" => peer.to_string()).record(latency_secs);
+}
+
+/// Records a dropped outbound consensus message.
+///
+/// `reason` is one of:
+/// - `"queue_full"` — push evicted the oldest message due to capacity overflow.
+/// - `"task_shutdown"` — peer was removed while messages were still queued.
+#[inline]
+pub fn record_peer_send_drop(peer: u64, reason: &'static str) {
+    counter!(
+        "ledger_peer_send_drops_total",
+        "peer" => peer.to_string(),
+        "reason" => reason,
+    )
+    .increment(1);
+}
+
+/// Sets the per-peer send queue depth gauge.
+#[inline]
+pub fn record_peer_send_queue_depth(peer: u64, depth: usize) {
+    #[allow(clippy::cast_precision_loss)]
+    let depth_f64 = depth as f64;
+    gauge!("ledger_peer_send_queue_depth", "peer" => peer.to_string()).set(depth_f64);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
