@@ -83,6 +83,25 @@ pub(crate) fn status_with_not_leader_hint(
     Status::with_details(tonic::Code::Unavailable, message, encoded.into())
 }
 
+/// Builds a `NotLeader` `Status` by extracting `(leader_id, leader_endpoint, term)`
+/// from a consensus handle and a peer-address map.
+///
+/// Prefer this over calling [`status_with_not_leader_hint`] directly when the
+/// call site has a [`inferadb_ledger_raft::ConsensusHandle`] and peer map in
+/// scope — consolidates the leader-state extraction boilerplate so all
+/// not-leader rejections populate the same hint shape.
+pub(crate) fn not_leader_status_from_handle(
+    handle: &inferadb_ledger_raft::ConsensusHandle,
+    peer_addresses: Option<&inferadb_ledger_raft::PeerAddressMap>,
+    message: impl Into<String>,
+) -> Status {
+    let shard_state = handle.shard_state();
+    let term = handle.current_term();
+    let leader_id = shard_state.leader.map(|n| n.0);
+    let leader_endpoint = leader_id.and_then(|id| peer_addresses.and_then(|m| m.get(id)));
+    status_with_not_leader_hint(message, leader_id, leader_endpoint.as_deref(), Some(term))
+}
+
 /// Synthesizes a generic `ErrorDetails` from a gRPC status code.
 ///
 /// Maps each gRPC code to the most appropriate `DiagnosticCode`, retryability flag,

@@ -1803,17 +1803,12 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         ctx.set_is_leader(self.handle.is_leader());
 
         if !self.handle.is_leader() {
-            ctx.set_error("NotLeader", "Only the leader can run garbage collection");
-            let shard_state = self.handle.shard_state();
-            let term = self.handle.current_term();
-            let leader_id = shard_state.leader.map(|n| n.0);
-            let leader_endpoint =
-                leader_id.and_then(|id| self.peer_addresses.as_ref().and_then(|m| m.get(id)));
-            return Err(super::metadata::status_with_not_leader_hint(
-                "Only the leader can run garbage collection",
-                leader_id,
-                leader_endpoint.as_deref(),
-                Some(term),
+            let msg = "Only the leader can run garbage collection";
+            ctx.set_error("NotLeader", msg);
+            return Err(super::metadata::not_leader_status_from_handle(
+                self.handle.as_ref(),
+                self.peer_addresses.as_ref(),
+                msg,
             ));
         }
 

@@ -116,15 +116,10 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
 
         // Must be leader to serve ReadIndex.
         if !handle.is_leader() {
-            let shard_state = handle.shard_state();
-            let term = handle.current_term();
-            let leader_id = shard_state.leader.map(|n| n.0);
-            let leader_endpoint = leader_id.and_then(|id| self.manager.peer_addresses().get(id));
-            return Err(super::metadata::status_with_not_leader_hint(
+            return Err(super::metadata::not_leader_status_from_handle(
+                handle.as_ref(),
+                Some(self.manager.peer_addresses()),
                 "Not the leader",
-                leader_id,
-                leader_endpoint.as_deref(),
-                Some(term),
             ));
         }
 
