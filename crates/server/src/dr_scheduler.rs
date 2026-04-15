@@ -311,10 +311,14 @@ pub async fn execute_operator(
             // Register transport channel for the new learner.
             if let Some(addr) = manager.peer_addresses().get(*node_id)
                 && let Some(transport) = group.consensus_transport()
-                && let Ok(endpoint) =
-                    tonic::transport::Channel::from_shared(format!("http://{addr}"))
+                && let Err(e) = transport.set_peer_via_registry(*node_id, &addr).await
             {
-                transport.set_peer(*node_id, endpoint.connect_lazy());
+                tracing::warn!(
+                    node_id = *node_id,
+                    addr = %addr,
+                    error = %e,
+                    "DR scheduler: failed to register learner transport via registry"
+                );
             }
             match tokio::time::timeout(
                 Duration::from_secs(3),

@@ -24,7 +24,6 @@ use inferadb_ledger_proto::proto::{
 };
 use parking_lot::RwLock;
 use tokio::{sync::mpsc, time::interval};
-use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -68,20 +67,13 @@ pub struct CachedSystemState {
     pub version: u64,
     /// Number of organizations in the cache.
     pub organization_count: usize,
-    /// Number of vaults in the cache.
-    pub vault_count: usize,
     /// Timestamp when this cache was last updated.
     pub last_updated: std::time::Instant,
 }
 
 impl Default for CachedSystemState {
     fn default() -> Self {
-        Self {
-            version: 0,
-            organization_count: 0,
-            vault_count: 0,
-            last_updated: std::time::Instant::now(),
-        }
+        Self { version: 0, organization_count: 0, last_updated: std::time::Instant::now() }
     }
 }
 
@@ -114,6 +106,10 @@ pub struct LearnerRefreshJob {
     /// Peer address map for resolving voter network addresses.
     #[builder(default)]
     peer_addresses: Option<PeerAddressMap>,
+    /// Shared per-node connection registry. Single source of truth for
+    /// inter-node HTTP/2 channels — reused across subsystems so each
+    /// refresh cycle shares the existing peer connection.
+    registry: Arc<crate::node_registry::NodeConnectionRegistry>,
     /// Watchdog heartbeat handle. Updated each cycle to prove liveness.
     #[builder(default)]
     watchdog_handle: Option<Arc<std::sync::atomic::AtomicU64>>,
@@ -157,17 +153,21 @@ impl LearnerRefreshJob {
     ///
     /// Returns a description string if the endpoint is invalid, the gRPC
     /// connection fails, or the `GetSystemState` RPC returns an error.
-    pub async fn refresh_from_voter(&self, voter_addr: &str) -> Result<bool, String> {
-        debug!(voter_addr, "Attempting to refresh state from voter");
+    pub async fn refresh_from_voter(
+        &self,
+        voter_id: LedgerNodeId,
+        voter_addr: &str,
+    ) -> Result<bool, String> {
+        debug!(voter_id, voter_addr, "Attempting to refresh state from voter");
 
-        // Connect to the voter
-        let endpoint = format!("http://{}", voter_addr);
-        let channel = Channel::from_shared(endpoint)
-            .map_err(|e| format!("Invalid endpoint: {}", e))?
-            .timeout(self.config.rpc_timeout)
-            .connect_lazy();
-
-        let mut client = SystemDiscoveryServiceClient::new(channel);
+        // Obtain the voter's peer connection from the shared registry.
+        // HTTP/2 multiplexes all subsystems over one channel per peer.
+        let peer = self
+            .registry
+            .get_or_register(voter_id, voter_addr)
+            .await
+            .map_err(|e| format!("register voter {voter_id} ({voter_addr}): {e}"))?;
+        let mut client = SystemDiscoveryServiceClient::new(peer.channel());
 
         // Request system state from voter
         // Use if_version_greater_than=0 to always get full state
@@ -186,7 +186,6 @@ impl LearnerRefreshJob {
         if voter_version > cache.version {
             cache.version = voter_version;
             cache.organization_count = response.organizations.len();
-            cache.vault_count = response.organizations.len(); // One entry per organization
             cache.last_updated = std::time::Instant::now();
 
             debug!(
@@ -231,7 +230,7 @@ impl LearnerRefreshJob {
         // Try each voter until one succeeds
         let mut last_error = None;
         for (voter_id, voter_addr) in voters {
-            match self.refresh_from_voter(&voter_addr).await {
+            match self.refresh_from_voter(voter_id, &voter_addr).await {
                 Ok(updated) => {
                     return Ok(updated);
                 },
@@ -333,8 +332,14 @@ impl LearnerRefreshJob {
     /// Returns a handle to the spawned task. The task runs until dropped.
     /// For graceful shutdown, use `run()` with a shutdown channel instead.
     pub fn start(self) -> tokio::task::JoinHandle<()> {
-        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
         tokio::spawn(async move {
+            // Keep the sender alive for the task's lifetime so the shutdown
+            // branch in `run()` does not immediately fire when the sender is
+            // dropped at the caller (which would cause `recv()` to return
+            // `None` on the first tick). Callers needing graceful shutdown
+            // should call `run()` directly with a sender they retain.
+            let _shutdown_tx_keep_alive = shutdown_tx;
             self.run(shutdown_rx).await;
         })
     }
@@ -379,7 +384,6 @@ mod tests {
         let state = CachedSystemState::default();
         assert_eq!(state.version, 0);
         assert_eq!(state.organization_count, 0);
-        assert_eq!(state.vault_count, 0);
         // Default state should be fresh (just created)
         assert!(state.is_fresh(Duration::from_secs(1)));
     }
@@ -435,7 +439,6 @@ mod tests {
             if voter_version > c.version {
                 c.version = voter_version;
                 c.organization_count = 10;
-                c.vault_count = 10;
                 c.last_updated = std::time::Instant::now();
             }
         }

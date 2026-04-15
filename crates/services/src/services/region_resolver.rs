@@ -46,6 +46,8 @@ use super::error_classify;
 ///
 /// Contains all the resources needed to process a request on a specific region.
 pub struct RegionContext {
+    /// The region this context is bound to.
+    pub region: Region,
     /// Consensus handle for this region's leadership and proposal operations.
     pub handle: Arc<ConsensusHandle>,
     /// State layer providing this region's entity and relationship reads.
@@ -108,6 +110,7 @@ pub enum ResolveResult {
 impl std::fmt::Debug for RegionContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegionContext")
+            .field("region", &self.region)
             .field("handle", &"<ConsensusHandle>")
             .field("state", &"<StateLayer>")
             .field("block_archive", &"<BlockArchive>")
@@ -181,6 +184,7 @@ fn region_context_from(
     region: &inferadb_ledger_raft::raft_manager::RegionGroup,
 ) -> Result<RegionContext, tonic::Status> {
     Ok(RegionContext {
+        region: region.region(),
         handle: region.handle().clone(),
         state: region.state().clone(),
         block_archive: region.block_archive().clone(),
@@ -428,7 +432,10 @@ mod tests {
         let temp = TestDir::new();
         let config =
             RaftManagerConfig::new(temp.path().to_path_buf(), 1, Region::DE_CENTRAL_FRANKFURT);
-        let manager = Arc::new(RaftManager::new(config));
+        let manager = Arc::new(RaftManager::new(
+            config,
+            Arc::new(inferadb_ledger_raft::node_registry::NodeConnectionRegistry::new()),
+        ));
 
         let resolver = RegionResolverService::new(manager);
         assert_eq!(resolver.local_region(), Region::DE_CENTRAL_FRANKFURT);
@@ -441,7 +448,10 @@ mod tests {
 
         let temp = TestDir::new();
         let config = RaftManagerConfig::new(temp.path().to_path_buf(), 1, Region::GLOBAL);
-        let manager = Arc::new(RaftManager::new(config));
+        let manager = Arc::new(RaftManager::new(
+            config,
+            Arc::new(inferadb_ledger_raft::node_registry::NodeConnectionRegistry::new()),
+        ));
 
         let resolver = RegionResolverService::new(manager);
         assert!(resolver.supports_forwarding());

@@ -30,7 +30,9 @@
 //!
 //! ```no_run
 //! # use std::path::PathBuf;
+//! # use std::sync::Arc;
 //! # use inferadb_ledger_raft::raft_manager::{RaftManagerConfig, RaftManager, RegionConfig};
+//! # use inferadb_ledger_raft::node_registry::NodeConnectionRegistry;
 //! # use inferadb_ledger_types::Region;
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = RaftManagerConfig::builder()
@@ -38,7 +40,8 @@
 //!     .node_id(1u64)
 //!     .local_region(Region::GLOBAL)
 //!     .build();
-//! let manager = RaftManager::new(config);
+//! let registry = Arc::new(NodeConnectionRegistry::new());
+//! let manager = RaftManager::new(config, registry);
 //!
 //! // Start the _system region (always required)
 //! let system_config = RegionConfig::system(1u64, "127.0.0.1:50051".to_string());
@@ -485,11 +488,25 @@ pub struct RaftManager {
     /// dynamically via `announce_peer` RPCs. Services use this to resolve
     /// peer addresses for forwarding and health checks.
     peer_addresses: crate::peer_address_map::PeerAddressMap,
+    /// Shared registry of per-peer gRPC channels.
+    ///
+    /// One registry per node (constructed by the server bootstrap and
+    /// threaded through here). Per-region consensus transports clone the
+    /// `Arc` so that all regions share a single channel per peer instead of
+    /// each region opening its own connection.
+    registry: Arc<crate::node_registry::NodeConnectionRegistry>,
 }
 
 impl RaftManager {
     /// Creates a new Raft Manager.
-    pub fn new(config: RaftManagerConfig) -> Self {
+    ///
+    /// `registry` is the shared per-node connection registry. Pass the same
+    /// `Arc` instance for the lifetime of the process so all regions reuse
+    /// peer channels.
+    pub fn new(
+        config: RaftManagerConfig,
+        registry: Arc<crate::node_registry::NodeConnectionRegistry>,
+    ) -> Self {
         let storage_manager = RegionStorageManager::new(config.data_dir.clone());
         Self {
             config,
@@ -497,7 +514,17 @@ impl RaftManager {
             regions: RwLock::new(HashMap::new()),
             router: RwLock::new(None),
             peer_addresses: crate::peer_address_map::PeerAddressMap::new(),
+            registry,
         }
+    }
+
+    /// Returns the shared per-node connection registry.
+    ///
+    /// Downstream components (services, forward clients) clone this `Arc`
+    /// to share peer channels with the consensus transport.
+    #[must_use]
+    pub fn registry(&self) -> Arc<crate::node_registry::NodeConnectionRegistry> {
+        Arc::clone(&self.registry)
     }
 
     /// Returns the configuration.
@@ -906,8 +933,11 @@ impl RaftManager {
             inferadb_ledger_consensus::rng::SystemRng,
         );
 
-        let consensus_transport =
-            crate::consensus_transport::GrpcConsensusTransport::new(self.config.node_id, region);
+        let consensus_transport = crate::consensus_transport::GrpcConsensusTransport::new(
+            self.config.node_id,
+            region,
+            Arc::clone(&self.registry),
+        );
         // Set the local address from initial_members so outbound messages include
         // the sender's address for auto-registration on the receiving end.
         if let Some((_, addr)) = initial_members.iter().find(|(id, _)| *id == self.config.node_id) {
@@ -917,16 +947,13 @@ impl RaftManager {
 
         // Register peer channels for initial members and populate the shared
         // peer address map so services can resolve addresses for forwarding.
+        // Channels flow through the node-level `NodeConnectionRegistry` so
+        // they're shared across consensus, forwarding, discovery, and admin.
         for (node_id, addr) in &initial_members {
             if *node_id != self.config.node_id {
                 self.peer_addresses.insert(*node_id, addr.clone());
-                match tonic::transport::Channel::from_shared(format!("http://{addr}")) {
-                    Ok(endpoint) => {
-                        consensus_transport.set_peer(*node_id, endpoint.connect_lazy());
-                    },
-                    Err(e) => {
-                        warn!(node_id, addr, error = %e, "Failed to create channel for peer");
-                    },
+                if let Err(e) = consensus_transport.set_peer_via_registry(*node_id, addr).await {
+                    warn!(node_id, addr, error = %e, "Failed to register peer via registry");
                 }
             }
         }
@@ -1514,6 +1541,13 @@ mod tests {
         RaftManagerConfig::new(temp_dir.path().to_path_buf(), 1, Region::GLOBAL)
     }
 
+    /// Convenience constructor for tests: builds a fresh per-test registry.
+    /// Production callers (server bootstrap) share a single registry across
+    /// the process — see [`bootstrap`](../../../server/src/bootstrap.rs).
+    fn test_manager(config: RaftManagerConfig) -> RaftManager {
+        RaftManager::new(config, Arc::new(crate::node_registry::NodeConnectionRegistry::new()))
+    }
+
     #[test]
     fn test_storage_manager_region_dir() {
         let temp = TestDir::new();
@@ -1629,17 +1663,34 @@ mod tests {
     fn test_manager_creation() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         assert_eq!(manager.list_regions().len(), 0);
         assert!(!manager.has_region(Region::GLOBAL));
     }
 
     #[test]
+    fn test_manager_exposes_shared_registry() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let registry = Arc::new(crate::node_registry::NodeConnectionRegistry::new());
+        let manager = RaftManager::new(config, Arc::clone(&registry));
+
+        // The accessor must hand back the same Arc instance so per-region
+        // transports and downstream services share one channel pool.
+        let from_manager = manager.registry();
+        assert!(Arc::ptr_eq(&registry, &from_manager));
+
+        // Successive calls return the same underlying registry.
+        let again = manager.registry();
+        assert!(Arc::ptr_eq(&from_manager, &again));
+    }
+
+    #[test]
     fn test_manager_stats_empty() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         let stats = manager.stats();
         assert_eq!(stats.total_regions, 0);
@@ -1652,7 +1703,7 @@ mod tests {
         let temp = TestDir::new();
         let config =
             RaftManagerConfig::new(temp.path().to_path_buf(), 1, Region::DE_CENTRAL_FRANKFURT);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
         assert_eq!(manager.local_region(), Region::DE_CENTRAL_FRANKFURT);
     }
 
@@ -1667,7 +1718,7 @@ mod tests {
     async fn test_system_region_required() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         // Try to start data region without system region
         let region_config =
@@ -1681,7 +1732,7 @@ mod tests {
     async fn test_start_system_region() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         let region_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
         let result = manager.start_system_region(region_config).await;
@@ -1698,7 +1749,7 @@ mod tests {
     async fn test_start_multiple_regions() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         // Start system region
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1718,7 +1769,7 @@ mod tests {
     async fn test_duplicate_region_error() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         // Start system region
         let region_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1735,7 +1786,7 @@ mod tests {
     async fn test_stop_region() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         // Start system region
         let region_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1753,7 +1804,7 @@ mod tests {
     async fn test_get_region_group() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         // Try to get non-existent region
         let result = manager.get_region_group(Region::GLOBAL);
@@ -1802,7 +1853,7 @@ mod tests {
     async fn test_region_with_background_jobs_disabled() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         // Create config with background jobs disabled
         let mut region_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1823,7 +1874,7 @@ mod tests {
     async fn test_region_with_background_jobs_enabled() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         // Create config with background jobs enabled (default)
         let region_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1844,7 +1895,7 @@ mod tests {
     async fn test_stop_region_aborts_background_jobs() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         // Start with background jobs enabled
         let region_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1870,7 +1921,7 @@ mod tests {
     async fn test_protected_region_rejects_insufficient_nodes() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         // Start system region first (required for data regions)
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1897,7 +1948,7 @@ mod tests {
     async fn test_protected_region_accepts_sufficient_nodes() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         // Start system region first
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1924,7 +1975,7 @@ mod tests {
     async fn test_non_protected_region_accepts_any_member_count() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         // Start system region first
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1958,7 +2009,7 @@ mod tests {
     async fn test_ensure_data_region_creates_new() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         // Start system region first
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -1980,7 +2031,7 @@ mod tests {
     async fn test_ensure_data_region_returns_existing() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         // Start system region and a data region
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -2005,7 +2056,7 @@ mod tests {
     async fn test_ensure_data_region_requires_system() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         // Without system region, ensure_data_region should fail
         let region_config =
@@ -2019,7 +2070,7 @@ mod tests {
     async fn test_ensure_data_region_global_returns_system() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         // Before system region: GLOBAL should return RegionNotFound
         let region_config =
@@ -2047,7 +2098,7 @@ mod tests {
         // First "session": create regions
         {
             let config = create_test_config(&temp);
-            let manager = RaftManager::new(config);
+            let manager = test_manager(config);
 
             let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
             manager.start_system_region(system_config).await.expect("start system");
@@ -2063,7 +2114,7 @@ mod tests {
         // Second "session": discover and reopen
         {
             let config = create_test_config(&temp);
-            let manager = RaftManager::new(config);
+            let manager = test_manager(config);
 
             // Discover regions that have existing data on disk
             let existing = manager.storage_manager().discover_existing_regions();
@@ -2103,7 +2154,7 @@ mod tests {
     async fn test_concurrent_ensure_data_region_is_safe() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = Arc::new(RaftManager::new(config));
+        let manager = Arc::new(test_manager(config));
 
         // System region must exist first
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -2152,7 +2203,7 @@ mod tests {
     async fn test_hibernate_region() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
         manager.start_system_region(system_config).await.expect("start system");
@@ -2172,7 +2223,7 @@ mod tests {
     async fn test_hibernate_idempotent() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
         manager.start_system_region(system_config).await.expect("start system");
@@ -2192,7 +2243,7 @@ mod tests {
     async fn test_wake_region() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
         manager.start_system_region(system_config).await.expect("start system");
@@ -2213,7 +2264,7 @@ mod tests {
     async fn test_wake_idempotent() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
         manager.start_system_region(system_config).await.expect("start system");
@@ -2234,7 +2285,7 @@ mod tests {
     async fn test_hibernate_not_found() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         let result = manager.hibernate_region(Region::US_EAST_VA);
         assert!(matches!(result, Err(RaftManagerError::RegionNotFound { .. })));
@@ -2244,7 +2295,7 @@ mod tests {
     async fn test_wake_not_found() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         let result = manager.wake_region(Region::US_EAST_VA);
         assert!(matches!(result, Err(RaftManagerError::RegionNotFound { .. })));
@@ -2254,7 +2305,7 @@ mod tests {
     async fn test_hibernate_idle_regions_skips_global() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
         manager.start_system_region(system_config).await.expect("start system");
@@ -2271,7 +2322,7 @@ mod tests {
     async fn test_hibernate_idle_regions_hibernates_idle() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
         manager.start_system_region(system_config).await.expect("start system");
@@ -2294,7 +2345,7 @@ mod tests {
     async fn test_touch_resets_idle_timer() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
         manager.start_system_region(system_config).await.expect("start system");
@@ -2311,7 +2362,7 @@ mod tests {
     async fn test_region_group_initial_jobs_active_state() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         // System region with background jobs enabled
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
@@ -2324,7 +2375,7 @@ mod tests {
     async fn test_region_group_no_jobs_active_when_disabled() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
-        let manager = RaftManager::new(config);
+        let manager = test_manager(config);
 
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
         manager.start_system_region(system_config).await.expect("start system");

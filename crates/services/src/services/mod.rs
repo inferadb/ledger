@@ -11,8 +11,10 @@
 //!
 //! ## Request Forwarding
 //!
-//! When an organization is on a remote region, the [`ForwardClient`] proxies
-//! requests to the correct node via gRPC.
+//! When an organization is on a remote region, the [`RegionForwardClient`]
+//! proxies requests to the correct node via gRPC. When a follower receives a
+//! write (or linearizable read) for a region it already serves, the
+//! [`LeaderForwardClient`] forwards to the current leader.
 
 mod admin;
 mod app;
@@ -40,7 +42,7 @@ pub use admin::AdminService;
 pub use app::AppService;
 pub use discovery::DiscoveryService;
 pub use events::EventsService;
-pub use forward_client::ForwardClient;
+pub use forward_client::{LeaderForwardClient, RegionForwardClient};
 pub use health::HealthService;
 pub use invitation::InvitationService;
 pub use organization::OrganizationService;

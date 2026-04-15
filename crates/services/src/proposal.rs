@@ -232,39 +232,17 @@ impl ProposalService for RaftProposalService {
 
                 let proto_region: inferadb_ledger_proto::proto::Region = region.into();
 
-                // Cache the leader channel to avoid creating a new TCP connection per proposal.
-                static PROPOSAL_CHANNEL: parking_lot::Mutex<
-                    Option<(String, tonic::transport::Channel)>,
-                > = parking_lot::Mutex::new(None);
-                let channel = {
-                    let cache = PROPOSAL_CHANNEL.lock();
-                    if let Some((ref addr, ref ch)) = *cache {
-                        if addr == &leader_addr { Some(ch.clone()) } else { None }
-                    } else {
-                        None
-                    }
-                };
-                let channel = match channel {
-                    Some(ch) => ch,
-                    None => {
-                        let ch =
-                            tonic::transport::Channel::from_shared(format!("http://{leader_addr}"))
-                                .map_err(|e| {
-                                    Status::internal(format!(
-                                        "invalid leader address {leader_addr}: {e}"
-                                    ))
-                                })?
-                                .connect_lazy();
-                        let mut cache = PROPOSAL_CHANNEL.lock();
-                        *cache = Some((leader_addr.clone(), ch.clone()));
-                        ch
-                    },
-                };
-
-                let mut client =
-                    inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new(
-                        channel,
-                    );
+                // Obtain the leader's peer connection from the shared registry.
+                // HTTP/2 multiplexes all subsystems over a single channel per peer.
+                let peer =
+                    manager.registry().get_or_register(leader_id, &leader_addr).await.map_err(
+                        |e| {
+                            Status::internal(format!(
+                                "register leader {leader_id} ({leader_addr}): {e}"
+                            ))
+                        },
+                    )?;
+                let mut client = peer.raft_client();
 
                 let resp = client
                     .forward_regional_proposal(
@@ -539,7 +517,10 @@ mod tests {
         let temp = TestDir::new();
         let node_id = 1u64;
         let config = RaftManagerConfig::new(temp.path().to_path_buf(), node_id, Region::GLOBAL);
-        let manager = Arc::new(RaftManager::new(config));
+        let manager = Arc::new(RaftManager::new(
+            config,
+            Arc::new(inferadb_ledger_raft::node_registry::NodeConnectionRegistry::new()),
+        ));
         let region_config =
             RegionConfig::system(node_id, "127.0.0.1:0".to_string()).without_background_jobs();
         let system = manager.start_system_region(region_config).await.expect("start system region");
@@ -572,7 +553,10 @@ mod tests {
         let temp = TestDir::new();
         let node_id = 1u64;
         let config = RaftManagerConfig::new(temp.path().to_path_buf(), node_id, Region::GLOBAL);
-        let manager = Arc::new(RaftManager::new(config));
+        let manager = Arc::new(RaftManager::new(
+            config,
+            Arc::new(inferadb_ledger_raft::node_registry::NodeConnectionRegistry::new()),
+        ));
         let region_config =
             RegionConfig::system(node_id, "127.0.0.1:0".to_string()).without_background_jobs();
         let system = manager.start_system_region(region_config).await.expect("start system region");
@@ -590,7 +574,10 @@ mod tests {
         let temp = TestDir::new();
         let node_id = 1u64;
         let config = RaftManagerConfig::new(temp.path().to_path_buf(), node_id, Region::GLOBAL);
-        let manager = Arc::new(RaftManager::new(config));
+        let manager = Arc::new(RaftManager::new(
+            config,
+            Arc::new(inferadb_ledger_raft::node_registry::NodeConnectionRegistry::new()),
+        ));
         let region_config =
             RegionConfig::system(node_id, "127.0.0.1:0".to_string()).without_background_jobs();
         let system = manager.start_system_region(region_config).await.expect("start system region");

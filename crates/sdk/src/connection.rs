@@ -389,18 +389,6 @@ impl ConnectionPool {
         })
     }
 
-    /// Invalidates the cached region leader endpoint.
-    ///
-    /// Called when `UNAVAILABLE` or leadership-change errors indicate the
-    /// cached leader is stale. The next [`get_channel`](Self::get_channel)
-    /// call will re-resolve via the gateway.
-    pub fn invalidate_region_leader(&self) {
-        if let Some(ref cache) = self.region_cache {
-            cache.invalidate();
-            *self.channel.write() = None;
-        }
-    }
-
     /// On a `NotLeader`-like error, applies the server-provided leader hint
     /// (if any) to the regional cache. Falls back to invalidating the cache
     /// when the server provided no hint.

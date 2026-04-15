@@ -94,6 +94,7 @@ inferadb-ledger-proto          â€" Protobuf codegen, From/TryFrom conversions
 - `StorageEngine` (state/engine.rs) â€" store wrapper with transaction helpers
 - `StateLayer` (state/state.rs) â€" `StateMachine` impl, applies blocks, computes state roots
 - `LedgerServer` (services/server.rs) â€" gRPC server, all 13 services + consensus
+- `NodeConnectionRegistry` (raft/node_registry.rs) â€" node-level connection pool; one `Channel` per peer, shared across all subsystems (consensus, forwarding, discovery, admin). HTTP/2 multiplexing serves all traffic through one TCP connection per peer.
 
 ## Data Model
 

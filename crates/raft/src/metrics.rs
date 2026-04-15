@@ -1410,6 +1410,32 @@ pub fn record_peer_send_queue_depth(peer: u64, depth: usize) {
     gauge!("ledger_peer_send_queue_depth", "peer" => peer.to_string()).set(depth_f64);
 }
 
+/// Records a node connection registry lifecycle event.
+///
+/// `event` is one of:
+/// - `"registered"` — a new peer was added to the registry.
+/// - `"unregistered"` — a peer was explicitly removed via `unregister`.
+/// - `"pruned"` — a peer was removed by `on_membership_changed`.
+/// - `"replaced"` — a peer's address changed; the old entry was evicted before re-registering under
+///   the new address.
+#[inline]
+pub fn record_node_connection_event(peer: u64, event: &'static str) {
+    counter!(
+        "ledger_node_connection_events_total",
+        "peer" => peer.to_string(),
+        "event" => event,
+    )
+    .increment(1);
+}
+
+/// Sets the active node-connection count gauge.
+#[inline]
+pub fn record_node_connections_active(count: usize) {
+    #[allow(clippy::cast_precision_loss)]
+    let count_f64 = count as f64;
+    gauge!("ledger_node_connections_active").set(count_f64);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

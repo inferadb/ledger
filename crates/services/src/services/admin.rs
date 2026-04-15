@@ -730,12 +730,17 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         // Register the joining node's gRPC channel so the consensus transport
         // can send AppendEntries for replication. Without this, the leader
         // cannot replicate entries to the new node, and multi-voter quorum
-        // commits would stall.
+        // commits would stall. The channel is resolved through the node-level
+        // `NodeConnectionRegistry` so it's shared with all other subsystems.
         if let Some(ref transport) = self.consensus_transport
-            && let Ok(endpoint) =
-                tonic::transport::Channel::from_shared(format!("http://{}", req.address))
+            && let Err(e) = transport.set_peer_via_registry(req.node_id, &req.address).await
         {
-            transport.set_peer(req.node_id, endpoint.connect_lazy());
+            tracing::warn!(
+                node_id = req.node_id,
+                address = %req.address,
+                error = %e,
+                "Failed to register joining node via registry",
+            );
         }
         // Also update the peer address map for forwarding.
         if let Some(ref peers) = self.peer_addresses {
@@ -2954,10 +2959,15 @@ async fn add_node_to_data_regions(
         if group.handle().is_leader() {
             // We ARE the data region leader — add directly.
             if let Some(transport) = group.consensus_transport()
-                && let Ok(endpoint) =
-                    tonic::transport::Channel::from_shared(format!("http://{address}"))
+                && let Err(e) = transport.set_peer_via_registry(node_id, address).await
             {
-                transport.set_peer(node_id, endpoint.connect_lazy());
+                tracing::warn!(
+                    region = region.as_str(),
+                    node_id,
+                    address,
+                    error = %e,
+                    "Failed to register node via registry for data region",
+                );
             }
             add_member_to_region(&group, node_id, region).await;
         } else {
@@ -2973,7 +2983,7 @@ async fn add_node_to_data_regions(
                     continue;
                 },
             };
-            forward_data_region_join(&leader_addr, node_id, address).await;
+            forward_data_region_join(manager, leader_id, &leader_addr, node_id, address).await;
         }
     }
 }
@@ -3033,12 +3043,17 @@ async fn add_member_to_region(
 /// The JoinCluster RPC is reused — the leader handles it the same way as a
 /// GLOBAL join but the data region membership change happens through
 /// `add_node_to_data_regions` on the receiving leader.
-async fn forward_data_region_join(leader_addr: &str, node_id: u64, address: &str) {
-    let endpoint = format!("http://{leader_addr}");
-    let channel = match tonic::transport::Channel::from_shared(endpoint) {
-        Ok(ep) => ep.connect_timeout(std::time::Duration::from_secs(5)).connect_lazy(),
+async fn forward_data_region_join(
+    manager: &inferadb_ledger_raft::raft_manager::RaftManager,
+    leader_id: u64,
+    leader_addr: &str,
+    node_id: u64,
+    address: &str,
+) {
+    let channel = match manager.registry().get_or_register(leader_id, leader_addr).await {
+        Ok(peer) => peer.channel(),
         Err(e) => {
-            tracing::warn!(leader_addr, error = %e, "Invalid data region leader address");
+            tracing::warn!(leader_id, leader_addr, error = %e, "Failed to register data region leader via registry");
             return;
         },
     };

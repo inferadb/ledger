@@ -335,6 +335,26 @@ heartbeats are self-healing).
 See the [consensus transport backpressure runbook](runbooks/consensus-transport-backpressure.md)
 for symptom-to-cause mapping.
 
+## Node Connection Registry
+
+Metrics from the node-level `NodeConnectionRegistry`, which owns one gRPC
+channel per peer node shared across all subsystems (consensus, forwarding,
+discovery, admin). Replaces the previous per-region, per-subsystem channel
+duplication.
+
+| Metric                                | Type    | Labels          | Description                                                                                                                  |
+| ------------------------------------- | ------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `ledger_node_connections_active`      | Gauge   | none            | Total peer connections currently in the registry.                                                                            |
+| `ledger_node_connection_events_total` | Counter | `peer`, `event` | Lifecycle events. `event` ∈ `registered` (new entry), `unregistered` (explicit remove), `pruned` (membership change removed). |
+
+**Labels:**
+
+- `peer`: Raw node ID (numeric string); cardinality bounded by cluster size
+- `event`: `registered`, `unregistered`, or `pruned`
+
+See the [node connection registry runbook](runbooks/node-connection-registry.md)
+for symptom-to-cause mapping.
+
 ## SDK Region Leader Cache
 
 Metrics emitted by the SDK's regional leader cache, which routes requests

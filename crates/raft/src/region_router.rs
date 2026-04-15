@@ -39,7 +39,7 @@ use inferadb_ledger_store::{FileBackend, StorageBackend};
 use inferadb_ledger_types::{NodeId, OrganizationId, Region};
 use parking_lot::RwLock;
 use snafu::{ResultExt, Snafu};
-use tonic::transport::Channel;
+use tonic::transport::{Channel, Endpoint};
 use tracing::{debug, info, warn};
 
 // ============================================================================
@@ -185,6 +185,12 @@ pub struct RegionRouter<B: StorageBackend + 'static = FileBackend> {
     config: RouterConfig,
     /// This node's region tag (set at startup from node config).
     local_region: Region,
+    /// Router-local channel cache for cross-region connections. Keyed
+    /// by the string `node_id` advertised by the target region's
+    /// membership; the value stores the last-known address alongside
+    /// the tonic [`Channel`] so an address change invalidates the
+    /// cached entry.
+    cross_region_channels: RwLock<HashMap<String, (String, Channel)>>,
 }
 
 impl<B: StorageBackend + 'static> RegionRouter<B> {
@@ -205,6 +211,7 @@ impl<B: StorageBackend + 'static> RegionRouter<B> {
             connections: RwLock::new(HashMap::new()),
             config,
             local_region,
+            cross_region_channels: RwLock::new(HashMap::new()),
         }
     }
 
@@ -400,23 +407,25 @@ impl<B: StorageBackend + 'static> RegionRouter<B> {
     }
 
     /// Connects to a specific node.
+    ///
+    /// Cross-region node IDs are string-valued (distinct from the
+    /// intra-cluster `LedgerNodeId(u64)` space used by
+    /// [`NodeConnectionRegistry`]). Mixing the two keyspaces via a
+    /// hash function risks collisions returning the wrong peer's
+    /// channel. We keep a router-local cache keyed on the string
+    /// `node_id` so intra-region and cross-region connections have
+    /// disjoint registries but share identical keepalive policy.
     async fn connect_to_node(&self, region: Region, node_id: &str) -> Result<RegionConnection> {
         // Parse node address (format: "host:port" or just "host")
         let address = self.resolve_node_address(node_id)?;
+        let addr_string = address.to_string();
 
-        let endpoint = format!("http://{}", address);
-
-        let channel = Channel::from_shared(endpoint.clone())
-            .map_err(|e| RoutingError::ConnectionFailed {
-                region,
-                message: format!("Invalid endpoint {}: {}", endpoint, e),
-            })?
-            .connect_timeout(self.config.connect_timeout)
-            .connect()
-            .await
-            .map_err(|e| RoutingError::ConnectionFailed {
-                region,
-                message: format!("Connection to {} failed: {}", endpoint, e),
+        let channel =
+            self.get_or_build_cross_region_channel(node_id, &addr_string).map_err(|e| {
+                RoutingError::ConnectionFailed {
+                    region,
+                    message: format!("register {node_id} ({addr_string}): {e}"),
+                }
             })?;
 
         debug!(region = region.as_str(), node_id, address = %address, "Connected to region node");
@@ -427,6 +436,43 @@ impl<B: StorageBackend + 'static> RegionRouter<B> {
             address,
             is_leader: false, // Will be confirmed on first request
         })
+    }
+
+    /// Returns a cached cross-region channel for `node_id`, lazily
+    /// constructing one with the same keepalive policy used by
+    /// [`NodeConnectionRegistry::make_connection`] when absent. The
+    /// cache is keyed by `(node_id, addr)`; an address change for an
+    /// existing `node_id` evicts the stale entry.
+    fn get_or_build_cross_region_channel(
+        &self,
+        node_id: &str,
+        addr: &str,
+    ) -> std::result::Result<Channel, String> {
+        // Fast path — cache hit with matching address.
+        {
+            let cache = self.cross_region_channels.read();
+            if let Some((cached_addr, channel)) = cache.get(node_id)
+                && cached_addr == addr
+            {
+                return Ok(channel.clone());
+            }
+        }
+
+        // Build a new channel with the same keepalive policy as the
+        // node-level registry. `connect_lazy()` defers the TCP handshake
+        // to first RPC, matching the intra-region path.
+        let uri = format!("http://{addr}");
+        let endpoint = Endpoint::from_shared(uri).map_err(|e| e.to_string())?;
+        let channel = endpoint
+            .http2_keep_alive_interval(Duration::from_secs(30))
+            .keep_alive_timeout(Duration::from_secs(10))
+            .keep_alive_while_idle(true)
+            .tcp_keepalive(Some(Duration::from_secs(60)))
+            .connect_lazy();
+
+        let mut cache = self.cross_region_channels.write();
+        cache.insert(node_id.to_owned(), (addr.to_owned(), channel.clone()));
+        Ok(channel)
     }
 
     /// Resolves a node ID to a socket address.

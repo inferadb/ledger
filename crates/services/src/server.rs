@@ -277,6 +277,7 @@ impl LedgerServer {
             .active_streams(active_watch_streams)
             .max_streams(self.max_watch_streams)
             .peer_addresses(self.peer_addresses.clone())
+            .registry(Some(self.manager.registry()))
             .build();
 
         // Create write service using the resolver. Batch writers are per-region
@@ -287,6 +288,7 @@ impl LedgerServer {
             .idempotency(self.idempotency.clone())
             .proposal_timeout(self.proposal_timeout)
             .peer_addresses(self.peer_addresses.clone())
+            .registry(Some(self.manager.registry()))
             .build()
             .with_health_state(self.health_state.clone());
         // Wire optional features via builder methods

@@ -194,10 +194,15 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
         if !req.from_address.is_empty() {
             if let Some(transport) = group.consensus_transport()
                 && !transport.peers().contains(&req.from_node)
-                && let Ok(endpoint) =
-                    tonic::transport::Channel::from_shared(format!("http://{}", req.from_address))
+                && let Err(e) =
+                    transport.set_peer_via_registry(req.from_node, &req.from_address).await
             {
-                transport.set_peer(req.from_node, endpoint.connect_lazy());
+                tracing::warn!(
+                    from_node = req.from_node,
+                    from_address = %req.from_address,
+                    error = %e,
+                    "Failed to auto-register sender via registry",
+                );
             }
             // Also update the peer address map so future lookups work.
             self.manager.peer_addresses().insert(req.from_node, req.from_address.clone());
@@ -294,14 +299,20 @@ mod tests {
     fn create_basic_service() -> (RaftService, TestDir) {
         let temp = TestDir::new();
         let config = RaftManagerConfig::new(temp.path().to_path_buf(), 1, Region::GLOBAL);
-        let manager = Arc::new(RaftManager::new(config));
+        let manager = Arc::new(RaftManager::new(
+            config,
+            Arc::new(inferadb_ledger_raft::node_registry::NodeConnectionRegistry::new()),
+        ));
         (RaftService::new(manager), temp)
     }
 
     async fn create_service_with_region() -> (RaftService, Arc<RaftManager>, TestDir) {
         let temp = TestDir::new();
         let config = RaftManagerConfig::new(temp.path().to_path_buf(), 1, Region::GLOBAL);
-        let manager = Arc::new(RaftManager::new(config));
+        let manager = Arc::new(RaftManager::new(
+            config,
+            Arc::new(inferadb_ledger_raft::node_registry::NodeConnectionRegistry::new()),
+        ));
         let region_config =
             RegionConfig::system(1, "127.0.0.1:50051".to_string()).without_background_jobs();
         manager.start_system_region(region_config).await.expect("start system region");

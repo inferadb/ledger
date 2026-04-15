@@ -1,34 +1,48 @@
-//! gRPC client for forwarding requests to remote regions.
+//! gRPC clients for forwarding requests across Raft leadership and region
+//! boundaries.
 //!
-//! When an organization is assigned to a region on a different node, requests
-//! must be forwarded via gRPC. This module provides the client infrastructure
-//! for transparent request forwarding.
+//! Two distinct scenarios share the same underlying gRPC mechanics but differ
+//! structurally:
+//!
+//! 1. **Same-node leader forwarding** — a follower receives a write (or a linearizable read) and
+//!    must forward it to the current leader for the region it already serves. Use
+//!    [`LeaderForwardClient`], constructed via `current_leader_client`, which consults the local
+//!    Raft state + the node-level [`NodeConnectionRegistry`].
+//!
+//! 2. **Cross-region routing** — the organization resolves to a region served by a different node.
+//!    Use [`RegionForwardClient`], constructed from a [`RegionConnection`] handed out by the region
+//!    router.
+//!
+//! Both types expose the same set of `forward_*` methods and delegate to
+//! shared free-function implementations so request building, trace-context
+//! injection, and deadline propagation stay identical.
 //!
 //! ## Usage
 //!
 //! ```no_run
-//! # use std::net::SocketAddr;
-//! # use inferadb_ledger_services::services::ForwardClient;
+//! # use inferadb_ledger_services::services::RegionForwardClient;
 //! # use inferadb_ledger_raft::region_router::RegionConnection;
 //! # use inferadb_ledger_types::Region;
 //! # use inferadb_ledger_proto::proto::ReadRequest;
 //! # use tonic::transport::Channel;
+//! # use std::net::SocketAddr;
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let channel = Channel::from_static("http://[::1]:50051").connect_lazy();
 //! # let addr: SocketAddr = "[::1]:50051".parse()?;
 //! # let connection = RegionConnection {
 //! #     region: Region::US_EAST_VA, channel, address: addr, is_leader: true,
 //! # };
-//! let mut client = ForwardClient::new(connection);
-//!
-//! // Forward a read request
+//! let mut client = RegionForwardClient::new(connection);
 //! let request = ReadRequest::default();
 //! let response = client.forward_read(request, None, None).await?;
 //! # Ok(())
 //! # }
 //! ```
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 use inferadb_ledger_proto::proto::{
     BatchReadRequest, BatchReadResponse, BatchWriteRequest, BatchWriteResponse, BlockAnnouncement,
@@ -41,6 +55,7 @@ use inferadb_ledger_proto::proto::{
     write_service_client::WriteServiceClient,
 };
 use inferadb_ledger_raft::{
+    node_registry::NodeConnectionRegistry,
     region_router::RegionConnection,
     trace_context::{self, TraceContext},
 };
@@ -51,29 +66,153 @@ use tracing::{debug, warn};
 /// Default timeout for forwarded requests.
 const DEFAULT_FORWARD_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Client for forwarding requests to remote regions.
+// ============================================================================
+// Shared request-building and RPC dispatch helpers
+// ============================================================================
+
+/// Builds a tonic [`Request`] with trace-context injection and deadline
+/// propagation. Shared by both forward-client types.
+fn build_request<T>(
+    message: T,
+    trace_ctx: Option<&TraceContext>,
+    grpc_deadline: Option<Duration>,
+) -> Request<T> {
+    let mut req = Request::new(message);
+    let timeout =
+        inferadb_ledger_raft::deadline::forwarding_timeout(grpc_deadline, DEFAULT_FORWARD_TIMEOUT);
+    req.set_timeout(timeout);
+    if let Some(ctx) = trace_ctx {
+        let child = ctx.child();
+        trace_context::inject_into_metadata(req.metadata_mut(), &child);
+    }
+    req
+}
+
+macro_rules! forward_impl {
+    ($name:ident, $client_ty:ident, $method:ident, $req_ty:ty, $resp_ty:ty) => {
+        async fn $name(
+            client: &mut $client_ty<Channel>,
+            region: Region,
+            request: $req_ty,
+            trace_ctx: Option<&TraceContext>,
+            grpc_deadline: Option<Duration>,
+        ) -> Result<Response<$resp_ty>, Status> {
+            debug!(region = region.as_str(), concat!("Forwarding ", stringify!($method), " request"));
+            let req = build_request(request, trace_ctx, grpc_deadline);
+            client.$method(req).await.map_err(|e| {
+                warn!(
+                    region = region.as_str(),
+                    error = %e,
+                    concat!("Forward ", stringify!($method), " failed")
+                );
+                e
+            })
+        }
+    };
+}
+
+forward_impl!(forward_read_impl, ReadServiceClient, read, ReadRequest, ReadResponse);
+forward_impl!(
+    forward_verified_read_impl,
+    ReadServiceClient,
+    verified_read,
+    VerifiedReadRequest,
+    VerifiedReadResponse
+);
+forward_impl!(
+    forward_historical_read_impl,
+    ReadServiceClient,
+    historical_read,
+    HistoricalReadRequest,
+    HistoricalReadResponse
+);
+forward_impl!(
+    forward_watch_blocks_impl,
+    ReadServiceClient,
+    watch_blocks,
+    WatchBlocksRequest,
+    tonic::Streaming<BlockAnnouncement>
+);
+forward_impl!(
+    forward_get_block_impl,
+    ReadServiceClient,
+    get_block,
+    GetBlockRequest,
+    GetBlockResponse
+);
+forward_impl!(
+    forward_get_block_range_impl,
+    ReadServiceClient,
+    get_block_range,
+    GetBlockRangeRequest,
+    GetBlockRangeResponse
+);
+forward_impl!(forward_get_tip_impl, ReadServiceClient, get_tip, GetTipRequest, GetTipResponse);
+forward_impl!(
+    forward_get_client_state_impl,
+    ReadServiceClient,
+    get_client_state,
+    GetClientStateRequest,
+    GetClientStateResponse
+);
+forward_impl!(
+    forward_list_relationships_impl,
+    ReadServiceClient,
+    list_relationships,
+    ListRelationshipsRequest,
+    ListRelationshipsResponse
+);
+forward_impl!(
+    forward_list_resources_impl,
+    ReadServiceClient,
+    list_resources,
+    ListResourcesRequest,
+    ListResourcesResponse
+);
+forward_impl!(
+    forward_list_entities_impl,
+    ReadServiceClient,
+    list_entities,
+    ListEntitiesRequest,
+    ListEntitiesResponse
+);
+forward_impl!(
+    forward_batch_read_impl,
+    ReadServiceClient,
+    batch_read,
+    BatchReadRequest,
+    BatchReadResponse
+);
+forward_impl!(forward_write_impl, WriteServiceClient, write, WriteRequest, WriteResponse);
+forward_impl!(
+    forward_batch_write_impl,
+    WriteServiceClient,
+    batch_write,
+    BatchWriteRequest,
+    BatchWriteResponse
+);
+
+// ============================================================================
+// LeaderForwardClient — same-node leader forwarding
+// ============================================================================
+
+/// Forwards requests to the current Raft leader for a region.
 ///
-/// Wraps gRPC clients for ReadService and WriteService to forward
-/// requests transparently to the correct region.
-pub struct ForwardClient {
+/// Constructed via `current_leader_client` once per forwarding decision —
+/// the caller has already observed leader identity via the local Raft
+/// handle and resolved the peer through the [`NodeConnectionRegistry`].
+/// This type holds the resolved [`Arc<PeerConnection>`][peer] so successive
+/// `forward_*` calls reuse the shared HTTP/2 channel owned by the registry.
+///
+/// [peer]: inferadb_ledger_raft::node_registry::PeerConnection
+pub struct LeaderForwardClient {
     read_client: ReadServiceClient<Channel>,
     write_client: WriteServiceClient<Channel>,
     region: Region,
 }
 
-impl ForwardClient {
-    /// Creates a new forward client from a region connection.
-    pub fn new(connection: RegionConnection) -> Self {
-        let channel = connection.channel;
-        Self {
-            read_client: ReadServiceClient::new(channel.clone()),
-            write_client: WriteServiceClient::new(channel),
-            region: connection.region,
-        }
-    }
-
-    /// Creates a new forward client from a channel directly.
-    pub fn from_channel(channel: Channel, region: Region) -> Self {
+impl LeaderForwardClient {
+    fn from_channel(channel: Channel, region: Region) -> Self {
         Self {
             read_client: ReadServiceClient::new(channel.clone()),
             write_client: WriteServiceClient::new(channel),
@@ -86,37 +225,258 @@ impl ForwardClient {
         self.region
     }
 
-    /// Creates a gRPC request with trace context and deadline propagation.
-    ///
-    /// Injects W3C Trace Context headers (`traceparent`, `tracestate`) into
-    /// the outgoing request metadata, enabling distributed trace continuity
-    /// across region boundaries.
-    ///
-    /// If a gRPC deadline is provided (extracted from the original incoming
-    /// request), it is propagated as the forwarded request's timeout. Otherwise
-    /// the default forward timeout is used.
-    fn make_request<T>(
-        &self,
-        message: T,
+    /// Forwards a Read request to the leader.
+    pub async fn forward_read(
+        &mut self,
+        request: ReadRequest,
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
-    ) -> Request<T> {
-        let mut req = Request::new(message);
-        let timeout = inferadb_ledger_raft::deadline::forwarding_timeout(
-            grpc_deadline,
-            DEFAULT_FORWARD_TIMEOUT,
-        );
-        req.set_timeout(timeout);
-        if let Some(ctx) = trace_ctx {
-            let child = ctx.child();
-            trace_context::inject_into_metadata(req.metadata_mut(), &child);
-        }
-        req
+    ) -> Result<Response<ReadResponse>, Status> {
+        forward_read_impl(&mut self.read_client, self.region, request, trace_ctx, grpc_deadline)
+            .await
     }
 
-    // ========================================================================
-    // Read Service Forwarding
-    // ========================================================================
+    /// Forwards a VerifiedRead request to the leader.
+    pub async fn forward_verified_read(
+        &mut self,
+        request: VerifiedReadRequest,
+        trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
+    ) -> Result<Response<VerifiedReadResponse>, Status> {
+        forward_verified_read_impl(
+            &mut self.read_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
+    }
+
+    /// Forwards a HistoricalRead request to the leader.
+    pub async fn forward_historical_read(
+        &mut self,
+        request: HistoricalReadRequest,
+        trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
+    ) -> Result<Response<HistoricalReadResponse>, Status> {
+        forward_historical_read_impl(
+            &mut self.read_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
+    }
+
+    /// Forwards a WatchBlocks request to the leader.
+    pub async fn forward_watch_blocks(
+        &mut self,
+        request: WatchBlocksRequest,
+        trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
+    ) -> Result<Response<tonic::Streaming<BlockAnnouncement>>, Status> {
+        forward_watch_blocks_impl(
+            &mut self.read_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
+    }
+
+    /// Forwards a GetBlock request to the leader.
+    pub async fn forward_get_block(
+        &mut self,
+        request: GetBlockRequest,
+        trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
+    ) -> Result<Response<GetBlockResponse>, Status> {
+        forward_get_block_impl(
+            &mut self.read_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
+    }
+
+    /// Forwards a GetBlockRange request to the leader.
+    pub async fn forward_get_block_range(
+        &mut self,
+        request: GetBlockRangeRequest,
+        trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
+    ) -> Result<Response<GetBlockRangeResponse>, Status> {
+        forward_get_block_range_impl(
+            &mut self.read_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
+    }
+
+    /// Forwards a GetTip request to the leader.
+    pub async fn forward_get_tip(
+        &mut self,
+        request: GetTipRequest,
+        trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
+    ) -> Result<Response<GetTipResponse>, Status> {
+        forward_get_tip_impl(&mut self.read_client, self.region, request, trace_ctx, grpc_deadline)
+            .await
+    }
+
+    /// Forwards a GetClientState request to the leader.
+    pub async fn forward_get_client_state(
+        &mut self,
+        request: GetClientStateRequest,
+        trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
+    ) -> Result<Response<GetClientStateResponse>, Status> {
+        forward_get_client_state_impl(
+            &mut self.read_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
+    }
+
+    /// Forwards a ListRelationships request to the leader.
+    pub async fn forward_list_relationships(
+        &mut self,
+        request: ListRelationshipsRequest,
+        trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
+    ) -> Result<Response<ListRelationshipsResponse>, Status> {
+        forward_list_relationships_impl(
+            &mut self.read_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
+    }
+
+    /// Forwards a ListResources request to the leader.
+    pub async fn forward_list_resources(
+        &mut self,
+        request: ListResourcesRequest,
+        trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
+    ) -> Result<Response<ListResourcesResponse>, Status> {
+        forward_list_resources_impl(
+            &mut self.read_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
+    }
+
+    /// Forwards a ListEntities request to the leader.
+    pub async fn forward_list_entities(
+        &mut self,
+        request: ListEntitiesRequest,
+        trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
+    ) -> Result<Response<ListEntitiesResponse>, Status> {
+        forward_list_entities_impl(
+            &mut self.read_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
+    }
+
+    /// Forwards a BatchRead request to the leader.
+    pub async fn forward_batch_read(
+        &mut self,
+        request: BatchReadRequest,
+        trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
+    ) -> Result<Response<BatchReadResponse>, Status> {
+        forward_batch_read_impl(
+            &mut self.read_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
+    }
+
+    /// Forwards a Write request to the leader.
+    pub async fn forward_write(
+        &mut self,
+        request: WriteRequest,
+        trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
+    ) -> Result<Response<WriteResponse>, Status> {
+        forward_write_impl(&mut self.write_client, self.region, request, trace_ctx, grpc_deadline)
+            .await
+    }
+
+    /// Forwards a BatchWrite request to the leader.
+    pub async fn forward_batch_write(
+        &mut self,
+        request: BatchWriteRequest,
+        trace_ctx: Option<&TraceContext>,
+        grpc_deadline: Option<Duration>,
+    ) -> Result<Response<BatchWriteResponse>, Status> {
+        forward_batch_write_impl(
+            &mut self.write_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
+    }
+}
+
+// ============================================================================
+// RegionForwardClient — cross-region routing
+// ============================================================================
+
+/// Forwards requests to a remote region's gateway.
+///
+/// Constructed from a [`RegionConnection`] supplied by the region router.
+/// The underlying [`Channel`] ultimately originates in the node-level
+/// registry (the router resolves member nodes through the same registry
+/// path), so channel reuse is preserved across subsystems.
+pub struct RegionForwardClient {
+    read_client: ReadServiceClient<Channel>,
+    write_client: WriteServiceClient<Channel>,
+    region: Region,
+}
+
+impl RegionForwardClient {
+    /// Creates a new cross-region forward client from a region connection.
+    pub fn new(connection: RegionConnection) -> Self {
+        let channel = connection.channel;
+        Self {
+            read_client: ReadServiceClient::new(channel.clone()),
+            write_client: WriteServiceClient::new(channel),
+            region: connection.region,
+        }
+    }
+
+    /// Returns the region ID this client forwards to.
+    pub fn region(&self) -> Region {
+        self.region
+    }
 
     /// Forwards a Read request to the remote region.
     pub async fn forward_read(
@@ -125,12 +485,8 @@ impl ForwardClient {
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<ReadResponse>, Status> {
-        debug!(region = self.region.as_str(), "Forwarding read request");
-        let req = self.make_request(request, trace_ctx, grpc_deadline);
-        self.read_client.read(req).await.map_err(|e| {
-            warn!(region = self.region.as_str(), error = %e, "Forward read failed");
-            e
-        })
+        forward_read_impl(&mut self.read_client, self.region, request, trace_ctx, grpc_deadline)
+            .await
     }
 
     /// Forwards a VerifiedRead request to the remote region.
@@ -140,12 +496,14 @@ impl ForwardClient {
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<VerifiedReadResponse>, Status> {
-        debug!(region = self.region.as_str(), "Forwarding verified_read request");
-        let req = self.make_request(request, trace_ctx, grpc_deadline);
-        self.read_client.verified_read(req).await.map_err(|e| {
-            warn!(region = self.region.as_str(), error = %e, "Forward verified_read failed");
-            e
-        })
+        forward_verified_read_impl(
+            &mut self.read_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
     }
 
     /// Forwards a HistoricalRead request to the remote region.
@@ -155,29 +513,31 @@ impl ForwardClient {
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<HistoricalReadResponse>, Status> {
-        debug!(region = self.region.as_str(), "Forwarding historical_read request");
-        let req = self.make_request(request, trace_ctx, grpc_deadline);
-        self.read_client.historical_read(req).await.map_err(|e| {
-            warn!(region = self.region.as_str(), error = %e, "Forward historical_read failed");
-            e
-        })
+        forward_historical_read_impl(
+            &mut self.read_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
     }
 
     /// Forwards a WatchBlocks request to the remote region.
-    ///
-    /// Returns a streaming response. The caller is responsible for consuming the stream.
     pub async fn forward_watch_blocks(
         &mut self,
         request: WatchBlocksRequest,
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<tonic::Streaming<BlockAnnouncement>>, Status> {
-        debug!(region = self.region.as_str(), "Forwarding watch_blocks request");
-        let req = self.make_request(request, trace_ctx, grpc_deadline);
-        self.read_client.watch_blocks(req).await.map_err(|e| {
-            warn!(region = self.region.as_str(), error = %e, "Forward watch_blocks failed");
-            e
-        })
+        forward_watch_blocks_impl(
+            &mut self.read_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
     }
 
     /// Forwards a GetBlock request to the remote region.
@@ -187,12 +547,14 @@ impl ForwardClient {
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<GetBlockResponse>, Status> {
-        debug!(region = self.region.as_str(), "Forwarding get_block request");
-        let req = self.make_request(request, trace_ctx, grpc_deadline);
-        self.read_client.get_block(req).await.map_err(|e| {
-            warn!(region = self.region.as_str(), error = %e, "Forward get_block failed");
-            e
-        })
+        forward_get_block_impl(
+            &mut self.read_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
     }
 
     /// Forwards a GetBlockRange request to the remote region.
@@ -202,12 +564,14 @@ impl ForwardClient {
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<GetBlockRangeResponse>, Status> {
-        debug!(region = self.region.as_str(), "Forwarding get_block_range request");
-        let req = self.make_request(request, trace_ctx, grpc_deadline);
-        self.read_client.get_block_range(req).await.map_err(|e| {
-            warn!(region = self.region.as_str(), error = %e, "Forward get_block_range failed");
-            e
-        })
+        forward_get_block_range_impl(
+            &mut self.read_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
     }
 
     /// Forwards a GetTip request to the remote region.
@@ -217,12 +581,8 @@ impl ForwardClient {
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<GetTipResponse>, Status> {
-        debug!(region = self.region.as_str(), "Forwarding get_tip request");
-        let req = self.make_request(request, trace_ctx, grpc_deadline);
-        self.read_client.get_tip(req).await.map_err(|e| {
-            warn!(region = self.region.as_str(), error = %e, "Forward get_tip failed");
-            e
-        })
+        forward_get_tip_impl(&mut self.read_client, self.region, request, trace_ctx, grpc_deadline)
+            .await
     }
 
     /// Forwards a GetClientState request to the remote region.
@@ -232,12 +592,14 @@ impl ForwardClient {
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<GetClientStateResponse>, Status> {
-        debug!(region = self.region.as_str(), "Forwarding get_client_state request");
-        let req = self.make_request(request, trace_ctx, grpc_deadline);
-        self.read_client.get_client_state(req).await.map_err(|e| {
-            warn!(region = self.region.as_str(), error = %e, "Forward get_client_state failed");
-            e
-        })
+        forward_get_client_state_impl(
+            &mut self.read_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
     }
 
     /// Forwards a ListRelationships request to the remote region.
@@ -247,12 +609,14 @@ impl ForwardClient {
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<ListRelationshipsResponse>, Status> {
-        debug!(region = self.region.as_str(), "Forwarding list_relationships request");
-        let req = self.make_request(request, trace_ctx, grpc_deadline);
-        self.read_client.list_relationships(req).await.map_err(|e| {
-            warn!(region = self.region.as_str(), error = %e, "Forward list_relationships failed");
-            e
-        })
+        forward_list_relationships_impl(
+            &mut self.read_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
     }
 
     /// Forwards a ListResources request to the remote region.
@@ -262,12 +626,14 @@ impl ForwardClient {
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<ListResourcesResponse>, Status> {
-        debug!(region = self.region.as_str(), "Forwarding list_resources request");
-        let req = self.make_request(request, trace_ctx, grpc_deadline);
-        self.read_client.list_resources(req).await.map_err(|e| {
-            warn!(region = self.region.as_str(), error = %e, "Forward list_resources failed");
-            e
-        })
+        forward_list_resources_impl(
+            &mut self.read_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
     }
 
     /// Forwards a ListEntities request to the remote region.
@@ -277,12 +643,14 @@ impl ForwardClient {
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<ListEntitiesResponse>, Status> {
-        debug!(region = self.region.as_str(), "Forwarding list_entities request");
-        let req = self.make_request(request, trace_ctx, grpc_deadline);
-        self.read_client.list_entities(req).await.map_err(|e| {
-            warn!(region = self.region.as_str(), error = %e, "Forward list_entities failed");
-            e
-        })
+        forward_list_entities_impl(
+            &mut self.read_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
     }
 
     /// Forwards a BatchRead request to the remote region.
@@ -292,17 +660,15 @@ impl ForwardClient {
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<BatchReadResponse>, Status> {
-        debug!(region = self.region.as_str(), "Forwarding batch_read request");
-        let req = self.make_request(request, trace_ctx, grpc_deadline);
-        self.read_client.batch_read(req).await.map_err(|e| {
-            warn!(region = self.region.as_str(), error = %e, "Forward batch_read failed");
-            e
-        })
+        forward_batch_read_impl(
+            &mut self.read_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
     }
-
-    // ========================================================================
-    // Write Service Forwarding
-    // ========================================================================
 
     /// Forwards a Write request to the remote region.
     pub async fn forward_write(
@@ -311,12 +677,8 @@ impl ForwardClient {
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<WriteResponse>, Status> {
-        debug!(region = self.region.as_str(), "Forwarding write request");
-        let req = self.make_request(request, trace_ctx, grpc_deadline);
-        self.write_client.write(req).await.map_err(|e| {
-            warn!(region = self.region.as_str(), error = %e, "Forward write failed");
-            e
-        })
+        forward_write_impl(&mut self.write_client, self.region, request, trace_ctx, grpc_deadline)
+            .await
     }
 
     /// Forwards a BatchWrite request to the remote region.
@@ -326,165 +688,197 @@ impl ForwardClient {
         trace_ctx: Option<&TraceContext>,
         grpc_deadline: Option<Duration>,
     ) -> Result<Response<BatchWriteResponse>, Status> {
-        debug!(region = self.region.as_str(), "Forwarding batch_write request");
-        let req = self.make_request(request, trace_ctx, grpc_deadline);
-        self.write_client.batch_write(req).await.map_err(|e| {
-            warn!(region = self.region.as_str(), error = %e, "Forward batch_write failed");
-            e
-        })
+        forward_batch_write_impl(
+            &mut self.write_client,
+            self.region,
+            request,
+            trace_ctx,
+            grpc_deadline,
+        )
+        .await
     }
 }
 
-/// Cached gRPC channel to the current Raft leader.
+// ============================================================================
+// Leader identity cache + resolver
+// ============================================================================
+
+/// Tracks the current known leader node ID for a region.
 ///
-/// Avoids creating a new TCP+HTTP/2 connection per forwarded request.
-/// The cache is invalidated when the leader changes (detected via node ID comparison).
-/// Uses `connect_lazy()` so channel creation is synchronous — the actual TCP handshake
-/// is deferred until the first RPC call.
-#[derive(Clone)]
-pub struct LeaderChannelCache {
-    inner: Arc<parking_lot::Mutex<Option<(u64, Channel)>>>,
+/// Replaces the old `LeaderChannelCache` — the channel itself is owned by
+/// the [`NodeConnectionRegistry`] on the node level. This cache tracks only
+/// leader identity (an [`AtomicU64`]), which means leader flaps are cheap
+/// (no channel teardown) and observable via the `update` metric hook.
+///
+/// Sentinel: `0` means "leader unknown". Valid node IDs are `>= 1`.
+#[derive(Debug, Default)]
+pub struct LeaderIdCache {
+    leader_id: AtomicU64,
 }
 
-impl Default for LeaderChannelCache {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl LeaderChannelCache {
-    /// Creates a new empty leader channel cache.
+impl LeaderIdCache {
+    /// Creates a new empty leader id cache.
     pub fn new() -> Self {
-        Self { inner: Arc::new(parking_lot::Mutex::new(None)) }
+        Self { leader_id: AtomicU64::new(0) }
     }
 
-    /// Returns a `ForwardClient` to the current leader, or `Ok(None)` if this node is the leader.
-    ///
-    /// Uses a cached channel if the leader hasn't changed; creates a new `connect_lazy()`
-    /// channel otherwise.
-    pub fn get_or_connect<NI>(
-        &self,
-        current_leader: Option<u64>,
-        this_node: u64,
-        nodes: NI,
-    ) -> Result<Option<ForwardClient>, Status>
-    where
-        NI: Iterator<Item = (u64, String)>,
-    {
-        // If this node is the leader, serve locally
-        let leader_id = match current_leader {
-            Some(id) if id == this_node => return Ok(None),
-            Some(id) => id,
-            None => {
-                return Err(super::metadata::status_with_not_leader_hint(
-                    "No leader available for forwarding",
-                    None,
-                    None,
-                    None,
-                ));
-            },
-        };
+    /// Returns the cached leader node ID, or `None` if unknown.
+    pub fn current(&self) -> Option<u64> {
+        let id = self.leader_id.load(Ordering::Acquire);
+        if id == 0 { None } else { Some(id) }
+    }
 
-        // Check cache
-        {
-            let cache = self.inner.lock();
-            if let Some((cached_id, ref channel)) = *cache
-                && cached_id == leader_id
-            {
-                return Ok(Some(ForwardClient::from_channel(channel.clone(), Region::GLOBAL)));
-            }
-        }
+    /// Updates the cached leader. Pass `0` to clear.
+    pub fn update(&self, id: u64) {
+        self.leader_id.store(id, Ordering::Release);
+    }
+}
 
-        // Cache miss — find leader address and create a lazy channel
-        let leader_addr =
-            nodes.into_iter().find(|(id, _)| *id == leader_id).map(|(_, addr)| addr).ok_or_else(
-                || {
-                    super::metadata::status_with_not_leader_hint(
-                        "Leader address not found in membership",
-                        Some(leader_id),
-                        None,
-                        None,
-                    )
-                },
-            )?;
+/// Resolves a [`LeaderForwardClient`] pointing at the current Raft leader.
+///
+/// Returns `Ok(None)` when this node IS the leader (serve locally). Returns
+/// `Ok(Some(client))` when forwarding is required. Returns `Err(Status)` when
+/// no leader is known or the leader's address cannot be resolved.
+///
+/// The channel is fetched from the node-level [`NodeConnectionRegistry`], so
+/// concurrent callers and multiple service instances share a single HTTP/2
+/// connection per peer. The `cache` parameter records the observed leader
+/// identity for observability; it does not gate channel creation.
+pub async fn current_leader_client<NI>(
+    cache: &LeaderIdCache,
+    registry: &NodeConnectionRegistry,
+    current_leader: Option<u64>,
+    this_node: u64,
+    nodes: NI,
+    region: Region,
+) -> Result<Option<LeaderForwardClient>, Status>
+where
+    NI: IntoIterator<Item = (u64, String)>,
+{
+    let leader_id = match current_leader {
+        Some(id) if id == this_node => return Ok(None),
+        Some(id) => id,
+        None => {
+            return Err(super::metadata::status_with_not_leader_hint(
+                "No leader available for forwarding",
+                None,
+                None,
+                None,
+            ));
+        },
+    };
 
-        let endpoint = format!("http://{}", leader_addr);
-        let channel = Channel::from_shared(endpoint)
-            .map_err(|e| {
+    cache.update(leader_id);
+
+    let leader_addr =
+        nodes.into_iter().find(|(id, _)| *id == leader_id).map(|(_, addr)| addr).ok_or_else(
+            || {
                 super::metadata::status_with_not_leader_hint(
-                    format!("Invalid leader endpoint: {e}"),
+                    "Leader address not found in membership",
                     Some(leader_id),
-                    Some(&leader_addr),
+                    None,
                     None,
                 )
-            })?
-            .connect_lazy();
+            },
+        )?;
 
-        debug!(leader_id, %leader_addr, "Cached new leader channel");
+    let peer = registry.get_or_register(leader_id, &leader_addr).await.map_err(|e| {
+        super::metadata::status_with_not_leader_hint(
+            format!("Failed to register leader peer: {e}"),
+            Some(leader_id),
+            Some(&leader_addr),
+            None,
+        )
+    })?;
 
-        let client = ForwardClient::from_channel(channel.clone(), Region::GLOBAL);
-        {
-            let mut cache = self.inner.lock();
-            *cache = Some((leader_id, channel));
-        }
+    debug!(leader_id, %leader_addr, "Resolved leader channel via registry");
 
-        Ok(Some(client))
-    }
+    Ok(Some(LeaderForwardClient::from_channel(peer.channel(), region)))
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     #[test]
-    fn test_forward_client_creation() {
-        // Basic struct test - full testing requires gRPC setup
+    fn leader_id_cache_starts_empty() {
+        let cache = LeaderIdCache::default();
+        assert!(cache.current().is_none());
     }
 
     #[test]
-    fn test_leader_channel_cache_default() {
-        let cache = LeaderChannelCache::default();
-        // This node is the leader — should return None
-        let result = cache.get_or_connect(Some(1), 1, std::iter::empty());
+    fn leader_id_cache_update_and_clear() {
+        let cache = LeaderIdCache::new();
+        cache.update(42);
+        assert_eq!(cache.current(), Some(42));
+        cache.update(0);
+        assert!(cache.current().is_none());
+    }
+
+    #[tokio::test]
+    async fn current_leader_client_returns_none_when_self_is_leader() {
+        let cache = LeaderIdCache::new();
+        let registry = NodeConnectionRegistry::new();
+        let result = current_leader_client(
+            &cache,
+            &registry,
+            Some(1),
+            1,
+            Vec::<(u64, String)>::new(),
+            Region::GLOBAL,
+        )
+        .await;
         assert!(result.is_ok());
-        assert!(result.as_ref().is_ok_and(|o| o.is_none()));
+        assert!(result.unwrap().is_none());
     }
 
-    #[test]
-    fn test_leader_channel_cache_no_leader() {
-        let cache = LeaderChannelCache::new();
-        let result = cache.get_or_connect(None, 1, std::iter::empty());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    #[allow(clippy::unwrap_used, clippy::disallowed_methods, clippy::panic)]
-    fn test_leader_channel_cache_no_leader_carries_not_leader_details() {
+    #[tokio::test]
+    async fn current_leader_client_errors_when_no_leader() {
         use inferadb_ledger_proto::proto;
         use prost::Message;
 
-        let cache = LeaderChannelCache::new();
-        let status = match cache.get_or_connect(None, 1, std::iter::empty()) {
+        let cache = LeaderIdCache::new();
+        let registry = NodeConnectionRegistry::new();
+        let status = match current_leader_client(
+            &cache,
+            &registry,
+            None,
+            1,
+            Vec::<(u64, String)>::new(),
+            Region::GLOBAL,
+        )
+        .await
+        {
             Err(s) => s,
             Ok(_) => panic!("expected error"),
         };
         assert_eq!(status.code(), tonic::Code::Unavailable);
         let details = proto::ErrorDetails::decode(status.details()).unwrap();
         assert!(details.is_retryable);
-        // No leader info in scope — hint keys should be absent.
         assert!(!details.context.contains_key("leader_id"));
         assert!(!details.context.contains_key("leader_endpoint"));
     }
 
-    #[test]
-    #[allow(clippy::unwrap_used, clippy::disallowed_methods, clippy::panic)]
-    fn test_leader_channel_cache_missing_member_carries_leader_id_hint() {
+    #[tokio::test]
+    async fn current_leader_client_errors_when_address_missing() {
         use inferadb_ledger_proto::proto;
         use prost::Message;
 
-        let cache = LeaderChannelCache::new();
-        // Leader is 2 but no member matches — triggers "Leader address not found in membership".
-        let status = match cache.get_or_connect(Some(2), 1, std::iter::empty()) {
+        let cache = LeaderIdCache::new();
+        let registry = NodeConnectionRegistry::new();
+        let status = match current_leader_client(
+            &cache,
+            &registry,
+            Some(2),
+            1,
+            Vec::<(u64, String)>::new(),
+            Region::GLOBAL,
+        )
+        .await
+        {
             Err(s) => s,
             Ok(_) => panic!("expected error"),
         };
@@ -494,19 +888,20 @@ mod tests {
         assert!(!details.context.contains_key("leader_endpoint"));
     }
 
-    #[test]
-    #[allow(clippy::unwrap_used, clippy::disallowed_methods, clippy::panic)]
-    fn test_leader_channel_cache_bad_endpoint_carries_full_hints() {
+    #[tokio::test]
+    async fn current_leader_client_errors_on_invalid_address() {
         use inferadb_ledger_proto::proto;
         use prost::Message;
 
-        let cache = LeaderChannelCache::new();
-        // Address containing a NUL byte is invalid for `Channel::from_shared`.
-        let nodes = vec![(2, "bad\u{0}host:5000".to_string())];
-        let status = match cache.get_or_connect(Some(2), 1, nodes.into_iter()) {
-            Err(s) => s,
-            Ok(_) => panic!("expected error"),
-        };
+        let cache = LeaderIdCache::new();
+        let registry = NodeConnectionRegistry::new();
+        let nodes = vec![(2u64, "bad\u{0}host:5000".to_string())];
+        let status =
+            match current_leader_client(&cache, &registry, Some(2), 1, nodes, Region::GLOBAL).await
+            {
+                Err(s) => s,
+                Ok(_) => panic!("expected error"),
+            };
         assert_eq!(status.code(), tonic::Code::Unavailable);
         let details = proto::ErrorDetails::decode(status.details()).unwrap();
         assert_eq!(details.context.get("leader_id").unwrap(), "2");
@@ -514,35 +909,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_leader_channel_cache_creates_channel() {
-        let cache = LeaderChannelCache::new();
-        let nodes = vec![(2, "127.0.0.1:50051".to_string())];
-        let result = cache.get_or_connect(Some(2), 1, nodes.into_iter());
+    async fn current_leader_client_builds_client_and_caches_id() {
+        let cache = LeaderIdCache::new();
+        let registry = NodeConnectionRegistry::new();
+        let nodes = vec![(2u64, "127.0.0.1:50051".to_string())];
+        let result =
+            current_leader_client(&cache, &registry, Some(2), 1, nodes, Region::GLOBAL).await;
         assert!(result.is_ok());
-        assert!(result.as_ref().is_ok_and(|o| o.is_some()));
+        let client = result.unwrap();
+        assert!(client.is_some());
+        assert_eq!(client.unwrap().region(), Region::GLOBAL);
+        assert_eq!(cache.current(), Some(2));
     }
 
     #[tokio::test]
-    async fn test_leader_channel_cache_reuses_channel() {
-        let cache = LeaderChannelCache::new();
-        let nodes = vec![(2, "127.0.0.1:50051".to_string())];
+    async fn current_leader_client_reuses_registry_peer_across_calls() {
+        let cache = LeaderIdCache::new();
+        let registry = Arc::new(NodeConnectionRegistry::new());
+        let nodes = vec![(2u64, "127.0.0.1:50051".to_string())];
 
-        // First call creates
-        let _ = cache.get_or_connect(Some(2), 1, nodes.clone().into_iter());
-        // Second call should reuse (no nodes needed since cached)
-        let result = cache.get_or_connect(Some(2), 1, std::iter::empty());
-        assert!(result.is_ok());
-        assert!(result.as_ref().is_ok_and(|o| o.is_some()));
+        let _ = current_leader_client(&cache, &registry, Some(2), 1, nodes.clone(), Region::GLOBAL)
+            .await
+            .unwrap();
+        let peer_a = registry.get(2).unwrap();
+
+        let _ = current_leader_client(&cache, &registry, Some(2), 1, nodes, Region::GLOBAL)
+            .await
+            .unwrap();
+        let peer_b = registry.get(2).unwrap();
+
+        // Same Arc<PeerConnection> — registry coalesced both lookups.
+        assert!(Arc::ptr_eq(&peer_a, &peer_b));
     }
 
     #[tokio::test]
-    async fn test_leader_channel_cache_invalidates_on_leader_change() {
-        let cache = LeaderChannelCache::new();
-        let nodes = vec![(2, "127.0.0.1:50051".to_string())];
-        let _ = cache.get_or_connect(Some(2), 1, nodes.into_iter());
+    async fn current_leader_client_updates_cache_on_leader_change() {
+        let cache = LeaderIdCache::new();
+        let registry = NodeConnectionRegistry::new();
+        let nodes_a = vec![(2u64, "127.0.0.1:50051".to_string())];
+        let _ = current_leader_client(&cache, &registry, Some(2), 1, nodes_a, Region::GLOBAL)
+            .await
+            .unwrap();
+        assert_eq!(cache.current(), Some(2));
 
-        // Leader changed to 3 — cache miss, but node 3 not in membership
-        let result = cache.get_or_connect(Some(3), 1, std::iter::empty());
-        assert!(result.is_err()); // No address for node 3
+        let nodes_b = vec![(3u64, "127.0.0.1:50052".to_string())];
+        let _ = current_leader_client(&cache, &registry, Some(3), 1, nodes_b, Region::GLOBAL)
+            .await
+            .unwrap();
+        assert_eq!(cache.current(), Some(3));
     }
 }

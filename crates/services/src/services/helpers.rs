@@ -383,7 +383,7 @@ pub(crate) async fn ensure_global_consistency(
         None => return,
     };
 
-    let committed_index = match read_index_from_leader(leader_id, &leader_addr).await {
+    let committed_index = match read_index_from_leader(manager, leader_id, &leader_addr).await {
         Some(idx) => idx,
         None => {
             // Fallback: use local commit_index (may be stale).
@@ -404,36 +404,20 @@ pub(crate) async fn ensure_global_consistency(
     .await;
 }
 
-/// Cached channel for ReadIndex RPCs to the GLOBAL leader.
-/// Avoids creating a new TCP connection for every follower-side RPC.
-static READ_INDEX_CHANNEL: parking_lot::Mutex<Option<(u64, tonic::transport::Channel)>> =
-    parking_lot::Mutex::new(None);
-
 /// Calls ReadIndex RPC on the GLOBAL leader to get its committed index.
-/// Caches the gRPC channel so all calls to the same leader reuse one TCP connection.
-async fn read_index_from_leader(leader_id: u64, leader_addr: &str) -> Option<u64> {
+///
+/// The gRPC channel is resolved through the node-level
+/// `NodeConnectionRegistry` on the `RaftManager`, so HTTP/2 multiplexing
+/// reuses a single TCP connection across all subsystems.
+async fn read_index_from_leader(
+    manager: &inferadb_ledger_raft::raft_manager::RaftManager,
+    leader_id: u64,
+    leader_addr: &str,
+) -> Option<u64> {
     use inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient;
 
-    // Check the cache — reuse the channel if the leader hasn't changed.
-    let channel = {
-        let cache = READ_INDEX_CHANNEL.lock();
-        if let Some((cached_id, ref ch)) = *cache {
-            if cached_id == leader_id { Some(ch.clone()) } else { None }
-        } else {
-            None
-        }
-    };
-
-    let channel = match channel {
-        Some(ch) => ch,
-        None => {
-            let endpoint = format!("http://{leader_addr}");
-            let ch = tonic::transport::Channel::from_shared(endpoint).ok()?.connect_lazy();
-            let mut cache = READ_INDEX_CHANNEL.lock();
-            *cache = Some((leader_id, ch.clone()));
-            ch
-        },
-    };
+    let peer = manager.registry().get_or_register(leader_id, leader_addr).await.ok()?;
+    let channel = peer.channel();
 
     let mut client = RaftServiceClient::new(channel);
     let resp = client

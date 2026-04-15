@@ -15,7 +15,7 @@ use parking_lot::RwLock;
 use tonic::transport::Channel;
 
 use self::peer_sender::PeerSender;
-use crate::types::LedgerNodeId;
+use crate::{node_registry::NodeConnectionRegistry, types::LedgerNodeId};
 
 /// gRPC-based network transport for consensus messages.
 ///
@@ -31,16 +31,25 @@ pub struct GrpcConsensusTransport {
     local_node: LedgerNodeId,
     local_address: Arc<RwLock<String>>,
     region: inferadb_ledger_types::Region,
+    registry: Arc<NodeConnectionRegistry>,
 }
 
 impl GrpcConsensusTransport {
     /// Creates a new transport for the given local node and region.
-    pub fn new(local_node: LedgerNodeId, region: inferadb_ledger_types::Region) -> Self {
+    ///
+    /// The `registry` is shared across all subsystems so HTTP/2 channels are
+    /// deduplicated per peer; see [`NodeConnectionRegistry`] for details.
+    pub fn new(
+        local_node: LedgerNodeId,
+        region: inferadb_ledger_types::Region,
+        registry: Arc<NodeConnectionRegistry>,
+    ) -> Self {
         Self {
             senders: Arc::new(RwLock::new(HashMap::new())),
             local_node,
             local_address: Arc::new(RwLock::new(String::new())),
             region,
+            registry,
         }
     }
 
@@ -55,11 +64,29 @@ impl GrpcConsensusTransport {
     /// Spawns a fresh drain task bound to the provided channel. Any
     /// previous sender for the same node is dropped when the map is
     /// updated, which signals its drain task to shut down.
-    pub fn set_peer(&self, node: LedgerNodeId, channel: Channel) {
+    pub(crate) fn set_peer(&self, node: LedgerNodeId, channel: Channel) {
         let from_address = self.local_address.read().clone();
         let sender =
             Arc::new(PeerSender::spawn(channel, node, self.region, self.local_node, from_address));
         self.senders.write().insert(node, sender);
+    }
+
+    /// Registers a peer by address via the node connection registry, then
+    /// starts a `PeerSender` for it. Production code should prefer this
+    /// over `set_peer(node, channel)` to ensure channel deduplication
+    /// across regions and subsystems.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `RegistryError` when the address cannot be parsed.
+    pub async fn set_peer_via_registry(
+        &self,
+        node: LedgerNodeId,
+        addr: &str,
+    ) -> Result<(), crate::node_registry::RegistryError> {
+        let conn = self.registry.get_or_register(node, addr).await?;
+        self.set_peer(node, conn.channel());
+        Ok(())
     }
 
     /// Removes the sender for a peer node. The drain task observes the
@@ -144,16 +171,22 @@ mod tests {
     use inferadb_ledger_consensus::types::{NodeId, ShardId};
 
     use super::*;
+    use crate::node_registry::NodeConnectionRegistry;
+
+    fn make_transport() -> GrpcConsensusTransport {
+        let registry = Arc::new(NodeConnectionRegistry::new());
+        GrpcConsensusTransport::new(1, inferadb_ledger_types::Region::GLOBAL, registry)
+    }
 
     #[test]
     fn new_transport_has_no_peers() {
-        let transport = GrpcConsensusTransport::new(1, inferadb_ledger_types::Region::GLOBAL);
+        let transport = make_transport();
         assert!(transport.peers().is_empty());
     }
 
     #[test]
     fn self_sends_are_skipped() {
-        let transport = GrpcConsensusTransport::new(1, inferadb_ledger_types::Region::GLOBAL);
+        let transport = make_transport();
         // Fire-and-forget with no channel for self — should not panic
         let messages =
             vec![OutboundMessage { to: NodeId(1), shard: ShardId(1), msg: Message::TimeoutNow }];
@@ -162,7 +195,7 @@ mod tests {
 
     #[test]
     fn unknown_peer_is_silently_skipped() {
-        let transport = GrpcConsensusTransport::new(1, inferadb_ledger_types::Region::GLOBAL);
+        let transport = make_transport();
         let messages =
             vec![OutboundMessage { to: NodeId(99), shard: ShardId(1), msg: Message::TimeoutNow }];
         transport.send_batch(messages);
@@ -170,7 +203,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_and_remove_peer() {
-        let transport = GrpcConsensusTransport::new(1, inferadb_ledger_types::Region::GLOBAL);
+        let transport = make_transport();
         assert!(transport.peers().is_empty());
 
         let channel = tonic::transport::Channel::from_static("http://127.0.0.1:1").connect_lazy();
@@ -187,7 +220,7 @@ mod tests {
 
     #[tokio::test]
     async fn retain_peers_removes_departed_channels() {
-        let transport = GrpcConsensusTransport::new(1, inferadb_ledger_types::Region::GLOBAL);
+        let transport = make_transport();
         let channel = tonic::transport::Channel::from_static("http://127.0.0.1:1").connect_lazy();
         transport.set_peer(2, channel.clone());
         transport.set_peer(3, channel);
@@ -203,7 +236,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn send_batch_enqueues_to_peer_sender() {
-        let transport = GrpcConsensusTransport::new(1, inferadb_ledger_types::Region::GLOBAL);
+        let transport = make_transport();
 
         // Lazy channel — never connects.
         let channel = tonic::transport::Channel::from_static("http://127.0.0.1:1").connect_lazy();
@@ -227,7 +260,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_peer_drops_sender() {
-        let transport = GrpcConsensusTransport::new(1, inferadb_ledger_types::Region::GLOBAL);
+        let transport = make_transport();
         let channel = tonic::transport::Channel::from_static("http://127.0.0.1:1").connect_lazy();
         transport.set_peer(2, channel);
         assert!(transport.peer_queue_depth(2).is_some());
@@ -247,7 +280,7 @@ mod tests {
         use super::peer_sender::PEER_QUEUE_CAPACITY;
 
         const TOTAL: usize = 10_000;
-        let transport = GrpcConsensusTransport::new(1, inferadb_ledger_types::Region::GLOBAL);
+        let transport = make_transport();
 
         // Lazy channel to an unreachable endpoint. Every send fails instantly.
         let channel = tonic::transport::Channel::from_static("http://127.0.0.1:1").connect_lazy();
@@ -297,7 +330,7 @@ mod tests {
     /// Stress test: peer removal cleanly tears down the sender task.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn peer_removal_cleans_up_sender() {
-        let transport = GrpcConsensusTransport::new(1, inferadb_ledger_types::Region::GLOBAL);
+        let transport = make_transport();
         let channel = tonic::transport::Channel::from_static("http://127.0.0.1:1").connect_lazy();
         transport.set_peer(2, channel);
 
@@ -309,5 +342,42 @@ mod tests {
         // Allow the drain task a beat to observe shutdown. This is a
         // smoke test — a real leak would manifest under longer soak testing.
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn set_peer_via_registry_registers_and_starts_sender() {
+        let registry = Arc::new(NodeConnectionRegistry::new());
+        let transport = GrpcConsensusTransport::new(
+            1,
+            inferadb_ledger_types::Region::GLOBAL,
+            Arc::clone(&registry),
+        );
+
+        transport.set_peer_via_registry(2, "127.0.0.1:5000").await.unwrap();
+
+        // Registry has the peer.
+        assert_eq!(registry.len(), 1);
+        assert!(registry.get(2).is_some());
+
+        // Transport has a PeerSender for it.
+        assert!(transport.peer_queue_depth(2).is_some());
+    }
+
+    #[tokio::test]
+    async fn set_peer_via_registry_invalid_address_errors() {
+        let registry = Arc::new(NodeConnectionRegistry::new());
+        let transport = GrpcConsensusTransport::new(
+            1,
+            inferadb_ledger_types::Region::GLOBAL,
+            Arc::clone(&registry),
+        );
+
+        let err = transport.set_peer_via_registry(2, "not a uri").await;
+        assert!(err.is_err());
+        // Registry leaves an uninitialized OnceCell entry behind, but no
+        // PeerConnection is observable via `get`, and the transport has no
+        // sender.
+        assert!(registry.get(2).is_none());
+        assert!(transport.peer_queue_depth(2).is_none());
     }
 }

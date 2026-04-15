@@ -430,7 +430,10 @@ pub(crate) mod tests {
         let temp = TestDir::new();
         let node_id = 1u64;
         let config = RaftManagerConfig::new(temp.path().to_path_buf(), node_id, Region::GLOBAL);
-        let manager = Arc::new(RaftManager::new(config));
+        let manager = Arc::new(RaftManager::new(
+            config,
+            Arc::new(inferadb_ledger_raft::node_registry::NodeConnectionRegistry::new()),
+        ));
         let region_config =
             RegionConfig::system(node_id, "127.0.0.1:0".to_string()).without_background_jobs();
         let system = manager.start_system_region(region_config).await.expect("start system region");
@@ -464,7 +467,10 @@ pub(crate) mod tests {
         let temp = TestDir::new();
         let node_id = 1u64;
         let config = RaftManagerConfig::new(temp.path().to_path_buf(), node_id, Region::GLOBAL);
-        let manager = Arc::new(RaftManager::new(config));
+        let manager = Arc::new(RaftManager::new(
+            config,
+            Arc::new(inferadb_ledger_raft::node_registry::NodeConnectionRegistry::new()),
+        ));
         let region_config =
             RegionConfig::system(node_id, "127.0.0.1:0".to_string()).without_background_jobs();
         let system = manager.start_system_region(region_config).await.expect("start system region");

@@ -358,37 +358,20 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                             })?;
                         let proto_region: inferadb_ledger_proto::proto::Region = region.into();
 
-                        // Cache the leader channel to avoid creating a new TCP
-                        // connection per saga proposal.
-                        static SAGA_CHANNEL: parking_lot::Mutex<
-                            Option<(String, tonic::transport::Channel)>,
-                        > = parking_lot::Mutex::new(None);
-                        let channel = {
-                            let cache = SAGA_CHANNEL.lock();
-                            if let Some((ref addr, ref ch)) = *cache {
-                                if addr == &leader_addr { Some(ch.clone()) } else { None }
-                            } else {
-                                None
-                            }
-                        };
-                        let channel = match channel {
-                            Some(ch) => ch,
-                            None => {
-                                let ch = tonic::transport::Channel::from_shared(format!(
-                                    "http://{leader_addr}"
-                                ))
-                                .map_err(|e| SagaError::SagaRaftWrite {
-                                    message: format!("invalid leader address: {e}"),
-                                    backtrace: snafu::Backtrace::generate(),
-                                })?
-                                .connect_lazy();
-                                let mut cache = SAGA_CHANNEL.lock();
-                                *cache = Some((leader_addr.clone(), ch.clone()));
-                                ch
-                            },
-                        };
-
-                        let mut client = inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new(channel);
+                        // Obtain the leader's peer connection from the shared
+                        // registry. HTTP/2 multiplexes all subsystems over a
+                        // single channel per peer.
+                        let peer = manager
+                            .registry()
+                            .get_or_register(leader_id, &leader_addr)
+                            .await
+                            .map_err(|e| SagaError::SagaRaftWrite {
+                                message: format!(
+                                    "register leader {leader_id} ({leader_addr}): {e}"
+                                ),
+                                backtrace: snafu::Backtrace::generate(),
+                            })?;
+                        let mut client = peer.raft_client();
                         let resp = client
                             .forward_regional_proposal(
                                 inferadb_ledger_proto::proto::ForwardRegionalProposalRequest {

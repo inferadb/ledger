@@ -522,21 +522,13 @@ impl TestCluster {
                         continue;
                     }
                     let addr_str = existing.addr.to_string();
-                    if let Ok(ep) =
-                        tonic::transport::Channel::from_shared(format!("http://{addr_str}"))
-                    {
-                        jt.set_peer(existing.id, ep.connect_lazy());
-                    }
+                    let _ = jt.set_peer_via_registry(existing.id, &addr_str).await;
                     // Reverse direction: existing node → joining node.
                     if let Ok(existing_global) = existing.manager.system_region()
                         && let Some(et) = existing_global.consensus_transport()
                     {
                         let join_addr_str = addr.to_string();
-                        if let Ok(ep) = tonic::transport::Channel::from_shared(format!(
-                            "http://{join_addr_str}"
-                        )) {
-                            et.set_peer(node_id, ep.connect_lazy());
-                        }
+                        let _ = et.set_peer_via_registry(node_id, &join_addr_str).await;
                     }
                 }
             }
@@ -575,20 +567,13 @@ impl TestCluster {
                     // joining node for this data region.
                     let joining_addr_str = addr.to_string();
                     let bootstrap_addr_str = nodes[0].addr.to_string();
-                    if let Some(bt) = bootstrap_rg.consensus_transport()
-                        && let Ok(ep) = tonic::transport::Channel::from_shared(format!(
-                            "http://{joining_addr_str}"
-                        ))
-                    {
-                        bt.set_peer(joining_node_id, ep.connect_lazy());
+                    if let Some(bt) = bootstrap_rg.consensus_transport() {
+                        let _ = bt.set_peer_via_registry(joining_node_id, &joining_addr_str).await;
                     }
                     if let Ok(joining_rg) = joining_manager.get_region_group(data_region)
                         && let Some(jt) = joining_rg.consensus_transport()
-                        && let Ok(ep) = tonic::transport::Channel::from_shared(format!(
-                            "http://{bootstrap_addr_str}"
-                        ))
                     {
-                        jt.set_peer(nodes[0].id, ep.connect_lazy());
+                        let _ = jt.set_peer_via_registry(nodes[0].id, &bootstrap_addr_str).await;
                     }
 
                     // Step 1: Add as learner first (required before voter promotion)

@@ -221,7 +221,11 @@ pub async fn bootstrap_node(
         .election_timeout_min_ms(el_min_ms)
         .election_timeout_max_ms(el_max_ms)
         .build();
-    let manager = Arc::new(RaftManager::new(raft_manager_config));
+    // Single shared per-node connection registry. All per-region consensus
+    // transports created via `start_region` clone this Arc so that they
+    // reuse one channel per peer instead of opening a connection per region.
+    let registry = Arc::new(inferadb_ledger_raft::node_registry::NodeConnectionRegistry::new());
+    let manager = Arc::new(RaftManager::new(raft_manager_config, registry));
 
     // Check whether this node has been initialized (cluster_id file exists).
     let cluster_id = crate::cluster_id::load_cluster_id(data_dir).map_err(|e| {
@@ -304,7 +308,7 @@ pub async fn bootstrap_node(
                     std::collections::HashMap::new();
                 tokio::time::sleep(bg_initial_delay).await;
                 loop {
-                    reconcile_transport_channels(&mgr);
+                    reconcile_transport_channels(&mgr).await;
                     crate::dr_scheduler::run_checker_cycle(&mgr, &mut learner_first_seen).await;
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
@@ -883,9 +887,15 @@ async fn seed_polling_loop(
 
             // Register a transport channel for the seed so Raft replication can reach it.
             if let Some(ref transport) = consensus_transport
-                && let Ok(ep) = tonic::transport::Channel::from_shared(format!("http://{addr}"))
+                && let Err(e) =
+                    transport.set_peer_via_registry(info.node_id, &addr.to_string()).await
             {
-                transport.set_peer(info.node_id, ep.connect_lazy());
+                tracing::warn!(
+                    seed_node_id = info.node_id,
+                    seed = %addr,
+                    error = %e,
+                    "Failed to register seed peer via registry"
+                );
             }
 
             // Send JoinCluster RPC to the seed node.
@@ -1075,6 +1085,7 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
         .handle(input.handle.clone())
         .applied_state(input.applied_state_accessor.clone())
         .peer_addresses(Some(input.manager.peer_addresses().clone()))
+        .registry(input.manager.registry())
         .watchdog_handle(watchdog.map(|w| w.register("learner_refresh", 5)))
         .build()
         .start();
@@ -1279,7 +1290,7 @@ async fn process_region_event(
         if let Some((_, tag)) = initial_members.first()
             && tag == "reconcile_transport"
         {
-            reconcile_transport_channels(mgr);
+            reconcile_transport_channels(mgr).await;
         }
         return;
     }
@@ -1296,7 +1307,7 @@ async fn process_region_event(
     match mgr.start_data_region(region_config).await {
         Ok(_) => {
             tracing::info!(region = region.as_str(), "Data region created via Raft consensus");
-            reconcile_transport_channels(mgr);
+            reconcile_transport_channels(mgr).await;
         },
         Err(e) => {
             tracing::warn!(
@@ -1314,7 +1325,7 @@ async fn process_region_event(
 /// that are missing from any region's transport. This is especially important
 /// for followers that only have a channel to the leader — without channels to
 /// other voters, leader transfer elections fail (VoteRequest can't reach peers).
-fn reconcile_transport_channels(manager: &inferadb_ledger_raft::RaftManager) {
+async fn reconcile_transport_channels(manager: &inferadb_ledger_raft::RaftManager) {
     let peer_addrs = manager.peer_addresses().iter_peers();
     let regions = manager.list_regions();
 
@@ -1328,8 +1339,13 @@ fn reconcile_transport_channels(manager: &inferadb_ledger_raft::RaftManager) {
             if *node_id == local_node || known_peers.contains(node_id) {
                 continue;
             }
-            if let Ok(endpoint) = tonic::transport::Channel::from_shared(format!("http://{addr}")) {
-                transport.set_peer(*node_id, endpoint.connect_lazy());
+            if let Err(e) = transport.set_peer_via_registry(*node_id, addr).await {
+                tracing::warn!(
+                    node_id = *node_id,
+                    addr = %addr,
+                    error = %e,
+                    "Failed to register peer via registry"
+                );
             }
         }
     }

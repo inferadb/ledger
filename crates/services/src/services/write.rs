@@ -35,7 +35,7 @@ use uuid::Uuid;
 pub(crate) use super::metadata::{response_with_correlation, status_with_correlation};
 use super::{
     error_classify,
-    forward_client::{ForwardClient, LeaderChannelCache},
+    forward_client::{self, LeaderForwardClient, LeaderIdCache, RegionForwardClient},
     region_resolver::{RegionContext, RegionResolver, RemoteRegionInfo, ResolveResult},
     slug_resolver::SlugResolver,
 };
@@ -86,12 +86,19 @@ pub struct WriteService {
     /// Handler-phase event handle for recording denial events.
     #[builder(default)]
     event_handle: Option<inferadb_ledger_raft::event_writer::EventHandle<FileBackend>>,
-    /// Cached leader channel for write forwarding.
+    /// Tracks the current known Raft leader node ID for write forwarding.
     ///
-    /// Shared across requests to avoid creating a new TCP+HTTP/2 connection
-    /// per forwarded write.
+    /// The underlying gRPC channel is owned by the node-level
+    /// [`inferadb_ledger_raft::node_registry::NodeConnectionRegistry`]; this
+    /// cache records only the observed leader identity.
     #[builder(default)]
-    leader_channel_cache: LeaderChannelCache,
+    leader_id_cache: LeaderIdCache,
+    /// Node-level connection registry for resolving peer channels.
+    ///
+    /// Shared with every other subsystem on the node — HTTP/2 multiplexing
+    /// means one connection per peer serves all services.
+    #[builder(default)]
+    registry: Option<Arc<inferadb_ledger_raft::node_registry::NodeConnectionRegistry>>,
     /// Health state for drain-phase write rejection.
     #[builder(default)]
     health_state: Option<inferadb_ledger_raft::graceful_shutdown::HealthState>,
@@ -159,7 +166,10 @@ impl WriteService {
     ///
     /// Creates a gRPC connection to the remote region's leader (or any member
     /// if leader unknown).
-    async fn get_forward_client(&self, remote: &RemoteRegionInfo) -> Result<ForwardClient, Status> {
+    async fn get_forward_client(
+        &self,
+        remote: &RemoteRegionInfo,
+    ) -> Result<RegionForwardClient, Status> {
         let manager = self.manager.as_ref().ok_or_else(|| {
             Status::unavailable("Request forwarding not configured for this service")
         })?;
@@ -178,7 +188,7 @@ impl WriteService {
                 Status::unavailable(format!("Failed to connect to remote region: {}", e))
             })?;
 
-        Ok(ForwardClient::new(connection))
+        Ok(RegionForwardClient::new(connection))
     }
 
     /// Rejects writes to organizations undergoing migration.
@@ -220,8 +230,8 @@ impl WriteService {
     }
 
     /// Checks if this node is the Raft leader for the given region. If not,
-    /// returns a `ForwardClient` to the current leader for transparent request
-    /// forwarding.
+    /// returns a `LeaderForwardClient` to the current leader for transparent
+    /// request forwarding.
     ///
     /// Uses a cached channel to avoid creating a new TCP+HTTP/2 connection per
     /// forwarded request.
@@ -229,17 +239,24 @@ impl WriteService {
     /// Returns `Ok(None)` if this node is the leader (proceed locally).
     /// Returns `Ok(Some(client))` if forwarding is needed.
     /// Returns `Err(Status)` if no leader is known.
-    fn forward_client_if_follower(
+    async fn forward_client_if_follower(
         &self,
         region: &RegionContext,
-    ) -> Result<Option<ForwardClient>, Status> {
+    ) -> Result<Option<LeaderForwardClient>, Status> {
         let handle = &region.handle;
+        let registry = self.registry.as_ref().ok_or_else(|| {
+            Status::unavailable("Write forwarding not configured: missing node connection registry")
+        })?;
         let peers = self.peer_addresses.as_ref().map(|m| m.iter_peers()).unwrap_or_default();
-        self.leader_channel_cache.get_or_connect(
+        forward_client::current_leader_client(
+            &self.leader_id_cache,
+            registry,
             handle.current_leader(),
             handle.node_id(),
-            peers.into_iter(),
+            peers,
+            region.region,
         )
+        .await
     }
 
     /// Validates all operations in a proto operation list.
@@ -580,7 +597,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             .extract_and_resolve_vault(&req.vault)?;
 
         // Forward to within-region leader if this node is a follower
-        if let Some(mut client) = self.forward_client_if_follower(&region)? {
+        if let Some(mut client) = self.forward_client_if_follower(&region).await? {
             let grpc_deadline =
                 inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             return client.forward_write(req, Some(&trace_ctx), grpc_deadline).await;
@@ -1138,7 +1155,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             .extract_and_resolve_vault(&req.vault)?;
 
         // Forward to within-region leader if this node is a follower
-        if let Some(mut client) = self.forward_client_if_follower(&region)? {
+        if let Some(mut client) = self.forward_client_if_follower(&region).await? {
             let grpc_deadline =
                 inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             return client.forward_batch_write(req, Some(&trace_ctx), grpc_deadline).await;

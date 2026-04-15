@@ -57,8 +57,8 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, warn};
 
 use super::{
-    ForwardClient,
-    forward_client::LeaderChannelCache,
+    LeaderForwardClient, RegionForwardClient,
+    forward_client::{self, LeaderIdCache},
     helpers::storage_err,
     region_resolver::{RegionContext, RegionResolver, RemoteRegionInfo, ResolveResult},
     slug_resolver::SlugResolver,
@@ -112,12 +112,16 @@ pub struct ReadService {
     /// Sampler for log tail sampling.
     #[builder(default)]
     sampler: Option<Sampler>,
-    /// Cached leader channel for read forwarding.
+    /// Tracks the current known Raft leader node ID for read forwarding.
     ///
-    /// Shared across requests to avoid creating a new TCP+HTTP/2 connection
-    /// per forwarded read.
+    /// The underlying gRPC channel is owned by the node-level
+    /// [`inferadb_ledger_raft::node_registry::NodeConnectionRegistry`]; this
+    /// cache records only the observed leader identity.
     #[builder(default)]
-    leader_channel_cache: LeaderChannelCache,
+    leader_id_cache: LeaderIdCache,
+    /// Node-level connection registry for resolving peer channels.
+    #[builder(default)]
+    registry: Option<Arc<inferadb_ledger_raft::node_registry::NodeConnectionRegistry>>,
     /// Shared counter for active `WatchBlocks` streams across all connections.
     ///
     /// Incremented when a stream starts, decremented on drop via `StreamGuard`.
@@ -199,10 +203,10 @@ impl ReadService {
     /// Returns `Ok(None)` if reads can be served locally (leader, caught up, or no Raft).
     /// Returns `Ok(Some(client))` if reads should be forwarded to the leader.
     /// Returns `Err(Status)` if forwarding is needed but no leader is available.
-    fn should_forward_to_leader(
+    async fn should_forward_to_leader(
         &self,
         ctx: &RegionContext,
-    ) -> Result<Option<ForwardClient>, Status> {
+    ) -> Result<Option<LeaderForwardClient>, Status> {
         let handle = &ctx.handle;
 
         // Leader always serves locally
@@ -214,12 +218,19 @@ impl ReadService {
         // The consensus handle provides commit_index which is sufficient
         // for basic forwarding decisions.
         // For now, followers always forward reads to the leader for consistency.
+        let registry = self.registry.as_ref().ok_or_else(|| {
+            Status::unavailable("Read forwarding not configured: missing node connection registry")
+        })?;
         let peers = self.peer_addresses.as_ref().map(|m| m.iter_peers()).unwrap_or_default();
-        self.leader_channel_cache.get_or_connect(
+        forward_client::current_leader_client(
+            &self.leader_id_cache,
+            registry,
             handle.current_leader(),
             handle.node_id(),
-            peers.into_iter(),
+            peers,
+            ctx.region,
         )
+        .await
     }
 
     /// Determines how to serve a read based on consistency level.
@@ -260,7 +271,7 @@ impl ReadService {
     async fn follower_read_index(&self, ctx: &RegionContext) -> Result<(), Status> {
         use inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient;
 
-        let channel = self.get_leader_channel(ctx)?;
+        let channel = self.get_leader_channel(ctx).await?;
         let mut client = RaftServiceClient::new(channel);
 
         let response = client
@@ -285,9 +296,13 @@ impl ReadService {
 
     /// Returns a gRPC channel to the current leader for this region.
     ///
-    /// Uses the peer address map to resolve the leader's address and creates a
-    /// lazy-connected channel.
-    fn get_leader_channel(&self, ctx: &RegionContext) -> Result<tonic::transport::Channel, Status> {
+    /// Resolves the leader's address from the peer address map and fetches a
+    /// shared channel from the node-level `NodeConnectionRegistry`. HTTP/2
+    /// multiplexing ensures all subsystems reuse the same TCP connection.
+    async fn get_leader_channel(
+        &self,
+        ctx: &RegionContext,
+    ) -> Result<tonic::transport::Channel, Status> {
         let handle = &ctx.handle;
         let leader_id = handle.current_leader().ok_or_else(|| {
             super::metadata::not_leader_status_from_handle(
@@ -310,13 +325,20 @@ impl ReadService {
                 )
             })?;
 
-        Ok(tonic::transport::Channel::from_shared(format!("http://{leader_addr}"))
-            .map_err(|e| Status::internal(format!("invalid leader address: {e}")))?
-            .connect_lazy())
+        let registry = self.registry.as_ref().ok_or_else(|| {
+            Status::unavailable("Read forwarding not configured: missing node connection registry")
+        })?;
+        let peer = registry.get_or_register(leader_id, &leader_addr).await.map_err(|e| {
+            Status::internal(format!("failed to register leader {leader_id} ({leader_addr}): {e}"))
+        })?;
+        Ok(peer.channel())
     }
 
     /// Returns a forward client for a remote region.
-    async fn get_forward_client(&self, remote: &RemoteRegionInfo) -> Result<ForwardClient, Status> {
+    async fn get_forward_client(
+        &self,
+        remote: &RemoteRegionInfo,
+    ) -> Result<RegionForwardClient, Status> {
         let manager = self.manager.as_ref().ok_or_else(|| {
             Status::unavailable("Request forwarding not configured for this service")
         })?;
@@ -335,7 +357,7 @@ impl ReadService {
                 Status::unavailable(format!("Failed to connect to remote region: {}", e))
             })?;
 
-        Ok(ForwardClient::new(connection))
+        Ok(RegionForwardClient::new(connection))
     }
 
     /// Fetches block header from archive for a given vault height.
@@ -669,7 +691,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region)? {
+        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
             let deadline =
                 inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("read");
@@ -822,7 +844,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region)? {
+        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
             let deadline =
                 inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("batch_read");
@@ -1001,7 +1023,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region)? {
+        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
             let deadline =
                 inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("verified_read");
@@ -1182,7 +1204,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region)? {
+        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
             let deadline =
                 inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("historical_read");
@@ -1428,7 +1450,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region)? {
+        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
             let deadline =
                 inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("watch_blocks");
@@ -1608,7 +1630,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region)? {
+        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
             let deadline =
                 inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("get_block");
@@ -1684,7 +1706,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region)? {
+        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
             let deadline =
                 inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("get_block_range");
@@ -1774,7 +1796,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region)? {
+        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
             let deadline =
                 inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("get_tip");
@@ -1843,7 +1865,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region)? {
+        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
             let deadline =
                 inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("get_client_state");
@@ -1903,7 +1925,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region)? {
+        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
             let deadline =
                 inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("list_relationships");
@@ -2059,7 +2081,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region)? {
+        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
             let deadline =
                 inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("list_resources");
@@ -2177,7 +2199,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region)? {
+        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
             let deadline =
                 inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
             metrics::record_read_forward("list_entities");

@@ -83,6 +83,8 @@ pub mod log_storage;
 pub mod logging;
 #[doc(hidden)]
 pub mod message_outbox;
+#[doc(hidden)]
+pub mod node_registry;
 #[cfg(feature = "observability")]
 #[doc(hidden)]
 pub mod otel;
