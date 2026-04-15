@@ -2,25 +2,52 @@
 
 ## Before Marking Complete
 
-1. **Format**: `cargo +nightly fmt --check`
-2. **Clippy**: `cargo +1.92 clippy --workspace --all-targets -- -D warnings`
-3. **Tests**: `cargo +1.92 test --workspace --lib`
-4. **Build**: `cargo +1.92 build --workspace`
+Per CLAUDE.md: *A task is complete only when all pass — no "pre-existing issue" exceptions.*
 
-## Quick One-Liner
+### Primary gates (pick one)
+
 ```bash
-just ci
+/validate          # 10-phase comprehensive (fmt, clippy, build matrix, unit, doctest, doc, udeps, shellcheck)
+/validate --full   # above + integration tests
+just ci            # fmt-check + clippy + doc-check + test (the canonical CI command)
 ```
 
-Or manually:
+### Manual one-liner equivalent to `just ci`
+
 ```bash
-cargo +nightly fmt --check && cargo +1.92 clippy --workspace --all-targets -- -D warnings && cargo +1.92 test --workspace --lib
+cargo +nightly fmt --all --check \
+  && cargo +1.92 clippy --workspace --all-targets -- -D warnings \
+  && RUSTDOCFLAGS="-D warnings" cargo +1.92 doc --workspace --no-deps \
+  && cargo +1.92 test --workspace --lib
 ```
 
-## Critical Rules
-- Never use `.unwrap()` — use snafu `.context()` (server) or thiserror (SDK)
-- Never use `panic!`, `todo!()`, `unimplemented!()`
-- No unsafe code
+Note: `doc-check` is part of `just ci` — don't omit it.
+
+### Pre-PR (regenerate protos if `.proto` files changed)
+
+```bash
+just ready   # proto + fmt + clippy + test
+```
+
+### Optional deeper validation
+
+```bash
+just test-integration    # real Raft clusters
+just test-stress         # throughput/scale
+just test-proptest 10000 # property tests at high iteration count
+just cluster-lifecycle   # 6-phase end-to-end
+just crash-recovery      # SIGKILL mid-write drill
+```
+
+## Critical Rules (non-negotiable)
+- Never `.unwrap()` / `.expect()` outside tests — use `.context(XxxSnafu)?` (server) or `?` with thiserror (SDK)
+- Never `panic!()`, `todo!()`, `unimplemented!()`
+- No `unsafe`
 - No TODO/FIXME/HACK comments
+- No backwards-compatibility shims, feature flags, or placeholder stubs
 - Document all public items
-- Use `?` for error propagation
+- Never commit — the user handles git
+
+## Toolchain
+- Build / test / clippy: `cargo +1.92`
+- Format / udeps: `cargo +nightly`
