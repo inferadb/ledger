@@ -323,6 +323,9 @@ mod tests {
             config,
             SystemClock,
             SystemRng,
+            0,
+            None,
+            0,
         );
         let transport = InMemoryTransport::new();
         let wal = InMemoryWalBackend::new();

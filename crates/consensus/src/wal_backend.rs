@@ -12,34 +12,68 @@ pub const CHECKPOINT_SHARD_ID: ShardId = ShardId(u64::MAX);
 
 /// A checkpoint frame recording the committed index at a point in time.
 ///
-/// Written by the reactor after each flush cycle. On recovery, the last
-/// checkpoint determines which entries need replay.
+/// Written by the reactor after each flush cycle and on every term/vote
+/// change. On recovery, the last checkpoint determines which entries need
+/// replay and restores the persisted Raft term and vote (Figure 2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckpointFrame {
     /// The committed log index at checkpoint time.
     pub committed_index: u64,
     /// The Raft term at checkpoint time.
     pub term: u64,
+    /// The candidate that received this node's vote in `term`, or `None`.
+    ///
+    /// Persisted per Raft Figure 2: `votedFor` must survive restarts to
+    /// prevent a node from granting duplicate votes in the same term.
+    pub voted_for: Option<u64>,
 }
 
 impl CheckpointFrame {
-    /// Encodes the checkpoint as 16 bytes: `[committed_index:8LE][term:8LE]`.
+    /// Encodes the checkpoint as 25 bytes:
+    /// `[committed_index:8LE][term:8LE][has_vote:1][voted_for:8LE]`.
+    ///
+    /// The format is backward-compatible: [`decode`](Self::decode) accepts
+    /// both the legacy 16-byte format (no `voted_for`) and the 25-byte
+    /// format.
     pub fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(16);
+        let mut buf = Vec::with_capacity(25);
         buf.extend_from_slice(&self.committed_index.to_le_bytes());
         buf.extend_from_slice(&self.term.to_le_bytes());
+        match self.voted_for {
+            Some(node_id) => {
+                buf.push(1);
+                buf.extend_from_slice(&node_id.to_le_bytes());
+            },
+            None => {
+                buf.push(0);
+                buf.extend_from_slice(&0u64.to_le_bytes());
+            },
+        }
         buf
     }
 
-    /// Decodes a checkpoint from 16 bytes. Returns `None` if the buffer is
-    /// too short.
+    /// Decodes a checkpoint from bytes. Accepts both legacy 16-byte format
+    /// (without `voted_for`) and the current 25-byte format.
+    ///
+    /// Returns `None` if the buffer is shorter than 16 bytes.
     pub fn decode(data: &[u8]) -> Option<Self> {
         if data.len() < 16 {
             return None;
         }
         let committed_index = u64::from_le_bytes(data[..8].try_into().ok()?);
         let term = u64::from_le_bytes(data[8..16].try_into().ok()?);
-        Some(Self { committed_index, term })
+        let voted_for = if data.len() >= 25 {
+            let has_vote = data[16];
+            if has_vote != 0 {
+                Some(u64::from_le_bytes(data[17..25].try_into().ok()?))
+            } else {
+                None
+            }
+        } else {
+            // Legacy 16-byte checkpoint — voted_for was not persisted.
+            None
+        };
+        Some(Self { committed_index, term, voted_for })
     }
 }
 
@@ -243,7 +277,7 @@ mod tests {
     fn test_default_write_checkpoint_appends_checkpoint_frame() {
         let mut wal = DefaultsOnlyBackend::new();
 
-        let cp = CheckpointFrame { committed_index: 10, term: 2 };
+        let cp = CheckpointFrame { committed_index: 10, term: 2, voted_for: None };
 
         wal.write_checkpoint(&cp).unwrap();
 
@@ -297,7 +331,8 @@ mod tests {
         let mut wal = DefaultsOnlyBackend::new();
 
         // Write two checkpoints interleaved with a regular frame.
-        wal.write_checkpoint(&CheckpointFrame { committed_index: 3, term: 1 }).unwrap();
+        wal.write_checkpoint(&CheckpointFrame { committed_index: 3, term: 1, voted_for: None })
+            .unwrap();
         wal.append(&[WalFrame {
             shard_id: ShardId(1),
             index: 4,
@@ -305,12 +340,14 @@ mod tests {
             data: Arc::from(b"entry" as &[u8]),
         }])
         .unwrap();
-        wal.write_checkpoint(&CheckpointFrame { committed_index: 7, term: 2 }).unwrap();
+        wal.write_checkpoint(&CheckpointFrame { committed_index: 7, term: 2, voted_for: Some(42) })
+            .unwrap();
 
         let cp = wal.last_checkpoint().unwrap().expect("should find a checkpoint");
 
         assert_eq!(cp.committed_index, 7);
         assert_eq!(cp.term, 2);
+        assert_eq!(cp.voted_for, Some(42));
     }
 
     #[test]
@@ -335,18 +372,40 @@ mod tests {
 
     #[test]
     fn test_checkpoint_frame_roundtrip() {
-        let cases: &[(u64, u64)] = &[(0, 0), (1, 1), (u64::MAX, u64::MAX), (42, 7)];
+        let cases: &[(u64, u64, Option<u64>)] = &[
+            (0, 0, None),
+            (1, 1, Some(1)),
+            (u64::MAX, u64::MAX, Some(u64::MAX)),
+            (42, 7, None),
+            (100, 5, Some(3)),
+        ];
 
-        for &(committed_index, term) in cases {
-            let cp = CheckpointFrame { committed_index, term };
+        for &(committed_index, term, voted_for) in cases {
+            let cp = CheckpointFrame { committed_index, term, voted_for };
 
             let encoded = cp.encode();
+            assert_eq!(encoded.len(), 25, "new format should always be 25 bytes");
             let decoded =
                 CheckpointFrame::decode(&encoded).expect("should decode valid checkpoint");
 
             assert_eq!(decoded.committed_index, committed_index);
             assert_eq!(decoded.term, term);
+            assert_eq!(decoded.voted_for, voted_for);
         }
+    }
+
+    #[test]
+    fn test_checkpoint_frame_decode_legacy_16_byte_format() {
+        // Simulate a legacy checkpoint that was written before voted_for
+        // was added (only 16 bytes: committed_index + term).
+        let mut legacy = Vec::with_capacity(16);
+        legacy.extend_from_slice(&42u64.to_le_bytes());
+        legacy.extend_from_slice(&7u64.to_le_bytes());
+
+        let cp = CheckpointFrame::decode(&legacy).expect("should decode legacy checkpoint");
+        assert_eq!(cp.committed_index, 42);
+        assert_eq!(cp.term, 7);
+        assert_eq!(cp.voted_for, None, "legacy checkpoints have no voted_for");
     }
 
     #[test]

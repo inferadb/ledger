@@ -61,8 +61,17 @@ impl Simulation {
         for (i, &node_id) in node_ids.iter().enumerate() {
             let rng = SimulatedRng::new(seed + i as u64);
             let config = default_shard_config();
-            let shard =
-                Shard::new(shard_id, node_id, membership.clone(), config, Arc::clone(&clock), rng);
+            let shard = Shard::new(
+                shard_id,
+                node_id,
+                membership.clone(),
+                config,
+                Arc::clone(&clock),
+                rng,
+                0,
+                None,
+                0,
+            );
             let mut shard_map = HashMap::new();
             shard_map.insert(shard_id, shard);
             nodes.insert(node_id, shard_map);
@@ -99,6 +108,9 @@ impl Simulation {
                 config,
                 Arc::clone(&self.clock),
                 rng,
+                0,
+                None,
+                0,
             );
             self.nodes.entry(node_id).or_default().insert(shard_id, shard);
             // Ensure node is tracked in node_ids.

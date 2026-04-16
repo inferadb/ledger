@@ -945,7 +945,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut wal = SegmentedWalBackend::open(dir.path()).unwrap();
 
-        let cp = CheckpointFrame { committed_index: 42, term: 3 };
+        let cp = CheckpointFrame { committed_index: 42, term: 3, voted_for: None };
         wal.write_checkpoint(&cp).unwrap();
         wal.sync().unwrap();
 
@@ -957,14 +957,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut wal = SegmentedWalBackend::open(dir.path()).unwrap();
 
-        wal.write_checkpoint(&CheckpointFrame { committed_index: 1, term: 1 }).unwrap();
-        wal.write_checkpoint(&CheckpointFrame { committed_index: 5, term: 2 }).unwrap();
-        wal.write_checkpoint(&CheckpointFrame { committed_index: 10, term: 2 }).unwrap();
+        wal.write_checkpoint(&CheckpointFrame { committed_index: 1, term: 1, voted_for: None })
+            .unwrap();
+        wal.write_checkpoint(&CheckpointFrame { committed_index: 5, term: 2, voted_for: None })
+            .unwrap();
+        wal.write_checkpoint(&CheckpointFrame { committed_index: 10, term: 2, voted_for: None })
+            .unwrap();
         wal.sync().unwrap();
 
         assert_eq!(
             wal.last_checkpoint().unwrap(),
-            Some(CheckpointFrame { committed_index: 10, term: 2 })
+            Some(CheckpointFrame { committed_index: 10, term: 2, voted_for: None })
         );
     }
 
@@ -982,14 +985,16 @@ mod tests {
         let mut wal = SegmentedWalBackend::open(dir.path()).unwrap();
 
         wal.append(&[frame(1, b"entry-1"), frame(2, b"entry-2")]).unwrap();
-        wal.write_checkpoint(&CheckpointFrame { committed_index: 2, term: 1 }).unwrap();
+        wal.write_checkpoint(&CheckpointFrame { committed_index: 2, term: 1, voted_for: None })
+            .unwrap();
         wal.append(&[frame(1, b"entry-3")]).unwrap();
-        wal.write_checkpoint(&CheckpointFrame { committed_index: 3, term: 1 }).unwrap();
+        wal.write_checkpoint(&CheckpointFrame { committed_index: 3, term: 1, voted_for: None })
+            .unwrap();
         wal.sync().unwrap();
 
         assert_eq!(
             wal.last_checkpoint().unwrap(),
-            Some(CheckpointFrame { committed_index: 3, term: 1 })
+            Some(CheckpointFrame { committed_index: 3, term: 1, voted_for: None })
         );
     }
 
@@ -1000,14 +1005,15 @@ mod tests {
         {
             let mut wal = SegmentedWalBackend::open(dir.path()).unwrap();
             wal.append(&[frame(1, b"entry-1")]).unwrap();
-            wal.write_checkpoint(&CheckpointFrame { committed_index: 1, term: 1 }).unwrap();
+            wal.write_checkpoint(&CheckpointFrame { committed_index: 1, term: 1, voted_for: None })
+                .unwrap();
             wal.sync().unwrap();
         }
 
         let wal = SegmentedWalBackend::open(dir.path()).unwrap();
         assert_eq!(
             wal.last_checkpoint().unwrap(),
-            Some(CheckpointFrame { committed_index: 1, term: 1 })
+            Some(CheckpointFrame { committed_index: 1, term: 1, voted_for: None })
         );
     }
 
@@ -1037,7 +1043,8 @@ mod tests {
                 data: Arc::from(b"entry-two".as_slice()),
             };
             wal.append(&[f1, f2]).unwrap();
-            wal.write_checkpoint(&CheckpointFrame { committed_index: 2, term: 1 }).unwrap();
+            wal.write_checkpoint(&CheckpointFrame { committed_index: 2, term: 1, voted_for: None })
+                .unwrap();
             wal.sync().unwrap();
         }
 

@@ -65,7 +65,19 @@ pub struct Shard<C: Clock, R: RngSource> {
 }
 
 impl<C: Clock + Clone, R: RngSource> Shard<C, R> {
-    /// Creates a new shard starting as a [`NodeState::Follower`] at term 0.
+    /// Creates a new shard starting as a [`NodeState::Follower`].
+    ///
+    /// For first boot pass `initial_term = 0, initial_voted_for = None,
+    /// initial_committed_index = 0`.
+    /// On restart, pass the values recovered from the WAL checkpoint to
+    /// satisfy the Raft durability requirement (Figure 2).
+    ///
+    /// `initial_committed_index` tells the shard (and its reactor) where
+    /// the state machine was last durably applied. On restart this is the
+    /// `committed_index` from the WAL checkpoint.  The reactor uses this
+    /// value to avoid re-dispatching already-applied entries to the apply
+    /// worker.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: ShardId,
         node_id: NodeId,
@@ -73,6 +85,9 @@ impl<C: Clock + Clone, R: RngSource> Shard<C, R> {
         config: ShardConfig,
         clock: C,
         rng: R,
+        initial_term: u64,
+        initial_voted_for: Option<NodeId>,
+        initial_committed_index: u64,
     ) -> Self {
         // Set the initial election deadline to the past so the first pre-vote
         // request from any node is immediately granted. For brand-new shards
@@ -87,12 +102,12 @@ impl<C: Clock + Clone, R: RngSource> Shard<C, R> {
             id,
             node_id,
             state: NodeState::Follower,
-            current_term: 0,
+            current_term: initial_term,
             last_committed_term: 0,
-            voted_for: None,
+            voted_for: initial_voted_for,
             log: VecDeque::new(),
-            commit_index: 0,
-            last_applied: 0,
+            commit_index: initial_committed_index,
+            last_applied: initial_committed_index,
             peer_states: Vec::new(),
             self_match_index: 0,
             membership,
@@ -145,6 +160,12 @@ impl<C: Clock + Clone, R: RngSource> Shard<C, R> {
     #[inline]
     pub fn current_term(&self) -> u64 {
         self.current_term
+    }
+
+    /// Returns the candidate this node voted for in the current term.
+    #[inline]
+    pub fn voted_for(&self) -> Option<NodeId> {
+        self.voted_for
     }
 
     /// Returns the current commit index.
@@ -517,19 +538,24 @@ impl<C: Clock + Clone, R: RngSource> Shard<C, R> {
 
         let (last_log_index, last_log_term) = self.last_log_info();
 
-        let mut actions: Vec<Action> = self
-            .voter_peers()
-            .map(|peer_id| Action::Send {
-                to: peer_id,
-                shard: self.id,
-                msg: Message::VoteRequest {
-                    term: self.current_term,
-                    candidate_id: self.node_id,
-                    last_log_index,
-                    last_log_term,
-                },
-            })
-            .collect();
+        // Raft Figure 2: persist currentTerm + votedFor before sending VoteRequests.
+        // Placed before Send actions so the reactor persists before transmitting.
+        let mut actions: Vec<Action> = vec![Action::PersistTermState {
+            shard: self.id,
+            term: self.current_term,
+            voted_for: self.voted_for,
+        }];
+
+        actions.extend(self.voter_peers().map(|peer_id| Action::Send {
+            to: peer_id,
+            shard: self.id,
+            msg: Message::VoteRequest {
+                term: self.current_term,
+                candidate_id: self.node_id,
+                last_log_index,
+                last_log_term,
+            },
+        }));
 
         // Single-node cluster: immediately become leader
         if self.votes_received >= self.membership.quorum() {
@@ -565,6 +591,12 @@ impl<C: Clock + Clone, R: RngSource> Shard<C, R> {
 
         if can_vote {
             self.voted_for = Some(from);
+            // Raft Figure 2: persist votedFor before sending VoteResponse.
+            actions.push(Action::PersistTermState {
+                shard: self.id,
+                term: self.current_term,
+                voted_for: self.voted_for,
+            });
             self.reset_election_timer(&mut actions);
         }
 
@@ -1014,6 +1046,12 @@ impl<C: Clock + Clone, R: RngSource> Shard<C, R> {
         self.pre_votes_received = 0;
         self.peer_states.clear();
         self.lease.invalidate();
+        // Raft Figure 2: persist currentTerm + votedFor before responding.
+        actions.push(Action::PersistTermState {
+            shard: self.id,
+            term: self.current_term,
+            voted_for: self.voted_for,
+        });
         self.reset_election_timer(actions);
     }
 
@@ -1377,7 +1415,7 @@ mod tests {
         rng: SimulatedRng,
         membership: Membership,
     ) -> Shard<Arc<SimulatedClock>, SimulatedRng> {
-        Shard::new(ShardId(1), node_id, membership, ShardConfig::default(), clock, rng)
+        Shard::new(ShardId(1), node_id, membership, ShardConfig::default(), clock, rng, 0, None, 0)
     }
 
     fn make_3node_shard(
@@ -2791,5 +2829,441 @@ mod tests {
             },
             _ => unreachable!("expected AppendEntriesResponse"),
         }
+    }
+
+    // ── Term + votedFor persistence (Raft Figure 2) ────────────────
+
+    #[test]
+    fn term_survives_simulated_restart() {
+        let clock = make_clock();
+        let (_, mut shard) = make_3node_shard(1);
+
+        // Advance to term 10 by becoming follower at that term.
+        let mut actions = Vec::new();
+        shard.become_follower(10, &mut actions);
+        assert_eq!(shard.current_term(), 10);
+
+        // Extract PersistTermState from actions.
+        let persist = actions.iter().find(|a| matches!(a, Action::PersistTermState { .. }));
+        assert!(persist.is_some(), "become_follower must emit PersistTermState");
+        let (persisted_term, persisted_voted_for) = match persist {
+            Some(Action::PersistTermState { term, voted_for, .. }) => (*term, *voted_for),
+            _ => unreachable!(),
+        };
+        assert_eq!(persisted_term, 10);
+        assert_eq!(persisted_voted_for, None);
+
+        // Simulate restart: create a NEW shard with the persisted values.
+        let restarted = make_shard(NodeId(1), clock.clone(), make_rng(), make_membership_3());
+        // Default shard starts at term 0 — this is the bug we're fixing.
+        assert_eq!(restarted.current_term(), 0);
+
+        // Now create with recovered state.
+        let recovered = Shard::new(
+            ShardId(1),
+            NodeId(1),
+            make_membership_3(),
+            ShardConfig::default(),
+            clock,
+            make_rng(),
+            persisted_term,
+            persisted_voted_for,
+            0,
+        );
+        assert_eq!(recovered.current_term(), 10);
+        assert_eq!(recovered.voted_for(), None);
+    }
+
+    #[test]
+    fn voted_for_survives_simulated_restart() {
+        let clock = make_clock();
+        let (_, mut shard) = make_3node_shard(1);
+
+        // Advance clock so election timeout can fire.
+        clock.advance(std::time::Duration::from_secs(1));
+        let _actions = shard.handle_election_timeout();
+        assert_eq!(shard.state(), NodeState::PreCandidate);
+
+        // Grant pre-votes to become Candidate.
+        let prospective_term = shard.current_term() + 1;
+        let _ = shard.handle_message(
+            NodeId(2),
+            Message::PreVoteResponse { term: prospective_term, vote_granted: true },
+        );
+        assert_eq!(shard.state(), NodeState::Candidate);
+
+        // Now the shard has voted for itself at term 1.
+        assert_eq!(shard.current_term(), 1);
+        assert_eq!(shard.voted_for(), Some(NodeId(1)));
+
+        // Simulate restart with recovered state.
+        let mut recovered = Shard::new(
+            ShardId(1),
+            NodeId(1),
+            make_membership_3(),
+            ShardConfig::default(),
+            clock.clone(),
+            make_rng(),
+            shard.current_term(),
+            shard.voted_for(),
+            0,
+        );
+        assert_eq!(recovered.current_term(), 1);
+        assert_eq!(recovered.voted_for(), Some(NodeId(1)));
+
+        // The recovered shard must reject a vote request from NodeId(3)
+        // at the same term (already voted for NodeId(1)).
+        let actions = recovered.handle_message(
+            NodeId(3),
+            Message::VoteRequest {
+                term: 1,
+                candidate_id: NodeId(3),
+                last_log_index: 0,
+                last_log_term: 0,
+            },
+        );
+        let vote_granted = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::Send { msg: Message::VoteResponse { vote_granted, .. }, .. } => {
+                    Some(*vote_granted)
+                },
+                _ => None,
+            })
+            .expect("should produce VoteResponse");
+        assert!(!vote_granted, "must reject vote — already voted for NodeId(1) at term 1");
+    }
+
+    /// Helper: verify a vote-granted action produces PersistTermState.
+    #[test]
+    fn vote_grant_emits_persist_term_state() {
+        let (_clock, mut shard) = make_3node_shard(1);
+
+        // Receive a VoteRequest from NodeId(2) at term 1.
+        let actions = shard.handle_message(
+            NodeId(2),
+            Message::VoteRequest {
+                term: 1,
+                candidate_id: NodeId(2),
+                last_log_index: 0,
+                last_log_term: 0,
+            },
+        );
+
+        // Verify PersistTermState was emitted. There may be two: one from
+        // become_follower (term advance) and one from the vote grant itself.
+        // The LAST one carries the final voted_for state.
+        let persist_actions: Vec<_> =
+            actions.iter().filter(|a| matches!(a, Action::PersistTermState { .. })).collect();
+        assert!(!persist_actions.is_empty(), "vote grant must emit at least one PersistTermState");
+        // The final PersistTermState must carry the vote.
+        match persist_actions.last() {
+            Some(Action::PersistTermState { term, voted_for, .. }) => {
+                assert_eq!(*term, 1);
+                assert_eq!(*voted_for, Some(NodeId(2)));
+            },
+            _ => unreachable!(),
+        }
+
+        // Verify PersistTermState appears BEFORE the VoteResponse Send.
+        let persist_pos = actions
+            .iter()
+            .position(|a| matches!(a, Action::PersistTermState { .. }))
+            .expect("PersistTermState must be present");
+        let send_pos = actions
+            .iter()
+            .position(|a| matches!(a, Action::Send { msg: Message::VoteResponse { .. }, .. }))
+            .expect("VoteResponse must be present");
+        assert!(
+            persist_pos < send_pos,
+            "PersistTermState (pos {persist_pos}) must precede VoteResponse (pos {send_pos})"
+        );
+    }
+
+    #[test]
+    fn start_election_emits_persist_term_state() {
+        let clock = make_clock();
+        let (_, mut shard) = make_3node_shard(1);
+
+        // Advance clock, trigger election timeout -> pre-vote.
+        clock.advance(std::time::Duration::from_secs(1));
+        let _ = shard.handle_election_timeout();
+
+        // Grant pre-votes to transition to Candidate (which calls start_election).
+        let prospective_term = shard.current_term() + 1;
+        let actions = shard.handle_message(
+            NodeId(2),
+            Message::PreVoteResponse { term: prospective_term, vote_granted: true },
+        );
+
+        // start_election was called internally. Verify PersistTermState.
+        let persist_actions: Vec<_> =
+            actions.iter().filter(|a| matches!(a, Action::PersistTermState { .. })).collect();
+        assert!(!persist_actions.is_empty(), "start_election must emit PersistTermState");
+        match &persist_actions[0] {
+            Action::PersistTermState { term, voted_for, .. } => {
+                assert_eq!(*term, 1, "term should be incremented to 1");
+                assert_eq!(*voted_for, Some(NodeId(1)), "should vote for self");
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn become_follower_emits_persist_term_state() {
+        let (_, mut shard) = make_3node_shard(1);
+
+        let mut actions = Vec::new();
+        shard.become_follower(5, &mut actions);
+
+        let persist = actions.iter().find(|a| matches!(a, Action::PersistTermState { .. }));
+        assert!(persist.is_some(), "become_follower must emit PersistTermState");
+        match persist {
+            Some(Action::PersistTermState { term, voted_for, .. }) => {
+                assert_eq!(*term, 5);
+                assert_eq!(*voted_for, None, "voted_for reset on term change");
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn restarted_shard_rejects_duplicate_vote_at_same_term() {
+        let clock = make_clock();
+
+        // Create a shard that has already voted for NodeId(2) at term 5.
+        let mut shard = Shard::new(
+            ShardId(1),
+            NodeId(1),
+            make_membership_3(),
+            ShardConfig::default(),
+            clock.clone(),
+            make_rng(),
+            5,
+            Some(NodeId(2)),
+            0,
+        );
+
+        // NodeId(3) requests a vote at term 5. Should be rejected because
+        // we already voted for NodeId(2).
+        let actions = shard.handle_message(
+            NodeId(3),
+            Message::VoteRequest {
+                term: 5,
+                candidate_id: NodeId(3),
+                last_log_index: 0,
+                last_log_term: 0,
+            },
+        );
+
+        let vote_response = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::Send { msg: Message::VoteResponse { vote_granted, .. }, .. } => {
+                    Some(*vote_granted)
+                },
+                _ => None,
+            })
+            .expect("should produce VoteResponse");
+        assert!(!vote_response, "must reject vote — already voted for NodeId(2) at term 5");
+    }
+
+    #[test]
+    fn restarted_shard_cannot_win_election_at_lower_term() {
+        let clock = make_clock();
+
+        // Shard B was at term 5. On restart, if term were lost (reset to 0),
+        // it could start an election at term 1 which should be rejected.
+        // With the fix, it correctly starts at term 5.
+        let mut shard_a = Shard::new(
+            ShardId(1),
+            NodeId(1),
+            make_membership_3(),
+            ShardConfig::default(),
+            clock.clone(),
+            make_rng(),
+            5,
+            None,
+            0,
+        );
+
+        // Simulate shard_b starting a vote request at term 3 (stale).
+        let actions = shard_a.handle_message(
+            NodeId(2),
+            Message::VoteRequest {
+                term: 3,
+                candidate_id: NodeId(2),
+                last_log_index: 0,
+                last_log_term: 0,
+            },
+        );
+
+        // shard_a at term 5 must reject the stale term 3 request.
+        let vote_response = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::Send { msg: Message::VoteResponse { vote_granted, term }, .. } => {
+                    Some((*vote_granted, *term))
+                },
+                _ => None,
+            })
+            .expect("should produce VoteResponse");
+        assert!(!vote_response.0, "must reject vote from stale term");
+        assert_eq!(vote_response.1, 5, "response should carry current term 5");
+    }
+
+    #[test]
+    fn initial_committed_index_sets_commit_and_last_applied() {
+        let clock = make_clock();
+        let shard = Shard::new(
+            ShardId(1),
+            NodeId(1),
+            make_membership_3(),
+            ShardConfig::default(),
+            clock,
+            make_rng(),
+            5,
+            None,
+            44,
+        );
+        assert_eq!(shard.commit_index(), 44);
+        assert_eq!(shard.last_applied, 44);
+        assert_eq!(shard.current_term(), 5);
+    }
+
+    /// A restarted shard with `initial_committed_index > 0` only emits
+    /// `Action::Committed` for entries BEYOND that index when processing
+    /// AppendEntries from the leader. This prevents the apply worker from
+    /// re-applying entries already in the state machine.
+    #[test]
+    fn recovered_shard_only_commits_beyond_initial_committed_index() {
+        let clock = make_clock();
+        // Simulate a follower that crashed with committed_index=3.
+        let mut follower = Shard::new(
+            ShardId(1),
+            NodeId(2),
+            make_membership_3(),
+            ShardConfig::default(),
+            clock.clone(),
+            make_rng(),
+            1,
+            None,
+            3,
+        );
+
+        // The leader sends entries 1-5 (catching the follower up) with
+        // leader_commit=5. Entries 1-3 were already committed before the
+        // crash; 4-5 are new.
+        let entries: Vec<Entry> = (1..=5)
+            .map(|i| Entry {
+                index: i,
+                term: 1,
+                data: Arc::from(format!("entry-{i}").into_bytes().as_slice()),
+                kind: EntryKind::Normal,
+            })
+            .collect();
+
+        let actions = follower.handle_message(
+            NodeId(1),
+            Message::AppendEntries {
+                term: 1,
+                leader_id: NodeId(1),
+                prev_log_index: 0,
+                prev_log_term: 0,
+                entries: Arc::from(entries.as_slice()),
+                leader_commit: 5,
+                closed_ts_nanos: 0,
+            },
+        );
+
+        // The Committed action should commit up to 5 (starting from the
+        // previous commit_index of 3).
+        let committed = actions.iter().find_map(|a| match a {
+            Action::Committed { up_to, .. } => Some(*up_to),
+            _ => None,
+        });
+        assert_eq!(committed, Some(5), "should commit up to 5");
+        assert_eq!(follower.commit_index(), 5);
+
+        // The shard's log should contain all 5 entries.
+        assert_eq!(follower.log_len(), 5);
+    }
+
+    /// When the leader sends entries that conflict with uncommitted entries
+    /// beyond the initial_committed_index, the shard truncates and replaces
+    /// them with the leader's version.
+    #[test]
+    fn recovered_shard_replaces_conflicting_uncommitted_entries() {
+        let clock = make_clock();
+        // Simulate a follower with committed_index=3. It will receive entries
+        // 1-3 (matching) and 4-5 (new from leader, possibly different from
+        // what was in the WAL before crash).
+        let mut follower = Shard::new(
+            ShardId(1),
+            NodeId(2),
+            make_membership_3(),
+            ShardConfig::default(),
+            clock.clone(),
+            make_rng(),
+            1,
+            None,
+            3,
+        );
+
+        // First, populate the log with entries 1-5 (simulating what the
+        // follower had received before the crash). In practice the log is
+        // empty on restart, but if WAL replay populated it, entries 4-5
+        // would be stale.
+        let initial_entries: Vec<Entry> = (1..=5)
+            .map(|i| Entry {
+                index: i,
+                term: 1,
+                data: Arc::from(format!("old-{i}").into_bytes().as_slice()),
+                kind: EntryKind::Normal,
+            })
+            .collect();
+        // Manually push entries into the log to simulate WAL replay.
+        for entry in &initial_entries {
+            follower.log.push_back(entry.clone());
+        }
+
+        // Leader sends entries 4-5 at term 2 (different term = conflict).
+        let leader_entries: Vec<Entry> = (4..=5)
+            .map(|i| Entry {
+                index: i,
+                term: 2,
+                data: Arc::from(format!("leader-{i}").into_bytes().as_slice()),
+                kind: EntryKind::Normal,
+            })
+            .collect();
+
+        let actions = follower.handle_message(
+            NodeId(1),
+            Message::AppendEntries {
+                term: 2,
+                leader_id: NodeId(1),
+                prev_log_index: 3,
+                prev_log_term: 1,
+                entries: Arc::from(leader_entries.as_slice()),
+                leader_commit: 5,
+                closed_ts_nanos: 0,
+            },
+        );
+
+        // The shard should have truncated entries 4-5 and replaced them.
+        assert_eq!(follower.log_len(), 5);
+
+        // Entries 4 and 5 should now have term 2 (leader's version).
+        assert_eq!(follower.log[3].term, 2);
+        assert_eq!(follower.log[4].term, 2);
+        assert_eq!(&*follower.log[3].data, b"leader-4");
+        assert_eq!(&*follower.log[4].data, b"leader-5");
+
+        // The committed action should advance to 5.
+        let committed = actions.iter().find_map(|a| match a {
+            Action::Committed { up_to, .. } => Some(*up_to),
+            _ => None,
+        });
+        assert_eq!(committed, Some(5));
     }
 }

@@ -127,7 +127,10 @@ pub struct Reactor<C: Clock, R: RngSource, W: WalBackend, T: NetworkTransport> {
     outbox: NetworkOutbox,
     /// Intermediate buffer: (shard_id, up_to) pairs accumulated before flush.
     pending_commits: Vec<(ShardId, u64)>,
-    pending_responses: Vec<(u64, oneshot::Sender<Result<u64, ConsensusError>>)>,
+    /// Proposal responses awaiting quorum commit. Each entry is (shard, log_index, sender).
+    /// Resolved only when the shard's commit_index >= log_index (quorum confirmation).
+    /// Rejected with `NotLeader` if the shard loses leadership before commit.
+    pending_responses: Vec<(ShardId, u64, oneshot::Sender<Result<u64, ConsensusError>>)>,
     flush_interval: Duration,
     /// Tracks the last index applied per shard so flush can collect the correct entry range.
     last_applied: HashMap<ShardId, u64>,
@@ -175,7 +178,16 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
     }
 
     /// Registers a shard with the reactor.
+    ///
+    /// If the shard has a non-zero `commit_index` (from WAL checkpoint
+    /// recovery), the reactor initializes its `last_applied` tracking for
+    /// this shard so committed entries up to that index are not
+    /// re-dispatched to the apply worker.
     pub fn add_shard(&mut self, id: ShardId, shard: Shard<C, R>) {
+        let restored_commit = shard.commit_index();
+        if restored_commit > 0 {
+            self.last_applied.insert(id, restored_commit);
+        }
         let actions = shard.initial_actions();
         self.shards.insert(id, shard);
         self.process_actions(actions);
@@ -264,7 +276,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                                 _ => None,
                             })
                             .unwrap_or(0);
-                        self.pending_responses.push((entry_index, response));
+                        self.pending_responses.push((shard, entry_index, response));
                         self.process_actions(actions);
                         vec![shard]
                     },
@@ -299,7 +311,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                                 _ => None,
                             })
                             .unwrap_or(0);
-                        self.pending_responses.push((entry_index, response));
+                        self.pending_responses.push((shard, entry_index, response));
                         self.process_actions(actions);
                         vec![shard]
                     },
@@ -515,11 +527,88 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
     }
 
     /// Sorts actions returned by shards into the appropriate pending buffers.
+    ///
+    /// Two-pass processing ensures Raft safety (Figure 2):
+    ///   1. **First pass**: `PersistTermState` actions write a WAL checkpoint and fsync, making
+    ///      term + votedFor durable *before* any messages leave the node.
+    ///   2. **Second pass**: all other actions are processed normally.
     fn process_actions(&mut self, actions: Vec<Action>) {
+        // ── Pass 1: persist term state before any sends ────────────────
+        //
+        // Multiple PersistTermState actions in a single batch are collapsed
+        // into one checkpoint write + fsync (the last one wins per shard, but
+        // in practice only one fires per event).
+        let mut needs_term_persist = false;
+        let mut latest_term_checkpoint: Option<CheckpointFrame> = None;
+
+        for action in &actions {
+            if let Action::PersistTermState { term, voted_for, .. } = action {
+                needs_term_persist = true;
+                // Build a checkpoint. committed_index comes from whichever
+                // shard we can observe — term state persistence is the priority.
+                let committed_index =
+                    self.shards.values().map(|s| s.commit_index()).max().unwrap_or(0);
+                latest_term_checkpoint = Some(CheckpointFrame {
+                    committed_index,
+                    term: *term,
+                    voted_for: voted_for.map(|n| n.0),
+                });
+            }
+        }
+
+        if needs_term_persist && let Some(cp) = &latest_term_checkpoint {
+            // Write checkpoint + fsync synchronously. If this fails, the
+            // node cannot safely participate in elections — skip all sends
+            // from this batch to avoid violating Raft safety.
+            if self.wal.write_checkpoint(cp).is_err() || self.wal.sync().is_err() {
+                tracing::error!(
+                    "Failed to persist term state (term={}, voted_for={:?}) — \
+                         dropping all outbound messages from this batch to preserve Raft safety",
+                    cp.term,
+                    cp.voted_for,
+                );
+                // Still process non-Send actions (timers, commits, etc.)
+                // but skip all message sends.
+                for action in actions {
+                    match action {
+                        Action::PersistTermState { .. } | Action::Send { .. } => {},
+                        Action::PersistEntries { shard, entries } => {
+                            for entry in entries {
+                                self.pending_wal_frames.push(WalFrame {
+                                    shard_id: shard,
+                                    index: entry.index,
+                                    term: entry.term,
+                                    data: Arc::clone(&entry.data),
+                                });
+                            }
+                        },
+                        Action::Committed { shard, up_to } => {
+                            self.pending_commits.push((shard, up_to));
+                        },
+                        Action::ScheduleTimer { shard, kind, deadline } => {
+                            self.timers.schedule(shard, kind, deadline);
+                        },
+                        Action::RenewLease { .. }
+                        | Action::TriggerSnapshot { .. }
+                        | Action::MembershipChanged { .. }
+                        | Action::SendSnapshot { .. }
+                        | Action::ShardRemoved { .. } => {},
+                    }
+                }
+                return;
+            }
+        }
+
+        // ── Pass 2: process all remaining actions ──────────────────────
         for action in actions {
             match action {
+                Action::PersistTermState { .. } => {
+                    // Already handled in pass 1.
+                },
                 Action::Send { to, shard, msg } => {
-                    // Vote messages bypass the outbox to avoid election latency.
+                    // Vote request messages bypass the outbox to avoid election
+                    // latency. This is safe because PersistTermState (if present)
+                    // was already fsynced in pass 1.
                     let is_vote =
                         matches!(msg, Message::PreVoteRequest { .. } | Message::VoteRequest { .. });
                     if is_vote {
@@ -649,15 +738,20 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
         }
     }
 
-    /// Flushes pending WAL frames to durable storage, resolves proposal
-    /// responses, and dispatches committed batches to the apply worker.
+    /// Flushes pending WAL frames to durable storage, dispatches committed
+    /// batches to the apply worker, and resolves proposal responses.
+    ///
+    /// Proposal responses are only resolved after quorum commit, not merely
+    /// after local WAL fsync. This ensures clients see success only when the
+    /// entry is durable on a majority of nodes (Raft safety). Responses for
+    /// shards that lose leadership are rejected with `NotLeader`.
     ///
     /// For backends that support async fsync (`supports_async_fsync() == true`),
     /// the flush cycle works in two steps:
     /// 1. Append frames and submit the fsync — set `fsync_phase` to `Submitted`, return without
     ///    resolving responses.
     /// 2. On the next flush tick, `poll_fsync_completion()` is checked first. When it returns
-    ///    `true`, responses are resolved and `fsync_phase` resets to `Idle`.
+    ///    `true`, commits are dispatched and committed responses are resolved.
     ///
     /// For synchronous backends (the default), both steps collapse into one:
     /// `submit_async_fsync()` calls `sync()` internally, `poll_fsync_completion()`
@@ -670,13 +764,12 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                 self.outbox.flush(&self.transport);
                 return;
             }
-            // Fsync complete — resolve responses, dispatch commits, reset phase.
+            // Fsync complete — dispatch commits, resolve committed responses, reset phase.
             self.fsync_phase = FsyncPhase::Idle;
-            for (index, resp) in self.pending_responses.drain(..) {
-                let _ = resp.send(Ok(index));
-            }
             let pending = std::mem::take(&mut self.pending_commits);
             self.dispatch_committed_batches(&pending).await;
+            self.resolve_committed_responses();
+            self.reject_stale_responses();
             self.outbox.flush(&self.transport);
             return;
         }
@@ -692,7 +785,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
 
             // Append entry frames (may be empty if only commits this cycle).
             if !frames.is_empty() && self.wal.append(&frames).is_err() {
-                for (_, resp) in self.pending_responses.drain(..) {
+                for (_, _, resp) in self.pending_responses.drain(..) {
                     let _ = resp.send(Err(ConsensusError::ProposalQueueFull));
                 }
                 self.pending_commits.clear();
@@ -703,8 +796,10 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             // Write checkpoint before fsync so it becomes durable with the
             // same sync call, avoiding an extra fsync.
             if let Some(committed_index) = max_committed {
-                let term = self.shards.values().next().map_or(0, |s| s.current_term());
-                let checkpoint = CheckpointFrame { committed_index, term };
+                let first_shard = self.shards.values().next();
+                let term = first_shard.map_or(0, |s| s.current_term());
+                let voted_for = first_shard.and_then(|s| s.voted_for().map(|n| n.0));
+                let checkpoint = CheckpointFrame { committed_index, term, voted_for };
                 // Best-effort: a checkpoint failure is non-fatal — crash
                 // recovery can replay from the previous checkpoint.
                 let _ = self.wal.write_checkpoint(&checkpoint);
@@ -713,7 +808,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             if self.wal.supports_async_fsync() {
                 // Async path: submit fsync and return — poll for completion next cycle.
                 if self.wal.submit_async_fsync().is_err() {
-                    for (_, resp) in self.pending_responses.drain(..) {
+                    for (_, _, resp) in self.pending_responses.drain(..) {
                         let _ = resp.send(Err(ConsensusError::ProposalQueueFull));
                     }
                     self.pending_commits.clear();
@@ -727,7 +822,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
 
             if self.wal.sync().is_err() {
                 // WAL failure — reject all pending proposals and membership changes.
-                for (_, resp) in self.pending_responses.drain(..) {
+                for (_, _, resp) in self.pending_responses.drain(..) {
                     let _ = resp.send(Err(ConsensusError::ProposalQueueFull));
                 }
                 self.pending_commits.clear();
@@ -736,17 +831,60 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             }
         }
 
-        // WAL is durable — resolve pending proposals.
-        for (index, resp) in self.pending_responses.drain(..) {
-            let _ = resp.send(Ok(index));
-        }
-
         // Dispatch committed batches to the apply worker.
         let pending = std::mem::take(&mut self.pending_commits);
         self.dispatch_committed_batches(&pending).await;
 
+        // Resolve responses for entries that have reached quorum commit.
+        self.resolve_committed_responses();
+
+        // Reject responses for shards where this node lost leadership.
+        self.reject_stale_responses();
+
         // Deliver outbound messages via the transport.
         self.outbox.flush(&self.transport);
+    }
+
+    /// Resolves pending proposal responses whose entry index has been committed
+    /// by a quorum.
+    ///
+    /// A response is resolved when the shard's `commit_index` is >= the entry's
+    /// log index, meaning the entry has been replicated to a quorum and is
+    /// durable. Unresolved responses remain in the queue for future flush cycles.
+    fn resolve_committed_responses(&mut self) {
+        let mut still_pending = Vec::new();
+        for (shard_id, index, resp) in self.pending_responses.drain(..) {
+            let committed = self.shards.get(&shard_id).map(|s| s.commit_index()).unwrap_or(0);
+            if index <= committed {
+                let _ = resp.send(Ok(index));
+            } else {
+                still_pending.push((shard_id, index, resp));
+            }
+        }
+        self.pending_responses = still_pending;
+    }
+
+    /// Rejects pending proposal responses for shards where this node is no
+    /// longer the leader.
+    ///
+    /// If leadership is lost (e.g., higher-term message, network partition
+    /// healing), pending proposals will never be committed on this node. Clients
+    /// receive [`ConsensusError::NotLeader`] so they can retry on the new leader.
+    fn reject_stale_responses(&mut self) {
+        let mut still_pending = Vec::new();
+        for (shard_id, index, resp) in self.pending_responses.drain(..) {
+            let is_leader = self
+                .shards
+                .get(&shard_id)
+                .map(|s| s.state() == crate::types::NodeState::Leader)
+                .unwrap_or(false);
+            if is_leader {
+                still_pending.push((shard_id, index, resp));
+            } else {
+                let _ = resp.send(Err(ConsensusError::NotLeader));
+            }
+        }
+        self.pending_responses = still_pending;
     }
 }
 
@@ -870,7 +1008,39 @@ mod tests {
         let membership = Membership::new([NodeId(1)]);
         let config = ShardConfig::default();
         let rng = SimulatedRng::new(42);
-        Shard::new(id, NodeId(1), membership, config, clock, rng)
+        Shard::new(id, NodeId(1), membership, config, clock, rng, 0, None, 0)
+    }
+
+    /// Creates a shard, triggers election to become leader, and adds it to the
+    /// reactor. Returns the shard's clock for further time manipulation.
+    ///
+    /// For single-node clusters this is deterministic: the shard transitions
+    /// Follower → PreCandidate → Candidate → Leader in one call to
+    /// `handle_election_timeout()`.
+    fn add_leader_shard(
+        reactor: &mut Reactor<
+            Arc<SimulatedClock>,
+            SimulatedRng,
+            impl WalBackend,
+            impl NetworkTransport,
+        >,
+        id: ShardId,
+    ) {
+        let clock = reactor.clock.clone();
+        let mut shard = make_shard(id, clock);
+        // Trigger election — single-node cluster immediately becomes leader.
+        let actions = shard.handle_election_timeout();
+        assert_eq!(
+            shard.state(),
+            crate::types::NodeState::Leader,
+            "single-node shard must become leader after election timeout"
+        );
+        reactor.add_shard(id, shard);
+        reactor.process_actions(actions);
+        // Flush to persist the leader's no-op entry and advance commit.
+        // The no-op entry's PersistEntries + Committed actions were already
+        // collected by process_actions above, so flush() writes WAL and
+        // dispatches committed batches, advancing commit_index.
     }
 
     // ── Shard registration ──────────────────────────────────────────
@@ -1020,16 +1190,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_flush_resolves_pending_responses() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+    async fn test_flush_resolves_committed_responses() {
+        let (mut reactor, _tx, mut _rx) = make_reactor();
+
+        // Set up a leader shard so proposals can commit.
+        add_leader_shard(&mut reactor, ShardId(1));
+        // Flush the no-op entry from leader election.
+        reactor.flush().await;
+
+        // The leader's no-op committed at index 1. Propose via the shard
+        // to get a real entry at index 2 that also commits immediately
+        // (single-node quorum).
+        let shard = reactor.shards.get_mut(&ShardId(1)).unwrap();
+        let actions = shard.handle_propose(b"test".to_vec()).unwrap();
+        let entry_index = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::PersistEntries { entries, .. } => entries.last().map(|e| e.index),
+                _ => None,
+            })
+            .unwrap();
+        reactor.process_actions(actions);
 
         let (resp_tx, resp_rx) = oneshot::channel();
-        reactor.pending_responses.push((42, resp_tx));
+        reactor.pending_responses.push((ShardId(1), entry_index, resp_tx));
 
         reactor.flush().await;
 
         let result = resp_rx.await.expect("response channel should not be dropped");
-        assert_eq!(result.unwrap(), 42);
+        assert_eq!(result.unwrap(), entry_index);
     }
 
     #[tokio::test]
@@ -1102,7 +1291,7 @@ mod tests {
             entries: vec![entry],
         }]);
         let (resp_tx, resp_rx) = oneshot::channel();
-        reactor.pending_responses.push((1, resp_tx));
+        reactor.pending_responses.push((ShardId(1), 1, resp_tx));
 
         // Inject an append error.
         reactor.wal.inject_append_error(true);
@@ -1124,12 +1313,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_flush_wal_append_failure_recovery_after_clear() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, mut _rx) = make_reactor();
+
+        // Set up a leader shard so responses can be resolved after commit.
+        add_leader_shard(&mut reactor, ShardId(1));
+        reactor.flush().await;
 
         // First flush: inject append error.
         let entry1 = Entry {
             term: 1,
-            index: 1,
+            index: 99,
             data: Arc::from(b"first" as &[u8]),
             kind: crate::types::EntryKind::Normal,
         };
@@ -1138,7 +1331,7 @@ mod tests {
             entries: vec![entry1],
         }]);
         let (resp_tx1, resp_rx1) = oneshot::channel();
-        reactor.pending_responses.push((1, resp_tx1));
+        reactor.pending_responses.push((ShardId(1), 99, resp_tx1));
         reactor.wal.inject_append_error(true);
 
         reactor.flush().await;
@@ -1146,30 +1339,28 @@ mod tests {
         let result1 = resp_rx1.await.expect("response channel should not be dropped");
         assert!(matches!(result1, Err(ConsensusError::ProposalQueueFull)));
 
-        // Second flush: clear the error, new entries should succeed.
+        // Second flush: clear the error, propose a real entry that commits
+        // immediately (single-node quorum).
         reactor.wal.inject_append_error(false);
 
-        let entry2 = Entry {
-            term: 1,
-            index: 2,
-            data: Arc::from(b"second" as &[u8]),
-            kind: crate::types::EntryKind::Normal,
-        };
-        reactor.process_actions(vec![Action::PersistEntries {
-            shard: ShardId(1),
-            entries: vec![entry2],
-        }]);
+        let shard = reactor.shards.get_mut(&ShardId(1)).unwrap();
+        let actions = shard.handle_propose(b"second".to_vec()).unwrap();
+        let entry_index = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::PersistEntries { entries, .. } => entries.last().map(|e| e.index),
+                _ => None,
+            })
+            .unwrap();
+        reactor.process_actions(actions);
+
         let (resp_tx2, resp_rx2) = oneshot::channel();
-        reactor.pending_responses.push((2, resp_tx2));
+        reactor.pending_responses.push((ShardId(1), entry_index, resp_tx2));
 
         reactor.flush().await;
 
         let result2 = resp_rx2.await.expect("response channel should not be dropped");
-        assert_eq!(result2.unwrap(), 2);
-
-        let frames = reactor.wal.read_frames(0).expect("read_frames should succeed");
-        assert_eq!(frames.len(), 1);
-        assert_eq!(&*frames[0].data, b"second");
+        assert_eq!(result2.unwrap(), entry_index);
     }
 
     // ── handle_event: missing shard ────────────────────────────────
@@ -1360,21 +1551,31 @@ mod tests {
 
     #[tokio::test]
     async fn test_flush_async_fsync_defers_responses_until_completion() {
-        let (mut reactor, _tx, _rx) = make_async_reactor();
+        let (mut reactor, _tx, mut _rx) = make_async_reactor();
 
-        // Arrange: queue a WAL frame and a pending response.
-        let entry = Entry {
-            term: 1,
-            index: 5,
-            data: Arc::from(b"deferred" as &[u8]),
-            kind: crate::types::EntryKind::Normal,
-        };
-        reactor.process_actions(vec![Action::PersistEntries {
-            shard: ShardId(1),
-            entries: vec![entry],
-        }]);
+        // Set up a leader shard for commit-based response resolution.
+        add_leader_shard(&mut reactor, ShardId(1));
+        // Mark the async WAL as completed so the leader's no-op flush goes
+        // through, then reset for the actual test.
+        reactor.wal.set_completed(true);
+        reactor.flush().await;
+        reactor.wal.set_completed(false);
+        reactor.fsync_phase = FsyncPhase::Idle;
+
+        // Propose a real entry that commits immediately (single-node quorum).
+        let shard = reactor.shards.get_mut(&ShardId(1)).unwrap();
+        let actions = shard.handle_propose(b"deferred".to_vec()).unwrap();
+        let entry_index = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::PersistEntries { entries, .. } => entries.last().map(|e| e.index),
+                _ => None,
+            })
+            .unwrap();
+        reactor.process_actions(actions);
+
         let (resp_tx, mut resp_rx) = oneshot::channel();
-        reactor.pending_responses.push((5, resp_tx));
+        reactor.pending_responses.push((ShardId(1), entry_index, resp_tx));
 
         // Act: first flush submits async fsync, does NOT resolve responses.
         reactor.flush().await;
@@ -1390,7 +1591,7 @@ mod tests {
         // Assert: response is now resolved.
         assert_eq!(reactor.fsync_phase, FsyncPhase::Idle);
         let result = resp_rx.await.expect("response channel should not be dropped");
-        assert_eq!(result.unwrap(), 5);
+        assert_eq!(result.unwrap(), entry_index);
     }
 
     #[tokio::test]
@@ -1464,7 +1665,7 @@ mod tests {
             entries: vec![entry],
         }]);
         let (resp_tx, resp_rx) = oneshot::channel();
-        reactor.pending_responses.push((1, resp_tx));
+        reactor.pending_responses.push((ShardId(1), 1, resp_tx));
         reactor.pending_commits.push((ShardId(1), 1));
 
         // Act
@@ -1533,7 +1734,7 @@ mod tests {
             entries: vec![entry],
         }]);
         let (resp_tx, resp_rx) = oneshot::channel();
-        reactor.pending_responses.push((1, resp_tx));
+        reactor.pending_responses.push((ShardId(1), 1, resp_tx));
         reactor.pending_commits.push((ShardId(1), 1));
         reactor.wal.inject_sync_error("disk full");
 
@@ -1633,5 +1834,233 @@ mod tests {
         let msg = panic_message(&payload);
 
         assert_eq!(msg, "unknown panic");
+    }
+
+    #[test]
+    fn add_shard_with_committed_index_initializes_last_applied() {
+        let (mut reactor, _tx, _rx) = make_reactor();
+        let clock = Arc::new(SimulatedClock::new());
+        let membership = Membership::new([NodeId(1)]);
+        let config = ShardConfig::default();
+        let rng = SimulatedRng::new(42);
+
+        // Create shard with initial_committed_index = 10.
+        let shard = Shard::new(ShardId(1), NodeId(1), membership, config, clock, rng, 1, None, 10);
+
+        reactor.add_shard(ShardId(1), shard);
+
+        // The reactor should have initialized last_applied to 10.
+        assert_eq!(
+            reactor.last_applied.get(&ShardId(1)).copied(),
+            Some(10),
+            "reactor must initialize last_applied from shard commit_index"
+        );
+    }
+
+    #[test]
+    fn add_shard_with_zero_committed_index_does_not_set_last_applied() {
+        let (mut reactor, _tx, _rx) = make_reactor();
+        let shard = make_shard(ShardId(1), Arc::new(SimulatedClock::new()));
+
+        reactor.add_shard(ShardId(1), shard);
+
+        // A fresh shard with commit_index=0 should not have an entry.
+        assert_eq!(
+            reactor.last_applied.get(&ShardId(1)),
+            None,
+            "fresh shard should not have last_applied entry"
+        );
+    }
+
+    // ── Commit-deferred response resolution ─────────────────────────
+
+    #[tokio::test]
+    async fn test_response_not_sent_before_commit() {
+        let (mut reactor, _tx, mut _rx) = make_reactor();
+
+        // Register a follower shard (not leader — proposals would fail at
+        // handle_propose, but we're testing the flush path directly).
+        let clock = reactor.clock.clone();
+        let shard = make_shard(ShardId(1), clock);
+        reactor.add_shard(ShardId(1), shard);
+
+        // Manually push a pending response with an index above commit_index (0).
+        let (resp_tx, mut resp_rx) = oneshot::channel();
+        reactor.pending_responses.push((ShardId(1), 5, resp_tx));
+
+        // Flush — the entry at index 5 is NOT committed (commit_index=0) and
+        // the shard is not leader, so the response should be rejected.
+        reactor.flush().await;
+
+        let result = resp_rx.try_recv().expect("response should be available");
+        assert!(
+            matches!(result, Err(ConsensusError::NotLeader)),
+            "expected NotLeader for follower shard, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_single_node_proposal_resolves_in_one_flush() {
+        let (mut reactor, _tx, mut _rx) = make_reactor();
+
+        // Set up a leader shard (single-node cluster commits immediately).
+        add_leader_shard(&mut reactor, ShardId(1));
+        reactor.flush().await;
+
+        // Propose via the shard — single-node quorum means commit_index
+        // advances in the same action batch.
+        let shard = reactor.shards.get_mut(&ShardId(1)).unwrap();
+        let actions = shard.handle_propose(b"single-node".to_vec()).unwrap();
+        let entry_index = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::PersistEntries { entries, .. } => entries.last().map(|e| e.index),
+                _ => None,
+            })
+            .unwrap();
+        reactor.process_actions(actions);
+
+        let (resp_tx, resp_rx) = oneshot::channel();
+        reactor.pending_responses.push((ShardId(1), entry_index, resp_tx));
+
+        // Single flush should resolve the response.
+        reactor.flush().await;
+
+        let result = resp_rx.await.expect("response channel should not be dropped");
+        assert_eq!(
+            result.unwrap(),
+            entry_index,
+            "single-node proposal should resolve in one flush cycle"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_leadership_loss_rejects_pending_responses() {
+        let (mut reactor, _tx, mut _rx) = make_reactor();
+
+        // Create a 3-node shard so proposals need quorum (2 of 3) to commit.
+        let clock = reactor.clock.clone();
+        let membership = Membership::new([NodeId(1), NodeId(2), NodeId(3)]);
+        let config = ShardConfig::default();
+        let rng = SimulatedRng::new(42);
+        let mut shard =
+            Shard::new(ShardId(1), NodeId(1), membership, config, clock, rng, 0, None, 0);
+
+        // Force the shard to become leader by simulating the election process.
+        // Step 1: Pre-vote (term 0 -> PreCandidate).
+        let actions = shard.handle_election_timeout();
+        reactor.process_actions(actions);
+
+        // Step 2: Grant pre-votes from peer.
+        let actions = shard
+            .handle_message(NodeId(2), Message::PreVoteResponse { term: 1, vote_granted: true });
+        reactor.process_actions(actions);
+
+        // Step 3: Grant real vote from peer.
+        let actions =
+            shard.handle_message(NodeId(2), Message::VoteResponse { term: 1, vote_granted: true });
+        reactor.process_actions(actions);
+        assert_eq!(shard.state(), crate::types::NodeState::Leader);
+
+        reactor.add_shard(ShardId(1), shard);
+        reactor.flush().await;
+
+        // Propose an entry — it will NOT be committed because peer has not acked.
+        let shard = reactor.shards.get_mut(&ShardId(1)).unwrap();
+        let actions = shard.handle_propose(b"will-lose-leader".to_vec()).unwrap();
+        let entry_index = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::PersistEntries { entries, .. } => entries.last().map(|e| e.index),
+                _ => None,
+            })
+            .unwrap();
+        reactor.process_actions(actions);
+
+        let (resp_tx, resp_rx) = oneshot::channel();
+        reactor.pending_responses.push((ShardId(1), entry_index, resp_tx));
+
+        // Verify the entry is NOT committed (no quorum ack).
+        assert!(
+            reactor.shards.get(&ShardId(1)).unwrap().commit_index() < entry_index,
+            "entry should not be committed without quorum"
+        );
+
+        // Simulate leadership loss: deliver a message from a higher-term leader.
+        let shard = reactor.shards.get_mut(&ShardId(1)).unwrap();
+        let current_term = shard.current_term();
+        let actions = shard.handle_message(
+            NodeId(2),
+            Message::AppendEntries {
+                term: current_term + 1,
+                leader_id: NodeId(2),
+                prev_log_index: 0,
+                prev_log_term: 0,
+                entries: Arc::from(Vec::<Entry>::new()),
+                leader_commit: 0,
+                closed_ts_nanos: 0,
+            },
+        );
+        reactor.process_actions(actions);
+
+        // Verify the shard is no longer leader.
+        assert_ne!(
+            reactor.shards.get(&ShardId(1)).unwrap().state(),
+            crate::types::NodeState::Leader,
+            "shard should have stepped down after higher-term message"
+        );
+
+        // Flush — the pending response should be rejected with NotLeader.
+        reactor.flush().await;
+
+        let result = resp_rx.await.expect("response channel should not be dropped");
+        assert!(
+            matches!(result, Err(ConsensusError::NotLeader)),
+            "expected NotLeader after leadership loss, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_uncommitted_response_stays_pending_across_flushes() {
+        let (mut reactor, _tx, mut _rx) = make_reactor();
+
+        // Set up a leader shard.
+        add_leader_shard(&mut reactor, ShardId(1));
+        reactor.flush().await;
+
+        // Manually push a response for a high index that hasn't been committed.
+        let (resp_tx, mut resp_rx) = oneshot::channel();
+        reactor.pending_responses.push((ShardId(1), 999, resp_tx));
+
+        // Flush — index 999 is above commit_index, but shard is still leader.
+        reactor.flush().await;
+
+        // Response should still be pending (not resolved, not rejected).
+        assert!(
+            resp_rx.try_recv().is_err(),
+            "response for uncommitted entry should stay pending while leader"
+        );
+        assert_eq!(
+            reactor.pending_responses.len(),
+            1,
+            "uncommitted response should remain in pending_responses"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_missing_shard_rejects_pending_response() {
+        let (mut reactor, _tx, _rx) = make_reactor();
+
+        // Push a response for a shard that doesn't exist.
+        let (resp_tx, resp_rx) = oneshot::channel();
+        reactor.pending_responses.push((ShardId(99), 1, resp_tx));
+
+        reactor.flush().await;
+
+        let result = resp_rx.await.expect("response channel should not be dropped");
+        assert!(
+            matches!(result, Err(ConsensusError::NotLeader)),
+            "expected NotLeader for missing shard, got {result:?}"
+        );
     }
 }

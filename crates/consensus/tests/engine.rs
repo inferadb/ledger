@@ -51,6 +51,9 @@ fn make_engine() -> (
         fast_shard_config(),
         clock.clone(),
         SimulatedRng::new(42),
+        0,
+        None,
+        0,
     );
 
     let (engine, commit_rx, mut state_rxs) = ConsensusEngine::start(
@@ -527,6 +530,9 @@ async fn multiple_shards_independent_proposals() {
             fast_shard_config(),
             clock.clone(),
             SimulatedRng::new(1),
+            0,
+            None,
+            0,
         ),
         Shard::new(
             shard_b,
@@ -535,6 +541,9 @@ async fn multiple_shards_independent_proposals() {
             fast_shard_config(),
             clock.clone(),
             SimulatedRng::new(2),
+            0,
+            None,
+            0,
         ),
     ];
 

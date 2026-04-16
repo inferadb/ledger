@@ -111,7 +111,7 @@ mod tests {
     }
 
     fn checkpoint(committed_index: u64, term: u64) -> CheckpointFrame {
-        CheckpointFrame { committed_index, term }
+        CheckpointFrame { committed_index, term, voted_for: None }
     }
 
     #[test]

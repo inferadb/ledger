@@ -414,6 +414,9 @@ mod tests {
             ShardConfig::default(),
             clock.clone(),
             SimulatedRng::new(42),
+            0,
+            None,
+            0,
         );
         let (engine, commit_rx, _state_rx) = ConsensusEngine::start(
             vec![shard],

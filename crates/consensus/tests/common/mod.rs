@@ -38,6 +38,9 @@ impl TestCluster {
                 config.clone(),
                 clock.clone(),
                 rng,
+                0,
+                None,
+                0,
             );
             shards.insert(node_id, shard);
         }
@@ -148,7 +151,17 @@ impl TestCluster {
     pub fn add_node(&mut self, node_id: NodeId, membership: Membership) {
         let rng = SimulatedRng::new(100 + node_id.0);
         let config = ShardConfig::default();
-        let shard = Shard::new(ShardId(0), node_id, membership, config, self.clock.clone(), rng);
+        let shard = Shard::new(
+            ShardId(0),
+            node_id,
+            membership,
+            config,
+            self.clock.clone(),
+            rng,
+            0,
+            None,
+            0,
+        );
         self.shards.insert(node_id, shard);
     }
 

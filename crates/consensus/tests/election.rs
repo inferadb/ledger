@@ -462,8 +462,17 @@ fn election_membership_change_rejected_before_noop_commits() {
     let clock = Arc::new(SimulatedClock::new());
     let membership = Membership::new([NodeId(1), NodeId(2), NodeId(3)]);
     let config = ShardConfig::default();
-    let mut shard =
-        Shard::new(ShardId(0), NodeId(1), membership, config, clock.clone(), SimulatedRng::new(42));
+    let mut shard = Shard::new(
+        ShardId(0),
+        NodeId(1),
+        membership,
+        config,
+        clock.clone(),
+        SimulatedRng::new(42),
+        0,
+        None,
+        0,
+    );
 
     // Trigger election timeout to start pre-vote.
     clock.advance(std::time::Duration::from_secs(2));
@@ -600,6 +609,9 @@ fn election_auto_promote_disabled_does_not_promote_caught_up_learner() {
                 config.clone(),
                 clock.clone(),
                 rng,
+                0,
+                None,
+                0,
             );
             shards.insert(node_id, shard);
         }

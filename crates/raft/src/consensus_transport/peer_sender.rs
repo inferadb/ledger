@@ -17,7 +17,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -26,6 +26,7 @@ use inferadb_ledger_consensus::transport::OutboundMessage;
 use parking_lot::Mutex;
 use tokio::{sync::Notify, task::JoinHandle};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 
 /// Default capacity of each peer's send queue. Chosen to absorb bursts
@@ -56,7 +57,7 @@ pub(crate) struct PeerSender {
 pub(super) struct Inner {
     pub(super) queue: Mutex<VecDeque<OutboundMessage>>,
     pub(super) notify: Notify,
-    pub(super) shutdown: AtomicBool,
+    pub(super) shutdown_token: CancellationToken,
     pub(super) depth: AtomicUsize,
     pub(super) dropped_count: AtomicUsize,
     pub(super) capacity: usize,
@@ -80,7 +81,7 @@ impl PeerSender {
         let inner = Arc::new(Inner {
             queue: Mutex::new(VecDeque::with_capacity(PEER_QUEUE_CAPACITY)),
             notify: Notify::new(),
-            shutdown: AtomicBool::new(false),
+            shutdown_token: CancellationToken::new(),
             depth: AtomicUsize::new(0),
             dropped_count: AtomicUsize::new(0),
             capacity: PEER_QUEUE_CAPACITY,
@@ -140,8 +141,7 @@ impl PeerSender {
 
 impl Drop for PeerSender {
     fn drop(&mut self) {
-        self.inner.shutdown.store(true, Ordering::Release);
-        self.inner.notify.notify_one();
+        self.inner.shutdown_token.cancel();
 
         // Count still-queued messages as dropped due to shutdown.
         let remaining = {
@@ -222,12 +222,16 @@ fn drop_queue(inner: &Arc<Inner>, reason: &'static str) {
     }
 }
 
-/// Wait for `d` or until the shutdown flag flips. Returns `true` if the
+/// Wait for `d` or until shutdown is cancelled. Returns `true` if
 /// shutdown was observed (caller should exit), `false` if the sleep elapsed.
+///
+/// Uses [`CancellationToken::cancelled`] which returns immediately if the
+/// token is already cancelled, avoiding the lost-notification race that
+/// occurs with `AtomicBool` + `Notify`.
 async fn wait_with_shutdown(inner: &Arc<Inner>, d: Duration) -> bool {
     tokio::select! {
-        () = tokio::time::sleep(d) => inner.shutdown.load(Ordering::Acquire),
-        () = inner.notify.notified() => inner.shutdown.load(Ordering::Acquire),
+        () = tokio::time::sleep(d) => inner.shutdown_token.is_cancelled(),
+        () = inner.shutdown_token.cancelled() => true,
     }
 }
 
@@ -241,7 +245,7 @@ async fn run_drain_loop(
     let mut backoff = INITIAL_BACKOFF;
 
     'outer: loop {
-        if inner.shutdown.load(Ordering::Acquire) {
+        if inner.shutdown_token.is_cancelled() {
             break;
         }
 
@@ -315,7 +319,7 @@ async fn run_drain_loop(
         // Inner drain loop. Exits on shutdown (outer loop exit), ack-task
         // completion (reconnect), or write-side error (reconnect).
         let stream_broken = loop {
-            if inner.shutdown.load(Ordering::Acquire) {
+            if inner.shutdown_token.is_cancelled() {
                 break false; // full shutdown
             }
 
@@ -331,10 +335,11 @@ async fn run_drain_loop(
             if drained.is_empty() {
                 crate::metrics::record_peer_send_queue_depth(inner.peer_id, 0);
 
-                // Wait for either a push-notify, an ack-task completion
-                // (stream broken), or shutdown via notify.
+                // Wait for either a push-notify, shutdown cancellation,
+                // or ack-task completion (stream broken).
                 tokio::select! {
                     biased;
+                    () = inner.shutdown_token.cancelled() => break false,
                     () = inner.notify.notified() => continue,
                     res = &mut ack_task => {
                         // ack task exited — stream is broken.
@@ -432,7 +437,7 @@ mod tests {
         let inner = Arc::new(Inner {
             queue: Mutex::new(VecDeque::with_capacity(capacity)),
             notify: Notify::new(),
-            shutdown: AtomicBool::new(false),
+            shutdown_token: CancellationToken::new(),
             depth: AtomicUsize::new(0),
             dropped_count: AtomicUsize::new(0),
             capacity,

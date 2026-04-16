@@ -345,7 +345,7 @@ fn checkpoint_frame_written_through_encrypted_backend_is_readable() {
     provider.set_key(CHECKPOINT_SHARD_ID.0, 0, [0xCC; 32]);
     let mut wal = encrypted_wal(Arc::clone(&provider));
 
-    let checkpoint = CheckpointFrame { committed_index: 42, term: 3 };
+    let checkpoint = CheckpointFrame { committed_index: 42, term: 3, voted_for: None };
 
     // Act
     wal.write_checkpoint(&checkpoint).unwrap();

@@ -13,6 +13,20 @@ use crate::{
 /// An action the reactor should execute on behalf of a shard.
 #[derive(Debug)]
 pub enum Action {
+    /// Persist the current term and votedFor to stable storage.
+    ///
+    /// The Raft paper (Figure 2) requires `currentTerm` and `votedFor` to be
+    /// updated on stable storage before responding to RPCs. The reactor must
+    /// process this action (write checkpoint + fsync) **before** flushing any
+    /// [`Send`](Action::Send) actions from the same batch.
+    PersistTermState {
+        /// Shard whose term state changed.
+        shard: ShardId,
+        /// The current term to persist.
+        term: u64,
+        /// The candidate that received our vote in this term, or `None`.
+        voted_for: Option<NodeId>,
+    },
     /// Send a message to a peer node.
     Send {
         /// Destination node.

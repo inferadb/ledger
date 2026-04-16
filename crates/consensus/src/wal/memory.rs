@@ -310,7 +310,7 @@ mod tests {
     fn test_checkpoint_write_then_read_roundtrips() {
         let mut wal = InMemoryWalBackend::new();
 
-        let cp = CheckpointFrame { committed_index: 42, term: 3 };
+        let cp = CheckpointFrame { committed_index: 42, term: 3, voted_for: None };
         wal.write_checkpoint(&cp).unwrap();
         wal.sync().unwrap();
 
@@ -321,14 +321,17 @@ mod tests {
     fn test_checkpoint_multiple_writes_returns_last() {
         let mut wal = InMemoryWalBackend::new();
 
-        wal.write_checkpoint(&CheckpointFrame { committed_index: 1, term: 1 }).unwrap();
-        wal.write_checkpoint(&CheckpointFrame { committed_index: 5, term: 2 }).unwrap();
-        wal.write_checkpoint(&CheckpointFrame { committed_index: 10, term: 2 }).unwrap();
+        wal.write_checkpoint(&CheckpointFrame { committed_index: 1, term: 1, voted_for: None })
+            .unwrap();
+        wal.write_checkpoint(&CheckpointFrame { committed_index: 5, term: 2, voted_for: None })
+            .unwrap();
+        wal.write_checkpoint(&CheckpointFrame { committed_index: 10, term: 2, voted_for: None })
+            .unwrap();
         wal.sync().unwrap();
 
         assert_eq!(
             wal.last_checkpoint().unwrap(),
-            Some(CheckpointFrame { committed_index: 10, term: 2 })
+            Some(CheckpointFrame { committed_index: 10, term: 2, voted_for: None })
         );
     }
 
@@ -344,14 +347,16 @@ mod tests {
         let mut wal = InMemoryWalBackend::new();
 
         wal.append(&[frame(1, b"entry-1"), frame(2, b"entry-2")]).unwrap();
-        wal.write_checkpoint(&CheckpointFrame { committed_index: 2, term: 1 }).unwrap();
+        wal.write_checkpoint(&CheckpointFrame { committed_index: 2, term: 1, voted_for: None })
+            .unwrap();
         wal.append(&[frame(1, b"entry-3")]).unwrap();
-        wal.write_checkpoint(&CheckpointFrame { committed_index: 3, term: 1 }).unwrap();
+        wal.write_checkpoint(&CheckpointFrame { committed_index: 3, term: 1, voted_for: None })
+            .unwrap();
         wal.sync().unwrap();
 
         assert_eq!(
             wal.last_checkpoint().unwrap(),
-            Some(CheckpointFrame { committed_index: 3, term: 1 })
+            Some(CheckpointFrame { committed_index: 3, term: 1, voted_for: None })
         );
 
         // Regular frames are still all readable.
@@ -368,7 +373,8 @@ mod tests {
     fn test_checkpoint_unsync_not_visible() {
         let mut wal = InMemoryWalBackend::new();
 
-        wal.write_checkpoint(&CheckpointFrame { committed_index: 10, term: 1 }).unwrap();
+        wal.write_checkpoint(&CheckpointFrame { committed_index: 10, term: 1, voted_for: None })
+            .unwrap();
         // Checkpoint is pending (not synced), so last_checkpoint scans durable only.
         assert!(wal.last_checkpoint().unwrap().is_none());
     }

@@ -24,7 +24,7 @@ fn frame(shard: u64, index: u64, term: u64, data: &[u8]) -> WalFrame {
 }
 
 fn checkpoint(committed: u64, term: u64) -> CheckpointFrame {
-    CheckpointFrame { committed_index: committed, term }
+    CheckpointFrame { committed_index: committed, term, voted_for: None }
 }
 
 fn applied(pairs: &[(u64, u64)]) -> HashMap<ShardId, u64> {

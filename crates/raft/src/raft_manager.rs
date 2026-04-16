@@ -59,6 +59,7 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
+use inferadb_ledger_consensus::WalBackend as _;
 use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_state::{
     BlockArchive, StateLayer,
@@ -923,6 +924,48 @@ impl RaftManager {
             inferadb_ledger_consensus::types::Membership::new(voter_ids)
         };
 
+        let wal_dir = self.storage_manager.region_dir(region).join("wal");
+        let wal =
+            inferadb_ledger_consensus::wal::SegmentedWalBackend::open(&wal_dir).map_err(|e| {
+                RaftManagerError::Storage { region, message: format!("failed to open WAL: {e}") }
+            })?;
+
+        // Recover persisted term + votedFor from the WAL checkpoint (Raft
+        // Figure 2). On first boot the WAL has no checkpoint, so we default
+        // to term=0, voted_for=None.
+        let (initial_term, initial_voted_for, initial_committed_index) = match wal.last_checkpoint()
+        {
+            Ok(Some(cp)) => {
+                info!(
+                    region = region.as_str(),
+                    term = cp.term,
+                    voted_for = ?cp.voted_for,
+                    committed_index = cp.committed_index,
+                    "Recovered Raft term state from WAL checkpoint"
+                );
+                (
+                    cp.term,
+                    cp.voted_for.map(inferadb_ledger_consensus::types::NodeId),
+                    cp.committed_index,
+                )
+            },
+            Ok(None) => {
+                info!(
+                    region = region.as_str(),
+                    "No WAL checkpoint found — starting at term 0 (first boot)"
+                );
+                (0, None, 0)
+            },
+            Err(e) => {
+                warn!(
+                    region = region.as_str(),
+                    error = %e,
+                    "Failed to read WAL checkpoint — starting at term 0 for safety"
+                );
+                (0, None, 0)
+            },
+        };
+
         let consensus_shard = inferadb_ledger_consensus::Shard::new(
             shard_id,
             inferadb_ledger_consensus::types::NodeId(self.config.node_id),
@@ -930,6 +973,9 @@ impl RaftManager {
             shard_config,
             inferadb_ledger_consensus::SystemClock,
             inferadb_ledger_consensus::rng::SystemRng,
+            initial_term,
+            initial_voted_for,
+            initial_committed_index,
         );
 
         let consensus_transport = crate::consensus_transport::GrpcConsensusTransport::new(
@@ -956,12 +1002,6 @@ impl RaftManager {
                 }
             }
         }
-
-        let wal_dir = self.storage_manager.region_dir(region).join("wal");
-        let wal =
-            inferadb_ledger_consensus::wal::SegmentedWalBackend::open(&wal_dir).map_err(|e| {
-                RaftManagerError::Storage { region, message: format!("failed to open WAL: {e}") }
-            })?;
         let (engine, commit_rx, state_watchers) = inferadb_ledger_consensus::ConsensusEngine::start(
             vec![consensus_shard],
             wal,

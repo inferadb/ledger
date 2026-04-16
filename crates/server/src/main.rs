@@ -189,6 +189,24 @@ async fn main() -> Result<(), ServerError> {
     let graceful_shutdown = graceful_shutdown.with_handle(node.handle.clone());
     let shutdown_handle = tokio::spawn(async move {
         shutdown::shutdown_signal().await;
+
+        // Spawn a watchdog THE MOMENT SIGTERM is received. This forces
+        // process exit after 30 seconds regardless of what happens during
+        // the graceful shutdown sequence. The 30-second budget covers:
+        //   5s  Kubernetes endpoint removal wait
+        //  15s  Load balancer drain
+        //  10s  Grace for pre-shutdown tasks + WAL flush
+        // Background tasks (compactor, GC, orphan cleanup) lack explicit
+        // shutdown signals and can keep the tokio runtime alive
+        // indefinitely; the watchdog is the hard backstop.
+        // Uses eprintln (not tracing) so the message survives even if
+        // the tracing subscriber is broken.
+        tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            eprintln!("Shutdown watchdog: forcing process exit after 30s grace period");
+            std::process::exit(0);
+        });
+
         graceful_shutdown
             .execute(|| async move {
                 // Consensus engine shutdown is handled by dropping the handle.
