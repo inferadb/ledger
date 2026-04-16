@@ -638,17 +638,30 @@ create_org() {
     return 1
   fi
 
-  # Phase 2: VerifyEmailCode
-  local verify_result
-  verify_result=$(grpcurl -plaintext \
-    -d "{\"email\": \"$email\", \"code\": \"$code\", \"region\": $region}" \
-    "$working_addr" \
-    ledger.v1.UserService/VerifyEmailCode 2>&1) || true
-
-  local onboarding_token
-  onboarding_token=$(echo "$verify_result" | jq -r '.newUser.onboardingToken // empty' 2>/dev/null || true)
+  # Phase 2: VerifyEmailCode — retry across nodes (regional leader may differ)
+  local onboarding_token=""
+  local verify_attempt=0
+  while [[ -z "$onboarding_token" && $verify_attempt -lt 30 ]]; do
+    for port in $(seq "$BASE_PORT" $((BASE_PORT + 9))); do
+      if ! nc -z 127.0.0.1 "$port" 2>/dev/null; then
+        continue
+      fi
+      local vaddr="127.0.0.1:$port"
+      local verify_result
+      verify_result=$(grpcurl -plaintext \
+        -d "{\"email\": \"$email\", \"code\": \"$code\", \"region\": $region}" \
+        "$vaddr" \
+        ledger.v1.UserService/VerifyEmailCode 2>&1) || true
+      onboarding_token=$(echo "$verify_result" | jq -r '.newUser.onboardingToken // empty' 2>/dev/null || true)
+      if [[ -n "$onboarding_token" ]]; then
+        break 2
+      fi
+    done
+    verify_attempt=$((verify_attempt + 1))
+    sleep 0.5
+  done
   if [[ -z "$onboarding_token" ]]; then
-    log_error "VerifyEmailCode failed: $verify_result"
+    log_error "VerifyEmailCode failed after $verify_attempt attempts"
     return 1
   fi
 
