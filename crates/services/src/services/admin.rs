@@ -3067,7 +3067,8 @@ async fn add_node_to_data_regions(
                     continue;
                 },
             };
-            forward_data_region_join(manager, leader_id, &leader_addr, node_id, address).await;
+            forward_data_region_join(manager, region, leader_id, &leader_addr, node_id, address)
+                .await;
         }
     }
 
@@ -3128,52 +3129,96 @@ async fn add_member_to_region(
     }
 }
 
-/// Forwards a data region join request to the data region leader via JoinCluster RPC.
+/// Forwards a data region learner-add to the DR leader via `SubmitRegionalProposal`.
 ///
-/// The JoinCluster RPC is reused — the leader handles it the same way as a
-/// GLOBAL join but the data region membership change happens through
-/// `add_node_to_data_regions` on the receiving leader.
+/// Sends an `AddRegionLearner` request to the DR leader, which intercepts it
+/// in `submit_regional_proposal` and calls `add_learner` + `promote_voter`
+/// directly on the region's consensus handle. This avoids re-triggering
+/// `JoinCluster` on the remote node.
 async fn forward_data_region_join(
     manager: &inferadb_ledger_raft::raft_manager::RaftManager,
+    region: inferadb_ledger_types::Region,
     leader_id: u64,
     leader_addr: &str,
     node_id: u64,
     address: &str,
 ) {
-    let channel = match manager.registry().get_or_register(leader_id, leader_addr).await {
-        Ok(peer) => peer.channel(),
+    let peer = match manager.registry().get_or_register(leader_id, leader_addr).await {
+        Ok(p) => p,
         Err(e) => {
-            tracing::warn!(leader_id, leader_addr, error = %e, "Failed to register data region leader via registry");
+            tracing::warn!(
+                leader_id,
+                leader_addr,
+                error = %e,
+                "Failed to register data region leader via registry"
+            );
             return;
         },
     };
 
-    // Use JoinCluster on the leader — the leader's JoinCluster handler will
-    // call add_node_to_data_regions which adds this node to data regions where
-    // the leader IS the data region leader.
-    let mut client =
-        inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::new(channel);
+    let learner_request = inferadb_ledger_raft::types::LedgerRequest::AddRegionLearner {
+        node_id,
+        address: address.to_string(),
+    };
+    let request_payload = match inferadb_ledger_types::encode(&learner_request) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::error!(
+                region = region.as_str(),
+                node_id,
+                error = %e,
+                "Failed to serialize AddRegionLearner request"
+            );
+            return;
+        },
+    };
+
+    let proto_region = inferadb_ledger_proto::proto::Region::from(region);
+    let mut client = peer.raft_client();
     match client
-        .join_cluster(inferadb_ledger_proto::proto::JoinClusterRequest {
-            node_id,
-            address: address.to_string(),
+        .submit_regional_proposal(inferadb_ledger_proto::proto::RegionalProposalRequest {
+            region: Some(proto_region as i32),
+            request_payload,
+            caller: 0,
+            timeout_ms: 30_000,
         })
         .await
     {
         Ok(resp) => {
             let inner = resp.into_inner();
-            if inner.success {
-                tracing::info!(node_id, "Data region join forwarded successfully");
+            if inner.status_code == 0 {
+                if inner.error_message.is_empty() {
+                    tracing::info!(
+                        region = region.as_str(),
+                        node_id,
+                        "Data region learner-add forwarded successfully"
+                    );
+                } else {
+                    // Partial success (e.g. learner added but promotion pending).
+                    tracing::info!(
+                        region = region.as_str(),
+                        node_id,
+                        message = %inner.error_message,
+                        "Data region learner-add forwarded with note"
+                    );
+                }
             } else {
-                tracing::info!(
+                tracing::warn!(
+                    region = region.as_str(),
                     node_id,
-                    message = %inner.message,
-                    "Data region join forwarded (already member or non-leader)"
+                    status = inner.status_code,
+                    error = %inner.error_message,
+                    "Data region learner-add forwarded but failed"
                 );
             }
         },
         Err(e) => {
-            tracing::warn!(node_id, error = %e, "Failed to forward data region join");
+            tracing::warn!(
+                region = region.as_str(),
+                node_id,
+                error = %e,
+                "Failed to forward data region learner-add"
+            );
         },
     }
 }

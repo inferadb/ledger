@@ -6661,6 +6661,24 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 (LedgerResponse::BatchWrite { responses }, last_vault_entry)
             },
+
+            LedgerRequest::AddRegionLearner { node_id, .. } => {
+                // AddRegionLearner is intercepted by submit_regional_proposal
+                // and handled as a direct membership change. It should never
+                // reach the apply handler through the Raft log.
+                tracing::error!(
+                    node_id,
+                    "AddRegionLearner reached the apply handler — this is a bug"
+                );
+                (
+                    LedgerResponse::Error {
+                        code: inferadb_ledger_types::ErrorCode::Internal,
+                        message: "AddRegionLearner must not be proposed to the Raft log"
+                            .to_string(),
+                    },
+                    None,
+                )
+            },
         }
     }
 

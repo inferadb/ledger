@@ -688,6 +688,20 @@ pub enum LedgerRequest {
     /// The apply handler decrypts using the `OrgShredKey` from state. If the
     /// key has been destroyed (org purged), the entry is skipped.
     EncryptedOrgSystem(crate::entry_crypto::EncryptedOrgSystemRequest),
+
+    /// Adds a node as a learner to a data region's Raft group.
+    ///
+    /// Sent via `SubmitRegionalProposal` from the GLOBAL leader to the data
+    /// region leader when the GLOBAL leader is not the DR leader. The
+    /// `submit_regional_proposal` handler intercepts this variant and calls
+    /// `add_learner` + `promote_voter` directly (membership changes bypass
+    /// the Raft log). This variant must never reach the apply handler.
+    AddRegionLearner {
+        /// Node ID to add as a learner (then promote to voter).
+        node_id: u64,
+        /// Network address of the node (host:port).
+        address: String,
+    },
 }
 
 /// System-level requests that modify the `_system` organization.
@@ -4004,6 +4018,9 @@ mod tests {
             LedgerRequest::System { .. } => RaftScope::Global,
             LedgerRequest::EncryptedUserSystem(_) => RaftScope::Regional,
             LedgerRequest::EncryptedOrgSystem(_) => RaftScope::Regional,
+            // AddRegionLearner is intercepted by submit_regional_proposal
+            // before reaching the Raft log. It carries no PII.
+            LedgerRequest::AddRegionLearner { .. } => RaftScope::Global,
         }
     }
 

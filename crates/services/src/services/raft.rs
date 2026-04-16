@@ -89,6 +89,125 @@ impl RaftService {
             host == caller_ip
         })
     }
+
+    /// Handles an `AddRegionLearner` request by calling `add_learner` and
+    /// `promote_voter` directly on the data region's consensus handle.
+    ///
+    /// This is a membership change, not a Raft log proposal, so it bypasses
+    /// `propose_and_wait`. The caller (GLOBAL leader) sends this when it is
+    /// not the DR leader and needs the DR leader to add the new node.
+    async fn handle_add_region_learner(
+        &self,
+        group: &inferadb_ledger_raft::raft_manager::RegionGroup,
+        region: inferadb_ledger_types::Region,
+        node_id: u64,
+        address: &str,
+    ) -> Result<Response<RegionalProposalResult>, Status> {
+        // Register the node's transport channel so the DR leader can
+        // replicate to it.
+        if let Some(transport) = group.consensus_transport()
+            && let Err(e) = transport.set_peer_via_registry(node_id, address).await
+        {
+            tracing::warn!(
+                region = region.as_str(),
+                node_id,
+                address,
+                error = %e,
+                "Failed to register node transport for AddRegionLearner",
+            );
+        }
+
+        // Add learner with retries (membership changes can conflict with
+        // in-progress changes).
+        let mut add_err = None;
+        for attempt in 0..5u32 {
+            match group.handle().add_learner(node_id, false).await {
+                Ok(()) => {
+                    add_err = None;
+                    break;
+                },
+                Err(e) if e.to_string().contains("already undergoing") => {
+                    add_err = Some(e);
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * u64::from(attempt + 1),
+                    ))
+                    .await;
+                },
+                Err(e) => {
+                    return Ok(Response::new(RegionalProposalResult {
+                        response_payload: Vec::new(),
+                        status_code: tonic::Code::Internal as i32,
+                        error_message: format!("add_learner failed: {e}"),
+                        committed_index: 0,
+                    }));
+                },
+            }
+        }
+        if let Some(e) = add_err {
+            return Ok(Response::new(RegionalProposalResult {
+                response_payload: Vec::new(),
+                status_code: tonic::Code::Internal as i32,
+                error_message: format!("add_learner retries exhausted: {e}"),
+                committed_index: 0,
+            }));
+        }
+
+        // Brief delay for membership commit before promotion.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Promote to voter with retries.
+        for attempt in 0..5u32 {
+            match group.handle().promote_voter(node_id).await {
+                Ok(()) => {
+                    tracing::info!(
+                        region = region.as_str(),
+                        node_id,
+                        "AddRegionLearner: node added and promoted to voter"
+                    );
+                    return Ok(Response::new(RegionalProposalResult {
+                        response_payload: Vec::new(),
+                        status_code: 0,
+                        error_message: String::new(),
+                        committed_index: group.handle().commit_index(),
+                    }));
+                },
+                Err(e) if e.to_string().contains("already undergoing") => {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * u64::from(attempt + 1),
+                    ))
+                    .await;
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        region = region.as_str(),
+                        node_id,
+                        error = %e,
+                        "AddRegionLearner: learner added but promote_voter failed"
+                    );
+                    // Learner was added; DR scheduler will reconcile promotion.
+                    return Ok(Response::new(RegionalProposalResult {
+                        response_payload: Vec::new(),
+                        status_code: 0,
+                        error_message: format!("learner added but promotion failed: {e}"),
+                        committed_index: group.handle().commit_index(),
+                    }));
+                },
+            }
+        }
+
+        // Retries exhausted on promote_voter — learner was added.
+        tracing::warn!(
+            region = region.as_str(),
+            node_id,
+            "AddRegionLearner: learner added but promote_voter retries exhausted"
+        );
+        Ok(Response::new(RegionalProposalResult {
+            response_payload: Vec::new(),
+            status_code: 0,
+            error_message: "learner added but promotion retries exhausted".to_string(),
+            committed_index: group.handle().commit_index(),
+        }))
+    }
 }
 
 #[tonic::async_trait]
@@ -261,6 +380,12 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
         // Deserialize the proposal payload.
         let ledger_request: LedgerRequest = decode(&req.request_payload)
             .map_err(|e| Status::invalid_argument(format!("deserialize request: {e}")))?;
+
+        // AddRegionLearner is a membership change — handle it directly via
+        // the consensus handle instead of proposing through the Raft log.
+        if let LedgerRequest::AddRegionLearner { node_id, ref address } = ledger_request {
+            return self.handle_add_region_learner(&group, region, node_id, address).await;
+        }
 
         let payload = RaftPayload::new(ledger_request, req.caller);
         let timeout = std::time::Duration::from_millis(u64::from(req.timeout_ms));
