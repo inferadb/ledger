@@ -299,7 +299,7 @@ impl ClientConfig {
 
 // Serde default functions for RetryPolicy
 const fn default_max_attempts() -> u32 {
-    3
+    5
 }
 fn default_initial_backoff() -> Duration {
     Duration::from_millis(100)
@@ -319,7 +319,23 @@ const fn default_jitter() -> f64 {
 #[builder(derive(Debug))]
 pub struct RetryPolicy {
     /// Maximum number of retry attempts (including initial attempt).
-    #[builder(default = 3)]
+    ///
+    /// Defaults to 5. This accommodates cold-start redirect routing
+    /// (wrong-leader hit → `NotLeader` hint applied → retry on the correct
+    /// leader) plus 3 additional attempts for transient failures during
+    /// the direct-leader path.
+    ///
+    /// Worst-case budget accounting under leader flap during a cold-start
+    /// cross-region write:
+    ///   attempt 1: hit wrong-region gateway → `NotLeader` redirect
+    ///   attempt 2: hit region's first member (stale leader) → `NotLeader`
+    ///   attempt 3: hit new leader, brief transitional state → transient fail
+    ///   attempt 4: success
+    /// 4 of 5 attempts consumed with 1 transient-failure reserve. Callers
+    /// that expect aggressive leader flaps should raise this ceiling; the
+    /// default 5 is the tradeoff between worst-case coverage and fast-fail
+    /// behavior for sustained outages.
+    #[builder(default = 5)]
     #[serde(default = "default_max_attempts")]
     pub max_attempts: u32,
 
@@ -832,7 +848,13 @@ mod tests {
     #[test]
     fn test_retry_policy_defaults() {
         let policy = RetryPolicy::default();
-        assert_eq!(policy.max_attempts, 3);
+        // 5 attempts: 1 redirect (cold-start) + 1 successful retry on the
+        // correct leader + 3 attempts in reserve for transient failures.
+        assert_eq!(policy.max_attempts, 5);
+        assert!(
+            policy.max_attempts >= 5,
+            "max_attempts must accommodate cold-start redirect + transient retries",
+        );
         assert_eq!(policy.initial_backoff, Duration::from_millis(100));
         assert_eq!(policy.max_backoff, Duration::from_secs(10));
         assert_eq!(policy.multiplier, 2.0);
@@ -871,7 +893,7 @@ mod tests {
         let json = "{}";
         let policy: RetryPolicy = serde_json::from_str(json).expect("deserialize");
 
-        assert_eq!(policy.max_attempts, 3);
+        assert_eq!(policy.max_attempts, 5);
         assert_eq!(policy.initial_backoff, Duration::from_millis(100));
         assert_eq!(policy.max_backoff, Duration::from_secs(10));
         assert_eq!(policy.multiplier, 2.0);

@@ -110,6 +110,13 @@ async fn route_request(&self, organization_slug: OrganizationSlug) -> LedgerClie
 }
 ```
 
+Within a region, the SDK redirects directly to the regional Raft leader via
+`NotLeader` hints — the Ledger server does not proxy or forward client
+requests across nodes on the client's behalf. Clients must therefore have
+direct network reachability to every node in the target region.
+
+See: [Redirect-Based Client Routing Architecture](runbooks/architecture-redirect-routing.md).
+
 ## Cross-Region Considerations
 
 ### Data Residency

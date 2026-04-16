@@ -21,6 +21,7 @@
 //! | `ledger_sdk_connections_total` | Counter | `endpoint`, `event` | Connection lifecycle events |
 //! | `ledger_sdk_leader_watch_updates_total` | Counter | `region` | Leader updates received over the WatchLeader stream |
 //! | `ledger_sdk_leader_watch_reconnects_total` | Counter | `region` | WatchLeader stream reconnect attempts |
+//! | `ledger_sdk_redirect_retries_total` | Counter | `region` | Retries triggered by a leader redirect hint |
 //!
 //! # Example
 //!
@@ -138,6 +139,15 @@ pub trait SdkMetrics: Send + Sync + fmt::Debug {
     /// stale relative to the currently-cached term. `source` is one of
     /// `"hint"` or `"watch"`.
     fn leader_stale_term_rejected(&self, _region: &str, _source: &'static str) {}
+
+    /// Called when a retry is triggered by a leader redirect hint.
+    ///
+    /// Observes the cost of redirect-based routing: how often clients
+    /// receive `NotLeader` + hint responses and have to reconnect to the
+    /// correct regional leader. Expected to be non-zero on cold-start
+    /// for cross-region writes; should trend toward zero on warm paths
+    /// with `preferred_region` configured.
+    fn redirect_retry(&self, _region: &str) {}
 }
 
 /// No-op metrics implementation with zero overhead.
@@ -190,6 +200,8 @@ mod metric_names {
     /// Cache writes rejected for carrying a stale term.
     pub const LEADER_STALE_TERM_REJECTED_TOTAL: &str =
         "ledger_sdk_leader_stale_term_rejected_total";
+    /// Retries triggered by a leader redirect hint.
+    pub const REDIRECT_RETRIES_TOTAL: &str = "ledger_sdk_redirect_retries_total";
 }
 
 impl SdkMetrics for MetricsSdkMetrics {
@@ -280,6 +292,14 @@ impl SdkMetrics for MetricsSdkMetrics {
             metric_names::LEADER_STALE_TERM_REJECTED_TOTAL,
             "region" => region.to_owned(),
             "source" => source,
+        )
+        .increment(1);
+    }
+
+    fn redirect_retry(&self, region: &str) {
+        metrics::counter!(
+            metric_names::REDIRECT_RETRIES_TOTAL,
+            "region" => region.to_owned(),
         )
         .increment(1);
     }

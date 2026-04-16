@@ -11,36 +11,52 @@
 //!                    +-------------+-------------+
 //!                    |                           |
 //!               Local region              Remote region
-//!              (RegionContext)          (ForwardInfo)
+//!              (RegionContext)           (RedirectInfo)
 //! ```
 //!
 //! Every server is multi-region capable. A single-region deployment is simply
 //! a `RegionResolverService` with one region (GLOBAL).
 //!
-//! ## Request Forwarding
+//! ## Cross-region redirects
 //!
-//! When an organization is assigned to a region on a different node, the resolver
-//! returns forwarding information that services can use to proxy the request
-//! via gRPC to the correct node.
+//! When an organization is assigned to a region hosted on a different node,
+//! the resolver returns [`RedirectInfo`]. Services translate this into a
+//! `NotLeader` `Status` so the SDK reconnects directly to an in-region node
+//! — the server never proxies client requests across regions.
 
 use std::sync::Arc;
 
 use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_raft::{
-    ConsensusHandle, LeaderLease,
-    batching::BatchWriterHandle,
-    log_storage::AppliedStateAccessor,
-    metrics,
-    raft_manager::RaftManager,
-    region_router::{RegionRouter, RoutingInfo},
+    ConsensusHandle, LeaderLease, batching::BatchWriterHandle, log_storage::AppliedStateAccessor,
+    metrics, raft_manager::RaftManager,
 };
-use inferadb_ledger_state::{BlockArchive, StateLayer};
+use inferadb_ledger_state::{BlockArchive, StateLayer, system::OrganizationStatus};
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{OrganizationId, Region};
 use tokio::sync::{broadcast, watch};
 use tonic::Status;
 
 use super::error_classify;
+
+/// Routing information for an organization.
+///
+/// Identifies the region hosting the organization. Used in [`RedirectInfo`]
+/// to surface the addressing information SDK clients need to retry against
+/// the correct node.
+#[derive(Debug, Clone)]
+pub struct RoutingInfo {
+    /// Region hosting this organization.
+    pub region: Region,
+    /// Hint for current leader (may be stale).
+    ///
+    /// Always `None` for cross-region redirects: this node has no
+    /// authoritative view of the remote region's leadership. Clients that
+    /// receive a `NotLeader` carrying this routing info must fall back to
+    /// `ResolveRegionLeader` / `WatchLeader` on an in-region node to learn
+    /// the current leader.
+    pub leader_hint: Option<String>,
+}
 
 /// Resolved region context for handling a request locally.
 ///
@@ -81,30 +97,31 @@ pub struct RegionContext {
     pub applied_index_rx: Option<watch::Receiver<u64>>,
 }
 
-/// Information for forwarding a request to a remote region.
+/// Information for redirecting a request to a remote region.
 ///
 /// When an organization is on a region hosted by a different node, this struct
-/// provides the routing information needed to forward the request via gRPC.
+/// provides the routing information services use to build a `NotLeader` hint
+/// so the SDK reconnects directly to an in-region node.
 #[derive(Debug, Clone)]
-pub struct RemoteRegionInfo {
+pub struct RedirectInfo {
     /// The region hosting the organization.
     pub region: Region,
     /// The organization being accessed (internal identifier).
     pub organization: OrganizationId,
-    /// Routing information including node addresses and leader hint.
+    /// Routing information including the target region and leader hint.
     pub routing: RoutingInfo,
 }
 
 /// Result of resolving an organization to its region.
 ///
 /// Either the region is local (can be handled directly) or remote
-/// (needs to be forwarded via gRPC).
+/// (the SDK must reconnect to an in-region node).
 #[derive(Debug)]
 pub enum ResolveResult {
     /// Region is available locally. Process the request directly.
     Local(RegionContext),
-    /// Region is on a remote node. Forward the request via gRPC.
-    Remote(RemoteRegionInfo),
+    /// Region is on a remote node. Return `NotLeader` + hint; SDK reconnects directly.
+    Redirect(RedirectInfo),
 }
 
 impl std::fmt::Debug for RegionContext {
@@ -140,24 +157,24 @@ pub trait RegionResolver: Send + Sync {
     ///
     /// Returns an error if:
     /// - The organization is not found in routing tables
-    /// - The region is on a remote node and forwarding is not supported
+    /// - The region is on a remote node and cross-region redirects are not supported
     fn resolve(&self, organization: OrganizationId) -> Result<RegionContext, Status>;
 
-    /// Resolves an organization, supporting remote regions.
+    /// Resolves an organization, supporting cross-region redirects.
     ///
-    /// Unlike `resolve()`, this method can return forwarding information
+    /// Unlike `resolve()`, this method can return redirect information
     /// when the organization is on a remote region, allowing services to
-    /// proxy the request via gRPC.
+    /// return a `NotLeader` hint so the SDK reconnects directly.
     ///
     /// # Returns
     ///
     /// - `Local(RegionContext)` - region is available locally
-    /// - `Remote(RemoteRegionInfo)` - region is on another node
+    /// - `Redirect(RedirectInfo)` - region is on another node; SDK must reconnect
     ///
     /// # Errors
     ///
     /// Returns an error if the organization is not found in routing tables.
-    fn resolve_with_forward(&self, organization: OrganizationId) -> Result<ResolveResult, Status> {
+    fn resolve_with_redirect(&self, organization: OrganizationId) -> Result<ResolveResult, Status> {
         // Default implementation: just try local resolution
         self.resolve(organization).map(ResolveResult::Local)
     }
@@ -168,9 +185,10 @@ pub trait RegionResolver: Send + Sync {
     /// organization creation and user management.
     fn system_region(&self) -> Result<RegionContext, Status>;
 
-    /// Checks if this resolver supports request forwarding.
+    /// Checks if this resolver can emit cross-region redirects.
     ///
-    /// Resolvers that can forward to remote regions return `true`.
+    /// Resolvers that recognise remote regions and return
+    /// [`ResolveResult::Redirect`] return `true`.
     fn supports_forwarding(&self) -> bool {
         false
     }
@@ -199,11 +217,11 @@ fn region_context_from(
 
 /// Region resolver backed by the [`RaftManager`].
 ///
-/// Routes organizations to their assigned regions using the RegionRouter.
-/// Supports request forwarding to remote regions when the organization
-/// is not hosted locally. Uses `local_region` for data residency decisions:
-/// non-protected regions are always local; protected regions require the
-/// node to be in the same region.
+/// Routes organizations to their assigned regions by querying the `_system`
+/// organization service directly. Emits cross-region redirects when the
+/// organization is not hosted locally so the SDK can reconnect directly.
+/// Uses `local_region` for data residency decisions: non-protected regions
+/// are always local; protected regions require the node to be in the same region.
 pub struct RegionResolverService {
     manager: Arc<RaftManager>,
 }
@@ -219,9 +237,15 @@ impl RegionResolverService {
         self.manager.local_region()
     }
 
-    /// Returns the RegionRouter for remote routing lookups.
-    fn router(&self) -> Option<Arc<RegionRouter>> {
-        self.manager.router()
+    /// Whether the given region can be served locally by this node.
+    ///
+    /// Non-protected regions are replicated to all nodes, so they are always
+    /// local. Protected regions are local only when this node's region matches.
+    fn is_region_local(&self, region: Region) -> bool {
+        if !region.requires_residency() {
+            return true;
+        }
+        self.local_region() == region
     }
 }
 
@@ -236,10 +260,10 @@ impl RegionResolver for RegionResolverService {
         let region = self.manager.route_organization(organization).ok_or_else(|| {
             // Check if it's a routing issue or the region is on another node
             if let Some(region_id) = self.manager.get_organization_region(organization) {
-                // Region exists but not on this node - use resolve_with_forward instead
+                // Region exists but not on this node - use resolve_with_redirect instead
                 Status::unavailable(format!(
                     "Organization {} is on region {} which is not available locally. \
-                     Use resolve_with_forward() for forwarding support.",
+                     Use resolve_with_redirect() for cross-region redirect support.",
                     organization, region_id
                 ))
             } else {
@@ -254,37 +278,52 @@ impl RegionResolver for RegionResolverService {
         region_context_from(&region)
     }
 
-    fn resolve_with_forward(&self, organization: OrganizationId) -> Result<ResolveResult, Status> {
+    fn resolve_with_redirect(&self, organization: OrganizationId) -> Result<ResolveResult, Status> {
         // System organization (0) always goes to system region
         if organization == OrganizationId::new(0) {
             return self.system_region().map(ResolveResult::Local);
         }
 
-        // Get routing info to determine the organization's region
-        let router =
-            self.router().ok_or_else(|| Status::unavailable("Region router not initialized"))?;
+        // Look up organization registry directly from _system service.
+        let system_state = self
+            .manager
+            .system_region()
+            .map_err(|e| Status::unavailable(format!("System region not available: {}", e)))?;
+        let sys = inferadb_ledger_state::system::SystemOrganizationService::new(
+            system_state.state().clone(),
+        );
 
-        let routing = router.get_routing(organization).map_err(|e| match e {
-            inferadb_ledger_raft::region_router::RoutingError::OrganizationNotFound { .. } => {
+        let registry = sys
+            .get_organization(organization)
+            .map_err(|e| error_classify::storage_error(&e))?
+            .ok_or_else(|| {
                 Status::not_found(format!(
                     "Organization {} not found in routing table",
                     organization
                 ))
-            },
-            inferadb_ledger_raft::region_router::RoutingError::OrganizationUnavailable {
-                status,
-                ..
-            } => Status::unavailable(format!("Organization {} is {:?}", organization, status)),
-            _ => error_classify::storage_error(&e),
-        })?;
+            })?;
 
-        let org_region = routing.region;
+        if registry.status != OrganizationStatus::Active {
+            return Err(Status::unavailable(format!(
+                "Organization {} is {:?}",
+                organization, registry.status
+            )));
+        }
+
+        let org_region = registry.region;
+        let routing = RoutingInfo {
+            region: org_region,
+            // Cross-region resolver doesn't know the target region's leader
+            // authoritatively. SDK falls back to ResolveRegionLeader /
+            // WatchLeader on an in-region node to learn the real leader.
+            leader_hint: None,
+        };
 
         // Region-aware routing decision:
         // - Non-protected regions: all nodes hold replicas → always local
         // - Protected regions, node in-region: local
-        // - Protected regions, node out-of-region: forward to in-region node
-        if router.is_region_local(org_region) {
+        // - Protected regions, node out-of-region: redirect to in-region node
+        if self.is_region_local(org_region) {
             // Local: non-protected or same-region protected
             let region = self.manager.route_organization(organization).ok_or_else(|| {
                 Status::unavailable(format!(
@@ -296,16 +335,16 @@ impl RegionResolver for RegionResolverService {
             return Ok(ResolveResult::Local(region_context_from(&region)?));
         }
 
-        // Protected region, out-of-region: forward with warning
+        // Protected region, out-of-region: redirect with warning
         tracing::warn!(
             organization = organization.value(),
             org_region = org_region.as_str(),
             local_region = self.local_region().as_str(),
-            "Cross-region request for protected region; forwarding to in-region node"
+            "Cross-region request for protected region; returning redirect to in-region node"
         );
         metrics::record_data_residency_violation(org_region.as_str());
 
-        Ok(ResolveResult::Remote(RemoteRegionInfo { region: org_region, organization, routing }))
+        Ok(ResolveResult::Redirect(RedirectInfo { region: org_region, organization, routing }))
     }
 
     fn system_region(&self) -> Result<RegionContext, Status> {
@@ -328,48 +367,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remote_region_info_stores_fields_correctly() {
-        let routing = RoutingInfo {
-            region: Region::US_EAST_VA,
-            member_nodes: vec!["node-1".to_string(), "node-2".to_string()],
-            leader_hint: Some("node-1".to_string()),
-        };
+    fn redirect_info_stores_fields_correctly() {
+        let routing =
+            RoutingInfo { region: Region::US_EAST_VA, leader_hint: Some("node-1".to_string()) };
 
-        let remote_info = RemoteRegionInfo {
+        let redirect_info = RedirectInfo {
             region: Region::US_EAST_VA,
             organization: OrganizationId::new(42),
             routing: routing.clone(),
         };
 
-        assert_eq!(remote_info.region, Region::US_EAST_VA);
-        assert_eq!(remote_info.organization, OrganizationId::new(42));
-        assert_eq!(remote_info.routing.region, Region::US_EAST_VA);
-        assert_eq!(remote_info.routing.member_nodes.len(), 2);
-        assert_eq!(remote_info.routing.leader_hint, Some("node-1".to_string()));
+        assert_eq!(redirect_info.region, Region::US_EAST_VA);
+        assert_eq!(redirect_info.organization, OrganizationId::new(42));
+        assert_eq!(redirect_info.routing.region, Region::US_EAST_VA);
+        assert_eq!(redirect_info.routing.leader_hint, Some("node-1".to_string()));
     }
 
     #[test]
-    fn resolve_result_remote_variant_stores_fields() {
-        let routing = RoutingInfo {
-            region: Region::IE_EAST_DUBLIN,
-            member_nodes: vec!["192.168.1.1:50051".to_string()],
-            leader_hint: None,
-        };
+    fn resolve_result_redirect_variant_stores_fields() {
+        let routing = RoutingInfo { region: Region::IE_EAST_DUBLIN, leader_hint: None };
 
-        let remote = RemoteRegionInfo {
+        let redirect = RedirectInfo {
             region: Region::IE_EAST_DUBLIN,
             organization: OrganizationId::new(100),
             routing,
         };
 
-        let result = ResolveResult::Remote(remote);
+        let result = ResolveResult::Redirect(redirect);
 
         match result {
-            ResolveResult::Local(_) => unreachable!("Expected Remote variant"),
-            ResolveResult::Remote(info) => {
+            ResolveResult::Local(_) => unreachable!("Expected Redirect variant"),
+            ResolveResult::Redirect(info) => {
                 assert_eq!(info.region, Region::IE_EAST_DUBLIN);
                 assert_eq!(info.organization, OrganizationId::new(100));
-                assert_eq!(info.routing.member_nodes.len(), 1);
+                assert_eq!(info.routing.region, Region::IE_EAST_DUBLIN);
             },
         }
     }
@@ -381,41 +412,34 @@ mod tests {
     }
 
     #[test]
-    fn remote_region_info_debug_output() {
+    fn redirect_info_debug_output() {
         // Verify our custom Debug impl compiles and works
         let debug_output = format!(
             "{:?}",
-            RemoteRegionInfo {
+            RedirectInfo {
                 region: Region::US_EAST_VA,
                 organization: OrganizationId::new(1),
-                routing: RoutingInfo {
-                    region: Region::US_EAST_VA,
-                    member_nodes: vec![],
-                    leader_hint: None,
-                },
+                routing: RoutingInfo { region: Region::US_EAST_VA, leader_hint: None },
             }
         );
-        assert!(debug_output.contains("RemoteRegionInfo"));
+        assert!(debug_output.contains("RedirectInfo"));
     }
 
     #[test]
     fn resolve_result_debug_output() {
-        // Verify Debug impl for RemoteRegionInfo (ResolveResult::Remote)
-        let routing = RoutingInfo {
-            region: Region::US_EAST_VA,
-            member_nodes: vec!["node-1".to_string()],
-            leader_hint: Some("node-1".to_string()),
-        };
+        // Verify Debug impl for RedirectInfo (ResolveResult::Redirect)
+        let routing =
+            RoutingInfo { region: Region::US_EAST_VA, leader_hint: Some("node-1".to_string()) };
 
-        let remote_info = RemoteRegionInfo {
+        let redirect_info = RedirectInfo {
             region: Region::US_EAST_VA,
             organization: OrganizationId::new(42),
             routing,
         };
 
-        let result = ResolveResult::Remote(remote_info);
+        let result = ResolveResult::Redirect(redirect_info);
         let debug_output = format!("{:?}", result);
-        assert!(debug_output.contains("Remote"));
+        assert!(debug_output.contains("Redirect"));
         assert!(debug_output.contains("region"));
         assert!(debug_output.contains("organization"));
     }
@@ -475,7 +499,7 @@ mod tests {
     }
 
     #[test]
-    fn default_resolve_with_forward_delegates_to_resolve() {
+    fn default_resolve_with_redirect_delegates_to_resolve() {
         // Default trait impl wraps resolve() result in Local variant.
         struct AlwaysErrorResolver;
         impl RegionResolver for AlwaysErrorResolver {
@@ -488,7 +512,7 @@ mod tests {
         }
 
         let resolver = AlwaysErrorResolver;
-        let result = resolver.resolve_with_forward(OrganizationId::new(42));
+        let result = resolver.resolve_with_redirect(OrganizationId::new(42));
         assert!(result.is_err());
         let status = result.unwrap_err();
         assert_eq!(status.code(), tonic::Code::NotFound);

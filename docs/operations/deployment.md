@@ -350,6 +350,24 @@ Run `inferadb-ledger --help` for usage information.
 
 This prevents split-brain scenarios where multiple nodes independently bootstrap separate clusters.
 
+## Network Connectivity
+
+### Clients → Cluster
+
+Under Phase 5's redirect-based routing, clients need direct network access to
+**every node** that could hold regional Raft leadership, not just a subset of
+gateway nodes. This is because:
+
+1. At cold start the client may connect to any node for discovery.
+2. After receiving a `NotLeader` hint, the client reconnects directly to the
+   regional leader's advertised endpoint.
+
+For single-VPC/VNet deployments this is typically already the case. For
+cross-VPC deployments, ensure ingress rules and firewall policies allow client
+traffic to every cluster node on the configured gRPC port.
+
+See: [Redirect-Based Client Routing Architecture](runbooks/architecture-redirect-routing.md).
+
 ## Kubernetes Deployment
 
 Use the provided Helm chart or raw manifests.

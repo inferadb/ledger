@@ -371,6 +371,8 @@ default) and single-flight coalescing for concurrent miss resolutions.
 | `ledger_sdk_region_resolve_stale_served_total`           | Counter | `region` | Stale-but-usable entries served to a caller while a background refresh was kicked off.                                         |
 | `ledger_sdk_leader_watch_updates_total`                  | Counter | `region` | Leader updates received over the `WatchLeader` stream (includes the initial state pushed on stream open).                       |
 | `ledger_sdk_leader_watch_reconnects_total`               | Counter | `region` | `WatchLeader` stream reconnect attempts after error or server-initiated close. Exponential backoff caps at 30s between attempts.|
+| `ledger_sdk_leader_stale_term_rejected_total`            | Counter | `region`, `source` | Cache writes rejected because the incoming Raft term is older than the currently-cached term. `source` ∈ `hint`, `watch`. Non-zero under message reordering; term-gating preserves monotonicity. |
+| `ledger_sdk_redirect_retries_total`                      | Counter | `region` | Number of retries triggered by a leader-redirect hint. Expected to be non-zero on cold start for cross-region writes; should trend toward zero on warm paths with `preferred_region` configured. See: [architecture-redirect-routing.md](runbooks/architecture-redirect-routing.md) |
 
 **Labels:**
 

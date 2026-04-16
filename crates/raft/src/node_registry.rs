@@ -1,10 +1,15 @@
 //! Node-level connection registry.
 //!
 //! Owns one [`PeerConnection`] per peer `NodeId`, shared across all
-//! subsystems (consensus transport, write forwarding, discovery, admin).
-//! HTTP/2 multiplexing means a single TCP connection per peer serves
-//! every subsystem, replacing the previous per-region, per-subsystem
-//! channel duplication.
+//! server-to-server subsystems: consensus transport (Phase 2 bidi stream),
+//! saga orchestration (`ForwardRegionalProposal`), follower `ReadIndex`
+//! consistency queries, and discovery announcements. HTTP/2 multiplexing
+//! means a single TCP connection per peer serves every subsystem,
+//! replacing the previous per-region, per-subsystem channel duplication.
+//!
+//! Client-request forwarding was removed in Phase 5; clients route
+//! directly to regional leaders via `NotLeader` hints (see
+//! `docs/operations/runbooks/architecture-redirect-routing.md`).
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 

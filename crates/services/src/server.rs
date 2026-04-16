@@ -288,7 +288,6 @@ impl LedgerServer {
             .idempotency(self.idempotency.clone())
             .proposal_timeout(self.proposal_timeout)
             .peer_addresses(self.peer_addresses.clone())
-            .registry(Some(self.manager.registry()))
             .build()
             .with_health_state(self.health_state.clone());
         // Wire optional features via builder methods

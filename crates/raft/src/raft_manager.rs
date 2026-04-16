@@ -82,7 +82,6 @@ use crate::{
     integrity_scrubber::IntegrityScrubberJob,
     log_storage::{AppliedStateAccessor, RaftLogStore},
     metrics::record_region_node_count,
-    region_router::RegionRouter,
     region_storage::RegionStorageManager,
     ttl_gc::TtlGarbageCollector,
     types::{LedgerNodeId, LedgerRequest, LedgerResponse, RaftPayload},
@@ -480,8 +479,6 @@ pub struct RaftManager {
     storage_manager: RegionStorageManager,
     /// Active region groups indexed by region ID.
     regions: RwLock<HashMap<Region, Arc<RegionGroup>>>,
-    /// Router for organization-to-region resolution.
-    router: RwLock<Option<Arc<RegionRouter<FileBackend>>>>,
     /// Shared peer address map (node ID → network address).
     ///
     /// Populated from `initial_members` during region startup and updated
@@ -512,7 +509,6 @@ impl RaftManager {
             config,
             storage_manager,
             regions: RwLock::new(HashMap::new()),
-            router: RwLock::new(None),
             peer_addresses: crate::peer_address_map::PeerAddressMap::new(),
             registry,
         }
@@ -649,48 +645,32 @@ impl RaftManager {
             regions.insert(region, region_group.clone());
         }
 
-        // Initialize the RegionRouter if this is the system region.
-        if region == Region::GLOBAL {
-            let system_service = Arc::new(SystemOrganizationService::new(state));
-            let router = Arc::new(RegionRouter::new(system_service, self.config.local_region));
-            *self.router.write() = Some(router);
-            info!("RegionRouter initialized with _system organization (consensus registration)");
-        }
-
         Ok(region_group)
-    }
-
-    /// Returns the region router (if initialized).
-    pub fn router(&self) -> Option<Arc<RegionRouter<FileBackend>>> {
-        self.router.read().clone()
     }
 
     /// Routes an organization to its region group.
     ///
-    /// Uses the RegionRouter to look up the organization's region assignment,
-    /// then returns the local RegionGroup if available.
+    /// Looks up the organization's region assignment in the `_system` service
+    /// and returns the local RegionGroup if available.
     ///
     /// Returns `None` if:
-    /// - Router not initialized (system region not started)
-    /// - Organization not found in routing table
+    /// - System region not started
+    /// - Organization not found in `_system`
     /// - Region is on a different node (requires forwarding)
     ///
     /// * `organization` - Internal organization identifier (`OrganizationId`).
     pub fn route_organization(&self, organization: OrganizationId) -> Option<Arc<RegionGroup>> {
-        let router = self.router.read().clone()?;
+        let region = self.get_organization_region(organization)?;
 
-        // Look up region assignment
-        let routing = router.get_routing(organization).ok()?;
-
-        // Get local region group. Data regions are now created through GLOBAL Raft
-        // consensus (CreateDataRegion), so we don't lazily create here — the region
-        // must already exist from a prior consensus proposal.
-        let group = self.regions.read().get(&routing.region).cloned()?;
+        // Get local region group. Data regions are created through GLOBAL Raft
+        // consensus (CreateDataRegion), so we don't lazily create here — the
+        // region must already exist from a prior consensus proposal.
+        let group = self.regions.read().get(&region).cloned()?;
         group.touch();
 
         // Auto-wake hibernated regions on first request
         if !group.is_jobs_active() {
-            let _ = self.wake_region(routing.region);
+            let _ = self.wake_region(region);
         }
 
         Some(group)
@@ -703,15 +683,16 @@ impl RaftManager {
     ///
     /// * `organization` - Internal organization identifier (`OrganizationId`).
     pub fn get_organization_region(&self, organization: OrganizationId) -> Option<Region> {
-        let router = self.router.read().clone()?;
-        router.get_routing(organization).ok().map(|r| r.region)
+        let system = self.system_region().ok()?;
+        let sys = SystemOrganizationService::new(system.state().clone());
+        let registry = sys.get_organization(organization).ok().flatten()?;
+        Some(registry.region)
     }
 
     /// Starts the system region (`_system`).
     ///
     /// The system region must be started before any data regions.
     /// It stores the organization routing table and cluster metadata.
-    /// Also initializes the `RegionRouter` for organization-to-region routing.
     ///
     /// # Errors
     ///
@@ -729,16 +710,7 @@ impl RaftManager {
             });
         }
 
-        let region = self.start_region(region_config).await?;
-
-        // Initialize the RegionRouter with access to _system's state
-        let system_service = Arc::new(SystemOrganizationService::new(region.state.clone()));
-        let router = Arc::new(RegionRouter::new(system_service, self.config.local_region));
-        *self.router.write() = Some(router);
-
-        info!("RegionRouter initialized with _system organization");
-
-        Ok(region)
+        self.start_region(region_config).await
     }
 
     /// Starts a data region.

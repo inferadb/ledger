@@ -28,12 +28,6 @@ const BATCH_SIZE: &str = "ledger_batch_size";
 const READS_TOTAL: &str = "ledger_reads_total";
 const READS_LATENCY: &str = "ledger_read_latency_seconds";
 const VERIFIED_READS_TOTAL: &str = "ledger_verified_reads_total";
-const READ_FORWARDS_TOTAL: &str = "ledger_read_forwards_total";
-
-// Cross-region forwarding metrics
-const CROSS_REGION_FORWARD_TOTAL: &str = "ledger_cross_region_forward_total";
-const CROSS_REGION_FORWARD_LATENCY: &str = "ledger_cross_region_forward_latency_seconds";
-
 // Data residency violation metrics
 const DATA_RESIDENCY_VIOLATION_TOTAL: &str = "ledger_data_residency_violation_total";
 
@@ -159,47 +153,6 @@ pub fn record_verified_read(success: bool, latency_secs: f64) {
     let status = if success { "success" } else { "error" };
     counter!(VERIFIED_READS_TOTAL, "status" => status).increment(1);
     histogram!(READS_LATENCY, "status" => status, "verified" => "true").record(latency_secs);
-}
-
-/// Records a read request forwarded to the leader due to Raft log lag.
-///
-/// `method` is the RPC method name (e.g., `"read"`, `"get_block"`, `"list_entities"`).
-#[inline]
-pub fn record_read_forward(method: &str) {
-    counter!(READ_FORWARDS_TOTAL, "method" => method.to_string()).increment(1);
-}
-
-// =============================================================================
-// Cross-Region Forwarding Metrics
-// =============================================================================
-
-/// Records a cross-region request forward.
-///
-/// Increments `ledger_cross_region_forward_total{method, source_region, target_region}`
-/// and records latency in `ledger_cross_region_forward_latency_seconds`.
-///
-/// Emitted when a request for a protected-region organization arrives at an
-/// out-of-region node and is forwarded to an in-region node.
-#[inline]
-pub fn record_cross_region_forward(
-    method: &str,
-    source_region: &str,
-    target_region: &str,
-    latency_secs: f64,
-) {
-    counter!(
-        CROSS_REGION_FORWARD_TOTAL,
-        "method" => method.to_string(),
-        "source_region" => source_region.to_string(),
-        "target_region" => target_region.to_string()
-    )
-    .increment(1);
-    histogram!(
-        CROSS_REGION_FORWARD_LATENCY,
-        "source_region" => source_region.to_string(),
-        "target_region" => target_region.to_string()
-    )
-    .record(latency_secs);
 }
 
 /// Records a data residency violation attempt.
@@ -1511,11 +1464,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cross_region_metric_names() {
-        assert!(CROSS_REGION_FORWARD_TOTAL.starts_with("ledger_"));
-        assert!(CROSS_REGION_FORWARD_TOTAL.ends_with("_total"));
-        assert!(CROSS_REGION_FORWARD_LATENCY.starts_with("ledger_"));
-        assert!(CROSS_REGION_FORWARD_LATENCY.ends_with("_seconds"));
+    fn test_data_residency_violation_metric_name() {
         assert!(DATA_RESIDENCY_VIOLATION_TOTAL.starts_with("ledger_"));
         assert!(DATA_RESIDENCY_VIOLATION_TOTAL.ends_with("_total"));
     }
@@ -1579,18 +1528,7 @@ mod tests {
         record_verified_read(false, 0.3);
     }
 
-    #[test]
-    fn test_record_read_forward() {
-        record_read_forward("read");
-        record_read_forward("get_block");
-    }
-
-    // --- Cross-region forwarding ---
-
-    #[test]
-    fn test_record_cross_region_forward() {
-        record_cross_region_forward("write", "us-east-va", "eu-central-de", 0.05);
-    }
+    // --- Data residency tracking ---
 
     #[test]
     fn test_record_data_residency_violation() {

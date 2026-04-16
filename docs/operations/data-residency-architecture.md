@@ -104,8 +104,7 @@ The multi-Raft routing infrastructure is fully implemented:
 | --------------------------- | ----------------------------------------------- | ----------------------------------------------------- |
 | `RaftManager`               | `crates/raft/src/raft_manager.rs`               | Manages per-region Raft group lifecycle               |
 | `RegionGroup`               | `crates/raft/src/raft_manager.rs`               | Holds Raft instance + state layer for a region        |
-| `RegionResolver`            | `crates/raft/src/region_router.rs`              | Maps organizations to their assigned region           |
-| `RegionRouter`              | `crates/raft/src/region_router.rs`              | Routes requests to the correct regional Raft          |
+| `RegionResolverService`     | `crates/services/src/services/region_resolver.rs` | Maps organizations to their assigned region           |
 | `propose_regional()`        | `crates/services/src/services/service_infra.rs` | Service-layer helper for regional proposals           |
 | `classify_system_request()` | `crates/raft/src/types.rs`                      | Compile-time enforcement of GLOBAL vs REGIONAL        |
 | `classify_ledger_request()` | `crates/raft/src/types.rs`                      | Classification for top-level `LedgerRequest` variants |

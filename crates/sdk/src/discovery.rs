@@ -391,6 +391,10 @@ mod tests {
             .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
             .connect_timeout(Duration::from_millis(100))
+            // Background refresh tests don't exercise retry behavior; using
+            // the default policy makes a single failed refresh take ~1.5s of
+            // backoff which races with the stop-and-wait poll window.
+            .retry_policy(crate::config::RetryPolicy::no_retry())
             .build()
             .expect("valid test config")
     }

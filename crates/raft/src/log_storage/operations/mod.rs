@@ -3481,7 +3481,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             }
                             state.organizations.insert(*organization, org_meta);
 
-                            // Sync OrganizationRegistry so RegionRouter and PurgeJob
+                            // Sync OrganizationRegistry so the resolver and PurgeJob
                             // see the updated status.
                             if let Some(sys) = &sys_service
                                 && let Ok(Some(mut registry)) = sys.get_organization(*organization)

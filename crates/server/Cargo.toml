@@ -72,6 +72,7 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 tokio-stream.workspace = true
 inferadb-ledger-test-utils.workspace = true
+inferadb-ledger-sdk.workspace = true
 futures.workspace = true
 uuid.workspace = true
 

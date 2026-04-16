@@ -454,6 +454,9 @@ impl ConnectionPool {
             Some(ref h) if h.leader_endpoint.is_some() => {
                 cache.apply_hint(h);
                 *self.channel.write() = None;
+                // Hint applied — a redirect occurred; record it so operators
+                // can observe redirect cost (cold-start vs. warm path).
+                self.config.metrics().redirect_retry(&cache.region().to_string());
             },
             _ => {
                 cache.invalidate();
@@ -985,6 +988,121 @@ mod tests {
         pool.apply_region_leader_hint_or_invalidate(&err);
 
         assert!(pool.region_cached_endpoint().is_none(), "cache should have been invalidated");
+    }
+
+    #[test]
+    fn apply_region_leader_hint_or_invalidate_emits_redirect_metric_on_hint() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        };
+
+        use inferadb_ledger_types::Region;
+        use tonic::Code;
+
+        use crate::{error::ServerErrorDetails, metrics::SdkMetrics};
+
+        #[derive(Debug, Default)]
+        struct CountingMetrics {
+            redirect_retries: AtomicU64,
+        }
+        impl SdkMetrics for CountingMetrics {
+            fn redirect_retry(&self, _region: &str) {
+                self.redirect_retries.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let counting = Arc::new(CountingMetrics::default());
+        let metrics: Arc<dyn SdkMetrics> = counting.clone();
+
+        let config = ClientConfig::builder()
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
+            .client_id("test-client")
+            .preferred_region(Region::US_EAST_VA)
+            .metrics(metrics)
+            .build()
+            .expect("valid test config");
+        let pool = ConnectionPool::new(config);
+
+        let details = ServerErrorDetails {
+            error_code: "2000".into(),
+            is_retryable: true,
+            retry_after_ms: None,
+            context: std::collections::HashMap::from([
+                ("leader_id".to_owned(), "42".to_owned()),
+                ("leader_endpoint".to_owned(), "http://10.0.2.5:5000".to_owned()),
+                ("leader_term".to_owned(), "7".to_owned()),
+            ]),
+            suggested_action: None,
+        };
+        let err = SdkError::Rpc {
+            code: Code::Unavailable,
+            message: "not leader".into(),
+            request_id: None,
+            trace_id: None,
+            error_details: Some(Box::new(details)),
+        };
+
+        pool.apply_region_leader_hint_or_invalidate(&err);
+
+        assert_eq!(
+            counting.redirect_retries.load(Ordering::SeqCst),
+            1,
+            "redirect_retry should fire exactly once when a hint is applied",
+        );
+    }
+
+    #[test]
+    fn apply_region_leader_hint_or_invalidate_does_not_emit_redirect_metric_without_hint() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        };
+
+        use inferadb_ledger_types::Region;
+        use tonic::Code;
+
+        use crate::metrics::SdkMetrics;
+
+        #[derive(Debug, Default)]
+        struct CountingMetrics {
+            redirect_retries: AtomicU64,
+        }
+        impl SdkMetrics for CountingMetrics {
+            fn redirect_retry(&self, _region: &str) {
+                self.redirect_retries.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let counting = Arc::new(CountingMetrics::default());
+        let metrics: Arc<dyn SdkMetrics> = counting.clone();
+
+        let config = ClientConfig::builder()
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
+            .client_id("test-client")
+            .preferred_region(Region::US_EAST_VA)
+            .metrics(metrics)
+            .build()
+            .expect("valid test config");
+        let pool = ConnectionPool::new(config);
+        pool.seed_region_cache_for_test("http://old:5000");
+
+        // Hintless error → invalidate path, must NOT fire redirect_retry.
+        let err = SdkError::Rpc {
+            code: Code::Unavailable,
+            message: "no hint".into(),
+            request_id: None,
+            trace_id: None,
+            error_details: None,
+        };
+
+        pool.apply_region_leader_hint_or_invalidate(&err);
+
+        assert_eq!(
+            counting.redirect_retries.load(Ordering::SeqCst),
+            0,
+            "redirect_retry must not fire on the invalidate-only branch",
+        );
     }
 
     #[test]

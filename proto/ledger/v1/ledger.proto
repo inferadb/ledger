@@ -3475,9 +3475,9 @@ service RaftService {
   // discards the acks.
   rpc ConsensusStream(stream ConsensusEnvelope) returns (stream ConsensusAck);
 
-  // Forward a regional proposal to the data region leader.
-  // Called when a node receives a write for a data region it doesn't lead.
-  // The leader proposes locally and returns the result.
+  // Internal server-to-server RPC for saga orchestration. The server validates
+  // the caller is a known cluster peer (by IP). Not for client use; client
+  // writes are routed directly to regional leaders via NotLeader redirects.
   rpc ForwardRegionalProposal(ForwardRegionalProposalRequest) returns (ForwardRegionalProposalResponse);
 }
 

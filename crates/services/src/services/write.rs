@@ -35,8 +35,7 @@ use uuid::Uuid;
 pub(crate) use super::metadata::{response_with_correlation, status_with_correlation};
 use super::{
     error_classify,
-    forward_client::{self, LeaderForwardClient, LeaderIdCache, RegionForwardClient},
-    region_resolver::{RegionContext, RegionResolver, RemoteRegionInfo, ResolveResult},
+    region_resolver::{RegionContext, RegionResolver, ResolveResult},
     slug_resolver::SlugResolver,
 };
 
@@ -86,25 +85,11 @@ pub struct WriteService {
     /// Handler-phase event handle for recording denial events.
     #[builder(default)]
     event_handle: Option<inferadb_ledger_raft::event_writer::EventHandle<FileBackend>>,
-    /// Tracks the current known Raft leader node ID for write forwarding.
-    ///
-    /// The underlying gRPC channel is owned by the node-level
-    /// [`inferadb_ledger_raft::node_registry::NodeConnectionRegistry`]; this
-    /// cache records only the observed leader identity.
-    #[builder(default)]
-    leader_id_cache: LeaderIdCache,
-    /// Node-level connection registry for resolving peer channels.
-    ///
-    /// Shared with every other subsystem on the node — HTTP/2 multiplexing
-    /// means one connection per peer serves all services.
-    #[builder(default)]
-    registry: Option<Arc<inferadb_ledger_raft::node_registry::NodeConnectionRegistry>>,
     /// Health state for drain-phase write rejection.
     #[builder(default)]
     health_state: Option<inferadb_ledger_raft::graceful_shutdown::HealthState>,
-    /// Shared peer address map for resolving peer network addresses.
-    ///
-    /// Used by write forwarding to resolve the leader's address.
+    /// Shared peer address map for resolving peer endpoints in `NotLeader`
+    /// hint responses returned to clients on follower nodes.
     #[builder(default)]
     peer_addresses: Option<inferadb_ledger_raft::PeerAddressMap>,
 }
@@ -162,35 +147,6 @@ impl WriteService {
         self
     }
 
-    /// Returns a forward client for a remote region.
-    ///
-    /// Creates a gRPC connection to the remote region's leader (or any member
-    /// if leader unknown).
-    async fn get_forward_client(
-        &self,
-        remote: &RemoteRegionInfo,
-    ) -> Result<RegionForwardClient, Status> {
-        let manager = self.manager.as_ref().ok_or_else(|| {
-            Status::unavailable("Request forwarding not configured for this service")
-        })?;
-
-        let router =
-            manager.router().ok_or_else(|| Status::unavailable("Region router not initialized"))?;
-
-        let connection = router
-            .get_connection(
-                remote.region,
-                &remote.routing.member_nodes,
-                remote.routing.leader_hint.as_deref(),
-            )
-            .await
-            .map_err(|e| {
-                Status::unavailable(format!("Failed to connect to remote region: {}", e))
-            })?;
-
-        Ok(RegionForwardClient::new(connection))
-    }
-
     /// Rejects writes to organizations undergoing migration.
     ///
     /// Returns `Ok(())` if the organization is not migrating (or doesn't exist yet).
@@ -227,36 +183,6 @@ impl WriteService {
             ));
         }
         Ok(())
-    }
-
-    /// Checks if this node is the Raft leader for the given region. If not,
-    /// returns a `LeaderForwardClient` to the current leader for transparent
-    /// request forwarding.
-    ///
-    /// Uses a cached channel to avoid creating a new TCP+HTTP/2 connection per
-    /// forwarded request.
-    ///
-    /// Returns `Ok(None)` if this node is the leader (proceed locally).
-    /// Returns `Ok(Some(client))` if forwarding is needed.
-    /// Returns `Err(Status)` if no leader is known.
-    async fn forward_client_if_follower(
-        &self,
-        region: &RegionContext,
-    ) -> Result<Option<LeaderForwardClient>, Status> {
-        let handle = &region.handle;
-        let registry = self.registry.as_ref().ok_or_else(|| {
-            Status::unavailable("Write forwarding not configured: missing node connection registry")
-        })?;
-        let peers = self.peer_addresses.as_ref().map(|m| m.iter_peers()).unwrap_or_default();
-        forward_client::current_leader_client(
-            &self.leader_id_cache,
-            registry,
-            handle.current_leader(),
-            handle.node_id(),
-            peers,
-            region.region,
-        )
-        .await
     }
 
     /// Validates all operations in a proto operation list.
@@ -522,8 +448,8 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         // Check for cross-region forwarding — if the organization is on a remote
         // region, run pre-flight checks and forward the raw request.
         if self.resolver.supports_forwarding()
-            && let ResolveResult::Remote(remote) =
-                self.resolver.resolve_with_forward(organization_id)?
+            && let ResolveResult::Redirect(remote) =
+                self.resolver.resolve_with_redirect(organization_id)?
         {
             // Pre-flight: validation on originating node
             if let Err(status) = self.validate_operations(&req.operations) {
@@ -563,27 +489,24 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                 return Err(status_with_correlation(status, &request_id, &trace_ctx.trace_id));
             }
 
-            // Forward to remote region — destination resolves vault slug
+            // Redirect cross-region writes — clients reconnect against the remote
+            // region's leader using the hint attached to the NotLeader status.
             let source_region =
                 self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
             debug!(
                 organization_id = organization_id.value(),
                 target_region = remote.region.as_str(),
                 source_region,
-                "Forwarding write to remote region"
+                "Redirecting write to remote region"
             );
-            let forward_start = std::time::Instant::now();
-            let grpc_deadline =
-                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-            let mut client = self.get_forward_client(&remote).await?;
-            let result = client.forward_write(req, Some(&trace_ctx), grpc_deadline).await;
-            metrics::record_cross_region_forward(
-                "write",
-                source_region,
-                remote.region.as_str(),
-                forward_start.elapsed().as_secs_f64(),
-            );
-            return result;
+            return Err(status_with_correlation(
+                super::metadata::not_leader_remote_region(
+                    &remote,
+                    "Organization hosted by a remote region; reconnect to that region",
+                ),
+                &request_id,
+                &trace_ctx.trace_id,
+            ));
         }
 
         // Ensure GLOBAL state is replicated before resolving vault slugs.
@@ -596,11 +519,18 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         let vault_id = SlugResolver::new(system.applied_state.clone())
             .extract_and_resolve_vault(&req.vault)?;
 
-        // Forward to within-region leader if this node is a follower
-        if let Some(mut client) = self.forward_client_if_follower(&region).await? {
-            let grpc_deadline =
-                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-            return client.forward_write(req, Some(&trace_ctx), grpc_deadline).await;
+        // Reject on followers — clients use the NotLeader hint to retry
+        // against the within-region leader directly.
+        if !region.handle.is_leader() {
+            return Err(status_with_correlation(
+                super::metadata::not_leader_status_from_handle(
+                    region.handle.as_ref(),
+                    self.peer_addresses.as_ref(),
+                    "Not the leader for this region",
+                ),
+                &request_id,
+                &trace_ctx.trace_id,
+            ));
         }
 
         // Create logging context for this request
@@ -1075,8 +1005,8 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         // Check for cross-region forwarding — if the organization is on a remote
         // region, run pre-flight checks and forward the raw request.
         if self.resolver.supports_forwarding()
-            && let ResolveResult::Remote(remote) =
-                self.resolver.resolve_with_forward(organization_id)?
+            && let ResolveResult::Redirect(remote) =
+                self.resolver.resolve_with_redirect(organization_id)?
         {
             // Flatten operations for pre-flight validation
             let all_operations: Vec<inferadb_ledger_proto::proto::Operation> =
@@ -1121,27 +1051,24 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                 return Err(status_with_correlation(status, &request_id, &trace_ctx.trace_id));
             }
 
-            // Forward to remote region — destination resolves vault slug
+            // Redirect cross-region batch writes — clients reconnect against the
+            // remote region's leader using the hint attached to the NotLeader status.
             let source_region =
                 self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
             debug!(
                 organization_id = organization_id.value(),
                 target_region = remote.region.as_str(),
                 source_region,
-                "Forwarding batch_write to remote region"
+                "Redirecting batch_write to remote region"
             );
-            let forward_start = std::time::Instant::now();
-            let grpc_deadline =
-                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-            let mut client = self.get_forward_client(&remote).await?;
-            let result = client.forward_batch_write(req, Some(&trace_ctx), grpc_deadline).await;
-            metrics::record_cross_region_forward(
-                "batch_write",
-                source_region,
-                remote.region.as_str(),
-                forward_start.elapsed().as_secs_f64(),
-            );
-            return result;
+            return Err(status_with_correlation(
+                super::metadata::not_leader_remote_region(
+                    &remote,
+                    "Organization hosted by a remote region; reconnect to that region",
+                ),
+                &request_id,
+                &trace_ctx.trace_id,
+            ));
         }
 
         // Ensure GLOBAL state is replicated before resolving vault slugs.
@@ -1154,11 +1081,18 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         let vault_id = SlugResolver::new(system.applied_state.clone())
             .extract_and_resolve_vault(&req.vault)?;
 
-        // Forward to within-region leader if this node is a follower
-        if let Some(mut client) = self.forward_client_if_follower(&region).await? {
-            let grpc_deadline =
-                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-            return client.forward_batch_write(req, Some(&trace_ctx), grpc_deadline).await;
+        // Reject on followers — clients use the NotLeader hint to retry
+        // against the within-region leader directly.
+        if !region.handle.is_leader() {
+            return Err(status_with_correlation(
+                super::metadata::not_leader_status_from_handle(
+                    region.handle.as_ref(),
+                    self.peer_addresses.as_ref(),
+                    "Not the leader for this region",
+                ),
+                &request_id,
+                &trace_ctx.trace_id,
+            ));
         }
 
         // Create logging context for this request

@@ -98,8 +98,35 @@ pub(crate) fn not_leader_status_from_handle(
     let shard_state = handle.shard_state();
     let term = handle.current_term();
     let leader_id = shard_state.leader.map(|n| n.0);
-    let leader_endpoint = leader_id.and_then(|id| peer_addresses.and_then(|m| m.get(id)));
+    let leader_endpoint =
+        leader_id.and_then(|id| peer_addresses.and_then(|m| m.get(id))).map(ensure_http_scheme);
     status_with_not_leader_hint(message, leader_id, leader_endpoint.as_deref(), Some(term))
+}
+
+/// Builds a `NotLeader` `Status` for a cross-region redirect, carrying the
+/// remote region's leader hint (if known) so the SDK can reconnect directly
+/// to the target region's leader.
+///
+/// Note: `RoutingInfo.leader_hint` is currently always `None` for cross-region
+/// redirects — see the doc on [`super::region_resolver::RoutingInfo::leader_hint`]
+/// for why. The helper remains correct: passing `None` makes the SDK fall back
+/// to `ResolveRegionLeader` / `WatchLeader` on an in-region node.
+pub(crate) fn not_leader_remote_region(
+    redirect: &super::region_resolver::RedirectInfo,
+    message: impl Into<String>,
+) -> Status {
+    status_with_not_leader_hint(message, None, redirect.routing.leader_hint.as_deref(), None)
+}
+
+/// Prepends `http://` if the address has no URI scheme.
+///
+/// Peer addresses are stored as bare `host:port` strings (the form
+/// `--listen`/`--advertise` produce). Client-facing leader hints must be valid
+/// URIs so the SDK can pass them straight to `tonic::transport::Endpoint`.
+/// This is a no-op when the address already includes a scheme (e.g. operators
+/// that advertise `https://...`).
+fn ensure_http_scheme(addr: String) -> String {
+    if addr.contains("://") { addr } else { format!("http://{addr}") }
 }
 
 /// Synthesizes a generic `ErrorDetails` from a gRPC status code.
@@ -271,6 +298,51 @@ mod tests {
 
         let details = proto::ErrorDetails::decode(enriched.details()).unwrap();
         assert_eq!(details.context.get("leader_id").unwrap(), "1");
+    }
+
+    #[test]
+    fn not_leader_remote_region_with_endpoint_hint_populates_details() {
+        use inferadb_ledger_types::{OrganizationId, Region};
+
+        use crate::services::region_resolver::{RedirectInfo, RoutingInfo};
+
+        let routing = RoutingInfo {
+            region: Region::US_EAST_VA,
+            leader_hint: Some("node-1:50051".to_string()),
+        };
+        let remote = RedirectInfo {
+            region: Region::US_EAST_VA,
+            organization: OrganizationId::new(42),
+            routing,
+        };
+
+        let status = not_leader_remote_region(&remote, "remote region");
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        let details = proto::ErrorDetails::decode(status.details()).unwrap();
+        assert_eq!(
+            details.context.get("leader_endpoint").map(String::as_str),
+            Some("node-1:50051")
+        );
+        assert!(details.is_retryable);
+    }
+
+    #[test]
+    fn not_leader_remote_region_without_hint_omits_endpoint() {
+        use inferadb_ledger_types::{OrganizationId, Region};
+
+        use crate::services::region_resolver::{RedirectInfo, RoutingInfo};
+
+        let routing = RoutingInfo { region: Region::US_EAST_VA, leader_hint: None };
+        let remote = RedirectInfo {
+            region: Region::US_EAST_VA,
+            organization: OrganizationId::new(42),
+            routing,
+        };
+
+        let status = not_leader_remote_region(&remote, "remote region");
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        let details = proto::ErrorDetails::decode(status.details()).unwrap();
+        assert!(!details.context.contains_key("leader_endpoint"));
     }
 
     #[test]

@@ -447,7 +447,7 @@ async fn test_multi_region_concurrent_writes() {
 /// Tests that writes to a local-region follower node succeed.
 ///
 /// In a 3-node cluster where all nodes host all regions, writing to any node
-/// should succeed — the `resolve_with_forward()` returns `Local` and the
+/// should succeed — the `resolve_with_redirect()` returns `Local` and the
 /// Raft layer handles leader election internally. This verifies the new
 /// forwarding code path is a transparent no-op for local organizations.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -465,7 +465,7 @@ async fn test_write_forwarding_local_region_all_nodes() {
         create_organization(node.addr, "fwd-local-all", node).await.expect("create organization");
     let vault = create_vault(node.addr, ns_id).await.expect("create vault");
 
-    // Write through the forwarding-enabled resolver — resolve_with_forward
+    // Write through the forwarding-enabled resolver — resolve_with_redirect
     // returns Local because the single node hosts every region.
     let height = write_entity(node.addr, ns_id, vault, "fwd-key-0", b"fwd-val-0")
         .await

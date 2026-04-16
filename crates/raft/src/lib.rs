@@ -126,8 +126,6 @@ pub mod post_erasure_compaction;
 #[doc(hidden)]
 pub mod rate_limit;
 #[doc(hidden)]
-pub mod region_router;
-#[doc(hidden)]
 pub mod region_storage;
 #[doc(hidden)]
 pub mod saga_orchestrator;

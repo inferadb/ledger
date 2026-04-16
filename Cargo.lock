@@ -1776,6 +1776,7 @@ dependencies = [
  "inferadb-ledger-consensus",
  "inferadb-ledger-proto",
  "inferadb-ledger-raft",
+ "inferadb-ledger-sdk",
  "inferadb-ledger-services",
  "inferadb-ledger-state",
  "inferadb-ledger-store",

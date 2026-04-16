@@ -11,10 +11,9 @@
 //!
 //! ## Request Forwarding
 //!
-//! When an organization is on a remote region, the [`RegionForwardClient`]
-//! proxies requests to the correct node via gRPC. When a follower receives a
-//! write (or linearizable read) for a region it already serves, the
-//! [`LeaderForwardClient`] forwards to the current leader.
+//! Cross-region and cross-leader requests are handled via redirect-only routing:
+//! services return `Status::unavailable` with addressing metadata so the SDK can
+//! retry against the correct node. No server-side request proxying.
 
 mod admin;
 mod app;
@@ -22,7 +21,6 @@ mod discovery;
 pub(crate) mod error_classify;
 pub(crate) mod error_details;
 mod events;
-mod forward_client;
 mod health;
 pub(crate) mod helpers;
 mod invitation;
@@ -42,7 +40,6 @@ pub use admin::AdminService;
 pub use app::AppService;
 pub use discovery::DiscoveryService;
 pub use events::EventsService;
-pub use forward_client::{LeaderForwardClient, RegionForwardClient};
 pub use health::HealthService;
 pub use invitation::InvitationService;
 pub use organization::OrganizationService;

@@ -14,7 +14,7 @@ use inferadb_ledger_raft::{
 };
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
-use inferadb_ledger_types::{Region, decode, encode};
+use inferadb_ledger_types::Region;
 use tonic::Status;
 
 /// Simplified Raft metrics for vault genesis blocks and service context.
@@ -53,6 +53,12 @@ pub(crate) trait ProposalService: Send + Sync {
     ///
     /// Resolves `region` to a [`RegionGroup`](inferadb_ledger_raft::raft_manager::RegionGroup)
     /// via the [`RaftManager`], then proposes through that group's Raft instance.
+    ///
+    /// If the local node is not the leader for the target region, returns a
+    /// `NotLeader` `Status` with leader-hint `ErrorDetails` attached. Callers
+    /// should propagate the status to the client; the SDK uses the hint to
+    /// retry directly against the within-region leader. This method does not
+    /// itself perform any cross-node forwarding.
     async fn propose_to_region(
         &self,
         region: Region,
@@ -154,7 +160,13 @@ impl ProposalService for RaftProposalService {
                 let global_state = self.handle.shard_state();
                 let mut initial_members = Vec::with_capacity(global_state.voters.len());
                 for voter in &global_state.voters {
-                    let addr = manager.peer_addresses().get(voter.0).unwrap_or_default();
+                    let addr = manager.peer_addresses().get(voter.0).ok_or_else(|| {
+                        Status::unavailable(format!(
+                            "Peer {} address not yet announced; cannot create data region \
+                             without full membership",
+                            voter.0
+                        ))
+                    })?;
                     initial_members.push((voter.0, addr));
                 }
 
@@ -207,90 +219,34 @@ impl ProposalService for RaftProposalService {
             },
         };
 
-        let payload = RaftPayload::new(request.clone(), caller);
+        let payload = RaftPayload::new(request, caller);
 
-        // Try local proposal first. If we're not the data region leader,
-        // forward to the leader node.
+        // Check leadership eagerly. If we're not the data region leader, return
+        // a NotLeader hint up front — the SDK's region-leader cache uses this
+        // hint to retry directly against the within-region leader without going
+        // through a server-side forwarding hop. This avoids relying on a
+        // stringly-typed match against openraft's error message format.
+        if !region_group.handle().is_leader() {
+            return Err(super::services::metadata::not_leader_status_from_handle(
+                region_group.handle().as_ref(),
+                Some(manager.peer_addresses()),
+                format!("Not the leader for region {region}"),
+            ));
+        }
+
         match region_group.handle().propose_and_wait(payload, timeout).await {
             Ok(response) => Ok(response),
             Err(HandleError::Consensus { source, .. })
                 if source.to_string().contains("Not the leader") =>
             {
-                // Not the data region leader — forward to the actual leader.
-                let leader_id = region_group.handle().current_leader().ok_or_else(|| {
-                    Status::unavailable(format!("No known leader for region {region}"))
-                })?;
-
-                let leader_addr = manager.peer_addresses().get(leader_id).ok_or_else(|| {
-                    Status::unavailable(format!(
-                        "No known address for leader node {leader_id} in region {region}"
-                    ))
-                })?;
-
-                let request_payload = encode(&request)
-                    .map_err(|e| Status::internal(format!("serialize request: {e}")))?;
-
-                let proto_region: inferadb_ledger_proto::proto::Region = region.into();
-
-                // Obtain the leader's peer connection from the shared registry.
-                // HTTP/2 multiplexes all subsystems over a single channel per peer.
-                let peer =
-                    manager.registry().get_or_register(leader_id, &leader_addr).await.map_err(
-                        |e| {
-                            Status::internal(format!(
-                                "register leader {leader_id} ({leader_addr}): {e}"
-                            ))
-                        },
-                    )?;
-                let mut client = peer.raft_client();
-
-                let resp = client
-                    .forward_regional_proposal(
-                        inferadb_ledger_proto::proto::ForwardRegionalProposalRequest {
-                            region: Some(proto_region as i32),
-                            request_payload,
-                            caller,
-                            timeout_ms: timeout.as_millis().min(u32::MAX as u128) as u32,
-                        },
-                    )
-                    .await
-                    .map_err(|e| {
-                        Status::unavailable(format!("forward to leader {leader_id} failed: {e}"))
-                    })?
-                    .into_inner();
-
-                if resp.status_code != 0 {
-                    return Err(Status::unavailable(format!(
-                        "leader {leader_id} returned error: {}",
-                        resp.error_message
-                    )));
-                }
-
-                let response: LedgerResponse = decode(&resp.response_payload).map_err(|e| {
-                    Status::internal(format!("deserialize forwarded response: {e}"))
-                })?;
-
-                // Wait for local replication to catch up to the leader's committed
-                // index so that subsequent local reads see the written data.
-                if resp.committed_index > 0 {
-                    let mut watch = region_group.applied_index_watch();
-                    if let Err(e) = inferadb_ledger_raft::wait_for_apply(
-                        &mut watch,
-                        resp.committed_index,
-                        std::time::Duration::from_secs(5),
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            region = region.as_str(),
-                            committed_index = resp.committed_index,
-                            error = %e,
-                            "Timed out waiting for local replication after forwarded write"
-                        );
-                    }
-                }
-
-                Ok(response)
+                // Leadership changed between the check above and the propose.
+                // Rare but possible — belt-and-suspenders to still surface the
+                // NotLeader hint when openraft rejects post-check.
+                Err(super::services::metadata::not_leader_status_from_handle(
+                    region_group.handle().as_ref(),
+                    Some(manager.peer_addresses()),
+                    format!("Not the leader for region {region} (lost leadership mid-propose)"),
+                ))
             },
             Err(HandleError::Consensus { source, .. }) => {
                 Err(classify_raft_error(&source.to_string()))

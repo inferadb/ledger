@@ -22,6 +22,7 @@ mod multi_region;
 mod network_simulation;
 mod onboarding;
 mod orphan_cleanup;
+mod redirect_routing;
 mod replication;
 mod saga_orchestrator;
 mod token_lifecycle;

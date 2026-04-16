@@ -28,6 +28,20 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 // =============================================================================
+// URL / scheme helpers
+// =============================================================================
+
+/// Ensures a peer address string carries a URL scheme.
+///
+/// Peer addresses are stored as `host:port` in the peer map. Most consumers
+/// expect a scheme-prefixed endpoint. If the address already carries a
+/// scheme (e.g. `https://...`), it is returned unchanged so we never emit
+/// double-prefixed URIs like `http://http://host:port`.
+fn ensure_http_scheme(addr: String) -> String {
+    if addr.contains("://") { addr } else { format!("http://{addr}") }
+}
+
+// =============================================================================
 // IP Address Validation
 // =============================================================================
 
@@ -293,8 +307,12 @@ impl DiscoveryService {
             )
         })?;
 
-        let endpoint =
-            self.peer_addresses.as_ref().and_then(|m| m.get(leader_id.0)).ok_or_else(|| {
+        let endpoint = self
+            .peer_addresses
+            .as_ref()
+            .and_then(|m| m.get(leader_id.0))
+            .map(ensure_http_scheme)
+            .ok_or_else(|| {
                 Status::unavailable(format!(
                     "Leader {} address not yet known — peer has not announced itself",
                     leader_id.0
@@ -535,7 +553,7 @@ fn make_leader_update(
         Some(leader) => {
             let endpoint = peer_addresses
                 .and_then(|m| m.get(leader.0))
-                .map(|addr| format!("http://{addr}"))
+                .map(ensure_http_scheme)
                 .unwrap_or_default();
             let leader_node_id = if endpoint.is_empty() { 0 } else { leader.0 };
             LeaderUpdate { endpoint, raft_term: state.term, leader_node_id }
@@ -712,5 +730,24 @@ mod tests {
     fn validate_peer_addresses_mixed_public_rejected() {
         let addrs = vec!["10.0.0.1".to_string(), "8.8.8.8".to_string()];
         assert!(validate_peer_addresses(&addrs).is_err());
+    }
+
+    // =========================================================================
+    // ensure_http_scheme
+    // =========================================================================
+
+    #[test]
+    fn ensure_http_scheme_prefixes_bare_host_port() {
+        assert_eq!(ensure_http_scheme("10.0.0.1:7000".to_string()), "http://10.0.0.1:7000");
+    }
+
+    #[test]
+    fn ensure_http_scheme_preserves_existing_http_scheme() {
+        assert_eq!(ensure_http_scheme("http://host:7000".to_string()), "http://host:7000");
+    }
+
+    #[test]
+    fn ensure_http_scheme_preserves_existing_https_scheme() {
+        assert_eq!(ensure_http_scheme("https://host:7000".to_string()), "https://host:7000");
     }
 }

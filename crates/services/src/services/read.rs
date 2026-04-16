@@ -57,10 +57,8 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, warn};
 
 use super::{
-    LeaderForwardClient, RegionForwardClient,
-    forward_client::{self, LeaderIdCache},
     helpers::storage_err,
-    region_resolver::{RegionContext, RegionResolver, RemoteRegionInfo, ResolveResult},
+    region_resolver::{RegionContext, RegionResolver, ResolveResult},
     slug_resolver::SlugResolver,
 };
 
@@ -112,14 +110,8 @@ pub struct ReadService {
     /// Sampler for log tail sampling.
     #[builder(default)]
     sampler: Option<Sampler>,
-    /// Tracks the current known Raft leader node ID for read forwarding.
-    ///
-    /// The underlying gRPC channel is owned by the node-level
-    /// [`inferadb_ledger_raft::node_registry::NodeConnectionRegistry`]; this
-    /// cache records only the observed leader identity.
-    #[builder(default)]
-    leader_id_cache: LeaderIdCache,
-    /// Node-level connection registry for resolving peer channels.
+    /// Node-level connection registry for opening a channel to the current
+    /// leader during follower ReadIndex requests (linearizable reads).
     #[builder(default)]
     registry: Option<Arc<inferadb_ledger_raft::node_registry::NodeConnectionRegistry>>,
     /// Shared counter for active `WatchBlocks` streams across all connections.
@@ -198,39 +190,14 @@ impl ReadService {
         ctx.handle.is_leader()
     }
 
-    /// Checks if this follower is too far behind the leader and should forward reads.
-    ///
-    /// Returns `Ok(None)` if reads can be served locally (leader, caught up, or no Raft).
-    /// Returns `Ok(Some(client))` if reads should be forwarded to the leader.
-    /// Returns `Err(Status)` if forwarding is needed but no leader is available.
-    async fn should_forward_to_leader(
-        &self,
-        ctx: &RegionContext,
-    ) -> Result<Option<LeaderForwardClient>, Status> {
-        let handle = &ctx.handle;
-
-        // Leader always serves locally
-        if handle.is_leader() {
-            return Ok(None);
-        }
-
-        // Without openraft metrics we can't check log lag precisely.
-        // The consensus handle provides commit_index which is sufficient
-        // for basic forwarding decisions.
-        // For now, followers always forward reads to the leader for consistency.
-        let registry = self.registry.as_ref().ok_or_else(|| {
-            Status::unavailable("Read forwarding not configured: missing node connection registry")
-        })?;
-        let peers = self.peer_addresses.as_ref().map(|m| m.iter_peers()).unwrap_or_default();
-        forward_client::current_leader_client(
-            &self.leader_id_cache,
-            registry,
-            handle.current_leader(),
-            handle.node_id(),
-            peers,
-            ctx.region,
+    /// Returns a `NotLeader` `Status` for a follower-served read, populated with
+    /// the within-region leader's identity and endpoint when known.
+    fn not_leader_within_region(&self, ctx: &RegionContext, message: &str) -> Status {
+        super::metadata::not_leader_status_from_handle(
+            ctx.handle.as_ref(),
+            self.peer_addresses.as_ref(),
+            message,
         )
-        .await
     }
 
     /// Determines how to serve a read based on consistency level.
@@ -271,7 +238,7 @@ impl ReadService {
     async fn follower_read_index(&self, ctx: &RegionContext) -> Result<(), Status> {
         use inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient;
 
-        let channel = self.get_leader_channel(ctx).await?;
+        let channel = self.leader_channel_for_read_index(ctx).await?;
         let mut client = RaftServiceClient::new(channel);
 
         let response = client
@@ -294,12 +261,18 @@ impl ReadService {
         .await
     }
 
-    /// Returns a gRPC channel to the current leader for this region.
+    /// Opens a gRPC channel to the current leader of this region for the
+    /// internal `ReadIndex` consensus RPC used by linearizable follower reads.
     ///
-    /// Resolves the leader's address from the peer address map and fetches a
-    /// shared channel from the node-level `NodeConnectionRegistry`. HTTP/2
+    /// This helper is consensus-internal: the only caller is
+    /// [`Self::follower_read_index`], which uses the channel to ask the leader
+    /// for its committed index. It is *not* used to forward client requests —
+    /// those return a `NotLeader` redirect instead.
+    ///
+    /// The leader address is resolved via the peer address map and the channel
+    /// is fetched from the node-level `NodeConnectionRegistry`; HTTP/2
     /// multiplexing ensures all subsystems reuse the same TCP connection.
-    async fn get_leader_channel(
+    async fn leader_channel_for_read_index(
         &self,
         ctx: &RegionContext,
     ) -> Result<tonic::transport::Channel, Status> {
@@ -313,7 +286,7 @@ impl ReadService {
         })?;
 
         if leader_id == handle.node_id() {
-            return Err(Status::internal("get_leader_channel called on leader node"));
+            return Err(Status::internal("leader_channel_for_read_index called on leader node"));
         }
 
         let leader_addr =
@@ -326,38 +299,12 @@ impl ReadService {
             })?;
 
         let registry = self.registry.as_ref().ok_or_else(|| {
-            Status::unavailable("Read forwarding not configured: missing node connection registry")
+            Status::unavailable("ReadIndex unavailable: missing node connection registry")
         })?;
         let peer = registry.get_or_register(leader_id, &leader_addr).await.map_err(|e| {
             Status::internal(format!("failed to register leader {leader_id} ({leader_addr}): {e}"))
         })?;
         Ok(peer.channel())
-    }
-
-    /// Returns a forward client for a remote region.
-    async fn get_forward_client(
-        &self,
-        remote: &RemoteRegionInfo,
-    ) -> Result<RegionForwardClient, Status> {
-        let manager = self.manager.as_ref().ok_or_else(|| {
-            Status::unavailable("Request forwarding not configured for this service")
-        })?;
-
-        let router =
-            manager.router().ok_or_else(|| Status::unavailable("Region router not initialized"))?;
-
-        let connection = router
-            .get_connection(
-                remote.region,
-                &remote.routing.member_nodes,
-                remote.routing.leader_hint.as_deref(),
-            )
-            .await
-            .map_err(|e| {
-                Status::unavailable(format!("Failed to connect to remote region: {}", e))
-            })?;
-
-        Ok(RegionForwardClient::new(connection))
     }
 
     /// Fetches block header from archive for a given vault height.
@@ -666,23 +613,13 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             let system = self.resolver.system_region()?;
             let organization_id =
                 SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
-            if let ResolveResult::Remote(remote) =
-                self.resolver.resolve_with_forward(organization_id)?
+            if let ResolveResult::Redirect(remote) =
+                self.resolver.resolve_with_redirect(organization_id)?
             {
-                let source_region =
-                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
-                let forward_start = std::time::Instant::now();
-                let deadline =
-                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-                let mut client = self.get_forward_client(&remote).await?;
-                let result = client.forward_read(req, Some(&trace_ctx), deadline).await;
-                metrics::record_cross_region_forward(
-                    "read",
-                    source_region,
-                    remote.region.as_str(),
-                    forward_start.elapsed().as_secs_f64(),
-                );
-                return result;
+                return Err(super::metadata::not_leader_remote_region(
+                    &remote,
+                    "Organization hosted by a remote region; reconnect to that region",
+                ));
             }
         }
 
@@ -691,11 +628,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
-            let deadline =
-                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-            metrics::record_read_forward("read");
-            return client.forward_read(req, Some(&trace_ctx), deadline).await;
+        if !region.handle.is_leader() {
+            return Err(self.not_leader_within_region(&region, "Not the leader for this region"));
         }
 
         // Create logging context
@@ -819,23 +753,13 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             let system = self.resolver.system_region()?;
             let organization_id =
                 SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
-            if let ResolveResult::Remote(remote) =
-                self.resolver.resolve_with_forward(organization_id)?
+            if let ResolveResult::Redirect(remote) =
+                self.resolver.resolve_with_redirect(organization_id)?
             {
-                let source_region =
-                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
-                let forward_start = std::time::Instant::now();
-                let deadline =
-                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-                let mut client = self.get_forward_client(&remote).await?;
-                let result = client.forward_batch_read(req, Some(&trace_ctx), deadline).await;
-                metrics::record_cross_region_forward(
-                    "batch_read",
-                    source_region,
-                    remote.region.as_str(),
-                    forward_start.elapsed().as_secs_f64(),
-                );
-                return result;
+                return Err(super::metadata::not_leader_remote_region(
+                    &remote,
+                    "Organization hosted by a remote region; reconnect to that region",
+                ));
             }
         }
 
@@ -844,11 +768,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
-            let deadline =
-                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-            metrics::record_read_forward("batch_read");
-            return client.forward_batch_read(req, Some(&trace_ctx), deadline).await;
+        if !region.handle.is_leader() {
+            return Err(self.not_leader_within_region(&region, "Not the leader for this region"));
         }
 
         // Create logging context
@@ -998,23 +919,13 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             let system = self.resolver.system_region()?;
             let organization_id =
                 SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
-            if let ResolveResult::Remote(remote) =
-                self.resolver.resolve_with_forward(organization_id)?
+            if let ResolveResult::Redirect(remote) =
+                self.resolver.resolve_with_redirect(organization_id)?
             {
-                let source_region =
-                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
-                let forward_start = std::time::Instant::now();
-                let deadline =
-                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-                let mut client = self.get_forward_client(&remote).await?;
-                let result = client.forward_verified_read(req, Some(&trace_ctx), deadline).await;
-                metrics::record_cross_region_forward(
-                    "verified_read",
-                    source_region,
-                    remote.region.as_str(),
-                    forward_start.elapsed().as_secs_f64(),
-                );
-                return result;
+                return Err(super::metadata::not_leader_remote_region(
+                    &remote,
+                    "Organization hosted by a remote region; reconnect to that region",
+                ));
             }
         }
 
@@ -1023,11 +934,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
-            let deadline =
-                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-            metrics::record_read_forward("verified_read");
-            return client.forward_verified_read(req, Some(&trace_ctx), deadline).await;
+        if !region.handle.is_leader() {
+            return Err(self.not_leader_within_region(&region, "Not the leader for this region"));
         }
 
         // Create logging context
@@ -1179,23 +1087,13 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             let system = self.resolver.system_region()?;
             let organization_id =
                 SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
-            if let ResolveResult::Remote(remote) =
-                self.resolver.resolve_with_forward(organization_id)?
+            if let ResolveResult::Redirect(remote) =
+                self.resolver.resolve_with_redirect(organization_id)?
             {
-                let source_region =
-                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
-                let forward_start = std::time::Instant::now();
-                let deadline =
-                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-                let mut client = self.get_forward_client(&remote).await?;
-                let result = client.forward_historical_read(req, Some(&trace_ctx), deadline).await;
-                metrics::record_cross_region_forward(
-                    "historical_read",
-                    source_region,
-                    remote.region.as_str(),
-                    forward_start.elapsed().as_secs_f64(),
-                );
-                return result;
+                return Err(super::metadata::not_leader_remote_region(
+                    &remote,
+                    "Organization hosted by a remote region; reconnect to that region",
+                ));
             }
         }
 
@@ -1204,11 +1102,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
-            let deadline =
-                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-            metrics::record_read_forward("historical_read");
-            return client.forward_historical_read(req, Some(&trace_ctx), deadline).await;
+        if !region.handle.is_leader() {
+            return Err(self.not_leader_within_region(&region, "Not the leader for this region"));
         }
 
         // Create logging context
@@ -1416,8 +1311,6 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         &self,
         request: Request<WatchBlocksRequest>,
     ) -> Result<Response<Self::WatchBlocksStream>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
         // Cross-region forwarding
@@ -1425,23 +1318,13 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             let system = self.resolver.system_region()?;
             let organization_id =
                 SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
-            if let ResolveResult::Remote(remote) =
-                self.resolver.resolve_with_forward(organization_id)?
+            if let ResolveResult::Redirect(remote) =
+                self.resolver.resolve_with_redirect(organization_id)?
             {
-                let source_region =
-                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
-                let forward_start = std::time::Instant::now();
-                let deadline =
-                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-                let mut client = self.get_forward_client(&remote).await?;
-                let resp = client.forward_watch_blocks(req, Some(&trace_ctx), deadline).await?;
-                metrics::record_cross_region_forward(
-                    "watch_blocks",
-                    source_region,
-                    remote.region.as_str(),
-                    forward_start.elapsed().as_secs_f64(),
-                );
-                return Ok(Response::new(Box::pin(resp.into_inner()) as Self::WatchBlocksStream));
+                return Err(super::metadata::not_leader_remote_region(
+                    &remote,
+                    "Organization hosted by a remote region; reconnect to that region",
+                ));
             }
         }
 
@@ -1449,13 +1332,10 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         let (organization_id, vault_id, region) =
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
-        // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
-            let deadline =
-                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-            metrics::record_read_forward("watch_blocks");
-            let resp = client.forward_watch_blocks(req, Some(&trace_ctx), deadline).await?;
-            return Ok(Response::new(Box::pin(resp.into_inner()) as Self::WatchBlocksStream));
+        // Reject on followers — clients use the NotLeader hint to reconnect
+        // their stream against the within-region leader directly.
+        if !region.handle.is_leader() {
+            return Err(self.not_leader_within_region(&region, "Not the leader for this region"));
         }
         let start_height = req.start_height;
 
@@ -1596,8 +1476,6 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         &self,
         request: Request<GetBlockRequest>,
     ) -> Result<Response<GetBlockResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
         // Cross-region forwarding
@@ -1605,23 +1483,13 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             let system = self.resolver.system_region()?;
             let organization_id =
                 SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
-            if let ResolveResult::Remote(remote) =
-                self.resolver.resolve_with_forward(organization_id)?
+            if let ResolveResult::Redirect(remote) =
+                self.resolver.resolve_with_redirect(organization_id)?
             {
-                let source_region =
-                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
-                let forward_start = std::time::Instant::now();
-                let deadline =
-                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-                let mut client = self.get_forward_client(&remote).await?;
-                let result = client.forward_get_block(req, Some(&trace_ctx), deadline).await;
-                metrics::record_cross_region_forward(
-                    "get_block",
-                    source_region,
-                    remote.region.as_str(),
-                    forward_start.elapsed().as_secs_f64(),
-                );
-                return result;
+                return Err(super::metadata::not_leader_remote_region(
+                    &remote,
+                    "Organization hosted by a remote region; reconnect to that region",
+                ));
             }
         }
 
@@ -1630,11 +1498,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
-            let deadline =
-                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-            metrics::record_read_forward("get_block");
-            return client.forward_get_block(req, Some(&trace_ctx), deadline).await;
+        if !region.handle.is_leader() {
+            return Err(self.not_leader_within_region(&region, "Not the leader for this region"));
         }
 
         let archive = &region.block_archive;
@@ -1672,8 +1537,6 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         &self,
         request: Request<GetBlockRangeRequest>,
     ) -> Result<Response<GetBlockRangeResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
         // Cross-region forwarding
@@ -1681,23 +1544,13 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             let system = self.resolver.system_region()?;
             let organization_id =
                 SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
-            if let ResolveResult::Remote(remote) =
-                self.resolver.resolve_with_forward(organization_id)?
+            if let ResolveResult::Redirect(remote) =
+                self.resolver.resolve_with_redirect(organization_id)?
             {
-                let source_region =
-                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
-                let forward_start = std::time::Instant::now();
-                let deadline =
-                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-                let mut client = self.get_forward_client(&remote).await?;
-                let result = client.forward_get_block_range(req, Some(&trace_ctx), deadline).await;
-                metrics::record_cross_region_forward(
-                    "get_block_range",
-                    source_region,
-                    remote.region.as_str(),
-                    forward_start.elapsed().as_secs_f64(),
-                );
-                return result;
+                return Err(super::metadata::not_leader_remote_region(
+                    &remote,
+                    "Organization hosted by a remote region; reconnect to that region",
+                ));
             }
         }
 
@@ -1706,11 +1559,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
-            let deadline =
-                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-            metrics::record_read_forward("get_block_range");
-            return client.forward_get_block_range(req, Some(&trace_ctx), deadline).await;
+        if !region.handle.is_leader() {
+            return Err(self.not_leader_within_region(&region, "Not the leader for this region"));
         }
 
         let archive = &region.block_archive;
@@ -1762,8 +1612,6 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         &self,
         request: Request<GetTipRequest>,
     ) -> Result<Response<GetTipResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
         // Cross-region forwarding
@@ -1771,23 +1619,13 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             let system = self.resolver.system_region()?;
             let organization_id =
                 SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
-            if let ResolveResult::Remote(remote) =
-                self.resolver.resolve_with_forward(organization_id)?
+            if let ResolveResult::Redirect(remote) =
+                self.resolver.resolve_with_redirect(organization_id)?
             {
-                let source_region =
-                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
-                let forward_start = std::time::Instant::now();
-                let deadline =
-                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-                let mut client = self.get_forward_client(&remote).await?;
-                let result = client.forward_get_tip(req, Some(&trace_ctx), deadline).await;
-                metrics::record_cross_region_forward(
-                    "get_tip",
-                    source_region,
-                    remote.region.as_str(),
-                    forward_start.elapsed().as_secs_f64(),
-                );
-                return result;
+                return Err(super::metadata::not_leader_remote_region(
+                    &remote,
+                    "Organization hosted by a remote region; reconnect to that region",
+                ));
             }
         }
 
@@ -1796,11 +1634,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
-            let deadline =
-                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-            metrics::record_read_forward("get_tip");
-            return client.forward_get_tip(req, Some(&trace_ctx), deadline).await;
+        if !region.handle.is_leader() {
+            return Err(self.not_leader_within_region(&region, "Not the leader for this region"));
         }
 
         let height = if vault_id.value() != 0 {
@@ -1831,8 +1666,6 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         &self,
         request: Request<GetClientStateRequest>,
     ) -> Result<Response<GetClientStateResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
         // Cross-region forwarding
@@ -1840,23 +1673,13 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             let system = self.resolver.system_region()?;
             let organization_id =
                 SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
-            if let ResolveResult::Remote(remote) =
-                self.resolver.resolve_with_forward(organization_id)?
+            if let ResolveResult::Redirect(remote) =
+                self.resolver.resolve_with_redirect(organization_id)?
             {
-                let source_region =
-                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
-                let forward_start = std::time::Instant::now();
-                let deadline =
-                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-                let mut client = self.get_forward_client(&remote).await?;
-                let result = client.forward_get_client_state(req, Some(&trace_ctx), deadline).await;
-                metrics::record_cross_region_forward(
-                    "get_client_state",
-                    source_region,
-                    remote.region.as_str(),
-                    forward_start.elapsed().as_secs_f64(),
-                );
-                return result;
+                return Err(super::metadata::not_leader_remote_region(
+                    &remote,
+                    "Organization hosted by a remote region; reconnect to that region",
+                ));
             }
         }
 
@@ -1865,11 +1688,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
-            let deadline =
-                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-            metrics::record_read_forward("get_client_state");
-            return client.forward_get_client_state(req, Some(&trace_ctx), deadline).await;
+        if !region.handle.is_leader() {
+            return Err(self.not_leader_within_region(&region, "Not the leader for this region"));
         }
         let client_id = req.client_id.as_ref().map(|c| c.id.as_str()).unwrap_or("");
 
@@ -1890,8 +1710,6 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         &self,
         request: Request<ListRelationshipsRequest>,
     ) -> Result<Response<ListRelationshipsResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
         // Cross-region forwarding
@@ -1899,24 +1717,13 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             let system = self.resolver.system_region()?;
             let organization_id =
                 SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
-            if let ResolveResult::Remote(remote) =
-                self.resolver.resolve_with_forward(organization_id)?
+            if let ResolveResult::Redirect(remote) =
+                self.resolver.resolve_with_redirect(organization_id)?
             {
-                let source_region =
-                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
-                let forward_start = std::time::Instant::now();
-                let deadline =
-                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-                let mut client = self.get_forward_client(&remote).await?;
-                let result =
-                    client.forward_list_relationships(req, Some(&trace_ctx), deadline).await;
-                metrics::record_cross_region_forward(
-                    "list_relationships",
-                    source_region,
-                    remote.region.as_str(),
-                    forward_start.elapsed().as_secs_f64(),
-                );
-                return result;
+                return Err(super::metadata::not_leader_remote_region(
+                    &remote,
+                    "Organization hosted by a remote region; reconnect to that region",
+                ));
             }
         }
 
@@ -1925,11 +1732,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
-            let deadline =
-                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-            metrics::record_read_forward("list_relationships");
-            return client.forward_list_relationships(req, Some(&trace_ctx), deadline).await;
+        if !region.handle.is_leader() {
+            return Err(self.not_leader_within_region(&region, "Not the leader for this region"));
         }
 
         // Check consistency requirements (may execute ReadIndex protocol on followers)
@@ -2047,8 +1851,6 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         &self,
         request: Request<ListResourcesRequest>,
     ) -> Result<Response<ListResourcesResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
         // Cross-region forwarding
@@ -2056,23 +1858,13 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             let system = self.resolver.system_region()?;
             let organization_id =
                 SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
-            if let ResolveResult::Remote(remote) =
-                self.resolver.resolve_with_forward(organization_id)?
+            if let ResolveResult::Redirect(remote) =
+                self.resolver.resolve_with_redirect(organization_id)?
             {
-                let source_region =
-                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
-                let forward_start = std::time::Instant::now();
-                let deadline =
-                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-                let mut client = self.get_forward_client(&remote).await?;
-                let result = client.forward_list_resources(req, Some(&trace_ctx), deadline).await;
-                metrics::record_cross_region_forward(
-                    "list_resources",
-                    source_region,
-                    remote.region.as_str(),
-                    forward_start.elapsed().as_secs_f64(),
-                );
-                return result;
+                return Err(super::metadata::not_leader_remote_region(
+                    &remote,
+                    "Organization hosted by a remote region; reconnect to that region",
+                ));
             }
         }
 
@@ -2081,11 +1873,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
-            let deadline =
-                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-            metrics::record_read_forward("list_resources");
-            return client.forward_list_resources(req, Some(&trace_ctx), deadline).await;
+        if !region.handle.is_leader() {
+            return Err(self.not_leader_within_region(&region, "Not the leader for this region"));
         }
 
         // Check consistency requirements (may execute ReadIndex protocol on followers)
@@ -2165,8 +1954,6 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         &self,
         request: Request<ListEntitiesRequest>,
     ) -> Result<Response<ListEntitiesResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
         // Cross-region forwarding
@@ -2174,23 +1961,13 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             let system = self.resolver.system_region()?;
             let organization_id =
                 SlugResolver::new(system.applied_state).extract_and_resolve(&req.organization)?;
-            if let ResolveResult::Remote(remote) =
-                self.resolver.resolve_with_forward(organization_id)?
+            if let ResolveResult::Redirect(remote) =
+                self.resolver.resolve_with_redirect(organization_id)?
             {
-                let source_region =
-                    self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
-                let forward_start = std::time::Instant::now();
-                let deadline =
-                    inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-                let mut client = self.get_forward_client(&remote).await?;
-                let result = client.forward_list_entities(req, Some(&trace_ctx), deadline).await;
-                metrics::record_cross_region_forward(
-                    "list_entities",
-                    source_region,
-                    remote.region.as_str(),
-                    forward_start.elapsed().as_secs_f64(),
-                );
-                return result;
+                return Err(super::metadata::not_leader_remote_region(
+                    &remote,
+                    "Organization hosted by a remote region; reconnect to that region",
+                ));
             }
         }
 
@@ -2199,11 +1976,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
         // Forward to leader if this follower is lagging behind
-        if let Some(mut client) = self.should_forward_to_leader(&region).await? {
-            let deadline =
-                inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-            metrics::record_read_forward("list_entities");
-            return client.forward_list_entities(req, Some(&trace_ctx), deadline).await;
+        if !region.handle.is_leader() {
+            return Err(self.not_leader_within_region(&region, "Not the leader for this region"));
         }
 
         // Check consistency requirements (may execute ReadIndex protocol on followers)

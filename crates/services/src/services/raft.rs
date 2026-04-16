@@ -7,7 +7,7 @@
 //! `consensus_stream` RPC — one long-lived stream per peer with
 //! HTTP/2 flow-controlled backpressure.
 
-use std::{str::FromStr, sync::Arc};
+use std::{net::SocketAddr, str::FromStr, sync::Arc};
 
 use inferadb_ledger_proto::proto::{
     BatchRaftRequest, BatchRaftResponse, ConsensusAck, ConsensusEnvelope,
@@ -50,6 +50,42 @@ impl RaftService {
     ) -> Self {
         self.peer_liveness = Some(liveness);
         self
+    }
+
+    /// Returns true if `addr` matches the IP of any known cluster peer.
+    ///
+    /// Used to authenticate `ForwardRegionalProposal` callers. The cluster
+    /// runs on a trusted (private / WireGuard) network, so IP-match against
+    /// the peer address map is the pragmatic guard — ports differ between
+    /// inbound (ephemeral client port) and outbound (configured server port),
+    /// so only the IP portion is compared.
+    fn is_known_peer(&self, addr: &SocketAddr) -> bool {
+        let peers = self.manager.peer_addresses();
+        if peers.is_empty() {
+            // In dev / test scenarios with no peer map wired, allow to avoid
+            // breaking single-node bootstraps where the node is its own peer
+            // and has not yet announced itself. Log a warning so operational
+            // misconfiguration in production is visible.
+            tracing::warn!(
+                remote = %addr,
+                "is_known_peer: empty peer_addresses map; allowing ForwardRegionalProposal unauthenticated"
+            );
+            return true;
+        }
+        let caller_ip = addr.ip().to_string();
+        peers.iter_peers().into_iter().any(|(_, entry)| {
+            // entry is `host:port` (or `[ipv6]:port`); compare the host
+            // portion only. `rsplit_once(':')` handles both IPv4 and
+            // bracketed IPv6.
+            let host = entry.rsplit_once(':').map_or(entry.as_str(), |(h, _)| h).to_owned();
+            // Strip IPv6 brackets if present.
+            let host = host
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .unwrap_or(&host)
+                .to_owned();
+            host == caller_ip
+        })
     }
 }
 
@@ -186,6 +222,22 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
         &self,
         request: Request<ForwardRegionalProposalRequest>,
     ) -> Result<Response<ForwardRegionalProposalResponse>, Status> {
+        // Verify the caller is a known cluster peer. `ForwardRegionalProposal`
+        // is an internal server-to-server RPC used by saga orchestration;
+        // allowing unauthenticated external callers would let them forge
+        // arbitrary LedgerRequest payloads and bypass JWT / org scoping /
+        // rate limiting.
+        let Some(remote_addr) = request.remote_addr() else {
+            return Err(Status::unauthenticated(
+                "ForwardRegionalProposal requires a known peer source address",
+            ));
+        };
+        if !self.is_known_peer(&remote_addr) {
+            return Err(Status::unauthenticated(format!(
+                "ForwardRegionalProposal from unknown peer {remote_addr}"
+            )));
+        }
+
         let req = request.into_inner();
 
         // Resolve the target region — None means GLOBAL (same logic as forward_consensus).
@@ -515,6 +567,32 @@ mod tests {
         )
         .await;
         assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn is_known_peer_rejects_unknown_ip() {
+        let (service, manager, _temp) = create_basic_service();
+        manager.peer_addresses().insert(1, "10.0.0.1:50051".to_string());
+        manager.peer_addresses().insert(2, "10.0.0.2:50051".to_string());
+        let unknown: std::net::SocketAddr = "192.168.1.1:12345".parse().unwrap();
+        assert!(!service.is_known_peer(&unknown));
+    }
+
+    #[tokio::test]
+    async fn is_known_peer_accepts_matching_ip_any_port() {
+        let (service, manager, _temp) = create_basic_service();
+        manager.peer_addresses().insert(1, "10.0.0.1:50051".to_string());
+        // Inbound port differs from outbound port, IP must still match.
+        let caller: std::net::SocketAddr = "10.0.0.1:40123".parse().unwrap();
+        assert!(service.is_known_peer(&caller));
+    }
+
+    #[tokio::test]
+    async fn is_known_peer_allows_when_map_empty() {
+        let (service, _manager, _temp) = create_basic_service();
+        let caller: std::net::SocketAddr = "10.0.0.1:12345".parse().unwrap();
+        // Empty map — single-node dev / test scenario. Allow.
+        assert!(service.is_known_peer(&caller));
     }
 
     /// A well-formed message from a known member reaches the consensus engine.
