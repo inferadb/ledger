@@ -17,6 +17,11 @@ pub struct ApplyWorker {
     store: RaftLogStore<FileBackend>,
     response_map: ResponseMap,
     spillover: SpilloverMap,
+    /// When set, fires after every committed batch is applied. Used by the
+    /// GLOBAL region's apply worker to wake the DR scheduler on all nodes —
+    /// ensures data region membership is updated within one apply cycle of
+    /// a GLOBAL membership change, regardless of which node is the DR leader.
+    dr_notify: Option<std::sync::Arc<tokio::sync::Notify>>,
 }
 
 impl ApplyWorker {
@@ -30,7 +35,17 @@ impl ApplyWorker {
         response_map: ResponseMap,
         spillover: SpilloverMap,
     ) -> Self {
-        Self { store, response_map, spillover }
+        Self { store, response_map, spillover, dr_notify: None }
+    }
+
+    /// Attaches a DR membership notification for this worker. When set, the
+    /// worker fires the notification after every committed batch is applied,
+    /// waking the DR scheduler on this node. Only the GLOBAL region's worker
+    /// should have this set — data region workers leave it `None`.
+    #[must_use]
+    pub fn with_dr_notify(mut self, notify: std::sync::Arc<tokio::sync::Notify>) -> Self {
+        self.dr_notify = Some(notify);
+        self
     }
 
     /// Runs the apply loop until the channel is closed (engine shutdown).
@@ -76,6 +91,13 @@ impl ApplyWorker {
                     }
                 },
             }
+            // Wake the DR scheduler so data region membership is reconciled
+            // promptly after GLOBAL state changes (new voter, decommission, etc.).
+            // Only the GLOBAL region's worker has this set; DR workers skip.
+            if let Some(ref notify) = self.dr_notify {
+                notify.notify_one();
+            }
+
             // Prune stale spillover entries. No-op responses from become_leader
             // accumulate because no proposer registered for them. Keep only
             // entries within 1000 indices of the latest committed entry.

@@ -822,8 +822,22 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
 
                     // After the node is a GLOBAL voter, add it to all existing
                     // data regions where this node is the data region leader.
+                    let mut dr_complete = true;
                     if let Some(ref manager) = self.raft_manager {
-                        add_node_to_data_regions(manager, req.node_id, &req.address).await;
+                        dr_complete =
+                            add_node_to_data_regions(manager, req.node_id, &req.address).await;
+                    }
+
+                    // Verify the node is in all unprotected data regions.
+                    // If any region was skipped, we still succeed — the DR
+                    // scheduler will reconcile — but log a warning so
+                    // operators know the join was partial.
+                    if !dr_complete {
+                        tracing::warn!(
+                            node_id = req.node_id,
+                            "JoinCluster completed but node is not yet in all \
+                             data regions — DR scheduler will reconcile"
+                        );
                     }
 
                     // The joining node just communicated with us — mark it live.
@@ -936,11 +950,11 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             },
         }
 
-        // Synchronously remove the departing node from data regions BEFORE
+        // Synchronously remove the departing node from ALL data regions BEFORE
         // removing from GLOBAL. After GLOBAL removal, the node stops receiving
-        // Raft entries and can't process DR changes. The DR scheduler handles
-        // normal async operations; this synchronous path ensures correctness
-        // when nodes are killed immediately after leave_cluster returns.
+        // Raft entries and can't process DR changes. Without this synchronous
+        // step, nodes killed immediately after leave_cluster returns leave stale
+        // voters in data region membership, preventing quorum.
         if let Some(ref manager) = self.raft_manager {
             let target = inferadb_ledger_consensus::types::NodeId(req.node_id);
             let local_node_id = manager.config().node_id;
@@ -950,15 +964,30 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                     continue;
                 }
                 let Ok(group) = manager.get_region_group(region) else { continue };
-                if !group.handle().is_leader() {
-                    continue;
-                }
                 let state = group.handle().shard_state();
                 if !state.voters.contains(&target) && !state.learners.contains(&target) {
                     continue;
                 }
 
-                // Self-removal: transfer DR leadership to a surviving voter first.
+                if !group.handle().is_leader() {
+                    // This node is not the DR leader — it cannot propose membership
+                    // changes directly. The Decommissioning status is already
+                    // committed to GLOBAL Raft (replicated to all nodes), so the
+                    // DR checker on the actual leader will detect the node is no
+                    // longer in the desired voter set and propose RemoveVoter on
+                    // its next cycle (1s timer). The poll loop below waits for
+                    // this to complete before proceeding to GLOBAL removal.
+                    tracing::info!(
+                        region = region.as_str(),
+                        node_id = req.node_id,
+                        dr_leader = ?state.leader,
+                        "Not DR leader — DR checker on leader will handle removal"
+                    );
+                    continue;
+                }
+
+                // Self-removal: transfer DR leadership to a surviving voter first,
+                // then let the new leader remove us via the DR checker.
                 if req.node_id == local_node_id {
                     let global_state_reader = manager.system_state_reader();
                     let other_voter = state.voters.iter().find(|n| {
@@ -987,7 +1016,9 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         }
                     }
-                    continue; // New DR leader handles removal via scheduler.
+                    // The new DR leader will remove us — handled by the poll
+                    // loop below after we wake the DR checker.
+                    continue;
                 }
 
                 // Other-removal: remove directly with retry.
@@ -1016,6 +1047,64 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                         _ => break,
                     }
                 }
+            }
+
+            // Wake both the DR checker and scheduler on this node immediately.
+            // The checker handles removals for regions where this node IS the
+            // DR leader but the direct removal above was skipped (self-removal).
+            // For regions where the DR leader is on a different node, the
+            // remote checker picks up the Decommissioning status on its own
+            // 1s timer cycle. The poll loop below waits for all removals to
+            // complete before proceeding to GLOBAL removal.
+            manager.notify_dr_membership_change();
+
+            // Poll until the departing node is no longer a voter or learner
+            // in ANY data region. This ensures the node can be safely killed
+            // after leave_cluster returns without breaking DR quorum.
+            //
+            // The DR checker on each leader runs on a 1s timer and is also
+            // woken by the notify above (on this node). On localhost clusters
+            // the membership change replicates within milliseconds, so 10s is
+            // generous. Using 30s caused gRPC RST_STREAM timeouts on slower
+            // networks where the client-side deadline expired first.
+            let poll_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let mut still_member = false;
+                for region in manager.list_regions() {
+                    if region == inferadb_ledger_types::Region::GLOBAL {
+                        continue;
+                    }
+                    let Ok(group) = manager.get_region_group(region) else { continue };
+                    let state = group.handle().shard_state();
+                    if state.voters.contains(&target) || state.learners.contains(&target) {
+                        still_member = true;
+                        break;
+                    }
+                }
+                if !still_member {
+                    tracing::info!(node_id = req.node_id, "Node removed from all data regions");
+                    break;
+                }
+                if tokio::time::Instant::now() >= poll_deadline {
+                    tracing::error!(
+                        node_id = req.node_id,
+                        "Timed out waiting for data region removal — \
+                         aborting to prevent GLOBAL removal before DR cleanup"
+                    );
+                    ctx.end_raft_timer();
+                    ctx.set_error(
+                        "DataRegionDrainTimeout",
+                        "Node still present in one or more data regions after 10s",
+                    );
+                    return Ok(Response::new(LeaveClusterResponse {
+                        success: false,
+                        message: "Timed out draining data regions. The node is still \
+                                  marked Decommissioning; retry LeaveCluster after the \
+                                  DR scheduler has removed the node from all data regions."
+                            .to_string(),
+                    }));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
         }
 
@@ -2913,22 +3002,48 @@ fn write_cluster_id_to_disk(data_dir: &std::path::Path, cluster_id: u64) -> Resu
 /// so that regional Raft replication includes the new node. This follows the
 /// same `add_learner` → `promote_voter` pattern as the GLOBAL join.
 ///
-/// Errors are logged but not propagated — data region membership is
-/// best-effort during the join. The node will participate after the next
-/// region creation if any regions fail to add it.
+/// Returns `true` if the node was successfully added to ALL data regions,
+/// `false` if any region was skipped (the DR scheduler will reconcile).
 async fn add_node_to_data_regions(
     manager: &inferadb_ledger_raft::raft_manager::RaftManager,
     node_id: u64,
     address: &str,
-) {
+) -> bool {
     let regions = manager.list_regions();
+    let mut all_joined = true;
     for region in regions {
         if region == inferadb_ledger_types::Region::GLOBAL {
             continue;
         }
-        let group = match manager.get_region_group(region) {
-            Ok(g) => g,
-            Err(_) => continue,
+
+        // Retry get_region_group — the apply worker may still be processing
+        // a CreateDataRegion entry from GLOBAL Raft.
+        let group = {
+            let mut found = None;
+            for attempt in 0..30u32 {
+                match manager.get_region_group(region) {
+                    Ok(g) => {
+                        found = Some(g);
+                        break;
+                    },
+                    Err(_) if attempt < 29 => {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    },
+                    Err(_) => {
+                        tracing::error!(
+                            region = region.as_str(),
+                            node_id,
+                            "Data region group not available after 3s — \
+                             DR scheduler will reconcile"
+                        );
+                        all_joined = false;
+                    },
+                }
+            }
+            match found {
+                Some(g) => g,
+                None => continue,
+            }
         };
 
         // Skip if this node is already a member.
@@ -2939,8 +3054,11 @@ async fn add_node_to_data_regions(
         }
 
         // Wait for a data region leader to be elected (may be in progress).
+        // Budget: 30s (300 retries × 100ms). On localhost, leader election
+        // completes in <1s. On production clusters, 30s covers worst-case
+        // election scenarios.
         let mut leader = None;
-        for _ in 0..50 {
+        for _ in 0..300 {
             if let Some(lid) = group.handle().current_leader() {
                 leader = Some(lid);
                 break;
@@ -2948,11 +3066,13 @@ async fn add_node_to_data_regions(
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         let Some(leader_id) = leader else {
-            tracing::warn!(
+            tracing::error!(
                 region = region.as_str(),
                 node_id,
-                "No data region leader elected — skipping join"
+                "No data region leader elected after 30s — \
+                 DR scheduler will reconcile"
             );
+            all_joined = false;
             continue;
         };
 
@@ -2975,17 +3095,25 @@ async fn add_node_to_data_regions(
             let leader_addr = match manager.peer_addresses().get(leader_id) {
                 Some(a) => a,
                 None => {
-                    tracing::warn!(
+                    tracing::error!(
                         region = region.as_str(),
                         leader_id,
-                        "No address for data region leader — skipping join"
+                        "No address for data region leader — \
+                         DR scheduler will reconcile"
                     );
+                    all_joined = false;
                     continue;
                 },
             };
             forward_data_region_join(manager, leader_id, &leader_addr, node_id, address).await;
         }
     }
+
+    // Wake the DR scheduler immediately so it can verify and reconcile
+    // any regions that were skipped or need promotion.
+    manager.notify_dr_membership_change();
+
+    all_joined
 }
 
 /// Adds a node as learner then promotes to voter on a data region group.

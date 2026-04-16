@@ -493,6 +493,12 @@ pub struct RaftManager {
     /// `Arc` so that all regions share a single channel per peer instead of
     /// each region opening its own connection.
     registry: Arc<crate::node_registry::NodeConnectionRegistry>,
+    /// Notifier for data region membership changes.
+    ///
+    /// Fired when a GLOBAL membership change completes (e.g. `JoinCluster`)
+    /// so the DR scheduler can immediately reconcile data region membership
+    /// instead of waiting for the next timer tick.
+    dr_membership_notify: Arc<tokio::sync::Notify>,
 }
 
 impl RaftManager {
@@ -512,6 +518,7 @@ impl RaftManager {
             regions: RwLock::new(HashMap::new()),
             peer_addresses: crate::peer_address_map::PeerAddressMap::new(),
             registry,
+            dr_membership_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -580,6 +587,24 @@ impl RaftManager {
     /// Lists all active region IDs.
     pub fn list_regions(&self) -> Vec<Region> {
         self.regions.read().keys().copied().collect()
+    }
+
+    /// Returns the data region membership change notifier.
+    ///
+    /// The DR scheduler `select!`s on this alongside its timer so it can
+    /// react immediately when a GLOBAL membership change occurs (e.g. a new
+    /// node joins via `JoinCluster`).
+    pub fn dr_membership_notify(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.dr_membership_notify)
+    }
+
+    /// Fires the data region membership notifier.
+    ///
+    /// Call after a GLOBAL membership change (JoinCluster, LeaveCluster) so
+    /// the DR scheduler wakes up and reconciles data region membership
+    /// immediately instead of waiting for the next timer tick.
+    pub fn notify_dr_membership_change(&self) {
+        self.dr_membership_notify.notify_waiters();
     }
 
     /// Checks if a region is active.
@@ -1083,11 +1108,17 @@ impl RaftManager {
         tokio::spawn(divergence_handler.run());
 
         // Spawn the apply worker — bridges consensus commits to state machine.
-        let apply_worker = crate::apply_worker::ApplyWorker::new(
+        // The GLOBAL region's worker gets the DR membership notification so
+        // that data region schedulers on ALL nodes (including remote DR leaders)
+        // wake up when GLOBAL membership changes are applied locally.
+        let mut apply_worker = crate::apply_worker::ApplyWorker::new(
             log_store,
             handle.response_map().clone(),
             handle.spillover().clone(),
         );
+        if region == inferadb_ledger_types::Region::GLOBAL {
+            apply_worker = apply_worker.with_dr_notify(self.dr_membership_notify());
+        }
         tokio::spawn(apply_worker.run(commit_rx));
 
         // Create region group

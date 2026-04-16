@@ -389,8 +389,12 @@ pub async fn bootstrap_node(
         let bg_stagger_delay = config.background_jobs.stagger_delay();
 
         // Spawn DR checker task (1s cadence) — reactive repair for dead/decommissioning voters.
+        // Also wakes immediately when notified of membership changes (e.g.
+        // LeaveCluster marks a node Decommissioning) so the checker can
+        // propose RemoveVoter without waiting for the next timer tick.
         {
             let mgr = manager.clone();
+            let notify = mgr.dr_membership_notify();
             tokio::spawn(async move {
                 let mut learner_first_seen: crate::dr_scheduler::LearnerFirstSeen =
                     std::collections::HashMap::new();
@@ -398,19 +402,37 @@ pub async fn bootstrap_node(
                 loop {
                     reconcile_transport_channels(&mgr).await;
                     crate::dr_scheduler::run_checker_cycle(&mgr, &mut learner_first_seen).await;
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    tokio::select! {
+                        () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
+                        () = notify.notified() => {
+                            tracing::debug!(
+                                "DR checker woken by membership change notification"
+                            );
+                        },
+                    }
                 }
             });
         }
 
         // Spawn DR scheduler task (5s cadence) — proactive growth (learner add/promote).
+        // Also wakes immediately when notified of GLOBAL membership changes
+        // (e.g. JoinCluster) so new nodes are added to data regions without
+        // waiting for the next timer tick.
         {
             let mgr = manager.clone();
+            let notify = mgr.dr_membership_notify();
             tokio::spawn(async move {
                 tokio::time::sleep(bg_stagger_delay).await;
                 loop {
                     crate::dr_scheduler::run_scheduler_cycle(&mgr).await;
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    tokio::select! {
+                        () = tokio::time::sleep(std::time::Duration::from_secs(5)) => {},
+                        () = notify.notified() => {
+                            tracing::debug!(
+                                "DR scheduler woken by membership change notification"
+                            );
+                        },
+                    }
                 }
             });
         }

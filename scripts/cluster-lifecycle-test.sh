@@ -1466,12 +1466,10 @@ for node_num in "${NODES_TO_REMOVE[@]}"; do
   wait_for_member_removed "$node_num" "${ACTIVE_QUERY_NODES[0]}"
 done
 
-# Data region membership changes are declarative: leave_cluster marks the
-# node as Decommissioning, the DR scheduler removes it from data regions,
-# and the drain monitor removes it from GLOBAL once fully drained. The
-# wait_for_member_removed calls above block until GLOBAL removal completes.
-log_info "Waiting for data region membership reconciliation..."
-sleep 5
+# leave_cluster synchronously removes the departing node from all data
+# regions before removing from GLOBAL, so no additional wait is needed.
+# The wait_for_member_removed calls above block until GLOBAL removal
+# completes, which guarantees DR removal already happened.
 
 # Protect node 4 from the cleanup trap — it's the survivor under test.
 _n4_pid=$(lsof -ti "tcp:$(node_port 4)" -sTCP:LISTEN 2>/dev/null || true)
