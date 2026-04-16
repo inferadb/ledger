@@ -749,26 +749,33 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
 
         // Replicate the peer address to all nodes via GLOBAL Raft so that
         // data region leaders on other nodes can reach the new peer.
-        // Fire-and-forget — we don't need to wait for this to commit before
-        // proceeding with the membership change. The address will replicate
-        // through normal Raft flow.
-        let register_handle = self.handle.clone();
-        let register_node_id = req.node_id;
-        let register_address = req.address.clone();
-        tokio::spawn(async move {
+        // This MUST commit before we proceed with the membership change —
+        // otherwise `add_node_to_data_regions` runs on the DR leader before
+        // the DR leader has the joining node's address, causing AddLearner
+        // to succeed (membership change committed) but the transport channel
+        // to be missing (messages silently dropped, learner never catches up).
+        {
             let register_request = inferadb_ledger_raft::types::LedgerRequest::System(
                 inferadb_ledger_raft::types::SystemRequest::RegisterPeerAddress {
-                    node_id: register_node_id,
-                    address: register_address,
+                    node_id: req.node_id,
+                    address: req.address.clone(),
                 },
             );
-            let _ = register_handle
+            if let Err(e) = self
+                .handle
                 .propose_and_wait(
                     inferadb_ledger_raft::types::RaftPayload::system(register_request),
                     std::time::Duration::from_secs(5),
                 )
-                .await;
-        });
+                .await
+            {
+                tracing::warn!(
+                    node_id = req.node_id,
+                    error = %e,
+                    "RegisterPeerAddress failed — proceeding with join (DR scheduler will reconcile)"
+                );
+            }
+        }
 
         // Step 1: Add as learner via ConsensusHandle
         ctx.start_raft_timer();

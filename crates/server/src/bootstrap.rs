@@ -1413,6 +1413,9 @@ async fn process_region_event(
         return;
     }
 
+    let node_id = mgr.config().node_id;
+    let is_initial_member = initial_members.iter().any(|(id, _)| *id == node_id);
+
     let region_config = inferadb_ledger_raft::RegionConfig::builder()
         .region(region)
         .initial_members(initial_members)
@@ -1422,6 +1425,20 @@ async fn process_region_event(
         Ok(_) => {
             tracing::info!(region = region.as_str(), "Data region created via Raft consensus");
             reconcile_transport_channels(mgr).await;
+
+            // Late-joiner: this node is NOT in the initial membership for this
+            // data region. The shard starts as a non-member observer that can't
+            // participate until the DR leader adds it as a learner. Notify the
+            // DR scheduler immediately so the leader's scheduler wakes and
+            // proposes AddLearner for this node on the next cycle.
+            if !is_initial_member {
+                tracing::info!(
+                    region = region.as_str(),
+                    node_id,
+                    "Late-joining data region — notifying DR scheduler for learner addition"
+                );
+                mgr.notify_dr_membership_change();
+            }
         },
         Err(e) => {
             tracing::warn!(

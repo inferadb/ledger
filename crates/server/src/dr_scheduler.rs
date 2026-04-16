@@ -308,9 +308,22 @@ pub async fn execute_operator(
             }
         },
         OperatorAction::AddLearner { node_id } => {
+            // Require the peer address before adding a learner. Without an
+            // address, the transport channel can't be created and the leader
+            // silently drops all AppendEntries to this peer — the learner
+            // never catches up and is never promoted. Skip this cycle; the
+            // scheduler retries next tick when RegisterPeerAddress may have
+            // been applied.
+            let Some(addr) = manager.peer_addresses().get(*node_id) else {
+                tracing::debug!(
+                    region = op.region.as_str(),
+                    node_id,
+                    "DR scheduler: deferring AddLearner — peer address not yet available"
+                );
+                return;
+            };
             // Register transport channel for the new learner.
-            if let Some(addr) = manager.peer_addresses().get(*node_id)
-                && let Some(transport) = group.consensus_transport()
+            if let Some(transport) = group.consensus_transport()
                 && let Err(e) = transport.set_peer_via_registry(*node_id, &addr).await
             {
                 tracing::warn!(
