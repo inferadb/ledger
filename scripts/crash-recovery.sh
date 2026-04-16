@@ -376,18 +376,28 @@ verify_no_data_loss() {
     key_val="${line#ok:}"
     ok_count=$((ok_count + 1))
 
-    # Read from node 1 (eventual consistency — all nodes should have it after convergence).
-    addr=$(node_addr 1)
-    read_result=$(grpcurl -plaintext \
-      -d "{\"caller\": {\"slug\": \"$USER_SLUG\"}, \"organization\": {\"slug\": \"$ORG_SLUG\"}, \"vault\": {\"slug\": \"$VAULT_SLUG\"}, \"key\": \"$key_val\", \"consistency\": \"READ_CONSISTENCY_EVENTUAL\"}" \
-      "$addr" \
-      ledger.v1.ReadService/Read 2>/dev/null || true)
-    val=$(echo "$read_result" | jq -r '.value // empty' 2>/dev/null || true)
-    if [[ -z "$val" ]]; then
+    # Try reading from ALL nodes — after leader crash, the restarted node may
+    # still be catching up. The entry is safe if ANY surviving node has it.
+    local found=false
+    local last_response=""
+    for node_num in 1 2 3; do
+      addr=$(node_addr "$node_num")
+      read_result=$(grpcurl -plaintext \
+        -d "{\"caller\": {\"slug\": \"$USER_SLUG\"}, \"organization\": {\"slug\": \"$ORG_SLUG\"}, \"vault\": {\"slug\": \"$VAULT_SLUG\"}, \"key\": \"$key_val\", \"consistency\": \"READ_CONSISTENCY_EVENTUAL\"}" \
+        "$addr" \
+        ledger.v1.ReadService/Read 2>/dev/null || true)
+      val=$(echo "$read_result" | jq -r '.value // empty' 2>/dev/null || true)
+      if [[ -n "$val" ]]; then
+        found=true
+        break
+      fi
+      last_response="$read_result"
+    done
+    if [[ "$found" != "true" ]]; then
       missing=$((missing + 1))
       if (( missing <= 3 )); then
-        log_error "  Missing: $key_val"
-        log_error "    Response: ${read_result:0:200}"
+        log_error "  Missing on ALL nodes: $key_val"
+        log_error "    Last response: ${last_response:0:200}"
       fi
     fi
   done < "$writer_log"

@@ -835,14 +835,22 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
         let pending = std::mem::take(&mut self.pending_commits);
         self.dispatch_committed_batches(&pending).await;
 
+        // Deliver outbound messages via the transport BEFORE resolving
+        // responses to clients. This ordering guarantee ensures that
+        // AppendEntries messages reach followers before any client sees
+        // a success response. Without this, a SIGKILL between response
+        // delivery and outbox flush can cause acknowledged writes to be
+        // lost — the client saw success, but no follower received the
+        // entry, so the new leader after election doesn't have it.
+        self.outbox.flush(&self.transport);
+
         // Resolve responses for entries that have reached quorum commit.
+        // Safe to send now: followers have the entries in their network
+        // receive buffers (or have already ack'd).
         self.resolve_committed_responses();
 
         // Reject responses for shards where this node lost leadership.
         self.reject_stale_responses();
-
-        // Deliver outbound messages via the transport.
-        self.outbox.flush(&self.transport);
     }
 
     /// Resolves pending proposal responses whose entry index has been committed
