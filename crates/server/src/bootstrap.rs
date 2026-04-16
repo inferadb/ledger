@@ -297,6 +297,94 @@ pub async fn bootstrap_node(
     // state. On fresh nodes these are deferred until after InitCluster completes
     // (the fresh path spawns them via `start_background_jobs`).
     if cluster_id.is_some() {
+        // === Restart: re-discover peer addresses from --join seeds ===
+        //
+        // On restart, the PeerAddressMap is empty (RegisterPeerAddress entries
+        // were applied in a prior run but the map is in-memory only). Seed the
+        // map from --join addresses by querying GetNodeInfo from each seed to
+        // learn its numeric node_id, then insert into the map. This enables
+        // `reconcile_transport_channels` to register transport channels promptly
+        // instead of waiting for peers to reconnect to us.
+        if let Some(ref seeds) = config.join
+            && !seeds.is_empty()
+        {
+            let addrs = crate::discovery::parse_seed_addresses(seeds);
+            let peer_addresses = manager.peer_addresses().clone();
+            let my_node_id = node_id;
+            let ct = system_region.consensus_transport().cloned();
+            tokio::spawn(async move {
+                for addr in &addrs {
+                    match crate::discovery::discover_node_info(*addr, Duration::from_secs(5)).await
+                    {
+                        Some(info) if info.node_id != my_node_id && info.node_id != 0 => {
+                            let addr_str = addr.to_string();
+                            tracing::info!(
+                                node_id = info.node_id,
+                                addr = %addr_str,
+                                "Restart: discovered peer from seed"
+                            );
+                            peer_addresses.insert(info.node_id, addr_str.clone());
+
+                            // Register in the consensus transport so heartbeats
+                            // can flow immediately rather than waiting for the
+                            // 1s reconcile_transport_channels cycle.
+                            if let Some(ref transport) = ct
+                                && let Err(e) =
+                                    transport.set_peer_via_registry(info.node_id, &addr_str).await
+                            {
+                                tracing::warn!(
+                                    node_id = info.node_id,
+                                    error = %e,
+                                    "Failed to register seed peer on restart"
+                                );
+                            }
+                        },
+                        _ => {
+                            tracing::debug!(
+                                seed = %addr,
+                                "Restart: seed not reachable or returned no node_id"
+                            );
+                        },
+                    }
+                }
+            });
+        }
+
+        // === Restart: re-start existing data regions from disk ===
+        //
+        // On restart, only the GLOBAL region is started eagerly. Data regions
+        // whose directories exist (created by prior CreateDataRegion entries)
+        // must be re-opened. The consensus Shard for each region will use its
+        // persisted membership (Fix 1) so it won't spuriously self-elect.
+        {
+            let discovered = storage_manager.discover_existing_regions();
+            if !discovered.is_empty() {
+                tracing::info!(
+                    count = discovered.len(),
+                    "Restart: re-starting discovered data regions"
+                );
+            }
+            for region in discovered {
+                let region_config = inferadb_ledger_raft::RegionConfig::builder()
+                    .region(region)
+                    .initial_members(vec![(node_id, config.advertise_addr())])
+                    .events_config(config.events.clone())
+                    .build();
+                match manager.start_data_region(region_config).await {
+                    Ok(_) => {
+                        tracing::info!(region = region.as_str(), "Restart: data region started");
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            region = region.as_str(),
+                            error = %e,
+                            "Restart: failed to start data region"
+                        );
+                    },
+                }
+            }
+        }
+
         let bg_initial_delay = config.background_jobs.initial_delay();
         let bg_stagger_delay = config.background_jobs.stagger_delay();
 

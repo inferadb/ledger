@@ -883,18 +883,45 @@ impl RaftManager {
             inferadb_ledger_consensus::types::ShardId(seahash::hash(region.as_str().as_bytes()));
 
         // Initial membership for the consensus engine shard.
-        let voter_ids: std::collections::BTreeSet<inferadb_ledger_consensus::types::NodeId> =
-            if initial_members.is_empty() {
-                [inferadb_ledger_consensus::types::NodeId(self.config.node_id)]
-                    .into_iter()
-                    .collect()
-            } else {
-                initial_members
+        //
+        // On restart (persisted state exists), use the persisted membership
+        // from the RaftLogStore rather than `initial_members`. The persisted
+        // membership reflects the last committed configuration, so the shard
+        // starts with the correct voter/learner set and does not
+        // spuriously elect itself leader as a sole-voter singleton.
+        let persisted_membership = log_store.persisted_membership();
+        let consensus_membership = if persisted_membership.voter_ids.len() > 1 {
+            let voters: std::collections::BTreeSet<inferadb_ledger_consensus::types::NodeId> =
+                persisted_membership
+                    .voter_ids
                     .iter()
-                    .map(|(id, _)| inferadb_ledger_consensus::types::NodeId(*id))
-                    .collect()
-            };
-        let consensus_membership = inferadb_ledger_consensus::types::Membership::new(voter_ids);
+                    .map(|&id| inferadb_ledger_consensus::types::NodeId(id))
+                    .collect();
+            let mut membership = inferadb_ledger_consensus::types::Membership::new(voters);
+            for &learner_id in &persisted_membership.learner_ids {
+                membership.add_learner(inferadb_ledger_consensus::types::NodeId(learner_id));
+            }
+            info!(
+                region = region.as_str(),
+                voters = ?persisted_membership.voter_ids,
+                learners = ?persisted_membership.learner_ids,
+                "Using persisted membership for consensus shard"
+            );
+            membership
+        } else {
+            let voter_ids: std::collections::BTreeSet<inferadb_ledger_consensus::types::NodeId> =
+                if initial_members.is_empty() {
+                    [inferadb_ledger_consensus::types::NodeId(self.config.node_id)]
+                        .into_iter()
+                        .collect()
+                } else {
+                    initial_members
+                        .iter()
+                        .map(|(id, _)| inferadb_ledger_consensus::types::NodeId(*id))
+                        .collect()
+                };
+            inferadb_ledger_consensus::types::Membership::new(voter_ids)
+        };
 
         let consensus_shard = inferadb_ledger_consensus::Shard::new(
             shard_id,

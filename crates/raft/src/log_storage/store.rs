@@ -410,6 +410,16 @@ impl<B: StorageBackend> RaftLogStore<B> {
         AppliedStateAccessor::new(self.applied_state.clone())
     }
 
+    /// Returns the persisted membership from the applied state.
+    ///
+    /// Called during region startup to initialize the consensus shard with the
+    /// last committed membership rather than `initial_members`. On a fresh store
+    /// the membership has no voters; on restart it reflects the last committed
+    /// configuration change.
+    pub fn persisted_membership(&self) -> StoredMembership {
+        self.applied_state.load().membership.clone()
+    }
+
     /// Returns the shared commitment buffer handle.
     ///
     /// Used to pass the same `Arc` to `RegionGroup` so that the proposal path
