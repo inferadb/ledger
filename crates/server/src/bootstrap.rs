@@ -422,11 +422,15 @@ pub async fn bootstrap_node(
             let mgr = manager.clone();
             let notify = mgr.dr_membership_notify();
             tokio::spawn(async move {
-                tokio::time::sleep(bg_stagger_delay).await;
+                // Use the same initial delay as the checker (not the longer
+                // stagger delay) so the growth scheduler starts promptly.
+                // Event-driven notifications wake the scheduler immediately
+                // when GLOBAL membership changes; the timer is just a fallback.
+                tokio::time::sleep(bg_initial_delay).await;
                 loop {
                     crate::dr_scheduler::run_scheduler_cycle(&mgr).await;
                     tokio::select! {
-                        () = tokio::time::sleep(std::time::Duration::from_secs(5)) => {},
+                        () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
                         () = notify.notified() => {
                             tracing::debug!(
                                 "DR scheduler woken by membership change notification"

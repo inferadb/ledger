@@ -95,7 +95,7 @@ impl ApplyWorker {
             // promptly after GLOBAL state changes (new voter, decommission, etc.).
             // Only the GLOBAL region's worker has this set; DR workers skip.
             if let Some(ref notify) = self.dr_notify {
-                notify.notify_one();
+                notify.notify_waiters();
             }
 
             // Prune stale spillover entries. No-op responses from become_leader

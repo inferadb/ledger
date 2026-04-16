@@ -1052,60 +1052,15 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             // Wake both the DR checker and scheduler on this node immediately.
             // The checker handles removals for regions where this node IS the
             // DR leader but the direct removal above was skipped (self-removal).
-            // For regions where the DR leader is on a different node, the
-            // remote checker picks up the Decommissioning status on its own
-            // 1s timer cycle. The poll loop below waits for all removals to
-            // complete before proceeding to GLOBAL removal.
-            manager.notify_dr_membership_change();
-
-            // Poll until the departing node is no longer a voter or learner
-            // in ANY data region. This ensures the node can be safely killed
-            // after leave_cluster returns without breaking DR quorum.
+            // For regions where the DR leader is on a different node, that
+            // node's GLOBAL apply worker fires the same notification when it
+            // processes the Decommissioning entry, waking its local checker.
             //
-            // The DR checker on each leader runs on a 1s timer and is also
-            // woken by the notify above (on this node). On localhost clusters
-            // the membership change replicates within milliseconds, so 10s is
-            // generous. Using 30s caused gRPC RST_STREAM timeouts on slower
-            // networks where the client-side deadline expired first.
-            let poll_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-            loop {
-                let mut still_member = false;
-                for region in manager.list_regions() {
-                    if region == inferadb_ledger_types::Region::GLOBAL {
-                        continue;
-                    }
-                    let Ok(group) = manager.get_region_group(region) else { continue };
-                    let state = group.handle().shard_state();
-                    if state.voters.contains(&target) || state.learners.contains(&target) {
-                        still_member = true;
-                        break;
-                    }
-                }
-                if !still_member {
-                    tracing::info!(node_id = req.node_id, "Node removed from all data regions");
-                    break;
-                }
-                if tokio::time::Instant::now() >= poll_deadline {
-                    tracing::error!(
-                        node_id = req.node_id,
-                        "Timed out waiting for data region removal — \
-                         aborting to prevent GLOBAL removal before DR cleanup"
-                    );
-                    ctx.end_raft_timer();
-                    ctx.set_error(
-                        "DataRegionDrainTimeout",
-                        "Node still present in one or more data regions after 10s",
-                    );
-                    return Ok(Response::new(LeaveClusterResponse {
-                        success: false,
-                        message: "Timed out draining data regions. The node is still \
-                                  marked Decommissioning; retry LeaveCluster after the \
-                                  DR scheduler has removed the node from all data regions."
-                            .to_string(),
-                    }));
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            }
+            // The GLOBAL removal below proceeds immediately. The caller (CLI,
+            // script, SDK) should poll GetClusterInfo to confirm removal from
+            // both GLOBAL and data regions before killing the node. Blocking
+            // here caused gRPC RST_STREAM timeouts.
+            manager.notify_dr_membership_change();
         }
 
         // Remove from GLOBAL.

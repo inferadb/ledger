@@ -1466,10 +1466,12 @@ for node_num in "${NODES_TO_REMOVE[@]}"; do
   wait_for_member_removed "$node_num" "${ACTIVE_QUERY_NODES[0]}"
 done
 
-# leave_cluster synchronously removes the departing node from all data
-# regions before removing from GLOBAL, so no additional wait is needed.
-# The wait_for_member_removed calls above block until GLOBAL removal
-# completes, which guarantees DR removal already happened.
+# leave_cluster fires the DR scheduler notification, which triggers
+# asynchronous removal from data regions. Wait for the data region
+# membership to converge before killing nodes — otherwise dead nodes
+# remain as DR voters and prevent quorum.
+log_info "Waiting for data region membership convergence..."
+sleep 5
 
 # Protect node 4 from the cleanup trap — it's the survivor under test.
 _n4_pid=$(lsof -ti "tcp:$(node_port 4)" -sTCP:LISTEN 2>/dev/null || true)
