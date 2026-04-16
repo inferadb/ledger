@@ -5,7 +5,7 @@
 #
 #   Phase 1: Boot a 3-node cluster, write data, verify replication
 #   Phase 2: Add a 4th node (--join), verify it catches up with all data
-#   Phase 3: Write data via the 4th node, verify all 4 nodes agree
+#   Phase 3: Write data via leader in 4-node cluster, verify all 4 agree
 #   Phase 4: Graceful leader handoff via TransferLeadership RPC
 #   Phase 5: Shut down the original 3 nodes, write data to the survivor
 #   Phase 6: Boot 2 new nodes, verify the new 3-node cluster has all data
@@ -652,17 +652,33 @@ create_org() {
     return 1
   fi
 
-  # Phase 3: CompleteRegistration
-  local reg_result
-  reg_result=$(grpcurl -plaintext \
-    -d "{\"onboarding_token\": \"$onboarding_token\", \"email\": \"$email\", \"region\": $region, \"name\": \"Test Admin\", \"organization_name\": \"$name\"}" \
-    "$working_addr" \
-    ledger.v1.UserService/CompleteRegistration 2>&1) || true
+  # Phase 3: CompleteRegistration — must run on the GLOBAL leader (saga orchestrator).
+  # The GLOBAL leader may differ from the regional leader used for email verification.
+  # Retry across all cluster nodes until we hit the GLOBAL leader.
+  local reg_attempt=0
+  while [[ $reg_attempt -lt 15 ]]; do
+    for port in $(seq "$BASE_PORT" $((BASE_PORT + 9))); do
+      if ! nc -z 127.0.0.1 "$port" 2>/dev/null; then
+        continue
+      fi
+      local reg_addr="127.0.0.1:$port"
+      local reg_result
+      reg_result=$(grpcurl -plaintext \
+        -d "{\"onboarding_token\": \"$onboarding_token\", \"email\": \"$email\", \"region\": $region, \"name\": \"Test Admin\", \"organization_name\": \"$name\"}" \
+        "$reg_addr" \
+        ledger.v1.UserService/CompleteRegistration 2>&1) || true
+      ORG_SLUG=$(echo "$reg_result" | jq -r '.organization.slug // empty' 2>/dev/null || true)
+      USER_SLUG=$(echo "$reg_result" | jq -r '.user.slug.slug // empty' 2>/dev/null || true)
+      if [[ -n "$ORG_SLUG" && -n "$USER_SLUG" ]]; then
+        break 2
+      fi
+    done
+    reg_attempt=$((reg_attempt + 1))
+    sleep 3
+  done
 
-  ORG_SLUG=$(echo "$reg_result" | jq -r '.organization.slug // empty' 2>/dev/null || true)
-  USER_SLUG=$(echo "$reg_result" | jq -r '.user.slug.slug // empty' 2>/dev/null || true)
   if [[ -z "$ORG_SLUG" || -z "$USER_SLUG" ]]; then
-    log_error "CompleteRegistration failed: $reg_result"
+    log_error "CompleteRegistration failed after 15 attempts"
     return 1
   fi
   log_step "Created organization '$name' (slug: $ORG_SLUG) with admin user (slug: $USER_SLUG)"
@@ -1187,26 +1203,26 @@ log_success "Node 4 catch-up verified with point reads"
 # Phase 3: Write data via the 4th node, verify all 4 agree
 # ===========================================================================
 
-log_phase "Phase 3: Write data via 4th node"
+log_phase "Phase 3: Write data via leader (4-node cluster)"
 
-# The 4th node might not be leader, but writes should be forwarded.
-# To be safe, find the current leader (could have changed).
+# Non-leader nodes return NotLeader with a leader hint (redirect model).
+# Write to the current leader to validate replication across all 4 nodes.
 LEADER=$(find_leader 1 2 3 4)
 log_info "Current leader is node $LEADER"
 
-log_info "Writing Phase 3 named entities via node 4..."
-write_entity 4 "user:diana" "Diana from Phase 3"
-write_entity 4 "user:edward" "Edward from Phase 3"
-write_entity 4 "config:version" "v2.0.0"
+log_info "Writing Phase 3 named entities via leader (node $LEADER)..."
+write_entity "$LEADER" "user:diana" "Diana from Phase 3"
+write_entity "$LEADER" "user:edward" "Edward from Phase 3"
+write_entity "$LEADER" "config:version" "v2.0.0"
 
-log_info "Writing Phase 3 bulk data via node 4 (30 entities)..."
-write_batch 4 "p3-data" 30 "Phase 3 batch"
+log_info "Writing Phase 3 bulk data via leader (30 entities)..."
+write_batch "$LEADER" "p3-data" 30 "Phase 3 batch"
 
 sleep 2
 
-verify_data_consistency "Phase 3 — all 4 nodes after writes via node 4 (87 entities)" 1 2 3 4
+verify_data_consistency "Phase 3 — all 4 nodes after writes via leader (87 entities)" 1 2 3 4
 
-# Point-read Phase 3 data on non-leader nodes (tests forwarded-write replication)
+# Point-read Phase 3 data on non-leader nodes (tests replication to all voters)
 log_info "Verifying point reads on non-leader nodes..."
 PHASE3_FOLLOWERS=()
 for n in 1 2 3 4; do
@@ -1449,7 +1465,7 @@ verify_read_on_nodes "p1-data:001" "Phase 1 batch item 001" 5 6
 verify_read_on_nodes "p1-data:025" "Phase 1 batch item 025" 5 6
 verify_read_on_nodes "p1-data:050" "Phase 1 batch item 050" 5 6
 
-# Phase 3 data (written via non-leader forwarding)
+# Phase 3 data (written via leader in 4-node cluster)
 verify_read_on_nodes "user:diana" "Diana from Phase 3" 5 6
 verify_read_on_nodes "p3-data:001" "Phase 3 batch item 001" 5 6
 verify_read_on_nodes "p3-data:015" "Phase 3 batch item 015" 5 6
@@ -1478,7 +1494,7 @@ log_phase "All phases passed!"
 
 echo -e "${GREEN}  Phase 1:${NC} 3-node boot + 55 entities + follower point reads        ✓"
 echo -e "${GREEN}  Phase 2:${NC} 4th node join + catch-up point reads (55 entities)    ✓"
-echo -e "${GREEN}  Phase 3:${NC} Writes via non-leader + 87 entities + follower reads  ✓"
+echo -e "${GREEN}  Phase 3:${NC} Writes in 4-node cluster + 87 entities + follower reads ✓"
 echo -e "${GREEN}  Phase 4:${NC} Graceful leader handoff via TransferLeadership        ✓"
 echo -e "${GREEN}  Phase 5:${NC} Original 3 shutdown + 110 entities on survivor        ✓"
 echo -e "${GREEN}  Phase 6:${NC} 2 new nodes + full historical catch-up reads          ✓"

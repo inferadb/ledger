@@ -10,13 +10,13 @@
 # Hot paths tested:
 #   1. Follower reads  — ensure_global_consistency → read_index_from_leader
 #   2. Follower writes — ensure_global_consistency → read_index_from_leader
-#   3. Proposal forwarding — proposal.rs non-leader → leader channel
-#   4. Multi-region forwarding — cross-region proposal forwarding
-#   5. Saga orchestrator — saga_orchestrator.rs non-leader forwarding
+#   3. Consensus transport — bidi streaming ConsensusStream channels
+#   4. Multi-region consensus — cross-region Raft transport channels
+#   5. Saga orchestrator — saga_orchestrator.rs leader-directed RPCs
 #
 # Expected port consumption per 10-second stress test:
 #   - 3-node cluster: ~30-70 TIME_WAIT sockets (channel cache hit rate >99%)
-#   - 1-node cluster: ~2-5 TIME_WAIT sockets (no forwarding)
+#   - 1-node cluster: ~2-5 TIME_WAIT sockets (no inter-node traffic)
 #   - Multi-region:   ~30-70 TIME_WAIT sockets
 #
 # Failure threshold: 200 TIME_WAIT sockets per test
@@ -83,7 +83,7 @@ run_stress_test() {
   if [[ $delta -gt $THRESHOLD ]]; then
     log_error "  REGRESSION: $delta new TIME_WAIT sockets (threshold: $THRESHOLD)"
     log_error "  This indicates gRPC channel caching is broken."
-    log_error "  Check: helpers.rs read_index_from_leader, proposal.rs, saga_orchestrator.rs"
+    log_error "  Check: helpers.rs read_index_from_leader, consensus transport, saga_orchestrator.rs"
     ((FAILED++))
   else
     log_ok "  $delta new TIME_WAIT sockets (within threshold of $THRESHOLD)"
@@ -97,34 +97,34 @@ echo "║        Threshold: $THRESHOLD TIME_WAIT sockets per test          ║"
 echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
 
-# ─── Test 1: 3-node cluster (follower reads + writes + forwarding) ────
-# This is the primary hot path. In a 3-node cluster, 2/3 of operations
-# hit followers and get forwarded to the leader. Each forward uses the
-# cached gRPC channel. Without caching, this creates ~16,000 sockets.
+# ─── Test 1: 3-node cluster (consensus transport + read index) ────────
+# This is the primary hot path. In a 3-node cluster, consensus transport
+# (Raft replication) and read_index_from_leader use cached gRPC channels.
+# Without caching, this creates ~16,000 sockets.
 run_stress_test \
   "test_stress_quick" \
-  "3-node cluster — follower read/write forwarding"
+  "3-node cluster — consensus transport + read index channels"
 
-# ─── Test 2: 1-node cluster (leader-only, no forwarding) ─────────────
-# Baseline: no forwarding needed, all operations hit the leader directly.
+# ─── Test 2: 1-node cluster (leader-only, no inter-node traffic) ─────
+# Baseline: single node, no consensus transport or read index channels.
 # Should create very few TIME_WAIT sockets (~2-5).
 run_stress_test \
   "test_stress_single_node" \
   "1-node cluster — leader-only baseline"
 
-# ─── Test 3: Multi-region (cross-region forwarding) ───────────────────
-# Tests the data region proposal forwarding path (proposal.rs).
-# Multiple regions means more channels, but they should all be cached.
+# ─── Test 3: Multi-region (cross-region consensus transport) ─────────
+# Tests the multi-region Raft transport path. Multiple regions means more
+# channels, but they should all be cached via NodeConnectionRegistry.
 run_stress_test \
   "test_stress_multi_region_quick" \
-  "Multi-region — cross-region proposal forwarding"
+  "Multi-region — cross-region consensus transport"
 
-# ─── Test 4: Batched writes (bulk forwarding) ────────────────────────
-# Tests that batch writes also use cached channels. The batch write
-# service forwards the entire batch via a single cached channel.
+# ─── Test 4: Batched writes (bulk consensus traffic) ─────────────────
+# Tests that batch writes also use cached channels. Batched writes
+# generate high Raft replication traffic via consensus transport.
 run_stress_test \
   "test_stress_batched" \
-  "Batched writes — bulk proposal forwarding"
+  "Batched writes — bulk consensus traffic"
 
 # ─── Test 5: Read-heavy workload ─────────────────────────────────────
 # Tests the read_index_from_leader path specifically. Read-heavy
@@ -144,11 +144,11 @@ if [[ $FAILED -gt 0 ]]; then
   log_error ""
   log_error "Likely causes:"
   log_error "  1. helpers.rs: read_index_from_leader creates Channel per call"
-  log_error "  2. proposal.rs: non-leader forwarding creates Channel per call"
-  log_error "  3. saga_orchestrator.rs: non-leader forwarding creates Channel per call"
+  log_error "  2. Consensus transport: bidi stream creates Channel per call"
+  log_error "  3. saga_orchestrator.rs: leader-directed RPCs create Channel per call"
   log_error "  4. learner_refresh.rs: refresh_from_voter creates Channel per call"
   log_error ""
-  log_error "Fix: ensure all hot-path gRPC channels use connect_lazy() with caching."
+  log_error "Fix: ensure all hot-path gRPC channels use NodeConnectionRegistry caching."
   exit 1
 else
   log_ok "All tests within port consumption threshold ($THRESHOLD TIME_WAIT sockets)"

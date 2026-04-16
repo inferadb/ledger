@@ -1757,6 +1757,23 @@ impl proto::user_service_server::UserService for UserService {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
+        // CompleteRegistration submits a saga to the GLOBAL leader's saga
+        // orchestrator. The saga caches PII in-memory on the node that
+        // received the submission. If this node is not the GLOBAL leader,
+        // the PII would be cached on the wrong node and the saga would
+        // fail with PiiLost. Reject early with NotLeader so the client
+        // retries on the GLOBAL leader.
+        if let Some(ref manager) = self.ctx.manager
+            && let Ok(global) = manager.system_region()
+            && !global.handle().is_leader()
+        {
+            return Err(super::metadata::not_leader_status_from_handle(
+                global.handle(),
+                Some(manager.peer_addresses()),
+                "Not the GLOBAL leader — registration saga must run on the leader",
+            ));
+        }
+
         let trace_ctx = trace_context::extract_or_generate(request.metadata());
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();

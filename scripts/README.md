@@ -18,7 +18,7 @@ invocation (`./scripts/foo.sh`) is always supported and equivalent.
 | `stress-throughput.sh`      | `just stress-throughput`                               | Batched + multi-region throughput against advisory targets.                               |
 | `stress-correctness.sh`     | `just stress-correctness`                              | Scale-level correctness: state root parity, snapshot determinism, watch streaming.        |
 | `check-port-consumption.sh` | `just check-port-consumption`                          | Regression test for gRPC channel caching via TIME_WAIT accounting.                        |
-| `cluster-lifecycle-test.sh` | `just cluster-lifecycle`                               | 6-phase e2e: bootstrap → join → non-leader writes → leader transfer → shutdown → rebuild. |
+| `cluster-lifecycle-test.sh` | `just cluster-lifecycle`                               | 6-phase e2e: bootstrap → join → replication → leader transfer → shutdown → rebuild.       |
 | `crash-recovery.sh`         | `just crash-recovery`                                  | SIGKILL a node mid-write, restart, verify convergence + zero data loss.                   |
 | `run-integration-tests.sh`  | `just test-external-cluster` / `just test-sdk-cluster` | Spawn a local cluster and run server or SDK integration tests against it.                 |
 | `update-dependencies.sh`    | —                                                      | Update `Cargo.lock` against crates.io (disables `[patch.crates-io]` temporarily).         |
