@@ -305,6 +305,12 @@ async fn run_drain_loop(
             }
         });
         tokio::pin!(ack_task);
+        // Tracks whether the pinned `ack_task` JoinHandle has already been
+        // polled to completion via the `select!` below. Polling a completed
+        // JoinHandle a second time panics in tokio internals
+        // ("JoinHandle polled after completion"), so the post-loop teardown
+        // must skip its own `.await` when this flag is set.
+        let mut ack_consumed = false;
 
         // Inner drain loop. Exits on shutdown (outer loop exit), ack-task
         // completion (reconnect), or write-side error (reconnect).
@@ -332,6 +338,7 @@ async fn run_drain_loop(
                     () = inner.notify.notified() => continue,
                     res = &mut ack_task => {
                         // ack task exited — stream is broken.
+                        ack_consumed = true;
                         if let Err(e) = res {
                             tracing::debug!(
                                 peer = inner.peer_id,
@@ -391,8 +398,12 @@ async fn run_drain_loop(
         }
 
         // Stream-broken path: make sure ack task is finished (ignore result)
-        // before reconnecting so we don't stack multiple readers.
-        let _ = ack_task.await;
+        // before reconnecting so we don't stack multiple readers. Skip the
+        // await if the `select!` above already consumed the completion —
+        // re-polling a completed JoinHandle panics in tokio internals.
+        if !ack_consumed {
+            let _ = ack_task.await;
+        }
 
         // Discard anything that was enqueued after we last drained but
         // before the stream broke — those messages can't be delivered on

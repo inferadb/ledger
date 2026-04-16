@@ -720,10 +720,13 @@ impl TestCluster {
             loop {
                 let mut all_synced = true;
                 for &dr in data_regions.iter().take(self.num_data_regions) {
+                    // Compare applied index (state-machine visible) rather than
+                    // commit index: EVENTUAL reads serve from applied state, so
+                    // callers of this helper need apply-level convergence.
                     let mut indices = Vec::new();
                     for node in &self.nodes {
                         if let Some(rg) = node.region_group(dr) {
-                            indices.push(rg.handle().commit_index());
+                            indices.push(*rg.applied_index_watch().borrow());
                         }
                     }
                     if indices.len() < self.nodes.len()

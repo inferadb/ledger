@@ -890,10 +890,32 @@ async fn test_idempotency_survives_leader_failover() {
     cluster.wait_for_leaders(Duration::from_secs(10)).await;
     cluster.wait_for_data_region_sync(Duration::from_secs(10)).await;
 
-    // Connect to the new leader
-    let new_leader = cluster.node(new_leader_id).expect("new leader node should exist");
-    let mut new_write_client =
-        common::create_write_client(new_leader.addr).await.expect("connect to new leader");
+    // Writes route through the data region that owns the vault (not GLOBAL).
+    // After failover the GLOBAL leader and data-region leader may be different
+    // nodes, so connect to whichever remaining node currently leads the first
+    // data region (the one `TestCluster::new` provisions).
+    let data_region = inferadb_ledger_types::ALL_REGIONS[1];
+    let regional_leader_addr = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            for node in cluster.nodes() {
+                if node.id == original_leader_id {
+                    continue;
+                }
+                if let Some(rg) = node.region_group(data_region)
+                    && rg.handle().current_leader() == Some(node.id)
+                {
+                    return node.addr;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("a remaining node should lead the data region after failover");
+
+    let mut new_write_client = common::create_write_client(regional_leader_addr)
+        .await
+        .expect("connect to new REGIONAL leader");
 
     // Retry the same request (same idempotency key, same payload) on the new leader.
     // The idempotency cache is replicated, so this should return ALREADY_COMMITTED

@@ -627,10 +627,9 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         let (organization_id, vault_id, region) =
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
-        // Forward to leader if this follower is lagging behind
-        if !region.handle.is_leader() {
-            return Err(self.not_leader_within_region(&region, "Not the leader for this region"));
-        }
+        // Follower routing is deferred to `resolve_read_consistency` below.
+        // EVENTUAL reads serve locally; LINEARIZABLE reads on followers use
+        // the ReadIndex protocol.
 
         // Create logging context
         let mut ctx = RequestContext::new("ReadService", "read");
@@ -767,10 +766,9 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         let (organization_id, vault_id, region) =
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
-        // Forward to leader if this follower is lagging behind
-        if !region.handle.is_leader() {
-            return Err(self.not_leader_within_region(&region, "Not the leader for this region"));
-        }
+        // Follower routing is deferred to `resolve_read_consistency` below.
+        // EVENTUAL reads serve locally; LINEARIZABLE reads on followers use
+        // the ReadIndex protocol.
 
         // Create logging context
         let mut ctx = RequestContext::new("ReadService", "batch_read");
@@ -933,10 +931,9 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         let (organization_id, vault_id, region) =
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
-        // Forward to leader if this follower is lagging behind
-        if !region.handle.is_leader() {
-            return Err(self.not_leader_within_region(&region, "Not the leader for this region"));
-        }
+        // Verified reads always use linearizable consistency. On followers
+        // the ReadIndex protocol below waits for local apply to reach the
+        // leader's committed index, so no preemptive redirect is needed.
 
         // Create logging context
         let mut ctx = RequestContext::new("ReadService", "verified_read");
@@ -1731,10 +1728,9 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         let (organization_id, vault_id, region) =
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
-        // Forward to leader if this follower is lagging behind
-        if !region.handle.is_leader() {
-            return Err(self.not_leader_within_region(&region, "Not the leader for this region"));
-        }
+        // Follower routing is deferred to `resolve_read_consistency`:
+        // EVENTUAL reads serve locally; LINEARIZABLE reads on followers use
+        // the ReadIndex protocol.
 
         // Check consistency requirements (may execute ReadIndex protocol on followers)
         self.resolve_read_consistency(&region, req.consistency).await?;
@@ -1872,10 +1868,9 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         let (organization_id, vault_id, region) =
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
-        // Forward to leader if this follower is lagging behind
-        if !region.handle.is_leader() {
-            return Err(self.not_leader_within_region(&region, "Not the leader for this region"));
-        }
+        // Follower routing is deferred to `resolve_read_consistency`:
+        // EVENTUAL reads serve locally; LINEARIZABLE reads on followers use
+        // the ReadIndex protocol.
 
         // Check consistency requirements (may execute ReadIndex protocol on followers)
         self.resolve_read_consistency(&region, req.consistency).await?;
@@ -1975,10 +1970,9 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         let (organization_id, vault_id, region) =
             self.resolve_org_vault_consistent(&req.organization, &req.vault).await?;
 
-        // Forward to leader if this follower is lagging behind
-        if !region.handle.is_leader() {
-            return Err(self.not_leader_within_region(&region, "Not the leader for this region"));
-        }
+        // Follower routing is deferred to `resolve_read_consistency`:
+        // EVENTUAL reads serve locally; LINEARIZABLE reads on followers use
+        // the ReadIndex protocol.
 
         // Check consistency requirements (may execute ReadIndex protocol on followers)
         self.resolve_read_consistency(&region, req.consistency).await?;
