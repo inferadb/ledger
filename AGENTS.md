@@ -96,7 +96,7 @@ inferadb-ledger-proto          â€" Protobuf codegen, From/TryFrom conversions
 - `LedgerServer` (services/server.rs) â€" gRPC server, all 13 services + consensus
 - `NodeConnectionRegistry` (raft/node_registry.rs) â€" node-level connection pool; one `Channel` per peer, shared across all subsystems (consensus, discovery, admin, saga forwarding). HTTP/2 multiplexing serves all traffic through one TCP connection per peer.
 - `RegionLeaderCache` (sdk) â€" SDK-side per-region leader endpoint cache with soft/hard TTLs, populated by `ResolveRegionLeader`, `NotLeader` hints, and `WatchLeader` push updates. All updates term-gated.
-- Client routing is redirect-only: a node that receives a request for a region it does not lead returns `NotLeader` + `LeaderHint` in `ErrorDetails`, and the SDK reconnects directly to the regional leader. Server-side forwarding is reserved for saga orchestration (`ForwardRegionalProposal` RPC), not client-request proxying.
+- Client routing is redirect-only: a node that receives a request for a region it does not lead returns `NotLeader` + `LeaderHint` in `ErrorDetails`, and the SDK reconnects directly to the regional leader. Server-side forwarding is reserved for saga orchestration (`SubmitRegionalProposal` RPC), not client-request proxying.
 
 ## Data Model
 

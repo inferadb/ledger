@@ -27,19 +27,7 @@ use parking_lot::RwLock;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-// =============================================================================
-// URL / scheme helpers
-// =============================================================================
-
-/// Ensures a peer address string carries a URL scheme.
-///
-/// Peer addresses are stored as `host:port` in the peer map. Most consumers
-/// expect a scheme-prefixed endpoint. If the address already carries a
-/// scheme (e.g. `https://...`), it is returned unchanged so we never emit
-/// double-prefixed URIs like `http://http://host:port`.
-fn ensure_http_scheme(addr: String) -> String {
-    if addr.contains("://") { addr } else { format!("http://{addr}") }
-}
+use super::metadata::ensure_http_scheme;
 
 // =============================================================================
 // IP Address Validation

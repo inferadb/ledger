@@ -21,10 +21,10 @@ use crate::{node_registry::NodeConnectionRegistry, types::LedgerNodeId};
 ///
 /// Each peer gets a dedicated `PeerSender` (see the `peer_sender` submodule)
 /// that owns a bounded outbound queue and a single drain task. `send_batch`
-/// enqueues messages to the
-/// per-peer queue (drop-oldest on overflow); the drain task serializes and
-/// ships them via the `ForwardConsensus` RPC. Messages are fire-and-forget
-/// — the consensus engine handles retries via heartbeats.
+/// enqueues messages to the per-peer queue (drop-oldest on overflow); the
+/// drain task serializes and ships them via a long-lived bidirectional
+/// `ConsensusStream` RPC. Acks are discarded — messages are fire-and-forget
+/// and the consensus engine handles retries via heartbeats.
 #[derive(Clone)]
 pub struct GrpcConsensusTransport {
     senders: Arc<RwLock<HashMap<LedgerNodeId, Arc<PeerSender>>>>,

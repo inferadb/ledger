@@ -31,10 +31,10 @@ use std::{
 };
 
 use inferadb_ledger_proto::proto::{
-    BatchRaftRequest, BatchRaftResponse, ConsensusAck, ConsensusEnvelope,
-    ForwardRegionalProposalRequest, ForwardRegionalProposalResponse, RaftAppendEntriesRequest,
+    BatchRaftRequest, BatchRaftResponse, ConsensusAck, ConsensusEnvelope, RaftAppendEntriesRequest,
     RaftAppendEntriesResponse, RaftInstallSnapshotRequest, RaftInstallSnapshotResponse,
-    RaftVoteRequest, RaftVoteResponse, ReadIndexRequest, ReadIndexResponse, TriggerElectionRequest,
+    RaftVoteRequest, RaftVoteResponse, ReadIndexRequest, ReadIndexResponse,
+    RegionalProposalRequest, RegionalProposalResult, TriggerElectionRequest,
     TriggerElectionResponse,
     raft_service_server::{RaftService, RaftServiceServer},
 };
@@ -225,11 +225,11 @@ impl RaftService for SplitBrainDetectionService {
     ) -> Result<Response<Self::ConsensusStreamStream>, Status> {
         Err(Status::unimplemented("ConsensusStream not supported in mock"))
     }
-    async fn forward_regional_proposal(
+    async fn submit_regional_proposal(
         &self,
-        _request: Request<ForwardRegionalProposalRequest>,
-    ) -> Result<Response<ForwardRegionalProposalResponse>, Status> {
-        Err(Status::unimplemented("ForwardRegionalProposal not supported in mock"))
+        _request: Request<RegionalProposalRequest>,
+    ) -> Result<Response<RegionalProposalResult>, Status> {
+        Err(Status::unimplemented("SubmitRegionalProposal not supported in mock"))
     }
 }
 
@@ -428,11 +428,11 @@ fn test_write_fails_in_minority_partition() {
         ) -> Result<Response<Self::ConsensusStreamStream>, Status> {
             Err(Status::unimplemented("ConsensusStream not supported in mock"))
         }
-        async fn forward_regional_proposal(
+        async fn submit_regional_proposal(
             &self,
-            _request: Request<ForwardRegionalProposalRequest>,
-        ) -> Result<Response<ForwardRegionalProposalResponse>, Status> {
-            Err(Status::unimplemented("ForwardRegionalProposal not supported in mock"))
+            _request: Request<RegionalProposalRequest>,
+        ) -> Result<Response<RegionalProposalResult>, Status> {
+            Err(Status::unimplemented("SubmitRegionalProposal not supported in mock"))
         }
     }
 
@@ -631,11 +631,11 @@ fn test_consistency_after_partition_heals() {
         ) -> Result<Response<Self::ConsensusStreamStream>, Status> {
             Err(Status::unimplemented("ConsensusStream not supported in mock"))
         }
-        async fn forward_regional_proposal(
+        async fn submit_regional_proposal(
             &self,
-            _request: Request<ForwardRegionalProposalRequest>,
-        ) -> Result<Response<ForwardRegionalProposalResponse>, Status> {
-            Err(Status::unimplemented("ForwardRegionalProposal not supported in mock"))
+            _request: Request<RegionalProposalRequest>,
+        ) -> Result<Response<RegionalProposalResult>, Status> {
+            Err(Status::unimplemented("SubmitRegionalProposal not supported in mock"))
         }
     }
 
@@ -839,11 +839,11 @@ fn test_network_delay_request_completion() {
         ) -> Result<Response<Self::ConsensusStreamStream>, Status> {
             Err(Status::unimplemented("ConsensusStream not supported in mock"))
         }
-        async fn forward_regional_proposal(
+        async fn submit_regional_proposal(
             &self,
-            _request: Request<ForwardRegionalProposalRequest>,
-        ) -> Result<Response<ForwardRegionalProposalResponse>, Status> {
-            Err(Status::unimplemented("ForwardRegionalProposal not supported in mock"))
+            _request: Request<RegionalProposalRequest>,
+        ) -> Result<Response<RegionalProposalResult>, Status> {
+            Err(Status::unimplemented("SubmitRegionalProposal not supported in mock"))
         }
     }
 

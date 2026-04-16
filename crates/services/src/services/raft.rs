@@ -10,10 +10,10 @@
 use std::{net::SocketAddr, str::FromStr, sync::Arc};
 
 use inferadb_ledger_proto::proto::{
-    BatchRaftRequest, BatchRaftResponse, ConsensusAck, ConsensusEnvelope,
-    ForwardRegionalProposalRequest, ForwardRegionalProposalResponse, RaftAppendEntriesRequest,
+    BatchRaftRequest, BatchRaftResponse, ConsensusAck, ConsensusEnvelope, RaftAppendEntriesRequest,
     RaftAppendEntriesResponse, RaftInstallSnapshotRequest, RaftInstallSnapshotResponse,
-    RaftVoteRequest, RaftVoteResponse, ReadIndexRequest, ReadIndexResponse, TriggerElectionRequest,
+    RaftVoteRequest, RaftVoteResponse, ReadIndexRequest, ReadIndexResponse,
+    RegionalProposalRequest, RegionalProposalResult, TriggerElectionRequest,
     TriggerElectionResponse,
 };
 use inferadb_ledger_raft::{
@@ -26,8 +26,10 @@ use tonic::{Request, Response, Status};
 
 /// Handles incoming consensus RPCs from peer nodes.
 ///
-/// Routes `forward_consensus` requests to the correct region's consensus engine.
-/// Legacy openraft RPCs (vote, append_entries, etc.) are no longer functional.
+/// Routes `ConsensusStream` bidi traffic to the correct region's consensus
+/// engine (Phase 4). Also serves `SubmitRegionalProposal` for server-to-server
+/// saga orchestration (Phase 5 retained, peer-identity gated). Legacy openraft
+/// RPCs (vote, append_entries, etc.) are no longer functional.
 pub struct RaftService {
     manager: Arc<RaftManager>,
     /// Per-node liveness timestamps. Updated on every successful Raft message.
@@ -54,7 +56,7 @@ impl RaftService {
 
     /// Returns true if `addr` matches the IP of any known cluster peer.
     ///
-    /// Used to authenticate `ForwardRegionalProposal` callers. The cluster
+    /// Used to authenticate `SubmitRegionalProposal` callers. The cluster
     /// runs on a trusted (private / WireGuard) network, so IP-match against
     /// the peer address map is the pragmatic guard — ports differ between
     /// inbound (ephemeral client port) and outbound (configured server port),
@@ -68,7 +70,7 @@ impl RaftService {
             // misconfiguration in production is visible.
             tracing::warn!(
                 remote = %addr,
-                "is_known_peer: empty peer_addresses map; allowing ForwardRegionalProposal unauthenticated"
+                "is_known_peer: empty peer_addresses map; allowing SubmitRegionalProposal unauthenticated"
             );
             return true;
         }
@@ -218,23 +220,23 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
         Ok(Response::new(ReceiverStream::new(ack_rx)))
     }
 
-    async fn forward_regional_proposal(
+    async fn submit_regional_proposal(
         &self,
-        request: Request<ForwardRegionalProposalRequest>,
-    ) -> Result<Response<ForwardRegionalProposalResponse>, Status> {
-        // Verify the caller is a known cluster peer. `ForwardRegionalProposal`
+        request: Request<RegionalProposalRequest>,
+    ) -> Result<Response<RegionalProposalResult>, Status> {
+        // Verify the caller is a known cluster peer. `SubmitRegionalProposal`
         // is an internal server-to-server RPC used by saga orchestration;
         // allowing unauthenticated external callers would let them forge
         // arbitrary LedgerRequest payloads and bypass JWT / org scoping /
         // rate limiting.
         let Some(remote_addr) = request.remote_addr() else {
             return Err(Status::unauthenticated(
-                "ForwardRegionalProposal requires a known peer source address",
+                "SubmitRegionalProposal requires a known peer source address",
             ));
         };
         if !self.is_known_peer(&remote_addr) {
             return Err(Status::unauthenticated(format!(
-                "ForwardRegionalProposal from unknown peer {remote_addr}"
+                "SubmitRegionalProposal from unknown peer {remote_addr}"
             )));
         }
 
@@ -268,14 +270,14 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
                 let response_bytes = encode(&response)
                     .map_err(|e| Status::internal(format!("serialize response: {e}")))?;
                 let committed_index = group.handle().commit_index();
-                Ok(Response::new(ForwardRegionalProposalResponse {
+                Ok(Response::new(RegionalProposalResult {
                     response_payload: response_bytes,
                     status_code: 0,
                     error_message: String::new(),
                     committed_index,
                 }))
             },
-            Err(e) => Ok(Response::new(ForwardRegionalProposalResponse {
+            Err(e) => Ok(Response::new(RegionalProposalResult {
                 response_payload: Vec::new(),
                 status_code: tonic::Code::Internal as i32,
                 error_message: e.to_string(),

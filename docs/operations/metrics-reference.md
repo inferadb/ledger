@@ -326,6 +326,7 @@ heartbeats are self-healing).
 | `ledger_peer_send_queue_depth`     | Gauge     | `peer`            | Current outbound queue depth for the peer.                                                                                         |
 | `ledger_peer_send_drops_total`     | Counter   | `peer`, `reason`  | Messages dropped from the queue. `reason` ∈ `queue_full` (capacity overflow), `task_shutdown` (peer removed or replaced). |
 | `ledger_peer_send_latency_seconds` | Histogram | `peer`            | Per-message send latency (enqueue-to-wire, dominated by gRPC call time).                                                            |
+| `ledger_peer_stream_reconnects_total` | Counter | `peer`         | Bidi `ConsensusStream` reconnect attempts (Phase 4). Non-zero during peer churn or network hiccups; exponential backoff caps at 5s between attempts. |
 
 **Labels:**
 

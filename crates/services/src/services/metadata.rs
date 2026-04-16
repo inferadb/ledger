@@ -125,7 +125,10 @@ pub(crate) fn not_leader_remote_region(
 /// URIs so the SDK can pass them straight to `tonic::transport::Endpoint`.
 /// This is a no-op when the address already includes a scheme (e.g. operators
 /// that advertise `https://...`).
-fn ensure_http_scheme(addr: String) -> String {
+///
+/// `pub(super)` so sibling modules (`discovery`, etc.) can share this helper
+/// instead of duplicating the logic.
+pub(super) fn ensure_http_scheme(addr: String) -> String {
     if addr.contains("://") { addr } else { format!("http://{addr}") }
 }
 

@@ -3475,10 +3475,17 @@ service RaftService {
   // discards the acks.
   rpc ConsensusStream(stream ConsensusEnvelope) returns (stream ConsensusAck);
 
-  // Internal server-to-server RPC for saga orchestration. The server validates
-  // the caller is a known cluster peer (by IP). Not for client use; client
-  // writes are routed directly to regional leaders via NotLeader redirects.
-  rpc ForwardRegionalProposal(ForwardRegionalProposalRequest) returns (ForwardRegionalProposalResponse);
+  // Submit a regional proposal to a region's Raft leader.
+  //
+  // Used exclusively by the saga orchestrator on the GLOBAL leader to commit
+  // proposals across regions as part of cross-region transactions. The server
+  // validates the caller is a known cluster peer (by IP — see `is_known_peer`)
+  // and proposes the payload on the target region's local Raft handle,
+  // returning the committed response.
+  //
+  // Not for client use; client writes reach their target region via
+  // `NotLeader` + hint redirect, not this RPC.
+  rpc SubmitRegionalProposal(RegionalProposalRequest) returns (RegionalProposalResult);
 }
 
 // Raft vote (term + node_id + committed flag).
@@ -3657,8 +3664,8 @@ message ConsensusEnvelope {
 // flowing in both directions.
 message ConsensusAck {}
 
-// Request to forward a regional proposal to the data region leader.
-message ForwardRegionalProposalRequest {
+// Request submitting a regional proposal to the data region leader.
+message RegionalProposalRequest {
   // Target data region.
   optional Region region = 1;
   // Postcard-serialized LedgerRequest.
@@ -3669,8 +3676,8 @@ message ForwardRegionalProposalRequest {
   uint32 timeout_ms = 4;
 }
 
-// Response from a forwarded regional proposal.
-message ForwardRegionalProposalResponse {
+// Result of a submitted regional proposal.
+message RegionalProposalResult {
   // Postcard-serialized LedgerResponse.
   bytes response_payload = 1;
   // gRPC status code (0 = OK).

@@ -14,7 +14,7 @@
 //!    `ledger_sdk_redirect_retries_total{region="us-east-va"}`.
 //!
 //! What this test does NOT directly assert: the absence of any
-//! `ForwardRegionalProposal` traffic on the client path. That RPC is still
+//! `SubmitRegionalProposal` traffic on the client path. That RPC is still
 //! used by the saga orchestrator and we have no per-caller counter to observe
 //! from outside. The redirect-retry counter incrementing is, however, the
 //! observable signal that the SDK took the redirect path the server expects.

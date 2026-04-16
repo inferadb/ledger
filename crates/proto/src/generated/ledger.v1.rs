@@ -4088,9 +4088,9 @@ pub struct ConsensusEnvelope {
 /// flowing in both directions.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ConsensusAck {}
-/// Request to forward a regional proposal to the data region leader.
+/// Request submitting a regional proposal to the data region leader.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ForwardRegionalProposalRequest {
+pub struct RegionalProposalRequest {
     /// Target data region.
     #[prost(enumeration = "Region", optional, tag = "1")]
     pub region: ::core::option::Option<i32>,
@@ -4104,9 +4104,9 @@ pub struct ForwardRegionalProposalRequest {
     #[prost(uint32, tag = "4")]
     pub timeout_ms: u32,
 }
-/// Response from a forwarded regional proposal.
+/// Result of a submitted regional proposal.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ForwardRegionalProposalResponse {
+pub struct RegionalProposalResult {
     /// Postcard-serialized LedgerResponse.
     #[prost(bytes = "vec", tag = "1")]
     pub response_payload: ::prost::alloc::vec::Vec<u8>,
@@ -19589,14 +19589,21 @@ pub mod raft_service_client {
                 .insert(GrpcMethod::new("ledger.v1.RaftService", "ConsensusStream"));
             self.inner.streaming(req, path, codec).await
         }
-        /// Forward a regional proposal to the data region leader.
-        /// Called when a node receives a write for a data region it doesn't lead.
-        /// The leader proposes locally and returns the result.
-        pub async fn forward_regional_proposal(
+        /// Submit a regional proposal to a region's Raft leader.
+        ///
+        /// Used exclusively by the saga orchestrator on the GLOBAL leader to commit
+        /// proposals across regions as part of cross-region transactions. The server
+        /// validates the caller is a known cluster peer (by IP — see `is_known_peer`)
+        /// and proposes the payload on the target region's local Raft handle,
+        /// returning the committed response.
+        ///
+        /// Not for client use; client writes reach their target region via
+        /// `NotLeader` + hint redirect, not this RPC.
+        pub async fn submit_regional_proposal(
             &mut self,
-            request: impl tonic::IntoRequest<super::ForwardRegionalProposalRequest>,
+            request: impl tonic::IntoRequest<super::RegionalProposalRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::ForwardRegionalProposalResponse>,
+            tonic::Response<super::RegionalProposalResult>,
             tonic::Status,
         > {
             self.inner
@@ -19609,12 +19616,12 @@ pub mod raft_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/ledger.v1.RaftService/ForwardRegionalProposal",
+                "/ledger.v1.RaftService/SubmitRegionalProposal",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
-                    GrpcMethod::new("ledger.v1.RaftService", "ForwardRegionalProposal"),
+                    GrpcMethod::new("ledger.v1.RaftService", "SubmitRegionalProposal"),
                 );
             self.inner.unary(req, path, codec).await
         }
@@ -19706,14 +19713,21 @@ pub mod raft_service_server {
             tonic::Response<Self::ConsensusStreamStream>,
             tonic::Status,
         >;
-        /// Forward a regional proposal to the data region leader.
-        /// Called when a node receives a write for a data region it doesn't lead.
-        /// The leader proposes locally and returns the result.
-        async fn forward_regional_proposal(
+        /// Submit a regional proposal to a region's Raft leader.
+        ///
+        /// Used exclusively by the saga orchestrator on the GLOBAL leader to commit
+        /// proposals across regions as part of cross-region transactions. The server
+        /// validates the caller is a known cluster peer (by IP — see `is_known_peer`)
+        /// and proposes the payload on the target region's local Raft handle,
+        /// returning the committed response.
+        ///
+        /// Not for client use; client writes reach their target region via
+        /// `NotLeader` + hint redirect, not this RPC.
+        async fn submit_regional_proposal(
             &self,
-            request: tonic::Request<super::ForwardRegionalProposalRequest>,
+            request: tonic::Request<super::RegionalProposalRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::ForwardRegionalProposalResponse>,
+            tonic::Response<super::RegionalProposalResult>,
             tonic::Status,
         >;
     }
@@ -20113,27 +20127,25 @@ pub mod raft_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/ledger.v1.RaftService/ForwardRegionalProposal" => {
+                "/ledger.v1.RaftService/SubmitRegionalProposal" => {
                     #[allow(non_camel_case_types)]
-                    struct ForwardRegionalProposalSvc<T: RaftService>(pub Arc<T>);
+                    struct SubmitRegionalProposalSvc<T: RaftService>(pub Arc<T>);
                     impl<
                         T: RaftService,
-                    > tonic::server::UnaryService<super::ForwardRegionalProposalRequest>
-                    for ForwardRegionalProposalSvc<T> {
-                        type Response = super::ForwardRegionalProposalResponse;
+                    > tonic::server::UnaryService<super::RegionalProposalRequest>
+                    for SubmitRegionalProposalSvc<T> {
+                        type Response = super::RegionalProposalResult;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
                             tonic::Status,
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<
-                                super::ForwardRegionalProposalRequest,
-                            >,
+                            request: tonic::Request<super::RegionalProposalRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as RaftService>::forward_regional_proposal(
+                                <T as RaftService>::submit_regional_proposal(
                                         &inner,
                                         request,
                                     )
@@ -20148,7 +20160,7 @@ pub mod raft_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = ForwardRegionalProposalSvc(inner);
+                        let method = SubmitRegionalProposalSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
