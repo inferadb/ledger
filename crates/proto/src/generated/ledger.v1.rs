@@ -3865,76 +3865,6 @@ pub struct RaftLogId {
     #[prost(uint64, tag = "2")]
     pub index: u64,
 }
-/// Vote request during leader election.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RaftVoteRequest {
-    #[prost(message, optional, tag = "1")]
-    pub vote: ::core::option::Option<RaftVote>,
-    #[prost(message, optional, tag = "2")]
-    pub last_log_id: ::core::option::Option<RaftLogId>,
-    /// Region for multi-region routing (defaults to GLOBAL).
-    #[prost(enumeration = "Region", optional, tag = "3")]
-    pub region: ::core::option::Option<i32>,
-}
-/// Vote response.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RaftVoteResponse {
-    #[prost(message, optional, tag = "1")]
-    pub vote: ::core::option::Option<RaftVote>,
-    #[prost(bool, tag = "2")]
-    pub vote_granted: bool,
-    #[prost(message, optional, tag = "3")]
-    pub last_log_id: ::core::option::Option<RaftLogId>,
-}
-/// Log replication request.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RaftAppendEntriesRequest {
-    #[prost(message, optional, tag = "1")]
-    pub vote: ::core::option::Option<RaftVote>,
-    #[prost(message, optional, tag = "2")]
-    pub prev_log_id: ::core::option::Option<RaftLogId>,
-    /// Serialized log entries
-    #[prost(bytes = "vec", repeated, tag = "3")]
-    pub entries: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
-    #[prost(message, optional, tag = "4")]
-    pub leader_commit: ::core::option::Option<RaftLogId>,
-    /// Region for multi-region routing (defaults to GLOBAL).
-    #[prost(enumeration = "Region", optional, tag = "5")]
-    pub region: ::core::option::Option<i32>,
-}
-/// Log replication response.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RaftAppendEntriesResponse {
-    #[prost(message, optional, tag = "1")]
-    pub vote: ::core::option::Option<RaftVote>,
-    #[prost(bool, tag = "2")]
-    pub success: bool,
-    #[prost(bool, tag = "3")]
-    pub conflict: bool,
-}
-/// Snapshot installation request.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct RaftInstallSnapshotRequest {
-    #[prost(message, optional, tag = "1")]
-    pub vote: ::core::option::Option<RaftVote>,
-    #[prost(message, optional, tag = "2")]
-    pub meta: ::core::option::Option<RaftSnapshotMeta>,
-    #[prost(uint64, tag = "3")]
-    pub offset: u64,
-    #[prost(bytes = "vec", tag = "4")]
-    pub data: ::prost::alloc::vec::Vec<u8>,
-    #[prost(bool, tag = "5")]
-    pub done: bool,
-    /// Region for multi-region routing (defaults to GLOBAL).
-    #[prost(enumeration = "Region", optional, tag = "6")]
-    pub region: ::core::option::Option<i32>,
-}
-/// Snapshot installation response.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RaftInstallSnapshotResponse {
-    #[prost(message, optional, tag = "1")]
-    pub vote: ::core::option::Option<RaftVote>,
-}
 /// Snapshot metadata.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RaftSnapshotMeta {
@@ -3978,22 +3908,6 @@ pub struct TransferLeadershipResponse {
     #[prost(string, tag = "3")]
     pub message: ::prost::alloc::string::String,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct TriggerElectionRequest {
-    /// Term the current leader is in. Target rejects if stale.
-    #[prost(uint64, tag = "1")]
-    pub leader_term: u64,
-    /// Node ID of the leader requesting the transfer.
-    #[prost(uint64, tag = "2")]
-    pub leader_id: u64,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct TriggerElectionResponse {
-    #[prost(bool, tag = "1")]
-    pub accepted: bool,
-    #[prost(string, tag = "2")]
-    pub message: ::prost::alloc::string::String,
-}
 /// ReadIndex request: follower asks leader to confirm committed index.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ReadIndexRequest {
@@ -4008,54 +3922,6 @@ pub struct ReadIndexResponse {
     pub committed_index: u64,
     #[prost(uint64, tag = "2")]
     pub leader_term: u64,
-}
-/// Batched cross-group Raft request.
-/// Contains multiple per-group messages coalesced into a single RPC call.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct BatchRaftRequest {
-    #[prost(message, repeated, tag = "1")]
-    pub entries: ::prost::alloc::vec::Vec<BatchRaftEntry>,
-}
-/// A single entry within a batched Raft request.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct BatchRaftEntry {
-    /// Region for routing to the correct Raft group.
-    #[prost(enumeration = "Region", optional, tag = "1")]
-    pub region: ::core::option::Option<i32>,
-    /// The Raft message to deliver. Currently only AppendEntries is batched;
-    /// Vote and InstallSnapshot remain individual RPCs.
-    #[prost(oneof = "batch_raft_entry::Message", tags = "2")]
-    pub message: ::core::option::Option<batch_raft_entry::Message>,
-}
-/// Nested message and enum types in `BatchRaftEntry`.
-pub mod batch_raft_entry {
-    /// The Raft message to deliver. Currently only AppendEntries is batched;
-    /// Vote and InstallSnapshot remain individual RPCs.
-    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
-    pub enum Message {
-        #[prost(message, tag = "2")]
-        AppendEntries(super::RaftAppendEntriesRequest),
-    }
-}
-/// Batched cross-group Raft response.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct BatchRaftResponse {
-    #[prost(message, repeated, tag = "1")]
-    pub responses: ::prost::alloc::vec::Vec<BatchRaftEntryResponse>,
-}
-/// Response for a single entry within a batched Raft request.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct BatchRaftEntryResponse {
-    #[prost(oneof = "batch_raft_entry_response::Response", tags = "1")]
-    pub response: ::core::option::Option<batch_raft_entry_response::Response>,
-}
-/// Nested message and enum types in `BatchRaftEntryResponse`.
-pub mod batch_raft_entry_response {
-    #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Oneof)]
-    pub enum Response {
-        #[prost(message, tag = "1")]
-        AppendEntries(super::RaftAppendEntriesResponse),
-    }
 }
 /// Envelope wrapping a consensus-engine message sent between peers over
 /// the ConsensusStream bidirectional RPC.
@@ -19322,7 +19188,7 @@ pub mod raft_service_client {
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
     /// Internal Raft RPC service for consensus protocol.
-    /// Used for inter-node communication: vote, log replication, snapshots.
+    /// Used for inter-node communication: consensus streaming, read index, regional proposals.
     #[derive(Debug, Clone)]
     pub struct RaftServiceClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -19403,108 +19269,6 @@ pub mod raft_service_client {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
         }
-        /// Request vote from peer during leader election.
-        pub async fn vote(
-            &mut self,
-            request: impl tonic::IntoRequest<super::RaftVoteRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RaftVoteResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ledger.v1.RaftService/Vote",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("ledger.v1.RaftService", "Vote"));
-            self.inner.unary(req, path, codec).await
-        }
-        /// Replicate log entries to followers.
-        pub async fn append_entries(
-            &mut self,
-            request: impl tonic::IntoRequest<super::RaftAppendEntriesRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RaftAppendEntriesResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ledger.v1.RaftService/AppendEntries",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("ledger.v1.RaftService", "AppendEntries"));
-            self.inner.unary(req, path, codec).await
-        }
-        /// Install snapshot on a follower that is too far behind.
-        pub async fn install_snapshot(
-            &mut self,
-            request: impl tonic::IntoRequest<super::RaftInstallSnapshotRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RaftInstallSnapshotResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ledger.v1.RaftService/InstallSnapshot",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("ledger.v1.RaftService", "InstallSnapshot"));
-            self.inner.unary(req, path, codec).await
-        }
-        /// Trigger an immediate leader election on this node.
-        /// Called by the current leader during leadership transfer.
-        /// This is an internal RPC — not exposed to external clients.
-        pub async fn trigger_election(
-            &mut self,
-            request: impl tonic::IntoRequest<super::TriggerElectionRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::TriggerElectionResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ledger.v1.RaftService/TriggerElection",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("ledger.v1.RaftService", "TriggerElection"));
-            self.inner.unary(req, path, codec).await
-        }
         /// Query committed index for follower ReadIndex protocol.
         /// Followers call this on the leader to confirm the committed index,
         /// then wait locally for their applied index to catch up.
@@ -19530,33 +19294,6 @@ pub mod raft_service_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("ledger.v1.RaftService", "ReadIndex"));
-            self.inner.unary(req, path, codec).await
-        }
-        /// Batched cross-group message delivery.
-        /// Coalesces AppendEntries messages for multiple Raft groups into a single RPC call,
-        /// reducing per-message overhead for multi-group deployments.
-        pub async fn batch_send(
-            &mut self,
-            request: impl tonic::IntoRequest<super::BatchRaftRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::BatchRaftResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ledger.v1.RaftService/BatchSend",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("ledger.v1.RaftService", "BatchSend"));
             self.inner.unary(req, path, codec).await
         }
         /// Bidirectional consensus-message transport between peers. Carries Raft
@@ -19640,40 +19377,6 @@ pub mod raft_service_server {
     /// Generated trait containing gRPC methods that should be implemented for use with RaftServiceServer.
     #[async_trait]
     pub trait RaftService: std::marker::Send + std::marker::Sync + 'static {
-        /// Request vote from peer during leader election.
-        async fn vote(
-            &self,
-            request: tonic::Request<super::RaftVoteRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RaftVoteResponse>,
-            tonic::Status,
-        >;
-        /// Replicate log entries to followers.
-        async fn append_entries(
-            &self,
-            request: tonic::Request<super::RaftAppendEntriesRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RaftAppendEntriesResponse>,
-            tonic::Status,
-        >;
-        /// Install snapshot on a follower that is too far behind.
-        async fn install_snapshot(
-            &self,
-            request: tonic::Request<super::RaftInstallSnapshotRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RaftInstallSnapshotResponse>,
-            tonic::Status,
-        >;
-        /// Trigger an immediate leader election on this node.
-        /// Called by the current leader during leadership transfer.
-        /// This is an internal RPC — not exposed to external clients.
-        async fn trigger_election(
-            &self,
-            request: tonic::Request<super::TriggerElectionRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::TriggerElectionResponse>,
-            tonic::Status,
-        >;
         /// Query committed index for follower ReadIndex protocol.
         /// Followers call this on the leader to confirm the committed index,
         /// then wait locally for their applied index to catch up.
@@ -19682,16 +19385,6 @@ pub mod raft_service_server {
             request: tonic::Request<super::ReadIndexRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ReadIndexResponse>,
-            tonic::Status,
-        >;
-        /// Batched cross-group message delivery.
-        /// Coalesces AppendEntries messages for multiple Raft groups into a single RPC call,
-        /// reducing per-message overhead for multi-group deployments.
-        async fn batch_send(
-            &self,
-            request: tonic::Request<super::BatchRaftRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::BatchRaftResponse>,
             tonic::Status,
         >;
         /// Server streaming response type for the ConsensusStream method.
@@ -19732,7 +19425,7 @@ pub mod raft_service_server {
         >;
     }
     /// Internal Raft RPC service for consensus protocol.
-    /// Used for inter-node communication: vote, log replication, snapshots.
+    /// Used for inter-node communication: consensus streaming, read index, regional proposals.
     #[derive(Debug)]
     pub struct RaftServiceServer<T> {
         inner: Arc<T>,
@@ -19809,186 +19502,6 @@ pub mod raft_service_server {
         }
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             match req.uri().path() {
-                "/ledger.v1.RaftService/Vote" => {
-                    #[allow(non_camel_case_types)]
-                    struct VoteSvc<T: RaftService>(pub Arc<T>);
-                    impl<
-                        T: RaftService,
-                    > tonic::server::UnaryService<super::RaftVoteRequest>
-                    for VoteSvc<T> {
-                        type Response = super::RaftVoteResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::RaftVoteRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as RaftService>::vote(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = VoteSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/ledger.v1.RaftService/AppendEntries" => {
-                    #[allow(non_camel_case_types)]
-                    struct AppendEntriesSvc<T: RaftService>(pub Arc<T>);
-                    impl<
-                        T: RaftService,
-                    > tonic::server::UnaryService<super::RaftAppendEntriesRequest>
-                    for AppendEntriesSvc<T> {
-                        type Response = super::RaftAppendEntriesResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::RaftAppendEntriesRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as RaftService>::append_entries(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = AppendEntriesSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/ledger.v1.RaftService/InstallSnapshot" => {
-                    #[allow(non_camel_case_types)]
-                    struct InstallSnapshotSvc<T: RaftService>(pub Arc<T>);
-                    impl<
-                        T: RaftService,
-                    > tonic::server::UnaryService<super::RaftInstallSnapshotRequest>
-                    for InstallSnapshotSvc<T> {
-                        type Response = super::RaftInstallSnapshotResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::RaftInstallSnapshotRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as RaftService>::install_snapshot(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = InstallSnapshotSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/ledger.v1.RaftService/TriggerElection" => {
-                    #[allow(non_camel_case_types)]
-                    struct TriggerElectionSvc<T: RaftService>(pub Arc<T>);
-                    impl<
-                        T: RaftService,
-                    > tonic::server::UnaryService<super::TriggerElectionRequest>
-                    for TriggerElectionSvc<T> {
-                        type Response = super::TriggerElectionResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::TriggerElectionRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as RaftService>::trigger_election(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = TriggerElectionSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
                 "/ledger.v1.RaftService/ReadIndex" => {
                     #[allow(non_camel_case_types)]
                     struct ReadIndexSvc<T: RaftService>(pub Arc<T>);
@@ -20019,51 +19532,6 @@ pub mod raft_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = ReadIndexSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/ledger.v1.RaftService/BatchSend" => {
-                    #[allow(non_camel_case_types)]
-                    struct BatchSendSvc<T: RaftService>(pub Arc<T>);
-                    impl<
-                        T: RaftService,
-                    > tonic::server::UnaryService<super::BatchRaftRequest>
-                    for BatchSendSvc<T> {
-                        type Response = super::BatchRaftResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::BatchRaftRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as RaftService>::batch_send(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = BatchSendSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

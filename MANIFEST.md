@@ -1149,7 +1149,6 @@ These files sit between this crate's openraft integration and the multi-shard co
 - `apply_worker.rs`: `ApplyWorker` — per-shard apply loop. Pulls committed batches from the consensus engine, calls the state machine's `apply()`, and updates `AppliedState` / `AppliedStateCore` / client idempotency tracking.
 - `read_index.rs`: Read-index protocol implementation on top of `ConsensusHandle`. Used by follower reads that need linearizability without a full round-trip to the leader.
 - `leader_lease.rs`: Leader-lease wrapper used by the raft crate to gate reads without a round-trip when the lease is valid. Composes the consensus crate's `LeaderLease` type with raft-crate policy (safety check on clock skew, lease refresh cadence).
-- `message_outbox.rs`: Per-peer message batching buffer. Coalesces multiple reactor-generated messages into a single network send when the peer is slow or disconnected.
 - `peer_address_map.rs`: Address mapping from `NodeId` to current peer address. Updated by discovery/membership changes so the transport always sends to the current endpoint even after a node rebinds.
 - `peer_tracker.rs`: Per-peer connection state, heartbeat tracking, and "last-seen" metadata for health/telemetry.
 - `file_lock.rs`: Advisory lock on the data directory to prevent two ledger processes from opening the same WAL + state.

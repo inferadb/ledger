@@ -3441,31 +3441,12 @@ message LeaderUpdate {
 // =============================================================================
 
 // Internal Raft RPC service for consensus protocol.
-// Used for inter-node communication: vote, log replication, snapshots.
+// Used for inter-node communication: consensus streaming, read index, regional proposals.
 service RaftService {
-  // Request vote from peer during leader election.
-  rpc Vote(RaftVoteRequest) returns (RaftVoteResponse);
-
-  // Replicate log entries to followers.
-  rpc AppendEntries(RaftAppendEntriesRequest) returns (RaftAppendEntriesResponse);
-
-  // Install snapshot on a follower that is too far behind.
-  rpc InstallSnapshot(RaftInstallSnapshotRequest) returns (RaftInstallSnapshotResponse);
-
-  // Trigger an immediate leader election on this node.
-  // Called by the current leader during leadership transfer.
-  // This is an internal RPC — not exposed to external clients.
-  rpc TriggerElection(TriggerElectionRequest) returns (TriggerElectionResponse);
-
   // Query committed index for follower ReadIndex protocol.
   // Followers call this on the leader to confirm the committed index,
   // then wait locally for their applied index to catch up.
   rpc ReadIndex(ReadIndexRequest) returns (ReadIndexResponse);
-
-  // Batched cross-group message delivery.
-  // Coalesces AppendEntries messages for multiple Raft groups into a single RPC call,
-  // reducing per-message overhead for multi-group deployments.
-  rpc BatchSend(BatchRaftRequest) returns (BatchRaftResponse);
 
   // Bidirectional consensus-message transport between peers. Carries Raft
   // protocol messages (vote, append-entries, heartbeat, etc.) serialized in
@@ -3501,53 +3482,6 @@ message RaftLogId {
   uint64 index = 2;
 }
 
-// Vote request during leader election.
-message RaftVoteRequest {
-  RaftVote vote = 1;
-  optional RaftLogId last_log_id = 2;
-  // Region for multi-region routing (defaults to GLOBAL).
-  optional Region region = 3;
-}
-
-// Vote response.
-message RaftVoteResponse {
-  RaftVote vote = 1;
-  bool vote_granted = 2;
-  optional RaftLogId last_log_id = 3;
-}
-
-// Log replication request.
-message RaftAppendEntriesRequest {
-  RaftVote vote = 1;
-  optional RaftLogId prev_log_id = 2;
-  repeated bytes entries = 3; // Serialized log entries
-  optional RaftLogId leader_commit = 4;
-  // Region for multi-region routing (defaults to GLOBAL).
-  optional Region region = 5;
-}
-
-// Log replication response.
-message RaftAppendEntriesResponse {
-  RaftVote vote = 1;
-  bool success = 2;
-  bool conflict = 3;
-}
-
-// Snapshot installation request.
-message RaftInstallSnapshotRequest {
-  RaftVote vote = 1;
-  RaftSnapshotMeta meta = 2;
-  uint64 offset = 3;
-  bytes data = 4;
-  bool done = 5;
-  // Region for multi-region routing (defaults to GLOBAL).
-  optional Region region = 6;
-}
-
-// Snapshot installation response.
-message RaftInstallSnapshotResponse {
-  RaftVote vote = 1;
-}
 
 // Snapshot metadata.
 message RaftSnapshotMeta {
@@ -3586,17 +3520,6 @@ message TransferLeadershipResponse {
   string message = 3;
 }
 
-message TriggerElectionRequest {
-  // Term the current leader is in. Target rejects if stale.
-  uint64 leader_term = 1;
-  // Node ID of the leader requesting the transfer.
-  uint64 leader_id = 2;
-}
-
-message TriggerElectionResponse {
-  bool accepted = 1;
-  string message = 2;
-}
 
 // ReadIndex request: follower asks leader to confirm committed index.
 message ReadIndexRequest {
@@ -3610,34 +3533,6 @@ message ReadIndexResponse {
   uint64 leader_term = 2;
 }
 
-// Batched cross-group Raft request.
-// Contains multiple per-group messages coalesced into a single RPC call.
-message BatchRaftRequest {
-  repeated BatchRaftEntry entries = 1;
-}
-
-// A single entry within a batched Raft request.
-message BatchRaftEntry {
-  // Region for routing to the correct Raft group.
-  optional Region region = 1;
-  // The Raft message to deliver. Currently only AppendEntries is batched;
-  // Vote and InstallSnapshot remain individual RPCs.
-  oneof message {
-    RaftAppendEntriesRequest append_entries = 2;
-  }
-}
-
-// Batched cross-group Raft response.
-message BatchRaftResponse {
-  repeated BatchRaftEntryResponse responses = 1;
-}
-
-// Response for a single entry within a batched Raft request.
-message BatchRaftEntryResponse {
-  oneof response {
-    RaftAppendEntriesResponse append_entries = 1;
-  }
-}
 
 // Envelope wrapping a consensus-engine message sent between peers over
 // the ConsensusStream bidirectional RPC.

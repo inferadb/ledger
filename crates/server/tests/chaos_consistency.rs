@@ -31,11 +31,8 @@ use std::{
 };
 
 use inferadb_ledger_proto::proto::{
-    BatchRaftRequest, BatchRaftResponse, ConsensusAck, ConsensusEnvelope, RaftAppendEntriesRequest,
-    RaftAppendEntriesResponse, RaftInstallSnapshotRequest, RaftInstallSnapshotResponse,
-    RaftVoteRequest, RaftVoteResponse, ReadIndexRequest, ReadIndexResponse,
-    RegionalProposalRequest, RegionalProposalResult, TriggerElectionRequest,
-    TriggerElectionResponse,
+    ConsensusAck, ConsensusEnvelope, ReadIndexRequest, ReadIndexResponse, RegionalProposalRequest,
+    RegionalProposalResult,
     raft_service_server::{RaftService, RaftServiceServer},
 };
 use parking_lot::Mutex;
@@ -139,7 +136,10 @@ pub struct NodeState {
     pub votes_received: AtomicU64,
 }
 
-/// Mock Raft service that tracks voting behavior for split-brain detection.
+/// Mock Raft service that tracks state for split-brain detection.
+///
+/// Uses `read_index` as the connectivity probe since the legacy unary
+/// RPCs (vote, append_entries, etc.) have been removed.
 struct SplitBrainDetectionService {
     node_id: u64,
     state: Arc<NodeState>,
@@ -148,75 +148,16 @@ struct SplitBrainDetectionService {
 
 #[tonic::async_trait]
 impl RaftService for SplitBrainDetectionService {
-    async fn vote(
-        &self,
-        request: Request<RaftVoteRequest>,
-    ) -> Result<Response<RaftVoteResponse>, Status> {
-        let req = request.into_inner();
-        let request_term = req.vote.as_ref().map_or(0, |v| v.term);
-
-        let current_term = self.state.current_term.load(Ordering::SeqCst);
-
-        // Standard Raft voting logic (simplified)
-        let vote_granted = match request_term.cmp(&current_term) {
-            std::cmp::Ordering::Greater => {
-                // Higher term - grant vote
-                self.state.current_term.store(request_term, Ordering::SeqCst);
-                *self.state.voted_for.lock() = Some(request_term);
-                true
-            },
-            std::cmp::Ordering::Equal => {
-                // Same term - check if already voted
-                let voted_for = self.state.voted_for.lock();
-                voted_for.is_none() || *voted_for == Some(request_term)
-            },
-            std::cmp::Ordering::Less => false,
-        };
-
-        if vote_granted {
-            self.state.votes_received.fetch_add(1, Ordering::SeqCst);
-        }
-
-        Ok(Response::new(RaftVoteResponse { vote: None, vote_granted, last_log_id: None }))
-    }
-
-    async fn append_entries(
-        &self,
-        _request: Request<RaftAppendEntriesRequest>,
-    ) -> Result<Response<RaftAppendEntriesResponse>, Status> {
-        Ok(Response::new(RaftAppendEntriesResponse { success: true, conflict: false, vote: None }))
-    }
-
-    async fn install_snapshot(
-        &self,
-        _request: Request<RaftInstallSnapshotRequest>,
-    ) -> Result<Response<RaftInstallSnapshotResponse>, Status> {
-        Ok(Response::new(RaftInstallSnapshotResponse { vote: None }))
-    }
-
-    async fn trigger_election(
-        &self,
-        _request: Request<TriggerElectionRequest>,
-    ) -> Result<Response<TriggerElectionResponse>, Status> {
-        Ok(Response::new(TriggerElectionResponse {
-            accepted: true,
-            message: "Election triggered".to_string(),
-        }))
-    }
-
     async fn read_index(
         &self,
         _request: Request<ReadIndexRequest>,
     ) -> Result<Response<ReadIndexResponse>, Status> {
-        Err(Status::unimplemented("ReadIndex not supported in mock"))
+        // Use read_index as a connectivity probe — return current term
+        // to allow split-brain detection logic to observe cluster state.
+        let term = self.state.current_term.load(Ordering::SeqCst);
+        Ok(Response::new(ReadIndexResponse { committed_index: 0, leader_term: term }))
     }
 
-    async fn batch_send(
-        &self,
-        _request: Request<BatchRaftRequest>,
-    ) -> Result<Response<BatchRaftResponse>, Status> {
-        Err(Status::unimplemented("BatchSend not supported in mock"))
-    }
     type ConsensusStreamStream = ReceiverStream<Result<ConsensusAck, Status>>;
 
     async fn consensus_stream(
@@ -289,18 +230,14 @@ fn test_minority_cannot_elect_leader() {
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // Now try to trigger election in minority partition
-        // In real Raft, node1 would try to gather votes but only reach node2
-        // With only 2/5 nodes, it cannot achieve quorum (need 3)
-
         // Verify nodes 3, 4, 5 can still communicate (majority partition)
         let mut client3 = turmoil_common::create_turmoil_channel("node3", 9999)
             .await
             .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
             .expect("connect to node3");
 
-        let vote_req = RaftVoteRequest { vote: None, last_log_id: None, region: None };
-        client3.vote(vote_req).await.expect("majority should still be operational");
+        let read_req = ReadIndexRequest { region: String::new() };
+        client3.read_index(read_req).await.expect("majority should still be operational");
 
         // Repair partition
         turmoil::repair("node1", "node3");
@@ -344,7 +281,7 @@ fn test_write_fails_in_minority_partition() {
     let attempts_clone = write_attempts.clone();
     let successes_clone = write_successes.clone();
 
-    // Mock service that simulates quorum-based writes
+    // Mock service that simulates quorum-based writes via read_index
     struct QuorumWriteService {
         node_id: u64,
         is_partitioned: Arc<Mutex<bool>>,
@@ -354,72 +291,23 @@ fn test_write_fails_in_minority_partition() {
 
     #[tonic::async_trait]
     impl RaftService for QuorumWriteService {
-        async fn vote(
+        async fn read_index(
             &self,
-            _request: Request<RaftVoteRequest>,
-        ) -> Result<Response<RaftVoteResponse>, Status> {
-            Ok(Response::new(RaftVoteResponse {
-                vote: None,
-                vote_granted: true,
-                last_log_id: None,
-            }))
-        }
-
-        async fn append_entries(
-            &self,
-            _request: Request<RaftAppendEntriesRequest>,
-        ) -> Result<Response<RaftAppendEntriesResponse>, Status> {
+            _request: Request<ReadIndexRequest>,
+        ) -> Result<Response<ReadIndexResponse>, Status> {
             self.write_attempts.fetch_add(1, Ordering::SeqCst);
 
             // Simulate: partitioned node cannot achieve quorum
             let partitioned = *self.is_partitioned.lock();
             if partitioned {
-                // Return failure - cannot replicate to quorum
-                Ok(Response::new(RaftAppendEntriesResponse {
-                    success: false,
-                    conflict: false,
-                    vote: None,
-                }))
+                // Return error - cannot confirm quorum during partition
+                Err(Status::unavailable("Cannot achieve quorum during partition"))
             } else {
                 self.write_successes.fetch_add(1, Ordering::SeqCst);
-                Ok(Response::new(RaftAppendEntriesResponse {
-                    success: true,
-                    conflict: false,
-                    vote: None,
-                }))
+                Ok(Response::new(ReadIndexResponse { committed_index: 1, leader_term: 1 }))
             }
         }
 
-        async fn install_snapshot(
-            &self,
-            _request: Request<RaftInstallSnapshotRequest>,
-        ) -> Result<Response<RaftInstallSnapshotResponse>, Status> {
-            Ok(Response::new(RaftInstallSnapshotResponse { vote: None }))
-        }
-
-        async fn trigger_election(
-            &self,
-            _request: Request<TriggerElectionRequest>,
-        ) -> Result<Response<TriggerElectionResponse>, Status> {
-            Ok(Response::new(TriggerElectionResponse {
-                accepted: true,
-                message: "Election triggered".to_string(),
-            }))
-        }
-
-        async fn read_index(
-            &self,
-            _request: Request<ReadIndexRequest>,
-        ) -> Result<Response<ReadIndexResponse>, Status> {
-            Err(Status::unimplemented("ReadIndex not supported in mock"))
-        }
-
-        async fn batch_send(
-            &self,
-            _request: Request<BatchRaftRequest>,
-        ) -> Result<Response<BatchRaftResponse>, Status> {
-            Err(Status::unimplemented("BatchSend not supported in mock"))
-        }
         type ConsensusStreamStream = ReceiverStream<Result<ConsensusAck, Status>>;
 
         async fn consensus_stream(
@@ -467,64 +355,46 @@ fn test_write_fails_in_minority_partition() {
     sim.client("test", async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // Phase 1: Write before partition (should succeed)
+        // Phase 1: Request before partition (should succeed)
         {
             let mut client = turmoil_common::create_turmoil_channel("node1", 9999)
                 .await
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
-            let req = RaftAppendEntriesRequest {
-                vote: None,
-                prev_log_id: None,
-                entries: vec![],
-                leader_commit: None,
-                region: None,
-            };
-            let resp = client.append_entries(req).await.expect("should succeed");
-            assert!(resp.into_inner().success, "write before partition should succeed");
+            let req = ReadIndexRequest { region: String::new() };
+            let resp = client.read_index(req).await;
+            assert!(resp.is_ok(), "read_index before partition should succeed");
         }
 
-        // Phase 2: Simulate partition (set flag to make writes fail)
+        // Phase 2: Simulate partition (set flag to make reads fail)
         *partition_control.lock() = true;
 
-        // Write during "partition" (should fail)
+        // Request during "partition" (should fail)
         {
             let mut client = turmoil_common::create_turmoil_channel("node1", 9999)
                 .await
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
-            let req = RaftAppendEntriesRequest {
-                vote: None,
-                prev_log_id: None,
-                entries: vec![],
-                leader_commit: None,
-                region: None,
-            };
-            let resp = client.append_entries(req).await.expect("rpc should complete");
-            assert!(!resp.into_inner().success, "write during partition should fail");
+            let req = ReadIndexRequest { region: String::new() };
+            let resp = client.read_index(req).await;
+            assert!(resp.is_err(), "read_index during partition should fail");
         }
 
         // Phase 3: Heal partition
         *partition_control.lock() = false;
 
-        // Write after heal (should succeed)
+        // Request after heal (should succeed)
         {
             let mut client = turmoil_common::create_turmoil_channel("node1", 9999)
                 .await
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
-            let req = RaftAppendEntriesRequest {
-                vote: None,
-                prev_log_id: None,
-                entries: vec![],
-                leader_commit: None,
-                region: None,
-            };
-            let resp = client.append_entries(req).await.expect("should succeed");
-            assert!(resp.into_inner().success, "write after heal should succeed");
+            let req = ReadIndexRequest { region: String::new() };
+            let resp = client.read_index(req).await;
+            assert!(resp.is_ok(), "read_index after heal should succeed");
         }
 
         Ok(())
@@ -536,8 +406,8 @@ fn test_write_fails_in_minority_partition() {
     let attempts = final_attempts.load(Ordering::SeqCst);
     let successes = final_successes.load(Ordering::SeqCst);
 
-    assert_eq!(attempts, 3, "should have 3 write attempts");
-    assert_eq!(successes, 2, "should have 2 successful writes");
+    assert_eq!(attempts, 3, "should have 3 read_index attempts");
+    assert_eq!(successes, 2, "should have 2 successful read_index calls");
 }
 
 /// Tests consistency verification after partition healing.
@@ -566,63 +436,14 @@ fn test_consistency_after_partition_heals() {
 
     #[tonic::async_trait]
     impl RaftService for StatefulService {
-        async fn vote(
-            &self,
-            _request: Request<RaftVoteRequest>,
-        ) -> Result<Response<RaftVoteResponse>, Status> {
-            Ok(Response::new(RaftVoteResponse {
-                vote: None,
-                vote_granted: true,
-                last_log_id: None,
-            }))
-        }
-
-        async fn append_entries(
-            &self,
-            request: Request<RaftAppendEntriesRequest>,
-        ) -> Result<Response<RaftAppendEntriesResponse>, Status> {
-            // Simulate applying entries to state
-            // In a real implementation, entries would contain the actual data
-            let _req = request.into_inner();
-
-            // Simulate successful replication
-            Ok(Response::new(RaftAppendEntriesResponse {
-                success: true,
-                conflict: false,
-                vote: None,
-            }))
-        }
-
-        async fn install_snapshot(
-            &self,
-            _request: Request<RaftInstallSnapshotRequest>,
-        ) -> Result<Response<RaftInstallSnapshotResponse>, Status> {
-            Ok(Response::new(RaftInstallSnapshotResponse { vote: None }))
-        }
-
-        async fn trigger_election(
-            &self,
-            _request: Request<TriggerElectionRequest>,
-        ) -> Result<Response<TriggerElectionResponse>, Status> {
-            Ok(Response::new(TriggerElectionResponse {
-                accepted: true,
-                message: "Election triggered".to_string(),
-            }))
-        }
-
         async fn read_index(
             &self,
             _request: Request<ReadIndexRequest>,
         ) -> Result<Response<ReadIndexResponse>, Status> {
-            Err(Status::unimplemented("ReadIndex not supported in mock"))
+            // Simulate successful read_index — the node is reachable
+            Ok(Response::new(ReadIndexResponse { committed_index: 1, leader_term: 1 }))
         }
 
-        async fn batch_send(
-            &self,
-            _request: Request<BatchRaftRequest>,
-        ) -> Result<Response<BatchRaftResponse>, Status> {
-            Err(Status::unimplemented("BatchSend not supported in mock"))
-        }
         type ConsensusStreamStream = ReceiverStream<Result<ConsensusAck, Status>>;
 
         async fn consensus_stream(
@@ -670,42 +491,30 @@ fn test_consistency_after_partition_heals() {
     sim.client("test", async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // Write to both nodes before partition
+        // Probe both nodes before partition
         for node in ["node1", "node2"] {
             let mut client = turmoil_common::create_turmoil_channel(node, 9999)
                 .await
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
-            let req = RaftAppendEntriesRequest {
-                vote: None,
-                prev_log_id: None,
-                entries: vec![],
-                leader_commit: None,
-                region: None,
-            };
-            client.append_entries(req).await.expect("initial write");
+            let req = ReadIndexRequest { region: String::new() };
+            client.read_index(req).await.expect("initial probe");
         }
 
         // Create partition
         turmoil::partition("node1", "node2");
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Write to node1 only (node2 is partitioned)
+        // Probe node1 only (node2 is partitioned from node1 but reachable from test)
         {
             let mut client = turmoil_common::create_turmoil_channel("node1", 9999)
                 .await
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
-            let req = RaftAppendEntriesRequest {
-                vote: None,
-                prev_log_id: None,
-                entries: vec![],
-                leader_commit: None,
-                region: None,
-            };
-            client.append_entries(req).await.expect("write during partition");
+            let req = ReadIndexRequest { region: String::new() };
+            client.read_index(req).await.expect("probe during partition");
         }
 
         // Heal partition
@@ -713,8 +522,6 @@ fn test_consistency_after_partition_heals() {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // After healing, both nodes should eventually converge
-        // In real Raft, the leader would replicate the missing entries
-
         // Verify both nodes are reachable
         for node in ["node1", "node2"] {
             let mut client = turmoil_common::create_turmoil_channel(node, 9999)
@@ -722,15 +529,9 @@ fn test_consistency_after_partition_heals() {
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect after heal");
 
-            let req = RaftAppendEntriesRequest {
-                vote: None,
-                prev_log_id: None,
-                entries: vec![],
-                leader_commit: None,
-                region: None,
-            };
+            let req = ReadIndexRequest { region: String::new() };
             client
-                .append_entries(req)
+                .read_index(req)
                 .await
                 .unwrap_or_else(|_| panic!("{} should be reachable after heal", node));
         }
@@ -774,63 +575,16 @@ fn test_network_delay_request_completion() {
 
     #[tonic::async_trait]
     impl RaftService for SlowService {
-        async fn vote(
-            &self,
-            _request: Request<RaftVoteRequest>,
-        ) -> Result<Response<RaftVoteResponse>, Status> {
-            // Introduce delay (in simulated time)
-            tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
-            self.requests_completed.fetch_add(1, Ordering::SeqCst);
-            Ok(Response::new(RaftVoteResponse {
-                vote: None,
-                vote_granted: true,
-                last_log_id: None,
-            }))
-        }
-
-        async fn append_entries(
-            &self,
-            _request: Request<RaftAppendEntriesRequest>,
-        ) -> Result<Response<RaftAppendEntriesResponse>, Status> {
-            tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
-            self.requests_completed.fetch_add(1, Ordering::SeqCst);
-            Ok(Response::new(RaftAppendEntriesResponse {
-                success: true,
-                conflict: false,
-                vote: None,
-            }))
-        }
-
-        async fn install_snapshot(
-            &self,
-            _request: Request<RaftInstallSnapshotRequest>,
-        ) -> Result<Response<RaftInstallSnapshotResponse>, Status> {
-            Ok(Response::new(RaftInstallSnapshotResponse { vote: None }))
-        }
-
-        async fn trigger_election(
-            &self,
-            _request: Request<TriggerElectionRequest>,
-        ) -> Result<Response<TriggerElectionResponse>, Status> {
-            Ok(Response::new(TriggerElectionResponse {
-                accepted: true,
-                message: "Election triggered".to_string(),
-            }))
-        }
-
         async fn read_index(
             &self,
             _request: Request<ReadIndexRequest>,
         ) -> Result<Response<ReadIndexResponse>, Status> {
-            Err(Status::unimplemented("ReadIndex not supported in mock"))
+            // Introduce delay (in simulated time)
+            tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+            self.requests_completed.fetch_add(1, Ordering::SeqCst);
+            Ok(Response::new(ReadIndexResponse { committed_index: 0, leader_term: 1 }))
         }
 
-        async fn batch_send(
-            &self,
-            _request: Request<BatchRaftRequest>,
-        ) -> Result<Response<BatchRaftResponse>, Status> {
-            Err(Status::unimplemented("BatchSend not supported in mock"))
-        }
         type ConsensusStreamStream = ReceiverStream<Result<ConsensusAck, Status>>;
 
         async fn consensus_stream(
@@ -889,8 +643,8 @@ fn test_network_delay_request_completion() {
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect to fast node");
 
-            let req = RaftVoteRequest { vote: None, last_log_id: None, region: None };
-            client.vote(req).await.expect("fast node should respond");
+            let req = ReadIndexRequest { region: String::new() };
+            client.read_index(req).await.expect("fast node should respond");
         }
 
         // Request to slow node (should complete despite delay)
@@ -900,8 +654,8 @@ fn test_network_delay_request_completion() {
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect to slow node");
 
-            let req = RaftVoteRequest { vote: None, last_log_id: None, region: None };
-            client.vote(req).await.expect("slow node should eventually respond");
+            let req = ReadIndexRequest { region: String::new() };
+            client.read_index(req).await.expect("slow node should eventually respond");
         }
 
         Ok(())

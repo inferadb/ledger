@@ -1,8 +1,6 @@
 //! Raft service implementation for inter-node communication.
 //!
 //! This service handles incoming consensus protocol messages from peer nodes.
-//! The legacy openraft RPC methods (vote, append_entries, install_snapshot)
-//! are retained for proto compatibility but return `UNIMPLEMENTED`.
 //! Active consensus messaging uses the bidirectional streaming
 //! `consensus_stream` RPC — one long-lived stream per peer with
 //! HTTP/2 flow-controlled backpressure.
@@ -10,11 +8,8 @@
 use std::{net::SocketAddr, str::FromStr, sync::Arc};
 
 use inferadb_ledger_proto::proto::{
-    BatchRaftRequest, BatchRaftResponse, ConsensusAck, ConsensusEnvelope, RaftAppendEntriesRequest,
-    RaftAppendEntriesResponse, RaftInstallSnapshotRequest, RaftInstallSnapshotResponse,
-    RaftVoteRequest, RaftVoteResponse, ReadIndexRequest, ReadIndexResponse,
-    RegionalProposalRequest, RegionalProposalResult, TriggerElectionRequest,
-    TriggerElectionResponse,
+    ConsensusAck, ConsensusEnvelope, ReadIndexRequest, ReadIndexResponse, RegionalProposalRequest,
+    RegionalProposalResult,
 };
 use inferadb_ledger_raft::{
     raft_manager::RaftManager,
@@ -27,9 +22,9 @@ use tonic::{Request, Response, Status};
 /// Handles incoming consensus RPCs from peer nodes.
 ///
 /// Routes `ConsensusStream` bidi traffic to the correct region's consensus
-/// engine (Phase 4). Also serves `SubmitRegionalProposal` for server-to-server
-/// saga orchestration (Phase 5 retained, peer-identity gated). Legacy openraft
-/// RPCs (vote, append_entries, etc.) are no longer functional.
+/// engine. Also serves `SubmitRegionalProposal` for server-to-server
+/// saga orchestration (peer-identity gated) and `ReadIndex` for follower
+/// read consistency.
 pub struct RaftService {
     manager: Arc<RaftManager>,
     /// Per-node liveness timestamps. Updated on every successful Raft message.
@@ -212,47 +207,6 @@ impl RaftService {
 
 #[tonic::async_trait]
 impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftService {
-    async fn vote(
-        &self,
-        _request: Request<RaftVoteRequest>,
-    ) -> Result<Response<RaftVoteResponse>, Status> {
-        Err(Status::unimplemented(
-            "Legacy openraft vote RPC is no longer supported. Use forward_consensus instead.",
-        ))
-    }
-
-    async fn append_entries(
-        &self,
-        _request: Request<RaftAppendEntriesRequest>,
-    ) -> Result<Response<RaftAppendEntriesResponse>, Status> {
-        Err(Status::unimplemented(
-            "Legacy openraft append_entries RPC is no longer supported. Use forward_consensus instead.",
-        ))
-    }
-
-    async fn install_snapshot(
-        &self,
-        _request: Request<RaftInstallSnapshotRequest>,
-    ) -> Result<Response<RaftInstallSnapshotResponse>, Status> {
-        Err(Status::unimplemented(
-            "Legacy openraft install_snapshot RPC is no longer supported. Use forward_consensus instead.",
-        ))
-    }
-
-    async fn trigger_election(
-        &self,
-        _request: Request<TriggerElectionRequest>,
-    ) -> Result<Response<TriggerElectionResponse>, Status> {
-        Err(Status::unimplemented("Legacy openraft trigger_election RPC is no longer supported."))
-    }
-
-    async fn batch_send(
-        &self,
-        _request: Request<BatchRaftRequest>,
-    ) -> Result<Response<BatchRaftResponse>, Status> {
-        Err(Status::unimplemented("Legacy openraft batch_send RPC is no longer supported."))
-    }
-
     async fn read_index(
         &self,
         request: Request<ReadIndexRequest>,
@@ -508,14 +462,10 @@ mod tests {
     use std::sync::Arc;
 
     use inferadb_ledger_consensus::Message;
-    use inferadb_ledger_proto::proto::{
-        ConsensusEnvelope, RaftAppendEntriesRequest, RaftInstallSnapshotRequest, RaftVoteRequest,
-        Region as ProtoRegion, raft_service_server::RaftService as RaftServiceProto,
-    };
+    use inferadb_ledger_proto::proto::{ConsensusEnvelope, Region as ProtoRegion};
     use inferadb_ledger_raft::{RaftManager, RaftManagerConfig, RegionConfig};
     use inferadb_ledger_test_utils::TestDir;
     use inferadb_ledger_types::{Region, encode};
-    use tonic::Request;
 
     use super::{RaftService, handle_consensus_message};
 
@@ -541,46 +491,6 @@ mod tests {
         manager.start_system_region(region_config).await.expect("start system region");
         let service = RaftService::new(Arc::clone(&manager));
         (service, manager, temp)
-    }
-
-    #[tokio::test]
-    async fn vote_returns_unimplemented() {
-        let (service, _manager, _temp) = create_basic_service();
-        let result = service
-            .vote(Request::new(RaftVoteRequest { vote: None, last_log_id: None, region: None }))
-            .await;
-        assert_eq!(result.unwrap_err().code(), tonic::Code::Unimplemented);
-    }
-
-    #[tokio::test]
-    async fn append_entries_returns_unimplemented() {
-        let (service, _manager, _temp) = create_basic_service();
-        let result = service
-            .append_entries(Request::new(RaftAppendEntriesRequest {
-                vote: None,
-                prev_log_id: None,
-                entries: vec![],
-                leader_commit: None,
-                region: None,
-            }))
-            .await;
-        assert_eq!(result.unwrap_err().code(), tonic::Code::Unimplemented);
-    }
-
-    #[tokio::test]
-    async fn install_snapshot_returns_unimplemented() {
-        let (service, _manager, _temp) = create_basic_service();
-        let result = service
-            .install_snapshot(Request::new(RaftInstallSnapshotRequest {
-                vote: None,
-                meta: None,
-                offset: 0,
-                data: vec![],
-                done: true,
-                region: None,
-            }))
-            .await;
-        assert_eq!(result.unwrap_err().code(), tonic::Code::Unimplemented);
     }
 
     // Byzantine fault tests for the streaming consensus handler.
