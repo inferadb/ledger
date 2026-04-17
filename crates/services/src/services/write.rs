@@ -308,8 +308,11 @@ impl WriteService {
     /// Uses the region resolver to obtain the block archive and applied state
     /// for the organization's region.
     ///
-    /// Returns (block_header, tx_proof) if successful, (None, None) on error.
-    /// Errors are logged with context for debugging.
+    /// Returns `(block_header, tx_proof, proof_error_reason)`.
+    /// On success, the third element is `None`.
+    /// On failure, `block_header` and `tx_proof` are `None` and `proof_error_reason`
+    /// carries a stable label describing why proof generation failed. The write
+    /// itself committed; the proof is a post-commit enrichment step.
     fn generate_write_proof(
         &self,
         organization: OrganizationId,
@@ -318,10 +321,22 @@ impl WriteService {
     ) -> (
         Option<inferadb_ledger_proto::proto::BlockHeader>,
         Option<inferadb_ledger_proto::proto::MerkleProof>,
+        Option<&'static str>,
     ) {
         let ctx = match self.resolver.resolve(organization) {
             Ok(ctx) => ctx,
-            Err(_) => return (None, None),
+            Err(_) => {
+                let reason = "region_unavailable";
+                metrics::record_proof_generation_failure(reason);
+                warn!(
+                    organization_id = organization.value(),
+                    vault_id = vault.value(),
+                    vault_height,
+                    reason,
+                    "Proof generation failed: region resolver returned error"
+                );
+                return (None, None, Some(reason));
+            },
         };
 
         // Resolve internal IDs to slugs for response construction
@@ -338,19 +353,43 @@ impl WriteService {
             vault_height,
             0,
         ) {
-            Ok(write_proof) => (Some(write_proof.block_header), Some(write_proof.tx_proof)),
+            Ok(write_proof) => (Some(write_proof.block_header), Some(write_proof.tx_proof), None),
             Err(e) => {
+                // Classify the failure reason for metrics and response metadata
+                let reason: &'static str = match &e {
+                    ProofError::BlockNotFound { .. } => "block_not_found",
+                    ProofError::NoTransactions => "no_transactions",
+                    _ => "internal_error",
+                };
+
                 // Log with appropriate severity based on error type
                 match &e {
                     ProofError::BlockNotFound { .. } | ProofError::NoTransactions => {
-                        // These may be timing issues (block not yet written to archive)
-                        debug!(error = %e, "Proof generation skipped");
+                        // Timing issue: block not yet written to archive
+                        debug!(
+                            error = %e,
+                            organization_id = organization.value(),
+                            vault_id = vault.value(),
+                            vault_height,
+                            reason,
+                            "Proof generation skipped"
+                        );
                     },
                     _ => {
-                        warn!(error = %e, "Proof generation failed");
+                        warn!(
+                            error = %e,
+                            organization_id = organization.value(),
+                            vault_id = vault.value(),
+                            vault_height,
+                            reason,
+                            "Proof generation failed"
+                        );
                     },
                 }
-                (None, None)
+
+                metrics::record_proof_generation_failure(reason);
+
+                (None, None, Some(reason))
             },
         }
     }
@@ -801,8 +840,10 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                 "Vault routing changed during request processing"
             );
             return Err(status_with_correlation(
-                Status::failed_precondition(
-                    "Stale routing: vault routing changed during request processing. Retry.",
+                super::helpers::error_code_to_status(
+                    inferadb_ledger_types::ErrorCode::StaleRouting,
+                    "Stale routing: vault routing changed during request processing. Retry."
+                        .to_string(),
                 ),
                 &ctx.request_id(),
                 ctx.trace_id(),
@@ -901,10 +942,10 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         match response {
             LedgerResponse::Write { block_height, block_hash, assigned_sequence } => {
                 // Generate proof and block header if requested
-                let (block_header, tx_proof) = if req.include_tx_proof {
+                let (block_header, tx_proof, proof_error_reason) = if req.include_tx_proof {
                     self.generate_write_proof(organization_id, vault_id, block_height)
                 } else {
-                    (None, None)
+                    (None, None, None)
                 };
 
                 let success = WriteSuccess {
@@ -939,7 +980,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                 let elapsed = ctx.elapsed_secs();
                 metrics::record_organization_latency(organization_id, "write", elapsed);
 
-                Ok(response_with_correlation(
+                let mut response = response_with_correlation(
                     WriteResponse {
                         result: Some(
                             inferadb_ledger_proto::proto::write_response::Result::Success(success),
@@ -947,7 +988,13 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                     },
                     &ctx.request_id(),
                     ctx.trace_id(),
-                ))
+                );
+                if let Some(reason) = proof_error_reason
+                    && let Ok(val) = tonic::metadata::MetadataValue::try_from(reason)
+                {
+                    response.metadata_mut().insert("x-proof-unavailable-reason", val);
+                }
+                Ok(response)
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
@@ -1424,8 +1471,10 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                 "Vault routing changed during batch_write processing"
             );
             return Err(status_with_correlation(
-                Status::failed_precondition(
-                    "Stale routing: vault routing changed during request processing. Retry.",
+                super::helpers::error_code_to_status(
+                    inferadb_ledger_types::ErrorCode::StaleRouting,
+                    "Stale routing: vault routing changed during request processing. Retry."
+                        .to_string(),
                 ),
                 &ctx.request_id(),
                 ctx.trace_id(),
@@ -1482,10 +1531,10 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         match response {
             LedgerResponse::Write { block_height, block_hash, assigned_sequence } => {
                 // Generate proof and block header if requested
-                let (block_header, tx_proof) = if req.include_tx_proofs {
+                let (block_header, tx_proof, proof_error_reason) = if req.include_tx_proofs {
                     self.generate_write_proof(organization_id, vault_id, block_height)
                 } else {
-                    (None, None)
+                    (None, None, None)
                 };
 
                 let success = WriteSuccess {
@@ -1520,7 +1569,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                 let elapsed = ctx.elapsed_secs();
                 metrics::record_organization_latency(organization_id, "write", elapsed);
 
-                Ok(response_with_correlation(
+                let mut response = response_with_correlation(
                     BatchWriteResponse {
                         result: Some(
                             inferadb_ledger_proto::proto::batch_write_response::Result::Success(
@@ -1536,7 +1585,13 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                     },
                     &ctx.request_id(),
                     ctx.trace_id(),
-                ))
+                );
+                if let Some(reason) = proof_error_reason
+                    && let Ok(val) = tonic::metadata::MetadataValue::try_from(reason)
+                {
+                    response.metadata_mut().insert("x-proof-unavailable-reason", val);
+                }
+                Ok(response)
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);

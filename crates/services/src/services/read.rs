@@ -257,6 +257,8 @@ impl ReadService {
             grpc_deadline,
         );
 
+        let rpc_start = tokio::time::Instant::now();
+
         let channel = self.leader_channel_for_read_index(ctx).await?;
         let mut client = RaftServiceClient::new(channel);
 
@@ -282,12 +284,18 @@ impl ReadService {
             .as_ref()
             .ok_or_else(|| Status::internal("Applied index watch not available for this region"))?;
 
-        inferadb_ledger_raft::wait_for_apply(
-            &mut watch.clone(),
-            committed_index,
-            Duration::from_secs(5),
-        )
-        .await
+        // Use remaining deadline for wait_for_apply, accounting for time
+        // already spent in the CommittedIndex RPC. Falls back to 5s default
+        // when no gRPC deadline was provided.
+        let remaining = timeout.saturating_sub(rpc_start.elapsed());
+        let apply_timeout = if grpc_deadline.is_some() {
+            remaining.max(Duration::from_millis(100)) // floor to avoid zero-timeout
+        } else {
+            Duration::from_secs(5)
+        };
+
+        inferadb_ledger_raft::wait_for_apply(&mut watch.clone(), committed_index, apply_timeout)
+            .await
     }
 
     /// Opens a gRPC channel to the current leader of this region for the

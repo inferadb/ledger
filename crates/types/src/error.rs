@@ -116,6 +116,12 @@ pub enum DiagnosticCode {
     AppOrganizationMigrating = 3106,
     /// User is currently migrating between regions.
     AppUserMigrating = 3107,
+    /// Block proof could not be generated after a successful write.
+    ///
+    /// The write committed; the proof is unavailable due to a timing issue or
+    /// missing block archive entry. The client can request the proof separately
+    /// or treat the write as committed without cryptographic proof.
+    AppProofUnavailable = 3208,
 }
 
 impl DiagnosticCode {
@@ -162,6 +168,7 @@ impl DiagnosticCode {
             3207 => Some(Self::AppInvalidRegionAssignment),
             3106 => Some(Self::AppOrganizationMigrating),
             3107 => Some(Self::AppUserMigrating),
+            3208 => Some(Self::AppProofUnavailable),
             _ => None,
         }
     }
@@ -291,6 +298,9 @@ impl DiagnosticCode {
             },
             Self::AppUserMigrating => {
                 "User is migrating between regions. Retry after the migration completes."
+            },
+            Self::AppProofUnavailable => {
+                "The write committed successfully. The proof was unavailable at response time due to a block archive timing issue. No retry is needed for the write itself."
             },
         }
     }
@@ -857,6 +867,7 @@ mod tests {
             DiagnosticCode::AppQuotaExceeded,
             DiagnosticCode::AppInsufficientRegionNodes,
             DiagnosticCode::AppInvalidRegionAssignment,
+            DiagnosticCode::AppProofUnavailable,
         ]
     }
 
@@ -962,6 +973,7 @@ mod tests {
             (DiagnosticCode::AppInternal, false),
             (DiagnosticCode::AppInsufficientRegionNodes, false),
             (DiagnosticCode::AppInvalidRegionAssignment, false),
+            (DiagnosticCode::AppProofUnavailable, false),
         ];
         for (code, expected) in &cases {
             assert_eq!(code.is_retryable(), *expected, "{code:?}");

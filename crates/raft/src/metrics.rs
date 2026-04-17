@@ -544,6 +544,31 @@ pub fn record_org_purge_failure(tier: &str, exhausted: bool) {
     );
 }
 
+// ─── Proof Generation ─────────────────────────────────────────
+
+/// Block proof generation failure counter.
+///
+/// Incremented when `generate_write_proof` fails after a successful write commit.
+/// The write is not affected; only the post-commit proof enrichment failed.
+const PROOF_GENERATION_FAILURES_TOTAL: &str = "ledger_proof_generation_failures_total";
+
+/// Records a proof generation failure for a committed write.
+///
+/// `ledger_proof_generation_failures_total{reason}`.
+///
+/// `reason` is one of `"block_not_found"`, `"no_transactions"`,
+/// `"region_unavailable"`, or `"internal_error"`.
+#[inline]
+pub fn record_proof_generation_failure(reason: &'static str) {
+    gated!(PROOF_GENERATION_FAILURES_TOTAL, &[(fields::REASON, reason)], {
+        counter!(
+            PROOF_GENERATION_FAILURES_TOTAL,
+            fields::REASON => reason
+        )
+        .increment(1);
+    });
+}
+
 // ─── Hot Key Detection ────────────────────────────────────────
 
 /// Hot key detection events.
