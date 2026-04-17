@@ -97,6 +97,17 @@ pub enum ReactorEvent {
         /// Channel to send the result back on.
         response: oneshot::Sender<Result<(u64, u64), ConsensusError>>,
     },
+    /// Notify the reactor that a snapshot has been successfully persisted.
+    ///
+    /// The external coordinator sends this after writing the snapshot to disk.
+    /// The reactor advances the shard's `last_snapshot_index` so future
+    /// threshold checks use the correct baseline.
+    SnapshotCompleted {
+        /// Target shard.
+        shard: ShardId,
+        /// The last log index included in the completed snapshot.
+        last_included_index: u64,
+    },
     /// Query a peer's match_index for the specified shard.
     QueryPeerState {
         /// Target shard.
@@ -440,6 +451,12 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                     let _ = response.send(Err(ConsensusError::ShardUnavailable { shard }));
                     vec![]
                 }
+            },
+            ReactorEvent::SnapshotCompleted { shard, last_included_index } => {
+                if let Some(s) = self.shards.get_mut(&shard) {
+                    s.handle_snapshot_completed(last_included_index);
+                }
+                vec![]
             },
             ReactorEvent::QueryPeerState { shard, node, response } => {
                 let result = self.shards.get(&shard).and_then(|s| s.peer_match_index(node));

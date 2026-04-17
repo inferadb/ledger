@@ -323,6 +323,27 @@ impl ConsensusEngine {
         rx.await.map_err(|_| ConsensusError::ProposalQueueFull)?
     }
 
+    /// Notifies the reactor that a snapshot has been successfully persisted.
+    ///
+    /// The external coordinator calls this after writing the snapshot to disk.
+    /// The reactor advances the shard's `last_snapshot_index` so future
+    /// threshold checks use the correct baseline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConsensusError::ProposalQueueFull`] if the reactor inbox is
+    /// full or the reactor has shut down.
+    pub async fn notify_snapshot_completed(
+        &self,
+        shard: ShardId,
+        last_included_index: u64,
+    ) -> Result<(), ConsensusError> {
+        self.inbox
+            .send(ReactorEvent::SnapshotCompleted { shard, last_included_index })
+            .await
+            .map_err(|_| ConsensusError::ProposalQueueFull)
+    }
+
     /// Returns the current committed index for a shard.
     ///
     /// Reads the shard's `commit_index` without going through the Raft log.

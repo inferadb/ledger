@@ -44,6 +44,10 @@ pub struct Shard<C: Clock, R: RngSource> {
     #[allow(dead_code)]
     pending_split: bool,
     last_snapshot_index: u64,
+    /// Set when a `TriggerSnapshot` action is emitted; cleared by
+    /// `handle_snapshot_completed`. Prevents duplicate trigger actions while
+    /// a snapshot is being persisted.
+    snapshot_in_flight: bool,
     config: ShardConfig,
     clock: C,
     rng: R,
@@ -115,6 +119,7 @@ impl<C: Clock + Clone, R: RngSource> Shard<C, R> {
             conf_epoch: 0,
             pending_split: false,
             last_snapshot_index: 0,
+            snapshot_in_flight: false,
             config,
             clock,
             rng,
@@ -1328,18 +1333,39 @@ impl<C: Clock + Clone, R: RngSource> Shard<C, R> {
     }
 
     /// Emits a `TriggerSnapshot` action if the log has grown past the snapshot threshold.
+    ///
+    /// This method does **not** advance `last_snapshot_index`. The caller
+    /// (reactor / external coordinator) must call [`handle_snapshot_completed`]
+    /// after the snapshot has been persisted successfully. A
+    /// `snapshot_in_flight` guard prevents duplicate trigger actions while a
+    /// snapshot is being persisted.
     fn maybe_trigger_snapshot(&mut self, actions: &mut Vec<Action>) {
+        if self.snapshot_in_flight {
+            return;
+        }
         let entries_since_snapshot = self.commit_index.saturating_sub(self.last_snapshot_index);
         if entries_since_snapshot >= self.config.snapshot_threshold
             && let Some(entry) = self.log.get((self.commit_index - 1) as usize)
         {
             let term = entry.term;
-            self.last_snapshot_index = self.commit_index;
+            self.snapshot_in_flight = true;
             actions.push(Action::TriggerSnapshot {
                 shard: self.id,
                 last_included_index: self.commit_index,
                 last_included_term: term,
             });
+        }
+    }
+
+    /// Advances `last_snapshot_index` after a snapshot has been successfully persisted.
+    ///
+    /// The reactor calls this once the external coordinator confirms the snapshot
+    /// at `last_included_index` is durable. This ensures the shard never believes
+    /// it has snapshotted beyond what is actually on disk.
+    pub fn handle_snapshot_completed(&mut self, last_included_index: u64) {
+        self.snapshot_in_flight = false;
+        if last_included_index > self.last_snapshot_index {
+            self.last_snapshot_index = last_included_index;
         }
     }
 
@@ -2353,6 +2379,164 @@ mod tests {
         let actions = shard.handle_trigger_snapshot();
 
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn test_maybe_trigger_snapshot_does_not_advance_last_snapshot_index() {
+        let clock = make_clock();
+        let config = ShardConfig { snapshot_threshold: 3, ..ShardConfig::default() };
+        let mut shard = Shard::new(
+            ShardId(1),
+            NodeId(1),
+            make_membership_3(),
+            config,
+            clock.clone(),
+            make_rng(),
+            0,
+            None,
+            0,
+        );
+        elect_leader(&mut shard, &clock);
+
+        // Propose and commit 3 entries to cross the snapshot threshold.
+        for _ in 0..3 {
+            let _ = shard.handle_propose(b"data".to_vec()).unwrap();
+        }
+        let match_index = shard.log_len();
+        let term = shard.current_term();
+        let actions = shard.handle_message(
+            NodeId(2),
+            Message::AppendEntriesResponse { term, success: true, match_index },
+        );
+
+        // A TriggerSnapshot action should have been emitted.
+        let has_snapshot = actions.iter().any(|a| matches!(a, Action::TriggerSnapshot { .. }));
+        assert!(has_snapshot, "expected TriggerSnapshot action after threshold crossed");
+
+        // But last_snapshot_index must NOT have advanced yet.
+        assert_eq!(
+            shard.last_snapshot_index, 0,
+            "last_snapshot_index should not advance on trigger"
+        );
+    }
+
+    #[test]
+    fn test_handle_snapshot_completed_advances_last_snapshot_index() {
+        let clock = make_clock();
+        let config = ShardConfig { snapshot_threshold: 3, ..ShardConfig::default() };
+        let mut shard = Shard::new(
+            ShardId(1),
+            NodeId(1),
+            make_membership_3(),
+            config,
+            clock.clone(),
+            make_rng(),
+            0,
+            None,
+            0,
+        );
+        elect_leader(&mut shard, &clock);
+
+        // Propose and commit 3 entries.
+        for _ in 0..3 {
+            let _ = shard.handle_propose(b"data".to_vec()).unwrap();
+        }
+        let match_index = shard.log_len();
+        let term = shard.current_term();
+        let _ = shard.handle_message(
+            NodeId(2),
+            Message::AppendEntriesResponse { term, success: true, match_index },
+        );
+
+        assert_eq!(shard.last_snapshot_index, 0);
+
+        // Simulate the reactor confirming the snapshot completed.
+        shard.handle_snapshot_completed(match_index);
+        assert_eq!(
+            shard.last_snapshot_index, match_index,
+            "last_snapshot_index should advance after completion"
+        );
+    }
+
+    #[test]
+    fn test_handle_snapshot_completed_ignores_stale_index() {
+        let (_clock, mut shard) = make_3node_shard(1);
+
+        // Manually set a snapshot index.
+        shard.last_snapshot_index = 10;
+
+        // A stale completion (lower index) should be ignored.
+        shard.handle_snapshot_completed(5);
+        assert_eq!(shard.last_snapshot_index, 10, "stale snapshot completion should be ignored");
+
+        // Equal index should also be a no-op (not strictly stale, but not an advance).
+        shard.handle_snapshot_completed(10);
+        assert_eq!(shard.last_snapshot_index, 10);
+    }
+
+    #[test]
+    fn test_snapshot_in_flight_suppresses_duplicate_triggers() {
+        let clock = make_clock();
+        let config = ShardConfig { snapshot_threshold: 2, ..ShardConfig::default() };
+        let mut shard = Shard::new(
+            ShardId(1),
+            NodeId(1),
+            make_membership_3(),
+            config,
+            clock.clone(),
+            make_rng(),
+            0,
+            None,
+            0,
+        );
+        elect_leader(&mut shard, &clock);
+
+        // Propose and commit enough entries to cross the threshold.
+        for _ in 0..2 {
+            let _ = shard.handle_propose(b"data".to_vec()).unwrap();
+        }
+        let match_index = shard.log_len();
+        let term = shard.current_term();
+        let actions = shard.handle_message(
+            NodeId(2),
+            Message::AppendEntriesResponse { term, success: true, match_index },
+        );
+
+        let trigger_count =
+            actions.iter().filter(|a| matches!(a, Action::TriggerSnapshot { .. })).count();
+        assert_eq!(
+            trigger_count, 1,
+            "first commit past threshold should trigger exactly one snapshot"
+        );
+        assert!(shard.snapshot_in_flight, "snapshot_in_flight should be set");
+
+        // Propose and commit more entries — no new trigger while in-flight.
+        for _ in 0..3 {
+            let _ = shard.handle_propose(b"data".to_vec()).unwrap();
+        }
+        let match_index2 = shard.log_len();
+        let actions2 = shard.handle_message(
+            NodeId(2),
+            Message::AppendEntriesResponse { term, success: true, match_index: match_index2 },
+        );
+        let trigger_count2 =
+            actions2.iter().filter(|a| matches!(a, Action::TriggerSnapshot { .. })).count();
+        assert_eq!(trigger_count2, 0, "no snapshot trigger while in-flight");
+
+        // Complete the snapshot — clears in-flight flag.
+        shard.handle_snapshot_completed(match_index);
+        assert!(!shard.snapshot_in_flight, "snapshot_in_flight should be cleared");
+
+        // Now a new trigger should fire on the next commit.
+        let _ = shard.handle_propose(b"data".to_vec()).unwrap();
+        let match_index3 = shard.log_len();
+        let actions3 = shard.handle_message(
+            NodeId(2),
+            Message::AppendEntriesResponse { term, success: true, match_index: match_index3 },
+        );
+        let trigger_count3 =
+            actions3.iter().filter(|a| matches!(a, Action::TriggerSnapshot { .. })).count();
+        assert_eq!(trigger_count3, 1, "new trigger should fire after completion");
     }
 
     // ── Auto-promotion ─────────────────────────────────────────────
