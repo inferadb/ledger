@@ -503,16 +503,28 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                 vec![]
             },
             ReactorEvent::ShutdownFlush { ack } => {
-                // NOTE: This handler does not check `fsync_phase`. If an async-capable
-                // WAL backend is in use and an async fsync is in-flight, the sync()
-                // call below will still ensure durability (sync is a superset of
-                // async fsync completion). All current backends use synchronous fsync
-                // so this is a no-op concern today.
+                // If an async fsync is in flight, complete it first. We cannot
+                // return early here (unlike the normal flush tick) because
+                // shutdown requires confirmed durability before proceeding.
+                if self.fsync_phase == FsyncPhase::Submitted {
+                    // Poll until the in-flight fsync completes. For synchronous
+                    // backends this returns true immediately. For async backends
+                    // this spins — acceptable at shutdown since we need the
+                    // durability guarantee and the reactor is about to stop.
+                    while !self.wal.poll_fsync_completion() {
+                        std::thread::yield_now();
+                    }
+                    self.fsync_phase = FsyncPhase::Idle;
 
-                // Force-flush all pending WAL frames and sync to disk.
-                // This is intentionally synchronous (blocking the reactor)
-                // because we need durability confirmed before proceeding
-                // with shutdown.
+                    // The in-flight fsync covered frames already appended to the
+                    // WAL. Those entries are now durable. Resolve any pending
+                    // responses that were waiting on that fsync and clear
+                    // pending_commits so we don't double-process them.
+                    self.resolve_committed_responses();
+                    self.pending_commits.clear();
+                }
+
+                // Force-flush all remaining pending WAL frames and sync to disk.
                 let frames = std::mem::take(&mut self.pending_wal_frames);
                 if !frames.is_empty() && self.wal.append(&frames).is_err() {
                     // Drain pending responses so waiters get a structured error
