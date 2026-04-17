@@ -129,6 +129,7 @@ Validate: [PASS|FAIL]  (mode: standard|full)
 ```
 
 Then, for any `✗` phase, include:
+
 - Exact command that failed
 - Stderr/stdout excerpt with the diagnostic
 - Proposed fix (file:line + description)

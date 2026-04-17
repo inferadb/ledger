@@ -118,7 +118,7 @@ PUT _index_template/inferadb-logging
         "batch_size": { "type": "integer" },
         "batch_coalesced": { "type": "boolean" },
         "idempotency_hit": { "type": "boolean" },
-        
+
         "trace_id": { "type": "keyword" },
         "span_id": { "type": "keyword" }
       }
@@ -163,16 +163,16 @@ curl -X POST "https://api.datadoghq.com/api/v1/dashboard" \
 
 Create facets for efficient filtering. In Datadog Logs → Configuration → Facets:
 
-| Facet           | Path                 | Type    |
-| --------------- | -------------------- | ------- |
-| Service         | `@service`           | String  |
-| Method          | `@method`            | String  |
-| Outcome         | `@outcome`           | String  |
-| Client ID       | `@client_id`         | String  |
+| Facet           | Path            | Type    |
+| --------------- | --------------- | ------- |
+| Service         | `@service`      | String  |
+| Method          | `@method`       | String  |
+| Outcome         | `@outcome`      | String  |
+| Client ID       | `@client_id`    | String  |
 | Organization ID | `@organization` | Integer |
-| Duration        | `@duration_ms`       | Double  |
-| Error Code      | `@error_code`        | String  |
-| Trace ID        | `@trace_id`          | String  |
+| Duration        | `@duration_ms`  | Double  |
+| Error Code      | `@error_code`   | String  |
+| Trace ID        | `@trace_id`     | String  |
 
 ### Template Variables
 

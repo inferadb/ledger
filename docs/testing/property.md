@@ -17,14 +17,14 @@ just test-proptest 50000
 
 ## Test Suites
 
-| Suite                  | Crate       | Properties                                                                                                                                                            |
-| ---------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Codec roundtrip        | `types`     | Encode/decode cycle preserves all serializable types (Operation, Entity, Relationship, Transaction, BlockHeader, VaultBlock, VaultEntry, ShardBlock, ChainCommitment) |
-| Merkle proofs          | `types`     | Valid proofs always verify, tampered proofs never verify, wrong roots never verify, root computation is deterministic                                                 |
-| B+ tree invariants     | `store`     | Inserted keys retrievable, iteration returns sorted keys, deletes remove only target keys, updates overwrite correctly, get/iteration consistency                     |
-| Consensus determinism  | `consensus` | Same operations on two independent engines produce identical state, encrypted WAL roundtrips correctly, block hashes are deterministic across nodes                   |
-| WAL integrity          | `consensus` | Frame write/read roundtrip, segment rotation preserves entries, CRC catches corruption, crash recovery replays correctly                                              |
-| Split/merge roundtrip  | `consensus` | Split followed by merge preserves all data, router updates are consistent, organization boundaries are respected                                                      |
+| Suite                 | Crate       | Properties                                                                                                                                                            |
+| --------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Codec roundtrip       | `types`     | Encode/decode cycle preserves all serializable types (Operation, Entity, Relationship, Transaction, BlockHeader, VaultBlock, VaultEntry, ShardBlock, ChainCommitment) |
+| Merkle proofs         | `types`     | Valid proofs always verify, tampered proofs never verify, wrong roots never verify, root computation is deterministic                                                 |
+| B+ tree invariants    | `store`     | Inserted keys retrievable, iteration returns sorted keys, deletes remove only target keys, updates overwrite correctly, get/iteration consistency                     |
+| Consensus determinism | `consensus` | Same operations on two independent engines produce identical state, encrypted WAL roundtrips correctly, block hashes are deterministic across nodes                   |
+| WAL integrity         | `consensus` | Frame write/read roundtrip, segment rotation preserves entries, CRC catches corruption, crash recovery replays correctly                                              |
+| Split/merge roundtrip | `consensus` | Split followed by merge preserves all data, router updates are consistent, organization boundaries are respected                                                      |
 
 ## Writing New Property Tests
 

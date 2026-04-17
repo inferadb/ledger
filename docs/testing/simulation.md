@@ -17,11 +17,11 @@ cargo +1.92 test -p inferadb-ledger-consensus --test simulation -- --seed 42
 
 ## Simulation Scenarios
 
-| Scenario         | What it tests                                                        |
-| ---------------- | -------------------------------------------------------------------- |
-| `linearizability`| Stale reads, partition recovery, lease expiry under network faults   |
-| `split_merge`    | Split/merge under crash, partition, clock skew                       |
-| `durability`     | WAL corruption, sync failures, recovery paths                        |
-| `closed_ts`      | Closed timestamp correctness under leader transitions                |
+| Scenario          | What it tests                                                      |
+| ----------------- | ------------------------------------------------------------------ |
+| `linearizability` | Stale reads, partition recovery, lease expiry under network faults |
+| `split_merge`     | Split/merge under crash, partition, clock skew                     |
+| `durability`      | WAL corruption, sync failures, recovery paths                      |
+| `closed_ts`       | Closed timestamp correctness under leader transitions              |
 
 Each test runs thousands of seeded iterations with fault injection (partitions, crashes, clock skew, slow disk). A failing test produces a seed that reproduces the exact failure.

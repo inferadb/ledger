@@ -94,18 +94,18 @@ kubectl delete pvc -l app.kubernetes.io/name=inferadb-ledger -n inferadb
 
 ## Values Reference
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `replicaCount` | Number of replicas (must be odd) | `3` |
-| `image.repository` | Image repository | `inferadb/ledger` |
-| `image.tag` | Image tag | Chart appVersion |
-| `persistence.enabled` | Enable persistent storage | `true` |
-| `persistence.size` | PVC size | `10Gi` |
-| `persistence.storageClass` | Storage class | `""` (default) |
-| `resources.requests.cpu` | CPU request | `250m` |
-| `resources.requests.memory` | Memory request | `512Mi` |
-| `resources.limits.cpu` | CPU limit | `2` |
-| `resources.limits.memory` | Memory limit | `4Gi` |
-| `podDisruptionBudget.enabled` | Enable PDB | `true` |
-| `podDisruptionBudget.maxUnavailable` | Max unavailable pods | `1` |
-| `serviceMonitor.enabled` | Enable Prometheus ServiceMonitor | `false` |
+| Parameter                            | Description                      | Default           |
+| ------------------------------------ | -------------------------------- | ----------------- |
+| `replicaCount`                       | Number of replicas (must be odd) | `3`               |
+| `image.repository`                   | Image repository                 | `inferadb/ledger` |
+| `image.tag`                          | Image tag                        | Chart appVersion  |
+| `persistence.enabled`                | Enable persistent storage        | `true`            |
+| `persistence.size`                   | PVC size                         | `10Gi`            |
+| `persistence.storageClass`           | Storage class                    | `""` (default)    |
+| `resources.requests.cpu`             | CPU request                      | `250m`            |
+| `resources.requests.memory`          | Memory request                   | `512Mi`           |
+| `resources.limits.cpu`               | CPU limit                        | `2`               |
+| `resources.limits.memory`            | Memory limit                     | `4Gi`             |
+| `podDisruptionBudget.enabled`        | Enable PDB                       | `true`            |
+| `podDisruptionBudget.maxUnavailable` | Max unavailable pods             | `1`               |
+| `serviceMonitor.enabled`             | Enable Prometheus ServiceMonitor | `false`           |

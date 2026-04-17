@@ -100,14 +100,14 @@ See `crates/raft/src/entry_crypto.rs` for the encryption implementation.
 
 The multi-Raft routing infrastructure is fully implemented:
 
-| Component                   | Location                                        | Purpose                                               |
-| --------------------------- | ----------------------------------------------- | ----------------------------------------------------- |
-| `RaftManager`               | `crates/raft/src/raft_manager.rs`               | Manages per-region Raft group lifecycle               |
-| `RegionGroup`               | `crates/raft/src/raft_manager.rs`               | Holds Raft instance + state layer for a region        |
+| Component                   | Location                                          | Purpose                                               |
+| --------------------------- | ------------------------------------------------- | ----------------------------------------------------- |
+| `RaftManager`               | `crates/raft/src/raft_manager.rs`                 | Manages per-region Raft group lifecycle               |
+| `RegionGroup`               | `crates/raft/src/raft_manager.rs`                 | Holds Raft instance + state layer for a region        |
 | `RegionResolverService`     | `crates/services/src/services/region_resolver.rs` | Maps organizations to their assigned region           |
-| `propose_regional()`        | `crates/services/src/services/service_infra.rs` | Service-layer helper for regional proposals           |
-| `classify_system_request()` | `crates/raft/src/types.rs`                      | Compile-time enforcement of GLOBAL vs REGIONAL        |
-| `classify_ledger_request()` | `crates/raft/src/types.rs`                      | Classification for top-level `LedgerRequest` variants |
+| `propose_regional()`        | `crates/services/src/services/service_infra.rs`   | Service-layer helper for regional proposals           |
+| `classify_system_request()` | `crates/raft/src/types.rs`                        | Compile-time enforcement of GLOBAL vs REGIONAL        |
+| `classify_ledger_request()` | `crates/raft/src/types.rs`                        | Classification for top-level `LedgerRequest` variants |
 
 ### Request Flow
 

@@ -121,16 +121,16 @@ For each RPC identified above, follow the `new-rpc` skill: proto method, server 
 
 ## Common mistakes
 
-| Mistake | Effect | Detected by |
-| --- | --- | --- |
-| PII field under a GLOBAL key | Silent residency violation | `data-residency-auditor` |
-| Forgot `KEY_REGISTRY` entry for new constant | `validate_key_tier` becomes a no-op for that key | `add-storage-key` checklist, registry tests |
-| Storage key contains `{Entity}Slug(u64)` instead of `{Entity}Id(i64)` | Keys shift whenever slugs rotate; invalidates snapshots | code review; grep for slug types in `system/keys.rs` |
-| Proto conversion resolves slug → ID internally | Couples proto crate to state layer; breaks independence | `proto-reviewer` |
-| RPC handler skips `SlugResolver` | Handler passes raw `u64` into state — compile fails or wrong entity loaded | type system (if newtypes are used), integration tests otherwise |
-| Secondary-index write in a post-commit hook | Index drift if the hook fails; stale references survive erasure | erasure proptests |
-| Missing `AuditEvent` on a mutation | Compliance gap | review against existing Write/Admin handlers |
-| Missing `set_{entity}_slug()` on `RequestContext` | Wide-event logs lose entity correlation | canonical-log-line tests |
+| Mistake                                                               | Effect                                                                     | Detected by                                                     |
+| --------------------------------------------------------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| PII field under a GLOBAL key                                          | Silent residency violation                                                 | `data-residency-auditor`                                        |
+| Forgot `KEY_REGISTRY` entry for new constant                          | `validate_key_tier` becomes a no-op for that key                           | `add-storage-key` checklist, registry tests                     |
+| Storage key contains `{Entity}Slug(u64)` instead of `{Entity}Id(i64)` | Keys shift whenever slugs rotate; invalidates snapshots                    | code review; grep for slug types in `system/keys.rs`            |
+| Proto conversion resolves slug → ID internally                        | Couples proto crate to state layer; breaks independence                    | `proto-reviewer`                                                |
+| RPC handler skips `SlugResolver`                                      | Handler passes raw `u64` into state — compile fails or wrong entity loaded | type system (if newtypes are used), integration tests otherwise |
+| Secondary-index write in a post-commit hook                           | Index drift if the hook fails; stale references survive erasure            | erasure proptests                                               |
+| Missing `AuditEvent` on a mutation                                    | Compliance gap                                                             | review against existing Write/Admin handlers                    |
+| Missing `set_{entity}_slug()` on `RequestContext`                     | Wide-event logs lose entity correlation                                    | canonical-log-line tests                                        |
 
 ## References
 

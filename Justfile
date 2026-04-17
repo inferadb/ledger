@@ -1,9 +1,40 @@
 # InferaDB Ledger development commands
 # Requires: just (https://github.com/casey/just)
 
-# Default recipe: show available commands
+# Default recipe: grouped help. Run 'just --list' for the complete catalog.
 default:
-    @just --list
+    @echo "InferaDB Ledger — developer commands"
+    @echo ""
+    @echo "First time?"
+    @echo "  just setup          # install toolchain via mise"
+    @echo ""
+    @echo "Daily loop:"
+    @echo "  just check          # fmt-check + clippy + unit tests"
+    @echo "  just fix            # auto-fix formatting and clippy suggestions"
+    @echo "  just watch          # re-run 'just check' on file change"
+    @echo ""
+    @echo "Before a PR:"
+    @echo "  just ci             # full pre-PR gate (adds doc-check)"
+    @echo "  just proto          # regenerate proto code (run after .proto edits)"
+    @echo ""
+    @echo "Troubleshooting:"
+    @echo "  just doctor         # check toolchain, ports, disk"
+    @echo ""
+    @echo "Full catalog:  just --list"
+
+# ============================================================================
+# Setup
+# ============================================================================
+
+# First-run setup: install pinned Rust toolchain and dev tools via mise.
+setup:
+    mise trust
+    mise install
+    @echo ""
+    @echo "Setup complete. Next:"
+    @echo "  just check     # fast developer loop"
+    @echo "  just ci        # full pre-PR gate"
+    @echo "  just --list    # full catalog"
 
 # Rust toolchain versions
 rust := "1.92"
@@ -69,35 +100,35 @@ test-sdk-cluster:
     ./scripts/run-integration-tests.sh sdk
 
 # Stress: smoke-level throughput tests (~1 min).
-stress-quick:
+test-stress-quick:
     ./scripts/stress-quick.sh
 
 # Stress: throughput measurement against advisory targets.
-stress-throughput:
+test-stress-throughput:
     ./scripts/stress-throughput.sh
 
 # Stress: scale-correctness tests (state root parity, snapshot determinism, watch).
-stress-correctness:
+test-stress-correctness:
     ./scripts/stress-correctness.sh
 
 # End-to-end cluster lifecycle test (bootstrap, join, transfer, shutdown, rebuild).
-cluster-lifecycle:
+test-cluster-lifecycle:
     ./scripts/cluster-lifecycle-test.sh
 
 # Binary-level crash recovery drill: SIGKILL a node mid-write, verify convergence.
-crash-recovery:
+test-crash-recovery-drill:
     ./scripts/crash-recovery.sh
 
 # gRPC channel caching regression test (TIME_WAIT accumulation).
-check-port-consumption:
+test-port-consumption:
     ./scripts/check-port-consumption.sh
 
 # Run crash recovery tests — dual-slot commit protocol verification in the store crate.
-test-recovery:
+test-store-recovery:
     cargo +{{rust}} test -p inferadb-ledger-store --test crash_recovery
 
 # Run crash recovery tests with fail-fast.
-test-recovery-ff:
+test-store-recovery-ff:
     cargo +{{rust}} test -p inferadb-ledger-store --test crash_recovery -- --fail-fast
 
 # Run full test suite including stress/scale tests
@@ -132,17 +163,16 @@ fmt-check:
 clippy:
     cargo +{{rust}} clippy --workspace --all-targets -- -D warnings
 
-# Run all checks (format + clippy + test) - use before committing
+# Fast developer loop: fmt-check + clippy + unit tests. Run during iteration.
 check: fmt-check clippy test
 
-# Quick check (format + clippy only) - faster pre-commit validation
-check-quick: fmt-check clippy
-
-# CI validation: format + clippy + doc + unit tests
+# Canonical pre-PR gate: fmt-check + clippy + doc-check + tests. Matches CI and the /just-ci-gate skill.
 ci: fmt-check clippy doc-check test
 
-# Pre-PR validation: regenerate protos, autoformat, lint, and test
-ready: proto fmt clippy test
+# Auto-fix formatting and lints. Run when `check` complains about style.
+fix:
+    cargo +{{nightly}} fmt
+    cargo +{{rust}} clippy --workspace --all-targets --fix --allow-dirty --allow-staged
 
 # ============================================================================
 # Documentation
@@ -164,12 +194,24 @@ doc-open:
 # Protobuf
 # ============================================================================
 
-# Update pre-generated proto code for crates.io publishing
+# Regenerate proto bindings from proto/ledger/v1/*.proto and copy to crates/proto/src/generated/.
 proto:
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo +{{rust}} clean -p inferadb-ledger-proto
     cargo +{{rust}} build -p inferadb-ledger-proto
-    cp target/debug/build/inferadb-ledger-proto-*/out/ledger.v1.rs crates/proto/src/generated/
-    cp target/debug/build/inferadb-ledger-proto-*/out/ledger_v1_descriptor.bin crates/proto/src/generated/
+    shopt -s nullglob
+    dirs=(target/debug/build/inferadb-ledger-proto-*/out)
+    if [ "${#dirs[@]}" -ne 1 ]; then
+        echo "error: expected exactly one build output dir, found ${#dirs[@]}:" >&2
+        printf '  %s\n' "${dirs[@]}" >&2
+        echo "hint: run 'cargo clean -p inferadb-ledger-proto' and retry" >&2
+        exit 1
+    fi
+    out="${dirs[0]}"
+    cp "$out/ledger.v1.rs" crates/proto/src/generated/
+    cp "$out/ledger_v1_descriptor.bin" crates/proto/src/generated/
+    echo "proto code regenerated from $out"
 
 # Lint protobuf definitions
 proto-lint:
@@ -220,3 +262,60 @@ update:
 # Check for unused dependencies (requires cargo-udeps)
 udeps:
     cargo +{{nightly}} udeps --workspace
+
+# ============================================================================
+# Diagnostics
+# ============================================================================
+
+# Check development environment: toolchain pinning, disk space, port availability.
+doctor:
+    #!/usr/bin/env bash
+    # Intentionally omit `-e`: keep running through all sections even if a
+    # single check fails so the operator sees the full diagnostic.
+    set -uo pipefail
+    echo "=== toolchain ==="
+    rustc +{{rust}} --version || { echo "  missing: rustc +{{rust}}"; exit 1; }
+    rustc +{{nightly}} --version || { echo "  missing: rustc +{{nightly}}"; exit 1; }
+    cargo +{{rust}} --version
+    echo ""
+    echo "=== just ==="
+    just --version
+    echo ""
+    echo "=== mise ==="
+    command -v mise >/dev/null && mise --version || echo "  mise not on PATH (optional but recommended)"
+    echo ""
+    echo "=== disk (target/) ==="
+    du -sh target/ 2>/dev/null || echo "  no target/ yet"
+    df -h . | tail -1
+    echo ""
+    echo "=== integration-test port range ==="
+    # Server integration tests allocate ports dynamically via allocate_ports;
+    # we spot-check a common band for conflicts.
+    if command -v lsof >/dev/null; then
+        lsof -iTCP -sTCP:LISTEN -P 2>/dev/null | awk '$9 ~ /:(9[0-9]{3}|1[0-9]{4})$/ {print "  busy: "$9}' | head -10
+        echo "  (listed any listeners in 9000–19999 range)"
+    else
+        echo "  lsof unavailable — skipping port scan"
+    fi
+    echo ""
+    echo "doctor complete."
+
+# ============================================================================
+# Convenience
+# ============================================================================
+
+# Re-run 'just check' whenever a Rust source file changes. Requires cargo-watch.
+# Install: cargo install cargo-watch
+watch:
+    cargo +{{rust}} watch -s "just check"
+
+# Produce a line-coverage report for the workspace. Requires cargo-llvm-cov.
+# Install: cargo install cargo-llvm-cov
+cover:
+    cargo +{{rust}} llvm-cov --workspace --lib --html
+    @echo ""
+    @echo "coverage report: target/llvm-cov/html/index.html"
+
+# Run workspace benchmarks. Store has the most mature suite (btree_bench).
+bench:
+    cargo +{{rust}} bench --workspace

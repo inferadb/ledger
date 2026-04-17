@@ -134,7 +134,7 @@ Active voice. No filler words ("very", "really", "basically"). Specific language
 - **Unit tests** — `just test` runs `cargo test --workspace --lib` (~8s). Fast loop.
 - **Integration** — `just test-integration`. Server integration is a single binary (golden rule 13).
 - **Property tests** — `just test-proptest`. Strategies in `crates/test-utils/src/strategies.rs`. Dev default 256 iterations; nightly CI runs 10k (`PROPTEST_CASES` overrides).
-- **Stress / recovery** — `just test-stress`, `just test-recovery`.
+- **Stress / recovery** — `just test-stress`, `just test-store-recovery`.
 - **Tooling** — standard `cargo test` only. No `cargo nextest`.
 - **Crash recovery** — use `CrashInjector` from `crates/test-utils`. Never `panic!` in production code to simulate failure.
 - **Mocks** — SDK tests use mocked transport via `tonic` test fixtures. State-layer tests use in-memory backend. Integration tests use real B+ tree + real WAL.
@@ -183,6 +183,7 @@ When a new rule is added here, also update the relevant **agent definition** (if
 - `proto-reviewer` — proto + conversion + service wiring, `SlugResolver`, `ErrorDetails`
 - `test-isolation-auditor` — server integration test hygiene
 - `consensus-reviewer` — custom Raft / WAL / shard / saga invariants
+- `docs-drift-auditor` — user-facing docs (`README.md`, `CONTRIBUTING.md`, `DESIGN.md`, `WHITEPAPER.md`, `MANIFEST.md`, `Justfile`, `docs/**`) for factual accuracy against code + developer-experience principles (audience, problem framing, Hello World, single source of truth, progressive disclosure). Dispatches parallel subagents.
 
 **Skills** (invoke via `/skill-name` or auto-triggered):
 
@@ -204,4 +205,5 @@ When a new rule is added here, also update the relevant **agent definition** (if
 - `PostToolUse` on `.rs` / `.md` edits — writing-check: flags fenced `ignore` blocks, untagged code-fence openers, and non-kebab-case markdown filenames.
 - `PostToolUse` on `crates/state/src/system/keys.rs` edits — auto-spawns `data-residency-auditor` as a subagent; findings surface in the transcript.
 - `PostToolUse` on `crates/server/tests/**` edits — auto-spawns `test-isolation-auditor` as a subagent.
+- `PostToolUse` on docs-drift sentinel paths (`proto/ledger/v1/**/*.proto`, `Justfile`, root `Cargo.toml`, `crates/services/src/services/**`, `crates/server/src/{main,config}.rs`, root docs, `docs/**/*.md`) — auto-spawns `docs-drift-auditor`, which fans out into parallel `Explore` subagents across doc partitions.
 - `SessionStart` — reminder to call `mcp__plugin_serena_serena__activate_project` for this workspace.

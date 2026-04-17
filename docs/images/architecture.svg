@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 900" font-family="sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#374151"/>
+    </marker>
+    <marker id="arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="5" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#9ca3af"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="960" height="900" fill="#ffffff"/>
+
+  <!-- Client tier: SDK box -->
+  <rect x="340" y="30" width="280" height="80" rx="8" fill="#eff6ff" stroke="#374151" stroke-width="1.5"/>
+  <text x="480" y="60" font-size="16" font-weight="600" text-anchor="middle" fill="#111827">SDK (Rust)</text>
+  <text x="480" y="85" font-size="12" text-anchor="middle" fill="#4b5563">RegionLeaderCache &#8594; direct routing</text>
+
+  <!-- Arrow SDK -> Node -->
+  <line x1="480" y1="110" x2="480" y2="165" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="410" y="125" width="140" height="20" fill="#ffffff" opacity="0.95"/>
+  <text x="480" y="140" font-size="12" text-anchor="middle" fill="#374151">gRPC (slug-addressed)</text>
+
+  <!-- Node boundary (dashed container) -->
+  <rect x="30" y="170" width="900" height="520" rx="10" fill="#fafafa" stroke="#374151" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <rect x="50" y="160" width="280" height="24" fill="#ffffff"/>
+  <text x="60" y="177" font-size="13" font-weight="600" fill="#111827">Node (one binary, 14 gRPC services)</text>
+
+  <!-- Top row: 3 components -->
+  <rect x="50" y="200" width="260" height="70" rx="6" fill="#f9fafb" stroke="#374151" stroke-width="1.2"/>
+  <text x="180" y="228" font-size="14" font-weight="600" text-anchor="middle" fill="#111827">Service / SlugResolver</text>
+  <text x="180" y="252" font-size="11" text-anchor="middle" fill="#4b5563">gRPC entrypoint, slug &#8594; id</text>
+
+  <rect x="350" y="200" width="260" height="70" rx="6" fill="#f9fafb" stroke="#374151" stroke-width="1.2"/>
+  <text x="480" y="228" font-size="14" font-weight="600" text-anchor="middle" fill="#111827">Saga Orchestrator</text>
+  <text x="480" y="252" font-size="11" text-anchor="middle" fill="#4b5563">crates/raft</text>
+
+  <rect x="650" y="200" width="260" height="70" rx="6" fill="#f9fafb" stroke="#374151" stroke-width="1.2"/>
+  <text x="780" y="228" font-size="14" font-weight="600" text-anchor="middle" fill="#111827">Router + RegionResolver</text>
+  <text x="780" y="252" font-size="11" text-anchor="middle" fill="#4b5563">leader discovery, redirects</text>
+
+  <!-- Horizontal arrows between top-row boxes -->
+  <line x1="310" y1="235" x2="348" y2="235" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="610" y1="235" x2="648" y2="235" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Consensus Engine container -->
+  <rect x="50" y="300" width="860" height="210" rx="6" fill="#f3f4f6" stroke="#374151" stroke-width="1.2"/>
+  <text x="70" y="325" font-size="14" font-weight="600" fill="#111827">Consensus Engine (crates/consensus)</text>
+
+  <!-- Reactor <- Shard inside -->
+  <rect x="70" y="340" width="820" height="50" rx="4" fill="#ffffff" stroke="#374151" stroke-width="1"/>
+  <text x="480" y="371" font-size="13" text-anchor="middle" fill="#111827">Reactor &#9664;&#8212; Shard (Action-only, no I/O)</text>
+
+  <!-- 3 annotations as bullets -->
+  <text x="80" y="420" font-size="12" fill="#374151">&#8226; per-vault AES-256-GCM WAL &#8212; single fsync per batch</text>
+  <text x="80" y="446" font-size="12" fill="#374151">&#8226; leader lease + closed-timestamp follower reads</text>
+  <text x="80" y="472" font-size="12" fill="#374151">&#8226; per-vault Merkle-chained blocks</text>
+
+  <!-- Arrow Consensus -> Storage -->
+  <line x1="480" y1="510" x2="480" y2="540" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- StorageEngine / StateLayer -->
+  <rect x="50" y="545" width="860" height="110" rx="6" fill="#f9fafb" stroke="#374151" stroke-width="1.2"/>
+  <text x="480" y="582" font-size="14" font-weight="600" text-anchor="middle" fill="#111827">StorageEngine / StateLayer (crates/state + crates/store)</text>
+  <text x="480" y="615" font-size="12" text-anchor="middle" fill="#4b5563">B+ tree + pages + KeyTier (Global / Regional)</text>
+
+  <!-- Separator label: Cluster-level topology -->
+  <text x="480" y="720" font-size="12" font-style="italic" text-anchor="middle" fill="#6b7280">Cluster-level topology &#8212; this node is a member of:</text>
+
+  <!-- Muted connectors from Consensus Engine outward to Raft groups (bypass StorageEngine) -->
+  <path d="M 260 510 C 260 680, 260 720, 260 755" stroke="#9ca3af" stroke-width="1" stroke-dasharray="4 3" fill="none" marker-end="url(#arrow-muted)"/>
+  <path d="M 700 510 C 700 680, 700 720, 700 755" stroke="#9ca3af" stroke-width="1" stroke-dasharray="4 3" fill="none" marker-end="url(#arrow-muted)"/>
+
+  <!-- Raft-group footer (outside node boundary) -->
+  <rect x="50" y="755" width="420" height="120" rx="6" fill="#eff6ff" stroke="#1d4ed8" stroke-width="1.2"/>
+  <text x="260" y="790" font-size="14" font-weight="600" text-anchor="middle" fill="#1e3a8a">Global Raft group</text>
+  <text x="260" y="818" font-size="12" text-anchor="middle" fill="#1e3a8a">tenancy, routing, directory</text>
+  <text x="260" y="842" font-size="11" text-anchor="middle" fill="#4b5563">no PII</text>
+
+  <rect x="490" y="755" width="420" height="120" rx="6" fill="#f0fdf4" stroke="#15803d" stroke-width="1.2"/>
+  <text x="700" y="790" font-size="14" font-weight="600" text-anchor="middle" fill="#14532d">Regional Raft groups</text>
+  <text x="700" y="818" font-size="12" text-anchor="middle" fill="#14532d">per-region PII, per-vault blockchain</text>
+  <text x="700" y="842" font-size="11" text-anchor="middle" fill="#4b5563">one per geographic region</text>
+
+</svg>

@@ -52,10 +52,10 @@ buf breaking --against 'https://github.com/inferadb/ledger.git#subdir=proto'
 
 ## Services Defined
 
-| Service                  | Description                                            |
-| ------------------------ | ------------------------------------------------------ |
-| `ReadService`            | Read operations (Get, List, VerifiedRead, WatchBlocks) |
-| `WriteService`           | Write operations (Write, BatchWrite)                   |
+| Service                  | Description                                               |
+| ------------------------ | --------------------------------------------------------- |
+| `ReadService`            | Read operations (Get, List, VerifiedRead, WatchBlocks)    |
+| `WriteService`           | Write operations (Write, BatchWrite)                      |
 | `AdminService`           | Administrative operations (Organization/Vault management) |
-| `HealthService`          | Health checks                                          |
-| `SystemDiscoveryService` | Peer discovery and cluster state                       |
+| `HealthService`          | Health checks                                             |
+| `SystemDiscoveryService` | Peer discovery and cluster state                          |

@@ -29,16 +29,16 @@ Fields are categorized by requirement level:
 
 ### Request Metadata
 
-| Field               | Level       | Type   | Condition                   | Description                                   | Example                                  |
-| ------------------- | ----------- | ------ | --------------------------- | --------------------------------------------- | ---------------------------------------- |
-| `request_id`        | Required    | UUID   | -                           | Unique identifier for correlation             | `"550e8400-e29b-41d4-a716-446655440000"` |
-| `service`           | Required    | String | -                           | gRPC service name                             | `"WriteService"`                         |
-| `method`            | Required    | String | -                           | gRPC method name                              | `"write"`                                |
-| `client_id`         | Conditional | String | When provided               | Idempotency client identifier (max 128 chars) | `"api_acme_corp"`                        |
-| `sequence`          | Conditional | u64    | When provided               | Per-client sequence number                    | `42`                                     |
-| `organization` | Conditional | i64    | When targeting organization | Target organization                           | `1001`                                   |
-| `vault`        | Conditional | u64    | When targeting vault        | Target vault (0 for organization-level ops)   | `7180591718400`                          |
-| `caller`            | Conditional | u64    | When caller slug provided   | User slug (external Snowflake) of the acting user; `0` for system-initiated requests | `302670195593552897`                     |
+| Field          | Level       | Type   | Condition                   | Description                                                                          | Example                                  |
+| -------------- | ----------- | ------ | --------------------------- | ------------------------------------------------------------------------------------ | ---------------------------------------- |
+| `request_id`   | Required    | UUID   | -                           | Unique identifier for correlation                                                    | `"550e8400-e29b-41d4-a716-446655440000"` |
+| `service`      | Required    | String | -                           | gRPC service name                                                                    | `"WriteService"`                         |
+| `method`       | Required    | String | -                           | gRPC method name                                                                     | `"write"`                                |
+| `client_id`    | Conditional | String | When provided               | Idempotency client identifier (max 128 chars)                                        | `"api_acme_corp"`                        |
+| `sequence`     | Conditional | u64    | When provided               | Per-client sequence number                                                           | `42`                                     |
+| `organization` | Conditional | i64    | When targeting organization | Target organization                                                                  | `1001`                                   |
+| `vault`        | Conditional | u64    | When targeting vault        | Target vault (0 for organization-level ops)                                          | `7180591718400`                          |
+| `caller`       | Conditional | u64    | When caller slug provided   | User slug (external Snowflake) of the acting user; `0` for system-initiated requests | `302670195593552897`                     |
 
 ### System Context
 
@@ -77,11 +77,11 @@ Fields are categorized by requirement level:
 
 ### Admin Operation Fields
 
-| Field                      | Level       | Type   | Condition        | Description                              | Example                 |
-| -------------------------- | ----------- | ------ | ---------------- | ---------------------------------------- | ----------------------- |
-| `admin_action`             | Conditional | String | Admin ops        | Administrative action name               | `"create_organization"` |
-| `retention_mode`           | Conditional | String | Vault creation   | Vault retention mode                     | `"compliance"`          |
-| `recovery_force`           | Conditional | bool   | Recovery ops     | Whether force mode was used              | `false`                 |
+| Field            | Level       | Type   | Condition      | Description                 | Example                 |
+| ---------------- | ----------- | ------ | -------------- | --------------------------- | ----------------------- |
+| `admin_action`   | Conditional | String | Admin ops      | Administrative action name  | `"create_organization"` |
+| `retention_mode` | Conditional | String | Vault creation | Vault retention mode        | `"compliance"`          |
+| `recovery_force` | Conditional | bool   | Recovery ops   | Whether force mode was used | `false`                 |
 
 ### Outcome Fields
 
@@ -726,4 +726,3 @@ cargo bench -p inferadb-ledger-raft --bench logging_bench
 - [Dashboard Templates](dashboards/) - Pre-built Grafana, Kibana, Datadog dashboards
 - [Metrics Reference](metrics-reference.md) - Prometheus metrics (complementary)
 - [Alerting Guide](alerting.md) - Using metrics for alerts
-

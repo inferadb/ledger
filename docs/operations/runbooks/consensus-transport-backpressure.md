@@ -28,14 +28,14 @@ Under normal operation:
 
 ## Symptom → Cause → Action
 
-| Symptom                                                 | Likely cause                                                                                | Action                                                                                                                   |
-| ------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| Sustained `drops_total{reason="queue_full"}` > 0        | Peer is persistently slow or unreachable; queue fills faster than drain                     | Check peer health and reachability; if down, expect membership change to follow and convert drops to `task_shutdown`     |
-| `queue_depth` climbing steadily                         | Transient network congestion or GC pause on target peer                                     | Short-lived: observe and confirm recovery; persistent: investigate peer CPU, GC, and network telemetry                   |
-| `queue_depth` pinned at 1024                            | Peer unrecoverable; drops accumulating at the push rate                                     | Peer is effectively down; cross-check `inferadb_ledger_raft_is_leader` and peer-side liveness before removing            |
-| `latency_seconds` p99 climbing                          | Network RTT increase, TLS handshake churn, or peer-side scheduling delays                   | Check network telemetry (TCP RTT), recent certificate or config changes, and peer CPU saturation                         |
-| `drops_total{reason="task_shutdown"}` spike             | Membership change (voter removed, learner demoted, region rebalance)                        | Expected; cross-check with audit logs or `ledger_background_job_runs_total{job="learner_refresh"}`                       |
-| All peers showing `queue_depth` > 0 simultaneously      | This node's tokio runtime is overloaded — not a peer-specific issue                         | Check local CPU and runtime; investigate blocking calls; consider raising `worker_threads`                               |
+| Symptom                                            | Likely cause                                                              | Action                                                                                                               |
+| -------------------------------------------------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Sustained `drops_total{reason="queue_full"}` > 0   | Peer is persistently slow or unreachable; queue fills faster than drain   | Check peer health and reachability; if down, expect membership change to follow and convert drops to `task_shutdown` |
+| `queue_depth` climbing steadily                    | Transient network congestion or GC pause on target peer                   | Short-lived: observe and confirm recovery; persistent: investigate peer CPU, GC, and network telemetry               |
+| `queue_depth` pinned at 1024                       | Peer unrecoverable; drops accumulating at the push rate                   | Peer is effectively down; cross-check `inferadb_ledger_raft_is_leader` and peer-side liveness before removing        |
+| `latency_seconds` p99 climbing                     | Network RTT increase, TLS handshake churn, or peer-side scheduling delays | Check network telemetry (TCP RTT), recent certificate or config changes, and peer CPU saturation                     |
+| `drops_total{reason="task_shutdown"}` spike        | Membership change (voter removed, learner demoted, region rebalance)      | Expected; cross-check with audit logs or `ledger_background_job_runs_total{job="learner_refresh"}`                   |
+| All peers showing `queue_depth` > 0 simultaneously | This node's tokio runtime is overloaded — not a peer-specific issue       | Check local CPU and runtime; investigate blocking calls; consider raising `worker_threads`                           |
 
 ## Dashboard Recommendations
 

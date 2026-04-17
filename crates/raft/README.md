@@ -14,13 +14,13 @@ This crate provides the distributed consensus layer:
 
 ## Services
 
-| Service            | Purpose                                 |
-| ------------------ | --------------------------------------- |
-| `ReadService`      | Entity/relationship queries, proofs     |
-| `WriteService`     | Transactions with Raft replication      |
+| Service            | Purpose                                    |
+| ------------------ | ------------------------------------------ |
+| `ReadService`      | Entity/relationship queries, proofs        |
+| `WriteService`     | Transactions with Raft replication         |
 | `AdminService`     | Organization/vault management, cluster ops |
-| `HealthService`    | Liveness and readiness checks           |
-| `DiscoveryService` | Peer discovery via DNS                  |
+| `HealthService`    | Liveness and readiness checks              |
+| `DiscoveryService` | Peer discovery via DNS                     |
 
 ## Usage
 

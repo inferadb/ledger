@@ -4,19 +4,19 @@ Complete reference for Ledger configuration via environment variables and CLI ar
 
 ## Quick Reference
 
-| Variable                             | CLI                        | Default       | Description                                     |
-| ------------------------------------ | -------------------------- | ------------- | ----------------------------------------------- |
-| `INFERADB__LEDGER__LISTEN`           | `--listen`                 | _(none)_      | TCP address for gRPC API                        |
-| `INFERADB__LEDGER__SOCKET`           | `--socket`                 | _(none)_      | Unix domain socket path for gRPC API            |
-| `INFERADB__LEDGER__METRICS`          | `--metrics`                | _(disabled)_  | Prometheus metrics address                      |
-| `INFERADB__LEDGER__DATA`             | `--data`                   | _(ephemeral)_ | Data directory                                  |
-| `INFERADB__LEDGER__JOIN`             | `--join`                   | _(none)_      | Comma-separated seed addresses for discovery    |
-| `INFERADB__LEDGER__REGION`           | `--region`                 | `global`      | Geographic data residency region                |
-| `INFERADB__LEDGER__ADVERTISE`        | `--advertise`              | _(auto)_      | Address advertised to peers                     |
-| `INFERADB__LEDGER__MAX_CONCURRENT`   | `--concurrent`             | `100`         | Max concurrent requests                         |
-| `INFERADB__LEDGER__TIMEOUT`          | `--timeout`                | `30`          | Request timeout (seconds)                       |
-| —                                    | `--log-format`             | `auto`        | Log format (`text`/`json`/`auto`)               |
-| `INFERADB__LEDGER__LOGGING__ENABLED` | —                          | `true`        | Enable request logging                          |
+| Variable                             | CLI            | Default       | Description                                  |
+| ------------------------------------ | -------------- | ------------- | -------------------------------------------- |
+| `INFERADB__LEDGER__LISTEN`           | `--listen`     | _(none)_      | TCP address for gRPC API                     |
+| `INFERADB__LEDGER__SOCKET`           | `--socket`     | _(none)_      | Unix domain socket path for gRPC API         |
+| `INFERADB__LEDGER__METRICS`          | `--metrics`    | _(disabled)_  | Prometheus metrics address                   |
+| `INFERADB__LEDGER__DATA`             | `--data`       | _(ephemeral)_ | Data directory                               |
+| `INFERADB__LEDGER__JOIN`             | `--join`       | _(none)_      | Comma-separated seed addresses for discovery |
+| `INFERADB__LEDGER__REGION`           | `--region`     | `global`      | Geographic data residency region             |
+| `INFERADB__LEDGER__ADVERTISE`        | `--advertise`  | _(auto)_      | Address advertised to peers                  |
+| `INFERADB__LEDGER__MAX_CONCURRENT`   | `--concurrent` | `100`         | Max concurrent requests                      |
+| `INFERADB__LEDGER__TIMEOUT`          | `--timeout`    | `30`          | Request timeout (seconds)                    |
+| —                                    | `--log-format` | `auto`        | Log format (`text`/`json`/`auto`)            |
+| `INFERADB__LEDGER__LOGGING__ENABLED` | —              | `true`        | Enable request logging                       |
 
 At least one of `--listen` or `--socket` must be specified. CLI arguments take precedence over environment variables.
 

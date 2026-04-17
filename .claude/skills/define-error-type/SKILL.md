@@ -9,10 +9,10 @@ Error handling in InferaDB is load-bearing for observability (correlation IDs, `
 
 ## Crate boundary
 
-| Crate | Error library |
-| --- | --- |
-| `types`, `store`, `proto`, `state`, `consensus`, `raft`, `services`, `server` | **snafu only** |
-| `sdk` | **thiserror only** (consumer-facing types: `SdkError`, `ResolverError`) |
+| Crate                                                                         | Error library                                                           |
+| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `types`, `store`, `proto`, `state`, `consensus`, `raft`, `services`, `server` | **snafu only**                                                          |
+| `sdk`                                                                         | **thiserror only** (consumer-facing types: `SdkError`, `ResolverError`) |
 
 Never `anyhow`. Never mix snafu + thiserror inside one crate.
 
@@ -100,14 +100,14 @@ pub enum SdkError {
 
 ## Common mistakes
 
-| Mistake | Consequence | Fix |
-| --- | --- | --- |
-| Forgot `#[snafu(implicit)] location` on a source-bearing variant | Compile succeeds; `.context()` captures location-less trace; debugging is painful | Add the field; every source carries a location |
-| Manual construction `MyError::X { source, location: snafu::Location::default() }` | Trace points to the constructor line, not the failing call site | Use `.context(XSnafu)?` |
-| Added an error variant but skipped `ErrorCode` mapping | SDK sees `ErrorCode::Unknown`; not retryable; no suggested action | Update `ErrorCode` + the `code()` impl together |
-| `anyhow::Result<T>` in a server crate | Foreign error type; strips structure; `snafu-error-reviewer` agent blocks | Convert to snafu |
-| `thiserror::Error` in a server crate | Same — wrong boundary | Convert to snafu |
-| Built `tonic::Status` by hand in a handler | `ErrorDetails` missing; SDK shows bare message | Route through `status_with_correlation` |
+| Mistake                                                                           | Consequence                                                                       | Fix                                             |
+| --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ----------------------------------------------- |
+| Forgot `#[snafu(implicit)] location` on a source-bearing variant                  | Compile succeeds; `.context()` captures location-less trace; debugging is painful | Add the field; every source carries a location  |
+| Manual construction `MyError::X { source, location: snafu::Location::default() }` | Trace points to the constructor line, not the failing call site                   | Use `.context(XSnafu)?`                         |
+| Added an error variant but skipped `ErrorCode` mapping                            | SDK sees `ErrorCode::Unknown`; not retryable; no suggested action                 | Update `ErrorCode` + the `code()` impl together |
+| `anyhow::Result<T>` in a server crate                                             | Foreign error type; strips structure; `snafu-error-reviewer` agent blocks         | Convert to snafu                                |
+| `thiserror::Error` in a server crate                                              | Same — wrong boundary                                                             | Convert to snafu                                |
+| Built `tonic::Status` by hand in a handler                                        | `ErrorDetails` missing; SDK shows bare message                                    | Route through `status_with_correlation`         |
 
 ## References
 

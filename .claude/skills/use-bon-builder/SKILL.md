@@ -81,13 +81,13 @@ Every `#[builder(default = …)]` has a matching `#[serde(default = …)]`. Othe
 
 ## Gotchas
 
-| Symptom | Cause | Fix |
-| --- | --- | --- |
-| `expected T, found Option<T>` at call site | Wrapped `Option<T>` setter in `Some(..)` | Pass the inner value: `.field(x)`, not `.field(Some(x))` |
-| `#[builder(default)] on Option<T> is redundant` compiler error | `#[builder(default)]` attribute on an `Option<T>` field | Remove the attribute — bon auto-infers `None` |
-| Fallible builder test fails with `::new()` not found | Using `::new().build()` pattern | `#[bon::bon] impl` generates `::builder()` — call `Config::builder().build()` |
-| `#[builder(into)]` not accepting `&str` | Field is not `String` | Only use `into` for `String` fields (or types with `From<&str>`) |
-| Config deserializes but builder rejects the same values | `#[serde(default)]` missing where `#[builder(default)]` is present | Add a matching serde default function |
+| Symptom                                                        | Cause                                                              | Fix                                                                           |
+| -------------------------------------------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| `expected T, found Option<T>` at call site                     | Wrapped `Option<T>` setter in `Some(..)`                           | Pass the inner value: `.field(x)`, not `.field(Some(x))`                      |
+| `#[builder(default)] on Option<T> is redundant` compiler error | `#[builder(default)]` attribute on an `Option<T>` field            | Remove the attribute — bon auto-infers `None`                                 |
+| Fallible builder test fails with `::new()` not found           | Using `::new().build()` pattern                                    | `#[bon::bon] impl` generates `::builder()` — call `Config::builder().build()` |
+| `#[builder(into)]` not accepting `&str`                        | Field is not `String`                                              | Only use `into` for `String` fields (or types with `From<&str>`)              |
+| Config deserializes but builder rejects the same values        | `#[serde(default)]` missing where `#[builder(default)]` is present | Add a matching serde default function                                         |
 
 ## Required over optional
 

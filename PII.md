@@ -24,8 +24,8 @@ Every PII field in the system, its owning struct, storage location, and encrypti
 
 | Field           | Struct      | Key Pattern             | Raft Scope | Encryption Key |
 | --------------- | ----------- | ----------------------- | ---------- | -------------- |
-| `name: String`  | `User`      | `user:{user_id}`        | REGIONAL   | UserShredKey     |
-| `email: String` | `UserEmail` | `user_email:{email_id}` | REGIONAL   | UserShredKey     |
+| `name: String`  | `User`      | `user:{user_id}`        | REGIONAL   | UserShredKey   |
+| `email: String` | `UserEmail` | `user_email:{email_id}` | REGIONAL   | UserShredKey   |
 
 **Non-PII user data** (stored GLOBAL):
 
@@ -53,14 +53,14 @@ Source: `crates/state/src/system/types.rs:18-76`, `crates/state/src/system/keys.
 
 ### Organization PII
 
-| Field          | Struct                | Key Pattern                 | Raft Scope | Encryption Key |
-| -------------- | --------------------- | --------------------------- | ---------- | -------------- |
-| `name: String` | `OrganizationProfile` | `org_profile:{org_id}` | REGIONAL   | OrgShredKey         |
+| Field          | Struct                | Key Pattern            | Raft Scope | Encryption Key |
+| -------------- | --------------------- | ---------------------- | ---------- | -------------- |
+| `name: String` | `OrganizationProfile` | `org_profile:{org_id}` | REGIONAL   | OrgShredKey    |
 
 **Non-PII organization data** (stored GLOBAL):
 
-| Field                                 | Struct                       | Key Pattern             |
-| ------------------------------------- | ---------------------------- | ----------------------- |
+| Field                                 | Struct                       | Key Pattern         |
+| ------------------------------------- | ---------------------------- | ------------------- |
 | `organization: OrganizationId`        | `OrganizationDirectoryEntry` | `_dir:org:{org_id}` |
 | `slug: Option<OrganizationSlug>`      | `OrganizationDirectoryEntry` | `_dir:org:{org_id}` |
 | `region: Option<Region>`              | `OrganizationDirectoryEntry` | `_dir:org:{org_id}` |
@@ -71,9 +71,9 @@ Source: `crates/state/src/system/types.rs:308-363`
 
 ### Team PII
 
-| Field          | Struct        | Key Pattern                            | Raft Scope | Encryption Key |
-| -------------- | ------------- | -------------------------------------- | ---------- | -------------- |
-| `name: String` | `Team` | `team:{org_id}:{team_id}` | REGIONAL   | OrgShredKey         |
+| Field          | Struct | Key Pattern               | Raft Scope | Encryption Key |
+| -------------- | ------ | ------------------------- | ---------- | -------------- |
+| `name: String` | `Team` | `team:{org_id}:{team_id}` | REGIONAL   | OrgShredKey    |
 
 Teams inherit the owning organization's OrgShredKey. No per-team encryption key exists.
 
@@ -81,10 +81,10 @@ Source: `crates/state/src/system/types.rs:376-395`
 
 ### App PII
 
-| Field                         | Struct       | Key Pattern                          | Raft Scope | Encryption Key |
-| ----------------------------- | ------------ | ------------------------------------ | ---------- | -------------- |
-| `name: String`                | `AppProfile` | `app_profile:{org_id}:{app_id}` | REGIONAL   | OrgShredKey         |
-| `description: Option<String>` | `AppProfile` | `app_profile:{org_id}:{app_id}` | REGIONAL   | OrgShredKey         |
+| Field                         | Struct       | Key Pattern                     | Raft Scope | Encryption Key |
+| ----------------------------- | ------------ | ------------------------------- | ---------- | -------------- |
+| `name: String`                | `AppProfile` | `app_profile:{org_id}:{app_id}` | REGIONAL   | OrgShredKey    |
+| `description: Option<String>` | `AppProfile` | `app_profile:{org_id}:{app_id}` | REGIONAL   | OrgShredKey    |
 
 The `App` struct (`app:{org_id}:{app_id}`) stores structural fields only (`enabled`, `credentials`, `version`) in GLOBAL state. PII is separated into `AppProfile` in REGIONAL state.
 
@@ -92,9 +92,9 @@ Source: `crates/state/src/system/types.rs:456-513`
 
 ### Client Assertion PII
 
-| Field          | Struct       | Key Pattern                                            | Raft Scope | Encryption Key |
-| -------------- | ------------ | ------------------------------------------------------ | ---------- | -------------- |
-| assertion name | (raw string) | `assertion_name:{org_id}:{app_id}:{assertion_id}` | REGIONAL   | OrgShredKey         |
+| Field          | Struct       | Key Pattern                                       | Raft Scope | Encryption Key |
+| -------------- | ------------ | ------------------------------------------------- | ---------- | -------------- |
+| assertion name | (raw string) | `assertion_name:{org_id}:{app_id}:{assertion_id}` | REGIONAL   | OrgShredKey    |
 
 The `ClientAssertionEntry` struct (`app_assertion:{org_id}:{app_id}:{assertion_id}`) stores only the public key, enabled flag, and expiry in GLOBAL state. The user-provided name is stored separately in REGIONAL state.
 
@@ -515,10 +515,10 @@ Source: `crates/raft/src/post_erasure_compaction.rs`
 
 ### After User Erasure
 
-| What Remains                                           | Location     | Contains PII?                                       |
-| ------------------------------------------------------ | ------------ | --------------------------------------------------- |
-| `UserDirectoryEntry { user: UserId, status: Deleted }` | GLOBAL       | No — slug, region, updated_at cleared               |
-| `ErasureAuditRecord { user_id, erased_at, region }`    | GLOBAL       | No — opaque IDs and timestamps                      |
+| What Remains                                           | Location     | Contains PII?                                         |
+| ------------------------------------------------------ | ------------ | ----------------------------------------------------- |
+| `UserDirectoryEntry { user: UserId, status: Deleted }` | GLOBAL       | No — slug, region, updated_at cleared                 |
+| `ErasureAuditRecord { user_id, erased_at, region }`    | GLOBAL       | No — opaque IDs and timestamps                        |
 | Encrypted Raft log entries (pre-truncation)            | REGIONAL log | No — UserShredKey destroyed, ciphertext unrecoverable |
 
 **Destroyed**:
@@ -534,9 +534,9 @@ Source: `crates/raft/src/post_erasure_compaction.rs`
 
 ### After Organization Purge
 
-| What Remains                                                | Location     | Contains PII?                                   |
-| ----------------------------------------------------------- | ------------ | ----------------------------------------------- |
-| `OrganizationRegistry { organization_id, status: Deleted }` | GLOBAL       | No — structural only                            |
+| What Remains                                                | Location     | Contains PII?                                        |
+| ----------------------------------------------------------- | ------------ | ---------------------------------------------------- |
+| `OrganizationRegistry { organization_id, status: Deleted }` | GLOBAL       | No — structural only                                 |
 | Encrypted Raft log entries (pre-truncation)                 | REGIONAL log | No — OrgShredKey destroyed, ciphertext unrecoverable |
 
 **Destroyed**:

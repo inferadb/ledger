@@ -65,19 +65,19 @@ Run through this checklist before opening a PR:
 2. Follow [Conventional Commits](https://www.conventionalcommits.org/) in both commits and the PR title (the PR title becomes the squashed commit message).
 3. Run `just ci` before submitting.
 4. Update docs for API or behavior changes.
-5. Submit with a description that covers the *why*, not just the *what*.
+5. Submit with a description that covers the _why_, not just the _what_.
 
 **Conventional Commit scope examples used in this repo:**
 
-| Scope       | Surface                                |
-| ----------- | -------------------------------------- |
-| `api`       | gRPC services, proto                   |
-| `storage`   | B+ tree, pages, WAL                    |
-| `consensus` | Raft engine, reactor, shard, simulation|
-| `raft`      | Saga orchestrator, apply pipeline      |
-| `sdk`       | Rust client crate                      |
-| `docs`      | Any `*.md` or `crates/*/CLAUDE.md`     |
-| `ci`        | GitHub Actions, Justfile gates         |
+| Scope       | Surface                                 |
+| ----------- | --------------------------------------- |
+| `api`       | gRPC services, proto                    |
+| `storage`   | B+ tree, pages, WAL                     |
+| `consensus` | Raft engine, reactor, shard, simulation |
+| `raft`      | Saga orchestrator, apply pipeline       |
+| `sdk`       | Rust client crate                       |
+| `docs`      | Any `*.md` or `crates/*/CLAUDE.md`      |
+| `ci`        | GitHub Actions, Justfile gates          |
 
 ## Using AI Assistants
 
@@ -85,7 +85,7 @@ This codebase is structured for AI-assisted development. Claude Code, Codex, and
 
 - **[CLAUDE.md](CLAUDE.md)** (symlinked as `AGENTS.md`) — 14 non-negotiable golden rules covering proto codegen, storage keys, PII residency, error handling, consensus I/O boundaries, and test hygiene. Read this before editing any of those surfaces.
 - **Per-crate `CLAUDE.md`** — `crates/*/CLAUDE.md` files extend the root rules with crate-specific invariants.
-- **Proactive audit agents** (`.claude/agents/`) — six reviewers (`consensus-reviewer`, `data-residency-auditor`, `proto-reviewer`, `snafu-error-reviewer`, `test-isolation-auditor`, `unsafe-panic-auditor`) fire on matching file changes and surface violations.
+- **Proactive audit agents** (`.claude/agents/`) — seven reviewers (`consensus-reviewer`, `data-residency-auditor`, `docs-drift-auditor`, `proto-reviewer`, `snafu-error-reviewer`, `test-isolation-auditor`, `unsafe-panic-auditor`) fire on matching file changes and surface violations.
 - **Task skills** (`.claude/skills/`) — `/add-new-entity`, `/add-proto-conversion`, `/add-storage-key`, `/new-rpc`, `/define-error-type`, `/use-bon-builder`, `/debug-integration-test`, `/just-ci-gate`, `/audit-claude-md`. Use these instead of improvising when their trigger applies.
 - **Hooks** (`.claude/settings.json`) — block `git commit` from agents, block edits to generated proto and `Cargo.lock`, auto-run `cargo +nightly fmt` + `cargo +1.92 check` after `.rs` edits. These exist so agents cannot silently violate golden rules.
 

@@ -29,14 +29,14 @@ done
 
 ## Fuzz Targets
 
-| Target                  | Attack Surface                                       |
-| ----------------------- | ---------------------------------------------------- |
-| `fuzz_proto_convert`    | Protobuf deserialization (gRPC requests)             |
-| `fuzz_postcard_codec`   | Postcard codec for domain types                      |
-| `fuzz_btree_keys`       | B+ tree key encoding/decoding, varint                |
-| `fuzz_pagination_token` | HMAC-signed pagination token parsing                 |
-| `fuzz_wal_frames`       | WAL frame parsing, CRC validation, crash recovery    |
-| `fuzz_rkyv_entries`     | rkyv archived entry deserialization and validation    |
+| Target                  | Attack Surface                                     |
+| ----------------------- | -------------------------------------------------- |
+| `fuzz_proto_convert`    | Protobuf deserialization (gRPC requests)           |
+| `fuzz_postcard_codec`   | Postcard codec for domain types                    |
+| `fuzz_btree_keys`       | B+ tree key encoding/decoding, varint              |
+| `fuzz_pagination_token` | HMAC-signed pagination token parsing               |
+| `fuzz_wal_frames`       | WAL frame parsing, CRC validation, crash recovery  |
+| `fuzz_rkyv_entries`     | rkyv archived entry deserialization and validation |
 
 ## Investigating Crashes
 

@@ -45,6 +45,10 @@
             "command": "f=\"$CLAUDE_FILE_PATH\"; [[ -z \"$f\" || ! -f \"$f\" ]] && exit 0; if [[ \"$f\" == *.rs || \"$f\" == *.md ]]; then grep -qE '^[[:space:]/]*```ignore\\b' \"$f\" && echo \"[writing-check] fenced 'ignore' blocks are banned. Use 'no_run' for Rust examples (validated by cargo doc) or 'text' for non-Rust content.\"; fi; if [[ \"$f\" == *.md ]]; then bad=$(awk 'BEGIN{i=0;b=0} /^[[:space:]]*```/{if(i){i=0}else{if($0~/^[[:space:]]*```[[:space:]]*$/)b++;i=1}next} END{print b+0}' \"$f\"); [[ \"$bad\" -gt 0 ]] && echo \"[writing-check] $bad untagged code-fence opener(s) — language-tag every opener (e.g. rust, bash, text).\"; base=$(basename \"$f\" .md); case \"$base\" in CLAUDE|AGENTS|README|MEMORY|LICENSE*|CONTRIBUTING|CHANGELOG|SECURITY|CODEOWNERS|CODE_OF_CONDUCT|SPEC|DESIGN|WHITEPAPER|PII|PRD|NOTICE|TODO|SKILL) ;; *) [[ \"$base\" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || echo \"[writing-check] '$base.md' is not kebab-case (lowercase letters/digits separated by hyphens).\";; esac; fi; exit 0"
           },
           {
+            "type": "command",
+            "command": "if [[ \"$CLAUDE_FILE_PATH\" == *.md ]]; then if command -v npx >/dev/null 2>&1; then out=$(npx --yes prettier@3 --write \"**/*.md\" --log-level=warn 2>&1); [[ -n \"$out\" ]] && echo \"$out\" | head -20; else echo \"[md-format] npx not on PATH — run 'mise install' to install node (defined in .mise.toml).\"; fi; if command -v autocorrect >/dev/null 2>&1; then autocorrect --fix \"$CLAUDE_FILE_PATH\" 2>&1 | head -10 || true; else echo \"[md-format] autocorrect not on PATH — run 'mise install' to install it (defined in .mise.toml).\"; fi; fi"
+          },
+          {
             "type": "agent",
             "prompt": "`crates/state/src/system/keys.rs` was just edited in the InferaDB Ledger workspace. Read `.claude/agents/data-residency-auditor.md` for the full audit checklist, then apply it to the current state of `crates/state/src/system/keys.rs` and any files it references. This is read-only verification — produce findings in the auditor's standard format (BLOCK / FIX / NOTE per finding, counts per severity, one-line verdict). Do not edit any file.",
             "if": "Edit(crates/state/src/system/keys.rs)",
@@ -67,6 +71,174 @@
             "prompt": "A file under `crates/server/tests/` was just written in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nExtract `tool_input.file_path` from that JSON. Read `.claude/agents/test-isolation-auditor.md` for the full audit checklist, then apply it to the written file and the surrounding `crates/server/tests/` directory. Focus on: `use crate::common::` vs `mod common;`, `autotests = false` + single `[[test]]` in Cargo.toml, port allocation via `allocate_ports`, `TestCluster` teardown, required clippy allows at file top, `mod X;` registration in `tests/integration.rs`. Read-only — produce findings in the auditor's standard format. Do not edit.",
             "if": "Write(crates/server/tests/**)",
             "timeout": 180
+          },
+          {
+            "type": "agent",
+            "prompt": "A docs-drift sentinel path was just edited in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nExtract `tool_input.file_path` from that JSON. Read `.claude/agents/docs-drift-auditor.md` for the full workflow, then run the audit: gather ground truth (`just --list`, `cargo metadata`, `git log`, proto RPC sweep), dispatch parallel Explore subagents across doc partitions A–E, and aggregate findings. Report-only — do not edit any doc. Findings flow back to the main transcript so the operator can apply fixes.",
+            "if": "Edit(proto/ledger/v1/**/*.proto)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "A docs-drift sentinel path was just written in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nExtract `tool_input.file_path` from that JSON. Read `.claude/agents/docs-drift-auditor.md` for the full workflow, then run the audit: gather ground truth (`just --list`, `cargo metadata`, `git log`, proto RPC sweep), dispatch parallel Explore subagents across doc partitions A–E, and aggregate findings. Report-only — do not edit any doc.",
+            "if": "Write(proto/ledger/v1/**/*.proto)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "A docs-drift sentinel path was just edited in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit. Report-only.",
+            "if": "Edit(Justfile)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "A docs-drift sentinel path was just written in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit. Report-only.",
+            "if": "Write(Justfile)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "Root `Cargo.toml` was just edited in the InferaDB Ledger workspace. Workspace member changes invalidate `MANIFEST.md`. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit, giving Partition C (MANIFEST.md) extra attention. Report-only.",
+            "if": "Edit(Cargo.toml)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "Root `Cargo.toml` was just written in the InferaDB Ledger workspace. Workspace member changes invalidate `MANIFEST.md`. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit, giving Partition C (MANIFEST.md) extra attention. Report-only.",
+            "if": "Write(Cargo.toml)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "A gRPC service implementation was just edited in the InferaDB Ledger workspace — new or renamed RPCs may have landed. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit, paying special attention to gRPC surface references in Partitions B (DESIGN/WHITEPAPER) and D (operator docs). Report-only.",
+            "if": "Edit(crates/services/src/services/**)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "A gRPC service implementation was just written in the InferaDB Ledger workspace — new or renamed RPCs may have landed. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit, paying special attention to gRPC surface references in Partitions B (DESIGN/WHITEPAPER) and D (operator docs). Report-only.",
+            "if": "Write(crates/services/src/services/**)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "The server CLI entrypoint or config was just edited in the InferaDB Ledger workspace — flags, env vars, or startup behaviour may have changed. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit, paying special attention to `docs/operations/configuration.md`, `docs/operations/deployment.md`, `README.md` quickstart, and the Justfile `default` help block. Report-only.",
+            "if": "Edit(crates/server/src/main.rs)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "The server CLI entrypoint or config was just written in the InferaDB Ledger workspace — flags, env vars, or startup behaviour may have changed. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit, paying special attention to `docs/operations/configuration.md`, `docs/operations/deployment.md`, `README.md` quickstart, and the Justfile `default` help block. Report-only.",
+            "if": "Write(crates/server/src/main.rs)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "The server config module was just edited in the InferaDB Ledger workspace — flags, env vars, or defaults may have changed. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit, paying special attention to `docs/operations/configuration.md`. Report-only.",
+            "if": "Edit(crates/server/src/config.rs)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "The server config module was just written in the InferaDB Ledger workspace — flags, env vars, or defaults may have changed. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit, paying special attention to `docs/operations/configuration.md`. Report-only.",
+            "if": "Write(crates/server/src/config.rs)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "An in-scope doc file was just edited in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit. Hand-edits to docs also need verification against current code. Report-only.",
+            "if": "Edit(docs/**/*.md)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "An in-scope doc file was just written in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit. Report-only.",
+            "if": "Write(docs/**/*.md)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "A root-level doc was just edited in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit. Report-only.",
+            "if": "Edit(README.md)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "A root-level doc was just written in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit. Report-only.",
+            "if": "Write(README.md)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "A root-level doc was just edited in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit. Report-only.",
+            "if": "Edit(CONTRIBUTING.md)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "A root-level doc was just written in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit. Report-only.",
+            "if": "Write(CONTRIBUTING.md)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "A root-level doc was just edited in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit, focusing on Partition B (architecture claims). Report-only.",
+            "if": "Edit(DESIGN.md)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "A root-level doc was just written in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit, focusing on Partition B (architecture claims). Report-only.",
+            "if": "Write(DESIGN.md)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "A root-level doc was just edited in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit, focusing on Partition B (architecture claims). Report-only.",
+            "if": "Edit(WHITEPAPER.md)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "A root-level doc was just written in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit, focusing on Partition B (architecture claims). Report-only.",
+            "if": "Write(WHITEPAPER.md)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "`MANIFEST.md` was just edited in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit, focusing on Partition C (file inventory). Report-only.",
+            "if": "Edit(MANIFEST.md)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "`MANIFEST.md` was just written in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit, focusing on Partition C (file inventory). Report-only.",
+            "if": "Write(MANIFEST.md)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "`PII.md` was just edited in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit. Report-only.",
+            "if": "Edit(PII.md)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "`PII.md` was just written in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit. Report-only.",
+            "if": "Write(PII.md)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "`SECURITY.md` was just edited in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit. Report-only.",
+            "if": "Edit(SECURITY.md)",
+            "timeout": 420
+          },
+          {
+            "type": "agent",
+            "prompt": "`SECURITY.md` was just written in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nRead `.claude/agents/docs-drift-auditor.md` and run the audit. Report-only.",
+            "if": "Write(SECURITY.md)",
+            "timeout": 420
           }
         ]
       }

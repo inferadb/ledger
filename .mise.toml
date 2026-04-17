@@ -14,3 +14,12 @@ buf = "1"
 
 # Shell script linter (used by `just validate` Phase 10)
 shellcheck = "0.10"
+
+# Node.js runtime — provides `npx`, used by the markdown-format PostToolUse hook
+# in `.claude/settings.json` to run `prettier --write` on edited `.md` files.
+node = "22"
+
+# AutoCorrect — markdown prose linter/fixer (https://github.com/huacnlee/autocorrect).
+# Used by the markdown-format PostToolUse hook to normalize spacing and style in `.md`
+# files after edits. Installed via ubi from the upstream GitHub release.
+"ubi:huacnlee/autocorrect" = "2.16.3"

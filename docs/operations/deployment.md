@@ -240,20 +240,20 @@ Configuration can be set via CLI arguments or environment variables. CLI argumen
 
 ### Core Options
 
-| CLI                        | Environment Variable                       | Default       | Description                                                                                 |
-| -------------------------- | ------------------------------------------ | ------------- | ------------------------------------------------------------------------------------------- |
-| `--listen`                 | `INFERADB__LEDGER__LISTEN`                 | _(none)_      | TCP address for gRPC API                                                                    |
-| `--socket`                 | `INFERADB__LEDGER__SOCKET`                 | _(none)_      | Unix domain socket path for gRPC API                                                        |
-| `--data`                   | `INFERADB__LEDGER__DATA`                   | _(ephemeral)_ | Persistent storage directory                                                                |
-| `--join`                   | `INFERADB__LEDGER__JOIN`                   | _(none)_      | Comma-separated seed addresses for cluster discovery                                        |
-| `--region`                 | `INFERADB__LEDGER__REGION`                 | `global`      | Geographic data residency region                                                            |
-| `--advertise`              | `INFERADB__LEDGER__ADVERTISE`              | _(auto)_      | Address advertised to peers                                                                 |
-| `--metrics`                | `INFERADB__LEDGER__METRICS`                | _(disabled)_  | Prometheus metrics address                                                                  |
-| `--email-blinding-key`     | `INFERADB__LEDGER__EMAIL_BLINDING_KEY`     | _(required)_  | HMAC key for email hashing (required for user onboarding RPCs)                              |
-| `--enable-grpc-reflection` | `INFERADB__LEDGER__ENABLE_GRPC_REFLECTION` | `false`       | Enable gRPC reflection (needed for `grpcurl` and other dynamic clients)                     |
-| `--log-format`             | —                                          | `auto`        | Log format: `text`, `json`, or `auto`                                                      |
-| `--concurrent`             | `INFERADB__LEDGER__MAX_CONCURRENT`         | `100`         | Max concurrent requests                                                                     |
-| `--timeout`                | `INFERADB__LEDGER__TIMEOUT`                | `30`          | Request timeout in seconds                                                                  |
+| CLI                        | Environment Variable                       | Default       | Description                                                             |
+| -------------------------- | ------------------------------------------ | ------------- | ----------------------------------------------------------------------- |
+| `--listen`                 | `INFERADB__LEDGER__LISTEN`                 | _(none)_      | TCP address for gRPC API                                                |
+| `--socket`                 | `INFERADB__LEDGER__SOCKET`                 | _(none)_      | Unix domain socket path for gRPC API                                    |
+| `--data`                   | `INFERADB__LEDGER__DATA`                   | _(ephemeral)_ | Persistent storage directory                                            |
+| `--join`                   | `INFERADB__LEDGER__JOIN`                   | _(none)_      | Comma-separated seed addresses for cluster discovery                    |
+| `--region`                 | `INFERADB__LEDGER__REGION`                 | `global`      | Geographic data residency region                                        |
+| `--advertise`              | `INFERADB__LEDGER__ADVERTISE`              | _(auto)_      | Address advertised to peers                                             |
+| `--metrics`                | `INFERADB__LEDGER__METRICS`                | _(disabled)_  | Prometheus metrics address                                              |
+| `--email-blinding-key`     | `INFERADB__LEDGER__EMAIL_BLINDING_KEY`     | _(required)_  | HMAC key for email hashing (required for user onboarding RPCs)          |
+| `--enable-grpc-reflection` | `INFERADB__LEDGER__ENABLE_GRPC_REFLECTION` | `false`       | Enable gRPC reflection (needed for `grpcurl` and other dynamic clients) |
+| `--log-format`             | —                                          | `auto`        | Log format: `text`, `json`, or `auto`                                   |
+| `--concurrent`             | `INFERADB__LEDGER__MAX_CONCURRENT`         | `100`         | Max concurrent requests                                                 |
+| `--timeout`                | `INFERADB__LEDGER__TIMEOUT`                | `30`          | Request timeout in seconds                                              |
 
 At least one of `--listen` or `--socket` must be specified.
 
