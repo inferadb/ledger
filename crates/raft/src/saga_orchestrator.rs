@@ -2383,7 +2383,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                         Ok(()) => {
                             pii_persisted = true;
                             break;
-                        }
+                        },
                         Err(e) => {
                             warn!(
                                 saga_id = %saga_id,
@@ -2393,7 +2393,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                             );
                             tokio::time::sleep(Duration::from_millis(100 * u64::from(attempt + 1)))
                                 .await;
-                        }
+                        },
                     }
                 }
                 if !pii_persisted {
@@ -2414,7 +2414,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                         Ok(()) => {
                             org_pii_persisted = true;
                             break;
-                        }
+                        },
                         Err(e) => {
                             warn!(
                                 saga_id = %saga_id,
@@ -2424,7 +2424,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                             );
                             tokio::time::sleep(Duration::from_millis(100 * u64::from(attempt + 1)))
                                 .await;
-                        }
+                        },
                     }
                 }
                 if !org_pii_persisted {
