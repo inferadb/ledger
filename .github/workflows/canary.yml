@@ -71,7 +71,7 @@ jobs:
               - 'crates/server/**'
               - 'Dockerfile'
 
-  # Compute canary version from release-please manifest
+  # Compute canary version from workspace.package.version in Cargo.toml
   version:
     name: Version
     runs-on: ubuntu-latest
@@ -90,11 +90,20 @@ jobs:
       - name: Compute canary version
         id: version
         run: |
-          # Read next version from release-please manifest
-          if [ -f ".release-please-manifest.json" ]; then
-            NEXT_VERSION=$(jq -r '.["." ] // .[] | select(. != null)' .release-please-manifest.json | head -1)
-          else
-            NEXT_VERSION="0.1.0"
+          # Extract workspace.package.version from Cargo.toml (single source of truth).
+          NEXT_VERSION=$(awk '
+            /^\[workspace\.package\]/ { f=1; next }
+            /^\[/ { f=0 }
+            f && /^version[[:space:]]*=/ {
+              sub(/^version[[:space:]]*=[[:space:]]*"/, "")
+              sub(/".*$/, "")
+              print
+              exit
+            }
+          ' Cargo.toml)
+          if [ -z "$NEXT_VERSION" ]; then
+            echo "ERROR: could not parse workspace.package.version from Cargo.toml" >&2
+            exit 1
           fi
 
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)

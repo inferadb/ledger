@@ -71,6 +71,10 @@ pub enum ErrorCode {
     /// A Pending invitation already exists for this org+email combination.
     /// Maps to `ALREADY_EXISTS`.
     InvitationDuplicatePending,
+
+    /// Vault routing changed between slug resolution and proposal submission.
+    /// Maps to `FAILED_PRECONDITION`.
+    StaleRouting,
 }
 
 impl ErrorCode {
@@ -90,6 +94,7 @@ impl ErrorCode {
             },
             Self::InvitationEmailMismatch => "NOT_FOUND",
             Self::InvitationAlreadyMember | Self::InvitationDuplicatePending => "ALREADY_EXISTS",
+            Self::StaleRouting => "FAILED_PRECONDITION",
         }
     }
 }
@@ -123,6 +128,7 @@ mod tests {
             (ErrorCode::InvitationEmailMismatch, "NOT_FOUND"),
             (ErrorCode::InvitationAlreadyMember, "ALREADY_EXISTS"),
             (ErrorCode::InvitationDuplicatePending, "ALREADY_EXISTS"),
+            (ErrorCode::StaleRouting, "FAILED_PRECONDITION"),
         ];
         for (code, expected) in cases {
             assert_eq!(code.grpc_code_name(), expected, "mismatch for {code:?}");
@@ -149,6 +155,7 @@ mod tests {
             ErrorCode::Internal,
             ErrorCode::RateLimited,
             ErrorCode::InvitationDuplicatePending,
+            ErrorCode::StaleRouting,
         ];
         for code in codes {
             let json = serde_json::to_string(&code).expect("serialize");

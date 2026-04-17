@@ -3,18 +3,7 @@
 name: Release
 
 on:
-  # Called by release-please when a release PR is merged
-  workflow_call:
-    inputs:
-      tag_name:
-        description: "Release tag (e.g., v1.0.0)"
-        type: string
-        required: true
-      version:
-        description: "Release version (e.g., 1.0.0)"
-        type: string
-        required: true
-  # Manual trigger for hotfix releases
+  # Manual trigger — releases are cut by hand.
   workflow_dispatch:
     inputs:
       version:
@@ -53,30 +42,20 @@ jobs:
       - name: Determine version
         id: version
         env:
-          CALL_VERSION: ${{ inputs.version }}
-          CALL_TAG: ${{ inputs.tag_name }}
           DISPATCH_VERSION: ${{ github.event.inputs.version }}
-          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            # Manual trigger - version includes 'v' prefix
-            VERSION="${DISPATCH_VERSION#v}"
-            TAG_NAME="v${VERSION}"
-          else
-            # Called from release-please
-            VERSION="$CALL_VERSION"
-            TAG_NAME="$CALL_TAG"
-          fi
+          # Input is accepted with or without a 'v' prefix; normalize both outputs.
+          VERSION="${DISPATCH_VERSION#v}"
+          TAG_NAME="v${VERSION}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
           echo "Release version: ${VERSION}, tag: ${TAG_NAME}"
 
-  # Create GitHub release (only for workflow_dispatch; release-please creates its own)
+  # Create the GitHub release for the supplied tag.
   create-release:
     name: Release
     needs: prepare
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
     steps:

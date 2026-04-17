@@ -26,6 +26,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use futures::StreamExt;
@@ -205,10 +206,14 @@ impl ReadService {
     /// - Linearizable on leader: serve directly (lease check is informational).
     /// - Linearizable on follower: ReadIndex protocol — ask leader for committed index, wait for
     ///   local apply, then serve from local state.
+    ///
+    /// `grpc_deadline` is the remaining time from the `grpc-timeout` header, used to bound
+    /// the `CommittedIndex` RPC on the follower path.
     async fn resolve_read_consistency(
         &self,
         ctx: &RegionContext,
         consistency: i32,
+        grpc_deadline: Option<Duration>,
     ) -> Result<(), Status> {
         let consistency =
             ReadConsistency::try_from(consistency).unwrap_or(ReadConsistency::Unspecified);
@@ -223,7 +228,7 @@ impl ReadService {
                     Ok(())
                 } else {
                     // Follower path — ReadIndex protocol
-                    self.follower_read_index(ctx).await
+                    self.follower_read_index(ctx, grpc_deadline).await
                 }
             },
         }
@@ -232,19 +237,42 @@ impl ReadService {
     /// Follower ReadIndex: ask leader for committed index, wait for local apply.
     ///
     /// 1. Obtain a gRPC channel to the current leader.
-    /// 2. Call `CommittedIndex` RPC to get the leader's committed index.
+    /// 2. Call `CommittedIndex` RPC to get the leader's committed index, bounded by the effective
+    ///    timeout (min of `grpc_deadline` and a 10-second default).
     /// 3. Wait for this node's applied index to reach that committed index.
-    async fn follower_read_index(&self, ctx: &RegionContext) -> Result<(), Status> {
+    ///
+    /// The `grpc_deadline` comes from the `grpc-timeout` header on the incoming request.
+    async fn follower_read_index(
+        &self,
+        ctx: &RegionContext,
+        grpc_deadline: Option<Duration>,
+    ) -> Result<(), Status> {
         use inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient;
+
+        /// Default timeout for the `CommittedIndex` RPC when no client deadline is set.
+        const DEFAULT_READ_INDEX_TIMEOUT: Duration = Duration::from_secs(10);
+
+        let timeout = inferadb_ledger_raft::deadline::effective_timeout(
+            DEFAULT_READ_INDEX_TIMEOUT,
+            grpc_deadline,
+        );
 
         let channel = self.leader_channel_for_read_index(ctx).await?;
         let mut client = RaftServiceClient::new(channel);
 
-        let response = client
-            .committed_index(inferadb_ledger_proto::proto::CommittedIndexRequest {
+        let rpc_future =
+            client.committed_index(inferadb_ledger_proto::proto::CommittedIndexRequest {
                 region: String::new(),
-            })
+            });
+
+        let response = tokio::time::timeout(timeout, rpc_future)
             .await
+            .map_err(|_| {
+                Status::deadline_exceeded(format!(
+                    "ReadIndex timed out waiting for leader response after {}ms",
+                    timeout.as_millis()
+                ))
+            })?
             .map_err(|e| Status::unavailable(format!("CommittedIndex RPC failed: {e}")))?;
 
         let committed_index = response.into_inner().committed_index;
@@ -257,7 +285,7 @@ impl ReadService {
         inferadb_ledger_raft::wait_for_apply(
             &mut watch.clone(),
             committed_index,
-            std::time::Duration::from_secs(5),
+            Duration::from_secs(5),
         )
         .await
     }
@@ -605,6 +633,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
     async fn read(&self, request: Request<ReadRequest>) -> Result<Response<ReadResponse>, Status> {
         // Build unified request context before consuming the request body.
         // from_request extracts transport metadata and trace context from gRPC headers.
+        let grpc_deadline = inferadb_ledger_raft::deadline::extract_deadline(&request);
         let mut ctx = RequestContext::from_request("ReadService", "read", &request, None);
         ctx.set_operation_type(OperationType::Read);
         if let Some(sampler) = &self.sampler {
@@ -659,7 +688,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         ctx.set_include_proof(false);
 
         // Check consistency requirements (may execute ReadIndex protocol on followers)
-        if let Err(e) = self.resolve_read_consistency(&region, req.consistency).await {
+        if let Err(e) = self.resolve_read_consistency(&region, req.consistency, grpc_deadline).await
+        {
             ctx.set_error("consistency_error", e.message());
             return Err(e);
         }
@@ -732,6 +762,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 
         // Build unified request context before consuming the request body.
         // from_request extracts transport metadata and trace context from gRPC headers.
+        let grpc_deadline = inferadb_ledger_raft::deadline::extract_deadline(&request);
         let mut ctx = RequestContext::from_request("ReadService", "batch_read", &request, None);
         ctx.set_operation_type(OperationType::Read);
         if let Some(sampler) = &self.sampler {
@@ -781,7 +812,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         ctx.set_include_proof(false);
 
         // Check consistency requirements (may execute ReadIndex protocol on followers)
-        if let Err(e) = self.resolve_read_consistency(&region, req.consistency).await {
+        if let Err(e) = self.resolve_read_consistency(&region, req.consistency, grpc_deadline).await
+        {
             ctx.set_error("consistency_error", e.message());
             return Err(e);
         }
@@ -881,6 +913,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
     ) -> Result<Response<VerifiedReadResponse>, Status> {
         // Build unified request context before consuming the request body.
         // from_request extracts transport metadata and trace context from gRPC headers.
+        let grpc_deadline = inferadb_ledger_raft::deadline::extract_deadline(&request);
         let mut ctx = RequestContext::from_request("ReadService", "verified_read", &request, None);
         ctx.set_operation_type(OperationType::Read);
         if let Some(sampler) = &self.sampler {
@@ -933,8 +966,9 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         // Verified reads require linearizable consistency.
         // On the leader, serve directly. On followers, use ReadIndex protocol
         // to wait for local state to catch up to the leader's committed index.
-        if let Err(e) =
-            self.resolve_read_consistency(&region, ReadConsistency::Linearizable as i32).await
+        if let Err(e) = self
+            .resolve_read_consistency(&region, ReadConsistency::Linearizable as i32, grpc_deadline)
+            .await
         {
             ctx.set_error("consistency_error", e.message());
             return Err(e);
@@ -1655,6 +1689,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         &self,
         request: Request<ListRelationshipsRequest>,
     ) -> Result<Response<ListRelationshipsResponse>, Status> {
+        let grpc_deadline = inferadb_ledger_raft::deadline::extract_deadline(&request);
         let req = request.into_inner();
 
         // Cross-region forwarding
@@ -1681,7 +1716,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         // the ReadIndex protocol.
 
         // Check consistency requirements (may execute ReadIndex protocol on followers)
-        self.resolve_read_consistency(&region, req.consistency).await?;
+        self.resolve_read_consistency(&region, req.consistency, grpc_deadline).await?;
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
         // Compute query hash from all filter parameters for token validation
@@ -1795,6 +1830,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         &self,
         request: Request<ListResourcesRequest>,
     ) -> Result<Response<ListResourcesResponse>, Status> {
+        let grpc_deadline = inferadb_ledger_raft::deadline::extract_deadline(&request);
         let req = request.into_inner();
 
         // Cross-region forwarding
@@ -1821,7 +1857,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         // the ReadIndex protocol.
 
         // Check consistency requirements (may execute ReadIndex protocol on followers)
-        self.resolve_read_consistency(&region, req.consistency).await?;
+        self.resolve_read_consistency(&region, req.consistency, grpc_deadline).await?;
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
         // Compute query hash from filter parameters for token validation
@@ -1897,6 +1933,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         &self,
         request: Request<ListEntitiesRequest>,
     ) -> Result<Response<ListEntitiesResponse>, Status> {
+        let grpc_deadline = inferadb_ledger_raft::deadline::extract_deadline(&request);
         let req = request.into_inner();
 
         // Cross-region forwarding
@@ -1923,7 +1960,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         // the ReadIndex protocol.
 
         // Check consistency requirements (may execute ReadIndex protocol on followers)
-        self.resolve_read_consistency(&region, req.consistency).await?;
+        self.resolve_read_consistency(&region, req.consistency, grpc_deadline).await?;
 
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
         let prefix = if req.key_prefix.is_empty() { None } else { Some(req.key_prefix.as_str()) };
@@ -2021,9 +2058,11 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#[allow(clippy::unwrap_used, clippy::disallowed_methods, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    // ── validate_read_key ───────────────────────────────────────────────────
 
     #[test]
     fn validate_read_key_accepts_normal_key() {
@@ -2063,5 +2102,72 @@ mod tests {
     fn validate_read_key_accepts_key_with_underscore_not_at_start() {
         assert!(validate_read_key("user_name:1").is_ok());
         assert!(validate_read_key("a_b").is_ok());
+    }
+
+    // ── parse_relationship_cursor ───────────────────────────────────────────
+
+    #[test]
+    fn parse_relationship_cursor_valid() {
+        let rel = parse_relationship_cursor("doc:1#viewer@user:2").unwrap();
+        assert_eq!(rel.resource, "doc:1");
+        assert_eq!(rel.relation, "viewer");
+        assert_eq!(rel.subject, "user:2");
+    }
+
+    #[test]
+    fn parse_relationship_cursor_missing_hash_returns_none() {
+        assert!(parse_relationship_cursor("doc1vieweruser2").is_none());
+    }
+
+    #[test]
+    fn parse_relationship_cursor_missing_at_returns_none() {
+        assert!(parse_relationship_cursor("doc:1#viewer").is_none());
+    }
+
+    #[test]
+    fn parse_relationship_cursor_empty_returns_none() {
+        assert!(parse_relationship_cursor("").is_none());
+    }
+
+    // ── follower_read_index timeout ─────────────────────────────────────────
+    //
+    // The `CommittedIndex` RPC is wrapped with `tokio::time::timeout`. These
+    // tests verify the effective timeout calculation: the deadline applied to
+    // the RPC is `min(DEFAULT_READ_INDEX_TIMEOUT=10s, grpc_deadline)`.
+
+    #[test]
+    fn read_index_timeout_uses_default_when_no_deadline() {
+        let default = Duration::from_secs(10);
+        let result = inferadb_ledger_raft::deadline::effective_timeout(default, None);
+        assert_eq!(result, default);
+    }
+
+    #[test]
+    fn read_index_timeout_uses_shorter_grpc_deadline() {
+        let default = Duration::from_secs(10);
+        let deadline = Duration::from_secs(3);
+        let result = inferadb_ledger_raft::deadline::effective_timeout(default, Some(deadline));
+        assert_eq!(result, deadline);
+    }
+
+    #[test]
+    fn read_index_timeout_uses_default_when_grpc_deadline_longer() {
+        let default = Duration::from_secs(10);
+        let deadline = Duration::from_secs(30);
+        let result = inferadb_ledger_raft::deadline::effective_timeout(default, Some(deadline));
+        assert_eq!(result, default);
+    }
+
+    #[test]
+    fn read_index_timeout_deadline_exceeded_message_contains_duration() {
+        // Verify the error message format produced on timeout matches expectation.
+        let timeout = Duration::from_millis(500);
+        let status = Status::deadline_exceeded(format!(
+            "ReadIndex timed out waiting for leader response after {}ms",
+            timeout.as_millis()
+        ));
+        assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+        assert!(status.message().contains("500ms"), "message: {}", status.message());
+        assert!(status.message().contains("ReadIndex timed out"));
     }
 }

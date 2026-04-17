@@ -263,6 +263,40 @@ update:
 udeps:
     cargo +{{nightly}} udeps --workspace
 
+# Bump the workspace version and all internal-crate dependency pins in one go.
+# Rewrites [workspace.package].version (member crates inherit via
+# `version.workspace = true`) and every inferadb-ledger-*.version entry under
+# [workspace.dependencies]. Validates semver; prints a diff; does NOT commit.
+# Run `cargo +{{rust}} build --workspace` after to refresh Cargo.lock.
+# Usage: just bump-version 0.2.0
+bump-version VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    new='{{VERSION}}'
+    # Validate semver: X.Y.Z with optional pre-release and build metadata.
+    if ! printf '%s' "$new" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+        echo "error: '$new' is not a valid semver (expected X.Y.Z[-pre][+build])" >&2
+        exit 1
+    fi
+    awk -v new="$new" '
+        /^\[workspace\.package\][[:space:]]*$/    { in_wp=1; in_wd=0; print; next }
+        /^\[workspace\.dependencies\][[:space:]]*$/ { in_wp=0; in_wd=1; print; next }
+        /^\[/                                      { in_wp=0; in_wd=0 }
+        in_wp && /^version[[:space:]]*=[[:space:]]*"[^"]*"/ {
+            sub(/"[^"]*"/, "\"" new "\"")
+        }
+        in_wd && /^inferadb-ledger-[a-z-]+[[:space:]]*=.*version[[:space:]]*=[[:space:]]*"[^"]*"/ {
+            sub(/version[[:space:]]*=[[:space:]]*"[^"]*"/, "version = \"" new "\"")
+        }
+        { print }
+    ' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
+    echo "bumped workspace to $new"
+    echo ""
+    echo "changes:"
+    git diff --stat Cargo.toml || true
+    echo ""
+    echo "next: cargo +{{rust}} build --workspace  # refresh Cargo.lock"
+
 # ============================================================================
 # Diagnostics
 # ============================================================================

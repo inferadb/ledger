@@ -1,6 +1,3 @@
-# Release-please manages CHANGELOG.md — prettier reformatting fights the release PR.
-CHANGELOG.md
-
 # Build artifacts and dependencies.
 target/
 node_modules/

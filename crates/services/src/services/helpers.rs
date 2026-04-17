@@ -352,6 +352,7 @@ pub(crate) fn error_code_to_status(code: ErrorCode, message: String) -> Status {
         ErrorCode::InvitationAlreadyMember | ErrorCode::InvitationDuplicatePending => {
             Status::already_exists(message)
         },
+        ErrorCode::StaleRouting => Status::failed_precondition(message),
     }
 }
 
@@ -968,6 +969,12 @@ mod tests {
     fn error_code_invitation_duplicate_pending_maps_to_already_exists() {
         let s = error_code_to_status(ErrorCode::InvitationDuplicatePending, "pending".into());
         assert_eq!(s.code(), tonic::Code::AlreadyExists);
+    }
+
+    #[test]
+    fn error_code_stale_routing_maps_to_failed_precondition() {
+        let s = error_code_to_status(ErrorCode::StaleRouting, "stale".into());
+        assert_eq!(s.code(), tonic::Code::FailedPrecondition);
     }
 
     // =========================================================================

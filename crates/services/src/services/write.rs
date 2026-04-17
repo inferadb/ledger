@@ -699,6 +699,28 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             request_hash,
         )?;
 
+        // Re-validate vault slug before proposal submission.
+        // Between the initial resolution and now (leader check, rate limiting,
+        // idempotency check), the GLOBAL state may have changed (e.g., vault
+        // migrated to a different shard during region migration). A mismatch
+        // means the request would be routed to a stale shard.
+        let revalidated_vault_id = SlugResolver::new(system.applied_state.clone())
+            .extract_and_resolve_vault(&req.vault)?;
+        if revalidated_vault_id != vault_id {
+            warn!(
+                vault_id = vault_id.value(),
+                revalidated_vault_id = revalidated_vault_id.value(),
+                "Vault routing changed during request processing"
+            );
+            return Err(status_with_correlation(
+                Status::failed_precondition(
+                    "Stale routing: vault routing changed during request processing. Retry.",
+                ),
+                &ctx.request_id(),
+                ctx.trace_id(),
+            ));
+        }
+
         // Compute effective timeout: min(proposal_timeout, grpc_deadline)
         let grpc_deadline =
             inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
@@ -1223,6 +1245,28 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             idempotency_key,
             request_hash,
         )?;
+
+        // Re-validate vault slug before proposal submission.
+        // Between the initial resolution and now (leader check, rate limiting,
+        // idempotency check), the GLOBAL state may have changed (e.g., vault
+        // migrated to a different shard during region migration). A mismatch
+        // means the request would be routed to a stale shard.
+        let revalidated_vault_id = SlugResolver::new(system.applied_state.clone())
+            .extract_and_resolve_vault(&req.vault)?;
+        if revalidated_vault_id != vault_id {
+            warn!(
+                vault_id = vault_id.value(),
+                revalidated_vault_id = revalidated_vault_id.value(),
+                "Vault routing changed during batch_write processing"
+            );
+            return Err(status_with_correlation(
+                Status::failed_precondition(
+                    "Stale routing: vault routing changed during request processing. Retry.",
+                ),
+                &ctx.request_id(),
+                ctx.trace_id(),
+            ));
+        }
 
         // Compute effective timeout: min(proposal_timeout, grpc_deadline)
         let grpc_deadline =
