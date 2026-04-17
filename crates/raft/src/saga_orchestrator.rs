@@ -2365,17 +2365,39 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
             debug!(saga_id = %saga_id, has_pii = submission.pii.is_some(), "Accepted saga submission");
 
-            // Persist PII to REGIONAL scratch storage (survives leader crashes)
+            // Persist PII to REGIONAL scratch storage (survives leader crashes).
+            // Retry up to 3 times with backoff — the regional Raft group may not
+            // be ready immediately after cluster bootstrap.
             if let Some(pii) = submission.pii {
                 let region = match &submission.record {
                     Saga::CreateOnboardingUser(s) => s.input.region,
                     Saga::CreateUser(s) => s.input.region,
                     _ => Region::GLOBAL,
                 };
-                if let Err(e) =
-                    self.persist_saga_pii(&saga_id, region, &SagaPii::Onboarding(pii)).await
-                {
-                    warn!(saga_id = %saga_id, error = %e, "Failed to persist onboarding PII");
+                let mut pii_persisted = false;
+                for attempt in 0..3u32 {
+                    match self
+                        .persist_saga_pii(&saga_id, region, &SagaPii::Onboarding(pii.clone()))
+                        .await
+                    {
+                        Ok(()) => {
+                            pii_persisted = true;
+                            break;
+                        }
+                        Err(e) => {
+                            warn!(
+                                saga_id = %saga_id,
+                                attempt = attempt + 1,
+                                error = %e,
+                                "Failed to persist onboarding PII, retrying"
+                            );
+                            tokio::time::sleep(Duration::from_millis(100 * u64::from(attempt + 1)))
+                                .await;
+                        }
+                    }
+                }
+                if !pii_persisted {
+                    warn!(saga_id = %saga_id, "PII persist exhausted retries; saga step 1 will reload from scratch or compensate");
                 }
             }
             if let Some(org_pii) = submission.org_pii {
@@ -2383,10 +2405,30 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     Saga::CreateOrganization(s) => s.input.region,
                     _ => Region::GLOBAL,
                 };
-                if let Err(e) =
-                    self.persist_saga_pii(&saga_id, region, &SagaPii::Organization(org_pii)).await
-                {
-                    warn!(saga_id = %saga_id, error = %e, "Failed to persist org PII");
+                let mut org_pii_persisted = false;
+                for attempt in 0..3u32 {
+                    match self
+                        .persist_saga_pii(&saga_id, region, &SagaPii::Organization(org_pii.clone()))
+                        .await
+                    {
+                        Ok(()) => {
+                            org_pii_persisted = true;
+                            break;
+                        }
+                        Err(e) => {
+                            warn!(
+                                saga_id = %saga_id,
+                                attempt = attempt + 1,
+                                error = %e,
+                                "Failed to persist org PII, retrying"
+                            );
+                            tokio::time::sleep(Duration::from_millis(100 * u64::from(attempt + 1)))
+                                .await;
+                        }
+                    }
+                }
+                if !org_pii_persisted {
+                    warn!(saga_id = %saga_id, "Org PII persist exhausted retries; saga step 1 will reload from scratch or compensate");
                 }
             }
 
