@@ -318,10 +318,7 @@ mod tests {
 
     fn arb_alloc_ops() -> impl Strategy<Value = Vec<AllocOp>> {
         proptest::collection::vec(
-            prop_oneof![
-                Just(AllocOp::Allocate),
-                (0u8..32u8).prop_map(AllocOp::Free),
-            ],
+            prop_oneof![Just(AllocOp::Allocate), (0u8..32u8).prop_map(AllocOp::Free),],
             1..200,
         )
     }
