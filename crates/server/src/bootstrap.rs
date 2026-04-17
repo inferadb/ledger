@@ -518,8 +518,8 @@ pub async fn bootstrap_node(
 
     let server = LedgerServer::builder()
         .manager(manager.clone())
-        .addr(config.listen_addr)
-        .unix_socket(config.unix_socket.clone())
+        .addr(config.listen)
+        .socket(config.socket.clone())
         .advertise_addr(config.advertise.clone())
         .max_concurrent(config.max_concurrent)
         .timeout_secs(config.timeout_secs)
@@ -555,7 +555,7 @@ pub async fn bootstrap_node(
     let saga_cell = server.saga_cell();
 
     // Start the gRPC server.
-    let server_addr = config.listen_addr;
+    let server_addr = config.listen;
     let server_handle = tokio::spawn(async move {
         match server.serve().await {
             Ok(()) => Ok(()),
@@ -566,11 +566,12 @@ pub async fn bootstrap_node(
         }
     });
 
-    // Wait for the listener to bind before proceeding.
-    if let Some(ref path) = config.unix_socket {
+    // Wait for listener(s) to bind before proceeding.
+    if let Some(addr) = server_addr {
+        wait_for_tcp_ready(&server_handle, addr).await?;
+    }
+    if let Some(ref path) = config.socket {
         wait_for_uds_ready(&server_handle, path).await?;
-    } else {
-        wait_for_tcp_ready(&server_handle, server_addr).await?;
     }
 
     if cluster_id.is_some() {

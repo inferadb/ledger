@@ -25,11 +25,29 @@ use std::{
 };
 
 /// Monotonically increasing cluster counter — guarantees each test gets unique
-/// socket paths even when tests run in parallel (no `#[serial]` required).
+/// socket paths even when tests run in parallel.
 static CLUSTER_COUNTER: AtomicU16 = AtomicU16::new(0);
 
 fn next_cluster_id() -> u16 {
     CLUSTER_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Monotonically increasing port counter for TCP-mode test clusters.
+static NEXT_PORT: AtomicU16 = AtomicU16::new(30_000);
+
+/// Allocates `count` contiguous ports from the global counter.
+pub fn allocate_ports(count: u16) -> u16 {
+    NEXT_PORT.fetch_add(count, Ordering::Relaxed)
+}
+
+/// Transport mode for test clusters.
+#[derive(Clone, Copy, Default)]
+pub enum TestTransport {
+    /// Unix domain sockets (default). Eliminates port contention.
+    #[default]
+    Uds,
+    /// TCP with auto-allocated ports. Required for tests that need `SocketAddr`.
+    Tcp,
 }
 
 /// Creates a gRPC channel — UDS for paths starting with `/`, TCP otherwise.
@@ -193,6 +211,13 @@ impl TestCluster {
         Self::build(size, num_data_regions, false).await
     }
 
+    /// Creates a cluster using TCP transport instead of UDS.
+    ///
+    /// Required for tests that need `SocketAddr` (e.g., `discover_node_info`).
+    pub async fn with_tcp(size: usize) -> Self {
+        Self::build_full(size, 1, true, None, TestTransport::Tcp).await
+    }
+
     /// Creates a cluster with a custom rate limit config.
     ///
     /// Allows tests to override the default high-burst test config (burst=10,000)
@@ -201,24 +226,30 @@ impl TestCluster {
         size: usize,
         rate_limit: inferadb_ledger_types::config::RateLimitConfig,
     ) -> Self {
-        Self::build_inner(size, 1, true, Some(rate_limit)).await
+        Self::build_full(size, 1, true, Some(rate_limit), TestTransport::Uds).await
     }
 
     async fn build(size: usize, num_data_regions: usize, include_blinding_key: bool) -> Self {
-        Self::build_inner(size, num_data_regions, include_blinding_key, None).await
+        Self::build_full(size, num_data_regions, include_blinding_key, None, TestTransport::Uds)
+            .await
     }
 
-    async fn build_inner(
+    async fn build_full(
         size: usize,
         num_data_regions: usize,
         include_blinding_key: bool,
         rate_limit_override: Option<inferadb_ledger_types::config::RateLimitConfig>,
+        transport: TestTransport,
     ) -> Self {
         assert!(size >= 1, "cluster must have at least 1 node");
         assert!(num_data_regions >= 1, "cluster must have at least 1 data region");
 
         let socket_dir = TestDir::new();
         let cluster_id = next_cluster_id();
+        let base_port = match transport {
+            TestTransport::Tcp => allocate_ports(size as u16),
+            TestTransport::Uds => 0, // unused
+        };
         let mut nodes = Vec::with_capacity(size);
 
         // Shared key manager for all nodes (enables TokenService with JWT support).
@@ -229,7 +260,18 @@ impl TestCluster {
         // Step 1: Start the bootstrap node with cluster_id pre-written so it
         // takes the restart path (immediate startup). It becomes leader, then
         // we dynamically add nodes.
-        let socket_path = socket_dir.path().join(format!("c{cluster_id}-n0.sock"));
+        let (node_addr, socket_path, listen) = match transport {
+            TestTransport::Uds => {
+                let sp = socket_dir.path().join(format!("c{cluster_id}-n0.sock"));
+                let addr = sp.to_string_lossy().to_string();
+                (addr, Some(sp), None)
+            },
+            TestTransport::Tcp => {
+                let tcp_addr: std::net::SocketAddr =
+                    format!("127.0.0.1:{base_port}").parse().unwrap();
+                (tcp_addr.to_string(), None, Some(tcp_addr))
+            },
+        };
         let temp_dir = TestDir::new();
         let data_dir = temp_dir.path().to_path_buf();
 
@@ -246,18 +288,15 @@ impl TestCluster {
             .expect("valid backup config");
 
         let config = inferadb_ledger_server::config::Config {
-            unix_socket: Some(socket_path.clone()),
+            listen,
+            socket: socket_path.clone(),
             metrics_addr: None,
             data_dir: Some(data_dir.clone()),
             backup: Some(backup_config),
             raft: Some(test_raft_config()),
-            // Fast saga poll for auto-bootstrap integration tests (default 30s too slow)
             saga: inferadb_ledger_types::config::SagaConfig { poll_interval_secs: 2 },
-            token_maintenance_interval_secs: 3, // Fast maintenance for integration tests
-            // High rate limits by default so most tests aren't affected; overridden
-            // by rate_limit_override for tests that exercise rate limiting behavior.
+            token_maintenance_interval_secs: 3,
             rate_limit: Some(rate_limit_override.clone().unwrap_or_else(test_rate_limit_config)),
-            // Enable onboarding RPCs with a fixed test blinding key (32 bytes hex-encoded)
             email_blinding_key: if include_blinding_key {
                 Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string())
             } else {
@@ -296,10 +335,10 @@ impl TestCluster {
         });
 
         let leader_handle = handle_clone.clone();
-        let leader_addr = socket_path.to_string_lossy().to_string();
+        let leader_addr = node_addr.clone();
         nodes.push(TestNode {
             id: node_id,
-            addr: socket_path.to_string_lossy().to_string(),
+            addr: node_addr.clone(),
             handle: handle_clone,
             state: state_clone,
             manager: manager_clone.clone(),
@@ -330,7 +369,7 @@ impl TestCluster {
         for &data_region in data_regions.iter().take(num_data_regions) {
             let data_region_config = RegionConfig {
                 region: data_region,
-                initial_members: vec![(node_id, socket_path.to_string_lossy().to_string())],
+                initial_members: vec![(node_id, node_addr.clone())],
                 bootstrap: true,
                 enable_background_jobs: true,
                 batch_writer_config: None,
@@ -366,30 +405,38 @@ impl TestCluster {
 
         // Step 2: Start remaining nodes and have them join the cluster dynamically
         for i in 1..size {
-            let socket_path = socket_dir.path().join(format!("c{cluster_id}-n{i}.sock"));
+            let (join_addr, join_socket, join_listen) = match transport {
+                TestTransport::Uds => {
+                    let sp = socket_dir.path().join(format!("c{cluster_id}-n{i}.sock"));
+                    let addr = sp.to_string_lossy().to_string();
+                    (addr, Some(sp), None)
+                },
+                TestTransport::Tcp => {
+                    let tcp_addr: std::net::SocketAddr =
+                        format!("127.0.0.1:{}", base_port + i as u16).parse().unwrap();
+                    (tcp_addr.to_string(), None, Some(tcp_addr))
+                },
+            };
             let temp_dir = TestDir::new();
             let data_dir = temp_dir.path().to_path_buf();
 
-            // Joining node: write cluster_id so bootstrap_node takes the restart
-            // path. The node starts its own system region, then gets incorporated
-            // into the cluster via JoinCluster RPC below.
             inferadb_ledger_server::cluster_id::write_cluster_id(&data_dir, 1)
                 .expect("write cluster_id for joining node");
 
-            // Uses auto-generated Snowflake ID for realistic testing.
             let backup_config = inferadb_ledger_types::config::BackupConfig::builder()
                 .destination(data_dir.join("backups").to_string_lossy().to_string())
                 .build()
                 .expect("valid backup config");
 
             let config = inferadb_ledger_server::config::Config {
-                unix_socket: Some(socket_path.clone()),
+                listen: join_listen,
+                socket: join_socket,
                 metrics_addr: None,
                 data_dir: Some(data_dir.clone()),
                 backup: Some(backup_config),
                 raft: Some(test_raft_config()),
                 saga: inferadb_ledger_types::config::SagaConfig { poll_interval_secs: 2 },
-                token_maintenance_interval_secs: 3, // Fast maintenance for integration tests
+                token_maintenance_interval_secs: 3,
                 rate_limit: Some(
                     rate_limit_override.clone().unwrap_or_else(test_rate_limit_config),
                 ),
@@ -450,10 +497,7 @@ impl TestCluster {
                 let channel = connect_channel(&current_leader_addr);
                 let mut client = AdminServiceClient::new(channel);
 
-                let join_request = JoinClusterRequest {
-                    node_id,
-                    address: socket_path.to_string_lossy().to_string(),
-                };
+                let join_request = JoinClusterRequest { node_id, address: join_addr.clone() };
 
                 match client.join_cluster(join_request).await {
                     Ok(response) => {
@@ -492,7 +536,7 @@ impl TestCluster {
             let new_handle = handle_clone.clone();
             nodes.push(TestNode {
                 id: node_id,
-                addr: socket_path.to_string_lossy().to_string(),
+                addr: join_addr.clone(),
                 handle: handle_clone,
                 state: state_clone,
                 manager: manager_clone,
@@ -543,7 +587,7 @@ impl TestCluster {
                     if let Ok(existing_global) = existing.manager.system_region()
                         && let Some(et) = existing_global.consensus_transport()
                     {
-                        let join_addr_str = socket_path.to_string_lossy().to_string();
+                        let join_addr_str = join_addr.clone();
                         let _ = et.set_peer_via_registry(node_id, &join_addr_str).await;
                     }
                 }
@@ -554,7 +598,7 @@ impl TestCluster {
             // receive the cluster membership from the leader via Raft log replication.
             let joining_manager = nodes.last().unwrap().manager.clone();
             let joining_node_id = node_id;
-            let _joining_addr = socket_path.to_string_lossy().to_string();
+            let _joining_addr = join_addr.clone();
             for &data_region in data_regions.iter().take(num_data_regions) {
                 let data_region_config = RegionConfig {
                     region: data_region,
@@ -581,7 +625,7 @@ impl TestCluster {
                     // Register bidirectional transport channels so the consensus
                     // engines can replicate between the bootstrap node and the
                     // joining node for this data region.
-                    let joining_addr_str = socket_path.to_string_lossy().to_string();
+                    let joining_addr_str = join_addr.clone();
                     let bootstrap_addr_str = nodes[0].addr.clone();
                     if let Some(bt) = bootstrap_rg.consensus_transport() {
                         let _ = bt.set_peer_via_registry(joining_node_id, &joining_addr_str).await;

@@ -129,7 +129,7 @@ async fn main() -> Result<(), ServerError> {
     })?;
 
     tracing::info!(
-        listen_addr = %config.listen_addr,
+        listen = ?config.listen,
         data_dir = %data_dir.display(),
         "Starting InferaDB Ledger"
     );

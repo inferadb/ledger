@@ -64,9 +64,6 @@ pub enum LogFormat {
     Auto,
 }
 
-/// Default listen address for the gRPC server (localhost only for security).
-const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:50051";
-
 /// Configuration for the InferaDB Ledger server.
 ///
 /// Configuration can be provided via command-line arguments or environment variables.
@@ -108,20 +105,21 @@ const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:50051";
 /// use inferadb_ledger_server::config::Config;
 ///
 /// let config = Config::builder()
-///     .listen_addr("0.0.0.0:9000".parse().unwrap())
+///     .listen("0.0.0.0:9000".parse().unwrap())
 ///     .data_dir(PathBuf::from("/data/ledger"))
 ///     .build();
 /// ```
 #[derive(Debug, Clone, Deserialize, JsonSchema, Builder, Parser)]
 #[builder(derive(Debug))]
 pub struct Config {
-    /// Address to listen on for gRPC.
+    /// TCP address to listen on for gRPC.
     ///
-    /// Defaults to 127.0.0.1:50051 (localhost only) for security.
-    /// Set to 0.0.0.0:50051 or a specific IP to accept remote connections.
-    #[arg(long = "listen", env = "INFERADB__LEDGER__LISTEN", default_value = DEFAULT_LISTEN_ADDR)]
-    #[builder(default = default_listen_addr())]
-    pub listen_addr: SocketAddr,
+    /// When set, the server binds a TCP listener on this address.
+    /// Set to `0.0.0.0:50051` to accept remote connections.
+    /// At least one of `--listen` or `--socket` must be specified.
+    #[arg(long = "listen", env = "INFERADB__LEDGER__LISTEN")]
+    #[serde(default)]
+    pub listen: Option<SocketAddr>,
 
     /// Address to expose Prometheus metrics. Disabled if not set.
     #[arg(long = "metrics", env = "INFERADB__LEDGER__METRICS")]
@@ -339,23 +337,17 @@ pub struct Config {
     pub token_maintenance_interval_secs: u64,
 
     // === Unix Domain Socket ===
-    /// Path to a Unix domain socket for local gRPC connections.
+    /// Path to a Unix domain socket for gRPC connections.
     ///
-    /// When set, the server listens on the specified Unix socket instead of
-    /// a TCP address. Useful for co-located sidecar communication with lower
-    /// overhead than TCP. Mutually exclusive with TCP listening at the
-    /// transport level — the server binds to one or the other.
-    #[arg(long = "unix-socket", env = "INFERADB__LEDGER__UNIX_SOCKET")]
+    /// When set alongside `--listen`, the server binds both TCP and UDS
+    /// simultaneously. When set alone, the server listens on UDS only.
+    /// At least one of `--listen` or `--socket` must be specified.
+    #[arg(long = "socket", env = "INFERADB__LEDGER__SOCKET")]
     #[serde(default)]
-    pub unix_socket: Option<PathBuf>,
+    pub socket: Option<PathBuf>,
 }
 
 // Default value functions
-#[expect(clippy::expect_used, reason = "infallible: parsing constant valid address")]
-fn default_listen_addr() -> SocketAddr {
-    DEFAULT_LISTEN_ADDR.parse().expect("valid default address")
-}
-
 fn default_region() -> inferadb_ledger_types::Region {
     inferadb_ledger_types::Region::GLOBAL
 }
@@ -373,7 +365,7 @@ fn default_timeout_secs() -> u64 {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            listen_addr: default_listen_addr(),
+            listen: None,
             metrics_addr: None,
             log_format: LogFormat::default(),
             data_dir: None,
@@ -396,7 +388,7 @@ impl Default for Config {
             rate_limit: None,
             token_maintenance_interval_secs: default_token_maintenance_interval_secs(),
             email_blinding_key: None,
-            unix_socket: None,
+            socket: None,
         }
     }
 }
@@ -413,7 +405,7 @@ impl Config {
         node_id::write_node_id(&data_dir, node_id).expect("failed to write test node_id");
 
         Self {
-            listen_addr: format!("127.0.0.1:{}", port).parse().unwrap(),
+            listen: Some(format!("127.0.0.1:{}", port).parse().unwrap()),
             metrics_addr: None,
             data_dir: Some(data_dir),
             logging: LoggingConfig::for_test(),
@@ -426,7 +418,7 @@ impl Config {
     /// When true, only local connections are accepted. Remote clients
     /// will not be able to connect.
     pub fn is_localhost_only(&self) -> bool {
-        self.listen_addr.ip().is_loopback()
+        self.listen.is_some_and(|a| a.ip().is_loopback())
     }
 
     /// Returns the address other nodes should use to reach this node.
@@ -437,10 +429,10 @@ impl Config {
         if let Some(ref addr) = self.advertise {
             return addr.clone();
         }
-        if let Some(ref path) = self.unix_socket {
+        if let Some(ref path) = self.socket {
             return path.display().to_string();
         }
-        self.listen_addr.to_string()
+        self.listen.map_or_else(String::new, |a| a.to_string())
     }
 
     /// Returns true if the server is running in ephemeral mode.
@@ -611,10 +603,11 @@ mod tests {
     }
 
     #[test]
-    fn default_config_is_ephemeral_and_localhost() {
+    fn default_config_is_ephemeral_and_not_localhost() {
         let config = Config::default();
         assert!(config.is_ephemeral());
-        assert!(config.is_localhost_only());
+        // listen is None by default, so is_localhost_only returns false
+        assert!(!config.is_localhost_only());
     }
 
     #[test]
@@ -622,7 +615,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let data_dir = temp_dir.path().to_path_buf();
         let config = Config::for_test(1, 50051, data_dir.clone());
-        assert_eq!(config.listen_addr.port(), 50051);
+        assert_eq!(config.listen.unwrap().port(), 50051);
         assert!(!config.is_ephemeral());
 
         // Verify node_id was written to file
@@ -639,20 +632,26 @@ mod tests {
     #[test]
     fn is_localhost_only_true_for_loopback_addresses() {
         let config =
-            Config { listen_addr: "127.0.0.1:50051".parse().unwrap(), ..Config::default() };
+            Config { listen: Some("127.0.0.1:50051".parse().unwrap()), ..Config::default() };
         assert!(config.is_localhost_only());
 
-        let config = Config { listen_addr: "[::1]:50051".parse().unwrap(), ..Config::default() };
+        let config = Config { listen: Some("[::1]:50051".parse().unwrap()), ..Config::default() };
         assert!(config.is_localhost_only());
     }
 
     #[test]
     fn is_localhost_only_false_for_non_loopback_addresses() {
-        let config = Config { listen_addr: "0.0.0.0:50051".parse().unwrap(), ..Config::default() };
+        let config = Config { listen: Some("0.0.0.0:50051".parse().unwrap()), ..Config::default() };
         assert!(!config.is_localhost_only());
 
         let config =
-            Config { listen_addr: "192.168.1.1:50051".parse().unwrap(), ..Config::default() };
+            Config { listen: Some("192.168.1.1:50051".parse().unwrap()), ..Config::default() };
+        assert!(!config.is_localhost_only());
+    }
+
+    #[test]
+    fn is_localhost_only_false_when_listen_is_none() {
+        let config = Config { listen: None, ..Config::default() };
         assert!(!config.is_localhost_only());
     }
 
@@ -698,7 +697,7 @@ mod tests {
         let from_builder = Config::builder().build();
         let from_default = Config::default();
 
-        assert_eq!(from_builder.listen_addr, from_default.listen_addr);
+        assert_eq!(from_builder.listen, from_default.listen);
         assert_eq!(from_builder.metrics_addr, from_default.metrics_addr);
         assert_eq!(from_builder.data_dir, from_default.data_dir);
         assert_eq!(from_builder.join, from_default.join);
@@ -709,7 +708,7 @@ mod tests {
     #[test]
     fn test_config_builder_with_custom_values() {
         let config = Config::builder()
-            .listen_addr("127.0.0.1:9999".parse().unwrap())
+            .listen("127.0.0.1:9999".parse().unwrap())
             .metrics_addr("127.0.0.1:9090".parse().unwrap())
             .data_dir(PathBuf::from("/custom/data"))
             .join(vec!["node1:9090".to_string(), "node2:9090".to_string()])
@@ -717,7 +716,7 @@ mod tests {
             .timeout_secs(60)
             .build();
 
-        assert_eq!(config.listen_addr.port(), 9999);
+        assert_eq!(config.listen.unwrap().port(), 9999);
         assert!(config.metrics_addr.is_some());
         assert_eq!(config.data_dir, Some(PathBuf::from("/custom/data")));
         assert_eq!(config.join, Some(vec!["node1:9090".to_string(), "node2:9090".to_string()]));
@@ -890,14 +889,14 @@ mod tests {
 
     #[test]
     fn test_config_region_from_serde() {
-        let json = r#"{"listen_addr": "127.0.0.1:50051", "region": "ie-east-dublin"}"#;
+        let json = r#"{"listen": "127.0.0.1:50051", "region": "ie-east-dublin"}"#;
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.region, inferadb_ledger_types::Region::IE_EAST_DUBLIN);
     }
 
     #[test]
     fn test_config_region_serde_default_is_global() {
-        let json = r#"{"listen_addr": "127.0.0.1:50051"}"#;
+        let json = r#"{"listen": "127.0.0.1:50051"}"#;
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.region, inferadb_ledger_types::Region::GLOBAL);
     }

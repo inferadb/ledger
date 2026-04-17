@@ -4,13 +4,7 @@ This guide covers cluster deployment, scaling, backup, and recovery for InferaDB
 
 ## Cluster Setup
 
-Ledger uses explicit bootstrap modes:
-
-| Flag          | Behavior                                                                            |
-| ------------- | ----------------------------------------------------------------------------------- |
-| `--single`    | Bootstrap immediately as single-node cluster                                        |
-| `--join`      | Wait to be added to existing cluster via AdminService                               |
-| `--cluster N` | Coordinated bootstrap: wait for N peers, lowest-ID node bootstraps all (default: 3) |
+Ledger uses a CockroachDB-style `start`+`init` bootstrap pattern. Nodes start their gRPC servers but wait for cluster initialization before accepting writes.
 
 ### Single-Node Cluster
 
@@ -18,91 +12,50 @@ Ledger uses explicit bootstrap modes:
 mkdir -p /var/lib/ledger
 
 ./target/release/inferadb-ledger \
-  --listen 127.0.0.1:50051 \
-  --data /var/lib/ledger \
-  --single
+  --listen 127.0.0.1:9090 \
+  --data /var/lib/ledger
+
+# Initialize (once, from any machine that can reach the node)
+./target/release/inferadb-ledger init --host 127.0.0.1:9090
 ```
 
 ### Multi-Node Cluster (3 nodes)
 
-Each node needs its own data directory and a peer file listing other nodes.
+Start each node with `--join` pointing to one or more seed addresses. Each node needs its own data directory.
 
-**Node 1** (`/var/lib/ledger-1`):
-
-```bash
-cat > /var/lib/ledger-1/peers.json << 'EOF'
-{"cached_at": 0, "peers": [
-  {"addr": "192.168.1.102:50051"},
-  {"addr": "192.168.1.103:50051"}
-]}
-EOF
-
-./target/release/inferadb-ledger \
-  --listen 192.168.1.101:50051 \
-  --data /var/lib/ledger-1 \
-  --peers /var/lib/ledger-1/peers.json \
-  --cluster 3
-```
-
-**Node 2** (`/var/lib/ledger-2`):
-
-```bash
-cat > /var/lib/ledger-2/peers.json << 'EOF'
-{"cached_at": 0, "peers": [
-  {"addr": "192.168.1.101:50051"},
-  {"addr": "192.168.1.103:50051"}
-]}
-EOF
-
-./target/release/inferadb-ledger \
-  --listen 192.168.1.102:50051 \
-  --data /var/lib/ledger-2 \
-  --peers /var/lib/ledger-2/peers.json \
-  --cluster 3
-```
-
-**Node 3** (`/var/lib/ledger-3`):
-
-```bash
-cat > /var/lib/ledger-3/peers.json << 'EOF'
-{"cached_at": 0, "peers": [
-  {"addr": "192.168.1.101:50051"},
-  {"addr": "192.168.1.102:50051"}
-]}
-EOF
-
-./target/release/inferadb-ledger \
-  --listen 192.168.1.103:50051 \
-  --data /var/lib/ledger-3 \
-  --peers /var/lib/ledger-3/peers.json \
-  --cluster 3
-```
-
-Start all three nodes. They will:
-
-1. Discover each other via peer file
-2. Exchange node info via `GetNodeInfo` RPC
-3. The node with lowest Snowflake ID bootstraps the cluster
-4. Other nodes join automatically
-
-### DNS-Based Discovery (Production / Kubernetes)
-
-For production, use DNS A records instead of static peer files:
+**Node 1** (`192.168.1.101`):
 
 ```bash
 ./target/release/inferadb-ledger \
-  --peers ledger.default.svc.cluster.local \
-  --cluster 3
+  --listen 192.168.1.101:9090 \
+  --data /var/lib/ledger
 ```
 
-For non-Kubernetes environments, configure DNS A records:
+**Node 2** (`192.168.1.102`):
 
 ```bash
-# DNS A records (all nodes share the same name, each with its own IP)
-ledger.cluster.example.com. 300 IN A 192.168.1.101
-ledger.cluster.example.com. 300 IN A 192.168.1.102
-ledger.cluster.example.com. 300 IN A 192.168.1.103
+./target/release/inferadb-ledger \
+  --listen 192.168.1.102:9090 \
+  --data /var/lib/ledger \
+  --join 192.168.1.101:9090
 ```
+
+**Node 3** (`192.168.1.103`):
+
+```bash
+./target/release/inferadb-ledger \
+  --listen 192.168.1.103:9090 \
+  --data /var/lib/ledger \
+  --join 192.168.1.101:9090,192.168.1.102:9090
+```
+
+**Initialize the cluster (once):**
+
+```bash
+./target/release/inferadb-ledger init --host 192.168.1.101:9090
+```
+
+All nodes discover each other via `--join` seed addresses, exchange node info, and form the cluster automatically after initialization.
 
 ## Shutdown and Restart
 
@@ -152,28 +105,21 @@ For a full cluster restart, use rolling restart to maintain availability:
 
 ### Adding a Node
 
-Start the new node with `--join` and a peer file pointing to existing nodes:
+Start the new node with `--join` pointing to any existing cluster member:
 
 ```bash
-cat > /var/lib/ledger-new/peers.json << 'EOF'
-{"cached_at": 0, "peers": [
-  {"addr": "192.168.1.101:50051"}
-]}
-EOF
-
 ./target/release/inferadb-ledger \
-  --listen 192.168.1.104:50051 \
-  --data /var/lib/ledger-new \
-  --peers /var/lib/ledger-new/peers.json \
-  --join
+  --listen 192.168.1.104:9090 \
+  --data /var/lib/ledger \
+  --join 192.168.1.101:9090
 ```
 
 The node will:
 
 1. Start its gRPC server
-2. Connect to discovered peers
-3. Wait for AdminService `JoinCluster` RPC from the leader
-4. Receive Raft log and become a cluster member
+2. Connect to the seed address and discover other peers
+3. Join the cluster as a learner
+4. Receive Raft log and be promoted to voter once caught up
 
 ### Removing a Node
 
@@ -258,15 +204,16 @@ mkdir -p /var/lib/ledger/snapshots
 cp /backup/000010000.snap /var/lib/ledger/snapshots/
 
 ./target/release/inferadb-ledger \
+  --listen 0.0.0.0:9090 \
   --data /var/lib/ledger \
-  --join
+  --join existing-node:9090
 ```
 
 The node will:
 
 1. Generate a new `node_id`
 2. Load state from snapshot
-3. Join the cluster as a new member
+3. Join the cluster as a new member via the seed address
 4. Receive missing log entries from peers
 
 ### Full Cluster Restore (Disaster Recovery)
@@ -277,11 +224,14 @@ If all nodes are lost, restore from the most recent backup:
 # On each node, restore from backup
 cp -r /backup/ledger-node1 /var/lib/ledger
 
-# Start first node with --single to force bootstrap
-./target/release/inferadb-ledger --data /var/lib/ledger --single
+# Start the first node
+./target/release/inferadb-ledger --listen 0.0.0.0:9090 --data /var/lib/ledger
+
+# Initialize the restored cluster
+./target/release/inferadb-ledger init --host node1:9090
 
 # Start remaining nodes with --join
-./target/release/inferadb-ledger --data /var/lib/ledger --join
+./target/release/inferadb-ledger --listen 0.0.0.0:9090 --data /var/lib/ledger --join node1:9090
 ```
 
 ## Configuration Reference
@@ -290,81 +240,61 @@ Configuration can be set via CLI arguments or environment variables. CLI argumen
 
 ### Core Options
 
-| CLI                     | Environment Variable                    | Default           | Description                                                                                 |
-| ----------------------- | --------------------------------------- | ----------------- | ------------------------------------------------------------------------------------------- |
-| `--listen`              | `INFERADB__LEDGER__LISTEN`              | `127.0.0.1:50051` | Host and port to accept connections                                                         |
-| `--data`                | `INFERADB__LEDGER__DATA`                | (ephemeral)       | Where to store data                                                                         |
-| `--metrics`             | `INFERADB__LEDGER__METRICS`             | (disabled)        | Expose Prometheus metrics at this address                                                   |
-| `--email-blinding-key`  | `INFERADB__LEDGER__EMAIL_BLINDING_KEY`  | (required)        | Hex-encoded 32-byte key for HMAC-based email hashing. Required for user onboarding RPCs     |
-| `--enable-grpc-reflection` | `INFERADB__LEDGER__ENABLE_GRPC_REFLECTION` | `false` | Enable gRPC reflection (needed for `grpcurl` and other dynamic clients; test/dev scripts assume on) |
+| CLI                        | Environment Variable                       | Default       | Description                                                                                 |
+| -------------------------- | ------------------------------------------ | ------------- | ------------------------------------------------------------------------------------------- |
+| `--listen`                 | `INFERADB__LEDGER__LISTEN`                 | _(none)_      | TCP address for gRPC API                                                                    |
+| `--socket`                 | `INFERADB__LEDGER__SOCKET`                 | _(none)_      | Unix domain socket path for gRPC API                                                        |
+| `--data`                   | `INFERADB__LEDGER__DATA`                   | _(ephemeral)_ | Persistent storage directory                                                                |
+| `--join`                   | `INFERADB__LEDGER__JOIN`                   | _(none)_      | Comma-separated seed addresses for cluster discovery                                        |
+| `--region`                 | `INFERADB__LEDGER__REGION`                 | `global`      | Geographic data residency region                                                            |
+| `--advertise`              | `INFERADB__LEDGER__ADVERTISE`              | _(auto)_      | Address advertised to peers                                                                 |
+| `--metrics`                | `INFERADB__LEDGER__METRICS`                | _(disabled)_  | Prometheus metrics address                                                                  |
+| `--email-blinding-key`     | `INFERADB__LEDGER__EMAIL_BLINDING_KEY`     | _(required)_  | HMAC key for email hashing (required for user onboarding RPCs)                              |
+| `--enable-grpc-reflection` | `INFERADB__LEDGER__ENABLE_GRPC_REFLECTION` | `false`       | Enable gRPC reflection (needed for `grpcurl` and other dynamic clients)                     |
+| `--log-format`             | —                                          | `auto`        | Log format: `text`, `json`, or `auto`                                                      |
+| `--concurrent`             | `INFERADB__LEDGER__MAX_CONCURRENT`         | `100`         | Max concurrent requests                                                                     |
+| `--timeout`                | `INFERADB__LEDGER__TIMEOUT`                | `30`          | Request timeout in seconds                                                                  |
 
-### Bootstrap Mode
+At least one of `--listen` or `--socket` must be specified.
 
-These flags are mutually exclusive. If none is specified, `--cluster 3` is the default.
+### Bootstrap
 
-| CLI           | Environment Variable        | Description                                           |
-| ------------- | --------------------------- | ----------------------------------------------------- |
-| `--single`    | —                           | Bootstrap immediately as single-node cluster          |
-| `--join`      | —                           | Wait to be added to existing cluster via AdminService |
-| `--cluster N` | `INFERADB__LEDGER__CLUSTER` | Coordinated bootstrap with N nodes (default: 3)       |
+Nodes start their gRPC servers but wait for initialization before accepting writes.
 
-### Discovery Options
+1. Start all nodes with `inferadb-ledger --listen ... --data ... [--join seed1,seed2]`
+2. Run `inferadb-ledger init --host <any-node>` once to initialize the cluster
+3. Nodes discover each other via `--join` seed addresses and form membership automatically
 
-How nodes find each other.
-
-| CLI           | Environment Variable          | Default    | Description                             |
-| ------------- | ----------------------------- | ---------- | --------------------------------------- |
-| `--peers`     | `INFERADB__LEDGER__PEERS`     | (disabled) | DNS domain or file path (auto-detected) |
-| `--peers-ttl` | `INFERADB__LEDGER__PEERS_TTL` | `3600`     | How long cached node list stays valid   |
-
-The `--peers` value is auto-detected:
-
-- **DNS domain** (no `/` or `\`, not `.json`): Performs A record lookup (e.g., `ledger.default.svc.cluster.local`)
-- **File path** (contains `/` or `\`, or ends with `.json`): Loads from JSON file (e.g., `/var/lib/ledger/peers.json`)
-
-### Tuning Options
-
-These defaults work well for most deployments.
-
-| CLI               | Environment Variable               | Default | Description                             |
-| ----------------- | ---------------------------------- | ------- | --------------------------------------- |
-| `--peers-timeout` | `INFERADB__LEDGER__PEERS_TIMEOUT`  | `60`    | How long to wait for other nodes (secs) |
-| `--peers-poll`    | `INFERADB__LEDGER__PEERS_POLL`     | `2`     | How often to check for other nodes      |
-| `--concurrent`    | `INFERADB__LEDGER__MAX_CONCURRENT` | `100`   | Simultaneous requests allowed           |
-| `--timeout`       | `INFERADB__LEDGER__TIMEOUT`        | `30`    | Max time for a request to complete      |
+The `init` subcommand sends a one-time `InitCluster` RPC to the specified host. Run it exactly once per cluster lifetime.
 
 ### Notes
 
-**Ephemeral Mode**: When `--data` is not specified, the server runs in ephemeral mode using a temporary directory. All data is lost on shutdown. Useful for development and testing.
+**Ephemeral Mode**: When `--data` is omitted, the server runs in ephemeral mode using a temporary directory. All data is lost on shutdown. Useful for development and testing.
 
-**Security**: The default listen address is `127.0.0.1` (localhost only). Set `--listen 0.0.0.0:50051` or a specific IP to accept remote connections.
+**Unix Domain Sockets**: Use `--socket /path/to/ledger.sock` for local-only access without TCP overhead. Both `--listen` and `--socket` can be used simultaneously.
 
 Run `inferadb-ledger --help` for usage information.
-
-**Coordinated Bootstrap**: When using `--cluster N`, nodes automatically generate Snowflake IDs (persisted to `{data_dir}/node_id`) and coordinate cluster formation:
-
-1. Each node starts its gRPC server and polls discovery for peers
-2. Once N nodes discover each other, they exchange node info via `GetNodeInfo` RPC
-3. The node with the lowest Snowflake ID (earliest started) bootstraps the cluster
-4. Other nodes wait to be added as Raft voters
-
-This prevents split-brain scenarios where multiple nodes independently bootstrap separate clusters.
 
 ## Network Connectivity
 
 ### Clients → Cluster
 
-Under Phase 5's redirect-based routing, clients need direct network access to
-**every node** that could hold regional Raft leadership, not just a subset of
-gateway nodes. This is because:
+Under redirect-based routing, clients need direct network access to **every node** that could hold regional Raft leadership, not just a subset of gateway nodes. This is because:
 
 1. At cold start the client may connect to any node for discovery.
-2. After receiving a `NotLeader` hint, the client reconnects directly to the
-   regional leader's advertised endpoint.
+2. After receiving a `NotLeader` hint, the client reconnects directly to the regional leader's advertised endpoint.
 
-For single-VPC/VNet deployments this is typically already the case. For
-cross-VPC deployments, ensure ingress rules and firewall policies allow client
-traffic to every cluster node on the configured gRPC port.
+For single-VPC/VNet deployments this is typically already the case. For cross-VPC deployments, ensure ingress rules and firewall policies allow client traffic to every cluster node on the configured gRPC port.
+
+### Unix Domain Sockets
+
+For co-located clients (sidecar proxies, local CLIs), use `--socket` to expose a Unix domain socket listener:
+
+```bash
+inferadb-ledger --socket /var/run/ledger.sock --data /var/lib/ledger
+```
+
+Both `--listen` (TCP) and `--socket` (UDS) can be used simultaneously for mixed access patterns.
 
 See: [Redirect-Based Client Routing Architecture](runbooks/architecture-redirect-routing.md).
 
@@ -392,6 +322,6 @@ The Kubernetes deployment uses:
 - **Headless Service** for DNS-based peer discovery
 - **PodDisruptionBudget** to maintain Raft quorum during rolling updates
 
-Pods discover each other via DNS A records from the headless service. Set `--peers` to the service FQDN (e.g., `ledger.inferadb.svc.cluster.local`).
+Pods discover each other via `--join` with the headless service FQDN (e.g., `--join ledger.inferadb.svc.cluster.local`). Run `inferadb-ledger init` once after the StatefulSet is ready.
 
 See [`deploy/kubernetes/`](../../deploy/kubernetes/) for raw manifests and [`deploy/helm/`](../../deploy/helm/) for the Helm chart.

@@ -57,6 +57,7 @@ For design rationale, correctness proofs, and internal layout, see the root-leve
 
 | Task              | Command                                                            |
 | ----------------- | ------------------------------------------------------------------ |
-| Start single node | `inferadb-ledger --single --data /tmp/ledger`                      |
-| Health check      | `grpcurl -plaintext localhost:50051 ledger.v1.HealthService/Check` |
-| View metrics      | `curl localhost:9090/metrics`                                      |
+| Start single node | `inferadb-ledger --listen 127.0.0.1:9090 --data /tmp/ledger`      |
+| Initialize cluster| `inferadb-ledger init --host 127.0.0.1:9090`                      |
+| Health check      | `grpcurl -plaintext localhost:9090 ledger.v1.HealthService/Check`  |
+| View metrics      | `curl localhost:9091/metrics`                                      |

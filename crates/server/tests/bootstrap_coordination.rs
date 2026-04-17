@@ -35,7 +35,7 @@ async fn test_single_node_bootstrap() {
     inferadb_ledger_server::cluster_id::write_cluster_id(&data_dir, 1).expect("write cluster_id");
 
     let config = Config {
-        unix_socket: Some(socket_path.clone()),
+        socket: Some(socket_path.clone()),
         metrics_addr: None,
         data_dir: Some(data_dir.clone()),
         ..Config::default()
@@ -93,7 +93,7 @@ async fn test_node_restart_preserves_id() {
     inferadb_ledger_server::cluster_id::write_cluster_id(&data_dir, 1).expect("write cluster_id");
 
     let config = Config {
-        unix_socket: Some(socket_path.clone()),
+        socket: Some(socket_path.clone()),
         metrics_addr: None,
         data_dir: Some(data_dir.clone()),
         ..Config::default()
@@ -135,7 +135,7 @@ async fn test_node_restart_preserves_id() {
         let socket_path2 = socket_dir.path().join("restart-test-2.sock");
 
         let config2 = Config {
-            unix_socket: Some(socket_path2.clone()),
+            socket: Some(socket_path2.clone()),
             metrics_addr: None,
             data_dir: Some(data_dir.clone()),
             ..Config::default()
@@ -239,7 +239,7 @@ async fn test_three_node_cluster_uses_coordinated_bootstrap() {
 #[tokio::test]
 async fn test_late_joiner_finds_existing_cluster() {
     // This test uses discover_node_info which requires a TCP SocketAddr,
-    // so we keep TCP (no unix_socket) for this specific test.
+    // so we keep TCP (no socket) for this specific test.
     let leader_dir = TestDir::new();
     let leader_data_dir = leader_dir.path().to_path_buf();
     // Bind TCP on port 0 to get an ephemeral port
@@ -255,7 +255,7 @@ async fn test_late_joiner_finds_existing_cluster() {
         .expect("write cluster_id");
 
     let leader_config = Config {
-        listen_addr: leader_addr,
+        listen: Some(leader_addr),
         metrics_addr: None,
         data_dir: Some(leader_data_dir.clone()),
         ..Config::default()
@@ -330,7 +330,7 @@ async fn test_fresh_node_waits_for_init() {
     // No cluster_id written — node enters "fresh" path and blocks waiting
     // for InitCluster RPC. The gRPC server is running during this wait.
     let config = Config {
-        unix_socket: Some(socket_path),
+        socket: Some(socket_path),
         metrics_addr: None,
         data_dir: Some(data_dir.clone()),
         ..Config::default()

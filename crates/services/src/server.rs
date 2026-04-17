@@ -83,8 +83,12 @@ pub struct LedgerServer {
     /// Idempotency cache for duplicate detection.
     #[builder(default = Arc::new(IdempotencyCache::new()))]
     idempotency: Arc<IdempotencyCache>,
-    /// Server bind address.
-    addr: SocketAddr,
+    /// Server bind address (TCP).
+    ///
+    /// When `None`, no TCP listener is created. At least one of `addr` or
+    /// `socket` must be set.
+    #[builder(default)]
+    addr: Option<SocketAddr>,
     /// Address other nodes should use to reach this node.
     ///
     /// Falls back to `addr` when not set. Used in `GetNodeInfo` and
@@ -211,13 +215,13 @@ pub struct LedgerServer {
     #[builder(default)]
     peer_liveness:
         Option<Arc<parking_lot::RwLock<std::collections::HashMap<u64, std::time::Instant>>>>,
-    /// Path to a Unix domain socket for local gRPC connections.
+    /// Path to a Unix domain socket for gRPC connections.
     ///
-    /// When set, the server listens on the Unix socket instead of a TCP address.
-    /// The stale socket file (if any) is removed before binding, and cleaned up
-    /// on graceful shutdown.
+    /// When set without `addr`, the server listens on the Unix socket only.
+    /// When both `addr` and `socket` are set, the server binds both TCP and
+    /// UDS simultaneously.
     #[builder(default)]
-    unix_socket: Option<std::path::PathBuf>,
+    socket: Option<std::path::PathBuf>,
 }
 
 impl LedgerServer {
@@ -242,6 +246,7 @@ impl LedgerServer {
     ///
     /// Returns an error if the server fails to bind to the configured address
     /// or encounters a transport-level error during operation.
+    #[allow(clippy::disallowed_methods)] // tokio::try_join! macro internally uses .unwrap()
     pub async fn serve(self) -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!(
             max_concurrent = self.max_concurrent,
@@ -314,9 +319,11 @@ impl LedgerServer {
             .applied_state(system.applied_state().clone())
             .block_archive(Some(system.block_archive().clone()))
             .advertise_addr(self.advertise_addr.clone().unwrap_or_else(|| {
-                self.unix_socket
+                self.socket
                     .as_ref()
-                    .map_or_else(|| self.addr.to_string(), |p| p.to_string_lossy().into_owned())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .or_else(|| self.addr.map(|a| a.to_string()))
+                    .unwrap_or_default()
             }))
             .proposal_timeout(self.proposal_timeout)
             .peer_addresses(self.peer_addresses.clone())
@@ -459,7 +466,9 @@ impl LedgerServer {
             raft_service
         };
 
-        tracing::info!("Starting Ledger gRPC server on {}", self.addr);
+        if let Some(addr) = self.addr {
+            tracing::info!("Starting Ledger gRPC server on {}", addr);
+        }
 
         let mut router = Server::builder()
             // HTTP/2 and TCP keepalive for long-lived connections
@@ -566,42 +575,91 @@ impl LedgerServer {
             )
         });
 
-        // Bind to either a Unix domain socket or a TCP address.
-        if let Some(ref path) = self.unix_socket {
-            // Remove stale socket file from a previous run.
+        // Bind listeners. Supports TCP, UDS, or both simultaneously.
+        let uds_incoming = if let Some(ref path) = self.socket {
             let _ = std::fs::remove_file(path);
-
             let uds = tokio::net::UnixListener::bind(path).map_err(|e| {
                 Box::new(std::io::Error::other(format!(
                     "failed to bind Unix socket {}: {e}",
                     path.display()
                 ))) as Box<dyn std::error::Error>
             })?;
-            let incoming = tokio_stream::wrappers::UnixListenerStream::new(uds);
-
             tracing::info!(path = %path.display(), "gRPC server listening on Unix socket");
+            Some(tokio_stream::wrappers::UnixListenerStream::new(uds))
+        } else {
+            None
+        };
 
-            if let Some(mut shutdown_rx) = self.shutdown_rx {
-                let path = path.clone();
+        match (self.addr, uds_incoming, self.shutdown_rx) {
+            // TCP + UDS (dual-listen) with shutdown.
+            (Some(addr), Some(incoming), Some(mut shutdown_rx)) => {
+                tracing::info!(%addr, "gRPC server listening on TCP + Unix socket");
+                let tcp_router = router.clone();
+                let (relay_tx, mut tcp_rx) = tokio::sync::watch::channel(false);
+                let mut uds_rx = tcp_rx.clone();
+                tokio::spawn(async move {
+                    let _ = shutdown_rx.wait_for(|v| *v).await;
+                    let _ = relay_tx.send(true);
+                });
+                let tcp_task = tokio::spawn(async move {
+                    tcp_router
+                        .serve_with_shutdown(addr, async move {
+                            let _ = tcp_rx.wait_for(|v| *v).await;
+                        })
+                        .await
+                });
+                let uds_task = tokio::spawn(async move {
+                    router
+                        .serve_with_incoming_shutdown(incoming, async move {
+                            let _ = uds_rx.wait_for(|v| *v).await;
+                        })
+                        .await
+                });
+                let _ = tokio::try_join!(tcp_task, uds_task);
+            },
+            // UDS only with shutdown.
+            (None, Some(incoming), Some(mut shutdown_rx)) => {
                 router
                     .serve_with_incoming_shutdown(incoming, async move {
                         let _ = shutdown_rx.wait_for(|v| *v).await;
-                        tracing::info!("Shutdown signal received, stopping gRPC server");
                     })
                     .await?;
-                let _ = std::fs::remove_file(&path);
-            } else {
+            },
+            // UDS only without shutdown.
+            (None, Some(incoming), None) => {
                 router.serve_with_incoming(incoming).await?;
-            }
-        } else if let Some(mut shutdown_rx) = self.shutdown_rx {
-            router
-                .serve_with_shutdown(self.addr, async move {
-                    let _ = shutdown_rx.wait_for(|v| *v).await;
-                    tracing::info!("Shutdown signal received, stopping gRPC server");
-                })
-                .await?;
-        } else {
-            router.serve(self.addr).await?;
+            },
+            // TCP only with shutdown.
+            (Some(addr), None, Some(mut shutdown_rx)) => {
+                router
+                    .serve_with_shutdown(addr, async move {
+                        let _ = shutdown_rx.wait_for(|v| *v).await;
+                    })
+                    .await?;
+            },
+            // TCP + UDS without shutdown.
+            (Some(addr), Some(incoming), None) => {
+                let tcp_router = router.clone();
+                let tcp_task = tokio::spawn(async move { tcp_router.serve(addr).await });
+                let uds_task =
+                    tokio::spawn(async move { router.serve_with_incoming(incoming).await });
+                let _ = tokio::try_join!(tcp_task, uds_task);
+            },
+            // TCP only without shutdown.
+            (Some(addr), None, None) => {
+                router.serve(addr).await?;
+            },
+            // No listener — shouldn't happen but handle gracefully.
+            (None, None, _) => {
+                return Err(Box::new(std::io::Error::other(
+                    "no listener configured: set --listen and/or --socket",
+                )));
+            },
+        }
+
+        // Clean up socket file on graceful exit.
+        if let Some(ref path) = self.socket {
+            let _ = std::fs::remove_file(path);
         }
 
         Ok(())

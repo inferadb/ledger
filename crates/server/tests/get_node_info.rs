@@ -124,26 +124,19 @@ async fn test_get_node_info_term_matches_raft_metrics() {
 /// Verifies that the discovery helper function correctly queries a node
 /// via the GetNodeInfo RPC and returns a DiscoveredNode.
 ///
-/// NOTE: Requires TCP transport — `discover_node_info` takes `SocketAddr`.
-/// TestCluster uses UDS, so this test is skipped. Covered by
-/// `test_late_joiner_finds_existing_cluster` in bootstrap_coordination.rs
-/// which bootstraps its own TCP node.
+/// Uses TCP transport since `discover_node_info` requires `SocketAddr`.
 #[tokio::test]
-#[ignore = "discover_node_info requires TCP SocketAddr; TestCluster uses UDS"]
 async fn test_discover_node_info_against_running_node() {
-    let cluster = TestCluster::new(1).await;
+    let cluster = TestCluster::with_tcp(1).await;
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
 
-    // Use discover_node_info to query the node — requires TCP SocketAddr
     let tcp_addr: std::net::SocketAddr = leader.addr.parse().expect("parse addr as SocketAddr");
     let discovered = discover_node_info(tcp_addr, Duration::from_secs(5)).await;
 
-    // Should successfully discover the node
     let node = discovered.expect("should discover node");
 
-    // Verify the discovered node info
     assert_eq!(node.node_id, leader.id, "node_id should match");
     assert_eq!(node.addr.to_string(), leader.addr, "addr should match");
     assert!(node.is_cluster_member, "should be cluster member after bootstrap");

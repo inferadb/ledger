@@ -37,7 +37,7 @@
 **Start a node:**
 
 ```bash
-inferadb-ledger start --data /var/lib/ledger --listen 0.0.0.0:9090
+inferadb-ledger --listen 0.0.0.0:9090 --data /var/lib/ledger
 ```
 
 **Bootstrap the cluster (once, from any machine):**
@@ -49,9 +49,9 @@ inferadb-ledger init --host node1:9090
 **Add more nodes:**
 
 ```bash
-inferadb-ledger start \
-  --data /var/lib/ledger \
+inferadb-ledger \
   --listen 0.0.0.0:9090 \
+  --data /var/lib/ledger \
   --join node1:9090
 ```
 
@@ -60,7 +60,8 @@ Nodes discover each other via `--join` seed addresses. The cluster manages membe
 **Data residency (regulated regions):**
 
 ```bash
-inferadb-ledger start \
+inferadb-ledger \
+  --listen 0.0.0.0:9090 \
   --data /var/lib/ledger \
   --join node1:9090 \
   --region ie-east-dublin
@@ -73,12 +74,13 @@ See the [deployment guide](docs/operations/deployment.md) for multi-node setup, 
 | CLI           | Purpose                                                                                                  | Default         |
 | ------------- | -------------------------------------------------------------------------------------------------------- | --------------- |
 | `--data`      | Persistent [storage](docs/internals/storage.md#directory-layout) (WAL, state, snapshots)                 | _(ephemeral)_   |
-| `--listen`    | Bind address for gRPC API                                                                                | `0.0.0.0:9090`  |
-| `--join`      | Seed addresses for [discovery](docs/operations/deployment.md#discovery-options) (comma-separated)        | _(none)_        |
-| `--region`    | Regulated data residency [regions](docs/operations/deployment.md) this node serves (comma-separated)     | _(none)_        |
+| `--listen`    | TCP address for gRPC API                                                                                 | _(none)_        |
+| `--socket`    | Unix domain socket path for gRPC API                                                                     | _(none)_        |
+| `--join`      | Seed addresses for [cluster discovery](docs/operations/deployment.md#adding-a-node) (comma-separated)    | _(none)_        |
+| `--region`    | Geographic data residency [region](docs/operations/deployment.md)                                        | `global`        |
 | `--advertise` | Address advertised to peers ([details](docs/operations/deployment.md#advertise-address))                 | _(auto-detect)_ |
 
-On restart, only `--data` is required. All other flags are persisted on first boot and ignored on subsequent starts.
+At least one of `--listen` or `--socket` must be specified. On restart, only `--data` is required. All other flags are persisted on first boot and ignored on subsequent starts.
 
 See [Configuration Reference](docs/operations/deployment.md#configuration-reference) for environment variables and all options including metrics, batching, and tuning.
 

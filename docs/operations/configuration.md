@@ -4,37 +4,42 @@ Complete reference for Ledger configuration via environment variables and CLI ar
 
 ## Quick Reference
 
-| Variable                             | CLI               | Default           | Description                            |
-| ------------------------------------ | ----------------- | ----------------- | -------------------------------------- |
-| `INFERADB__LEDGER__LISTEN`           | `--listen`        | `127.0.0.1:50051` | gRPC listen address                    |
-| `INFERADB__LEDGER__METRICS`          | `--metrics`       | (disabled)        | Prometheus metrics address             |
-| `INFERADB__LEDGER__DATA`             | `--data`          | (ephemeral)       | Data directory                         |
-| `INFERADB__LEDGER__CLUSTER`          | `--cluster`       | `3`               | Cluster size for coordinated bootstrap |
-| `INFERADB__LEDGER__PEERS`            | `--peers`         | (none)            | Peer discovery (DNS or file)           |
-| `INFERADB__LEDGER__PEERS_TTL`        | `--peers-ttl`     | `3600`            | Peer cache TTL (seconds)               |
-| `INFERADB__LEDGER__PEERS_TIMEOUT`    | `--peers-timeout` | `60`              | Peer discovery timeout (seconds)       |
-| `INFERADB__LEDGER__PEERS_POLL`       | `--peers-poll`    | `2`               | Peer discovery poll interval (seconds) |
-| `INFERADB__LEDGER__MAX_CONCURRENT`   | `--concurrent`    | `100`             | Max concurrent requests                |
-| `INFERADB__LEDGER__TIMEOUT`          | `--timeout`       | `30`              | Request timeout (seconds)              |
-| `INFERADB__LEDGER__LOG_FORMAT`       | -                 | `auto`            | Log format (text/json/auto)            |
-| `INFERADB__LEDGER__LOGGING__ENABLED` | -                 | `true`            | Enable request logging                 |
+| Variable                             | CLI                        | Default       | Description                                     |
+| ------------------------------------ | -------------------------- | ------------- | ----------------------------------------------- |
+| `INFERADB__LEDGER__LISTEN`           | `--listen`                 | _(none)_      | TCP address for gRPC API                        |
+| `INFERADB__LEDGER__SOCKET`           | `--socket`                 | _(none)_      | Unix domain socket path for gRPC API            |
+| `INFERADB__LEDGER__METRICS`          | `--metrics`                | _(disabled)_  | Prometheus metrics address                      |
+| `INFERADB__LEDGER__DATA`             | `--data`                   | _(ephemeral)_ | Data directory                                  |
+| `INFERADB__LEDGER__JOIN`             | `--join`                   | _(none)_      | Comma-separated seed addresses for discovery    |
+| `INFERADB__LEDGER__REGION`           | `--region`                 | `global`      | Geographic data residency region                |
+| `INFERADB__LEDGER__ADVERTISE`        | `--advertise`              | _(auto)_      | Address advertised to peers                     |
+| `INFERADB__LEDGER__MAX_CONCURRENT`   | `--concurrent`             | `100`         | Max concurrent requests                         |
+| `INFERADB__LEDGER__TIMEOUT`          | `--timeout`                | `30`          | Request timeout (seconds)                       |
+| —                                    | `--log-format`             | `auto`        | Log format (`text`/`json`/`auto`)               |
+| `INFERADB__LEDGER__LOGGING__ENABLED` | —                          | `true`        | Enable request logging                          |
 
-CLI arguments take precedence over environment variables.
+At least one of `--listen` or `--socket` must be specified. CLI arguments take precedence over environment variables.
 
 ## Network Configuration
 
-### Listen Address
+### Listen Address (TCP)
 
 ```bash
-# Localhost only (default, secure for development)
-INFERADB__LEDGER__LISTEN=127.0.0.1:50051
-
 # Accept all interfaces (required for containers/remote access)
-INFERADB__LEDGER__LISTEN=0.0.0.0:50051
+INFERADB__LEDGER__LISTEN=0.0.0.0:9090
 
 # Specific interface (WireGuard)
-INFERADB__LEDGER__LISTEN=10.0.0.1:50051
+INFERADB__LEDGER__LISTEN=10.0.0.1:9090
 ```
+
+### Unix Domain Socket
+
+```bash
+# Local-only access without TCP overhead
+INFERADB__LEDGER__SOCKET=/var/run/ledger.sock
+```
+
+Both `--listen` and `--socket` can be used simultaneously. At least one must be specified.
 
 ### Metrics Endpoint
 
@@ -45,107 +50,40 @@ INFERADB__LEDGER__METRICS=0.0.0.0:9090
 
 Disabled by default. Enable for production monitoring.
 
-## Bootstrap Modes
+## Cluster Bootstrap
 
-Ledger supports three bootstrap modes, controlled via CLI flags:
+Ledger uses a `start`+`init` pattern. Nodes start their gRPC servers and wait for initialization.
 
-| Flag          | Env Value   | Description                           |
-| ------------- | ----------- | ------------------------------------- |
-| `--single`    | `CLUSTER=1` | Single-node cluster (no coordination) |
-| `--join`      | `CLUSTER=0` | Wait to be added via AdminService     |
-| `--cluster N` | `CLUSTER=N` | Coordinated N-node bootstrap          |
-
-### Single-Node Mode
+### Single-Node
 
 ```bash
-# CLI
-inferadb-ledger --single --data /data
+# Start the node
+inferadb-ledger --listen 127.0.0.1:9090 --data /data
 
-# Environment
-INFERADB__LEDGER__CLUSTER=1 inferadb-ledger
+# Initialize the cluster (once)
+inferadb-ledger init --host 127.0.0.1:9090
 ```
 
-Use for development, testing, or single-node deployments.
-
-### Join Mode
+### Multi-Node
 
 ```bash
-# CLI
-inferadb-ledger --join --data /data --peers ledger.internal
+# Start the first node
+inferadb-ledger --listen 0.0.0.0:9090 --data /data
 
-# Environment
-INFERADB__LEDGER__CLUSTER=0 \
-INFERADB__LEDGER__PEERS=ledger.internal \
-inferadb-ledger
+# Start additional nodes with seed addresses
+inferadb-ledger --listen 0.0.0.0:9090 --data /data --join node1:9090
+
+# Initialize the cluster (once, from any machine)
+inferadb-ledger init --host node1:9090
 ```
 
-Node waits to be added via `AdminService/JoinCluster`. Use when adding nodes to an existing cluster.
-
-### Coordinated Bootstrap
+### Adding Nodes to an Existing Cluster
 
 ```bash
-# CLI (3-node cluster)
-inferadb-ledger --cluster 3 --data /data --peers ledger.internal
-
-# Environment
-INFERADB__LEDGER__CLUSTER=3 \
-INFERADB__LEDGER__PEERS=ledger.internal \
-inferadb-ledger
+inferadb-ledger --listen 0.0.0.0:9090 --data /data --join node1:9090,node2:9090
 ```
 
-Nodes discover each other, exchange IDs, and the lowest-ID node bootstraps the cluster. Default mode.
-
-## Peer Discovery
-
-### DNS-Based (Recommended)
-
-```bash
-# Kubernetes headless service
-INFERADB__LEDGER__PEERS=ledger.default.svc.cluster.local
-
-# Custom DNS domain
-INFERADB__LEDGER__PEERS=ledger.internal.example.com
-```
-
-Resolves A records to find peer IP addresses.
-
-### File-Based
-
-```bash
-# Absolute path
-INFERADB__LEDGER__PEERS=/var/lib/ledger/peers.json
-
-# Relative path
-INFERADB__LEDGER__PEERS=./peers.json
-```
-
-JSON format:
-
-```json
-{
-  "cached_at": 0,
-  "peers": [
-    { "addr": "10.0.0.1:50051" },
-    { "addr": "10.0.0.2:50051" },
-    { "addr": "10.0.0.3:50051" }
-  ]
-}
-```
-
-Detection: Values containing `/` or `\` or ending with `.json` are treated as file paths.
-
-### Discovery Parameters
-
-```bash
-# Cache peer list for 1 hour
-INFERADB__LEDGER__PEERS_TTL=3600
-
-# Wait up to 2 minutes for all peers during bootstrap
-INFERADB__LEDGER__PEERS_TIMEOUT=120
-
-# Poll for new peers every 5 seconds
-INFERADB__LEDGER__PEERS_POLL=5
-```
+The `--join` flag accepts a comma-separated list of seed addresses. The new node connects to the seeds, discovers the cluster, and joins as a learner.
 
 ## Storage
 
@@ -298,17 +236,18 @@ services:
   ledger:
     image: inferadb/ledger:latest
     environment:
-      INFERADB__LEDGER__LISTEN: "0.0.0.0:50051"
-      INFERADB__LEDGER__METRICS: "0.0.0.0:9090"
+      INFERADB__LEDGER__LISTEN: "0.0.0.0:9090"
+      INFERADB__LEDGER__METRICS: "0.0.0.0:9091"
       INFERADB__LEDGER__DATA: "/data"
-      INFERADB__LEDGER__CLUSTER: "3"
-      INFERADB__LEDGER__PEERS: "ledger.internal"
+      INFERADB__LEDGER__JOIN: "ledger-1:9090,ledger-2:9090"
     volumes:
       - ledger-data:/data
     ports:
-      - "50051:50051"
       - "9090:9090"
+      - "9091:9091"
 ```
+
+After all containers start, run `inferadb-ledger init --host ledger-1:9090` once.
 
 ### Kubernetes ConfigMap
 
@@ -318,27 +257,26 @@ kind: ConfigMap
 metadata:
   name: ledger-config
 data:
-  INFERADB__LEDGER__LISTEN: "0.0.0.0:50051"
-  INFERADB__LEDGER__METRICS: "0.0.0.0:9090"
+  INFERADB__LEDGER__LISTEN: "0.0.0.0:9090"
+  INFERADB__LEDGER__METRICS: "0.0.0.0:9091"
   INFERADB__LEDGER__DATA: "/data"
-  INFERADB__LEDGER__CLUSTER: "3"
-  INFERADB__LEDGER__PEERS: "ledger-headless.default.svc.cluster.local"
+  INFERADB__LEDGER__JOIN: "ledger-headless.default.svc.cluster.local"
 ```
 
 ### CLI with All Options
 
 ```bash
 inferadb-ledger \
-  --listen 0.0.0.0:50051 \
-  --metrics 0.0.0.0:9090 \
+  --listen 0.0.0.0:9090 \
+  --socket /var/run/ledger.sock \
+  --metrics 0.0.0.0:9091 \
   --data /var/lib/ledger \
-  --cluster 3 \
-  --peers ledger.internal \
-  --peers-ttl 3600 \
-  --peers-timeout 120 \
-  --peers-poll 5 \
+  --join node1:9090,node2:9090 \
+  --region us-east-va \
+  --advertise node3:9090 \
   --concurrent 100 \
-  --timeout 30
+  --timeout 30 \
+  --enable-grpc-reflection
 ```
 
 ## Storage Configuration
@@ -370,13 +308,13 @@ Controls how expired client sequence entries are purged from the replicated stat
 ```bash
 grpcurl -plaintext -d '{
   "config_json": "{\"compaction\":{\"target_fill_ratio\":0.85}}"
-}' localhost:50051 ledger.v1.AdminService/UpdateConfig
+}' localhost:9090 ledger.v1.AdminService/UpdateConfig
 ```
 
 Use `GetConfig` to inspect current runtime configuration:
 
 ```bash
-grpcurl -plaintext localhost:50051 ledger.v1.AdminService/GetConfig
+grpcurl -plaintext localhost:9090 ledger.v1.AdminService/GetConfig
 ```
 
 ## JWT Configuration
@@ -431,5 +369,5 @@ These fields are updatable at runtime via the `UpdateConfig` RPC without restart
 ```bash
 grpcurl -plaintext -d '{
   "config_json": "{\"events\":{\"default_ttl_days\":30,\"ingest_rate_limit_per_source\":5000}}"
-}' localhost:50051 ledger.v1.AdminService/UpdateConfig
+}' localhost:9090 ledger.v1.AdminService/UpdateConfig
 ```
