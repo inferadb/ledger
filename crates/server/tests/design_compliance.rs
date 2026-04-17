@@ -15,6 +15,7 @@
 use std::time::Duration;
 
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use serial_test::serial;
 
 use crate::{
     common,
@@ -27,7 +28,7 @@ use crate::{
 
 /// Creates an organization and returns its slug.
 async fn create_organization(
-    addr: std::net::SocketAddr,
+    addr: &str,
     name: &str,
     node: &TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
@@ -37,7 +38,7 @@ async fn create_organization(
 
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
     crate::common::create_test_vault(addr, organization).await
@@ -57,13 +58,13 @@ async fn test_idempotency_key_reuse_detection() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization = create_organization(leader.addr, "idem-reuse-ns", leader)
+    let organization = create_organization(&leader.addr, "idem-reuse-ns", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
     let mut write_client =
-        common::create_write_client(leader.addr).await.expect("connect to leader");
+        common::create_write_client(&leader.addr).await.expect("connect to leader");
 
     let shared_key = uuid::Uuid::new_v4().as_bytes().to_vec();
 
@@ -145,13 +146,13 @@ async fn test_distinct_idempotency_keys_both_succeed() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization = create_organization(leader.addr, "same-vault-ns", leader)
+    let organization = create_organization(&leader.addr, "same-vault-ns", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
     let mut write_client =
-        common::create_write_client(leader.addr).await.expect("connect to leader");
+        common::create_write_client(&leader.addr).await.expect("connect to leader");
 
     // First write
     let request1 = inferadb_ledger_proto::proto::WriteRequest {
@@ -222,14 +223,14 @@ async fn test_two_vault_server_assigned_sequences() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and two vaults
-    let organization = create_organization(leader.addr, "two-vault-seq-ns", leader)
+    let organization = create_organization(&leader.addr, "two-vault-seq-ns", leader)
         .await
         .expect("create organization");
-    let vault1 = create_vault(leader.addr, organization).await.expect("create vault 1");
-    let vault2 = create_vault(leader.addr, organization).await.expect("create vault 2");
+    let vault1 = create_vault(&leader.addr, organization).await.expect("create vault 1");
+    let vault2 = create_vault(&leader.addr, organization).await.expect("create vault 2");
 
     let mut write_client =
-        common::create_write_client(leader.addr).await.expect("connect to leader");
+        common::create_write_client(&leader.addr).await.expect("connect to leader");
 
     let client_id = "two-vault-test".to_string();
 
@@ -359,14 +360,14 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and two vaults
-    let organization = create_organization(leader.addr, "vault-isolation-ns", leader)
+    let organization = create_organization(&leader.addr, "vault-isolation-ns", leader)
         .await
         .expect("create organization");
-    let vault1 = create_vault(leader.addr, organization).await.expect("create vault 1");
-    let vault2 = create_vault(leader.addr, organization).await.expect("create vault 2");
+    let vault1 = create_vault(&leader.addr, organization).await.expect("create vault 1");
+    let vault2 = create_vault(&leader.addr, organization).await.expect("create vault 2");
 
     let mut write_client =
-        common::create_write_client(leader.addr).await.expect("connect to leader");
+        common::create_write_client(&leader.addr).await.expect("connect to leader");
 
     // Write to vault 1
     let request1 = inferadb_ledger_proto::proto::WriteRequest {
@@ -439,7 +440,7 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
 
     // Simulate vault 1 divergence using the admin API
     let mut admin_client =
-        common::create_admin_client(leader.addr).await.expect("connect to admin service");
+        common::create_admin_client(&leader.addr).await.expect("connect to admin service");
 
     let divergence_request = inferadb_ledger_proto::proto::SimulateDivergenceRequest {
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
@@ -466,7 +467,7 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
 
     // Verify vault 1 is now UNAVAILABLE (diverged vaults report as unavailable)
     let mut health_client =
-        create_health_client(leader.addr).await.expect("connect to health service");
+        create_health_client(&leader.addr).await.expect("connect to health service");
 
     let vault1_health = health_client
         .check(inferadb_ledger_proto::proto::HealthCheckRequest {
@@ -540,6 +541,7 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
 /// When a vault's computed state root doesn't match the expected root,
 /// the vault should be marked as diverged and return UNAVAILABLE.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn test_diverged_vault_returns_unavailable() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;
@@ -547,13 +549,13 @@ async fn test_diverged_vault_returns_unavailable() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization = create_organization(leader.addr, "divergence-ns", leader)
+    let organization = create_organization(&leader.addr, "divergence-ns", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
     let mut write_client =
-        common::create_write_client(leader.addr).await.expect("connect to leader");
+        common::create_write_client(&leader.addr).await.expect("connect to leader");
 
     // Write some data to establish a vault
     let request = inferadb_ledger_proto::proto::WriteRequest {
@@ -587,7 +589,7 @@ async fn test_diverged_vault_returns_unavailable() {
 
     // Simulate vault divergence using the admin API
     let mut admin_client =
-        common::create_admin_client(leader.addr).await.expect("connect to admin service");
+        common::create_admin_client(&leader.addr).await.expect("connect to admin service");
 
     let divergence_request = inferadb_ledger_proto::proto::SimulateDivergenceRequest {
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
@@ -614,7 +616,7 @@ async fn test_diverged_vault_returns_unavailable() {
 
     // Verify health check returns UNAVAILABLE (diverged vaults report as unavailable)
     let mut health_client =
-        create_health_client(leader.addr).await.expect("connect to health service");
+        create_health_client(&leader.addr).await.expect("connect to health service");
 
     let health_response = health_client
         .check(inferadb_ledger_proto::proto::HealthCheckRequest {
@@ -633,7 +635,7 @@ async fn test_diverged_vault_returns_unavailable() {
     );
 
     // Attempt to read from the diverged vault - should return UNAVAILABLE
-    let mut read_client = create_read_client(leader.addr).await.expect("connect to read service");
+    let mut read_client = create_read_client(&leader.addr).await.expect("connect to read service");
 
     let read_request = inferadb_ledger_proto::proto::ReadRequest {
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
@@ -673,6 +675,7 @@ async fn test_diverged_vault_returns_unavailable() {
 /// When a follower applies log entries, it must verify that its computed
 /// state root matches the state root included in the log entry from the leader.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn test_follower_state_root_verification() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;
@@ -680,15 +683,15 @@ async fn test_follower_state_root_verification() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization = create_organization(leader.addr, "state-root-ns", leader)
+    let organization = create_organization(&leader.addr, "state-root-ns", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
     // Wait for org/vault creation to replicate
     cluster.wait_for_sync(Duration::from_secs(2)).await;
 
-    let mut client = common::create_write_client(leader.addr).await.expect("connect to leader");
+    let mut client = common::create_write_client(&leader.addr).await.expect("connect to leader");
 
     // Submit a write that will replicate to followers
     let request = inferadb_ledger_proto::proto::WriteRequest {
@@ -723,7 +726,7 @@ async fn test_follower_state_root_verification() {
     // If state roots didn't match, the vault would be marked as Diverged
     for node in cluster.nodes() {
         let mut health_client =
-            create_health_client(node.addr).await.expect("connect to node for health check");
+            create_health_client(&node.addr).await.expect("connect to node for health check");
 
         let health_req = inferadb_ledger_proto::proto::HealthCheckRequest {
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
@@ -759,12 +762,13 @@ async fn test_follower_state_root_verification() {
 /// The idempotency cache is stored in the replicated applied state, so the new
 /// leader should still detect duplicate idempotency keys.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn test_idempotency_survives_leader_failover() {
     let cluster = TestCluster::new(3).await;
     let original_leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
-    let leader_addr = leader.addr;
+    let leader_addr = &leader.addr;
 
     // Create organization and vault before writing
     let organization = create_organization(leader_addr, "failover-test-ns", leader)
@@ -871,7 +875,7 @@ async fn test_idempotency_survives_leader_failover() {
     // Now have the NEW leader remove the old node from the cluster.
     let new_leader_node = cluster.node(new_leader_id).expect("new leader should exist");
     let mut new_admin_client =
-        common::create_admin_client(new_leader_node.addr).await.expect("connect to new leader");
+        common::create_admin_client(&new_leader_node.addr).await.expect("connect to new leader");
 
     let leave_response = new_admin_client
         .leave_cluster(inferadb_ledger_proto::proto::LeaveClusterRequest {
@@ -904,7 +908,7 @@ async fn test_idempotency_survives_leader_failover() {
                 if let Some(rg) = node.region_group(data_region)
                     && rg.handle().current_leader() == Some(node.id)
                 {
-                    return node.addr;
+                    return node.addr.clone();
                 }
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -913,7 +917,7 @@ async fn test_idempotency_survives_leader_failover() {
     .await
     .expect("a remaining node should lead the data region after failover");
 
-    let mut new_write_client = common::create_write_client(regional_leader_addr)
+    let mut new_write_client = common::create_write_client(&regional_leader_addr)
         .await
         .expect("connect to new REGIONAL leader");
 

@@ -519,6 +519,7 @@ pub async fn bootstrap_node(
     let server = LedgerServer::builder()
         .manager(manager.clone())
         .addr(config.listen_addr)
+        .unix_socket(config.unix_socket.clone())
         .advertise_addr(config.advertise.clone())
         .max_concurrent(config.max_concurrent)
         .timeout_secs(config.timeout_secs)
@@ -565,8 +566,12 @@ pub async fn bootstrap_node(
         }
     });
 
-    // Wait for TCP listener to bind before proceeding.
-    wait_for_tcp_ready(&server_handle, server_addr).await?;
+    // Wait for the listener to bind before proceeding.
+    if let Some(ref path) = config.unix_socket {
+        wait_for_uds_ready(&server_handle, path).await?;
+    } else {
+        wait_for_tcp_ready(&server_handle, server_addr).await?;
+    }
 
     if cluster_id.is_some() {
         // === Restart path ===
@@ -895,6 +900,44 @@ async fn wait_for_tcp_ready(
         return Err(BootstrapError::Server {
             message: format!(
                 "server did not accept TCP connections on {server_addr} within {}s",
+                timeout.as_secs()
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Waits for the gRPC server to accept Unix domain socket connections.
+///
+/// Same structure as [`wait_for_tcp_ready`] but connects via
+/// `tokio::net::UnixStream` instead of `TcpStream`.
+async fn wait_for_uds_ready(
+    server_handle: &tokio::task::JoinHandle<Result<(), String>>,
+    socket_path: &std::path::Path,
+) -> Result<(), BootstrapError> {
+    let start = Instant::now();
+    let timeout = Duration::from_secs(30);
+    let mut ready = false;
+    while start.elapsed() < timeout {
+        if server_handle.is_finished() {
+            return Err(BootstrapError::Server {
+                message: format!(
+                    "server exited before accepting connections on {}",
+                    socket_path.display()
+                ),
+            });
+        }
+        if tokio::net::UnixStream::connect(socket_path).await.is_ok() {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    if !ready {
+        return Err(BootstrapError::Server {
+            message: format!(
+                "server did not accept Unix socket connections on {} within {}s",
+                socket_path.display(),
                 timeout.as_secs()
             ),
         });

@@ -35,7 +35,7 @@ use crate::common::{
 
 /// Creates an organization and returns its slug and admin user slug.
 async fn create_organization(
-    addr: std::net::SocketAddr,
+    addr: &str,
     name: &str,
     node: &TestNode,
 ) -> Result<(OrganizationSlug, u64), Box<dyn std::error::Error>> {
@@ -44,7 +44,7 @@ async fn create_organization(
 
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
     crate::common::create_test_vault(addr, organization).await
@@ -54,7 +54,7 @@ async fn create_vault(
 ///
 /// The saga orchestrator auto-creates signing keys on its poll cycle (default 30s),
 /// but integration tests call this explicitly to avoid waiting.
-async fn ensure_signing_key(addr: std::net::SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+async fn ensure_signing_key(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = create_token_client(addr).await?;
     let result = client
         .create_signing_key(proto::CreateSigningKeyRequest {
@@ -76,10 +76,7 @@ async fn ensure_signing_key(addr: std::net::SocketAddr) -> Result<(), Box<dyn st
 /// After `CreateSigningKey` the key must propagate through Raft and be loaded
 /// into the JwtEngine's in-memory cache before tokens can be signed. This polls
 /// `CreateUserSession` until it succeeds or times out.
-async fn wait_for_signing_key_ready(
-    addr: std::net::SocketAddr,
-    user: UserSlug,
-) -> proto::TokenPair {
+async fn wait_for_signing_key_ready(addr: &str, user: UserSlug) -> proto::TokenPair {
     let start = tokio::time::Instant::now();
     let timeout = Duration::from_secs(10);
     loop {
@@ -142,7 +139,7 @@ async fn validate_token(
 /// Used by auto-bootstrap tests where the saga orchestrator creates signing keys
 /// asynchronously. Panics if no keys appear within the timeout.
 async fn poll_for_public_keys(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: Option<proto::OrganizationSlug>,
     timeout: Duration,
     context: &str,
@@ -180,7 +177,7 @@ async fn poll_for_public_keys(
 async fn test_user_session_lifecycle() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
     let user_slug = setup_user(addr, "Test User", "user42@test.com", node).await;
     let user = UserSlug::new(user_slug);
 
@@ -242,7 +239,7 @@ async fn test_user_session_lifecycle() {
 async fn test_vault_token_lifecycle() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     // Set up org + vault + app (enabled)
     let (org, admin_slug) =
@@ -300,7 +297,7 @@ async fn test_vault_token_lifecycle() {
 async fn test_revoke_all_user_sessions() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
     let user_slug = setup_user(addr, "Test User", "user99@test.com", node).await;
     let user = UserSlug::new(user_slug);
 
@@ -391,7 +388,7 @@ async fn test_revoke_all_user_sessions() {
 async fn test_org_deletion_cascades_token_revocation() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     // Set up org + vault + app (enabled) + vault token
     let (org, admin_slug) =
@@ -452,7 +449,7 @@ async fn test_org_deletion_cascades_token_revocation() {
 async fn test_refresh_token_theft_detection() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
     let user_slug = setup_user(addr, "Test User", "user300@test.com", node).await;
     let user = UserSlug::new(user_slug);
 
@@ -513,7 +510,7 @@ async fn test_refresh_token_theft_detection() {
 async fn test_concurrent_refresh_and_revoke_all() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
     let user_slug = setup_user(addr, "Test User", "user400@test.com", node).await;
     let user = UserSlug::new(user_slug);
 
@@ -526,18 +523,19 @@ async fn test_concurrent_refresh_and_revoke_all() {
     // Fire both operations concurrently.
     // Raft serializes them — one commits first. We test the invariant
     // that after revoke-all, the refresh token cannot be used.
-    let addr_clone = addr;
+    let addr_for_refresh = addr.to_string();
     let refresh_token_clone = refresh_token.clone();
 
     let refresh_handle = tokio::spawn(async move {
-        let mut client = create_token_client(addr_clone).await.expect("connect");
+        let mut client = create_token_client(&addr_for_refresh).await.expect("connect");
         client
             .refresh_token(proto::RefreshTokenRequest { refresh_token: refresh_token_clone })
             .await
     });
 
+    let addr_for_revoke = addr.to_string();
     let revoke_handle = tokio::spawn(async move {
-        let mut client = create_token_client(addr).await.expect("connect");
+        let mut client = create_token_client(&addr_for_revoke).await.expect("connect");
         client
             .revoke_all_user_sessions(proto::RevokeAllUserSessionsRequest {
                 user: Some(proto::UserSlug { slug: user.value() }),
@@ -578,7 +576,7 @@ async fn test_concurrent_refresh_and_revoke_all() {
             let new_tokens = response.into_inner().tokens.expect("should have tokens");
 
             // The new refresh token should be unusable (family was revoked by revoke-all)
-            let mut client = create_token_client(addr_clone).await.expect("connect");
+            let mut client = create_token_client(addr).await.expect("connect");
             let post_revoke_refresh = client
                 .refresh_token(proto::RefreshTokenRequest {
                     refresh_token: new_tokens.refresh_token.clone(),
@@ -610,7 +608,7 @@ async fn test_concurrent_refresh_and_revoke_all() {
 async fn test_concurrent_refresh_same_token() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
     let user_slug = setup_user(addr, "Test User", "user500@test.com", node).await;
     let user = UserSlug::new(user_slug);
 
@@ -624,13 +622,15 @@ async fn test_concurrent_refresh_same_token() {
     let refresh_1 = refresh_token.clone();
     let refresh_2 = refresh_token.clone();
 
+    let addr_1 = addr.to_string();
     let handle_1 = tokio::spawn(async move {
-        let mut client = create_token_client(addr).await.expect("connect");
+        let mut client = create_token_client(&addr_1).await.expect("connect");
         client.refresh_token(proto::RefreshTokenRequest { refresh_token: refresh_1 }).await
     });
 
+    let addr_2 = addr.to_string();
     let handle_2 = tokio::spawn(async move {
-        let mut client = create_token_client(addr).await.expect("connect");
+        let mut client = create_token_client(&addr_2).await.expect("connect");
         client.refresh_token(proto::RefreshTokenRequest { refresh_token: refresh_2 }).await
     });
 
@@ -679,7 +679,7 @@ async fn test_concurrent_refresh_same_token() {
 
 /// Creates an app within an organization and returns its slug.
 async fn create_app(
-    addr: std::net::SocketAddr,
+    addr: &str,
     org: OrganizationSlug,
     name: &str,
     caller: u64,
@@ -706,7 +706,7 @@ async fn create_app(
 
 /// Connects an app to a vault with given scopes.
 async fn add_app_vault(
-    addr: std::net::SocketAddr,
+    addr: &str,
     org: OrganizationSlug,
     app: AppSlug,
     vault: VaultSlug,
@@ -728,7 +728,7 @@ async fn add_app_vault(
 
 /// Updates allowed scopes on an app-vault connection.
 async fn update_app_vault_scopes(
-    addr: std::net::SocketAddr,
+    addr: &str,
     org: OrganizationSlug,
     app: AppSlug,
     vault: VaultSlug,
@@ -750,7 +750,7 @@ async fn update_app_vault_scopes(
 
 /// Removes an app-vault connection.
 async fn remove_app_vault(
-    addr: std::net::SocketAddr,
+    addr: &str,
     org: OrganizationSlug,
     app: AppSlug,
     vault: VaultSlug,
@@ -770,7 +770,7 @@ async fn remove_app_vault(
 
 /// Sets an app's enabled/disabled status.
 async fn set_app_enabled(
-    addr: std::net::SocketAddr,
+    addr: &str,
     org: OrganizationSlug,
     app: AppSlug,
     enabled: bool,
@@ -790,7 +790,7 @@ async fn set_app_enabled(
 
 /// Bootstraps an org-scoped signing key via the TokenService RPC.
 async fn ensure_org_signing_key(
-    addr: std::net::SocketAddr,
+    addr: &str,
     org: OrganizationSlug,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = create_token_client(addr).await?;
@@ -808,7 +808,7 @@ async fn ensure_org_signing_key(
 ///
 /// Returns the token pair on success.
 async fn wait_for_vault_token(
-    addr: std::net::SocketAddr,
+    addr: &str,
     org: OrganizationSlug,
     app: AppSlug,
     vault: VaultSlug,
@@ -852,7 +852,7 @@ async fn wait_for_vault_token(
 async fn test_vault_token_scope_validation() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     let (org, admin_slug) =
         create_organization(addr, "scope-validation", node).await.expect("create org");
@@ -903,7 +903,7 @@ async fn test_vault_token_scope_validation() {
 async fn test_scope_reduction_on_vault_refresh() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     let (org, admin_slug) =
         create_organization(addr, "scope-reduce", node).await.expect("create org");
@@ -962,7 +962,7 @@ async fn test_scope_reduction_on_vault_refresh() {
 async fn test_scope_expansion_on_vault_refresh() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     let (org, admin_slug) =
         create_organization(addr, "scope-expand", node).await.expect("create org");
@@ -1019,7 +1019,7 @@ async fn test_scope_expansion_on_vault_refresh() {
 async fn test_connection_removal_on_vault_refresh() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     let (org, admin_slug) =
         create_organization(addr, "conn-remove", node).await.expect("create org");
@@ -1060,7 +1060,7 @@ async fn test_connection_removal_on_vault_refresh() {
 async fn test_app_disabled_rejects_vault_refresh() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     let (org, admin_slug) =
         create_organization(addr, "app-disable-refresh", node).await.expect("create org");
@@ -1100,7 +1100,7 @@ async fn test_app_disabled_rejects_vault_refresh() {
 async fn test_app_disabled_blocks_creation_and_revokes_tokens() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     let (org, admin_slug) =
         create_organization(addr, "app-disable-create", node).await.expect("create org");
@@ -1158,7 +1158,7 @@ async fn test_app_disabled_blocks_creation_and_revokes_tokens() {
 async fn test_connection_removed_blocks_creation_and_revokes_tokens() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     let (org, admin_slug) =
         create_organization(addr, "conn-remove-create", node).await.expect("create org");
@@ -1225,7 +1225,7 @@ async fn test_connection_removed_blocks_creation_and_revokes_tokens() {
 async fn test_signing_key_rotation_during_active_sessions() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
     let user_slug = setup_user(addr, "Test User", "user600@test.com", node).await;
     let user = UserSlug::new(user_slug);
 
@@ -1310,7 +1310,7 @@ async fn test_signing_key_rotation_during_active_sessions() {
 async fn test_signing_key_revocation_immediately_invalidates() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
     let user_slug = setup_user(addr, "Test User", "user601@test.com", node).await;
     let user = UserSlug::new(user_slug);
 
@@ -1371,7 +1371,7 @@ async fn test_signing_key_revocation_immediately_invalidates() {
 async fn test_signing_key_rotation_grace_zero() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
     let user_slug = setup_user(addr, "Test User", "user602@test.com", node).await;
     let user = UserSlug::new(user_slug);
 
@@ -1437,7 +1437,7 @@ async fn test_signing_key_rotation_grace_zero() {
 async fn test_auto_bootstrap_global_signing_key() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     // Do NOT call ensure_signing_key — let the saga orchestrator auto-create it.
     // TestCluster uses saga poll_interval_secs=2, so the key should appear within ~5s.
@@ -1461,7 +1461,7 @@ async fn test_auto_bootstrap_global_signing_key() {
 async fn test_auto_bootstrap_org_signing_key() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     // Create an organization — this triggers a CreateSigningKeySaga for the org scope
     let (org, _admin_slug) =
@@ -1489,7 +1489,7 @@ async fn test_auto_bootstrap_org_signing_key() {
 async fn test_create_signing_key_idempotency() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     // Create a global signing key
     let mut client = create_token_client(addr).await.expect("connect");
@@ -1551,7 +1551,7 @@ async fn test_create_signing_key_idempotency() {
 async fn test_global_key_not_found_returns_error() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
     let user_slug = setup_user(addr, "Test User", "user700@test.com", node).await;
     let user = UserSlug::new(user_slug);
 
@@ -1616,7 +1616,7 @@ async fn test_global_key_not_found_returns_error() {
 async fn test_state_machine_timestamps_use_proposed_at() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     // Create a global signing key
     let mut client = create_token_client(addr).await.expect("connect");
@@ -1710,7 +1710,7 @@ async fn test_poisoned_family_persists_across_replication() {
     // Wait for leader election and cluster stabilization
     let leader_id = cluster.wait_for_leader().await;
     let leader = cluster.node(leader_id).expect("leader node");
-    let addr = leader.addr;
+    let addr = &leader.addr;
 
     ensure_signing_key(addr).await.expect("create signing key");
     let user_slug = setup_user(addr, "Test User", "user950@test.com", leader).await;
@@ -1759,10 +1759,10 @@ async fn test_poisoned_family_persists_across_replication() {
     // ValidateToken reads local applied state (not forwarded to leader).
     let followers = cluster.followers();
     assert!(!followers.is_empty(), "should have follower nodes");
-    let follower_addr = followers[0].addr;
+    let follower_addr = followers[0].addr.clone();
 
     let mut follower_client =
-        create_token_client(follower_addr).await.expect("connect to follower");
+        create_token_client(&follower_addr).await.expect("connect to follower");
 
     // The access token should still validate on the follower (it's a JWT
     // verified locally — token validity is independent of refresh token state).
@@ -1790,7 +1790,7 @@ async fn test_poisoned_family_persists_across_replication() {
 async fn test_token_maintenance_transitions_rotated_keys() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     // Create and rotate a signing key with a short grace period
     let mut client = create_token_client(addr).await.expect("connect");
@@ -1868,7 +1868,7 @@ async fn test_token_maintenance_transitions_rotated_keys() {
 async fn test_token_maintenance_idempotency() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     // Create and rotate a signing key with a short grace period
     let mut client = create_token_client(addr).await.expect("connect");
@@ -1974,7 +1974,7 @@ async fn test_rate_limiting_on_create_vault_token() {
         .expect("valid rate limit config");
     let cluster = TestCluster::with_rate_limit(1, rate_limit).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     // Step 1: Create organization with admin user
     let (org, admin_slug) =

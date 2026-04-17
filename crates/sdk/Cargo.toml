@@ -22,6 +22,7 @@ tokio-util = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
 tower = { workspace = true }
+hyper-util = { workspace = true }
 
 # Serialization
 serde = { workspace = true }

@@ -11,6 +11,7 @@
 use std::time::Duration;
 
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use serial_test::serial;
 
 use crate::common::{TestCluster, create_read_client, create_write_client};
 
@@ -20,7 +21,7 @@ use crate::common::{TestCluster, create_read_client, create_write_client};
 
 /// Creates an organization and returns its slug.
 async fn create_organization(
-    addr: std::net::SocketAddr,
+    addr: &str,
     name: &str,
     node: &crate::common::TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
@@ -30,7 +31,7 @@ async fn create_organization(
 
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
     crate::common::create_test_vault(addr, organization).await
@@ -38,7 +39,7 @@ async fn create_vault(
 
 /// Writes an entity to a specific organization.
 async fn write_entity(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
@@ -81,7 +82,7 @@ async fn write_entity(
 
 /// Reads an entity from an organization.
 async fn read_entity(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
@@ -126,6 +127,7 @@ async fn test_orphan_cleanup_job_starts() {
 
 /// Tests that orphan cleanup only runs on leader.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn test_orphan_cleanup_leader_only() {
     let cluster = TestCluster::new(3).await;
     let leader_id = cluster.wait_for_leader().await;
@@ -152,10 +154,10 @@ async fn test_deleted_user_detection() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault for test data
-    let ns_id = create_organization(leader.addr, "deleted-user-ns", leader)
+    let ns_id = create_organization(&leader.addr, "deleted-user-ns", leader)
         .await
         .expect("create organization");
-    let vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
+    let vault_id = create_vault(&leader.addr, ns_id).await.expect("create vault");
 
     // Create a user with deleted_at timestamp
     let deleted_user_id = 1001i64;
@@ -168,7 +170,7 @@ async fn test_deleted_user_detection() {
     });
 
     write_entity(
-        leader.addr,
+        &leader.addr,
         ns_id,
         vault_id,
         &deleted_user_key,
@@ -189,7 +191,7 @@ async fn test_deleted_user_detection() {
     });
 
     write_entity(
-        leader.addr,
+        &leader.addr,
         ns_id,
         vault_id,
         &deleted_status_user_key,
@@ -209,12 +211,19 @@ async fn test_deleted_user_detection() {
         "status": "ACTIVE",
     });
 
-    write_entity(leader.addr, ns_id, vault_id, &active_user_key, &active_user_value, "orphan-test")
-        .await
-        .expect("create active user");
+    write_entity(
+        &leader.addr,
+        ns_id,
+        vault_id,
+        &active_user_key,
+        &active_user_value,
+        "orphan-test",
+    )
+    .await
+    .expect("create active user");
 
     // Verify all users were written
-    let deleted_bytes = read_entity(leader.addr, ns_id, vault_id, &deleted_user_key)
+    let deleted_bytes = read_entity(&leader.addr, ns_id, vault_id, &deleted_user_key)
         .await
         .expect("read deleted user")
         .expect("deleted user should exist");
@@ -222,7 +231,7 @@ async fn test_deleted_user_detection() {
     let deleted_user: serde_json::Value = serde_json::from_slice(&deleted_bytes).unwrap();
     assert!(deleted_user.get("deleted_at").is_some(), "User should have deleted_at");
 
-    let status_bytes = read_entity(leader.addr, ns_id, vault_id, &deleted_status_user_key)
+    let status_bytes = read_entity(&leader.addr, ns_id, vault_id, &deleted_status_user_key)
         .await
         .expect("read status-deleted user")
         .expect("status-deleted user should exist");
@@ -230,7 +239,7 @@ async fn test_deleted_user_detection() {
     let status_user: serde_json::Value = serde_json::from_slice(&status_bytes).unwrap();
     assert_eq!(status_user.get("status").and_then(|s| s.as_str()), Some("DELETED"));
 
-    let active_bytes = read_entity(leader.addr, ns_id, vault_id, &active_user_key)
+    let active_bytes = read_entity(&leader.addr, ns_id, vault_id, &active_user_key)
         .await
         .expect("read active user")
         .expect("active user should exist");
@@ -248,10 +257,10 @@ async fn test_membership_data_format() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create an organization and vault
-    let ns_id = create_organization(leader.addr, "membership-test-ns", leader)
+    let ns_id = create_organization(&leader.addr, "membership-test-ns", leader)
         .await
         .expect("create organization");
-    let vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
+    let vault_id = create_vault(&leader.addr, ns_id).await.expect("create vault");
 
     // Create a membership record
     let user_id = 2001i64;
@@ -262,12 +271,12 @@ async fn test_membership_data_format() {
         "created_at": "2024-01-01T00:00:00Z",
     });
 
-    write_entity(leader.addr, ns_id, vault_id, &member_key, &member_value, "membership-test")
+    write_entity(&leader.addr, ns_id, vault_id, &member_key, &member_value, "membership-test")
         .await
         .expect("create membership");
 
     // Verify membership was written
-    let member_bytes = read_entity(leader.addr, ns_id, vault_id, &member_key)
+    let member_bytes = read_entity(&leader.addr, ns_id, vault_id, &member_key)
         .await
         .expect("read membership")
         .expect("membership should exist");
@@ -287,10 +296,10 @@ async fn test_orphan_cleanup_skips_active_records() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let ns_id = create_organization(leader.addr, "skip-active-ns", leader)
+    let ns_id = create_organization(&leader.addr, "skip-active-ns", leader)
         .await
         .expect("create organization");
-    let vault_id = create_vault(leader.addr, ns_id).await.expect("create vault");
+    let vault_id = create_vault(&leader.addr, ns_id).await.expect("create vault");
 
     // Write a "member" record that should not be cleaned up
     let member_key = "member:9999";
@@ -300,7 +309,7 @@ async fn test_orphan_cleanup_skips_active_records() {
         "note": "This active member should not be cleaned",
     });
 
-    write_entity(leader.addr, ns_id, vault_id, member_key, &member_value, "skip-active-test")
+    write_entity(&leader.addr, ns_id, vault_id, member_key, &member_value, "skip-active-test")
         .await
         .expect("create member");
 
@@ -308,7 +317,7 @@ async fn test_orphan_cleanup_skips_active_records() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // The member should still exist (not orphaned)
-    let member_bytes = read_entity(leader.addr, ns_id, vault_id, member_key)
+    let member_bytes = read_entity(&leader.addr, ns_id, vault_id, member_key)
         .await
         .expect("read member")
         .expect("active member should still exist");
@@ -326,7 +335,7 @@ async fn test_orphan_cleanup_handles_empty_organization() {
 
     // Create an organization with no memberships
     let _ns_id =
-        create_organization(leader.addr, "empty-ns", leader).await.expect("create organization");
+        create_organization(&leader.addr, "empty-ns", leader).await.expect("create organization");
 
     // Give cleanup time to run
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -337,6 +346,7 @@ async fn test_orphan_cleanup_handles_empty_organization() {
 
 /// Tests concurrent background jobs don't interfere.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn test_orphan_cleanup_with_concurrent_jobs() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;
@@ -345,7 +355,7 @@ async fn test_orphan_cleanup_with_concurrent_jobs() {
     // Create some state to exercise all background jobs.
     // Use the saga-aware helper that waits for Active status to avoid
     // "Organization with slug not found" races on multi-node clusters.
-    let organization = create_organization(leader.addr, "concurrent-jobs-test", leader)
+    let organization = create_organization(&leader.addr, "concurrent-jobs-test", leader)
         .await
         .expect("create organization");
 
@@ -356,7 +366,7 @@ async fn test_orphan_cleanup_with_concurrent_jobs() {
     );
 
     // Create vault
-    let _vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let _vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
     // Wait for vault creation to propagate, then let background jobs run
     // at least one cycle (OrphanCleanup, TtlGC, SagaOrchestrator, AutoRecovery, LearnerRefresh).

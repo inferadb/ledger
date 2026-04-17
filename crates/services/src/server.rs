@@ -211,6 +211,13 @@ pub struct LedgerServer {
     #[builder(default)]
     peer_liveness:
         Option<Arc<parking_lot::RwLock<std::collections::HashMap<u64, std::time::Instant>>>>,
+    /// Path to a Unix domain socket for local gRPC connections.
+    ///
+    /// When set, the server listens on the Unix socket instead of a TCP address.
+    /// The stale socket file (if any) is removed before binding, and cleaned up
+    /// on graceful shutdown.
+    #[builder(default)]
+    unix_socket: Option<std::path::PathBuf>,
 }
 
 impl LedgerServer {
@@ -306,7 +313,11 @@ impl LedgerServer {
             .state(system.state().clone())
             .applied_state(system.applied_state().clone())
             .block_archive(Some(system.block_archive().clone()))
-            .advertise_addr(self.advertise_addr.as_deref().unwrap_or(&self.addr.to_string()))
+            .advertise_addr(self.advertise_addr.clone().unwrap_or_else(|| {
+                self.unix_socket
+                    .as_ref()
+                    .map_or_else(|| self.addr.to_string(), |p| p.to_string_lossy().into_owned())
+            }))
             .proposal_timeout(self.proposal_timeout)
             .peer_addresses(self.peer_addresses.clone())
             .build()
@@ -555,7 +566,34 @@ impl LedgerServer {
             )
         });
 
-        if let Some(mut shutdown_rx) = self.shutdown_rx {
+        // Bind to either a Unix domain socket or a TCP address.
+        if let Some(ref path) = self.unix_socket {
+            // Remove stale socket file from a previous run.
+            let _ = std::fs::remove_file(path);
+
+            let uds = tokio::net::UnixListener::bind(path).map_err(|e| {
+                Box::new(std::io::Error::other(format!(
+                    "failed to bind Unix socket {}: {e}",
+                    path.display()
+                ))) as Box<dyn std::error::Error>
+            })?;
+            let incoming = tokio_stream::wrappers::UnixListenerStream::new(uds);
+
+            tracing::info!(path = %path.display(), "gRPC server listening on Unix socket");
+
+            if let Some(mut shutdown_rx) = self.shutdown_rx {
+                let path = path.clone();
+                router
+                    .serve_with_incoming_shutdown(incoming, async move {
+                        let _ = shutdown_rx.wait_for(|v| *v).await;
+                        tracing::info!("Shutdown signal received, stopping gRPC server");
+                    })
+                    .await?;
+                let _ = std::fs::remove_file(&path);
+            } else {
+                router.serve_with_incoming(incoming).await?;
+            }
+        } else if let Some(mut shutdown_rx) = self.shutdown_rx {
             router
                 .serve_with_shutdown(self.addr, async move {
                     let _ = shutdown_rx.wait_for(|v| *v).await;

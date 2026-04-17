@@ -11,6 +11,7 @@
 use std::time::Duration;
 
 use inferadb_ledger_types::{OrganizationId, OrganizationSlug, UserId, VaultSlug};
+use serial_test::serial;
 
 use crate::common::{TestCluster, create_read_client, create_write_client};
 
@@ -20,7 +21,7 @@ use crate::common::{TestCluster, create_read_client, create_write_client};
 
 /// Creates an organization and returns its slug.
 async fn create_organization(
-    addr: std::net::SocketAddr,
+    addr: &str,
     name: &str,
     node: &crate::common::TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
@@ -30,7 +31,7 @@ async fn create_organization(
 
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
     crate::common::create_test_vault(addr, organization).await
@@ -38,7 +39,7 @@ async fn create_vault(
 
 /// Writes an entity to an organization.
 async fn write_entity(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
@@ -81,7 +82,7 @@ async fn write_entity(
 
 /// Reads an entity from an organization.
 async fn read_entity(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
@@ -126,6 +127,7 @@ async fn test_saga_orchestrator_starts() {
 
 /// Tests that saga orchestrator only runs on leader.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn test_saga_orchestrator_leader_only() {
     let cluster = TestCluster::new(3).await;
     let leader_id = cluster.wait_for_leader().await;
@@ -152,10 +154,10 @@ async fn test_delete_user_saga_state_transitions() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization = create_organization(leader.addr, "delete-user-saga-ns", leader)
+    let organization = create_organization(&leader.addr, "delete-user-saga-ns", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
     // First, create a user entity
     let user_id = 12345i64;
@@ -167,7 +169,7 @@ async fn test_delete_user_saga_state_transitions() {
         "status": "ACTIVE",
     });
 
-    write_entity(leader.addr, organization, vault, &user_key, &user_value, "delete-test-client")
+    write_entity(&leader.addr, organization, vault, &user_key, &user_value, "delete-test-client")
         .await
         .expect("create user");
 
@@ -186,14 +188,14 @@ async fn test_delete_user_saga_state_transitions() {
     let saga_key = format!("saga-test:{}", saga_id);
     let saga_value = serde_json::to_value(&wrapped).unwrap();
 
-    write_entity(leader.addr, organization, vault, &saga_key, &saga_value, "delete-test-client")
+    write_entity(&leader.addr, organization, vault, &saga_key, &saga_value, "delete-test-client")
         .await
         .expect("write delete saga");
 
     // The saga entity is committed through Raft when write_entity returns.
 
     // Read saga and verify it round-trips correctly
-    let saga_bytes = read_entity(leader.addr, organization, vault, &saga_key)
+    let saga_bytes = read_entity(&leader.addr, organization, vault, &saga_key)
         .await
         .expect("read saga")
         .expect("saga should exist");
@@ -223,10 +225,10 @@ async fn test_completed_saga_not_reexecuted() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization = create_organization(leader.addr, "completed-saga-ns", leader)
+    let organization = create_organization(&leader.addr, "completed-saga-ns", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
     // Create a saga that's already completed
     let saga_id = "test-completed-saga".to_string();
@@ -250,15 +252,22 @@ async fn test_completed_saga_not_reexecuted() {
     let saga_key = format!("saga-test:{}", saga_id);
     let saga_value = serde_json::to_value(&wrapped).unwrap();
 
-    write_entity(leader.addr, organization, vault, &saga_key, &saga_value, "completed-test-client")
-        .await
-        .expect("write completed saga");
+    write_entity(
+        &leader.addr,
+        organization,
+        vault,
+        &saga_key,
+        &saga_value,
+        "completed-test-client",
+    )
+    .await
+    .expect("write completed saga");
 
     // Give orchestrator time to cycle and potentially (incorrectly) re-execute
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Read saga back - it should still be in Completed state (not re-processed)
-    let saga_bytes = read_entity(leader.addr, organization, vault, &saga_key)
+    let saga_bytes = read_entity(&leader.addr, organization, vault, &saga_key)
         .await
         .expect("read saga")
         .expect("saga exists");
@@ -290,10 +299,10 @@ async fn test_saga_serialization_roundtrip() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization = create_organization(leader.addr, "roundtrip-saga-ns", leader)
+    let organization = create_organization(&leader.addr, "roundtrip-saga-ns", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
     // Create saga with various field values
     let saga_id = "test-roundtrip-saga".to_string();
@@ -311,12 +320,12 @@ async fn test_saga_serialization_roundtrip() {
     let saga_key = format!("saga-test:{}", saga_id);
     let saga_value = serde_json::to_value(&wrapped).unwrap();
 
-    write_entity(leader.addr, organization, vault, &saga_key, &saga_value, "roundtrip-client")
+    write_entity(&leader.addr, organization, vault, &saga_key, &saga_value, "roundtrip-client")
         .await
         .expect("write saga");
 
     // Read back
-    let saga_bytes = read_entity(leader.addr, organization, vault, &saga_key)
+    let saga_bytes = read_entity(&leader.addr, organization, vault, &saga_key)
         .await
         .expect("read saga")
         .expect("saga exists");

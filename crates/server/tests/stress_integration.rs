@@ -31,7 +31,7 @@ use crate::common::{TestCluster, create_read_client, create_write_client};
 
 /// Creates an organization and returns its slug.
 async fn create_organization(
-    addr: std::net::SocketAddr,
+    addr: &str,
     name: &str,
     node: &crate::common::TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
@@ -41,7 +41,7 @@ async fn create_organization(
 
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
     crate::common::create_test_vault(addr, organization).await
@@ -49,7 +49,7 @@ async fn create_vault(
 
 /// Writes an entity and returns the assigned sequence number.
 async fn write_entity(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
@@ -86,7 +86,7 @@ async fn write_entity(
 
 /// Reads an entity and returns its value (if it exists).
 async fn read_entity(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
@@ -147,15 +147,15 @@ async fn test_2000_unique_client_ids_no_page_full() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let organization = create_organization(leader.addr, "pagefull-2000-ns", leader)
+    let organization = create_organization(&leader.addr, "pagefull-2000-ns", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
     for i in 0..2000 {
         let client_id = format!("client-{:05}", i);
         write_entity(
-            leader.addr,
+            &leader.addr,
             organization,
             vault,
             &format!("key-{}", i),
@@ -167,10 +167,10 @@ async fn test_2000_unique_client_ids_no_page_full() {
     }
 
     // Spot-check first and last entries.
-    let first = read_entity(leader.addr, organization, vault, "key-0").await;
+    let first = read_entity(&leader.addr, organization, vault, "key-0").await;
     assert_eq!(first, Some(b"value-0".to_vec()));
 
-    let last = read_entity(leader.addr, organization, vault, "key-1999").await;
+    let last = read_entity(&leader.addr, organization, vault, "key-1999").await;
     assert_eq!(last, Some(b"value-1999".to_vec()));
 }
 
@@ -190,13 +190,13 @@ async fn test_snapshot_20_orgs_5_vaults_round_trip() {
     // Create 20 organizations, each with 5 vaults.
     let mut organizations = Vec::with_capacity(20);
     for i in 0..20 {
-        let organization = create_organization(leader.addr, &format!("snap-org-{}", i), leader)
+        let organization = create_organization(&leader.addr, &format!("snap-org-{}", i), leader)
             .await
             .expect("create organization");
         organizations.push(organization);
 
         for _v in 0..5 {
-            create_vault(leader.addr, organization).await.expect("create vault");
+            create_vault(&leader.addr, organization).await.expect("create vault");
         }
     }
 
@@ -209,8 +209,8 @@ async fn test_snapshot_20_orgs_5_vaults_round_trip() {
     let follower = cluster.followers().into_iter().next().expect("should have follower");
     let last_org = *organizations.last().unwrap();
 
-    let last_vault = create_vault(leader.addr, last_org).await.expect("create extra vault");
-    write_entity(leader.addr, last_org, last_vault, "snap-verify", b"snap-value", "snap-client")
+    let last_vault = create_vault(&leader.addr, last_org).await.expect("create extra vault");
+    write_entity(&leader.addr, last_org, last_vault, "snap-verify", b"snap-value", "snap-client")
         .await
         .expect("write to last org");
 
@@ -218,7 +218,7 @@ async fn test_snapshot_20_orgs_5_vaults_round_trip() {
     let synced = cluster.wait_for_sync(Duration::from_secs(10)).await;
     assert!(synced, "cluster should sync after verify write");
 
-    let value = read_entity(follower.addr, last_org, last_vault, "snap-verify").await;
+    let value = read_entity(&follower.addr, last_org, last_vault, "snap-verify").await;
     assert_eq!(
         value,
         Some(b"snap-value".to_vec()),
@@ -242,15 +242,15 @@ async fn test_bulk_writes_replicated_state_roots_match() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let organization = create_organization(leader.addr, "bulk-writes-ns", leader)
+    let organization = create_organization(&leader.addr, "bulk-writes-ns", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
     // Write 1,000 entities using a single client ID (to focus on entity storage,
     // not client sequence scaling).
     let entity_count = 1_000;
-    let mut write_client = create_write_client(leader.addr).await.expect("connect");
+    let mut write_client = create_write_client(&leader.addr).await.expect("connect");
     for i in 0..entity_count {
         let response = write_client
             .write(proto::WriteRequest {
@@ -295,12 +295,12 @@ async fn test_bulk_writes_replicated_state_roots_match() {
 
     // Spot-check entities on a follower.
     let follower = cluster.followers().into_iter().next().expect("follower");
-    let first = read_entity(follower.addr, organization, vault, "entity-00000").await;
+    let first = read_entity(&follower.addr, organization, vault, "entity-00000").await;
     assert_eq!(first, Some(b"data-0".to_vec()));
 
     let last_key = format!("entity-{:05}", entity_count - 1);
     let last_value = format!("data-{}", entity_count - 1).into_bytes();
-    let last = read_entity(follower.addr, organization, vault, &last_key).await;
+    let last = read_entity(&follower.addr, organization, vault, &last_key).await;
     assert_eq!(last, Some(last_value));
 }
 
@@ -317,19 +317,19 @@ async fn test_snapshot_during_active_apply_loop() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let organization = create_organization(leader.addr, "concurrent-snap-ns", leader)
+    let organization = create_organization(&leader.addr, "concurrent-snap-ns", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
     // Spawn a background writer that continuously writes entities.
-    let writer_addr = leader.addr;
+    let writer_addr = leader.addr.clone();
     let writer_org = organization;
     let writer_vault = vault;
     let writer_handle = tokio::spawn(async move {
         for i in 0..500 {
             let _ = write_entity(
-                writer_addr,
+                &writer_addr,
                 writer_org,
                 writer_vault,
                 &format!("concurrent-key-{}", i),
@@ -353,7 +353,7 @@ async fn test_snapshot_during_active_apply_loop() {
 
     // Verify data is readable on followers (state is consistent).
     let follower = cluster.followers().into_iter().next().expect("follower");
-    let value = read_entity(follower.addr, organization, vault, "concurrent-key-0").await;
+    let value = read_entity(&follower.addr, organization, vault, "concurrent-key-0").await;
     assert_eq!(
         value,
         Some(b"concurrent-value-0".to_vec()),
@@ -384,17 +384,17 @@ async fn test_snapshot_determinism_all_nodes_identical_state() {
     // multiple table sections in the snapshot.
     let mut org_vault_pairs = Vec::new();
     for i in 0..3 {
-        let organization = create_organization(leader.addr, &format!("determ-org-{i}"), leader)
+        let organization = create_organization(&leader.addr, &format!("determ-org-{i}"), leader)
             .await
             .expect("create organization");
         for j in 0..2 {
-            let vault = create_vault(leader.addr, organization).await.expect("create vault");
+            let vault = create_vault(&leader.addr, organization).await.expect("create vault");
             org_vault_pairs.push((organization, vault, i, j));
         }
     }
 
     // Write 50 entities per vault (300 total) with varied data.
-    let mut write_client = create_write_client(leader.addr).await.expect("connect");
+    let mut write_client = create_write_client(&leader.addr).await.expect("connect");
     for (organization, vault, org_idx, vault_idx) in &org_vault_pairs {
         for k in 0..50 {
             let key = format!("det-{org_idx}-{vault_idx}-{k:03}");
@@ -447,14 +447,14 @@ async fn test_snapshot_determinism_all_nodes_identical_state() {
     // Verify every entity is byte-identical on ALL nodes (leader + followers).
     // This proves deterministic snapshot creation: if the snapshot were
     // non-deterministic, followers would have different state.
-    let all_addrs: Vec<_> = cluster.nodes().iter().map(|n| (n.id, n.addr)).collect();
+    let all_addrs: Vec<_> = cluster.nodes().iter().map(|n| (n.id, &n.addr)).collect();
     for (organization, vault, org_idx, vault_idx) in &org_vault_pairs {
         for k in 0..50 {
             let key = format!("det-{org_idx}-{vault_idx}-{k:03}");
             let expected = format!("value-org{org_idx}-vault{vault_idx}-entity{k}").into_bytes();
 
             for (node_id, addr) in &all_addrs {
-                let actual = read_entity(*addr, *organization, *vault, &key).await;
+                let actual = read_entity(addr, *organization, *vault, &key).await;
                 assert_eq!(
                     actual,
                     Some(expected.clone()),
@@ -481,10 +481,10 @@ async fn test_batch_writes_replicated_to_all_nodes() {
 
     // Create organization and vault
     let organization =
-        create_organization(leader.addr, "batch-ns", leader).await.expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+        create_organization(&leader.addr, "batch-ns", leader).await.expect("create organization");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
-    let mut client = create_write_client(leader.addr).await.expect("connect to leader");
+    let mut client = create_write_client(&leader.addr).await.expect("connect to leader");
 
     let client_id = format!("batch-test-{}", leader_id);
 
@@ -508,7 +508,7 @@ async fn test_batch_writes_replicated_to_all_nodes() {
         for i in 0..num_keys {
             let key = format!("batch-key-{:04}", i);
             let expected = format!("batch-value-{:04}", i);
-            let value = read_entity(node.addr, organization, vault, &key).await;
+            let value = read_entity(&node.addr, organization, vault, &key).await;
             if value == Some(expected.into_bytes()) {
                 found += 1;
             }

@@ -17,7 +17,6 @@
 )]
 
 use std::{
-    net::SocketAddr,
     sync::{
         Arc,
         atomic::{AtomicU16, Ordering},
@@ -25,13 +24,32 @@ use std::{
     time::Duration,
 };
 
-/// Monotonically increasing port counter — guarantees each test gets unique
-/// ports even when tests run in parallel (no `#[serial]` required).
-static NEXT_PORT: AtomicU16 = AtomicU16::new(30_000);
+/// Monotonically increasing cluster counter — guarantees each test gets unique
+/// socket paths even when tests run in parallel (no `#[serial]` required).
+static CLUSTER_COUNTER: AtomicU16 = AtomicU16::new(0);
 
-/// Allocates `count` contiguous ports from the global counter.
-pub fn allocate_ports(count: u16) -> u16 {
-    NEXT_PORT.fetch_add(count, Ordering::Relaxed)
+fn next_cluster_id() -> u16 {
+    CLUSTER_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Creates a gRPC channel — UDS for paths starting with `/`, TCP otherwise.
+pub fn connect_channel(addr: &str) -> tonic::transport::Channel {
+    if addr.starts_with('/') {
+        let path = std::path::PathBuf::from(addr);
+        tonic::transport::Endpoint::try_from("http://[::]:50051")
+            .unwrap()
+            .connect_with_connector_lazy(tower::service_fn(move |_: tonic::transport::Uri| {
+                let path = path.clone();
+                async move {
+                    Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(
+                        tokio::net::UnixStream::connect(&path).await?,
+                    ))
+                }
+            }))
+    } else {
+        let endpoint = format!("http://{}", addr);
+        tonic::transport::Channel::from_shared(endpoint).unwrap().connect_lazy()
+    }
 }
 
 use inferadb_ledger_proto::proto::{JoinClusterRequest, admin_service_client::AdminServiceClient};
@@ -48,8 +66,8 @@ use tokio::time::timeout;
 pub struct TestNode {
     /// The node ID.
     pub id: u64,
-    /// The gRPC address.
-    pub addr: SocketAddr,
+    /// The gRPC address (UDS socket path or TCP "ip:port").
+    pub addr: String,
     /// The GLOBAL consensus handle.
     pub handle: Arc<ConsensusHandle>,
     /// The GLOBAL state layer (internally thread-safe via inferadb-ledger-store MVCC).
@@ -145,6 +163,8 @@ pub struct TestCluster {
     nodes: Vec<TestNode>,
     /// Number of data regions (at least 1).
     num_data_regions: usize,
+    /// Keeps socket files alive for cluster lifetime.
+    _socket_dir: TestDir,
 }
 
 impl TestCluster {
@@ -197,7 +217,8 @@ impl TestCluster {
         assert!(size >= 1, "cluster must have at least 1 node");
         assert!(num_data_regions >= 1, "cluster must have at least 1 data region");
 
-        let base_port = allocate_ports(size as u16);
+        let socket_dir = TestDir::new();
+        let cluster_id = next_cluster_id();
         let mut nodes = Vec::with_capacity(size);
 
         // Shared key manager for all nodes (enables TokenService with JWT support).
@@ -208,7 +229,7 @@ impl TestCluster {
         // Step 1: Start the bootstrap node with cluster_id pre-written so it
         // takes the restart path (immediate startup). It becomes leader, then
         // we dynamically add nodes.
-        let addr: SocketAddr = format!("127.0.0.1:{base_port}").parse().unwrap();
+        let socket_path = socket_dir.path().join(format!("c{cluster_id}-n0.sock"));
         let temp_dir = TestDir::new();
         let data_dir = temp_dir.path().to_path_buf();
 
@@ -225,7 +246,7 @@ impl TestCluster {
             .expect("valid backup config");
 
         let config = inferadb_ledger_server::config::Config {
-            listen_addr: addr,
+            unix_socket: Some(socket_path.clone()),
             metrics_addr: None,
             data_dir: Some(data_dir.clone()),
             backup: Some(backup_config),
@@ -275,10 +296,10 @@ impl TestCluster {
         });
 
         let leader_handle = handle_clone.clone();
-        let leader_addr = addr;
+        let leader_addr = socket_path.to_string_lossy().to_string();
         nodes.push(TestNode {
             id: node_id,
-            addr,
+            addr: socket_path.to_string_lossy().to_string(),
             handle: handle_clone,
             state: state_clone,
             manager: manager_clone.clone(),
@@ -309,7 +330,7 @@ impl TestCluster {
         for &data_region in data_regions.iter().take(num_data_regions) {
             let data_region_config = RegionConfig {
                 region: data_region,
-                initial_members: vec![(node_id, addr.to_string())],
+                initial_members: vec![(node_id, socket_path.to_string_lossy().to_string())],
                 bootstrap: true,
                 enable_background_jobs: true,
                 batch_writer_config: None,
@@ -345,10 +366,9 @@ impl TestCluster {
 
         // Step 2: Start remaining nodes and have them join the cluster dynamically
         for i in 1..size {
-            let port = base_port + i as u16;
+            let socket_path = socket_dir.path().join(format!("c{cluster_id}-n{i}.sock"));
             let temp_dir = TestDir::new();
             let data_dir = temp_dir.path().to_path_buf();
-            let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
 
             // Joining node: write cluster_id so bootstrap_node takes the restart
             // path. The node starts its own system region, then gets incorporated
@@ -363,7 +383,7 @@ impl TestCluster {
                 .expect("valid backup config");
 
             let config = inferadb_ledger_server::config::Config {
-                listen_addr: addr,
+                unix_socket: Some(socket_path.clone()),
                 metrics_addr: None,
                 data_dir: Some(data_dir.clone()),
                 backup: Some(backup_config),
@@ -423,21 +443,17 @@ impl TestCluster {
                     .iter()
                     .find_map(|n| {
                         let leader_id = n.handle.current_leader()?;
-                        nodes.iter().find(|n2| n2.id == leader_id).map(|n2| n2.addr)
+                        nodes.iter().find(|n2| n2.id == leader_id).map(|n2| n2.addr.clone())
                     })
-                    .unwrap_or(leader_addr);
+                    .unwrap_or_else(|| leader_addr.clone());
 
-                let endpoint = format!("http://{}", current_leader_addr);
-                let mut client = match AdminServiceClient::connect(endpoint).await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        last_error = format!("connect failed: {}", e);
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        continue;
-                    },
+                let channel = connect_channel(&current_leader_addr);
+                let mut client = AdminServiceClient::new(channel);
+
+                let join_request = JoinClusterRequest {
+                    node_id,
+                    address: socket_path.to_string_lossy().to_string(),
                 };
-
-                let join_request = JoinClusterRequest { node_id, address: addr.to_string() };
 
                 match client.join_cluster(join_request).await {
                     Ok(response) => {
@@ -476,7 +492,7 @@ impl TestCluster {
             let new_handle = handle_clone.clone();
             nodes.push(TestNode {
                 id: node_id,
-                addr,
+                addr: socket_path.to_string_lossy().to_string(),
                 handle: handle_clone,
                 state: state_clone,
                 manager: manager_clone,
@@ -527,7 +543,7 @@ impl TestCluster {
                     if let Ok(existing_global) = existing.manager.system_region()
                         && let Some(et) = existing_global.consensus_transport()
                     {
-                        let join_addr_str = addr.to_string();
+                        let join_addr_str = socket_path.to_string_lossy().to_string();
                         let _ = et.set_peer_via_registry(node_id, &join_addr_str).await;
                     }
                 }
@@ -538,7 +554,7 @@ impl TestCluster {
             // receive the cluster membership from the leader via Raft log replication.
             let joining_manager = nodes.last().unwrap().manager.clone();
             let joining_node_id = node_id;
-            let _joining_addr = addr;
+            let _joining_addr = socket_path.to_string_lossy().to_string();
             for &data_region in data_regions.iter().take(num_data_regions) {
                 let data_region_config = RegionConfig {
                     region: data_region,
@@ -565,8 +581,8 @@ impl TestCluster {
                     // Register bidirectional transport channels so the consensus
                     // engines can replicate between the bootstrap node and the
                     // joining node for this data region.
-                    let joining_addr_str = addr.to_string();
-                    let bootstrap_addr_str = nodes[0].addr.to_string();
+                    let joining_addr_str = socket_path.to_string_lossy().to_string();
+                    let bootstrap_addr_str = nodes[0].addr.clone();
                     if let Some(bt) = bootstrap_rg.consensus_transport() {
                         let _ = bt.set_peer_via_registry(joining_node_id, &joining_addr_str).await;
                     }
@@ -613,7 +629,7 @@ impl TestCluster {
             }
         }
 
-        Self { nodes, num_data_regions }
+        Self { nodes, num_data_regions, _socket_dir: socket_dir }
     }
 
     /// Waits for a leader to be elected AND all nodes to agree.
@@ -764,8 +780,8 @@ impl TestCluster {
     }
 
     /// Returns all node addresses.
-    pub fn addrs(&self) -> Vec<SocketAddr> {
-        self.nodes.iter().map(|n| n.addr).collect()
+    pub fn addrs(&self) -> Vec<String> {
+        self.nodes.iter().map(|n| n.addr.clone()).collect()
     }
 
     /// Waits until all regions (GLOBAL + data) on the first node have elected
@@ -804,73 +820,71 @@ impl TestCluster {
 /// Helper to create a gRPC write client for a node.
 #[allow(dead_code)]
 pub async fn create_write_client(
-    addr: SocketAddr,
+    addr: &str,
 ) -> Result<
     inferadb_ledger_proto::proto::write_service_client::WriteServiceClient<
         tonic::transport::Channel,
     >,
     tonic::transport::Error,
 > {
-    let endpoint = format!("http://{}", addr);
-    inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::connect(endpoint).await
+    let channel = connect_channel(addr);
+    Ok(inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::new(channel))
 }
 
 /// Helper to create a read client for a node.
 #[allow(dead_code)]
 pub async fn create_read_client(
-    addr: SocketAddr,
+    addr: &str,
 ) -> Result<
     inferadb_ledger_proto::proto::read_service_client::ReadServiceClient<tonic::transport::Channel>,
     tonic::transport::Error,
 > {
-    let endpoint = format!("http://{}", addr);
-    inferadb_ledger_proto::proto::read_service_client::ReadServiceClient::connect(endpoint).await
+    let channel = connect_channel(addr);
+    Ok(inferadb_ledger_proto::proto::read_service_client::ReadServiceClient::new(channel))
 }
 
 /// Helper to create a health client for a node.
 #[allow(dead_code)]
 pub async fn create_health_client(
-    addr: SocketAddr,
+    addr: &str,
 ) -> Result<
     inferadb_ledger_proto::proto::health_service_client::HealthServiceClient<
         tonic::transport::Channel,
     >,
     tonic::transport::Error,
 > {
-    let endpoint = format!("http://{}", addr);
-    inferadb_ledger_proto::proto::health_service_client::HealthServiceClient::connect(endpoint)
-        .await
+    let channel = connect_channel(addr);
+    Ok(inferadb_ledger_proto::proto::health_service_client::HealthServiceClient::new(channel))
 }
 
 /// Helper to create an admin client for a node.
 #[allow(dead_code)]
 pub async fn create_admin_client(
-    addr: SocketAddr,
+    addr: &str,
 ) -> Result<
     inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient<
         tonic::transport::Channel,
     >,
     tonic::transport::Error,
 > {
-    let endpoint = format!("http://{}", addr);
-    inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::connect(endpoint).await
+    let channel = connect_channel(addr);
+    Ok(inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::new(channel))
 }
 
 /// Helper to create an organization client for a node.
 #[allow(dead_code)]
 pub async fn create_organization_client(
-    addr: SocketAddr,
+    addr: &str,
 ) -> Result<
     inferadb_ledger_proto::proto::organization_service_client::OrganizationServiceClient<
         tonic::transport::Channel,
     >,
     tonic::transport::Error,
 > {
-    let endpoint = format!("http://{}", addr);
-    inferadb_ledger_proto::proto::organization_service_client::OrganizationServiceClient::connect(
-        endpoint,
-    )
-    .await
+    let channel = connect_channel(addr);
+    Ok(inferadb_ledger_proto::proto::organization_service_client::OrganizationServiceClient::new(
+        channel,
+    ))
 }
 
 // ============================================================================
@@ -984,15 +998,15 @@ impl ExternalCluster {
 /// Helper to create a vault client for a node.
 #[allow(dead_code)]
 pub async fn create_vault_client(
-    addr: SocketAddr,
+    addr: &str,
 ) -> Result<
     inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient<
         tonic::transport::Channel,
     >,
     tonic::transport::Error,
 > {
-    let endpoint = format!("http://{}", addr);
-    inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient::connect(endpoint).await
+    let channel = connect_channel(addr);
+    Ok(inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient::new(channel))
 }
 
 /// Helper to create a vault client from a URL string.
@@ -1059,54 +1073,53 @@ pub async fn create_user_client_from_url(
 /// Helper to create an app service client for a node.
 #[allow(dead_code)]
 pub async fn create_app_client(
-    addr: SocketAddr,
+    addr: &str,
 ) -> Result<
     inferadb_ledger_proto::proto::app_service_client::AppServiceClient<tonic::transport::Channel>,
     tonic::transport::Error,
 > {
-    let endpoint = format!("http://{}", addr);
-    inferadb_ledger_proto::proto::app_service_client::AppServiceClient::connect(endpoint).await
+    let channel = connect_channel(addr);
+    Ok(inferadb_ledger_proto::proto::app_service_client::AppServiceClient::new(channel))
 }
 
 pub async fn create_token_client(
-    addr: SocketAddr,
+    addr: &str,
 ) -> Result<
     inferadb_ledger_proto::proto::token_service_client::TokenServiceClient<
         tonic::transport::Channel,
     >,
     tonic::transport::Error,
 > {
-    let endpoint = format!("http://{}", addr);
-    inferadb_ledger_proto::proto::token_service_client::TokenServiceClient::connect(endpoint).await
+    let channel = connect_channel(addr);
+    Ok(inferadb_ledger_proto::proto::token_service_client::TokenServiceClient::new(channel))
 }
 
 /// Helper to create a user service client for a node.
 #[allow(dead_code)]
 pub async fn create_user_client(
-    addr: SocketAddr,
+    addr: &str,
 ) -> Result<
     inferadb_ledger_proto::proto::user_service_client::UserServiceClient<tonic::transport::Channel>,
     tonic::transport::Error,
 > {
-    let endpoint = format!("http://{}", addr);
-    inferadb_ledger_proto::proto::user_service_client::UserServiceClient::connect(endpoint).await
+    let channel = connect_channel(addr);
+    Ok(inferadb_ledger_proto::proto::user_service_client::UserServiceClient::new(channel))
 }
 
 /// Helper to create an invitation service client for a node.
 #[allow(dead_code)]
 pub async fn create_invitation_client(
-    addr: SocketAddr,
+    addr: &str,
 ) -> Result<
     inferadb_ledger_proto::proto::invitation_service_client::InvitationServiceClient<
         tonic::transport::Channel,
     >,
     tonic::transport::Error,
 > {
-    let endpoint = format!("http://{}", addr);
-    inferadb_ledger_proto::proto::invitation_service_client::InvitationServiceClient::connect(
-        endpoint,
-    )
-    .await
+    let channel = connect_channel(addr);
+    Ok(inferadb_ledger_proto::proto::invitation_service_client::InvitationServiceClient::new(
+        channel,
+    ))
 }
 
 // ============================================================================
@@ -1119,7 +1132,7 @@ pub async fn create_invitation_client(
 /// isn't ready yet and polls `GetOrganization` until the status is Active.
 #[allow(dead_code)]
 pub async fn create_test_organization(
-    addr: SocketAddr,
+    addr: &str,
     name: &str,
     node: &TestNode,
 ) -> Result<(inferadb_ledger_types::OrganizationSlug, u64), Box<dyn std::error::Error>> {
@@ -1192,7 +1205,7 @@ pub async fn create_test_organization(
 /// Retries if the organization is not yet ready (saga still provisioning).
 #[allow(dead_code)]
 pub async fn create_test_vault(
-    addr: SocketAddr,
+    addr: &str,
     organization: inferadb_ledger_types::OrganizationSlug,
 ) -> Result<inferadb_ledger_types::VaultSlug, Box<dyn std::error::Error>> {
     let start = tokio::time::Instant::now();
@@ -1259,7 +1272,7 @@ fn test_blinding_key() -> inferadb_ledger_types::EmailBlindingKey {
 ///
 /// Returns the user's external slug.
 #[allow(dead_code)]
-pub async fn setup_user(_addr: SocketAddr, _name: &str, email: &str, node: &TestNode) -> u64 {
+pub async fn setup_user(_addr: &str, _name: &str, email: &str, node: &TestNode) -> u64 {
     use inferadb_ledger_raft::types::{LedgerRequest, RaftPayload, SystemRequest};
 
     let blinding_key = test_blinding_key();
@@ -1391,7 +1404,7 @@ pub async fn setup_user(_addr: SocketAddr, _name: &str, email: &str, node: &Test
 /// `setup_user` first, then the org is created with that user as admin.
 #[allow(dead_code)]
 pub async fn setup_org_with_admin(
-    addr: SocketAddr,
+    addr: &str,
     org_name: &str,
     admin_email: &str,
     node: &TestNode,

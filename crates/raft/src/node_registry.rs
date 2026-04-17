@@ -145,17 +145,34 @@ impl NodeConnectionRegistry {
         node: LedgerNodeId,
         addr: &str,
     ) -> Result<Arc<PeerConnection>, RegistryError> {
-        let uri = format!("http://{addr}");
-        let endpoint = Endpoint::from_shared(uri).map_err(|e| RegistryError::InvalidAddress {
-            addr: addr.to_owned(),
-            reason: e.to_string(),
-        })?;
-        let endpoint = endpoint
-            .http2_keep_alive_interval(HTTP2_KEEPALIVE_INTERVAL)
-            .keep_alive_timeout(HTTP2_KEEPALIVE_TIMEOUT)
-            .keep_alive_while_idle(true)
-            .tcp_keepalive(Some(TCP_KEEPALIVE));
-        let channel = endpoint.connect_lazy();
+        let channel = if addr.starts_with('/') {
+            // Unix Domain Socket path — use a UDS connector instead of TCP.
+            let endpoint = Endpoint::try_from("http://[::]:50051").map_err(|e| {
+                RegistryError::InvalidAddress { addr: addr.to_owned(), reason: e.to_string() }
+            })?;
+            let path = std::path::PathBuf::from(addr);
+            endpoint.connect_with_connector_lazy(tower::service_fn(
+                move |_: tonic::transport::Uri| {
+                    let path = path.clone();
+                    async move {
+                        Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(
+                            tokio::net::UnixStream::connect(&path).await?,
+                        ))
+                    }
+                },
+            ))
+        } else {
+            let uri = format!("http://{addr}");
+            let endpoint = Endpoint::from_shared(uri).map_err(|e| {
+                RegistryError::InvalidAddress { addr: addr.to_owned(), reason: e.to_string() }
+            })?;
+            let endpoint = endpoint
+                .http2_keep_alive_interval(HTTP2_KEEPALIVE_INTERVAL)
+                .keep_alive_timeout(HTTP2_KEEPALIVE_TIMEOUT)
+                .keep_alive_while_idle(true)
+                .tcp_keepalive(Some(TCP_KEEPALIVE));
+            endpoint.connect_lazy()
+        };
         Ok(Arc::new(PeerConnection { node_id: node, addr: addr.to_owned(), channel }))
     }
 

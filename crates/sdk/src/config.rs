@@ -382,13 +382,20 @@ impl RetryPolicy {
     }
 }
 
-/// Validates that a URL is well-formed HTTP(S).
+/// Validates that a URL is well-formed HTTP(S) or a Unix Domain Socket path.
 fn validate_url(url: &str) -> Result<()> {
+    // Unix Domain Socket path — no scheme validation needed
+    if url.starts_with('/') {
+        return Ok(());
+    }
+
     // Basic validation - must start with http:// or https://
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err(SdkError::InvalidUrl {
             url: url.to_owned(),
-            message: "URL must start with http:// or https://".to_owned(),
+            message:
+                "URL must start with http://, https://, or be a Unix socket path (starting with /)"
+                    .to_owned(),
         });
     }
 

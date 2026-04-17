@@ -22,7 +22,7 @@ use crate::common::{TestCluster, TestNode, create_read_client, create_write_clie
 
 /// Creates an organization and returns its slug.
 async fn create_organization(
-    addr: std::net::SocketAddr,
+    addr: &str,
     name: &str,
     node: &TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
@@ -32,7 +32,7 @@ async fn create_organization(
 
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
     crate::common::create_test_vault(addr, organization).await
@@ -51,13 +51,13 @@ async fn test_single_node_write_read() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization = create_organization(leader.addr, "write-read-ns", leader)
+    let organization = create_organization(&leader.addr, "write-read-ns", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
     // Create a write client
-    let mut client = create_write_client(leader.addr).await.expect("connect to leader");
+    let mut client = create_write_client(&leader.addr).await.expect("connect to leader");
 
     // Submit a write request using SetEntity operation
     let request = inferadb_ledger_proto::proto::WriteRequest {
@@ -108,12 +108,12 @@ async fn test_write_idempotency() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization = create_organization(leader.addr, "idempotency-ns", leader)
+    let organization = create_organization(&leader.addr, "idempotency-ns", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
-    let mut client = create_write_client(leader.addr).await.expect("connect to leader");
+    let mut client = create_write_client(&leader.addr).await.expect("connect to leader");
 
     // Use a fixed idempotency key for both writes to test deduplication
     let idempotency_key = uuid::Uuid::new_v4().as_bytes().to_vec();
@@ -173,15 +173,15 @@ async fn test_write_creates_retrievable_block() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization = create_organization(leader.addr, "block-test-ns", leader)
+    let organization = create_organization(&leader.addr, "block-test-ns", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
     // Create write and read clients
-    let mut write_client = create_write_client(leader.addr).await.expect("connect to leader");
+    let mut write_client = create_write_client(&leader.addr).await.expect("connect to leader");
     let mut read_client =
-        create_read_client(leader.addr).await.expect("connect to leader for reads");
+        create_read_client(&leader.addr).await.expect("connect to leader for reads");
 
     // Submit a write
     let request = inferadb_ledger_proto::proto::WriteRequest {
@@ -260,12 +260,12 @@ async fn test_three_node_write_replication() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization = create_organization(leader.addr, "replication-ns", leader)
+    let organization = create_organization(&leader.addr, "replication-ns", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
-    let mut client = create_write_client(leader.addr).await.expect("connect to leader");
+    let mut client = create_write_client(&leader.addr).await.expect("connect to leader");
 
     // Submit a write
     let request = inferadb_ledger_proto::proto::WriteRequest {

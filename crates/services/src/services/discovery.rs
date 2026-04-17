@@ -27,7 +27,7 @@ use parking_lot::RwLock;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-use super::metadata::ensure_http_scheme;
+use super::metadata::ensure_endpoint_url;
 
 // =============================================================================
 // IP Address Validation
@@ -299,7 +299,7 @@ impl DiscoveryService {
             .peer_addresses
             .as_ref()
             .and_then(|m| m.get(leader_id.0))
-            .map(ensure_http_scheme)
+            .map(ensure_endpoint_url)
             .ok_or_else(|| {
                 Status::unavailable(format!(
                     "Leader {} address not yet known — peer has not announced itself",
@@ -541,7 +541,7 @@ fn make_leader_update(
         Some(leader) => {
             let endpoint = peer_addresses
                 .and_then(|m| m.get(leader.0))
-                .map(ensure_http_scheme)
+                .map(ensure_endpoint_url)
                 .unwrap_or_default();
             let leader_node_id = if endpoint.is_empty() { 0 } else { leader.0 };
             LeaderUpdate { endpoint, raft_term: state.term, leader_node_id }
@@ -721,21 +721,21 @@ mod tests {
     }
 
     // =========================================================================
-    // ensure_http_scheme
+    // ensure_endpoint_url
     // =========================================================================
 
     #[test]
-    fn ensure_http_scheme_prefixes_bare_host_port() {
-        assert_eq!(ensure_http_scheme("10.0.0.1:7000".to_string()), "http://10.0.0.1:7000");
+    fn ensure_endpoint_url_prefixes_bare_host_port() {
+        assert_eq!(ensure_endpoint_url("10.0.0.1:7000".to_string()), "http://10.0.0.1:7000");
     }
 
     #[test]
-    fn ensure_http_scheme_preserves_existing_http_scheme() {
-        assert_eq!(ensure_http_scheme("http://host:7000".to_string()), "http://host:7000");
+    fn ensure_endpoint_url_preserves_existing_http_scheme() {
+        assert_eq!(ensure_endpoint_url("http://host:7000".to_string()), "http://host:7000");
     }
 
     #[test]
-    fn ensure_http_scheme_preserves_existing_https_scheme() {
-        assert_eq!(ensure_http_scheme("https://host:7000".to_string()), "https://host:7000");
+    fn ensure_endpoint_url_preserves_existing_https_scheme() {
+        assert_eq!(ensure_endpoint_url("https://host:7000".to_string()), "https://host:7000");
     }
 }

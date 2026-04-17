@@ -16,8 +16,9 @@ use inferadb_ledger_server::{
     bootstrap::bootstrap_node, config::Config, node_id::load_or_generate_node_id,
 };
 use inferadb_ledger_test_utils::TestDir;
+use serial_test::serial;
 
-use crate::common::{TestCluster, allocate_ports, create_admin_client};
+use crate::common::{TestCluster, create_admin_client};
 
 /// Tests single-node bootstrap with pre-written cluster_id.
 ///
@@ -25,16 +26,16 @@ use crate::common::{TestCluster, allocate_ports, create_admin_client};
 /// file exists (restart path).
 #[tokio::test]
 async fn test_single_node_bootstrap() {
+    let socket_dir = TestDir::new();
+    let socket_path = socket_dir.path().join("bootstrap-single.sock");
     let temp_dir = TestDir::new();
     let data_dir = temp_dir.path().to_path_buf();
-    let port = allocate_ports(1);
-    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
     // Write cluster_id so bootstrap_node takes the restart path (immediate startup)
     inferadb_ledger_server::cluster_id::write_cluster_id(&data_dir, 1).expect("write cluster_id");
 
     let config = Config {
-        listen_addr: addr,
+        unix_socket: Some(socket_path.clone()),
         metrics_addr: None,
         data_dir: Some(data_dir.clone()),
         ..Config::default()
@@ -53,11 +54,12 @@ async fn test_single_node_bootstrap() {
     assert!(result.is_ok(), "single-node bootstrap should succeed: {:?}", result.err());
 
     let bootstrapped = result.unwrap();
+    let addr = socket_path.to_string_lossy().to_string();
 
-    // Server is already running and accepting TCP connections from bootstrap_node()
+    // Server is already running and accepting connections from bootstrap_node()
 
     // Verify node is a cluster member via GetNodeInfo
-    let mut client = create_admin_client(addr).await.expect("connect to admin service");
+    let mut client = create_admin_client(&addr).await.expect("connect to admin service");
     let response = client.get_node_info(GetNodeInfoRequest {}).await.expect("get_node_info RPC");
     let info = response.into_inner();
 
@@ -82,16 +84,16 @@ async fn test_single_node_bootstrap() {
 /// 2. It resumes its cluster membership
 #[tokio::test]
 async fn test_node_restart_preserves_id() {
+    let socket_dir = TestDir::new();
+    let socket_path = socket_dir.path().join("restart-test.sock");
     let temp_dir = TestDir::new();
     let data_dir = temp_dir.path().to_path_buf();
-    let port = allocate_ports(2);
-    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
     // Write cluster_id so bootstrap_node takes the restart path
     inferadb_ledger_server::cluster_id::write_cluster_id(&data_dir, 1).expect("write cluster_id");
 
     let config = Config {
-        listen_addr: addr,
+        unix_socket: Some(socket_path.clone()),
         metrics_addr: None,
         data_dir: Some(data_dir.clone()),
         ..Config::default()
@@ -129,16 +131,16 @@ async fn test_node_restart_preserves_id() {
 
     // Second startup - should load existing ID and resume
     let second_id = {
-        // Use a different port since the old one may not be released yet
-        let port2 = port + 1;
-        let addr2: std::net::SocketAddr = format!("127.0.0.1:{}", port2).parse().unwrap();
+        // Use a different socket path since the old one may still be in use
+        let socket_path2 = socket_dir.path().join("restart-test-2.sock");
 
         let config2 = Config {
-            listen_addr: addr2,
+            unix_socket: Some(socket_path2.clone()),
             metrics_addr: None,
             data_dir: Some(data_dir.clone()),
             ..Config::default()
         };
+        let addr2 = socket_path2.to_string_lossy().to_string();
 
         let (_shutdown_tx2, shutdown_rx2) = tokio::sync::watch::channel(false);
         let bootstrapped = bootstrap_node(
@@ -156,7 +158,7 @@ async fn test_node_restart_preserves_id() {
         // Server is already running and accepting TCP connections from bootstrap_node()
 
         // Verify cluster membership
-        let mut client = create_admin_client(addr2).await.expect("connect");
+        let mut client = create_admin_client(&addr2).await.expect("connect");
         let response = client.get_node_info(GetNodeInfoRequest {}).await.expect("get_node_info");
         let info = response.into_inner();
 
@@ -197,6 +199,7 @@ async fn test_snowflake_ids_are_time_ordered_across_nodes() {
 /// This verifies that the existing test infrastructure works correctly
 /// with the coordinated bootstrap system.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn test_three_node_cluster_uses_coordinated_bootstrap() {
     // TestCluster uses single-node mode for the first node and dynamic
     // join for subsequent nodes via AdminService
@@ -208,7 +211,7 @@ async fn test_three_node_cluster_uses_coordinated_bootstrap() {
 
     // All nodes should be cluster members
     for node in cluster.nodes() {
-        let mut client = create_admin_client(node.addr).await.expect("connect");
+        let mut client = create_admin_client(&node.addr).await.expect("connect");
         let response = client.get_node_info(GetNodeInfoRequest {}).await.expect("get_node_info");
         let info = response.into_inner();
 
@@ -235,11 +238,14 @@ async fn test_three_node_cluster_uses_coordinated_bootstrap() {
 /// it should return JoinExisting decision (via is_cluster_member=true).
 #[tokio::test]
 async fn test_late_joiner_finds_existing_cluster() {
-    // Start a single-node cluster first
+    // This test uses discover_node_info which requires a TCP SocketAddr,
+    // so we keep TCP (no unix_socket) for this specific test.
     let leader_dir = TestDir::new();
     let leader_data_dir = leader_dir.path().to_path_buf();
-    let leader_port = allocate_ports(1);
-    let leader_addr: std::net::SocketAddr = format!("127.0.0.1:{}", leader_port).parse().unwrap();
+    // Bind TCP on port 0 to get an ephemeral port
+    let tcp_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let leader_addr: std::net::SocketAddr = tcp_listener.local_addr().expect("local addr");
+    drop(tcp_listener);
 
     // Pre-write node_id for deterministic test behavior
     std::fs::write(leader_dir.path().join("node_id"), "1").expect("write node_id");
@@ -254,6 +260,7 @@ async fn test_late_joiner_finds_existing_cluster() {
         data_dir: Some(leader_data_dir.clone()),
         ..Config::default()
     };
+    let leader_addr_str = leader_addr.to_string();
 
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let leader = bootstrap_node(
@@ -278,21 +285,21 @@ async fn test_late_joiner_finds_existing_cluster() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    // Wait for server to be ready and retry connection
-    let mut client = None;
+    // Wait for server to be ready by retrying the RPC (lazy channels always
+    // succeed on creation, so we must probe with an actual request).
+    let mut response = None;
     let start = tokio::time::Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
-        match create_admin_client(leader_addr).await {
-            Ok(c) => {
-                client = Some(c);
+        let mut client = create_admin_client(&leader_addr_str).await.unwrap();
+        match client.get_node_info(GetNodeInfoRequest {}).await {
+            Ok(r) => {
+                response = Some(r);
                 break;
             },
             Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
         }
     }
-    let mut client = client.expect("connect to leader");
-    let response = client.get_node_info(GetNodeInfoRequest {}).await.expect("get_node_info");
-    let info = response.into_inner();
+    let info = response.expect("get_node_info RPC").into_inner();
     assert!(info.is_cluster_member, "leader should be cluster member");
 
     // Now test that discover_node_info correctly identifies the cluster
@@ -314,15 +321,16 @@ async fn test_late_joiner_finds_existing_cluster() {
 /// but does not initialize a Raft cluster — it waits for InitCluster RPC.
 #[tokio::test]
 async fn test_fresh_node_waits_for_init() {
+    let socket_dir = TestDir::new();
+    let socket_path = socket_dir.path().join("fresh-node.sock");
     let temp_dir = TestDir::new();
     let data_dir = temp_dir.path().to_path_buf();
-    let port = allocate_ports(1);
-    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+    let addr = socket_path.to_string_lossy().to_string();
 
     // No cluster_id written — node enters "fresh" path and blocks waiting
     // for InitCluster RPC. The gRPC server is running during this wait.
     let config = Config {
-        listen_addr: addr,
+        unix_socket: Some(socket_path),
         metrics_addr: None,
         data_dir: Some(data_dir.clone()),
         ..Config::default()
@@ -342,22 +350,20 @@ async fn test_fresh_node_waits_for_init() {
         .await
     });
 
-    // Wait for the gRPC server to be reachable.
+    // Wait for the gRPC server to be reachable via a probe RPC.
     let start = tokio::time::Instant::now();
-    let mut client = None;
-    while start.elapsed() < Duration::from_secs(5) {
-        match create_admin_client(addr).await {
-            Ok(c) => {
-                client = Some(c);
+    let mut response = None;
+    while start.elapsed() < Duration::from_secs(10) {
+        let mut client = create_admin_client(&addr).await.unwrap();
+        match client.get_node_info(GetNodeInfoRequest {}).await {
+            Ok(r) => {
+                response = Some(r);
                 break;
             },
-            Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
         }
     }
-    let mut client = client.expect("connect to admin service");
-
-    // Verify node is NOT a cluster member (hasn't been initialized)
-    let response = client.get_node_info(GetNodeInfoRequest {}).await.expect("get_node_info RPC");
+    let response = response.expect("get_node_info RPC");
     let info = response.into_inner();
 
     assert!(!info.is_cluster_member, "fresh node should NOT be cluster member");

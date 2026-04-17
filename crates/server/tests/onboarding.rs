@@ -78,7 +78,7 @@ fn extract_onboarding_token(resp: &proto::VerifyEmailCodeResponse) -> &str {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_initiate_email_verification_returns_code() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let addr = &cluster.nodes()[0].addr;
     let mut client = create_user_client(addr).await.expect("connect");
 
     let code = initiate(&mut client, "alice@example.com", REGION_GLOBAL)
@@ -98,7 +98,7 @@ async fn test_initiate_email_verification_returns_code() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_initiate_twice_returns_codes() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let addr = &cluster.nodes()[0].addr;
     let mut client = create_user_client(addr).await.expect("connect");
 
     let code1 =
@@ -118,7 +118,7 @@ async fn test_initiate_twice_returns_codes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_verify_email_code_new_user() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let addr = &cluster.nodes()[0].addr;
     let mut client = create_user_client(addr).await.expect("connect");
 
     let code = initiate(&mut client, "charlie@example.com", REGION_GLOBAL).await.expect("initiate");
@@ -135,7 +135,7 @@ async fn test_verify_email_code_new_user() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_verify_wrong_code_rejected() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let addr = &cluster.nodes()[0].addr;
     let mut client = create_user_client(addr).await.expect("connect");
 
     initiate(&mut client, "dave@example.com", REGION_GLOBAL).await.expect("initiate");
@@ -152,7 +152,7 @@ async fn test_verify_wrong_code_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_verify_without_initiate_rejected() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let addr = &cluster.nodes()[0].addr;
     let mut client = create_user_client(addr).await.expect("connect");
 
     let err = verify(&mut client, "nobody@example.com", "ABCDEF", REGION_GLOBAL)
@@ -166,7 +166,7 @@ async fn test_verify_without_initiate_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_verify_empty_code_rejected() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let addr = &cluster.nodes()[0].addr;
     let mut client = create_user_client(addr).await.expect("connect");
 
     let err = verify(&mut client, "empty@example.com", "", REGION_GLOBAL)
@@ -184,7 +184,7 @@ async fn test_verify_empty_code_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_initiate_invalid_region_rejected() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let addr = &cluster.nodes()[0].addr;
     let mut client = create_user_client(addr).await.expect("connect");
 
     let err = initiate(&mut client, "region@example.com", 999)
@@ -199,7 +199,7 @@ async fn test_initiate_invalid_region_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_initiate_unspecified_region_rejected() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let addr = &cluster.nodes()[0].addr;
     let mut client = create_user_client(addr).await.expect("connect");
 
     let err = initiate(&mut client, "unspec@example.com", 0)
@@ -217,7 +217,7 @@ async fn test_initiate_unspecified_region_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_initiate_empty_email_rejected() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let addr = &cluster.nodes()[0].addr;
     let mut client = create_user_client(addr).await.expect("connect");
 
     let err = initiate(&mut client, "", REGION_GLOBAL).await.expect_err("empty email should fail");
@@ -229,7 +229,7 @@ async fn test_initiate_empty_email_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_initiate_malformed_email_rejected() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let addr = &cluster.nodes()[0].addr;
     let mut client = create_user_client(addr).await.expect("connect");
 
     let err = initiate(&mut client, "not-an-email", REGION_GLOBAL)
@@ -247,7 +247,7 @@ async fn test_initiate_malformed_email_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_complete_registration_malformed_token() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let addr = &cluster.nodes()[0].addr;
     let mut client = create_user_client(addr).await.expect("connect");
 
     let err = client
@@ -276,7 +276,7 @@ async fn test_complete_registration_malformed_token() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_complete_registration_empty_token() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let addr = &cluster.nodes()[0].addr;
     let mut client = create_user_client(addr).await.expect("connect");
 
     let err = client
@@ -297,7 +297,7 @@ async fn test_complete_registration_empty_token() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_complete_registration_without_verify() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let addr = &cluster.nodes()[0].addr;
     let mut client = create_user_client(addr).await.expect("connect");
 
     // Generate a valid-format onboarding token that doesn't match any record
@@ -327,7 +327,7 @@ async fn test_complete_registration_without_verify() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_complete_registration_wrong_token_hash() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let addr = &cluster.nodes()[0].addr;
     let mut client = create_user_client(addr).await.expect("connect");
 
     // Initiate and verify to create an onboarding account
@@ -368,7 +368,7 @@ async fn test_complete_registration_wrong_token_hash() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_reverify_produces_new_token() {
     let cluster = TestCluster::new(1).await;
-    let addr = cluster.nodes()[0].addr;
+    let addr = &cluster.nodes()[0].addr;
     let mut client = create_user_client(addr).await.expect("connect");
 
     // First flow
@@ -426,7 +426,7 @@ fn test_domain_separation_code_hash_vs_email_hmac() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_missing_blinding_key_returns_failed_precondition() {
     let cluster = crate::common::TestCluster::without_blinding_key(1, 1).await;
-    let addr = cluster.nodes()[0].addr;
+    let addr = &cluster.nodes()[0].addr;
     let mut client = create_user_client(addr).await.expect("connect");
 
     // Wait for cluster to stabilize

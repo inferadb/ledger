@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use serial_test::serial;
 
 use crate::common::{TestCluster, create_read_client, create_vault_client, create_write_client};
 
@@ -35,7 +36,7 @@ use crate::common::{TestCluster, create_read_client, create_vault_client, create
 
 /// Creates an organization and returns its slug.
 async fn create_organization(
-    addr: std::net::SocketAddr,
+    addr: &str,
     name: &str,
     node: &crate::common::TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
@@ -45,7 +46,7 @@ async fn create_organization(
 
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
     crate::common::create_test_vault(addr, organization).await
@@ -53,7 +54,7 @@ async fn create_vault(
 
 /// Writes an entity and returns the assigned sequence number.
 async fn write_entity(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
@@ -90,7 +91,7 @@ async fn write_entity(
 
 /// Reads an entity and returns its value (if it exists).
 async fn read_entity(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
@@ -111,7 +112,7 @@ async fn read_entity(
 
 /// Deletes a vault.
 async fn delete_vault(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
     vault: VaultSlug,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -128,7 +129,7 @@ async fn delete_vault(
 
 /// Gets the client state (last committed sequence).
 async fn get_client_state(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
     vault: VaultSlug,
     client_id: &str,
@@ -151,6 +152,7 @@ async fn get_client_state(
 /// Verifies that an empty state (no organizations, no vaults) snapshot
 /// round-trips correctly on a 3-node cluster.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn test_empty_state_snapshot_round_trip() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;
@@ -179,34 +181,35 @@ async fn test_empty_state_snapshot_round_trip() {
 /// Verifies snapshot with deleted vaults and organizations: the deleted entries
 /// are preserved correctly and sequence counters are not corrupted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn test_snapshot_with_deleted_entities() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
     // Create 3 orgs, each with 2 vaults.
-    let org1 = create_organization(leader.addr, "del-org-1", leader).await.expect("create org 1");
-    let org2 = create_organization(leader.addr, "del-org-2", leader).await.expect("create org 2");
-    let org3 = create_organization(leader.addr, "del-org-3", leader).await.expect("create org 3");
+    let org1 = create_organization(&leader.addr, "del-org-1", leader).await.expect("create org 1");
+    let org2 = create_organization(&leader.addr, "del-org-2", leader).await.expect("create org 2");
+    let org3 = create_organization(&leader.addr, "del-org-3", leader).await.expect("create org 3");
 
-    let v1a = create_vault(leader.addr, org1).await.expect("vault 1a");
-    let v1b = create_vault(leader.addr, org1).await.expect("vault 1b");
-    let v2a = create_vault(leader.addr, org2).await.expect("vault 2a");
-    let _v2b = create_vault(leader.addr, org2).await.expect("vault 2b");
-    let _v3a = create_vault(leader.addr, org3).await.expect("vault 3a");
-    let _v3b = create_vault(leader.addr, org3).await.expect("vault 3b");
+    let v1a = create_vault(&leader.addr, org1).await.expect("vault 1a");
+    let v1b = create_vault(&leader.addr, org1).await.expect("vault 1b");
+    let v2a = create_vault(&leader.addr, org2).await.expect("vault 2a");
+    let _v2b = create_vault(&leader.addr, org2).await.expect("vault 2b");
+    let _v3a = create_vault(&leader.addr, org3).await.expect("vault 3a");
+    let _v3b = create_vault(&leader.addr, org3).await.expect("vault 3b");
 
     // Write some data to org1's vaults.
-    write_entity(leader.addr, org1, v1a, "k1", b"v1", "del-client").await.expect("write to v1a");
-    write_entity(leader.addr, org1, v1b, "k2", b"v2", "del-client").await.expect("write to v1b");
-    write_entity(leader.addr, org2, v2a, "k3", b"v3", "del-client").await.expect("write to v2a");
+    write_entity(&leader.addr, org1, v1a, "k1", b"v1", "del-client").await.expect("write to v1a");
+    write_entity(&leader.addr, org1, v1b, "k2", b"v2", "del-client").await.expect("write to v1b");
+    write_entity(&leader.addr, org2, v2a, "k3", b"v3", "del-client").await.expect("write to v2a");
 
     // Delete vault 1b, then delete org 2 (which requires deleting its vaults first).
-    delete_vault(leader.addr, org1, v1b).await.expect("delete vault 1b");
+    delete_vault(&leader.addr, org1, v1b).await.expect("delete vault 1b");
 
     // Write another entity to org3 to advance sequences after deletion.
-    let org3_vault = create_vault(leader.addr, org3).await.expect("extra vault for org3");
-    write_entity(leader.addr, org3, org3_vault, "post-delete", b"still-works", "del-client")
+    let org3_vault = create_vault(&leader.addr, org3).await.expect("extra vault for org3");
+    write_entity(&leader.addr, org3, org3_vault, "post-delete", b"still-works", "del-client")
         .await
         .expect("write after delete");
 
@@ -220,14 +223,14 @@ async fn test_snapshot_with_deleted_entities() {
     // 2. org3's post-delete write is present.
     let follower = cluster.followers().into_iter().next().expect("follower");
 
-    let v1a_data = read_entity(follower.addr, org1, v1a, "k1").await;
+    let v1a_data = read_entity(&follower.addr, org1, v1a, "k1").await;
     assert_eq!(v1a_data, Some(b"v1".to_vec()), "org1/v1a should still have data");
 
-    let post_del = read_entity(follower.addr, org3, org3_vault, "post-delete").await;
+    let post_del = read_entity(&follower.addr, org3, org3_vault, "post-delete").await;
     assert_eq!(post_del, Some(b"still-works".to_vec()), "post-delete write should be replicated");
 
     // Verify sequence counters aren't corrupted by checking we can still write.
-    write_entity(leader.addr, org1, v1a, "after-del-2", b"ok", "del-client")
+    write_entity(&leader.addr, org1, v1a, "after-del-2", b"ok", "del-client")
         .await
         .expect("write after all deletions should succeed");
 }
@@ -239,17 +242,19 @@ async fn test_snapshot_with_deleted_entities() {
 /// Verifies that a write committed on leader A survives leadership transfer
 /// and is readable from the new leader.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn test_leader_failover_mid_batch_no_data_loss() {
     let cluster = TestCluster::new(3).await;
     let leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let organization =
-        create_organization(leader.addr, "failover-ns", leader).await.expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let organization = create_organization(&leader.addr, "failover-ns", leader)
+        .await
+        .expect("create organization");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
     // Write a batch of entities.
-    let mut write_client = create_write_client(leader.addr).await.expect("connect");
+    let mut write_client = create_write_client(&leader.addr).await.expect("connect");
     let batch_request = proto::BatchWriteRequest {
         client_id: Some(proto::ClientId { id: "failover-batch".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
@@ -291,7 +296,7 @@ async fn test_leader_failover_mid_batch_no_data_loss() {
     for i in [0, 25, 49] {
         let key = format!("fail-key-{}", i);
         let expected = format!("fail-value-{}", i).into_bytes();
-        let value = read_entity(follower.addr, organization, vault, &key).await;
+        let value = read_entity(&follower.addr, organization, vault, &key).await;
         assert_eq!(value, Some(expected), "follower should have {} after failover", key);
     }
 
@@ -312,12 +317,12 @@ async fn test_idempotency_dedup_same_key_returns_cached() {
     let leader = cluster.leader().expect("should have leader");
 
     let organization =
-        create_organization(leader.addr, "dedup-ns", leader).await.expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+        create_organization(&leader.addr, "dedup-ns", leader).await.expect("create organization");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
     // Write with a specific idempotency key.
     let shared_key = uuid::Uuid::new_v4().as_bytes().to_vec();
-    let mut write_client = create_write_client(leader.addr).await.expect("connect");
+    let mut write_client = create_write_client(&leader.addr).await.expect("connect");
     let request = proto::WriteRequest {
         client_id: Some(proto::ClientId { id: "dedup-client".to_string() }),
         idempotency_key: shared_key.clone(),
@@ -381,7 +386,7 @@ async fn test_idempotency_dedup_same_key_returns_cached() {
     }
 
     // Verify the entity was only written once (same value, not duplicated).
-    let value = read_entity(leader.addr, organization, vault, "dedup-key").await;
+    let value = read_entity(&leader.addr, organization, vault, "dedup-key").await;
     assert_eq!(value, Some(b"dedup-value".to_vec()));
 }
 
@@ -394,6 +399,7 @@ async fn test_idempotency_dedup_same_key_returns_cached() {
 /// creating organizations, vaults, and writing entities, the sequence counters
 /// should reflect the number of created resources.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn test_sequence_counters_persisted_and_restored() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;
@@ -405,13 +411,13 @@ async fn test_sequence_counters_persisted_and_restored() {
     let mut organizations = Vec::new();
     let mut vaults = Vec::new();
     for i in 0..3 {
-        let org = create_organization(leader.addr, &format!("seq-org-{}", i), leader)
+        let org = create_organization(&leader.addr, &format!("seq-org-{}", i), leader)
             .await
             .expect("create org");
         organizations.push(org);
 
         for _v in 0..2 {
-            let vault = create_vault(leader.addr, org).await.expect("create vault");
+            let vault = create_vault(&leader.addr, org).await.expect("create vault");
             vaults.push(vault);
         }
     }
@@ -420,7 +426,7 @@ async fn test_sequence_counters_persisted_and_restored() {
     for (idx, &vault) in vaults.iter().enumerate() {
         let org_idx = idx / 2;
         write_entity(
-            leader.addr,
+            &leader.addr,
             organizations[org_idx],
             vault,
             &format!("seq-key-{}", idx),
@@ -439,15 +445,15 @@ async fn test_sequence_counters_persisted_and_restored() {
     // After replication, create additional resources to verify sequences
     // didn't reset. If sequences were corrupted, these would get duplicate IDs
     // or fail.
-    let extra_org = create_organization(leader.addr, "seq-extra-org", leader)
+    let extra_org = create_organization(&leader.addr, "seq-extra-org", leader)
         .await
         .expect("create extra org after sync");
     let extra_vault =
-        create_vault(leader.addr, extra_org).await.expect("create extra vault after sync");
+        create_vault(&leader.addr, extra_org).await.expect("create extra vault after sync");
 
     // Verify the extra vault is writable and gets a valid sequence.
     let seq = write_entity(
-        leader.addr,
+        &leader.addr,
         extra_org,
         extra_vault,
         "seq-post-sync",
@@ -461,7 +467,7 @@ async fn test_sequence_counters_persisted_and_restored() {
     // Verify on a follower that client state is consistent.
     let follower = cluster.followers().into_iter().next().expect("follower");
     let client_seq =
-        get_client_state(follower.addr, organizations[0], vaults[0], "seq-client").await;
+        get_client_state(&follower.addr, organizations[0], vaults[0], "seq-client").await;
     // The client state query may fail on followers (leadership required for
     // some implementations), so we only assert if it succeeds.
     if let Ok(seq) = client_seq {
@@ -494,19 +500,26 @@ async fn test_client_sequence_eviction_infrastructure() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let organization =
-        create_organization(leader.addr, "eviction-ns", leader).await.expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let organization = create_organization(&leader.addr, "eviction-ns", leader)
+        .await
+        .expect("create organization");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
     // Write with a unique client ID.
-    let seq =
-        write_entity(leader.addr, organization, vault, "evict-key", b"evict-value", "evict-client")
-            .await
-            .expect("write");
+    let seq = write_entity(
+        &leader.addr,
+        organization,
+        vault,
+        "evict-key",
+        b"evict-value",
+        "evict-client",
+    )
+    .await
+    .expect("write");
     assert_eq!(seq, 1);
 
     // Verify client state is persisted.
-    let client_seq = get_client_state(leader.addr, organization, vault, "evict-client").await;
+    let client_seq = get_client_state(&leader.addr, organization, vault, "evict-client").await;
     if let Ok(s) = client_seq {
         assert_eq!(s, 1, "client should have sequence 1 before eviction");
     }
@@ -517,7 +530,7 @@ async fn test_client_sequence_eviction_infrastructure() {
     // infrastructure doesn't crash (actual eviction requires clock manipulation).
     for i in 0..100 {
         write_entity(
-            leader.addr,
+            &leader.addr,
             organization,
             vault,
             &format!("evict-advance-{}", i),
@@ -530,7 +543,8 @@ async fn test_client_sequence_eviction_infrastructure() {
 
     // Verify the original client's sequence is still accessible (TTL hasn't
     // elapsed, so it shouldn't be evicted).
-    let client_seq_after = get_client_state(leader.addr, organization, vault, "evict-client").await;
+    let client_seq_after =
+        get_client_state(&leader.addr, organization, vault, "evict-client").await;
     if let Ok(s) = client_seq_after {
         assert_eq!(s, 1, "client should still have sequence 1 (TTL not elapsed)");
     }
@@ -552,14 +566,14 @@ async fn test_post_eviction_retry_accepted() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let organization = create_organization(leader.addr, "post-evict-ns", leader)
+    let organization = create_organization(&leader.addr, "post-evict-ns", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
     // Write with a specific client and key.
     let key = uuid::Uuid::new_v4().as_bytes().to_vec();
-    let mut write_client = create_write_client(leader.addr).await.expect("connect");
+    let mut write_client = create_write_client(&leader.addr).await.expect("connect");
     let request = proto::WriteRequest {
         client_id: Some(proto::ClientId { id: "post-evict-client".to_string() }),
         idempotency_key: key.clone(),
@@ -623,20 +637,21 @@ async fn test_post_eviction_retry_accepted() {
 /// This is primarily verified at the unit level. The integration test verifies
 /// the overall snapshot installation path works end-to-end on a 3-node cluster.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn test_snapshot_install_events_best_effort() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let organization = create_organization(leader.addr, "snap-events-ns", leader)
+    let organization = create_organization(&leader.addr, "snap-events-ns", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
     // Write enough data to make a meaningful snapshot.
     for i in 0..100 {
         write_entity(
-            leader.addr,
+            &leader.addr,
             organization,
             vault,
             &format!("event-key-{}", i),
@@ -654,7 +669,7 @@ async fn test_snapshot_install_events_best_effort() {
 
     // Verify data is present on both followers.
     for follower in cluster.followers() {
-        let value = read_entity(follower.addr, organization, vault, "event-key-50").await;
+        let value = read_entity(&follower.addr, organization, vault, "event-key-50").await;
         assert_eq!(
             value,
             Some(b"event-value-50".to_vec()),

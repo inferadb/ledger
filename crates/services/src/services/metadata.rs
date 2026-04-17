@@ -99,7 +99,7 @@ pub(crate) fn not_leader_status_from_handle(
     let term = handle.current_term();
     let leader_id = shard_state.leader.map(|n| n.0);
     let leader_endpoint =
-        leader_id.and_then(|id| peer_addresses.and_then(|m| m.get(id))).map(ensure_http_scheme);
+        leader_id.and_then(|id| peer_addresses.and_then(|m| m.get(id))).map(ensure_endpoint_url);
     status_with_not_leader_hint(message, leader_id, leader_endpoint.as_deref(), Some(term))
 }
 
@@ -120,16 +120,17 @@ pub(crate) fn not_leader_remote_region(
 
 /// Prepends `http://` if the address has no URI scheme.
 ///
-/// Peer addresses are stored as bare `host:port` strings (the form
-/// `--listen`/`--advertise` produce). Client-facing leader hints must be valid
-/// URIs so the SDK can pass them straight to `tonic::transport::Endpoint`.
-/// This is a no-op when the address already includes a scheme (e.g. operators
-/// that advertise `https://...`).
+/// Normalizes a peer address into a valid endpoint URL for client connections.
 ///
-/// `pub(super)` so sibling modules (`discovery`, etc.) can share this helper
-/// instead of duplicating the logic.
-pub(super) fn ensure_http_scheme(addr: String) -> String {
-    if addr.contains("://") { addr } else { format!("http://{addr}") }
+/// Peer addresses are stored as bare `host:port` strings or Unix socket paths.
+/// Client-facing leader hints must be valid URIs so the SDK can pass them to
+/// `tonic::transport::Endpoint`. UDS paths (starting with `/`) and addresses
+/// with an explicit scheme are returned as-is; bare `host:port` gets `http://`
+/// prepended.
+///
+/// `pub(super)` so sibling modules (`discovery`, etc.) can share this helper.
+pub(super) fn ensure_endpoint_url(addr: String) -> String {
+    if addr.starts_with('/') || addr.contains("://") { addr } else { format!("http://{addr}") }
 }
 
 /// Synthesizes a generic `ErrorDetails` from a gRPC status code.

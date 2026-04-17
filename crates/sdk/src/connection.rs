@@ -257,6 +257,11 @@ impl ConnectionPool {
             });
         };
 
+        // Unix Domain Socket — use a UDS connector instead of TCP
+        if endpoint_url.starts_with('/') {
+            return self.create_uds_channel(&endpoint_url).await;
+        }
+
         // Parse the endpoint URL
         let endpoint =
             Endpoint::try_from(endpoint_url.clone()).map_err(|_| SdkError::InvalidUrl {
@@ -430,6 +435,11 @@ impl ConnectionPool {
 
     /// Connects to a specific endpoint URL with the pool's TLS and timeout settings.
     async fn connect_to_endpoint(&self, endpoint_url: &str) -> Result<Channel> {
+        // Unix Domain Socket — use a UDS connector instead of TCP
+        if endpoint_url.starts_with('/') {
+            return self.create_uds_channel(endpoint_url).await;
+        }
+
         let endpoint = Endpoint::try_from(endpoint_url.to_owned()).map_err(|_| {
             SdkError::Connection { message: format!("Invalid leader endpoint: {endpoint_url}") }
         })?;
@@ -437,6 +447,41 @@ impl ConnectionPool {
         endpoint.connect().await.map_err(|e| SdkError::Connection {
             message: format!("Failed to connect to region leader: {e}"),
         })
+    }
+
+    /// Creates a gRPC channel over a Unix Domain Socket.
+    ///
+    /// Uses a dummy HTTP endpoint since tonic requires a valid URI, but the
+    /// actual transport is routed through the UDS connector. Timeouts are
+    /// applied; TLS and TCP-specific settings (nodelay, keepalive) are skipped
+    /// as they do not apply to Unix sockets.
+    async fn create_uds_channel(&self, path: &str) -> Result<Channel> {
+        let path_buf = std::path::PathBuf::from(path);
+        // Tonic requires a valid URI for the endpoint, but the connector
+        // overrides the actual transport — use a placeholder address.
+        let endpoint =
+            Endpoint::try_from("http://[::]:50051").map_err(|_| SdkError::InvalidUrl {
+                url: path.to_owned(),
+                message: "Failed to create placeholder endpoint for UDS".to_owned(),
+            })?;
+        let endpoint =
+            endpoint.connect_timeout(self.config.connect_timeout).timeout(self.config.timeout);
+
+        let channel = endpoint
+            .connect_with_connector(tower::service_fn(move |_: tonic::transport::Uri| {
+                let path = path_buf.clone();
+                async move {
+                    Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(
+                        tokio::net::UnixStream::connect(&path).await?,
+                    ))
+                }
+            }))
+            .await
+            .map_err(|e| SdkError::Connection {
+                message: format!("Failed to connect to Unix socket {path}: {e}"),
+            })?;
+
+        Ok(channel)
     }
 
     /// On a `NotLeader`-like error, applies the server-provided leader hint

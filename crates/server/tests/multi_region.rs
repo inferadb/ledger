@@ -22,7 +22,7 @@ use crate::common::{TestCluster, TestNode, create_read_client, create_write_clie
 
 /// Creates an organization on a multi-region cluster and returns its slug.
 async fn create_organization(
-    addr: std::net::SocketAddr,
+    addr: &str,
     name: &str,
     node: &TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
@@ -32,7 +32,7 @@ async fn create_organization(
 
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
     crate::common::create_test_vault(addr, organization).await
@@ -40,7 +40,7 @@ async fn create_vault(
 
 /// Writes an entity and return the block height.
 async fn write_entity(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
@@ -85,7 +85,7 @@ async fn write_entity(
 
 /// Reads an entity from a vault.
 async fn read_entity(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
@@ -125,16 +125,16 @@ async fn test_multi_region_write_and_read() {
 
     // Create organization (gets assigned to a data region)
     let ns_id =
-        create_organization(node.addr, "ms-write-read", node).await.expect("create organization");
-    let vault = create_vault(node.addr, ns_id).await.expect("create vault");
+        create_organization(&node.addr, "ms-write-read", node).await.expect("create organization");
+    let vault = create_vault(&node.addr, ns_id).await.expect("create vault");
 
     // Write entity
     let height =
-        write_entity(node.addr, ns_id, vault, "key1", b"value1").await.expect("write entity");
+        write_entity(&node.addr, ns_id, vault, "key1", b"value1").await.expect("write entity");
     assert!(height > 0, "block height should be positive");
 
     // Read it back
-    let value = read_entity(node.addr, ns_id, vault, "key1").await.expect("read entity");
+    let value = read_entity(&node.addr, ns_id, vault, "key1").await.expect("read entity");
     assert_eq!(value, Some(b"value1".to_vec()), "should read back written value");
 }
 
@@ -153,21 +153,21 @@ async fn test_multi_region_organization_isolation() {
     let node = cluster.any_node();
 
     // Create two organizations (may land in different regions)
-    let ns_a = create_organization(node.addr, "isolated-a", node).await.expect("create ns A");
-    let ns_b = create_organization(node.addr, "isolated-b", node).await.expect("create ns B");
+    let ns_a = create_organization(&node.addr, "isolated-a", node).await.expect("create ns A");
+    let ns_b = create_organization(&node.addr, "isolated-b", node).await.expect("create ns B");
 
-    let vault_a = create_vault(node.addr, ns_a).await.expect("create vault A");
-    let vault_b = create_vault(node.addr, ns_b).await.expect("create vault B");
+    let vault_a = create_vault(&node.addr, ns_a).await.expect("create vault A");
+    let vault_b = create_vault(&node.addr, ns_b).await.expect("create vault B");
 
     // Write to organization A
-    write_entity(node.addr, ns_a, vault_a, "shared-key", b"value-a").await.expect("write to ns A");
+    write_entity(&node.addr, ns_a, vault_a, "shared-key", b"value-a").await.expect("write to ns A");
 
     // Write different value to organization B with same key
-    write_entity(node.addr, ns_b, vault_b, "shared-key", b"value-b").await.expect("write to ns B");
+    write_entity(&node.addr, ns_b, vault_b, "shared-key", b"value-b").await.expect("write to ns B");
 
     // Read from both — values should be independent
-    let val_a = read_entity(node.addr, ns_a, vault_a, "shared-key").await.expect("read from ns A");
-    let val_b = read_entity(node.addr, ns_b, vault_b, "shared-key").await.expect("read from ns B");
+    let val_a = read_entity(&node.addr, ns_a, vault_a, "shared-key").await.expect("read from ns A");
+    let val_b = read_entity(&node.addr, ns_b, vault_b, "shared-key").await.expect("read from ns B");
 
     assert_eq!(val_a, Some(b"value-a".to_vec()), "ns A should have its own value");
     assert_eq!(val_b, Some(b"value-b".to_vec()), "ns B should have its own value");
@@ -187,11 +187,11 @@ async fn test_multi_region_batch_write() {
     let node = cluster.any_node();
 
     let ns_id =
-        create_organization(node.addr, "ms-batch", node).await.expect("create organization");
-    let vault = create_vault(node.addr, ns_id).await.expect("create vault");
+        create_organization(&node.addr, "ms-batch", node).await.expect("create organization");
+    let vault = create_vault(&node.addr, ns_id).await.expect("create vault");
 
     // Submit a batch write with multiple operations
-    let mut client = create_write_client(node.addr).await.expect("connect");
+    let mut client = create_write_client(&node.addr).await.expect("connect");
 
     let request = inferadb_ledger_proto::proto::BatchWriteRequest {
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: ns_id.value() }),
@@ -239,8 +239,10 @@ async fn test_multi_region_batch_write() {
     }
 
     // Verify both keys are readable
-    let val1 = read_entity(node.addr, ns_id, vault, "batch-key-1").await.expect("read batch key 1");
-    let val2 = read_entity(node.addr, ns_id, vault, "batch-key-2").await.expect("read batch key 2");
+    let val1 =
+        read_entity(&node.addr, ns_id, vault, "batch-key-1").await.expect("read batch key 1");
+    let val2 =
+        read_entity(&node.addr, ns_id, vault, "batch-key-2").await.expect("read batch key 2");
 
     assert_eq!(val1, Some(b"batch-val-1".to_vec()), "first batch key should be readable");
     assert_eq!(val2, Some(b"batch-val-2".to_vec()), "second batch key should be readable");
@@ -260,10 +262,10 @@ async fn test_multi_region_write_idempotency() {
     let node = cluster.any_node();
 
     let ns_id =
-        create_organization(node.addr, "ms-idempotent", node).await.expect("create organization");
-    let vault = create_vault(node.addr, ns_id).await.expect("create vault");
+        create_organization(&node.addr, "ms-idempotent", node).await.expect("create organization");
+    let vault = create_vault(&node.addr, ns_id).await.expect("create vault");
 
-    let mut client = create_write_client(node.addr).await.expect("connect");
+    let mut client = create_write_client(&node.addr).await.expect("connect");
     let idempotency_key = uuid::Uuid::new_v4().as_bytes().to_vec();
 
     let request = inferadb_ledger_proto::proto::WriteRequest {
@@ -320,7 +322,7 @@ async fn test_multi_region_write_nonexistent_organization() {
     );
 
     let node = cluster.any_node();
-    let mut client = create_write_client(node.addr).await.expect("connect");
+    let mut client = create_write_client(&node.addr).await.expect("connect");
 
     // Write to organization 99999 which doesn't exist
     let request = inferadb_ledger_proto::proto::WriteRequest {
@@ -393,23 +395,24 @@ async fn test_multi_region_concurrent_writes() {
     // Create 3 organizations
     let mut organizations = Vec::new();
     for i in 0..3 {
-        let ns_id = create_organization(node.addr, &format!("concurrent-{}", i), node)
+        let ns_id = create_organization(&node.addr, &format!("concurrent-{}", i), node)
             .await
             .expect("create organization");
-        let vault = create_vault(node.addr, ns_id).await.expect("create vault");
+        let vault = create_vault(&node.addr, ns_id).await.expect("create vault");
         organizations.push((ns_id, vault));
     }
 
     // Spawn concurrent writes to all organizations
-    let addr = node.addr;
+    let addr = node.addr.clone();
     let mut handles = Vec::new();
 
     for (i, &(ns_id, vault)) in organizations.iter().enumerate() {
+        let addr = addr.clone();
         let handle = tokio::spawn(async move {
             for j in 0..5 {
                 let key = format!("concurrent-{}-{}", i, j);
                 let value = format!("value-{}-{}", i, j);
-                write_entity(addr, ns_id, vault, &key, value.as_bytes())
+                write_entity(&addr, ns_id, vault, &key, value.as_bytes())
                     .await
                     .expect("concurrent write");
             }
@@ -428,7 +431,7 @@ async fn test_multi_region_concurrent_writes() {
             let key = format!("concurrent-{}-{}", i, j);
             let expected = format!("value-{}-{}", i, j);
             let value =
-                read_entity(addr, ns_id, vault, &key).await.expect("read after concurrent writes");
+                read_entity(&addr, ns_id, vault, &key).await.expect("read after concurrent writes");
             assert_eq!(
                 value,
                 Some(expected.into_bytes()),
@@ -462,19 +465,19 @@ async fn test_write_forwarding_local_region_all_nodes() {
 
     let node = cluster.any_node();
     let ns_id =
-        create_organization(node.addr, "fwd-local-all", node).await.expect("create organization");
-    let vault = create_vault(node.addr, ns_id).await.expect("create vault");
+        create_organization(&node.addr, "fwd-local-all", node).await.expect("create organization");
+    let vault = create_vault(&node.addr, ns_id).await.expect("create vault");
 
     // Write through the forwarding-enabled resolver — resolve_with_redirect
     // returns Local because the single node hosts every region.
-    let height = write_entity(node.addr, ns_id, vault, "fwd-key-0", b"fwd-val-0")
+    let height = write_entity(&node.addr, ns_id, vault, "fwd-key-0", b"fwd-val-0")
         .await
         .expect("write should succeed through forwarding path");
     assert!(height > 0, "block height should be positive");
 
     // Verify readable
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let value = read_entity(node.addr, ns_id, vault, "fwd-key-0").await.expect("read after write");
+    let value = read_entity(&node.addr, ns_id, vault, "fwd-key-0").await.expect("read after write");
     assert_eq!(value, Some(b"fwd-val-0".to_vec()));
 }
 
@@ -491,12 +494,13 @@ async fn test_batch_write_forwarding_local_region() {
     );
 
     let node = cluster.any_node();
-    let ns_id =
-        create_organization(node.addr, "fwd-batch-local", node).await.expect("create organization");
-    let vault = create_vault(node.addr, ns_id).await.expect("create vault");
+    let ns_id = create_organization(&node.addr, "fwd-batch-local", node)
+        .await
+        .expect("create organization");
+    let vault = create_vault(&node.addr, ns_id).await.expect("create vault");
 
     // Send batch write through the forwarding-enabled resolver
-    let mut client = create_write_client(node.addr).await.expect("connect");
+    let mut client = create_write_client(&node.addr).await.expect("connect");
 
     let request = inferadb_ledger_proto::proto::BatchWriteRequest {
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: ns_id.value() }),
@@ -547,8 +551,10 @@ async fn test_batch_write_forwarding_local_region() {
 
     // Verify readable
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let val1 = read_entity(node.addr, ns_id, vault, "batch-fwd-1").await.expect("read batch key 1");
-    let val2 = read_entity(node.addr, ns_id, vault, "batch-fwd-2").await.expect("read batch key 2");
+    let val1 =
+        read_entity(&node.addr, ns_id, vault, "batch-fwd-1").await.expect("read batch key 1");
+    let val2 =
+        read_entity(&node.addr, ns_id, vault, "batch-fwd-2").await.expect("read batch key 2");
 
     assert_eq!(val1, Some(b"batch-fwd-val-1".to_vec()));
     assert_eq!(val2, Some(b"batch-fwd-val-2".to_vec()));

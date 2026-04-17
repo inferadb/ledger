@@ -25,11 +25,7 @@ type InvClient =
 /// Creates an organization with a real admin user and waits for Active status.
 /// Returns `(org_slug, admin_user_slug)`.
 /// Uses a unique admin email derived from the org name to avoid collisions.
-async fn setup_org(
-    addr: std::net::SocketAddr,
-    name: &str,
-    node: &crate::common::TestNode,
-) -> (u64, u64) {
+async fn setup_org(addr: &str, name: &str, node: &crate::common::TestNode) -> (u64, u64) {
     let admin_email = format!("admin-{}@test.example.com", name.to_lowercase().replace(' ', "-"));
     setup_org_with_admin(addr, name, &admin_email, node).await
 }
@@ -69,7 +65,7 @@ async fn create_invite(
 async fn test_create_and_list_invitations() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     let (org, admin) = setup_org(addr, "Lifecycle Org", node).await;
     let mut client = create_invitation_client(addr).await.expect("connect inv");
@@ -107,7 +103,7 @@ async fn test_create_and_list_invitations() {
 async fn test_create_and_revoke_invitation() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     let (org, admin) = setup_org(addr, "Revoke Org", node).await;
     let mut client = create_invitation_client(addr).await.expect("connect inv");
@@ -146,7 +142,7 @@ async fn test_create_and_revoke_invitation() {
 async fn test_duplicate_pending_returns_already_exists() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     let (org, admin) = setup_org(addr, "Dup Org", node).await;
     let mut client = create_invitation_client(addr).await.expect("connect inv");
@@ -179,7 +175,7 @@ async fn test_duplicate_pending_returns_already_exists() {
 async fn test_per_email_pending_cap() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     let target_email = "popular@example.com";
     let mut client = create_invitation_client(addr).await.expect("connect inv");
@@ -218,7 +214,7 @@ async fn test_per_email_pending_cap() {
 async fn test_per_email_total_limit() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     let target_email = "targeted@example.com";
     let mut client = create_invitation_client(addr).await.expect("connect inv");
@@ -267,7 +263,7 @@ async fn test_per_email_total_limit() {
 async fn test_cross_org_team_rejected() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     let (org_a, admin_a) = setup_org(addr, "Team Org A", node).await;
     let (org_b, admin_b) = setup_org(addr, "Team Org B", node).await;
@@ -315,7 +311,7 @@ async fn test_cross_org_team_rejected() {
 async fn test_plus_addressing_dedup() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     let (org, admin) = setup_org(addr, "Plus Org", node).await;
     let mut client = create_invitation_client(addr).await.expect("connect inv");
@@ -348,7 +344,7 @@ async fn test_plus_addressing_dedup() {
 async fn test_gmail_dot_dedup() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     let (org, admin) = setup_org(addr, "Gmail Org", node).await;
     let mut client = create_invitation_client(addr).await.expect("connect inv");
@@ -385,7 +381,7 @@ async fn test_gmail_dot_dedup() {
 async fn test_wrong_user_gets_not_found() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     let (org, admin) = setup_org(addr, "Auth Org", node).await;
     let mut client = create_invitation_client(addr).await.expect("connect inv");
@@ -413,7 +409,7 @@ async fn test_wrong_user_gets_not_found() {
 async fn test_nonexistent_slug_gets_not_found() {
     let cluster = TestCluster::new(1).await;
     let node = &cluster.nodes()[0];
-    let addr = node.addr;
+    let addr = &node.addr;
 
     let mut client = create_invitation_client(addr).await.expect("connect inv");
 

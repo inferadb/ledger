@@ -31,6 +31,7 @@ use std::{
 
 use inferadb_ledger_sdk::{ClientConfig, LedgerClient, SdkMetrics, ServerSource};
 use inferadb_ledger_types::{Region, UserSlug};
+use serial_test::serial;
 
 use crate::common::{TestCluster, create_test_organization, create_test_vault};
 
@@ -91,6 +92,7 @@ async fn wait_for_new_region_leader(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn write_via_stale_region_cache_redirects_and_succeeds() {
     let cluster = TestCluster::with_data_regions(3, 1).await;
     assert!(
@@ -111,17 +113,21 @@ async fn write_via_stale_region_cache_redirects_and_succeeds() {
         .iter()
         .find(|n| n.id != initial_leader_id)
         .expect("at least one follower should exist");
-    let gateway_endpoint = format!("http://{}", follower_node.addr);
+    let gateway_endpoint = if follower_node.addr.starts_with('/') {
+        follower_node.addr.clone()
+    } else {
+        format!("http://{}", &follower_node.addr)
+    };
 
     // Provision an org + vault on US_EAST_VA via the existing helpers (these
     // talk to whichever node accepts the request; saga + global routing handle
     // it).
     let any_node = cluster.any_node();
     let (org_slug, admin_slug) =
-        create_test_organization(any_node.addr, "redirect-routing", any_node)
+        create_test_organization(&any_node.addr, "redirect-routing", any_node)
             .await
             .expect("create organization");
-    let vault_slug = create_test_vault(any_node.addr, org_slug).await.expect("create vault");
+    let vault_slug = create_test_vault(&any_node.addr, org_slug).await.expect("create vault");
 
     // Build the SDK client. `preferred_region` is what enables the
     // region-leader cache on the connection pool — without it the redirect

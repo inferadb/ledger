@@ -46,7 +46,6 @@
 
 use std::{
     collections::HashMap,
-    net::SocketAddr,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -116,15 +115,13 @@ impl Default for StressConfig {
 /// Error format varies - may have escaped or unescaped quotes:
 /// - Unescaped: addr: "127.0.0.1:50187"
 /// - Escaped: addr: \"127.0.0.1:50187\"
-fn extract_leader_addr_from_error(error_msg: &str) -> Option<SocketAddr> {
+fn extract_leader_addr_from_error(error_msg: &str) -> Option<String> {
     // Try escaped quotes first (more common in error strings)
     if let Some(start) = error_msg.find("addr: \\\"") {
         let addr_start = start + "addr: \\\"".len();
         let remaining = &error_msg[addr_start..];
-        if let Some(end) = remaining.find("\\\"")
-            && let Ok(addr) = remaining[..end].parse()
-        {
-            return Some(addr);
+        if let Some(end) = remaining.find("\\\"") {
+            return Some(remaining[..end].to_string());
         }
     }
 
@@ -132,10 +129,8 @@ fn extract_leader_addr_from_error(error_msg: &str) -> Option<SocketAddr> {
     if let Some(start) = error_msg.find("addr: \"") {
         let addr_start = start + "addr: \"".len();
         let remaining = &error_msg[addr_start..];
-        if let Some(end) = remaining.find('"')
-            && let Ok(addr) = remaining[..end].parse()
-        {
-            return Some(addr);
+        if let Some(end) = remaining.find('"') {
+            return Some(remaining[..end].to_string());
         }
     }
 
@@ -189,17 +184,13 @@ struct RegionAssignment {
 /// then creates a vault in each. This enables parallel writes since each region has
 /// independent Raft consensus.
 async fn setup_multi_region_organizations(
-    leader_addr: SocketAddr,
+    leader_addr: &str,
     num_regions: usize,
     node: &crate::common::TestNode,
 ) -> Result<Vec<RegionAssignment>, String> {
+    let channel = crate::common::connect_channel(leader_addr);
     let mut vault_client =
-        inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient::connect(format!(
-            "http://{}",
-            leader_addr
-        ))
-        .await
-        .map_err(|e| format!("Failed to connect vault client: {}", e))?;
+        inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient::new(channel);
 
     let mut assignments = Vec::with_capacity(num_regions);
 
@@ -363,25 +354,16 @@ impl StressMetrics {
 /// across multiple operations. This is the key to achieving high throughput.
 async fn write_worker(
     worker_id: usize,
-    leader_addr: SocketAddr,
+    leader_addr: String,
     config: StressConfig,
     metrics: Arc<StressMetrics>,
     running: Arc<AtomicBool>,
     semaphore: Arc<Semaphore>,
 ) {
-    let mut current_endpoint = format!("http://{}", leader_addr);
+    let mut current_addr = leader_addr.to_string();
+    let channel = crate::common::connect_channel(&current_addr);
     let mut client =
-        match inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::connect(
-            current_endpoint.clone(),
-        )
-        .await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("Write worker {} failed to connect: {}", worker_id, e);
-                return;
-            },
-        };
+        inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::new(channel);
 
     let client_id = format!("stress-writer-{}", worker_id);
     let mut batch_counter = 0u64;
@@ -398,14 +380,9 @@ async fn write_worker(
             if consecutive_errors > 10 {
                 // Reset and try reconnecting
                 consecutive_errors = 0;
-                if let Ok(new_client) =
-                    inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::connect(
-                        current_endpoint.clone(),
-                    )
-                    .await
-                {
-                    client = new_client;
-                }
+                let ch = crate::common::connect_channel(&current_addr);
+                client =
+                    inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::new(ch);
             }
         }
 
@@ -508,17 +485,10 @@ async fn write_worker(
                     // Check if this is a forwarding error and extract the leader address
                     if let Some(leader_addr) = extract_leader_addr_from_error(&error_msg) {
                         // Don't count forwarding as error - just reconnect to leader
-                        let new_endpoint = format!("http://{}", leader_addr);
-                        if current_endpoint != new_endpoint {
-                            current_endpoint = new_endpoint;
-                            if let Ok(new_client) =
-                                inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::connect(
-                                    current_endpoint.clone(),
-                                )
-                                .await
-                            {
-                                client = new_client;
-                            }
+                        if current_addr != leader_addr {
+                            current_addr = leader_addr;
+                            let ch = crate::common::connect_channel(&current_addr);
+                            client = inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::new(ch);
                         }
                         // Retry immediately without counting as error
                         continue;
@@ -532,14 +502,11 @@ async fn write_worker(
                     if consecutive_errors <= 3 {
                         eprintln!("Write worker {} batch error: {}", worker_id, e);
                     }
-                    if let Ok(new_client) =
-                        inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::connect(
-                            current_endpoint.clone(),
-                        )
-                        .await
-                    {
-                        client = new_client;
-                    }
+                    let ch = crate::common::connect_channel(&current_addr);
+                    client =
+                        inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::new(
+                            ch,
+                        );
                 },
             }
         } else {
@@ -601,17 +568,10 @@ async fn write_worker(
                     // Check if this is a forwarding error and extract the leader address
                     if let Some(leader_addr) = extract_leader_addr_from_error(&error_msg) {
                         // Don't count forwarding as error - just reconnect to leader
-                        let new_endpoint = format!("http://{}", leader_addr);
-                        if current_endpoint != new_endpoint {
-                            current_endpoint = new_endpoint;
-                            if let Ok(new_client) =
-                                inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::connect(
-                                    current_endpoint.clone(),
-                                )
-                                .await
-                            {
-                                client = new_client;
-                            }
+                        if current_addr != leader_addr {
+                            current_addr = leader_addr;
+                            let ch = crate::common::connect_channel(&current_addr);
+                            client = inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::new(ch);
                         }
                         // Retry immediately without counting as error
                         continue;
@@ -623,14 +583,11 @@ async fn write_worker(
                     if consecutive_errors <= 3 {
                         eprintln!("Write worker {} error: {}", worker_id, e);
                     }
-                    if let Ok(new_client) =
-                        inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::connect(
-                            current_endpoint.clone(),
-                        )
-                        .await
-                    {
-                        client = new_client;
-                    }
+                    let ch = crate::common::connect_channel(&current_addr);
+                    client =
+                        inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::new(
+                            ch,
+                        );
                 },
             }
         }
@@ -645,7 +602,7 @@ async fn write_worker(
 /// Connection pooling via tonic's keep-alive prevents reconnection overhead.
 async fn read_worker(
     worker_id: usize,
-    node_addr: SocketAddr,
+    node_addr: String,
     config: StressConfig,
     metrics: Arc<StressMetrics>,
     running: Arc<AtomicBool>,
@@ -653,18 +610,7 @@ async fn read_worker(
 ) {
     // Create a channel with keep-alive to reuse the TCP connection.
     // This is more efficient than creating new connections per request.
-    let endpoint = tonic::transport::Channel::from_shared(format!("http://{}", node_addr))
-        .expect("valid endpoint")
-        .http2_keep_alive_interval(Duration::from_secs(10))
-        .keep_alive_while_idle(true);
-
-    let channel = match endpoint.connect().await {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Read worker {} failed to connect: {}", worker_id, e);
-            return;
-        },
-    };
+    let channel = crate::common::connect_channel(&node_addr);
 
     let mut client =
         inferadb_ledger_proto::proto::read_service_client::ReadServiceClient::new(channel);
@@ -765,17 +711,15 @@ async fn read_worker(
 
 /// Verifies consistency of written values by reading them back.
 async fn verify_consistency(
-    leader_addr: SocketAddr,
+    leader_addr: &str,
     config: &StressConfig,
     metrics: &StressMetrics,
 ) -> Result<(), String> {
     println!("\n🔍 Verifying consistency of written values...");
 
-    let endpoint = format!("http://{}", leader_addr);
+    let channel = crate::common::connect_channel(leader_addr);
     let mut client =
-        inferadb_ledger_proto::proto::read_service_client::ReadServiceClient::connect(endpoint)
-            .await
-            .map_err(|e| format!("Failed to connect for verification: {}", e))?;
+        inferadb_ledger_proto::proto::read_service_client::ReadServiceClient::new(channel);
 
     let written = metrics.written_values.lock().clone();
     let total = written.len();
@@ -867,16 +811,14 @@ async fn verify_consistency(
 /// Unlike single-region verification, this reads from the correct organization/vault
 /// for each key based on where it was written.
 async fn verify_multi_region_consistency(
-    leader_addr: SocketAddr,
+    leader_addr: &str,
     metrics: &StressMetrics,
 ) -> Result<(), String> {
     println!("\n🔍 Verifying consistency across all regions...");
 
-    let endpoint = format!("http://{}", leader_addr);
+    let channel = crate::common::connect_channel(leader_addr);
     let mut client =
-        inferadb_ledger_proto::proto::read_service_client::ReadServiceClient::connect(endpoint)
-            .await
-            .map_err(|e| format!("Failed to connect for verification: {}", e))?;
+        inferadb_ledger_proto::proto::read_service_client::ReadServiceClient::new(channel);
 
     let written = metrics.written_values_with_location.lock().clone();
     let total = written.len();
@@ -1008,8 +950,8 @@ async fn run_stress_test_with_cluster_size(cluster_size: usize, mut config: Stre
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let leader = cluster.leader().expect("should have leader");
-    let leader_addr = leader.addr;
-    let all_addrs: Vec<SocketAddr> = cluster.nodes().iter().map(|n| n.addr).collect();
+    let leader_addr = &leader.addr;
+    let all_addrs: Vec<String> = cluster.addrs();
 
     // Setup: Create admin user + organization + vault for the stress test.
     // Uses setup_org_with_admin which creates a user via direct Raft write
@@ -1025,13 +967,9 @@ async fn run_stress_test_with_cluster_size(cluster_size: usize, mut config: Stre
     config.organization = OrganizationSlug::new(org_slug);
 
     // Create vault (retry — org provisioning saga may still be running)
+    let ch = crate::common::connect_channel(leader_addr);
     let mut vault_client =
-        inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient::connect(format!(
-            "http://{}",
-            leader_addr
-        ))
-        .await
-        .expect("connect vault client");
+        inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient::new(ch);
     let vault =
         crate::common::create_vault_with_retry(&mut vault_client, config.organization, admin_slug)
             .await;
@@ -1056,13 +994,13 @@ async fn run_stress_test_with_cluster_size(cluster_size: usize, mut config: Stre
         let r = running.clone();
         let s = write_semaphore.clone();
         let c = config.clone();
-        handles.push(tokio::spawn(write_worker(i, leader_addr, c, m, r, s)));
+        handles.push(tokio::spawn(write_worker(i, leader_addr.to_string(), c, m, r, s)));
     }
 
     // Spawn read workers (distributed across all nodes)
     println!("📖 Spawning {} read workers...", config.read_workers);
     for i in 0..config.read_workers {
-        let node_addr = all_addrs[i % all_addrs.len()];
+        let node_addr = all_addrs[i % all_addrs.len()].clone();
         let m = metrics.clone();
         let r = running.clone();
         let s = read_semaphore.clone();
@@ -1275,13 +1213,13 @@ async fn run_multi_region_stress_test(num_nodes: usize, num_regions: usize, conf
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let node = cluster.any_node();
-    let leader_addr = node.addr;
+    let leader_addr = node.addr.clone();
     let all_addrs = cluster.addrs();
 
     // Setup organizations across all regions - one organization per region
     println!("🔧 Setting up {} organizations (one per region)...", num_regions);
     let region_assignments =
-        match setup_multi_region_organizations(leader_addr, num_regions, node).await {
+        match setup_multi_region_organizations(&leader_addr, num_regions, node).await {
             Ok(assignments) => {
                 for assignment in &assignments {
                     println!(
@@ -1321,8 +1259,9 @@ async fn run_multi_region_stress_test(num_nodes: usize, num_regions: usize, conf
         let metrics = metrics.clone();
         let running = running.clone();
         let semaphore = write_semaphore.clone();
+        let addr = leader_addr.clone();
         handles.push(tokio::spawn(async move {
-            write_worker(i, leader_addr, worker_config, metrics, running, semaphore).await;
+            write_worker(i, addr, worker_config, metrics, running, semaphore).await;
         }));
     }
 
@@ -1343,7 +1282,7 @@ async fn run_multi_region_stress_test(num_nodes: usize, num_regions: usize, conf
         let running = running.clone();
         let semaphore = read_semaphore.clone();
         // Distribute read workers across all nodes
-        let node_addr = all_addrs[i % all_addrs.len()];
+        let node_addr = all_addrs[i % all_addrs.len()].clone();
         handles.push(tokio::spawn(async move {
             read_worker(i, node_addr, worker_config, metrics, running, semaphore).await;
         }));
@@ -1388,7 +1327,7 @@ async fn run_multi_region_stress_test(num_nodes: usize, num_regions: usize, conf
     metrics.report(actual_duration);
 
     // Verify consistency across all regions - reads from each key's recorded organization/vault
-    let consistency_result = verify_multi_region_consistency(leader_addr, &metrics).await;
+    let consistency_result = verify_multi_region_consistency(&leader_addr, &metrics).await;
     if let Err(e) = &consistency_result {
         eprintln!("  ❌ Multi-region consistency verification failed: {}", e);
     }

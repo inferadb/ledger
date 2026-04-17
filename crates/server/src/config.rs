@@ -337,6 +337,17 @@ pub struct Config {
     #[serde(default = "default_token_maintenance_interval_secs")]
     #[builder(default = default_token_maintenance_interval_secs())]
     pub token_maintenance_interval_secs: u64,
+
+    // === Unix Domain Socket ===
+    /// Path to a Unix domain socket for local gRPC connections.
+    ///
+    /// When set, the server listens on the specified Unix socket instead of
+    /// a TCP address. Useful for co-located sidecar communication with lower
+    /// overhead than TCP. Mutually exclusive with TCP listening at the
+    /// transport level — the server binds to one or the other.
+    #[arg(long = "unix-socket", env = "INFERADB__LEDGER__UNIX_SOCKET")]
+    #[serde(default)]
+    pub unix_socket: Option<PathBuf>,
 }
 
 // Default value functions
@@ -385,6 +396,7 @@ impl Default for Config {
             rate_limit: None,
             token_maintenance_interval_secs: default_token_maintenance_interval_secs(),
             email_blinding_key: None,
+            unix_socket: None,
         }
     }
 }
@@ -419,9 +431,16 @@ impl Config {
 
     /// Returns the address other nodes should use to reach this node.
     ///
-    /// Uses `--advertise` when set, otherwise falls back to `--listen`.
+    /// Uses `--advertise` when set, then falls back to the Unix socket path
+    /// (if configured), and finally to the TCP listen address.
     pub fn advertise_addr(&self) -> String {
-        self.advertise.clone().unwrap_or_else(|| self.listen_addr.to_string())
+        if let Some(ref addr) = self.advertise {
+            return addr.clone();
+        }
+        if let Some(ref path) = self.unix_socket {
+            return path.display().to_string();
+        }
+        self.listen_addr.to_string()
     }
 
     /// Returns true if the server is running in ephemeral mode.

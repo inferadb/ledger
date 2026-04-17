@@ -19,7 +19,7 @@ use crate::common::{TestCluster, create_admin_client, create_write_client};
 
 /// Creates an organization and returns its slug.
 async fn create_organization(
-    addr: std::net::SocketAddr,
+    addr: &str,
     name: &str,
     node: &crate::common::TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
@@ -29,7 +29,7 @@ async fn create_organization(
 
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
     crate::common::create_test_vault(addr, organization).await
@@ -37,7 +37,7 @@ async fn create_vault(
 
 /// Writes an entity and return the block height.
 async fn write_entity(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
@@ -82,7 +82,7 @@ async fn write_entity(
 
 /// Creates a backup and return the response.
 async fn create_backup(
-    addr: std::net::SocketAddr,
+    addr: &str,
     tag: Option<&str>,
     base_backup_id: Option<&str>,
 ) -> Result<inferadb_ledger_proto::proto::CreateBackupResponse, Box<dyn std::error::Error>> {
@@ -99,7 +99,7 @@ async fn create_backup(
 
 /// Lists backups and return the list.
 async fn list_backups(
-    addr: std::net::SocketAddr,
+    addr: &str,
     limit: u32,
 ) -> Result<Vec<inferadb_ledger_proto::proto::BackupInfo>, Box<dyn std::error::Error>> {
     let mut client = create_admin_client(addr).await?;
@@ -125,14 +125,14 @@ async fn test_backup_create_and_list_metadata() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create some data to back up
-    let ns_id = create_organization(leader.addr, "backup-metadata", leader)
+    let ns_id = create_organization(&leader.addr, "backup-metadata", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, ns_id).await.expect("create vault");
+    let vault = create_vault(&leader.addr, ns_id).await.expect("create vault");
 
     for i in 0..5 {
         write_entity(
-            leader.addr,
+            &leader.addr,
             ns_id,
             vault,
             &format!("key-{}", i),
@@ -144,7 +144,7 @@ async fn test_backup_create_and_list_metadata() {
 
     // Create a tagged backup
     let backup =
-        create_backup(leader.addr, Some("test-snapshot"), None).await.expect("create backup");
+        create_backup(&leader.addr, Some("test-snapshot"), None).await.expect("create backup");
 
     assert!(!backup.backup_id.is_empty(), "backup should have an ID");
     assert!(backup.region_height > 0, "backup should have a region height");
@@ -152,7 +152,7 @@ async fn test_backup_create_and_list_metadata() {
     assert!(!backup.backup_path.is_empty(), "backup should have a path");
 
     // List backups and verify metadata
-    let backups = list_backups(leader.addr, 10).await.expect("list backups");
+    let backups = list_backups(&leader.addr, 10).await.expect("list backups");
 
     assert!(!backups.is_empty(), "should have at least one backup");
 
@@ -176,30 +176,30 @@ async fn test_backup_during_active_writes() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let ns_id = create_organization(leader.addr, "backup-concurrent", leader)
+    let ns_id = create_organization(&leader.addr, "backup-concurrent", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, ns_id).await.expect("create vault");
+    let vault = create_vault(&leader.addr, ns_id).await.expect("create vault");
 
     // Write initial data
     for i in 0..3 {
-        write_entity(leader.addr, ns_id, vault, &format!("initial-{}", i), b"initial-value")
+        write_entity(&leader.addr, ns_id, vault, &format!("initial-{}", i), b"initial-value")
             .await
             .expect("write initial entity");
     }
 
     // Start concurrent writes in background
-    let addr = leader.addr;
+    let addr = leader.addr.clone();
     let write_handle = tokio::spawn(async move {
         for i in 0..5 {
-            let _ =
-                write_entity(addr, ns_id, vault, &format!("concurrent-{}", i), b"concurrent").await;
+            let _ = write_entity(&addr, ns_id, vault, &format!("concurrent-{}", i), b"concurrent")
+                .await;
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     });
 
     // Create backup while writes are happening
-    let backup = create_backup(leader.addr, Some("during-writes"), None)
+    let backup = create_backup(&leader.addr, Some("during-writes"), None)
         .await
         .expect("backup during writes should succeed");
 
@@ -221,16 +221,16 @@ async fn test_backup_list_with_limit() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let ns_id = create_organization(leader.addr, "backup-limit", leader)
+    let ns_id = create_organization(&leader.addr, "backup-limit", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, ns_id).await.expect("create vault");
+    let vault = create_vault(&leader.addr, ns_id).await.expect("create vault");
 
     // Write data and create multiple backups
     let mut backup_ids = Vec::new();
     for i in 0..3 {
         write_entity(
-            leader.addr,
+            &leader.addr,
             ns_id,
             vault,
             &format!("data-{}", i),
@@ -242,7 +242,7 @@ async fn test_backup_list_with_limit() {
         // Delay between backups to ensure different timestamps and completion
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-        let backup = create_backup(leader.addr, Some(&format!("backup-{}", i)), None)
+        let backup = create_backup(&leader.addr, Some(&format!("backup-{}", i)), None)
             .await
             .expect("create backup");
         backup_ids.push(backup.backup_id);
@@ -251,7 +251,7 @@ async fn test_backup_list_with_limit() {
     // Poll until all 3 backup jobs have completed and metadata is persisted.
     let all = tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
-            let backups = list_backups(leader.addr, 0).await.expect("list all");
+            let backups = list_backups(&leader.addr, 0).await.expect("list all");
             if backups.len() >= 3 {
                 return backups;
             }
@@ -264,7 +264,7 @@ async fn test_backup_list_with_limit() {
     assert!(all.len() >= 3, "should have at least 3 backups, got {}", all.len());
 
     // List with limit=2 should return at most 2
-    let limited = list_backups(leader.addr, 2).await.expect("list limited");
+    let limited = list_backups(&leader.addr, 2).await.expect("list limited");
     assert!(limited.len() <= 2, "limit should be respected, got {}", limited.len());
 }
 
@@ -278,13 +278,13 @@ async fn test_backup_checksum_present() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let ns_id = create_organization(leader.addr, "backup-checksum", leader)
+    let ns_id = create_organization(&leader.addr, "backup-checksum", leader)
         .await
         .expect("create organization");
-    let _vault = create_vault(leader.addr, ns_id).await.expect("create vault");
+    let _vault = create_vault(&leader.addr, ns_id).await.expect("create vault");
 
     let backup =
-        create_backup(leader.addr, Some("checksum-test"), None).await.expect("create backup");
+        create_backup(&leader.addr, Some("checksum-test"), None).await.expect("create backup");
 
     // Checksum should be present and non-zero
     assert!(backup.checksum.is_some(), "backup should have a checksum");

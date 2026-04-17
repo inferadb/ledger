@@ -13,6 +13,7 @@
 use std::time::Duration;
 
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use serial_test::serial;
 
 use crate::common::{TestCluster, TestNode, create_write_client};
 
@@ -22,7 +23,7 @@ use crate::common::{TestCluster, TestNode, create_write_client};
 
 /// Creates an organization and returns its slug.
 async fn create_organization(
-    addr: std::net::SocketAddr,
+    addr: &str,
     name: &str,
     node: &TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
@@ -32,7 +33,7 @@ async fn create_organization(
 
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
     crate::common::create_test_vault(addr, organization).await
@@ -44,6 +45,7 @@ async fn create_vault(
 
 /// Tests that multiple writes replicate in order.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn test_ordered_replication() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;
@@ -51,12 +53,12 @@ async fn test_ordered_replication() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization = create_organization(leader.addr, "ordered-repl-ns", leader)
+    let organization = create_organization(&leader.addr, "ordered-repl-ns", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
-    let mut client = create_write_client(leader.addr).await.expect("connect to leader");
+    let mut client = create_write_client(&leader.addr).await.expect("connect to leader");
 
     // Submit multiple writes
     for i in 0..5u64 {
@@ -110,6 +112,7 @@ async fn test_ordered_replication() {
 
 /// Tests that followers have consistent state after writes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn test_follower_state_consistency() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;
@@ -117,12 +120,12 @@ async fn test_follower_state_consistency() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization = create_organization(leader.addr, "follower-consistency-ns", leader)
+    let organization = create_organization(&leader.addr, "follower-consistency-ns", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
-    let mut client = create_write_client(leader.addr).await.expect("connect to leader");
+    let mut client = create_write_client(&leader.addr).await.expect("connect to leader");
 
     // Submit a batch of writes
     let batch_request = inferadb_ledger_proto::proto::BatchWriteRequest {
@@ -178,6 +181,7 @@ async fn test_follower_state_consistency() {
 /// Verifies that the replication pipeline handles non-contiguous writes
 /// (with idle time between them) without losing data.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn test_replication_with_idle_gap_between_writes() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;
@@ -185,12 +189,12 @@ async fn test_replication_with_idle_gap_between_writes() {
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let organization = create_organization(leader.addr, "delay-repl-ns", leader)
+    let organization = create_organization(&leader.addr, "delay-repl-ns", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
-    let mut client = create_write_client(leader.addr).await.expect("connect to leader");
+    let mut client = create_write_client(&leader.addr).await.expect("connect to leader");
 
     // Write some data
     let request = inferadb_ledger_proto::proto::WriteRequest {

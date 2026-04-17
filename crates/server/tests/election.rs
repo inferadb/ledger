@@ -12,6 +12,8 @@
 
 use std::time::Duration;
 
+use serial_test::serial;
+
 use crate::common::TestCluster;
 
 /// Tests that a single-node cluster immediately elects itself as leader.
@@ -31,6 +33,7 @@ async fn test_single_node_self_election() {
 
 /// Tests that a three-node cluster elects a leader.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn test_three_node_leader_election() {
     let cluster = TestCluster::new(3).await;
 
@@ -64,6 +67,7 @@ async fn test_three_node_leader_election() {
 
 /// Tests that all nodes eventually agree on the same term.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn test_term_agreement() {
     let cluster = TestCluster::new(3).await;
     let _leader_id = cluster.wait_for_leader().await;
@@ -89,6 +93,7 @@ async fn test_term_agreement() {
 
 /// Tests that leader has higher or equal term than followers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn test_leader_term_dominance() {
     let cluster = TestCluster::new(3).await;
     let leader_id = cluster.wait_for_leader().await;

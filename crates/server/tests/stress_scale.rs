@@ -24,7 +24,7 @@ use crate::common::{TestCluster, create_read_client, create_write_client};
 
 /// Creates an organization and returns its slug.
 async fn create_organization(
-    addr: std::net::SocketAddr,
+    addr: &str,
     name: &str,
     node: &crate::common::TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
@@ -34,7 +34,7 @@ async fn create_organization(
 
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
     crate::common::create_test_vault(addr, organization).await
@@ -42,7 +42,7 @@ async fn create_vault(
 
 /// Writes an entity and returns the assigned sequence number.
 async fn write_entity(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
@@ -113,7 +113,7 @@ async fn write_with_retry(
 
 /// Reads an entity and returns its value (if it exists).
 async fn read_entity(
-    addr: std::net::SocketAddr,
+    addr: &str,
     organization: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
@@ -148,14 +148,14 @@ async fn test_snapshot_over_10k_entities_per_vault_no_data_loss() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let organization = create_organization(leader.addr, "10k-plus-snap-ns", leader)
+    let organization = create_organization(&leader.addr, "10k-plus-snap-ns", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
     // Write 10,001 entities — one more than the old cap.
     let entity_count = 10_001;
-    let mut write_client = create_write_client(leader.addr).await.expect("connect");
+    let mut write_client = create_write_client(&leader.addr).await.expect("connect");
     for i in 0..entity_count {
         write_with_retry(
             &mut write_client,
@@ -188,17 +188,17 @@ async fn test_snapshot_over_10k_entities_per_vault_no_data_loss() {
     let follower = cluster.followers().into_iter().next().expect("should have follower");
 
     // Check first, last, and boundary entities.
-    let first = read_entity(follower.addr, organization, vault, "e-00000").await;
+    let first = read_entity(&follower.addr, organization, vault, "e-00000").await;
     assert_eq!(first, Some(b"v-0".to_vec()), "first entity should be present on follower");
 
-    let at_cap = read_entity(follower.addr, organization, vault, "e-09999").await;
+    let at_cap = read_entity(&follower.addr, organization, vault, "e-09999").await;
     assert_eq!(
         at_cap,
         Some(b"v-9999".to_vec()),
         "entity at old 10K cap should be present on follower"
     );
 
-    let beyond_cap = read_entity(follower.addr, organization, vault, "e-10000").await;
+    let beyond_cap = read_entity(&follower.addr, organization, vault, "e-10000").await;
     assert_eq!(
         beyond_cap,
         Some(b"v-10000".to_vec()),
@@ -206,7 +206,7 @@ async fn test_snapshot_over_10k_entities_per_vault_no_data_loss() {
     );
 
     // Spot-check mid-range for integrity.
-    let mid = read_entity(follower.addr, organization, vault, "e-05000").await;
+    let mid = read_entity(&follower.addr, organization, vault, "e-05000").await;
     assert_eq!(mid, Some(b"v-5000".to_vec()), "mid-range entity should match");
 }
 
@@ -221,12 +221,12 @@ async fn test_10k_writes_replicated_state_roots_match() {
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let organization = create_organization(leader.addr, "10k-writes-ns", leader)
+    let organization = create_organization(&leader.addr, "10k-writes-ns", leader)
         .await
         .expect("create organization");
-    let vault = create_vault(leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
 
-    let mut write_client = create_write_client(leader.addr).await.expect("connect");
+    let mut write_client = create_write_client(&leader.addr).await.expect("connect");
     for i in 0..10_000 {
         write_with_retry(
             &mut write_client,
@@ -265,10 +265,10 @@ async fn test_10k_writes_replicated_state_roots_match() {
     }
 
     let follower = cluster.followers().into_iter().next().expect("follower");
-    let first = read_entity(follower.addr, organization, vault, "entity-00000").await;
+    let first = read_entity(&follower.addr, organization, vault, "entity-00000").await;
     assert_eq!(first, Some(b"data-0".to_vec()));
 
-    let last = read_entity(follower.addr, organization, vault, "entity-09999").await;
+    let last = read_entity(&follower.addr, organization, vault, "entity-09999").await;
     assert_eq!(last, Some(b"data-9999".to_vec()));
 }
 
@@ -287,11 +287,11 @@ async fn test_multi_org_vault_write_distribution_2k_entities() {
     // Create 10 orgs with 5 vaults each.
     let mut targets: Vec<(OrganizationSlug, VaultSlug)> = Vec::new();
     for i in 0..10 {
-        let org = create_organization(leader.addr, &format!("throughput-org-{}", i), leader)
+        let org = create_organization(&leader.addr, &format!("throughput-org-{}", i), leader)
             .await
             .expect("create org");
         for _v in 0..5 {
-            let vault = create_vault(leader.addr, org).await.expect("create vault");
+            let vault = create_vault(&leader.addr, org).await.expect("create vault");
             targets.push((org, vault));
         }
     }
@@ -302,7 +302,7 @@ async fn test_multi_org_vault_write_distribution_2k_entities() {
         let (org, vault) = targets[i % targets.len()];
         let client_id = format!("tp-client-{}", i);
         write_entity(
-            leader.addr,
+            &leader.addr,
             org,
             vault,
             &format!("tp-key-{}", i),
@@ -327,12 +327,13 @@ async fn test_multi_org_vault_write_distribution_2k_entities() {
 
     // Spot-check entries from multiple organizations to verify cross-org writes.
     let (org_first, vault_first) = targets[0];
-    let value = read_entity(leader.addr, org_first, vault_first, "tp-key-0").await;
+    let value = read_entity(&leader.addr, org_first, vault_first, "tp-key-0").await;
     assert_eq!(value, Some(b"tp-val-0".to_vec()), "first org/vault entry should be readable");
 
     let last_idx = 1_999;
     let (org_last, vault_last) = targets[last_idx % targets.len()];
-    let value = read_entity(leader.addr, org_last, vault_last, &format!("tp-key-{last_idx}")).await;
+    let value =
+        read_entity(&leader.addr, org_last, vault_last, &format!("tp-key-{last_idx}")).await;
     assert_eq!(
         value,
         Some(format!("tp-val-{last_idx}").into_bytes()),
