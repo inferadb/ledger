@@ -24,7 +24,6 @@ use std::{
 };
 
 use futures::FutureExt as _;
-
 use inferadb_ledger_state::{
     StateLayer,
     system::{

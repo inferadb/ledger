@@ -345,6 +345,22 @@ pub struct Config {
     #[arg(long = "socket", env = "INFERADB__LEDGER__SOCKET")]
     #[serde(default)]
     pub socket: Option<PathBuf>,
+
+    // === Bootstrap Initialization Timeout ===
+    /// How long a fresh node waits for an `InitCluster` RPC before returning an error, in seconds.
+    ///
+    /// Prevents a misconfigured or isolated fresh node from waiting forever. After the timeout
+    /// elapses with no initialization signal, `bootstrap_node` returns
+    /// [`BootstrapError::InitTimeout`]. Defaults to 600 seconds (10 minutes). Set to 0 to
+    /// disable the timeout (wait indefinitely).
+    #[arg(
+        long = "init-wait-timeout",
+        env = "INFERADB__LEDGER__INIT_WAIT_TIMEOUT",
+        default_value_t = default_init_wait_timeout_secs()
+    )]
+    #[serde(default = "default_init_wait_timeout_secs")]
+    #[builder(default = default_init_wait_timeout_secs())]
+    pub init_wait_timeout_secs: u64,
 }
 
 // Default value functions
@@ -360,6 +376,9 @@ fn default_max_concurrent() -> usize {
 }
 fn default_timeout_secs() -> u64 {
     30
+}
+fn default_init_wait_timeout_secs() -> u64 {
+    600 // 10 minutes
 }
 
 impl Default for Config {
@@ -389,6 +408,7 @@ impl Default for Config {
             token_maintenance_interval_secs: default_token_maintenance_interval_secs(),
             email_blinding_key: None,
             socket: None,
+            init_wait_timeout_secs: default_init_wait_timeout_secs(),
         }
     }
 }

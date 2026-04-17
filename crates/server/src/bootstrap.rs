@@ -28,6 +28,7 @@ use inferadb_ledger_state::{
     TieredSnapshotManager,
 };
 use inferadb_ledger_store::FileBackend;
+
 use crate::config::Config;
 
 /// Errors during cluster bootstrap, including database, Raft, and coordination failures.
@@ -68,6 +69,16 @@ pub enum BootstrapError {
     Timeout {
         /// Error description.
         message: String,
+    },
+    /// Fresh node timed out waiting for `InitCluster` RPC.
+    ///
+    /// The node started uninitialized and no `InitCluster` RPC (or seed discovery signal) arrived
+    /// within the configured [`Config::init_wait_timeout_secs`] window. This usually indicates
+    /// a misconfiguration or network partition preventing the init operator from reaching the node.
+    #[snafu(display("init wait timeout after {timeout_secs}s: no InitCluster RPC received"))]
+    InitTimeout {
+        /// The timeout that elapsed.
+        timeout_secs: u64,
     },
     /// Configuration validation failed.
     #[snafu(display("configuration error: {message}"))]
@@ -693,29 +704,50 @@ pub async fn bootstrap_node(
         }
 
         // Wait for initialization (via InitCluster RPC or seed discovery) or shutdown.
+        // Wrap with an optional timeout to prevent indefinite hangs on misconfigured nodes.
         let mut shutdown_wait = shutdown_rx.clone();
-        tokio::select! {
-            result = init_rx.wait_for(|v| v.is_some()) => {
-                match result {
-                    Ok(guard) => {
-                        if let Some(cid) = *guard {
-                            tracing::info!(node_id, cluster_id = cid, "Initialization complete");
+        let timeout_secs = config.init_wait_timeout_secs;
+        let init_fut = async {
+            tokio::select! {
+                result = init_rx.wait_for(|v| v.is_some()) => {
+                    match result {
+                        Ok(guard) => {
+                            if let Some(cid) = *guard {
+                                tracing::info!(node_id, cluster_id = cid, "Initialization complete");
+                            }
+                            Ok(())
+                        }
+                        Err(_) => {
+                            // All senders dropped without initializing — treat as shutdown.
+                            tracing::info!(node_id, "Init channel closed before initialization");
+                            Err(BootstrapError::Initialize {
+                                message: "init channel closed before initialization".to_string(),
+                            })
                         }
                     }
-                    Err(_) => {
-                        // All senders dropped without initializing — treat as shutdown.
-                        tracing::info!(node_id, "Init channel closed before initialization");
-                        return Err(BootstrapError::Initialize {
-                            message: "init channel closed before initialization".to_string(),
-                        });
-                    }
+                }
+                _ = async { let _ = shutdown_wait.wait_for(|&v| v).await; } => {
+                    tracing::info!(node_id, "Shutdown received before initialization");
+                    Err(BootstrapError::Initialize {
+                        message: "shutdown received before initialization".to_string(),
+                    })
                 }
             }
-            _ = async { let _ = shutdown_wait.wait_for(|&v| v).await; } => {
-                tracing::info!(node_id, "Shutdown received before initialization");
-                return Err(BootstrapError::Initialize {
-                    message: "shutdown received before initialization".to_string(),
-                });
+        };
+
+        if timeout_secs == 0 {
+            init_fut.await?;
+        } else {
+            match tokio::time::timeout(Duration::from_secs(timeout_secs), init_fut).await {
+                Ok(result) => result?,
+                Err(_elapsed) => {
+                    tracing::error!(
+                        node_id,
+                        timeout_secs,
+                        "Fresh node timed out waiting for InitCluster RPC"
+                    );
+                    return Err(BootstrapError::InitTimeout { timeout_secs });
+                },
             }
         }
 
@@ -1597,6 +1629,38 @@ mod tests {
                     "expected shutdown-before-init error, got: {err}"
                 );
             },
+        }
+    }
+
+    /// Tests that a fresh node returns [`BootstrapError::InitTimeout`] when no
+    /// `InitCluster` RPC arrives before `init_wait_timeout_secs` elapses.
+    #[tokio::test]
+    async fn test_bootstrap_fresh_node_init_timeout() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let data_dir = temp_dir.path().to_path_buf();
+
+        // Use a unique port to avoid conflicts.
+        let mut config = Config::for_test(1, 50060, data_dir.clone());
+        // Set a very short timeout — no InitCluster RPC will arrive.
+        config.init_wait_timeout_secs = 1;
+
+        // No cluster_id file → fresh node path.
+        let health = inferadb_ledger_raft::HealthState::new();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+
+        let start = std::time::Instant::now();
+        let result = bootstrap_node(&config, &data_dir, health, rx, None).await;
+        let elapsed = start.elapsed();
+
+        // Must complete within a generous window (2× timeout + startup overhead).
+        assert!(elapsed.as_secs() < 5, "bootstrap should return well within 5s, took {elapsed:?}");
+
+        match result {
+            Err(BootstrapError::InitTimeout { timeout_secs }) => {
+                assert_eq!(timeout_secs, 1, "reported timeout_secs should match config");
+            },
+            Ok(_) => panic!("expected InitTimeout error, got Ok"),
+            Err(other) => panic!("expected InitTimeout, got: {other}"),
         }
     }
 
