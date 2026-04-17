@@ -4,7 +4,7 @@
 //! a builder that accumulates fields throughout the request lifecycle. On drop,
 //! it emits a single structured event to the `ledger::events` tracing target.
 
-use std::{cell::RefCell, time::Instant};
+use std::{cell::RefCell, sync::Arc, time::Instant};
 
 use inferadb_ledger_types::Region;
 use tracing::info;
@@ -202,7 +202,6 @@ impl RequestContextGuard {
 /// When a sampler is configured via [`set_sampler`](Self::set_sampler), the context
 /// will apply tail sampling at emission time. Sampling decisions are deterministic
 /// based on request_id and consider outcome, latency, and operation type.
-#[derive(Debug)]
 pub struct RequestContext {
     // Request metadata
     pub(crate) request_id: Uuid,
@@ -282,6 +281,25 @@ pub struct RequestContext {
     // Sampling
     pub(crate) operation_type: OperationType,
     pub(crate) sampler: Option<Sampler>,
+
+    // Metric emission — true for gRPC handlers, false for background jobs
+    pub(crate) emit_grpc_metric: bool,
+
+    // Event handle for handler-phase business event emission (not Debug — trait object)
+    pub(crate) event_handle: Option<Arc<dyn crate::event_writer::EventEmitter>>,
+}
+
+// Manual Debug because `dyn EventEmitter` is not Debug.
+impl std::fmt::Debug for RequestContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestContext")
+            .field("request_id", &self.request_id)
+            .field("service", &self.service)
+            .field("method", &self.method)
+            .field("emit_grpc_metric", &self.emit_grpc_metric)
+            .field("event_handle", &self.event_handle.as_ref().map(|_| "..."))
+            .finish_non_exhaustive()
+    }
 }
 
 impl RequestContext {
@@ -343,6 +361,8 @@ impl RequestContext {
             emitted: false,
             operation_type: OperationType::Write, // Default, can be overridden
             sampler: None,
+            emit_grpc_metric: false,
+            event_handle: None,
         }
     }
 
@@ -354,10 +374,59 @@ impl RequestContext {
         ctx
     }
 
+    /// Creates a context for a gRPC handler.
+    ///
+    /// Extracts transport metadata (SDK version, source IP) and trace context
+    /// (W3C traceparent) from the request. Emits a gRPC request metric and
+    /// the canonical log line on Drop.
+    ///
+    /// # Arguments
+    ///
+    /// * `service` - The gRPC service name (e.g., `"WriteService"`).
+    /// * `method` - The gRPC method name (e.g., `"write"`).
+    /// * `request` - The tonic request to extract metadata from.
+    /// * `event_handle` - Optional trait-erased event handle for business event emission.
+    #[must_use]
+    pub fn from_request<T>(
+        service: &'static str,
+        method: &'static str,
+        request: &tonic::Request<T>,
+        event_handle: Option<Arc<dyn crate::event_writer::EventEmitter>>,
+    ) -> Self {
+        let mut ctx = Self::new(service, method);
+        ctx.emit_grpc_metric = true;
+        ctx.event_handle = event_handle;
+        ctx.extract_transport_metadata(request.metadata());
+
+        let trace_ctx = crate::trace_context::extract_or_generate(request.metadata());
+        ctx.set_trace_context_from(&trace_ctx);
+
+        ctx
+    }
+
+    /// Copies trace fields from a [`TraceContext`](crate::trace_context::TraceContext).
+    pub fn set_trace_context_from(&mut self, trace_ctx: &crate::trace_context::TraceContext) {
+        self.trace_id = Some(trace_ctx.trace_id.clone());
+        self.span_id = Some(trace_ctx.span_id.clone());
+        self.parent_span_id = trace_ctx.parent_span_id.clone();
+        self.trace_flags = Some(trace_ctx.trace_flags);
+    }
+
     /// Returns the request ID.
     #[must_use]
     pub fn request_id(&self) -> Uuid {
         self.request_id
+    }
+
+    /// Returns the W3C trace ID if one was set or extracted from request metadata.
+    ///
+    /// Use this to pass the trace ID to correlation helpers such as
+    /// `response_with_correlation` and `status_with_correlation` after calling
+    /// [`from_request`](Self::from_request) instead of keeping a separate
+    /// `trace_ctx` variable.
+    #[must_use]
+    pub fn trace_id(&self) -> &str {
+        self.trace_id.as_deref().unwrap_or("")
     }
 
     // =========================================================================
@@ -748,6 +817,103 @@ impl RequestContext {
     }
 
     // =========================================================================
+    // Event emission
+    // =========================================================================
+
+    /// Records a handler-phase business event using this context's scope fields.
+    ///
+    /// Organization, vault, caller, and trace ID are read from `self` and
+    /// merged into the event entry. Additional key-value details can be supplied
+    /// via the `details` slice.
+    ///
+    /// This is a no-op if no event handle was set (e.g., background jobs or
+    /// contexts created via [`new()`](Self::new) rather than
+    /// [`from_request()`](Self::from_request)).
+    ///
+    /// Named `record_event` (not `emit_event`) because `emit_event` is the
+    /// internal method that emits the canonical log line on Drop.
+    pub fn record_event(
+        &self,
+        action: inferadb_ledger_types::events::EventAction,
+        outcome: inferadb_ledger_types::events::EventOutcome,
+        details: &[(&str, &str)],
+    ) {
+        let Some(handle) = &self.event_handle else {
+            return;
+        };
+
+        let org_id =
+            inferadb_ledger_types::OrganizationId::new(self.organization.unwrap_or(0) as i64);
+        let org_slug = self.organization.map(inferadb_ledger_types::OrganizationSlug::new);
+        let vault_slug = self.vault.map(inferadb_ledger_types::VaultSlug::new);
+        let node_id = self.node_id.unwrap_or(0);
+
+        let principal = match self.caller {
+            Some(slug) => format!("user:{slug}"),
+            None => String::new(),
+        };
+
+        let mut emitter = crate::event_writer::HandlerPhaseEmitter::for_organization(
+            action, org_id, org_slug, node_id,
+        )
+        .principal(&principal)
+        .outcome(outcome);
+
+        if let Some(slug) = vault_slug {
+            emitter = emitter.vault(slug);
+        }
+
+        if let Some(ref tid) = self.trace_id {
+            emitter = emitter.trace_id(tid);
+        }
+
+        for &(k, v) in details {
+            emitter = emitter.detail(k, v);
+        }
+
+        // Use 90-day TTL, matching existing handler-phase patterns.
+        let entry = emitter.build(90);
+        handle.record_event(entry);
+    }
+
+    /// Sets the event handle for handler-phase event emission.
+    pub fn set_event_handle(&mut self, handle: Arc<dyn crate::event_writer::EventEmitter>) {
+        self.event_handle = Some(handle);
+    }
+
+    // =========================================================================
+    // Metric helpers (used by Drop)
+    // =========================================================================
+
+    /// Fields emitted as metric labels. ONLY bounded-enum values.
+    ///
+    /// Entity IDs (org, vault, caller) are deliberately excluded —
+    /// they appear in logs and events where high cardinality is cheap.
+    /// Region is excluded because it is a scraper-implicit label added
+    /// by the metrics infrastructure, not by the instrumented code.
+    ///
+    /// Future label changes happen HERE, in one method, once.
+    #[allow(dead_code)]
+    pub(crate) fn metric_labels(&self) -> Vec<(&'static str, String)> {
+        vec![
+            (super::fields::SERVICE, self.service.to_string()),
+            (super::fields::METHOD, self.method.to_string()),
+            (super::fields::STATUS, self.grpc_status_str().to_string()),
+        ]
+    }
+
+    /// Maps the request outcome to a gRPC status string for metrics.
+    fn grpc_status_str(&self) -> &str {
+        match &self.outcome {
+            Some(Outcome::Success | Outcome::Cached) => "OK",
+            Some(Outcome::Error { code, .. }) => code.as_str(),
+            Some(Outcome::RateLimited) => "RESOURCE_EXHAUSTED",
+            Some(Outcome::PreconditionFailed { .. }) => "FAILED_PRECONDITION",
+            None => "UNKNOWN",
+        }
+    }
+
+    // =========================================================================
     // Timing methods
     // =========================================================================
 
@@ -973,6 +1139,16 @@ impl Drop for RequestContext {
         if !self.emitted {
             self.emitted = true;
             self.emit_event();
+
+            if self.emit_grpc_metric {
+                let status = self.grpc_status_str();
+                crate::metrics::record_grpc_request(
+                    self.service,
+                    self.method,
+                    status,
+                    self.start_time.elapsed().as_secs_f64(),
+                );
+            }
         }
     }
 }
@@ -1694,5 +1870,269 @@ mod tests {
             let found_id = with_current_context(|ctx| ctx.request_id());
             assert_eq!(found_id, Some(id));
         });
+    }
+
+    // ── gRPC metric emission ──
+
+    #[test]
+    fn grpc_context_emits_metric_on_drop() {
+        // Verify that a context with emit_grpc_metric = true calls
+        // record_grpc_request without panicking. The metrics crate is safe
+        // to call without a recorder installed — calls become no-ops.
+        let mut ctx = RequestContext::new("WriteService", "write");
+        ctx.emit_grpc_metric = true;
+        ctx.set_success();
+        ctx.set_region(Region::GLOBAL);
+        drop(ctx); // should not panic
+    }
+
+    #[test]
+    fn non_grpc_context_skips_metric_emission() {
+        // Default context has emit_grpc_metric = false.
+        let mut ctx = RequestContext::new("BackgroundJob", "compact");
+        ctx.set_success();
+        assert!(!ctx.emit_grpc_metric);
+        drop(ctx); // should not panic, and should not attempt metric emission
+    }
+
+    #[test]
+    fn grpc_status_str_maps_outcomes() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+
+        // No outcome -> UNKNOWN
+        assert_eq!(ctx.grpc_status_str(), "UNKNOWN");
+
+        ctx.set_success();
+        assert_eq!(ctx.grpc_status_str(), "OK");
+
+        ctx.set_cached();
+        assert_eq!(ctx.grpc_status_str(), "OK");
+
+        ctx.set_rate_limited();
+        assert_eq!(ctx.grpc_status_str(), "RESOURCE_EXHAUSTED");
+
+        ctx.set_precondition_failed(Some("key"));
+        assert_eq!(ctx.grpc_status_str(), "FAILED_PRECONDITION");
+
+        ctx.set_error("NOT_FOUND", "not found");
+        assert_eq!(ctx.grpc_status_str(), "NOT_FOUND");
+    }
+
+    // ── Event handle ──
+
+    #[test]
+    fn record_event_noop_when_no_event_handle() {
+        let mut ctx = RequestContext::new("WriteService", "write");
+        ctx.suppress_emission();
+        ctx.set_organization(100);
+        ctx.set_caller(42);
+
+        // Should not panic even without an event handle
+        ctx.record_event(
+            inferadb_ledger_types::events::EventAction::RequestRateLimited,
+            inferadb_ledger_types::events::EventOutcome::Denied {
+                reason: "rate_limited".to_string(),
+            },
+            &[("level", "organization")],
+        );
+    }
+
+    #[test]
+    fn record_event_reads_scope_from_self() {
+        use std::sync::{Arc, Mutex};
+
+        use inferadb_ledger_types::events::{EventAction, EventEntry, EventOutcome};
+
+        /// Test event emitter that captures the entry for assertion.
+        struct TestEmitter {
+            captured: Mutex<Option<EventEntry>>,
+        }
+
+        impl crate::event_writer::EventEmitter for TestEmitter {
+            fn record_event(&self, entry: EventEntry) {
+                *self.captured.lock().unwrap() = Some(entry);
+            }
+        }
+
+        let emitter = Arc::new(TestEmitter { captured: Mutex::new(None) });
+
+        let mut ctx = RequestContext::new("WriteService", "write");
+        ctx.suppress_emission();
+        ctx.set_organization(100);
+        ctx.set_vault(200);
+        ctx.set_caller(42);
+        ctx.set_trace_id("abc123".to_string());
+        ctx.set_node_id(7);
+        ctx.event_handle = Some(emitter.clone());
+
+        ctx.record_event(
+            EventAction::RequestRateLimited,
+            EventOutcome::Denied { reason: "rate_limited".to_string() },
+            &[("level", "organization")],
+        );
+
+        let entry = emitter.captured.lock().unwrap().take().unwrap();
+        assert_eq!(entry.organization_id, inferadb_ledger_types::OrganizationId::new(100));
+        assert_eq!(entry.organization, Some(inferadb_ledger_types::OrganizationSlug::new(100)));
+        assert_eq!(entry.vault, Some(inferadb_ledger_types::VaultSlug::new(200)));
+        assert_eq!(entry.principal, "user:42");
+        assert_eq!(entry.trace_id.as_deref(), Some("abc123"));
+        assert_eq!(entry.details.get("level").map(String::as_str), Some("organization"));
+        assert_eq!(entry.action, EventAction::RequestRateLimited);
+    }
+
+    // ── from_request constructor ──
+
+    #[test]
+    fn from_request_extracts_metadata() {
+        use tonic::metadata::MetadataValue;
+
+        let mut request = tonic::Request::new(());
+        request.metadata_mut().insert("x-sdk-version", MetadataValue::from_static("3.0.0"));
+        request.metadata_mut().insert(
+            "traceparent",
+            MetadataValue::from_static("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"),
+        );
+
+        let mut ctx = RequestContext::from_request("ReadService", "get", &request, None);
+        assert_eq!(ctx.service, "ReadService");
+        assert_eq!(ctx.method, "get");
+        assert!(ctx.emit_grpc_metric);
+        assert!(ctx.event_handle.is_none());
+        assert_eq!(ctx.sdk_version.as_deref(), Some("3.0.0"));
+        assert_eq!(ctx.trace_id.as_deref(), Some("0af7651916cd43dd8448eb211c80319c"),);
+        assert!(ctx.span_id.is_some());
+        assert_eq!(ctx.parent_span_id.as_deref(), Some("b7ad6b7169203331"),);
+        assert_eq!(ctx.trace_flags, Some(0x01));
+
+        ctx.suppress_emission();
+    }
+
+    #[test]
+    fn set_trace_context_from_copies_fields() {
+        let trace_ctx = crate::trace_context::TraceContext {
+            trace_id: "aaaa".repeat(8),
+            span_id: "bbbb".repeat(4),
+            parent_span_id: Some("cccc".repeat(4)),
+            trace_flags: 0x01,
+            trace_state: None,
+        };
+
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+        ctx.set_trace_context_from(&trace_ctx);
+
+        assert_eq!(ctx.trace_id.as_deref(), Some(trace_ctx.trace_id.as_str()));
+        assert_eq!(ctx.span_id.as_deref(), Some(trace_ctx.span_id.as_str()));
+        assert_eq!(ctx.parent_span_id, trace_ctx.parent_span_id);
+        assert_eq!(ctx.trace_flags, Some(0x01));
+    }
+
+    // ── metric_labels() partition enforcement ──
+
+    #[test]
+    fn metric_labels_returns_service_method_status() {
+        let mut ctx = RequestContext::new("TestService", "test_method");
+        ctx.suppress_emission();
+        ctx.set_success();
+
+        let labels = ctx.metric_labels();
+
+        assert_eq!(labels.len(), 3);
+
+        let service_label = labels.iter().find(|(k, _)| *k == crate::logging::fields::SERVICE);
+        let method_label = labels.iter().find(|(k, _)| *k == crate::logging::fields::METHOD);
+        let status_label = labels.iter().find(|(k, _)| *k == crate::logging::fields::STATUS);
+
+        assert_eq!(service_label.map(|(_, v)| v.as_str()), Some("TestService"));
+        assert_eq!(method_label.map(|(_, v)| v.as_str()), Some("test_method"));
+        assert_eq!(status_label.map(|(_, v)| v.as_str()), Some("OK"));
+    }
+
+    #[test]
+    fn metric_labels_never_contain_entity_ids_or_region() {
+        let mut ctx = RequestContext::new("TestService", "test_method");
+        ctx.suppress_emission();
+        ctx.set_target(12345, 67890);
+        ctx.set_caller(99999);
+        ctx.set_region(Region::US_EAST_VA);
+        ctx.set_success();
+
+        let labels = ctx.metric_labels();
+        let label_keys: Vec<&str> = labels.iter().map(|(k, _)| *k).collect();
+
+        // High-cardinality entity IDs must never appear as metric labels.
+        assert!(
+            !label_keys.contains(&crate::logging::fields::ORGANIZATION),
+            "organization (slug) must not be a metric label"
+        );
+        assert!(
+            !label_keys.contains(&crate::logging::fields::VAULT),
+            "vault (slug) must not be a metric label"
+        );
+        assert!(
+            !label_keys.contains(&crate::logging::fields::CALLER),
+            "caller must not be a metric label"
+        );
+        // Region is scraper-implicit — the metrics infrastructure adds it;
+        // application code must not duplicate it.
+        assert!(
+            !label_keys.contains(&crate::logging::fields::REGION),
+            "region must not be a metric label"
+        );
+        // Internal sequential IDs are also excluded.
+        assert!(
+            !label_keys.contains(&crate::logging::fields::ORGANIZATION_ID),
+            "organization_id must not be a metric label"
+        );
+        assert!(
+            !label_keys.contains(&crate::logging::fields::VAULT_ID),
+            "vault_id must not be a metric label"
+        );
+
+        // Bounded-enum fields MUST appear.
+        assert!(
+            label_keys.contains(&crate::logging::fields::SERVICE),
+            "service must be a metric label"
+        );
+        assert!(
+            label_keys.contains(&crate::logging::fields::METHOD),
+            "method must be a metric label"
+        );
+        assert!(
+            label_keys.contains(&crate::logging::fields::STATUS),
+            "status must be a metric label"
+        );
+    }
+
+    #[test]
+    fn metric_labels_status_reflects_outcome() {
+        let mut ctx = RequestContext::new("S", "m");
+        ctx.suppress_emission();
+
+        // No outcome set -> UNKNOWN
+        let labels = ctx.metric_labels();
+        let status = labels
+            .iter()
+            .find(|(k, _)| *k == crate::logging::fields::STATUS)
+            .map(|(_, v)| v.as_str());
+        assert_eq!(status, Some("UNKNOWN"));
+
+        ctx.set_rate_limited();
+        let labels = ctx.metric_labels();
+        let status = labels
+            .iter()
+            .find(|(k, _)| *k == crate::logging::fields::STATUS)
+            .map(|(_, v)| v.as_str());
+        assert_eq!(status, Some("RESOURCE_EXHAUSTED"));
+
+        ctx.set_error("NOT_FOUND", "missing");
+        let labels = ctx.metric_labels();
+        let status = labels
+            .iter()
+            .find(|(k, _)| *k == crate::logging::fields::STATUS)
+            .map(|(_, v)| v.as_str());
+        assert_eq!(status, Some("NOT_FOUND"));
     }
 }

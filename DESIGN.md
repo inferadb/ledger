@@ -161,15 +161,15 @@ Each vault maintains its own blockchain. A corruption in Vault A cannot affect V
 
 ### Terminology
 
-| Term                       | Definition                                                                                                                                                                               |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Organization**           | Storage unit per customer/org. Contains entities and vaults. Isolated with separate storage.                                                                                             |
-| **Vault**                  | Relationship store within an organization. Maintains its own cryptographic chain (state_root, previous_hash, block height).                                                              |
-| **Entity**                 | Key-value data stored in an organization (users, teams, clients, sessions). Supports TTL, versioning, conditional writes.                                                                |
-| **Relationship**           | Authorization tuple: `(resource, relation, subject)`. Used by Engine for permission checks.                                                                                              |
-| **Region**                 | Geographic zone mapped 1:1 to a Raft consensus group. Organizations declare a region at creation for data residency. See [Scaling Architecture: Regions](#scaling-architecture-regions). |
-| **`_system` organization** | Global control plane replicated to all nodes: org registry, sequences, node discovery. See [Discovery & Coordination](#system-organization-_system--global-control-plane).               |
-| **Consensus engine**       | Purpose-built multi-shard Raft implementation in `crates/consensus/` — event-driven `Reactor`, per-vault segmented WAL, `LeaderLease`, `ClosedTimestampTracker`, `StateMachine` trait. Determinism-first: the Reactor returns `Action`s rather than performing I/O, which makes the engine simulation-testable. |
+| Term                        | Definition                                                                                                                                                                                                                                                                                                      |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Organization**            | Storage unit per customer/org. Contains entities and vaults. Isolated with separate storage.                                                                                                                                                                                                                    |
+| **Vault**                   | Relationship store within an organization. Maintains its own cryptographic chain (state_root, previous_hash, block height).                                                                                                                                                                                     |
+| **Entity**                  | Key-value data stored in an organization (users, teams, clients, sessions). Supports TTL, versioning, conditional writes.                                                                                                                                                                                       |
+| **Relationship**            | Authorization tuple: `(resource, relation, subject)`. Used by Engine for permission checks.                                                                                                                                                                                                                     |
+| **Region**                  | Geographic zone mapped 1:1 to a Raft consensus group. Organizations declare a region at creation for data residency. See [Scaling Architecture: Regions](#scaling-architecture-regions).                                                                                                                        |
+| **`_system` organization**  | Global control plane replicated to all nodes: org registry, sequences, node discovery. See [Discovery & Coordination](#system-organization-_system--global-control-plane).                                                                                                                                      |
+| **Consensus engine**        | Purpose-built multi-shard Raft implementation in `crates/consensus/` — event-driven `Reactor`, per-vault segmented WAL, `LeaderLease`, `ClosedTimestampTracker`, `StateMachine` trait. Determinism-first: the Reactor returns `Action`s rather than performing I/O, which makes the engine simulation-testable. |
 | **Raft operationalization** | Wrapping layer in `crates/raft/` — openraft-compatible `RaftLogStore`, `ApplyPool` / `ApplyWorker` for parallel state-machine apply across shards, `SagaOrchestrator`, background jobs (compaction, retention, events GC), rate limiting, hot-key detection, `LeaderTransfer`, `RaftManager` for region groups. |
 
 ### Block Structure
@@ -813,12 +813,12 @@ Each refresh token belongs to a **family** (random 16-byte ID assigned at initia
 
 Entity lifecycle changes trigger cascade token revocation through the Raft state machine:
 
-| Event                        | Revocation Scope                      | Mechanism                                                  |
-| ---------------------------- | ------------------------------------- | ---------------------------------------------------------- |
-| App disabled                 | All tokens for app (all vaults)       | Inline cascade in `SetAppEnabled` apply handler            |
-| App-vault connection removed | Tokens for app+vault pair             | Inline cascade in `RemoveAppVault` apply handler           |
-| Organization deleted         | All signing keys + all refresh tokens | `delete_org_signing_keys` + subject index scan             |
-| Password change              | All user sessions                     | `RevokeAllUserSessions` (increments `TokenVersion`)        |
+| Event                        | Revocation Scope                      | Mechanism                                           |
+| ---------------------------- | ------------------------------------- | --------------------------------------------------- |
+| App disabled                 | All tokens for app (all vaults)       | Inline cascade in `SetAppEnabled` apply handler     |
+| App-vault connection removed | Tokens for app+vault pair             | Inline cascade in `RemoveAppVault` apply handler    |
+| Organization deleted         | All signing keys + all refresh tokens | `delete_org_signing_keys` + subject index scan      |
+| Password change              | All user sessions                     | `RevokeAllUserSessions` (increments `TokenVersion`) |
 
 **TokenVersion for immediate user invalidation**: Each user has an atomic `TokenVersion` counter. `RevokeAllUserSessions` increments it. `ValidateToken` compares the token's `version` claim against current state — stale versions are rejected without waiting for token expiry.
 
@@ -884,15 +884,15 @@ The server assigns a monotonically increasing `sequence` per `(client_id, vault)
 
 ### Prometheus Metrics
 
+All Prometheus writes go through one of two `ObservabilityContext` types. `RequestContext` is created at gRPC handler entry and its `Drop` impl emits `ledger_grpc_requests_total`, `ledger_grpc_request_latency_seconds`, and the SLI histogram — handlers emit no metrics directly. `JobContext` is created at background job cycle start and its `Drop` impl emits the three `ledger_background_job_*` family metrics. Both contexts route writes through `CardinalityTracker`, which enforces per-metric time-series budgets and increments `ledger_metrics_cardinality_overflow_total` rather than letting high-cardinality label sets reach the registry. Entity IDs, user IDs, and region are not metric labels — they appear in structured log lines and wide events only.
+
 Histogram buckets are aligned with SLI targets: `[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 5.0, 10.0]` seconds.
 
-```
-# Latency histograms
-ledger_read_latency_seconds{quantile="0.99"}
-ledger_write_latency_seconds{quantile="0.99"}
-
-# gRPC request tracking (with error classification)
-ledger_grpc_requests_total{service, method, status, error_class}
+```text
+# gRPC request tracking (unified across all 13 services)
+ledger_grpc_requests_total{service, method, status}
+ledger_grpc_request_latency_seconds{service, method}
+ledger_grpc_sli_latency_seconds{service, method, status}
 
 # Batch & rate limit queue depth
 ledger_batch_queue_depth
@@ -903,10 +903,10 @@ ledger_cluster_quorum_status              # 1 = quorum, 0 = lost
 ledger_leader_elections_total
 
 # Resource saturation
-ledger_disk_bytes_total / _free / _used
-ledger_page_cache_hits_total / _misses_total / _size
-ledger_btree_depth{table}
-ledger_btree_page_splits_total
+ledger_disk_total_bytes{path} / ledger_disk_available_bytes{path}
+ledger_page_cache_hits_total / _misses_total
+ledger_btree_depth
+ledger_btree_splits_total
 ledger_compaction_lag_blocks
 ledger_snapshot_disk_bytes
 
@@ -914,7 +914,7 @@ ledger_snapshot_disk_bytes
 ledger_rate_limit_exceeded_total
 ledger_hot_key_detected_total
 
-# Raft proposals (note: inferadb_ledger_ prefix for legacy Raft-layer metrics)
+# Raft proposals (note: inferadb_ledger_ prefix for Raft-layer metrics)
 inferadb_ledger_raft_proposals_total
 inferadb_ledger_raft_proposal_timeouts_total
 
@@ -927,22 +927,21 @@ ledger_trigger_elections_total{result}
 ledger_event_writes_total{emission, scope, action}
 ledger_events_ingest_total
 ledger_events_ingest_duration_seconds
-ledger_events_gc_cycles_total
-ledger_events_gc_entries_deleted
 
-# Onboarding lifecycle
-ledger_onboarding_initiation_total{status}
-ledger_onboarding_verification_total{status}
-ledger_onboarding_registration_total{status}
-ledger_onboarding_verification_codes_gc_total
-ledger_onboarding_accounts_gc_total
-ledger_totp_challenges_gc_total
+# Onboarding lifecycle (collapsed to single family)
+ledger_onboarding_requests_total{stage, status}
 
-# Organization purge + post-erasure compaction
-ledger_org_purge_regional_failures_total{region}
-ledger_org_purge_global_failures_total
-ledger_org_purge_retry_exhausted_total
+# Organization purge + post-erasure compaction (collapsed)
+ledger_org_purge_failures_total{tier, exhausted}
 ledger_post_erasure_compaction_triggered_total{region}
+
+# Cardinality discipline
+ledger_metrics_cardinality_overflow_total{metric_name}  # must be zero
+
+# Background jobs (all 20 jobs, emitted by JobContext)
+ledger_background_job_runs_total{job, result}
+ledger_background_job_duration_seconds{job}
+ledger_background_job_items_processed_total{job}
 
 # SDK-side metrics (optional, ledger_sdk_ prefix)
 ledger_sdk_request_duration_seconds{method}
@@ -1571,51 +1570,51 @@ Key design decisions and their rationale:
 
 **Source file cross-references:**
 
-| DESIGN.md Section | Primary Source Files                                                                 |
-| ----------------- | ------------------------------------------------------------------------------------ |
-| Block Structure   | `crates/types/src/types.rs`                                                          |
-| Write Path        | `crates/services/src/services/write.rs`                                              |
-| Read Path         | `crates/services/src/services/read.rs`                                               |
-| State Layer       | `crates/state/src/state.rs`                                                          |
-| Storage Backend   | `crates/store/src/db.rs`, `crates/store/src/tables.rs`                               |
-| Region Router     | `crates/raft/src/region_router.rs`                                                   |
-| Region Resolver   | `crates/services/src/services/region_resolver.rs`                                    |
-| Raft Consensus    | `crates/raft/src/raft_manager.rs`, `crates/raft/src/raft_network.rs`                 |
-| ID Generation     | `crates/types/src/types.rs` (`define_id!` macro)                                     |
-| Key Encoding      | `crates/state/src/keys.rs`                                                           |
-| Batching          | `crates/raft/src/batching.rs`                                                        |
-| Health Checks     | `crates/services/src/services/health.rs`, `crates/raft/src/dependency_health.rs`     |
-| Graceful Shutdown | `crates/raft/src/graceful_shutdown.rs`                                               |
-| Metrics           | `crates/raft/src/metrics.rs`                                                         |
-| Snapshots         | `crates/state/src/snapshot.rs`                                                       |
-| Tiered Storage    | `crates/state/src/tiered_storage.rs`                                                 |
-| Rate Limiting     | `crates/raft/src/rate_limit.rs`                                                      |
-| Hot Key Detection | `crates/raft/src/hot_key_detector.rs`                                                |
-| Input Validation  | `crates/types/src/validation.rs`                                                     |
-| Encryption        | `crates/store/src/crypto/` (operations, types, sidecar, cache, backend, key_manager) |
-| DEK Re-wrapping   | `crates/raft/src/dek_rewrap.rs`                                                      |
-| Key Management    | `crates/types/src/config/key_management.rs`                                          |
-| SDK Client        | `crates/sdk/src/client.rs`                                                           |
+| DESIGN.md Section | Primary Source Files                                                                                                                              |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Block Structure   | `crates/types/src/types.rs`                                                                                                                       |
+| Write Path        | `crates/services/src/services/write.rs`                                                                                                           |
+| Read Path         | `crates/services/src/services/read.rs`                                                                                                            |
+| State Layer       | `crates/state/src/state.rs`                                                                                                                       |
+| Storage Backend   | `crates/store/src/db.rs`, `crates/store/src/tables.rs`                                                                                            |
+| Region Router     | `crates/raft/src/region_router.rs`                                                                                                                |
+| Region Resolver   | `crates/services/src/services/region_resolver.rs`                                                                                                 |
+| Raft Consensus    | `crates/raft/src/raft_manager.rs`, `crates/raft/src/raft_network.rs`                                                                              |
+| ID Generation     | `crates/types/src/types.rs` (`define_id!` macro)                                                                                                  |
+| Key Encoding      | `crates/state/src/keys.rs`                                                                                                                        |
+| Batching          | `crates/raft/src/batching.rs`                                                                                                                     |
+| Health Checks     | `crates/services/src/services/health.rs`, `crates/raft/src/dependency_health.rs`                                                                  |
+| Graceful Shutdown | `crates/raft/src/graceful_shutdown.rs`                                                                                                            |
+| Metrics           | `crates/raft/src/metrics.rs`                                                                                                                      |
+| Snapshots         | `crates/state/src/snapshot.rs`                                                                                                                    |
+| Tiered Storage    | `crates/state/src/tiered_storage.rs`                                                                                                              |
+| Rate Limiting     | `crates/raft/src/rate_limit.rs`                                                                                                                   |
+| Hot Key Detection | `crates/raft/src/hot_key_detector.rs`                                                                                                             |
+| Input Validation  | `crates/types/src/validation.rs`                                                                                                                  |
+| Encryption        | `crates/store/src/crypto/` (operations, types, sidecar, cache, backend, key_manager)                                                              |
+| DEK Re-wrapping   | `crates/raft/src/dek_rewrap.rs`                                                                                                                   |
+| Key Management    | `crates/types/src/config/key_management.rs`                                                                                                       |
+| SDK Client        | `crates/sdk/src/client.rs`                                                                                                                        |
 | JWT Tokens        | `crates/services/src/jwt.rs`, `crates/services/src/services/token.rs`, `crates/state/src/system/token.rs`, `crates/raft/src/token_maintenance.rs` |
 
 ---
 
 ## Revision History
 
-| Date       | Change                                                                                                     |
-| ---------- | ---------------------------------------------------------------------------------------------------------- |
+| Date       | Change                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 2026-04-15 | Extracted `inferadb-ledger-consensus` crate (event-driven Reactor, purpose-built multi-shard engine, segmented WAL). Operationalization concerns (apply-phase parallelism, saga orchestration, background jobs) remain in `inferadb-ledger-raft`. Metric name corrections (`ledger_hot_key_detected_total`, `inferadb_ledger_raft_proposal_timeouts_total`). Added metrics for leader transfer, events, onboarding, organization purge, post-erasure compaction. Table count 19 → 23 (added slug indexes, vault-scoped tables, string dictionary). Constant-time hash comparison (`hash_eq`) now covers all security-sensitive paths. |
-| 2026-03-10 | JWT token architecture: EdDSA signing keys, refresh token families, envelope encryption, TokenService, cascade revocation, token maintenance |
-| 2026-03-03 | Document hygiene: metadata block, audience guide, deduplicated invariants, expanded references             |
-| 2026-03-01 | Regional data residency, multi-region architecture, cross-region saga orchestration                        |
-| 2026-02-26 | Graceful leader transfer protocol, shutdown phase transitions                                              |
-| 2026-02-22 | Dual-ID architecture (`OrganizationSlug`, `VaultSlug`), namespace → organization rename                    |
-| 2026-02-06 | Proto conversion deduplication, Raft proposal timeout, write path expanded to 13 steps                     |
-| 2026-01-28 | Encryption at rest (per-page envelope encryption, RMK lifecycle), crypto-shredding, tiered storage         |
-| 2026-01-28 | Health checks (three-probe pattern), graceful shutdown, backup and restore, degraded operation modes       |
-| 2026-01-15 | Observability (Prometheus metrics, SLI/SLO), rate limiting, hot key detection, input validation            |
-| 2026-01-10 | Core architecture: state layer, bucket-based state roots, transaction batching, Raft consensus integration |
-| 2026-01-09 | Initial design document                                                                                    |
+| 2026-03-10 | JWT token architecture: EdDSA signing keys, refresh token families, envelope encryption, TokenService, cascade revocation, token maintenance                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| 2026-03-03 | Document hygiene: metadata block, audience guide, deduplicated invariants, expanded references                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| 2026-03-01 | Regional data residency, multi-region architecture, cross-region saga orchestration                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| 2026-02-26 | Graceful leader transfer protocol, shutdown phase transitions                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| 2026-02-22 | Dual-ID architecture (`OrganizationSlug`, `VaultSlug`), namespace → organization rename                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| 2026-02-06 | Proto conversion deduplication, Raft proposal timeout, write path expanded to 13 steps                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| 2026-01-28 | Encryption at rest (per-page envelope encryption, RMK lifecycle), crypto-shredding, tiered storage                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| 2026-01-28 | Health checks (three-probe pattern), graceful shutdown, backup and restore, degraded operation modes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| 2026-01-15 | Observability (Prometheus metrics, SLI/SLO), rate limiting, hot key detection, input validation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| 2026-01-10 | Core architecture: state layer, bucket-based state roots, transaction batching, Raft consensus integration                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| 2026-01-09 | Initial design document                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 ---
 

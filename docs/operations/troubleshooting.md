@@ -238,12 +238,12 @@ RUST_LOG=inferadb_ledger_consensus=debug,inferadb_ledger_raft=debug inferadb-led
 
 ### Performance Baselines
 
-| Metric                                       | Expected p50 | Expected p99 |
-| -------------------------------------------- | ------------ | ------------ |
-| `ledger_write_latency_seconds`               | <10ms        | <50ms        |
-| `ledger_read_latency_seconds`                | <1ms         | <5ms         |
-| `inferadb_ledger_raft_apply_latency_seconds` | <5ms         | <20ms        |
-| `inferadb_ledger_state_root_latency_seconds` | <1ms         | <5ms         |
+| Metric                                                        | Expected p50 | Expected p99 |
+| ------------------------------------------------------------- | ------------ | ------------ |
+| `ledger_grpc_request_latency_seconds{service="WriteService"}` | <10ms        | <50ms        |
+| `ledger_grpc_request_latency_seconds{service="ReadService"}`  | <1ms         | <5ms         |
+| `inferadb_ledger_raft_apply_latency_seconds`                  | <5ms         | <20ms        |
+| `inferadb_ledger_state_root_latency_seconds`                  | <1ms         | <5ms         |
 
 ## Getting Help
 

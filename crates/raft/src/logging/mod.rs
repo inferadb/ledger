@@ -62,12 +62,15 @@
 //! }
 //! ```
 
+pub mod fields;
+mod job_context;
 mod request_context;
 mod sampling;
 
 #[cfg(test)]
 mod tests;
 
+pub use job_context::JobContext;
 pub use request_context::{
     CanonicalLogLine, RequestContext, RequestContextGuard, try_with_current_context,
     with_current_context,

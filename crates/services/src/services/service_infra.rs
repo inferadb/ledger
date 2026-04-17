@@ -10,14 +10,11 @@ use std::{sync::Arc, time::Duration};
 use inferadb_ledger_raft::{
     log_storage::AppliedStateAccessor,
     logging::{OperationType, RequestContext, Sampler},
-    trace_context,
     types::{LedgerRequest, LedgerResponse, SystemRequest},
 };
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
-use inferadb_ledger_types::{
-    EmailBlindingKey, Region, config::ValidationConfig, events::EventEntry,
-};
+use inferadb_ledger_types::{EmailBlindingKey, Region, config::ValidationConfig};
 use tonic::Status;
 
 use super::error_classify;
@@ -89,45 +86,33 @@ pub(crate) struct ServiceContext {
 }
 
 impl ServiceContext {
-    /// Creates a `RequestContext` for a service method.
+    /// Creates a unified `RequestContext` using the `from_request` constructor.
     ///
-    /// Populates operation type, transport metadata, trace context, and node ID.
-    /// The caller should use `extract_caller` separately to set the user slug
-    /// from the proto request's `UserSlug caller` field.
-    pub(crate) fn make_request_context(
+    /// Unlike [`make_request_context`](Self::make_request_context), this variant:
+    /// - Extracts trace context directly from the request (no separate `TraceContext` variable
+    ///   needed)
+    /// - Enables automatic gRPC metric emission on Drop
+    /// - Attaches the event handle so `ctx.record_event()` works
+    ///
+    /// Must be called **before** `request.into_inner()`.
+    pub(crate) fn make_request_context_from<T>(
         &self,
         service: &'static str,
         method: &'static str,
-        grpc_metadata: &tonic::metadata::MetadataMap,
-        trace_ctx: &trace_context::TraceContext,
+        request: &tonic::Request<T>,
     ) -> RequestContext {
-        let mut ctx = RequestContext::new(service, method);
-        ctx.set_admin_action(method);
-        self.fill_context(&mut ctx, grpc_metadata, trace_ctx);
-        ctx
-    }
-
-    /// Fills common fields on a `RequestContext` from gRPC metadata and trace context.
-    pub(crate) fn fill_context(
-        &self,
-        ctx: &mut RequestContext,
-        grpc_metadata: &tonic::metadata::MetadataMap,
-        trace_ctx: &trace_context::TraceContext,
-    ) {
+        let event_handle: Option<Arc<dyn inferadb_ledger_raft::event_writer::EventEmitter>> =
+            self.event_handle.as_ref().map(|h| Arc::new(h.clone()) as _);
+        let mut ctx = RequestContext::from_request(service, method, request, event_handle);
         ctx.set_operation_type(OperationType::Admin);
-        ctx.extract_transport_metadata(grpc_metadata);
+        ctx.set_admin_action(method);
         if let Some(ref sampler) = self.sampler {
             ctx.set_sampler(sampler.clone());
         }
         if let Some(node_id) = self.node_id {
             ctx.set_node_id(node_id);
         }
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
+        ctx
     }
 
     /// Proposes a `LedgerRequest` through Raft with deadline handling.
@@ -338,18 +323,6 @@ impl ServiceContext {
             ctx,
         )
         .await
-    }
-
-    /// Records a handler-phase audit event if the event handle is configured.
-    pub(crate) fn record_handler_event(&self, entry: EventEntry) {
-        if let Some(ref handle) = self.event_handle {
-            handle.record_handler_event(entry);
-        }
-    }
-
-    /// Returns the configured TTL for handler-phase events, defaulting to 90 days.
-    pub(crate) fn default_ttl_days(&self) -> u32 {
-        self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)
     }
 
     /// Returns current Raft metrics for the GLOBAL group.

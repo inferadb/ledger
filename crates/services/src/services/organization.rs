@@ -27,7 +27,7 @@ use inferadb_ledger_proto::proto::{
 use inferadb_ledger_raft::{
     error::ServiceError,
     logging::RequestContext,
-    metrics, trace_context,
+    metrics,
     types::{LedgerRequest, LedgerResponse},
 };
 use inferadb_ledger_state::system::{
@@ -423,17 +423,13 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         // Reject if node is draining
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        // Extract trace context from gRPC metadata before consuming the request
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let req = request.into_inner();
-
-        let mut ctx = self.ctx.make_request_context(
+        let mut ctx = self.ctx.make_request_context_from(
             "OrganizationService",
             "create_organization",
-            &grpc_metadata,
-            &trace_ctx,
+            &request,
         );
+        let req = request.into_inner();
+
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         // Validate organization name
@@ -520,22 +516,11 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             .map_err(|e| Status::unavailable(format!("Failed to submit saga: {e}")))?;
 
         // Saga is now persisted. The orchestrator will drive it to completion.
-        if let Some(node_id) = self.ctx.node_id {
-            self.ctx.record_handler_event(
-                inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
-                    EventAction::OrganizationCreated,
-                    inferadb_ledger_types::OrganizationId::new(0),
-                    Some(slug),
-                    node_id,
-                )
-                .principal("system")
-                .detail("saga_id", saga_id.value())
-                .detail("region", region.as_str())
-                .trace_id(&trace_ctx.trace_id)
-                .outcome(EventOutcomeType::Success)
-                .build(self.ctx.default_ttl_days()),
-            );
-        }
+        ctx.record_event(
+            EventAction::OrganizationCreated,
+            EventOutcomeType::Success,
+            &[("saga_id", saga_id.value()), ("region", region.as_str())],
+        );
 
         ctx.set_organization(slug.value());
         ctx.set_region(region);
@@ -567,17 +552,14 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         // Reject if node is draining
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        // Extract trace context from gRPC metadata before consuming the request
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx = self.ctx.make_request_context_from(
+            "OrganizationService",
+            "delete_organization",
+            &request,
+        );
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = self.ctx.make_request_context(
-            "OrganizationService",
-            "delete_organization",
-            &grpc_metadata,
-            &trace_ctx,
-        );
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -661,20 +643,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
                 metrics::record_organization_operation(deleted_org_id, "delete");
                 metrics::record_organization_latency(deleted_org_id, "delete", ctx.elapsed_secs());
 
-                if let Some(node_id) = self.ctx.node_id {
-                    self.ctx.record_handler_event(
-                        inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
-                            EventAction::OrganizationDeleted,
-                            deleted_org_id,
-                            Some(DomainOrganizationSlug::new(organization_slug_val)),
-                            node_id,
-                        )
-                        .principal("system")
-                        .trace_id(&trace_ctx.trace_id)
-                        .outcome(EventOutcomeType::Success)
-                        .build(self.ctx.default_ttl_days()),
-                    );
-                }
+                ctx.record_event(EventAction::OrganizationDeleted, EventOutcomeType::Success, &[]);
 
                 Ok(Response::new(DeleteOrganizationResponse {
                     deleted_at: Some(crate::proto_compat::datetime_to_proto(&deleted_at)),
@@ -700,17 +669,10 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         &self,
         request: Request<GetOrganizationRequest>,
     ) -> Result<Response<GetOrganizationResponse>, Status> {
-        // Extract trace context from gRPC metadata before consuming the request
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
+        let mut ctx =
+            self.ctx.make_request_context_from("OrganizationService", "get_organization", &request);
         let req = request.into_inner();
 
-        let mut ctx = self.ctx.make_request_context(
-            "OrganizationService",
-            "get_organization",
-            &grpc_metadata,
-            &trace_ctx,
-        );
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         // Extract organization from request
@@ -755,16 +717,13 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         &self,
         request: Request<ListOrganizationsRequest>,
     ) -> Result<Response<ListOrganizationsResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let req = request.into_inner();
-
-        let mut ctx = self.ctx.make_request_context(
+        let mut ctx = self.ctx.make_request_context_from(
             "OrganizationService",
             "list_organizations",
-            &grpc_metadata,
-            &trace_ctx,
+            &request,
         );
+        let req = request.into_inner();
+
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         // Ensure GLOBAL state is fresh before listing (recent org creation may
@@ -820,17 +779,14 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         // Reject if node is draining
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        // Extract trace context from gRPC metadata before consuming the request
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx = self.ctx.make_request_context_from(
+            "OrganizationService",
+            "migrate_organization",
+            &request,
+        );
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = self.ctx.make_request_context(
-            "OrganizationService",
-            "migrate_organization",
-            &grpc_metadata,
-            &trace_ctx,
-        );
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         // Resolve organization slug → internal ID
@@ -1053,16 +1009,14 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         // Reject if node is draining
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx = self.ctx.make_request_context_from(
+            "OrganizationService",
+            "update_organization",
+            &request,
+        );
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = self.ctx.make_request_context(
-            "OrganizationService",
-            "update_organization",
-            &grpc_metadata,
-            &trace_ctx,
-        );
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -1121,20 +1075,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
                 metrics::record_organization_operation(updated_org_id, "update");
                 metrics::record_organization_latency(updated_org_id, "update", ctx.elapsed_secs());
 
-                if let Some(node_id) = self.ctx.node_id {
-                    self.ctx.record_handler_event(
-                        inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
-                            EventAction::OrganizationUpdated,
-                            updated_org_id,
-                            Some(DomainOrganizationSlug::new(organization_slug_val)),
-                            node_id,
-                        )
-                        .principal("system")
-                        .trace_id(&trace_ctx.trace_id)
-                        .outcome(EventOutcomeType::Success)
-                        .build(self.ctx.default_ttl_days()),
-                    );
-                }
+                ctx.record_event(EventAction::OrganizationUpdated, EventOutcomeType::Success, &[]);
 
                 // Re-read the org to return full response
                 let org_meta = self
@@ -1176,16 +1117,13 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         &self,
         request: Request<ListOrganizationMembersRequest>,
     ) -> Result<Response<ListOrganizationMembersResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let req = request.into_inner();
-
-        let mut ctx = self.ctx.make_request_context(
+        let mut ctx = self.ctx.make_request_context_from(
             "OrganizationService",
             "list_organization_members",
-            &grpc_metadata,
-            &trace_ctx,
+            &request,
         );
+        let req = request.into_inner();
+
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -1234,16 +1172,14 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx = self.ctx.make_request_context_from(
+            "OrganizationService",
+            "remove_organization_member",
+            &request,
+        );
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = self.ctx.make_request_context(
-            "OrganizationService",
-            "remove_organization_member",
-            &grpc_metadata,
-            &trace_ctx,
-        );
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -1343,16 +1279,14 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx = self.ctx.make_request_context_from(
+            "OrganizationService",
+            "update_organization_member_role",
+            &request,
+        );
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = self.ctx.make_request_context(
-            "OrganizationService",
-            "update_organization_member_role",
-            &grpc_metadata,
-            &trace_ctx,
-        );
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -1450,15 +1384,13 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         &self,
         request: Request<ListOrganizationTeamsRequest>,
     ) -> Result<Response<ListOrganizationTeamsResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let inner = request.into_inner();
-        let mut ctx = self.ctx.make_request_context(
+        let mut ctx = self.ctx.make_request_context_from(
             "OrganizationService",
             "list_organization_teams",
-            &grpc_metadata,
-            &trace_ctx,
+            &request,
         );
+        let inner = request.into_inner();
+
         super::helpers::extract_caller(&mut ctx, &inner.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -1512,15 +1444,13 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         &self,
         request: Request<GetOrganizationTeamRequest>,
     ) -> Result<Response<GetOrganizationTeamResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let inner = request.into_inner();
-        let mut ctx = self.ctx.make_request_context(
+        let mut ctx = self.ctx.make_request_context_from(
             "OrganizationService",
             "get_organization_team",
-            &grpc_metadata,
-            &trace_ctx,
+            &request,
         );
+        let inner = request.into_inner();
+
         super::helpers::extract_caller(&mut ctx, &inner.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -1565,15 +1495,14 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let inner = request.into_inner();
-        let mut ctx = self.ctx.make_request_context(
+        let mut ctx = self.ctx.make_request_context_from(
             "OrganizationService",
             "create_organization_team",
-            &grpc_metadata,
-            &trace_ctx,
+            &request,
         );
+        let grpc_metadata = request.metadata().clone();
+        let inner = request.into_inner();
+
         super::helpers::extract_caller(&mut ctx, &inner.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -1676,15 +1605,14 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let inner = request.into_inner();
-        let mut ctx = self.ctx.make_request_context(
+        let mut ctx = self.ctx.make_request_context_from(
             "OrganizationService",
             "delete_organization_team",
-            &grpc_metadata,
-            &trace_ctx,
+            &request,
         );
+        let grpc_metadata = request.metadata().clone();
+        let inner = request.into_inner();
+
         super::helpers::extract_caller(&mut ctx, &inner.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -1771,15 +1699,14 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let inner = request.into_inner();
-        let mut ctx = self.ctx.make_request_context(
+        let mut ctx = self.ctx.make_request_context_from(
             "OrganizationService",
             "update_organization_team",
-            &grpc_metadata,
-            &trace_ctx,
+            &request,
         );
+        let grpc_metadata = request.metadata().clone();
+        let inner = request.into_inner();
+
         super::helpers::extract_caller(&mut ctx, &inner.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -1874,15 +1801,11 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx =
+            self.ctx.make_request_context_from("OrganizationService", "add_team_member", &request);
         let grpc_metadata = request.metadata().clone();
         let inner = request.into_inner();
-        let mut ctx = self.ctx.make_request_context(
-            "OrganizationService",
-            "add_team_member",
-            &grpc_metadata,
-            &trace_ctx,
-        );
+
         super::helpers::extract_caller(&mut ctx, &inner.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -1967,15 +1890,14 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let inner = request.into_inner();
-        let mut ctx = self.ctx.make_request_context(
+        let mut ctx = self.ctx.make_request_context_from(
             "OrganizationService",
             "remove_team_member",
-            &grpc_metadata,
-            &trace_ctx,
+            &request,
         );
+        let grpc_metadata = request.metadata().clone();
+        let inner = request.into_inner();
+
         super::helpers::extract_caller(&mut ctx, &inner.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -2042,15 +1964,14 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let inner = request.into_inner();
-        let mut ctx = self.ctx.make_request_context(
+        let mut ctx = self.ctx.make_request_context_from(
             "OrganizationService",
             "update_team_member_role",
-            &grpc_metadata,
-            &trace_ctx,
+            &request,
         );
+        let grpc_metadata = request.metadata().clone();
+        let inner = request.into_inner();
+
         super::helpers::extract_caller(&mut ctx, &inner.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());

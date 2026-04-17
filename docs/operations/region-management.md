@@ -300,8 +300,8 @@ Direct routing reduces latency by avoiding forwarding hops. Write forwarding pro
 Monitor these metrics per region:
 
 ```promql
-# Write latency trending up for a region
-histogram_quantile(0.99, rate(ledger_write_latency_seconds_bucket{region="us-east-va"}[5m])) > 0.05
+# Write latency trending up for a region (region tag added at agent level)
+histogram_quantile(0.99, rate(ledger_grpc_request_latency_seconds_bucket{service="WriteService"}[5m])) > 0.05
 
 # Proposal backlog building in a region
 inferadb_ledger_raft_proposals_pending{region="us-east-va"} > 30
@@ -317,8 +317,8 @@ Track per-region metrics:
 # Leader per region
 sum by (region) (inferadb_ledger_raft_is_leader)
 
-# Write latency per region
-histogram_quantile(0.99, rate(ledger_write_latency_seconds_bucket[5m])) by (region)
+# Write latency per region (region tag added at scrape/agent level)
+histogram_quantile(0.99, rate(ledger_grpc_request_latency_seconds_bucket{service="WriteService"}[5m]))
 
 # Storage size per region
 inferadb_ledger_disk_bytes{region="us-east-va"}

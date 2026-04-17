@@ -8,11 +8,7 @@
 //! within a cycle. Organizations that exhaust all retries are tracked in a
 //! priority set and retried on every subsequent tick until successful.
 
-use std::{
-    collections::HashSet,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use inferadb_ledger_state::StateLayer;
@@ -23,11 +19,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     consensus_handle::ConsensusHandle,
-    metrics::{
-        record_background_job_duration, record_background_job_items, record_background_job_run,
-        record_org_purge_global_failure, record_org_purge_regional_failure,
-        record_org_purge_retry_exhausted,
-    },
+    metrics::record_org_purge_failure,
     raft_manager::RaftManager,
     trace_context::TraceContext,
     types::{LedgerRequest, RaftPayload, SystemRequest},
@@ -129,7 +121,7 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
             {
                 Ok(_) => return true,
                 Err(e) => {
-                    record_org_purge_regional_failure(&region.to_string());
+                    record_org_purge_failure("regional", false);
                     let remaining = MAX_RETRIES - attempt - 1;
                     if remaining > 0 {
                         let delay = BACKOFF_BASE * BACKOFF_MULTIPLIER.pow(attempt);
@@ -171,7 +163,7 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
             match self.handle.propose(RaftPayload::system(request)).await {
                 Ok(_) => return true,
                 Err(e) => {
-                    record_org_purge_global_failure();
+                    record_org_purge_failure("global", false);
                     let remaining = MAX_RETRIES - attempt - 1;
                     if remaining > 0 {
                         let delay = BACKOFF_BASE * BACKOFF_MULTIPLIER.pow(attempt);
@@ -210,8 +202,8 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
             return 0;
         }
 
+        let mut job = crate::logging::JobContext::new("organization_purge", None);
         let trace_ctx = TraceContext::new();
-        let cycle_start = Instant::now();
         debug!(trace_id = %trace_ctx.trace_id, "Starting organization purge cycle");
 
         let sys = inferadb_ledger_state::system::SystemOrganizationService::new(self.state.clone());
@@ -219,9 +211,7 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
         let organizations = match sys.list_organizations() {
             Ok(orgs) => orgs,
             Err(e) => {
-                let duration = cycle_start.elapsed().as_secs_f64();
-                record_background_job_duration("organization_purge", duration);
-                record_background_job_run("organization_purge", "failure");
+                job.set_failure();
                 warn!(
                     trace_id = %trace_ctx.trace_id,
                     error = %e,
@@ -274,31 +264,25 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
                 purged_count += 1;
             } else {
                 priority.insert(org.organization_id);
-                record_org_purge_retry_exhausted();
+                record_org_purge_failure("global", true);
             }
         }
 
-        let duration = cycle_start.elapsed().as_secs_f64();
-        record_background_job_duration("organization_purge", duration);
-        record_background_job_items("organization_purge", purged_count as u64);
+        job.record_items(purged_count as u64);
 
         if purged_count > 0 {
-            record_background_job_run("organization_purge", "success");
             info!(
                 trace_id = %trace_ctx.trace_id,
                 purged_count,
                 scanned = organizations.len(),
                 priority_pending = priority.len(),
-                duration_secs = duration,
                 "Organization purge cycle complete"
             );
         } else {
-            record_background_job_run("organization_purge", "success");
             debug!(
                 trace_id = %trace_ctx.trace_id,
                 scanned = organizations.len(),
                 priority_pending = priority.len(),
-                duration_secs = duration,
                 "Organization purge cycle complete (no expired organizations)"
             );
         }

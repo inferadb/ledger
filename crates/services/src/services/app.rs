@@ -24,17 +24,14 @@ use inferadb_ledger_proto::proto::{
     SetAppCredentialEnabledResponse, SetAppEnabledRequest, SetAppEnabledResponse, UpdateAppRequest,
     UpdateAppResponse, UpdateAppVaultRequest, UpdateAppVaultResponse,
 };
-use inferadb_ledger_raft::{
-    trace_context,
-    types::{LedgerRequest, LedgerResponse},
-};
+use inferadb_ledger_raft::types::{LedgerRequest, LedgerResponse};
 use inferadb_ledger_state::system::{
     App, AppCredentialType as DomainAppCredentialType, AppVaultConnection, ClientAssertionEntry,
     SYSTEM_VAULT_ID, SystemKeys,
 };
 use inferadb_ledger_types::{
     AppId as DomainAppId, ClientAssertionId as DomainClientAssertionId,
-    OrganizationId as DomainOrganizationId, OrganizationSlug as DomainOrganizationSlug, decode,
+    OrganizationId as DomainOrganizationId, decode,
     events::{EventAction, EventOutcome as EventOutcomeType},
 };
 use moka::sync::Cache as MokaCache;
@@ -98,30 +95,6 @@ impl AppService {
     /// Constructs a slug resolver from the applied state.
     fn resolver(&self) -> SlugResolver {
         SlugResolver::new(self.ctx.applied_state.clone())
-    }
-
-    /// Records an audit event for an app mutation if the event handle is configured.
-    fn emit_event(
-        &self,
-        action: EventAction,
-        org_id: DomainOrganizationId,
-        org_slug_val: u64,
-        trace_id: &str,
-    ) {
-        if let Some(node_id) = self.ctx.node_id {
-            self.ctx.record_handler_event(
-                inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
-                    action,
-                    org_id,
-                    Some(DomainOrganizationSlug::new(org_slug_val)),
-                    node_id,
-                )
-                .principal("system")
-                .trace_id(trace_id)
-                .outcome(EventOutcomeType::Success)
-                .build(self.ctx.default_ttl_days()),
-            );
-        }
     }
 
     /// Loads an app from GLOBAL state and merges with `AppProfile` from REGIONAL state.
@@ -352,15 +325,11 @@ impl proto::app_service_server::AppService for AppService {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx = self.ctx.make_request_context_from("AppService", "create_app", &request);
         let grpc_metadata = request.metadata().clone();
-        let mut ctx =
-            self.ctx.make_request_context("AppService", "CreateApp", &grpc_metadata, &trace_ctx);
-
         let inner = request.into_inner();
         super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
-        let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
         let slug = inferadb_ledger_types::snowflake::generate_app_slug()
             .map_err(|e| error_classify::internal_error("id-generation", &e))?;
@@ -419,7 +388,7 @@ impl proto::app_service_server::AppService for AppService {
             return Err(super::helpers::error_code_to_status(code, message));
         }
 
-        self.emit_event(EventAction::AppCreated, org_id, org_slug_val, &trace_ctx.trace_id);
+        ctx.record_event(EventAction::AppCreated, EventOutcomeType::Success, &[]);
         let app = self.load_app(org_id, app_id)?;
         let info = self.app_to_proto(&app, true)?;
         Ok(Response::new(CreateAppResponse { app: Some(info) }))
@@ -470,15 +439,11 @@ impl proto::app_service_server::AppService for AppService {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx = self.ctx.make_request_context_from("AppService", "update_app", &request);
         let grpc_metadata = request.metadata().clone();
-        let mut ctx =
-            self.ctx.make_request_context("AppService", "UpdateApp", &grpc_metadata, &trace_ctx);
-
         let inner = request.into_inner();
         super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
-        let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
         let (_, app_id) = resolver.extract_and_resolve_app(&inner.app)?;
 
@@ -537,7 +502,7 @@ impl proto::app_service_server::AppService for AppService {
                 Err(super::helpers::error_code_to_status(code, message))
             },
             _ => {
-                self.emit_event(EventAction::AppUpdated, org_id, org_slug_val, &trace_ctx.trace_id);
+                ctx.record_event(EventAction::AppUpdated, EventOutcomeType::Success, &[]);
                 let app = self.load_app(org_id, app_id)?;
                 let info = self.app_to_proto(&app, true)?;
                 Ok(Response::new(UpdateAppResponse { app: Some(info) }))
@@ -552,15 +517,11 @@ impl proto::app_service_server::AppService for AppService {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx = self.ctx.make_request_context_from("AppService", "delete_app", &request);
         let grpc_metadata = request.metadata().clone();
-        let mut ctx =
-            self.ctx.make_request_context("AppService", "DeleteApp", &grpc_metadata, &trace_ctx);
-
         let inner = request.into_inner();
         super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
-        let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
         let (_, app_id) = resolver.extract_and_resolve_app(&inner.app)?;
 
@@ -594,7 +555,7 @@ impl proto::app_service_server::AppService for AppService {
 
         match response {
             LedgerResponse::AppDeleted { .. } => {
-                self.emit_event(EventAction::AppDeleted, org_id, org_slug_val, &trace_ctx.trace_id);
+                ctx.record_event(EventAction::AppDeleted, EventOutcomeType::Success, &[]);
                 Ok(Response::new(DeleteAppResponse {}))
             },
             LedgerResponse::Error { code, message } => {
@@ -614,19 +575,11 @@ impl proto::app_service_server::AppService for AppService {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx = self.ctx.make_request_context_from("AppService", "set_app_enabled", &request);
         let grpc_metadata = request.metadata().clone();
-        let mut ctx = self.ctx.make_request_context(
-            "AppService",
-            "SetAppEnabled",
-            &grpc_metadata,
-            &trace_ctx,
-        );
-
         let inner = request.into_inner();
         super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
-        let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
         let (_, app_id) = resolver.extract_and_resolve_app(&inner.app)?;
 
@@ -645,12 +598,7 @@ impl proto::app_service_server::AppService for AppService {
 
         match response {
             LedgerResponse::AppToggled { organization_id } => {
-                self.emit_event(
-                    EventAction::AppStatusChanged,
-                    org_id,
-                    org_slug_val,
-                    &trace_ctx.trace_id,
-                );
+                ctx.record_event(EventAction::AppStatusChanged, EventOutcomeType::Success, &[]);
                 let app = self.load_app(organization_id, app_id)?;
                 let info = self.app_to_proto(&app, true)?;
                 Ok(Response::new(SetAppEnabledResponse { app: Some(info) }))
@@ -672,19 +620,15 @@ impl proto::app_service_server::AppService for AppService {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let mut ctx = self.ctx.make_request_context(
+        let mut ctx = self.ctx.make_request_context_from(
             "AppService",
-            "SetAppCredentialEnabled",
-            &grpc_metadata,
-            &trace_ctx,
+            "set_app_credential_enabled",
+            &request,
         );
-
+        let grpc_metadata = request.metadata().clone();
         let inner = request.into_inner();
         super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
-        let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
         let (_, app_id) = resolver.extract_and_resolve_app(&inner.app)?;
         let credential_type = map_credential_type(inner.credential_type)?;
@@ -705,11 +649,10 @@ impl proto::app_service_server::AppService for AppService {
 
         match response {
             LedgerResponse::AppCredentialToggled { organization_id } => {
-                self.emit_event(
+                ctx.record_event(
                     EventAction::AppCredentialStatusChanged,
-                    org_id,
-                    org_slug_val,
-                    &trace_ctx.trace_id,
+                    EventOutcomeType::Success,
+                    &[],
                 );
                 let app = self.load_app(organization_id, app_id)?;
                 let info = self.app_to_proto(&app, true)?;
@@ -751,19 +694,12 @@ impl proto::app_service_server::AppService for AppService {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx =
+            self.ctx.make_request_context_from("AppService", "rotate_app_client_secret", &request);
         let grpc_metadata = request.metadata().clone();
-        let mut ctx = self.ctx.make_request_context(
-            "AppService",
-            "RotateAppClientSecret",
-            &grpc_metadata,
-            &trace_ctx,
-        );
-
         let inner = request.into_inner();
         super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
-        let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
         let (_, app_id) = resolver.extract_and_resolve_app(&inner.app)?;
 
@@ -807,12 +743,7 @@ impl proto::app_service_server::AppService for AppService {
 
         match response {
             LedgerResponse::AppClientSecretRotated { .. } => {
-                self.emit_event(
-                    EventAction::AppSecretRotated,
-                    org_id,
-                    org_slug_val,
-                    &trace_ctx.trace_id,
-                );
+                ctx.record_event(EventAction::AppSecretRotated, EventOutcomeType::Success, &[]);
                 // Cache the secret for idempotent retries
                 if let Some(ck) = cache_key {
                     self.credential_cache
@@ -860,19 +791,15 @@ impl proto::app_service_server::AppService for AppService {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let mut ctx = self.ctx.make_request_context(
+        let mut ctx = self.ctx.make_request_context_from(
             "AppService",
-            "CreateAppClientAssertion",
-            &grpc_metadata,
-            &trace_ctx,
+            "create_app_client_assertion",
+            &request,
         );
-
+        let grpc_metadata = request.metadata().clone();
         let inner = request.into_inner();
         super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
-        let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
         let (_, app_id) = resolver.extract_and_resolve_app(&inner.app)?;
 
@@ -967,12 +894,7 @@ impl proto::app_service_server::AppService for AppService {
                     return Err(super::helpers::error_code_to_status(code, message));
                 }
 
-                self.emit_event(
-                    EventAction::AppAssertionCreated,
-                    org_id,
-                    org_slug_val,
-                    &trace_ctx.trace_id,
-                );
+                ctx.record_event(EventAction::AppAssertionCreated, EventOutcomeType::Success, &[]);
 
                 // Build the assertion info from the committed data
                 let assertion_info = AppClientAssertionInfo {
@@ -1015,19 +937,15 @@ impl proto::app_service_server::AppService for AppService {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let mut ctx = self.ctx.make_request_context(
+        let mut ctx = self.ctx.make_request_context_from(
             "AppService",
-            "DeleteAppClientAssertion",
-            &grpc_metadata,
-            &trace_ctx,
+            "delete_app_client_assertion",
+            &request,
         );
-
+        let grpc_metadata = request.metadata().clone();
         let inner = request.into_inner();
         super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
-        let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
         let (_, app_id) = resolver.extract_and_resolve_app(&inner.app)?;
         let assertion_id = inner
@@ -1078,12 +996,7 @@ impl proto::app_service_server::AppService for AppService {
 
         match response {
             LedgerResponse::AppClientAssertionDeleted { .. } => {
-                self.emit_event(
-                    EventAction::AppAssertionDeleted,
-                    org_id,
-                    org_slug_val,
-                    &trace_ctx.trace_id,
-                );
+                ctx.record_event(EventAction::AppAssertionDeleted, EventOutcomeType::Success, &[]);
                 Ok(Response::new(DeleteAppClientAssertionResponse {}))
             },
             LedgerResponse::Error { code, message } => {
@@ -1103,19 +1016,15 @@ impl proto::app_service_server::AppService for AppService {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let mut ctx = self.ctx.make_request_context(
+        let mut ctx = self.ctx.make_request_context_from(
             "AppService",
-            "SetAppClientAssertionEnabled",
-            &grpc_metadata,
-            &trace_ctx,
+            "set_app_client_assertion_enabled",
+            &request,
         );
-
+        let grpc_metadata = request.metadata().clone();
         let inner = request.into_inner();
         super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
-        let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
         let (_, app_id) = resolver.extract_and_resolve_app(&inner.app)?;
         let assertion_id = inner
@@ -1140,11 +1049,10 @@ impl proto::app_service_server::AppService for AppService {
 
         match response {
             LedgerResponse::AppClientAssertionToggled { .. } => {
-                self.emit_event(
+                ctx.record_event(
                     EventAction::AppCredentialStatusChanged,
-                    org_id,
-                    org_slug_val,
-                    &trace_ctx.trace_id,
+                    EventOutcomeType::Success,
+                    &[],
                 );
                 Ok(Response::new(SetAppClientAssertionEnabledResponse {}))
             },
@@ -1183,15 +1091,11 @@ impl proto::app_service_server::AppService for AppService {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx = self.ctx.make_request_context_from("AppService", "add_app_vault", &request);
         let grpc_metadata = request.metadata().clone();
-        let mut ctx =
-            self.ctx.make_request_context("AppService", "AddAppVault", &grpc_metadata, &trace_ctx);
-
         let inner = request.into_inner();
         super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
-        let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
         let (_, app_id) = resolver.extract_and_resolve_app(&inner.app)?;
         let vault_slug = SlugResolver::extract_vault_slug(&inner.vault)?;
@@ -1214,12 +1118,7 @@ impl proto::app_service_server::AppService for AppService {
 
         match response {
             LedgerResponse::AppVaultAdded { organization_id } => {
-                self.emit_event(
-                    EventAction::AppVaultConnected,
-                    org_id,
-                    org_slug_val,
-                    &trace_ctx.trace_id,
-                );
+                ctx.record_event(EventAction::AppVaultConnected, EventOutcomeType::Success, &[]);
                 let conn = self.read_vault_connection(organization_id, app_id, vault_id)?;
                 Ok(Response::new(AddAppVaultResponse {
                     vault: Some(Self::vault_connection_to_proto(&conn)),
@@ -1242,19 +1141,12 @@ impl proto::app_service_server::AppService for AppService {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx =
+            self.ctx.make_request_context_from("AppService", "update_app_vault", &request);
         let grpc_metadata = request.metadata().clone();
-        let mut ctx = self.ctx.make_request_context(
-            "AppService",
-            "UpdateAppVault",
-            &grpc_metadata,
-            &trace_ctx,
-        );
-
         let inner = request.into_inner();
         super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
-        let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
         let (_, app_id) = resolver.extract_and_resolve_app(&inner.app)?;
         let vault_slug = SlugResolver::extract_vault_slug(&inner.vault)?;
@@ -1276,12 +1168,7 @@ impl proto::app_service_server::AppService for AppService {
 
         match response {
             LedgerResponse::AppVaultUpdated { organization_id } => {
-                self.emit_event(
-                    EventAction::AppVaultUpdated,
-                    org_id,
-                    org_slug_val,
-                    &trace_ctx.trace_id,
-                );
+                ctx.record_event(EventAction::AppVaultUpdated, EventOutcomeType::Success, &[]);
                 let conn = self.read_vault_connection(organization_id, app_id, vault_id)?;
                 Ok(Response::new(UpdateAppVaultResponse {
                     vault: Some(Self::vault_connection_to_proto(&conn)),
@@ -1304,19 +1191,12 @@ impl proto::app_service_server::AppService for AppService {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx =
+            self.ctx.make_request_context_from("AppService", "remove_app_vault", &request);
         let grpc_metadata = request.metadata().clone();
-        let mut ctx = self.ctx.make_request_context(
-            "AppService",
-            "RemoveAppVault",
-            &grpc_metadata,
-            &trace_ctx,
-        );
-
         let inner = request.into_inner();
         super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
-        let org_slug_val = inner.organization.as_ref().map_or(0, |n| n.slug);
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
         let (_, app_id) = resolver.extract_and_resolve_app(&inner.app)?;
         let vault_slug = SlugResolver::extract_vault_slug(&inner.vault)?;
@@ -1337,12 +1217,7 @@ impl proto::app_service_server::AppService for AppService {
 
         match response {
             LedgerResponse::AppVaultRemoved { .. } => {
-                self.emit_event(
-                    EventAction::AppVaultDisconnected,
-                    org_id,
-                    org_slug_val,
-                    &trace_ctx.trace_id,
-                );
+                ctx.record_event(EventAction::AppVaultDisconnected, EventOutcomeType::Success, &[]);
                 Ok(Response::new(RemoveAppVaultResponse {}))
             },
             LedgerResponse::Error { code, message } => {

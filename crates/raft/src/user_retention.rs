@@ -4,7 +4,7 @@
 //! elapsed and submits `EraseUser` Raft proposals to finalize deletion.
 //! Only runs on the leader node.
 
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
 use chrono::Utc;
 use inferadb_ledger_state::StateLayer;
@@ -15,9 +15,6 @@ use tracing::{debug, info, warn};
 
 use crate::{
     consensus_handle::ConsensusHandle,
-    metrics::{
-        record_background_job_duration, record_background_job_items, record_background_job_run,
-    },
     trace_context::TraceContext,
     types::{LedgerRequest, RaftPayload, SystemRequest},
 };
@@ -61,8 +58,8 @@ impl<B: StorageBackend + 'static> UserRetentionReaper<B> {
             return 0;
         }
 
+        let mut job = crate::logging::JobContext::new("user_retention_reaper", None);
         let trace_ctx = TraceContext::new();
-        let cycle_start = Instant::now();
         debug!(trace_id = %trace_ctx.trace_id, "Starting user retention reaper cycle");
 
         let sys = inferadb_ledger_state::system::SystemOrganizationService::new(self.state.clone());
@@ -71,9 +68,7 @@ impl<B: StorageBackend + 'static> UserRetentionReaper<B> {
         let users = match sys.list_users(None, self.config.batch_size) {
             Ok(users) => users,
             Err(e) => {
-                let duration = cycle_start.elapsed().as_secs_f64();
-                record_background_job_duration("user_retention_reaper", duration);
-                record_background_job_run("user_retention_reaper", "failure");
+                job.set_failure();
                 warn!(
                     trace_id = %trace_ctx.trace_id,
                     error = %e,
@@ -131,25 +126,19 @@ impl<B: StorageBackend + 'static> UserRetentionReaper<B> {
             }
         }
 
-        let duration = cycle_start.elapsed().as_secs_f64();
-        record_background_job_duration("user_retention_reaper", duration);
-        record_background_job_items("user_retention_reaper", erased_count as u64);
+        job.record_items(erased_count as u64);
 
         if erased_count > 0 {
-            record_background_job_run("user_retention_reaper", "success");
             info!(
                 trace_id = %trace_ctx.trace_id,
                 erased_count,
                 scanned = users.len(),
-                duration_secs = duration,
                 "User retention reaper cycle complete"
             );
         } else {
-            record_background_job_run("user_retention_reaper", "success");
             debug!(
                 trace_id = %trace_ctx.trace_id,
                 scanned = users.len(),
-                duration_secs = duration,
                 "User retention reaper cycle complete (no expired users)"
             );
         }

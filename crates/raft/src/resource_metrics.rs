@@ -134,6 +134,7 @@ impl<B: StorageBackend + 'static> ResourceMetricsCollector<B> {
                         std::sync::atomic::Ordering::Relaxed,
                     );
                 }
+                let _job = crate::logging::JobContext::new("resource_metrics", None);
                 self.collect();
             }
         })

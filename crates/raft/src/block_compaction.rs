@@ -21,13 +21,8 @@ use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use crate::{
-    consensus_handle::ConsensusHandle,
-    log_storage::AppliedStateAccessor,
-    metrics::{
-        record_background_job_duration, record_background_job_items, record_background_job_run,
-    },
-    trace_context::TraceContext,
-    types::BlockRetentionMode,
+    consensus_handle::ConsensusHandle, log_storage::AppliedStateAccessor,
+    trace_context::TraceContext, types::BlockRetentionMode,
 };
 
 /// Default interval between compaction cycles.
@@ -71,8 +66,9 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
             return;
         }
 
-        let trace_ctx = TraceContext::new();
+        let mut job = crate::logging::JobContext::new("block_compaction", None);
         let cycle_start = Instant::now();
+        let trace_ctx = TraceContext::new();
         debug!(trace_id = %trace_ctx.trace_id, "Starting block compaction cycle");
 
         // Get all vault metadata to check retention policies
@@ -151,21 +147,22 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
             }
         }
 
-        let duration = cycle_start.elapsed().as_secs_f64();
-        record_background_job_duration("gc", duration);
-        record_background_job_run("gc", if had_error { "failure" } else { "success" });
+        if had_error {
+            job.set_failure();
+        }
+        job.record_items(total_compacted);
+        let duration_secs = cycle_start.elapsed().as_secs_f64();
         if total_compacted > 0 {
-            record_background_job_items("gc", total_compacted);
             info!(
                 trace_id = %trace_ctx.trace_id,
                 total_compacted,
-                duration_secs = duration,
+                duration_secs,
                 "Block compaction cycle complete"
             );
         } else {
             debug!(
                 trace_id = %trace_ctx.trace_id,
-                duration_secs = duration,
+                duration_secs,
                 "Block compaction cycle complete (no blocks compacted)"
             );
         }

@@ -15,19 +15,17 @@ use inferadb_ledger_proto::proto::{
 use inferadb_ledger_raft::{
     batching::BatchError,
     error::classify_raft_error,
+    event_writer::EventEmitter,
     idempotency::IdempotencyCache,
     logging::{OperationType, RequestContext, Sampler},
     metrics,
     proof::{self, ProofError},
     raft_manager::RaftManager,
     rate_limit::RateLimiter,
-    trace_context,
     types::{LedgerRequest, LedgerResponse, RaftPayload},
 };
 use inferadb_ledger_store::FileBackend;
-use inferadb_ledger_types::{
-    OrganizationId, OrganizationSlug, SetCondition, VaultId, VaultSlug, config::ValidationConfig,
-};
+use inferadb_ledger_types::{OrganizationId, SetCondition, VaultId, config::ValidationConfig};
 use tonic::{Request, Response, Status};
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -202,13 +200,6 @@ impl WriteService {
         super::helpers::check_rate_limit(self.rate_limiter.as_ref(), client_id, organization)
     }
 
-    /// Records a handler-phase event (best-effort).
-    fn record_handler_event(&self, entry: inferadb_ledger_types::events::EventEntry) {
-        if let Some(ref handle) = self.event_handle {
-            handle.record_handler_event(entry);
-        }
-    }
-
     /// Records key accesses from operations for hot key detection.
     fn record_hot_keys(
         &self,
@@ -378,18 +369,10 @@ impl WriteService {
         request_hash: u64,
     ) -> Result<LedgerRequest, Status> {
         // Convert proto operations to internal Operations
-        // Time the proto → internal type conversion
-        let convert_start = std::time::Instant::now();
         let internal_ops: Vec<inferadb_ledger_types::Operation> = operations
             .iter()
             .map(inferadb_ledger_types::Operation::try_from)
             .collect::<Result<Vec<_>, Status>>()?;
-        let convert_secs = convert_start.elapsed().as_secs_f64();
-
-        // Record proto decode metrics (per operation average for consistency)
-        if !operations.is_empty() {
-            metrics::record_proto_decode(convert_secs / operations.len() as f64, "write_operation");
-        }
 
         // Create a single transaction with all operations
         // Server-assigned sequences: sequence=0 is a placeholder; actual sequence
@@ -428,10 +411,20 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         // Reject if node is draining
         super::helpers::check_not_draining(self.health_state.as_ref())?;
 
-        // Extract trace context and transport metadata from gRPC headers before consuming
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        // Build unified request context before consuming the request body.
+        // from_request extracts transport metadata and trace context from gRPC headers.
+        let event_handle: Option<Arc<dyn EventEmitter>> =
+            self.event_handle.as_ref().map(|h| Arc::new(h.clone()) as _);
         let grpc_metadata = request.metadata().clone();
-        let request_id = Uuid::new_v4();
+        let mut ctx = RequestContext::from_request("WriteService", "write", &request, event_handle);
+        ctx.set_operation_type(OperationType::Write);
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+
         let req = request.into_inner();
 
         // Extract client ID
@@ -441,6 +434,9 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         let system = self.resolver.system_region()?;
         let organization_id = SlugResolver::new(system.applied_state.clone())
             .extract_and_resolve(&req.organization)?;
+
+        // Set organization slug on context for event emission in early-exit paths.
+        ctx.set_organization(req.organization.as_ref().map_or(0, |n| n.slug));
 
         // Reject writes to organizations undergoing migration
         self.check_not_migrating(&system, organization_id)?;
@@ -453,40 +449,26 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         {
             // Pre-flight: validation on originating node
             if let Err(status) = self.validate_operations(&req.operations) {
-                self.record_handler_event(
-                    inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
-                        inferadb_ledger_types::events::EventAction::RequestValidationFailed,
-                        organization_id,
-                        req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
-                        self.node_id.unwrap_or(0),
-                    )
-                    .principal(&client_id)
-                    .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                ctx.record_event(
+                    inferadb_ledger_types::events::EventAction::RequestValidationFailed,
+                    inferadb_ledger_types::events::EventOutcome::Denied {
                         reason: status.message().to_string(),
-                    })
-                    .trace_id(&trace_ctx.trace_id)
-                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+                    },
+                    &[],
                 );
                 return Err(status);
             }
 
             // Pre-flight: rate limit on originating node
             if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
-                self.record_handler_event(
-                    inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
-                        inferadb_ledger_types::events::EventAction::RequestRateLimited,
-                        organization_id,
-                        req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
-                        self.node_id.unwrap_or(0),
-                    )
-                    .principal(&client_id)
-                    .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                ctx.record_event(
+                    inferadb_ledger_types::events::EventAction::RequestRateLimited,
+                    inferadb_ledger_types::events::EventOutcome::Denied {
                         reason: "rate_limited".to_string(),
-                    })
-                    .trace_id(&trace_ctx.trace_id)
-                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+                    },
+                    &[],
                 );
-                return Err(status_with_correlation(status, &request_id, &trace_ctx.trace_id));
+                return Err(status_with_correlation(status, &ctx.request_id(), ctx.trace_id()));
             }
 
             // Redirect cross-region writes — clients reconnect against the remote
@@ -504,8 +486,8 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                     &remote,
                     "Organization hosted by a remote region; reconnect to that region",
                 ),
-                &request_id,
-                &trace_ctx.trace_id,
+                &ctx.request_id(),
+                ctx.trace_id(),
             ));
         }
 
@@ -528,29 +510,10 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                     self.peer_addresses.as_ref(),
                     "Not the leader for this region",
                 ),
-                &request_id,
-                &trace_ctx.trace_id,
+                &ctx.request_id(),
+                ctx.trace_id(),
             ));
         }
-
-        // Create logging context for this request
-        let mut ctx = RequestContext::new("WriteService", "write");
-        ctx.set_operation_type(OperationType::Write);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
-
-        // Set trace context for distributed tracing correlation
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
 
         // Extract caller identity for canonical log line
         super::helpers::extract_caller(&mut ctx, &req.caller);
@@ -563,19 +526,12 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
 
         // Validate all operations before any processing
         if let Err(status) = self.validate_operations(&req.operations) {
-            self.record_handler_event(
-                inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
-                    inferadb_ledger_types::events::EventAction::RequestValidationFailed,
-                    organization_id,
-                    req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
-                    self.node_id.unwrap_or(0),
-                )
-                .principal(&client_id)
-                .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+            ctx.record_event(
+                inferadb_ledger_types::events::EventAction::RequestValidationFailed,
+                inferadb_ledger_types::events::EventOutcome::Denied {
                     reason: status.message().to_string(),
-                })
-                .trace_id(&trace_ctx.trace_id)
-                .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+                },
+                &[],
             );
             return Err(status);
         }
@@ -612,8 +568,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                     ctx.set_state_root(&Self::bytes_to_hex(&state_root.value));
                 }
                 ctx.set_block_height(cached.block_height);
-                metrics::record_idempotency_hit();
-                metrics::record_write(true, ctx.elapsed_secs());
+                metrics::record_idempotency_operation("hit");
                 return Ok(response_with_correlation(
                     WriteResponse {
                         result: Some(
@@ -621,7 +576,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                         ),
                     },
                     &ctx.request_id(),
-                    &trace_ctx.trace_id,
+                    ctx.trace_id(),
                 ));
             },
             IdempotencyCheckResult::KeyReused => {
@@ -629,7 +584,6 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                     "IdempotencyKeyReused",
                     "Idempotency key reused with different payload",
                 );
-                metrics::record_write(false, ctx.elapsed_secs());
                 return Ok(response_with_correlation(
                     WriteResponse {
                         result: Some(inferadb_ledger_proto::proto::write_response::Result::Error(WriteError {
@@ -646,7 +600,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                         })),
                     },
                     &ctx.request_id(),
-                    &trace_ctx.trace_id,
+                    ctx.trace_id(),
                 ));
             },
             IdempotencyCheckResult::NewRequest => {
@@ -662,8 +616,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                         request_hash,
                     ) {
                         ReplicatedCheck::AlreadyCommitted { sequence } => {
-                            metrics::record_idempotency_hit();
-                            metrics::record_write(true, ctx.elapsed_secs());
+                            metrics::record_idempotency_operation("hit");
                             return Ok(response_with_correlation(
                                 WriteResponse {
                                     result: Some(
@@ -682,7 +635,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                                     ),
                                 },
                                 &ctx.request_id(),
-                                &trace_ctx.trace_id,
+                                ctx.trace_id(),
                             ));
                         },
                         ReplicatedCheck::KeyReused => {
@@ -690,7 +643,6 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                                 "IdempotencyKeyReused",
                                 "Idempotency key reused with different payload (cross-failover)",
                             );
-                            metrics::record_write(false, ctx.elapsed_secs());
                             return Ok(response_with_correlation(
                                 WriteResponse {
                                     result: Some(
@@ -709,35 +661,27 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                                     ),
                                 },
                                 &ctx.request_id(),
-                                &trace_ctx.trace_id,
+                                ctx.trace_id(),
                             ));
                         },
                         ReplicatedCheck::Miss => {},
                     }
                 }
-                metrics::record_idempotency_miss();
+                metrics::record_idempotency_operation("miss");
             },
         }
 
         // Check rate limits (backpressure, organization, client)
         if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
             ctx.set_rate_limited();
-            self.record_handler_event(
-                inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
-                    inferadb_ledger_types::events::EventAction::RequestRateLimited,
-                    organization_id,
-                    req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
-                    self.node_id.unwrap_or(0),
-                )
-                .principal(&client_id)
-                .vault(VaultSlug::new(vault))
-                .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+            ctx.record_event(
+                inferadb_ledger_types::events::EventAction::RequestRateLimited,
+                inferadb_ledger_types::events::EventOutcome::Denied {
                     reason: "rate_limited".to_string(),
-                })
-                .trace_id(&trace_ctx.trace_id)
-                .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+                },
+                &[],
             );
-            return Err(status_with_correlation(status, &ctx.request_id(), &trace_ctx.trace_id));
+            return Err(status_with_correlation(status, &ctx.request_id(), ctx.trace_id()));
         }
 
         // Track key access frequency for hot key detection.
@@ -773,27 +717,24 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                 Ok(Ok(Err(batch_err))) => {
                     ctx.end_raft_timer();
                     ctx.set_error("BatchError", &batch_err.to_string());
-                    metrics::record_write(false, ctx.elapsed_secs());
                     return Err(status_with_correlation(
                         classify_batch_error(&batch_err),
                         &ctx.request_id(),
-                        &trace_ctx.trace_id,
+                        ctx.trace_id(),
                     ));
                 },
                 Ok(Err(_recv_err)) => {
                     ctx.end_raft_timer();
                     ctx.set_error("BatchChannelClosed", "Batch writer channel closed");
-                    metrics::record_write(false, ctx.elapsed_secs());
                     return Err(status_with_correlation(
                         Status::internal("Batch writer unavailable"),
                         &ctx.request_id(),
-                        &trace_ctx.trace_id,
+                        ctx.trace_id(),
                     ));
                 },
                 Err(_elapsed) => {
                     ctx.end_raft_timer();
                     ctx.set_error("ProposalTimeout", "Raft proposal timed out");
-                    metrics::record_write(false, ctx.elapsed_secs());
                     metrics::record_raft_proposal_timeout();
                     return Err(status_with_correlation(
                         Status::deadline_exceeded(format!(
@@ -801,7 +742,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                             timeout.as_millis()
                         )),
                         &ctx.request_id(),
-                        &trace_ctx.trace_id,
+                        ctx.trace_id(),
                     ));
                 },
             }
@@ -824,7 +765,6 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                 Err(inferadb_ledger_raft::HandleError::Timeout { .. }) => {
                     ctx.end_raft_timer();
                     ctx.set_error("ProposalTimeout", "Raft proposal timed out");
-                    metrics::record_write(false, ctx.elapsed_secs());
                     metrics::record_raft_proposal_timeout();
                     return Err(status_with_correlation(
                         Status::deadline_exceeded(format!(
@@ -832,17 +772,16 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                             timeout.as_millis()
                         )),
                         &ctx.request_id(),
-                        &trace_ctx.trace_id,
+                        ctx.trace_id(),
                     ));
                 },
                 Err(e) => {
                     ctx.end_raft_timer();
                     ctx.set_error("RaftError", &e.to_string());
-                    metrics::record_write(false, ctx.elapsed_secs());
                     return Err(status_with_correlation(
                         classify_raft_error(&e.to_string()),
                         &ctx.request_id(),
-                        &trace_ctx.trace_id,
+                        ctx.trace_id(),
                     ));
                 },
             }
@@ -888,7 +827,6 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                 }
 
                 let elapsed = ctx.elapsed_secs();
-                metrics::record_write(true, elapsed);
                 metrics::record_organization_latency(organization_id, "write", elapsed);
 
                 Ok(response_with_correlation(
@@ -898,12 +836,11 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                         ),
                     },
                     &ctx.request_id(),
-                    &trace_ctx.trace_id,
+                    ctx.trace_id(),
                 ))
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
-                metrics::record_write(false, ctx.elapsed_secs());
 
                 Ok(response_with_correlation(
                     WriteResponse {
@@ -921,7 +858,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                         )),
                     },
                     &ctx.request_id(),
-                    &trace_ctx.trace_id,
+                    ctx.trace_id(),
                 ))
             },
             LedgerResponse::PreconditionFailed {
@@ -938,7 +875,6 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                     Self::map_condition_to_error_code(failed_condition.as_ref(), key_exists);
 
                 ctx.set_precondition_failed(Some(&key));
-                metrics::record_write(false, ctx.elapsed_secs());
 
                 Ok(response_with_correlation(
                     WriteResponse {
@@ -956,16 +892,15 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                         )),
                     },
                     &ctx.request_id(),
-                    &trace_ctx.trace_id,
+                    ctx.trace_id(),
                 ))
             },
             _ => {
                 ctx.set_error("UnexpectedResponse", "Unexpected response type");
-                metrics::record_write(false, ctx.elapsed_secs());
                 Err(status_with_correlation(
                     Status::internal("Unexpected response type"),
                     &ctx.request_id(),
-                    &trace_ctx.trace_id,
+                    ctx.trace_id(),
                 ))
             },
         }
@@ -985,10 +920,21 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         // Reject if node is draining
         super::helpers::check_not_draining(self.health_state.as_ref())?;
 
-        // Extract trace context and transport metadata from gRPC headers before consuming
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        // Build unified request context before consuming the request body.
+        // from_request extracts transport metadata and trace context from gRPC headers.
+        let event_handle: Option<Arc<dyn EventEmitter>> =
+            self.event_handle.as_ref().map(|h| Arc::new(h.clone()) as _);
         let grpc_metadata = request.metadata().clone();
-        let request_id = Uuid::new_v4();
+        let mut ctx =
+            RequestContext::from_request("WriteService", "batch_write", &request, event_handle);
+        ctx.set_operation_type(OperationType::Write);
+        if let Some(ref sampler) = self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = self.node_id {
+            ctx.set_node_id(node_id);
+        }
+
         let req = request.into_inner();
 
         // Extract client ID
@@ -998,6 +944,9 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         let system = self.resolver.system_region()?;
         let organization_id = SlugResolver::new(system.applied_state.clone())
             .extract_and_resolve(&req.organization)?;
+
+        // Set organization slug on context for event emission in early-exit paths.
+        ctx.set_organization(req.organization.as_ref().map_or(0, |n| n.slug));
 
         // Reject writes to organizations undergoing migration
         self.check_not_migrating(&system, organization_id)?;
@@ -1014,41 +963,26 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
 
             // Pre-flight: validation on originating node
             if let Err(status) = self.validate_operations(&all_operations) {
-                self.record_handler_event(
-                    inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
-                        inferadb_ledger_types::events::EventAction::RequestValidationFailed,
-                        organization_id,
-                        req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
-                        self.node_id.unwrap_or(0),
-                    )
-                    .principal(&client_id)
-                    .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                ctx.record_event(
+                    inferadb_ledger_types::events::EventAction::RequestValidationFailed,
+                    inferadb_ledger_types::events::EventOutcome::Denied {
                         reason: status.message().to_string(),
-                    })
-                    .trace_id(&trace_ctx.trace_id)
-                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+                    },
+                    &[],
                 );
                 return Err(status);
             }
 
             // Pre-flight: rate limit on originating node
             if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
-                self.record_handler_event(
-                    inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
-                        inferadb_ledger_types::events::EventAction::RequestRateLimited,
-                        organization_id,
-                        req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
-                        self.node_id.unwrap_or(0),
-                    )
-                    .principal(&client_id)
-                    .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+                ctx.record_event(
+                    inferadb_ledger_types::events::EventAction::RequestRateLimited,
+                    inferadb_ledger_types::events::EventOutcome::Denied {
                         reason: "rate_limited".to_string(),
-                    })
-                    .operations_count(all_operations.len() as u32)
-                    .trace_id(&trace_ctx.trace_id)
-                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+                    },
+                    &[],
                 );
-                return Err(status_with_correlation(status, &request_id, &trace_ctx.trace_id));
+                return Err(status_with_correlation(status, &ctx.request_id(), ctx.trace_id()));
             }
 
             // Redirect cross-region batch writes — clients reconnect against the
@@ -1066,8 +1000,8 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                     &remote,
                     "Organization hosted by a remote region; reconnect to that region",
                 ),
-                &request_id,
-                &trace_ctx.trace_id,
+                &ctx.request_id(),
+                ctx.trace_id(),
             ));
         }
 
@@ -1090,29 +1024,10 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                     self.peer_addresses.as_ref(),
                     "Not the leader for this region",
                 ),
-                &request_id,
-                &trace_ctx.trace_id,
+                &ctx.request_id(),
+                ctx.trace_id(),
             ));
         }
-
-        // Create logging context for this request
-        let mut ctx = RequestContext::new("WriteService", "batch_write");
-        ctx.set_operation_type(OperationType::Write);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
-
-        // Set trace context for distributed tracing correlation
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
 
         // Extract caller identity for canonical log line
         super::helpers::extract_caller(&mut ctx, &req.caller);
@@ -1135,20 +1050,12 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
 
         // Validate all operations before any processing
         if let Err(status) = self.validate_operations(&all_operations) {
-            self.record_handler_event(
-                inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
-                    inferadb_ledger_types::events::EventAction::RequestValidationFailed,
-                    organization_id,
-                    req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
-                    self.node_id.unwrap_or(0),
-                )
-                .principal(&client_id)
-                .vault(VaultSlug::new(vault))
-                .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+            ctx.record_event(
+                inferadb_ledger_types::events::EventAction::RequestValidationFailed,
+                inferadb_ledger_types::events::EventOutcome::Denied {
                     reason: status.message().to_string(),
-                })
-                .trace_id(&trace_ctx.trace_id)
-                .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+                },
+                &[],
             );
             return Err(status);
         }
@@ -1182,8 +1089,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                     ctx.set_state_root(&Self::bytes_to_hex(&state_root.value));
                 }
                 ctx.set_block_height(cached.block_height);
-                metrics::record_idempotency_hit();
-                metrics::record_batch_write(true, 0, ctx.elapsed_secs());
+                metrics::record_idempotency_operation("hit");
                 return Ok(response_with_correlation(
                     BatchWriteResponse {
                         result: Some(
@@ -1199,7 +1105,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                         ),
                     },
                     &ctx.request_id(),
-                    &trace_ctx.trace_id,
+                    ctx.trace_id(),
                 ));
             },
             IdempotencyCheckResult::KeyReused => {
@@ -1207,7 +1113,6 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                     "IdempotencyKeyReused",
                     "Idempotency key reused with different payload",
                 );
-                metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
                 return Ok(response_with_correlation(BatchWriteResponse {
                     result: Some(inferadb_ledger_proto::proto::batch_write_response::Result::Error(WriteError {
                         code: WriteErrorCode::IdempotencyKeyReused.into(),
@@ -1221,7 +1126,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                         committed_block_height: None,
                         assigned_sequence: None,
                     })),
-                }, &ctx.request_id(), &trace_ctx.trace_id));
+                }, &ctx.request_id(), ctx.trace_id()));
             },
             IdempotencyCheckResult::NewRequest => {
                 // Moka miss — check replicated state for cross-failover dedup
@@ -1236,8 +1141,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                         request_hash,
                     ) {
                         ReplicatedCheck::AlreadyCommitted { sequence } => {
-                            metrics::record_idempotency_hit();
-                            metrics::record_batch_write(true, 0, ctx.elapsed_secs());
+                            metrics::record_idempotency_operation("hit");
                             return Ok(response_with_correlation(
                                 BatchWriteResponse {
                                     result: Some(
@@ -1256,7 +1160,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                                     ),
                                 },
                                 &ctx.request_id(),
-                                &trace_ctx.trace_id,
+                                ctx.trace_id(),
                             ));
                         },
                         ReplicatedCheck::KeyReused => {
@@ -1264,7 +1168,6 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                                 "IdempotencyKeyReused",
                                 "Idempotency key reused with different payload (cross-failover)",
                             );
-                            metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
                             return Ok(response_with_correlation(
                                 BatchWriteResponse {
                                     result: Some(
@@ -1283,36 +1186,27 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                                     ),
                                 },
                                 &ctx.request_id(),
-                                &trace_ctx.trace_id,
+                                ctx.trace_id(),
                             ));
                         },
                         ReplicatedCheck::Miss => {},
                     }
                 }
-                metrics::record_idempotency_miss();
+                metrics::record_idempotency_operation("miss");
             },
         }
 
         // Check rate limits (backpressure, organization, client)
         if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
             ctx.set_rate_limited();
-            self.record_handler_event(
-                inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
-                    inferadb_ledger_types::events::EventAction::RequestRateLimited,
-                    organization_id,
-                    req.organization.as_ref().map(|n| OrganizationSlug::new(n.slug)),
-                    self.node_id.unwrap_or(0),
-                )
-                .principal(&client_id)
-                .vault(VaultSlug::new(vault))
-                .outcome(inferadb_ledger_types::events::EventOutcome::Denied {
+            ctx.record_event(
+                inferadb_ledger_types::events::EventAction::RequestRateLimited,
+                inferadb_ledger_types::events::EventOutcome::Denied {
                     reason: "rate_limited".to_string(),
-                })
-                .operations_count(batch_size as u32)
-                .trace_id(&trace_ctx.trace_id)
-                .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+                },
+                &[],
             );
-            return Err(status_with_correlation(status, &ctx.request_id(), &trace_ctx.trace_id));
+            return Err(status_with_correlation(status, &ctx.request_id(), ctx.trace_id()));
         }
 
         // Track key access frequency for hot key detection.
@@ -1355,7 +1249,6 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             Err(inferadb_ledger_raft::HandleError::Timeout { .. }) => {
                 ctx.end_raft_timer();
                 ctx.set_error("ProposalTimeout", "Raft proposal timed out");
-                metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
                 metrics::record_raft_proposal_timeout();
                 return Err(status_with_correlation(
                     Status::deadline_exceeded(format!(
@@ -1363,17 +1256,16 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                         timeout.as_millis()
                     )),
                     &ctx.request_id(),
-                    &trace_ctx.trace_id,
+                    ctx.trace_id(),
                 ));
             },
             Err(e) => {
                 ctx.end_raft_timer();
                 ctx.set_error("RaftError", &e.to_string());
-                metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
                 return Err(status_with_correlation(
                     classify_raft_error(&e.to_string()),
                     &ctx.request_id(),
-                    &trace_ctx.trace_id,
+                    ctx.trace_id(),
                 ));
             },
         };
@@ -1418,7 +1310,6 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                 }
 
                 let elapsed = ctx.elapsed_secs();
-                metrics::record_batch_write(true, batch_size, elapsed);
                 metrics::record_organization_latency(organization_id, "write", elapsed);
 
                 Ok(response_with_correlation(
@@ -1436,12 +1327,11 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                         ),
                     },
                     &ctx.request_id(),
-                    &trace_ctx.trace_id,
+                    ctx.trace_id(),
                 ))
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
-                metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
 
                 Ok(response_with_correlation(
                     BatchWriteResponse {
@@ -1461,7 +1351,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                         ),
                     },
                     &ctx.request_id(),
-                    &trace_ctx.trace_id,
+                    ctx.trace_id(),
                 ))
             },
             LedgerResponse::PreconditionFailed {
@@ -1478,7 +1368,6 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                     Self::map_condition_to_error_code(failed_condition.as_ref(), key_exists);
 
                 ctx.set_precondition_failed(Some(&key));
-                metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
 
                 Ok(response_with_correlation(
                     BatchWriteResponse {
@@ -1498,16 +1387,15 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                         ),
                     },
                     &ctx.request_id(),
-                    &trace_ctx.trace_id,
+                    ctx.trace_id(),
                 ))
             },
             _ => {
                 ctx.set_error("UnexpectedResponse", "Unexpected response type");
-                metrics::record_batch_write(false, batch_size, ctx.elapsed_secs());
                 Err(status_with_correlation(
                     Status::internal("Unexpected response type"),
                     &ctx.request_id(),
-                    &trace_ctx.trace_id,
+                    ctx.trace_id(),
                 ))
             },
         }

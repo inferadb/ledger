@@ -25,6 +25,7 @@ mod orphan_cleanup;
 mod redirect_routing;
 mod replication;
 mod saga_orchestrator;
+mod telemetry_context;
 mod token_lifecycle;
 mod ttl_gc;
 mod watch_blocks_realtime;

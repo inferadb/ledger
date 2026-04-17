@@ -371,7 +371,7 @@ spec:
             summary: "High Raft proposal backlog"
 
         - alert: LedgerHighWriteLatency
-          expr: histogram_quantile(0.99, rate(ledger_write_latency_seconds_bucket[5m])) > 0.1
+          expr: histogram_quantile(0.99, rate(ledger_grpc_request_latency_seconds_bucket{service="WriteService"}[5m])) > 0.1
           for: 5m
           labels:
             severity: warning

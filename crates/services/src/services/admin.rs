@@ -26,17 +26,15 @@ use inferadb_ledger_proto::proto::{
 use inferadb_ledger_raft::{
     ConsensusHandle, HandleError, NodeStatus,
     error::classify_raft_error,
-    event_writer::HandlerPhaseEmitter,
     log_storage::{AppliedStateAccessor, VaultHealthStatus},
     logging::{OperationType, RequestContext, Sampler},
-    metrics, trace_context,
+    metrics,
     types::{LedgerRequest, LedgerResponse, RaftPayload, SystemRequest},
 };
 use inferadb_ledger_state::{BlockArchive, StateLayer, system::SystemOrganizationService};
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{
-    ALL_REGIONS, OrganizationId as DomainOrganizationId,
-    OrganizationSlug as DomainOrganizationSlug, VaultEntry, VaultId as DomainVaultId, VaultSlug,
+    ALL_REGIONS, OrganizationId as DomainOrganizationId, VaultEntry, VaultId as DomainVaultId,
     ZERO_HASH,
     config::ValidationConfig,
     events::{EventAction, EventOutcome as EventOutcomeType},
@@ -265,17 +263,20 @@ impl AdminService {
         self
     }
 
-    /// Creates a `RequestContext` for an admin operation, filling common fields
-    /// from gRPC metadata and trace context.
-    fn make_request_context(
+    /// Creates a `RequestContext` for an admin operation using the unified
+    /// `from_request` constructor, which extracts trace context and transport
+    /// metadata from the tonic request in one step.
+    ///
+    /// Must be called **before** `request.into_inner()`.
+    fn make_request_context_unified<T>(
         &self,
         method: &'static str,
-        grpc_metadata: &tonic::metadata::MetadataMap,
-        trace_ctx: &trace_context::TraceContext,
+        request: &tonic::Request<T>,
     ) -> RequestContext {
-        let mut ctx = RequestContext::new("AdminService", method);
+        let event_handle: Option<Arc<dyn inferadb_ledger_raft::event_writer::EventEmitter>> =
+            self.event_handle.as_ref().map(|h| Arc::new(h.clone()) as _);
+        let mut ctx = RequestContext::from_request("AdminService", method, request, event_handle);
         ctx.set_operation_type(OperationType::Admin);
-        ctx.extract_transport_metadata(grpc_metadata);
         ctx.set_admin_action(method);
         if let Some(ref sampler) = self.sampler {
             ctx.set_sampler(sampler.clone());
@@ -283,20 +284,7 @@ impl AdminService {
         if let Some(node_id) = self.node_id {
             ctx.set_node_id(node_id);
         }
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
         ctx
-    }
-
-    /// Records a handler-phase event (best-effort).
-    fn record_handler_event(&self, entry: inferadb_ledger_types::events::EventEntry) {
-        if let Some(ref handle) = self.event_handle {
-            handle.record_handler_event(entry);
-        }
     }
 
     /// Proposes a `LedgerRequest` through Raft with deadline handling.
@@ -344,10 +332,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         &self,
         request: Request<CreateSnapshotRequest>,
     ) -> Result<Response<CreateSnapshotResponse>, Status> {
-        // Extract trace context and transport metadata from gRPC headers before consuming
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-
-        let mut ctx = self.make_request_context("create_snapshot", request.metadata(), &trace_ctx);
+        let mut ctx = self.make_request_context_unified("create_snapshot", &request);
         let _req = request.into_inner();
 
         // Trigger a Raft snapshot via the consensus engine.
@@ -374,16 +359,11 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         ctx.set_success();
 
         // Emit SnapshotCreated handler-phase event
-        if let Some(node_id) = self.node_id {
-            self.record_handler_event(
-                HandlerPhaseEmitter::for_system(EventAction::SnapshotCreated, node_id)
-                    .principal("system")
-                    .detail("height", &block_height.to_string())
-                    .trace_id(&trace_ctx.trace_id)
-                    .outcome(EventOutcomeType::Success)
-                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
-            );
-        }
+        ctx.record_event(
+            EventAction::SnapshotCreated,
+            EventOutcomeType::Success,
+            &[("height", &block_height.to_string())],
+        );
 
         Ok(Response::new(CreateSnapshotResponse {
             block_height,
@@ -400,21 +380,16 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         &self,
         request: Request<CheckIntegrityRequest>,
     ) -> Result<Response<CheckIntegrityResponse>, Status> {
-        // Extract trace context and transport metadata from gRPC headers before consuming
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx = self.make_request_context_unified("check_integrity", &request);
+        let req = request.into_inner();
         let mut issues = Vec::new();
 
-        let mut ctx = self.make_request_context("check_integrity", request.metadata(), &trace_ctx);
-        let req = request.into_inner();
-
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
-        let organization_slug_val =
-            req.organization.as_ref().map(|n| DomainOrganizationSlug::new(n.slug));
         let organization_id = slug_resolver.extract_and_resolve_optional(&req.organization)?;
         let vault_id = slug_resolver.extract_and_resolve_vault_optional(&req.vault)?;
 
-        if let Some(slug_val) = organization_slug_val {
-            ctx.set_organization(slug_val.value());
+        if let Some(ref n) = req.organization {
+            ctx.set_organization(n.slug);
         }
         if let Some(ref v) = req.vault {
             ctx.set_vault(v.slug);
@@ -629,7 +604,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         }
 
         // Emit IntegrityChecked handler-phase event (org-scoped when org is specified)
-        if let (Some(org_id), Some(node_id)) = (organization_id, self.node_id) {
+        if organization_id.is_some() {
             let outcome = if issues.is_empty() {
                 EventOutcomeType::Success
             } else {
@@ -638,23 +613,13 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                     detail: format!("{} issues found", issues.len()),
                 }
             };
-            let mut emitter =
-                inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
-                    EventAction::IntegrityChecked,
-                    org_id,
-                    organization_slug_val,
-                    node_id,
-                )
-                .detail("issues_found", &issues.len().to_string())
-                .detail("full_check", &req.full_check.to_string())
-                .trace_id(&trace_ctx.trace_id)
-                .outcome(outcome);
-            if let Some(ref v) = req.vault {
-                emitter = emitter.vault(VaultSlug::new(v.slug));
-            }
-            self.record_handler_event(
-                emitter
-                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
+            ctx.record_event(
+                EventAction::IntegrityChecked,
+                outcome,
+                &[
+                    ("issues_found", &issues.len().to_string()),
+                    ("full_check", &req.full_check.to_string()),
+                ],
             );
         }
 
@@ -672,10 +637,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
     ) -> Result<Response<JoinClusterResponse>, Status> {
         // Reject if node is draining
         super::helpers::check_not_draining(self.health_state.as_ref())?;
-        // Extract trace context from gRPC metadata before consuming the request
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
 
-        let mut ctx = self.make_request_context("join_cluster", request.metadata(), &trace_ctx);
+        let mut ctx = self.make_request_context_unified("join_cluster", &request);
         let req = request.into_inner();
 
         // Check if we're the leader via consensus handle
@@ -876,10 +839,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
     ) -> Result<Response<LeaveClusterResponse>, Status> {
         // Reject if node is draining
         super::helpers::check_not_draining(self.health_state.as_ref())?;
-        // Extract trace context from gRPC metadata before consuming the request
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
 
-        let mut ctx = self.make_request_context("leave_cluster", request.metadata(), &trace_ctx);
+        let mut ctx = self.make_request_context_unified("leave_cluster", &request);
         let req = request.into_inner();
 
         // Check leadership via consensus handle
@@ -1171,9 +1132,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         &self,
         request: Request<GetClusterInfoRequest>,
     ) -> Result<Response<GetClusterInfoResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-
-        let mut ctx = self.make_request_context("get_cluster_info", request.metadata(), &trace_ctx);
+        let mut ctx = self.make_request_context_unified("get_cluster_info", &request);
         let _req = request.into_inner();
 
         let current_leader = self.handle.current_leader();
@@ -1260,9 +1219,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         &self,
         request: Request<GetNodeInfoRequest>,
     ) -> Result<Response<GetNodeInfoResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-
-        let mut ctx = self.make_request_context("get_node_info", request.metadata(), &trace_ctx);
+        let mut ctx = self.make_request_context_unified("get_node_info", &request);
         let _req = request.into_inner();
 
         let current_term = self.handle.current_term();
@@ -1373,10 +1330,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
     ) -> Result<Response<RecoverVaultResponse>, Status> {
         // Reject if node is draining
         super::helpers::check_not_draining(self.health_state.as_ref())?;
-        // Extract trace context from gRPC metadata before consuming the request
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
 
-        let mut ctx = self.make_request_context("recover_vault", request.metadata(), &trace_ctx);
+        let mut ctx = self.make_request_context_unified("recover_vault", &request);
         let req = request.into_inner();
         ctx.set_recovery_force(req.force);
 
@@ -1631,25 +1586,14 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             ctx.set_block_height(expected_height);
             ctx.set_error("DivergenceReproduced", "Recovery reproduced divergence");
             // Emit VaultRecovered handler-phase event (failed recovery)
-            if let Some(node_id) = self.node_id {
-                self.record_handler_event(
-                    inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
-                        EventAction::VaultRecovered,
-                        organization_id,
-                        Some(DomainOrganizationSlug::new(organization_slug_val)),
-                        node_id,
-                    )
-                    .vault(VaultSlug::new(vault_val))
-                    .detail("recovery_method", "replay")
-                    .detail("final_height", &expected_height.to_string())
-                    .trace_id(&trace_ctx.trace_id)
-                    .outcome(EventOutcomeType::Failed {
-                        code: "divergence_reproduced".to_string(),
-                        detail: "Recovery reproduced divergence".to_string(),
-                    })
-                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
-                );
-            }
+            ctx.record_event(
+                EventAction::VaultRecovered,
+                EventOutcomeType::Failed {
+                    code: "divergence_reproduced".to_string(),
+                    detail: "Recovery reproduced divergence".to_string(),
+                },
+                &[("recovery_method", "replay"), ("final_height", &expected_height.to_string())],
+            );
             Ok(Response::new(RecoverVaultResponse {
                 success: false,
                 message: "Recovery reproduced divergence - possible determinism bug. Manual investigation required.".to_string(),
@@ -1681,22 +1625,11 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             ctx.set_block_height(expected_height);
             ctx.set_success();
             // Emit VaultRecovered handler-phase event (successful recovery)
-            if let Some(node_id) = self.node_id {
-                self.record_handler_event(
-                    inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
-                        EventAction::VaultRecovered,
-                        organization_id,
-                        Some(DomainOrganizationSlug::new(organization_slug_val)),
-                        node_id,
-                    )
-                    .vault(VaultSlug::new(vault_val))
-                    .detail("recovery_method", "replay")
-                    .detail("final_height", &expected_height.to_string())
-                    .trace_id(&trace_ctx.trace_id)
-                    .outcome(EventOutcomeType::Success)
-                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
-                );
-            }
+            ctx.record_event(
+                EventAction::VaultRecovered,
+                EventOutcomeType::Success,
+                &[("recovery_method", "replay"), ("final_height", &expected_height.to_string())],
+            );
             Ok(Response::new(RecoverVaultResponse {
                 success: true,
                 message: "Vault recovered successfully".to_string(),
@@ -1716,11 +1649,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         &self,
         request: Request<inferadb_ledger_proto::proto::SimulateDivergenceRequest>,
     ) -> Result<Response<inferadb_ledger_proto::proto::SimulateDivergenceResponse>, Status> {
-        // Extract trace context from gRPC metadata before consuming the request
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-
-        let mut ctx =
-            self.make_request_context("simulate_divergence", request.metadata(), &trace_ctx);
+        let mut ctx = self.make_request_context_unified("simulate_divergence", &request);
         let req = request.into_inner();
 
         let slug_resolver = SlugResolver::new(self.applied_state.clone());
@@ -1826,10 +1755,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
     ) -> Result<Response<inferadb_ledger_proto::proto::ForceGcResponse>, Status> {
         // Reject if node is draining
         super::helpers::check_not_draining(self.health_state.as_ref())?;
-        // Extract trace context from gRPC metadata before consuming the request
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
 
-        let mut ctx = self.make_request_context("force_gc", request.metadata(), &trace_ctx);
+        let mut ctx = self.make_request_context_unified("force_gc", &request);
         let req = request.into_inner();
 
         // Check if this node is the leader
@@ -1986,6 +1913,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
     ) -> Result<Response<UpdateConfigResponse>, Status> {
         // Reject if node is draining
         super::helpers::check_not_draining(self.health_state.as_ref())?;
+        let mut ctx = self.make_request_context_unified("update_config", &request);
         let inner = request.into_inner();
 
         let runtime_config = self.runtime_config.as_ref().ok_or_else(|| {
@@ -2032,22 +1960,20 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             .map_err(|e| Status::invalid_argument(format!("Config update failed: {e}")))?;
 
         // Emit ConfigurationChanged handler-phase event
-        if let Some(node_id) = self.node_id {
-            self.record_handler_event(
-                HandlerPhaseEmitter::for_system(EventAction::ConfigurationChanged, node_id)
-                    .principal("admin")
-                    .detail("changed_fields", &changed.join(", "))
-                    .outcome(EventOutcomeType::Success)
-                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
-            );
-        }
+        let changed_fields_str = changed.join(", ");
+        ctx.set_success();
+        ctx.record_event(
+            EventAction::ConfigurationChanged,
+            EventOutcomeType::Success,
+            &[("changed_fields", &changed_fields_str)],
+        );
 
         let updated = runtime_config.load();
         let updated_json = serde_json::to_string_pretty(&*updated).unwrap_or_default();
 
         Ok(Response::new(UpdateConfigResponse {
             applied: true,
-            message: format!("Updated: {}", changed.join(", ")),
+            message: format!("Updated: {changed_fields_str}"),
             current_config_json: updated_json,
             changed_fields: changed,
         }))
@@ -2073,9 +1999,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         &self,
         request: Request<CreateBackupRequest>,
     ) -> Result<Response<CreateBackupResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-
-        let mut ctx = self.make_request_context("create_backup", request.metadata(), &trace_ctx);
+        let mut ctx = self.make_request_context_unified("create_backup", &request);
         let req = request.into_inner();
 
         let backup_manager = self
@@ -2179,20 +2103,14 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         ctx.set_block_height(meta.region_height);
         ctx.set_success();
 
-        inferadb_ledger_raft::backup::record_backup_created(meta.region_height, meta.size_bytes);
+        inferadb_ledger_raft::metrics::record_backup_created(meta.region_height, meta.size_bytes);
 
         // Emit BackupCreated handler-phase event
-        if let Some(node_id) = self.node_id {
-            self.record_handler_event(
-                HandlerPhaseEmitter::for_system(EventAction::BackupCreated, node_id)
-                    .principal("system")
-                    .detail("backup_id", &meta.backup_id)
-                    .detail("tag", &tag)
-                    .trace_id(&trace_ctx.trace_id)
-                    .outcome(EventOutcomeType::Success)
-                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
-            );
-        }
+        ctx.record_event(
+            EventAction::BackupCreated,
+            EventOutcomeType::Success,
+            &[("backup_id", &meta.backup_id), ("tag", &tag)],
+        );
 
         Ok(Response::new(CreateBackupResponse {
             backup_id: meta.backup_id,
@@ -2261,9 +2179,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
     ) -> Result<Response<RestoreBackupResponse>, Status> {
         // Reject if node is draining
         super::helpers::check_not_draining(self.health_state.as_ref())?;
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
 
-        let mut ctx = self.make_request_context("restore_backup", request.metadata(), &trace_ctx);
+        let mut ctx = self.make_request_context_unified("restore_backup", &request);
         let req = request.into_inner();
 
         // Safety gate: require explicit confirmation
@@ -2349,16 +2266,11 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         ctx.set_success();
 
         // Emit BackupRestored handler-phase event
-        if let Some(node_id) = self.node_id {
-            self.record_handler_event(
-                HandlerPhaseEmitter::for_system(EventAction::BackupRestored, node_id)
-                    .principal("system")
-                    .detail("backup_id", &meta.backup_id)
-                    .trace_id(&trace_ctx.trace_id)
-                    .outcome(EventOutcomeType::Success)
-                    .build(self.event_handle.as_ref().map_or(90, |h| h.config().default_ttl_days)),
-            );
-        }
+        ctx.record_event(
+            EventAction::BackupRestored,
+            EventOutcomeType::Success,
+            &[("backup_id", &meta.backup_id)],
+        );
 
         Ok(Response::new(RestoreBackupResponse { success: true, message, restored_height }))
     }
@@ -2368,10 +2280,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         &self,
         request: Request<TransferLeadershipRequest>,
     ) -> Result<Response<TransferLeadershipResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-
-        let mut ctx =
-            self.make_request_context("transfer_leadership", request.metadata(), &trace_ctx);
+        let mut ctx = self.make_request_context_unified("transfer_leadership", &request);
         let req = request.into_inner();
 
         // Validate and default timeout
@@ -2443,11 +2352,9 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx = self.make_request_context_unified("rotate_blinding_key", &request);
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
-
-        let mut ctx = self.make_request_context("rotate_blinding_key", &grpc_metadata, &trace_ctx);
 
         if req.new_key_version == 0 {
             ctx.set_error("InvalidArgument", "new_key_version must be > 0");
@@ -2493,22 +2400,15 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         match response {
             LedgerResponse::Empty => {
                 // Record audit event
-                if let Some(node_id) = self.node_id {
-                    self.record_handler_event(
-                        HandlerPhaseEmitter::for_system(EventAction::ConfigurationChanged, node_id)
-                            .principal("system")
-                            .detail("resource", "blinding_key")
-                            .detail("new_version", &req.new_key_version.to_string())
-                            .detail("previous_version", &current_version.to_string())
-                            .trace_id(&trace_ctx.trace_id)
-                            .outcome(EventOutcomeType::Success)
-                            .build(
-                                self.event_handle
-                                    .as_ref()
-                                    .map_or(90, |h| h.config().default_ttl_days),
-                            ),
-                    );
-                }
+                ctx.record_event(
+                    EventAction::ConfigurationChanged,
+                    EventOutcomeType::Success,
+                    &[
+                        ("resource", "blinding_key"),
+                        ("new_version", &req.new_key_version.to_string()),
+                        ("previous_version", &current_version.to_string()),
+                    ],
+                );
 
                 ctx.set_success();
                 Ok(Response::new(RotateBlindingKeyResponse {
@@ -2535,13 +2435,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         &self,
         request: Request<GetBlindingKeyRehashStatusRequest>,
     ) -> Result<Response<GetBlindingKeyRehashStatusResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-
-        let mut ctx = self.make_request_context(
-            "get_blinding_key_rehash_status",
-            request.metadata(),
-            &trace_ctx,
-        );
+        let mut ctx = self.make_request_context_unified("get_blinding_key_rehash_status", &request);
         let _req = request.into_inner();
 
         let system_service = SystemOrganizationService::new(Arc::clone(&self.state));
@@ -2591,10 +2485,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-
-        let mut ctx =
-            self.make_request_context("rotate_region_key", request.metadata(), &trace_ctx);
+        let mut ctx = self.make_request_context_unified("rotate_region_key", &request);
         let req = request.into_inner();
 
         let progress = self.rewrap_progress.as_ref().ok_or_else(|| {
@@ -2637,10 +2528,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         &self,
         request: Request<GetRewrapStatusRequest>,
     ) -> Result<Response<GetRewrapStatusResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-
-        let mut ctx =
-            self.make_request_context("get_rewrap_status", request.metadata(), &trace_ctx);
+        let mut ctx = self.make_request_context_unified("get_rewrap_status", &request);
         let _req = request.into_inner();
 
         let progress = self.rewrap_progress.as_ref().ok_or_else(|| {
@@ -2680,12 +2568,9 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         super::helpers::check_not_draining(self.health_state.as_ref())?;
 
         let start = std::time::Instant::now();
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx = self.make_request_context_unified("migrate_existing_users", &request);
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
-
-        let mut ctx =
-            self.make_request_context("migrate_existing_users", &grpc_metadata, &trace_ctx);
 
         // Pre-validation: parse default region (reject UNSPECIFIED).
         let default_region = inferadb_ledger_proto::convert::region_from_i32(req.default_region)?;
@@ -2806,24 +2691,17 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         match response {
             LedgerResponse::UsersMigrated { users, migrated, skipped, errors } => {
                 // Record audit event.
-                if let Some(node_id) = self.node_id {
-                    self.record_handler_event(
-                        HandlerPhaseEmitter::for_system(EventAction::UsersMigrated, node_id)
-                            .principal("admin")
-                            .detail("users", &users.to_string())
-                            .detail("migrated", &migrated.to_string())
-                            .detail("skipped", &(skipped + pre_skipped).to_string())
-                            .detail("errors", &errors.to_string())
-                            .detail("default_region", default_region.as_str())
-                            .trace_id(&trace_ctx.trace_id)
-                            .outcome(EventOutcomeType::Success)
-                            .build(
-                                self.event_handle
-                                    .as_ref()
-                                    .map_or(90, |h| h.config().default_ttl_days),
-                            ),
-                    );
-                }
+                ctx.record_event(
+                    EventAction::UsersMigrated,
+                    EventOutcomeType::Success,
+                    &[
+                        ("users", &users.to_string()),
+                        ("migrated", &migrated.to_string()),
+                        ("skipped", &(skipped + pre_skipped).to_string()),
+                        ("errors", &errors.to_string()),
+                        ("default_region", default_region.as_str()),
+                    ],
+                );
 
                 ctx.set_success();
                 Ok(Response::new(MigrateExistingUsersResponse {
@@ -2860,9 +2738,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         super::helpers::check_not_draining(self.health_state.as_ref())?;
 
         let start = std::time::Instant::now();
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-
-        let mut ctx = self.make_request_context("provision_region", request.metadata(), &trace_ctx);
+        let mut ctx = self.make_request_context_unified("provision_region", &request);
         let req = request.into_inner();
 
         let region = inferadb_ledger_proto::convert::region_from_i32(req.region)?;

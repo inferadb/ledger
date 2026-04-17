@@ -12,7 +12,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use chrono::Utc;
@@ -26,9 +26,6 @@ use tracing::{debug, info, warn};
 
 use crate::{
     consensus_handle::ConsensusHandle,
-    metrics::{
-        record_background_job_duration, record_background_job_items, record_background_job_run,
-    },
     raft_manager::RaftManager,
     trace_context::TraceContext,
     types::{LedgerRequest, RaftPayload, SystemRequest},
@@ -423,8 +420,8 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
             return InviteMaintenanceResult::default();
         }
 
+        let mut job = crate::logging::JobContext::new("invite_maintenance", None);
         let trace_ctx = TraceContext::new();
-        let cycle_start = Instant::now();
         debug!(trace_id = %trace_ctx.trace_id, "Starting invite maintenance cycle");
 
         let mut result = InviteMaintenanceResult::default();
@@ -434,9 +431,6 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
         let entries = self.scan_email_entries();
 
         if entries.is_empty() {
-            let duration = cycle_start.elapsed().as_secs_f64();
-            record_background_job_duration("invite_maintenance", duration);
-            record_background_job_run("invite_maintenance", "success");
             return result;
         }
 
@@ -450,21 +444,17 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
         result.invitations_reaped = reaped;
         had_errors |= reaping_errors;
 
-        let duration = cycle_start.elapsed().as_secs_f64();
-        record_background_job_duration("invite_maintenance", duration);
-        let status = if had_errors { "failure" } else { "success" };
-        record_background_job_run("invite_maintenance", status);
-        record_background_job_items(
-            "invite_maintenance",
-            result.invitations_expired + result.invitations_reaped,
-        );
+        if had_errors {
+            job.set_failure();
+        }
+        job.record_items_detail("expired", result.invitations_expired);
+        job.record_items_detail("reaped", result.invitations_reaped);
 
         debug!(
             trace_id = %trace_ctx.trace_id,
             expired = result.invitations_expired,
             reaped = result.invitations_reaped,
             scanned = entries.len(),
-            duration_secs = duration,
             "Invite maintenance cycle complete"
         );
 

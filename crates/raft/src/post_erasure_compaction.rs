@@ -24,13 +24,8 @@ use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use crate::{
-    consensus_handle::ConsensusHandle,
-    metrics::{
-        record_background_job_duration, record_background_job_run,
-        record_post_erasure_compaction_triggered,
-    },
-    raft_manager::RaftManager,
-    trace_context::TraceContext,
+    consensus_handle::ConsensusHandle, metrics::record_post_erasure_compaction_triggered,
+    raft_manager::RaftManager, trace_context::TraceContext,
 };
 
 /// Background job that enforces maximum Raft log retention by triggering
@@ -125,8 +120,9 @@ impl PostErasureCompactionJob {
 
     /// Runs a single compaction check cycle across all Raft groups.
     async fn run_cycle(&self, last_snapshots: &mut HashMap<String, Option<Instant>>) {
-        let trace_ctx = TraceContext::new();
+        let mut job = crate::logging::JobContext::new("post_erasure_compaction", None);
         let cycle_start = Instant::now();
+        let trace_ctx = TraceContext::new();
         debug!(trace_id = %trace_ctx.trace_id, "Starting post-erasure compaction cycle");
 
         let threshold = Duration::from_secs(self.config.max_log_retention_secs);
@@ -185,21 +181,20 @@ impl PostErasureCompactionJob {
             }
         }
 
-        let duration = cycle_start.elapsed().as_secs_f64();
-        record_background_job_duration("post_erasure_compaction", duration);
+        job.record_items(triggered);
+        let duration_secs = cycle_start.elapsed().as_secs_f64();
 
-        record_background_job_run("post_erasure_compaction", "success");
         if triggered > 0 {
             info!(
                 trace_id = %trace_ctx.trace_id,
                 triggered,
-                duration_secs = duration,
+                duration_secs,
                 "Post-erasure compaction cycle complete"
             );
         } else {
             debug!(
                 trace_id = %trace_ctx.trace_id,
-                duration_secs = duration,
+                duration_secs,
                 "Post-erasure compaction cycle complete (no snapshots triggered)"
             );
         }

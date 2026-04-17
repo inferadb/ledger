@@ -193,7 +193,7 @@ Vaults are independent; operations on different vaults don't block each other.
 
 ```promql
 # Write throughput approaching limit
-rate(ledger_writes_total[5m]) > 4000
+rate(ledger_grpc_requests_total{service="WriteService"}[5m]) > 4000
 
 # High proposal backlog (approaching capacity)
 inferadb_ledger_raft_proposals_pending > 30
@@ -210,7 +210,7 @@ node_filesystem_size_bytes{mountpoint="/data"} < 0.2
 
 ```yaml
 - alert: LedgerApproachingCapacity
-  expr: rate(ledger_writes_total[5m]) > 4000
+  expr: rate(ledger_grpc_requests_total{service="WriteService"}[5m]) > 4000
   for: 10m
   labels:
     severity: warning

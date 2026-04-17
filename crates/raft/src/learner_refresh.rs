@@ -304,17 +304,20 @@ impl LearnerRefreshJob {
 
                     // Attempt refresh with timing
                     let start = std::time::Instant::now();
+                    let mut job = crate::logging::JobContext::new("learner_refresh", None);
                     match self.try_refresh().await {
                         Ok(updated) => {
                             let latency = start.elapsed().as_secs_f64();
                             crate::metrics::record_learner_refresh(true, latency);
                             if updated {
+                                job.record_items(1);
                                 debug!("Learner cache updated from voter");
                             }
                         }
                         Err(e) => {
                             let latency = start.elapsed().as_secs_f64();
                             crate::metrics::record_learner_refresh(false, latency);
+                            job.set_failure();
                             warn!(error = %e, "Failed to refresh learner cache from any voter");
                         }
                     }

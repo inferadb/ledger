@@ -16,16 +16,18 @@ These boundaries enable accurate p50/p95/p99 calculation at the latency ranges t
 
 ### Latency
 
-| Operation             | p50 Target | p95 Target | p99 Target | Metric                                           |
-| --------------------- | ---------- | ---------- | ---------- | ------------------------------------------------ |
-| Read (single entity)  | < 1ms      | < 5ms      | < 10ms     | `ledger_read_latency_seconds`                    |
-| Write (single entity) | < 5ms      | < 25ms     | < 50ms     | `ledger_write_latency_seconds`                   |
-| Batch write           | < 10ms     | < 50ms     | < 100ms    | `ledger_write_latency_seconds`                   |
-| Raft apply            | < 1ms      | < 5ms      | < 25ms     | `inferadb_ledger_raft_apply_latency_seconds`     |
-| Batch flush           | < 5ms      | < 25ms     | < 100ms    | `ledger_batch_flush_latency_seconds`             |
-| Token validation      | < 1ms      | < 5ms      | < 10ms     | `ledger_token_validation_latency_seconds`        |
-| Token refresh         | < 5ms      | < 25ms     | < 50ms     | `ledger_token_operations_total{op="refresh"}`    |
-| Signing key rotation  | < 10ms     | < 50ms     | < 100ms    | `ledger_token_operations_total{op="rotate_key"}` |
+All per-RPC latency SLIs use `ledger_grpc_request_latency_seconds{service=..., method=...}`. The `ledger_read_latency_seconds` and `ledger_write_latency_seconds` histograms have been removed; use the unified histogram below.
+
+| Operation             | p50 Target | p95 Target | p99 Target | Metric / Query                                                                           |
+| --------------------- | ---------- | ---------- | ---------- | ---------------------------------------------------------------------------------------- |
+| Read (single entity)  | < 1ms      | < 5ms      | < 10ms     | `ledger_grpc_request_latency_seconds{service="ReadService", method="GetRelationship"}`   |
+| Write (single entity) | < 5ms      | < 25ms     | < 50ms     | `ledger_grpc_request_latency_seconds{service="WriteService", method="SetRelationships"}` |
+| Batch write           | < 10ms     | < 50ms     | < 100ms    | `ledger_grpc_request_latency_seconds{service="WriteService", method="BatchWrite"}`       |
+| Raft apply            | < 1ms      | < 5ms      | < 25ms     | `inferadb_ledger_raft_apply_latency_seconds`                                             |
+| Batch flush           | < 5ms      | < 25ms     | < 100ms    | `ledger_batch_flush_latency_seconds`                                                     |
+| Token validation      | < 1ms      | < 5ms      | < 10ms     | `ledger_token_validation_latency_seconds`                                                |
+| Token refresh         | < 5ms      | < 25ms     | < 50ms     | `ledger_grpc_request_latency_seconds{service="TokenService", method="RefreshToken"}`     |
+| Signing key rotation  | < 10ms     | < 50ms     | < 100ms    | `ledger_grpc_request_latency_seconds{service="TokenService", method="RotateSigningKey"}` |
 
 ### Availability
 
@@ -100,7 +102,9 @@ The `error_class` label on `ledger_grpc_requests_total` groups errors by cause:
 ```yaml
 - alert: LedgerWriteLatencyP99High
   expr: |
-    histogram_quantile(0.99, rate(ledger_write_latency_seconds_bucket[5m])) > 0.05
+    histogram_quantile(0.99,
+      rate(ledger_grpc_request_latency_seconds_bucket{service="WriteService"}[5m])
+    ) > 0.05
   for: 5m
   labels:
     severity: warning

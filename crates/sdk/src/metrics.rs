@@ -8,22 +8,11 @@
 //! - [`MetricsSdkMetrics`]: Integration with the [`metrics`](https://docs.rs/metrics) crate facade,
 //!   automatically forwarding to whatever recorder is installed (Prometheus, StatsD, etc.).
 //!
-//! # Metric Names
+//! # Opt-In
 //!
-//! All metrics follow the `ledger_sdk_` prefix convention:
-//!
-//! | Metric | Type | Labels | Description |
-//! |--------|------|--------|-------------|
-//! | `ledger_sdk_requests_total` | Counter | `method`, `status` | Total requests by method and outcome |
-//! | `ledger_sdk_request_duration_seconds` | Histogram | `method` | Request latency distribution |
-//! | `ledger_sdk_retries_total` | Counter | `method`, `attempt`, `error_type` | Retry attempts by method |
-//! | `ledger_sdk_circuit_transitions_total` | Counter | `endpoint`, `state` | Circuit breaker state transitions |
-//! | `ledger_sdk_connections_total` | Counter | `endpoint`, `event` | Connection lifecycle events |
-//! | `ledger_sdk_leader_watch_updates_total` | Counter | `region` | Leader updates received over the WatchLeader stream |
-//! | `ledger_sdk_leader_watch_reconnects_total` | Counter | `region` | WatchLeader stream reconnect attempts |
-//! | `ledger_sdk_redirect_retries_total` | Counter | `region` | Retries triggered by a leader redirect hint |
-//!
-//! # Example
+//! SDK metrics are **opt-in**. The default implementation is [`NoopSdkMetrics`], which
+//! compiles away to nothing. To enable metrics emission, pass a [`MetricsSdkMetrics`]
+//! (or a custom implementation) to [`ClientConfig::builder().metrics()`]:
 //!
 //! ```no_run
 //! use inferadb_ledger_sdk::{ClientConfig, ServerSource, MetricsSdkMetrics};
@@ -38,6 +27,46 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Cardinality
+//!
+//! All label values emitted by the SDK are bounded:
+//!
+//! - `method`: fixed set of RPC method names (hardcoded at call sites).
+//! - `status`: `"success"` or `"error"`.
+//! - `attempt`: bounded by `RetryConfig::max_attempts` (typically ≤ 5).
+//! - `error_type`: fixed classification strings from the SDK error classifier.
+//! - `endpoint`: server URLs from `ClientConfig::servers()` or discovery — bounded by the cluster's
+//!   server list, not arbitrary user input.
+//! - `event`: three values (`"connected"`, `"disconnected"`, `"failed"`).
+//! - `state`: three values (`"closed"`, `"open"`, `"half-open"`).
+//! - `region`: logical region names from server configuration.
+//! - `source`: `"hint"` or `"watch"`.
+//!
+//! The cardinality guard (`CardinalityTracker`) is a server-side concern and is not
+//! wired into the SDK. Consumers using a custom `SdkMetrics` implementation are
+//! responsible for their own cardinality management.
+//!
+//! # Metric Names
+//!
+//! All metrics follow the `ledger_sdk_` prefix convention:
+//!
+//! | Metric | Type | Labels | Description |
+//! |--------|------|--------|-------------|
+//! | `ledger_sdk_requests_total` | Counter | `method`, `status` | Total requests by method and outcome |
+//! | `ledger_sdk_request_duration_seconds` | Histogram | `method` | Request latency distribution |
+//! | `ledger_sdk_retries_total` | Counter | `method`, `attempt`, `error_type` | Retry attempts by method |
+//! | `ledger_sdk_circuit_transitions_total` | Counter | `endpoint`, `state` | Circuit breaker state transitions |
+//! | `ledger_sdk_connections_total` | Counter | `endpoint`, `event` | Connection lifecycle events |
+//! | `ledger_sdk_leader_cache_hits_total` | Counter | `region` | Region leader cache hits (fresh or stale-but-usable) |
+//! | `ledger_sdk_leader_cache_misses_total` | Counter | `region` | Region leader cache misses (absent or past hard TTL) |
+//! | `ledger_sdk_leader_cache_flaps_total` | Counter | `region` | Leader changes detected on resolve |
+//! | `ledger_sdk_region_resolve_singleflight_coalesced_total` | Counter | `region` | Resolves coalesced onto an in-flight future |
+//! | `ledger_sdk_region_resolve_stale_served_total` | Counter | `region` | Stale entries served while background refresh ran |
+//! | `ledger_sdk_leader_watch_updates_total` | Counter | `region` | Leader updates received over the WatchLeader stream |
+//! | `ledger_sdk_leader_watch_reconnects_total` | Counter | `region` | WatchLeader stream reconnect attempts |
+//! | `ledger_sdk_leader_stale_term_rejected_total` | Counter | `region`, `source` | Cache writes rejected for carrying a stale term |
+//! | `ledger_sdk_redirect_retries_total` | Counter | `region` | Retries triggered by a leader redirect hint |
 
 use std::{fmt, sync::Arc, time::Duration};
 
@@ -305,7 +334,28 @@ impl SdkMetrics for MetricsSdkMetrics {
     }
 }
 
-/// Creates the default metrics instance (no-op).
+/// Returns the default metrics implementation (no-op).
+///
+/// SDK metrics are opt-in. By default every `LedgerClient` uses [`NoopSdkMetrics`],
+/// which compiles away to nothing. To enable metrics emission, configure a recorder:
+///
+/// ```no_run
+/// use inferadb_ledger_sdk::{ClientConfig, ServerSource, MetricsSdkMetrics};
+/// use std::sync::Arc;
+///
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let config = ClientConfig::builder()
+///     .servers(ServerSource::from_static(["http://localhost:50051"]))
+///     .client_id("my-app")
+///     .metrics(Arc::new(MetricsSdkMetrics))
+///     .build()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Each SDK instance emits up to 14 custom metrics × N tag combinations to your
+/// configured metrics platform. All label values are bounded — see the
+/// [module-level cardinality documentation](self) for details.
 pub(crate) fn default_metrics() -> Arc<dyn SdkMetrics> {
     Arc::new(NoopSdkMetrics)
 }
@@ -366,10 +416,24 @@ mod tests {
         }
 
         #[test]
-        fn noop_is_default() {
+        fn default_metrics_is_noop() {
+            // Invariant: the default metrics implementation must be NoopSdkMetrics (opt-in).
+            // Any change that makes metrics non-opt-in would break this test.
             let metrics = default_metrics();
-            // Should not panic
-            metrics.record_request("read", Duration::from_millis(1), true);
+            // Verify it's NoopSdkMetrics — call every method and assert no panic
+            metrics.record_request("test", Duration::from_millis(1), true);
+            metrics.record_retry("test", 2, "unavailable");
+            metrics.record_circuit_state("http://localhost:50051", "open");
+            metrics.record_connection("http://localhost:50051", ConnectionEvent::Connected);
+            metrics.leader_cache_hit("us-east-1");
+            metrics.leader_cache_miss("us-east-1");
+            metrics.leader_cache_flap("us-east-1");
+            metrics.region_resolve_coalesced("us-east-1");
+            metrics.region_resolve_stale_served("us-east-1");
+            metrics.leader_watch_update("us-east-1");
+            metrics.leader_watch_reconnect("us-east-1");
+            metrics.leader_stale_term_rejected("us-east-1", "hint");
+            metrics.redirect_retry("us-east-1");
         }
 
         #[test]

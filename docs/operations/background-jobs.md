@@ -1,6 +1,14 @@
 # Background Job Observability
 
-InferaDB Ledger runs several background jobs that maintain data integrity, manage storage, handle key rotation, and ensure high availability. Most jobs emit three standardized metrics for unified monitoring.
+InferaDB Ledger runs several background jobs that maintain data integrity, manage storage, handle key rotation, and ensure high availability. All jobs emit metrics through `JobContext`, which captures duration, result, and items processed automatically on cycle completion. Jobs do not call Prometheus APIs directly.
+
+```rust
+// Typical job cycle pattern
+let ctx = JobContext::start("my_job");
+let items = do_work()?;
+ctx.set_items_processed(items);
+// ctx.drop() emits all three metrics
+```
 
 ## Metrics
 
@@ -18,28 +26,28 @@ InferaDB Ledger runs several background jobs that maintain data integrity, manag
 
 ### Items Processed per Job
 
-| Job                       | Item Meaning                                                                 |
-| ------------------------- | ---------------------------------------------------------------------------- |
-| `auto_recovery`           | Vaults successfully recovered from Diverged state                            |
-| `backup`                  | Backups created                                                              |
+| Job                       | Item Meaning                                                                  |
+| ------------------------- | ----------------------------------------------------------------------------- |
+| `auto_recovery`           | Vaults successfully recovered from Diverged state                             |
+| `backup`                  | Backups created                                                               |
 | `block_compaction`        | Transaction bodies reclaimed from blocks in vaults with `COMPACTED` retention |
-| `btree_compaction`        | B-tree leaf pages merged                                                     |
-| `dek_rewrap`              | Per-page DEK sidecars re-wrapped to a newer RMK version                      |
-| `dependency_health`       | Dependency checks performed (disk, peers, Raft lag)                          |
-| `events_gc`               | Expired events.db entries removed                                            |
-| `hot_key_detector`        | Detector ticks (Count-Min Sketch windows rotated)                            |
-| `integrity_scrub`         | Pages checked (checksum + structural)                                        |
-| `invite_maintenance`      | Invitations expired/reaped                                                   |
-| `learner_refresh`         | Learner nodes refreshed                                                      |
-| `organization_purge`      | Organizations purged after retention                                         |
-| `orphan_cleanup`          | Orphaned membership / token records removed                                  |
-| `post_erasure_compaction` | Proactive Raft snapshots triggered after crypto-shredding                    |
-| `resource_metrics`        | Metric collection cycles completed                                           |
-| `saga_orchestrator`       | Sagas processed per cycle                                                    |
-| `state_root_verifier`     | State-root verification rounds (detects divergence)                          |
-| `token_maintenance`       | Expired refresh tokens deleted + signing keys transitioned                   |
-| `ttl_gc`                  | Expired entities removed                                                     |
-| `user_retention`          | Users reaped after retention expiry                                          |
+| `btree_compaction`        | B-tree leaf pages merged                                                      |
+| `dek_rewrap`              | Per-page DEK sidecars re-wrapped to a newer RMK version                       |
+| `dependency_health`       | Dependency checks performed (disk, peers, Raft lag)                           |
+| `events_gc`               | Expired events.db entries removed                                             |
+| `hot_key_detector`        | Detector ticks (Count-Min Sketch windows rotated)                             |
+| `integrity_scrub`         | Pages checked (checksum + structural)                                         |
+| `invite_maintenance`      | Invitations expired/reaped                                                    |
+| `learner_refresh`         | Learner nodes refreshed                                                       |
+| `organization_purge`      | Organizations purged after retention                                          |
+| `orphan_cleanup`          | Orphaned membership / token records removed                                   |
+| `post_erasure_compaction` | Proactive Raft snapshots triggered after crypto-shredding                     |
+| `resource_metrics`        | Metric collection cycles completed                                            |
+| `saga_orchestrator`       | Sagas processed per cycle                                                     |
+| `state_root_verifier`     | State-root verification rounds (detects divergence)                           |
+| `token_maintenance`       | Expired refresh tokens deleted + signing keys transitioned                    |
+| `ttl_gc`                  | Expired entities removed                                                      |
+| `user_retention`          | Users reaped after retention expiry                                           |
 
 ## Jobs
 

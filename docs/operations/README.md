@@ -60,11 +60,11 @@ grpcurl -plaintext \
 
 ### Key Metrics
 
-| Metric                                   | Normal     | Warning     | Critical    |
-| ---------------------------------------- | ---------- | ----------- | ----------- |
-| `inferadb_ledger_raft_proposals_pending` | < 10       | > 50        | > 100       |
-| `ledger_write_latency_seconds`           | p99 < 50ms | p99 > 100ms | p99 > 500ms |
-| `ledger_determinism_bug_total`           | 0          | -           | > 0         |
+| Metric                                                              | Normal | Warning | Critical |
+| ------------------------------------------------------------------- | ------ | ------- | -------- |
+| `inferadb_ledger_raft_proposals_pending`                            | < 10   | > 50    | > 100    |
+| `ledger_grpc_request_latency_seconds{service="WriteService"}` (p99) | < 50ms | > 100ms | > 500ms  |
+| `ledger_determinism_bug_total`                                      | 0      | -       | > 0      |
 
 ### Common Commands
 

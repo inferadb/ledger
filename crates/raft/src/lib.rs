@@ -30,6 +30,7 @@
 // Public modules — stable API surface for SDK and external consumers
 // ---------------------------------------------------------------------------
 
+pub mod cardinality;
 pub mod metrics;
 pub mod trace_context;
 
@@ -57,6 +58,9 @@ pub mod deadline;
 pub mod dek_rewrap;
 #[doc(hidden)]
 pub mod dependency_health;
+#[cfg(feature = "dogstatsd")]
+#[doc(hidden)]
+pub mod dogstatsd;
 #[doc(hidden)]
 pub mod entry_crypto;
 #[doc(hidden)]
@@ -159,6 +163,9 @@ pub use block_compaction::BlockCompactor;
 pub use consensus_handle::{ConsensusHandle, HandleError, ResponseMap, SpilloverMap};
 #[doc(hidden)]
 pub use consensus_transport::GrpcConsensusTransport;
+#[cfg(feature = "dogstatsd")]
+#[doc(hidden)]
+pub use dogstatsd::{DogStatsdError, init_dogstatsd};
 #[doc(hidden)]
 pub use events_gc::EventsGarbageCollector;
 #[doc(hidden)]

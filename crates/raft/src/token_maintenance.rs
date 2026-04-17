@@ -9,7 +9,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use inferadb_ledger_state::StateLayer;
@@ -19,10 +19,6 @@ use tracing::{debug, info, warn};
 
 use crate::{
     consensus_handle::ConsensusHandle,
-    metrics::{
-        record_background_job_duration, record_background_job_items, record_background_job_run,
-        record_onboarding_gc_accounts, record_onboarding_gc_codes, record_totp_gc_challenges,
-    },
     raft_manager::RaftManager,
     trace_context::TraceContext,
     types::{LedgerRequest, RaftPayload, SystemRequest},
@@ -90,8 +86,8 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
             return MaintenanceResult::default();
         }
 
+        let mut job = crate::logging::JobContext::new("token_maintenance", None);
         let trace_ctx = TraceContext::new();
-        let cycle_start = Instant::now();
         debug!(trace_id = %trace_ctx.trace_id, "Starting token maintenance cycle");
 
         let mut result = MaintenanceResult::default();
@@ -244,28 +240,24 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
                 }
             }
             if result.onboarding_codes_deleted > 0 {
-                record_onboarding_gc_codes(result.onboarding_codes_deleted);
+                job.record_items_detail("onboarding_codes", result.onboarding_codes_deleted);
             }
             if result.onboarding_accounts_deleted > 0 {
-                record_onboarding_gc_accounts(result.onboarding_accounts_deleted);
+                job.record_items_detail("onboarding_accounts", result.onboarding_accounts_deleted);
             }
             if result.totp_challenges_deleted > 0 {
-                record_totp_gc_challenges(result.totp_challenges_deleted);
+                job.record_items_detail("totp_challenges", result.totp_challenges_deleted);
             }
         }
 
-        let duration = cycle_start.elapsed().as_secs_f64();
-        record_background_job_duration("token_maintenance", duration);
-        let status = if had_errors { "failure" } else { "success" };
-        record_background_job_run("token_maintenance", status);
-        record_background_job_items(
-            "token_maintenance",
-            result.expired_tokens_deleted
-                + result.signing_keys_revoked
-                + result.onboarding_codes_deleted
-                + result.onboarding_accounts_deleted
-                + result.totp_challenges_deleted,
-        );
+        if had_errors {
+            job.set_failure();
+        }
+        job.record_items_detail("expired_tokens", result.expired_tokens_deleted);
+        job.record_items_detail("signing_keys_revoked", result.signing_keys_revoked);
+        job.record_items_detail("onboarding_codes", result.onboarding_codes_deleted);
+        job.record_items_detail("onboarding_accounts", result.onboarding_accounts_deleted);
+        job.record_items_detail("totp_challenges", result.totp_challenges_deleted);
 
         debug!(
             trace_id = %trace_ctx.trace_id,
@@ -274,7 +266,6 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
             onboarding_codes = result.onboarding_codes_deleted,
             onboarding_accounts = result.onboarding_accounts_deleted,
             totp_challenges = result.totp_challenges_deleted,
-            duration_secs = duration,
             "Token maintenance cycle complete"
         );
 

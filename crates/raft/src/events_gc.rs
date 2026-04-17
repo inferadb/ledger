@@ -24,8 +24,6 @@ use inferadb_ledger_types::events::EventConfig;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
-use crate::metrics;
-
 /// Default interval between GC cycles (5 minutes).
 ///
 /// Longer than entity TTL GC (60s) because audit events have day-scale TTLs
@@ -121,20 +119,15 @@ impl<B: StorageBackend + 'static> EventsGarbageCollector<B> {
                     );
                 }
 
-                let start = std::time::Instant::now();
+                let mut job = crate::logging::JobContext::new("events_gc", None);
                 match self.run_cycle() {
                     Ok(deleted) => {
-                        let duration = start.elapsed().as_secs_f64();
-                        metrics::record_events_gc_cycle_duration(duration);
-                        metrics::record_events_gc_cycle("success");
                         if deleted > 0 {
-                            metrics::record_events_gc_entries_deleted(deleted as u64);
+                            job.record_items(deleted as u64);
                         }
                     },
                     Err(e) => {
-                        let duration = start.elapsed().as_secs_f64();
-                        metrics::record_events_gc_cycle_duration(duration);
-                        metrics::record_events_gc_cycle("failure");
+                        job.set_failure();
                         warn!(error = %e, "Events GC cycle failed");
                     },
                 }

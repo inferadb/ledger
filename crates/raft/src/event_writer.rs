@@ -9,6 +9,9 @@
 //!   level (UUID v4, wall-clock timestamps, node-specific)
 //! - [`EventHandle`] — a cheaply cloneable handle for best-effort handler-phase event writes,
 //!   injected into gRPC services
+//! - [`EventEmitter`] — trait-erased event emission, enabling
+//!   [`RequestContext`](crate::logging::RequestContext) to carry an event handle without being
+//!   generic over the storage backend
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -485,6 +488,26 @@ impl HandlerPhaseEmitter {
             correlation_id: self.correlation_id,
             operations_count: self.operations_count,
         }
+    }
+}
+
+/// Trait-erased event emission.
+///
+/// Implemented by [`EventHandle<B>`] to allow [`RequestContext`](crate::logging::RequestContext)
+/// to carry an event handle without being generic over the storage backend.
+/// This decouples the logging/metrics layer from the concrete storage
+/// implementation.
+pub trait EventEmitter: Send + Sync {
+    /// Records a handler-phase business event (best-effort).
+    ///
+    /// Implementations should log warnings on failure but never propagate
+    /// errors — event persistence must not affect the primary RPC.
+    fn record_event(&self, entry: EventEntry);
+}
+
+impl<B: StorageBackend + 'static> EventEmitter for EventHandle<B> {
+    fn record_event(&self, entry: EventEntry) {
+        self.record_handler_event(entry);
     }
 }
 

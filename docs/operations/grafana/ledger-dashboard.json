@@ -224,12 +224,12 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(ledger_writes_total{status=\"success\"}[5m]))",
+          "expr": "sum(rate(ledger_grpc_requests_total{service=\"WriteService\", status=\"OK\"}[5m]))",
           "legendFormat": "Success",
           "refId": "A"
         },
         {
-          "expr": "sum(rate(ledger_writes_total{status=\"error\"}[5m]))",
+          "expr": "sum(rate(ledger_grpc_requests_total{service=\"WriteService\", status!=\"OK\"}[5m]))",
           "legendFormat": "Error",
           "refId": "B"
         }
@@ -261,17 +261,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(ledger_write_latency_seconds_bucket[5m])) by (le))",
+          "expr": "histogram_quantile(0.50, sum(rate(ledger_grpc_request_latency_seconds_bucket{service=\"WriteService\"}[5m])) by (le))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(ledger_write_latency_seconds_bucket[5m])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(ledger_grpc_request_latency_seconds_bucket{service=\"WriteService\"}[5m])) by (le))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(ledger_write_latency_seconds_bucket[5m])) by (le))",
+          "expr": "histogram_quantile(0.99, sum(rate(ledger_grpc_request_latency_seconds_bucket{service=\"WriteService\"}[5m])) by (le))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -309,12 +309,12 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(ledger_reads_total{status=\"success\"}[5m]))",
+          "expr": "sum(rate(ledger_grpc_requests_total{service=\"ReadService\", status=\"OK\"}[5m]))",
           "legendFormat": "Success",
           "refId": "A"
         },
         {
-          "expr": "sum(rate(ledger_reads_total{status=\"error\"}[5m]))",
+          "expr": "sum(rate(ledger_grpc_requests_total{service=\"ReadService\", status!=\"OK\"}[5m]))",
           "legendFormat": "Error",
           "refId": "B"
         }
@@ -346,17 +346,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(ledger_read_latency_seconds_bucket[5m])) by (le))",
+          "expr": "histogram_quantile(0.50, sum(rate(ledger_grpc_request_latency_seconds_bucket{service=\"ReadService\"}[5m])) by (le))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(ledger_read_latency_seconds_bucket[5m])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(ledger_grpc_request_latency_seconds_bucket{service=\"ReadService\"}[5m])) by (le))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(ledger_read_latency_seconds_bucket[5m])) by (le))",
+          "expr": "histogram_quantile(0.99, sum(rate(ledger_grpc_request_latency_seconds_bucket{service=\"ReadService\"}[5m])) by (le))",
           "legendFormat": "p99",
           "refId": "C"
         }

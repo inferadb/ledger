@@ -72,6 +72,8 @@ tempfile.workspace = true
 
 # Metrics
 metrics.workspace = true
+# DogStatsD exporter — optional, enabled by the `dogstatsd` feature
+metrics-exporter-dogstatsd = { workspace = true, optional = true }
 
 # OpenTelemetry (OTLP export) — optional, enabled by the `observability` feature
 opentelemetry = { workspace = true, optional = true }
@@ -90,6 +92,7 @@ futures = "0.3"
 [features]
 default = ["observability"]
 observability = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
+dogstatsd = ["dep:metrics-exporter-dogstatsd"]
 
 [dev-dependencies]
 inferadb-ledger-test-utils.workspace = true

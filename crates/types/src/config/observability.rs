@@ -208,6 +208,59 @@ impl OtelConfig {
 }
 
 // =========================================================================
+// DogStatsdConfig
+// =========================================================================
+
+/// Default value for `use_distributions` (true).
+const fn default_use_distributions() -> bool {
+    true
+}
+
+/// DogStatsD exporter configuration.
+///
+/// When enabled, histograms are emitted as Datadog distributions in parallel
+/// with the Prometheus exporter. Distributions are 1 custom metric per
+/// `(name, tag_set)` vs. 8 for legacy histograms — an 8× cost reduction.
+///
+/// # Single-recorder constraint
+///
+/// The `metrics` crate permits only one global recorder. When this is enabled,
+/// the DogStatsD recorder replaces the Prometheus recorder. Deploy a Prometheus
+/// sidecar (e.g. `dogstatsd_exporter`) if you need both simultaneously, or use
+/// the OTLP pipeline to forward traces to Datadog alongside DogStatsD metrics.
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_types::config::DogStatsdConfig;
+/// let config = DogStatsdConfig::default();
+/// assert_eq!(config.endpoint, None);
+/// assert!(config.use_distributions);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DogStatsdConfig {
+    /// UDP endpoint for the DogStatsD agent (e.g., `"127.0.0.1:8125"`).
+    ///
+    /// When `None`, the exporter is disabled and no recorder is installed.
+    /// The default DogStatsD port is 8125.
+    pub endpoint: Option<std::net::SocketAddr>,
+
+    /// Emit histograms as Datadog distributions (default: `true`).
+    ///
+    /// Distributions are computed server-side by the Datadog agent and cost
+    /// 1 custom metric per `(name, tag_set)` instead of 8 for legacy
+    /// histogram buckets.
+    #[serde(default = "default_use_distributions")]
+    pub use_distributions: bool,
+}
+
+impl Default for DogStatsdConfig {
+    fn default() -> Self {
+        Self { endpoint: None, use_distributions: default_use_distributions() }
+    }
+}
+
+// =========================================================================
 // HotKeyConfig
 // =========================================================================
 

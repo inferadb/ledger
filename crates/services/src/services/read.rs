@@ -46,7 +46,6 @@ use inferadb_ledger_raft::{
     metrics,
     pagination::{PageToken, PageTokenCodec},
     raft_manager::RaftManager,
-    trace_context,
     types::LedgerNodeId,
 };
 use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
@@ -604,9 +603,17 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
     ///
     /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
     async fn read(&self, request: Request<ReadRequest>) -> Result<Response<ReadResponse>, Status> {
-        // Extract trace context and transport metadata from gRPC headers before consuming
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
+        // Build unified request context before consuming the request body.
+        // from_request extracts transport metadata and trace context from gRPC headers.
+        let mut ctx = RequestContext::from_request("ReadService", "read", &request, None);
+        ctx.set_operation_type(OperationType::Read);
+        if let Some(sampler) = &self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = &self.node_id {
+            ctx.set_node_id(*node_id);
+        }
+
         let req = request.into_inner();
 
         // Cross-region forwarding: if the organization lives on a remote region,
@@ -632,25 +639,6 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         // Follower routing is deferred to `resolve_read_consistency` below.
         // EVENTUAL reads serve locally; LINEARIZABLE reads on followers use
         // the ReadIndex protocol.
-
-        // Create logging context
-        let mut ctx = RequestContext::new("ReadService", "read");
-        ctx.set_operation_type(OperationType::Read);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        if let Some(sampler) = &self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = &self.node_id {
-            ctx.set_node_id(*node_id);
-        }
-
-        // Set trace context for distributed tracing correlation
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
 
         // Extract caller identity for canonical log line
         super::helpers::extract_caller(&mut ctx, &req.caller);
@@ -701,7 +689,6 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                 ctx.end_storage_timer();
                 let msg = format!("Storage error: {}", e);
                 ctx.set_error("storage_error", &msg);
-                metrics::record_read(false, ctx.elapsed_secs());
                 return Err(Status::internal(msg));
             },
         };
@@ -722,7 +709,6 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         ctx.set_bytes_read(value_size);
 
         let elapsed = ctx.elapsed_secs();
-        metrics::record_read(true, elapsed);
         metrics::record_organization_operation(organization_id, "read");
         metrics::record_organization_latency(organization_id, "read", elapsed);
         ctx.set_success();
@@ -744,9 +730,17 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
     ) -> Result<Response<inferadb_ledger_proto::proto::BatchReadResponse>, Status> {
         use inferadb_ledger_proto::proto::{BatchReadResponse, BatchReadResult};
 
-        // Extract trace context and transport metadata from gRPC headers before consuming
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
+        // Build unified request context before consuming the request body.
+        // from_request extracts transport metadata and trace context from gRPC headers.
+        let mut ctx = RequestContext::from_request("ReadService", "batch_read", &request, None);
+        ctx.set_operation_type(OperationType::Read);
+        if let Some(sampler) = &self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = &self.node_id {
+            ctx.set_node_id(*node_id);
+        }
+
         let req = request.into_inner();
 
         // Cross-region forwarding
@@ -771,25 +765,6 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         // Follower routing is deferred to `resolve_read_consistency` below.
         // EVENTUAL reads serve locally; LINEARIZABLE reads on followers use
         // the ReadIndex protocol.
-
-        // Create logging context
-        let mut ctx = RequestContext::new("ReadService", "batch_read");
-        ctx.set_operation_type(OperationType::Read);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        if let Some(sampler) = &self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = &self.node_id {
-            ctx.set_node_id(*node_id);
-        }
-
-        // Set trace context for distributed tracing correlation
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
 
         // Extract caller identity for canonical log line
         super::helpers::extract_caller(&mut ctx, &req.caller);
@@ -880,16 +855,11 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         ctx.end_storage_timer();
         ctx.set_found_count(found_count);
 
-        let batch_size = results.len();
         let total_bytes: usize =
             results.iter().filter_map(|r| r.value.as_ref()).map(|v| v.len()).sum();
         ctx.set_bytes_read(total_bytes);
 
-        // Record metrics for each read in the batch
         let latency = ctx.elapsed_secs();
-        for _ in 0..batch_size {
-            metrics::record_read(true, latency / batch_size as f64);
-        }
         metrics::record_organization_operation(organization_id, "read");
         metrics::record_organization_latency(organization_id, "read", latency);
 
@@ -909,9 +879,17 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         &self,
         request: Request<VerifiedReadRequest>,
     ) -> Result<Response<VerifiedReadResponse>, Status> {
-        // Extract trace context and transport metadata from gRPC headers before consuming
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
+        // Build unified request context before consuming the request body.
+        // from_request extracts transport metadata and trace context from gRPC headers.
+        let mut ctx = RequestContext::from_request("ReadService", "verified_read", &request, None);
+        ctx.set_operation_type(OperationType::Read);
+        if let Some(sampler) = &self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = &self.node_id {
+            ctx.set_node_id(*node_id);
+        }
+
         let req = request.into_inner();
 
         // Cross-region forwarding
@@ -936,25 +914,6 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         // Verified reads always use linearizable consistency. On followers
         // the ReadIndex protocol below waits for local apply to reach the
         // leader's committed index, so no preemptive redirect is needed.
-
-        // Create logging context
-        let mut ctx = RequestContext::new("ReadService", "verified_read");
-        ctx.set_operation_type(OperationType::Read);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        if let Some(sampler) = &self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = &self.node_id {
-            ctx.set_node_id(*node_id);
-        }
-
-        // Set trace context for distributed tracing correlation
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
 
         // Extract caller identity for canonical log line
         super::helpers::extract_caller(&mut ctx, &req.caller);
@@ -989,7 +948,6 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                 organization_id, vault_id, at_height
             );
             ctx.set_error("vault_diverged", &msg);
-            metrics::record_verified_read(false, ctx.elapsed_secs());
             return Err(Status::unavailable(msg));
         }
 
@@ -1004,7 +962,6 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                 ctx.end_storage_timer();
                 let msg = format!("Storage error: {}", e);
                 ctx.set_error("storage_error", &msg);
-                metrics::record_verified_read(false, ctx.elapsed_secs());
                 return Err(Status::internal(msg));
             },
         };
@@ -1057,7 +1014,6 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             + chain_proof.as_ref().map_or(0, std::mem::size_of_val);
         ctx.set_proof_size_bytes(proof_size);
 
-        metrics::record_verified_read(true, ctx.elapsed_secs());
         ctx.set_success();
 
         Ok(Response::new(VerifiedReadResponse {
@@ -1076,9 +1032,18 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         &self,
         request: Request<HistoricalReadRequest>,
     ) -> Result<Response<HistoricalReadResponse>, Status> {
-        // Extract trace context and transport metadata from gRPC headers before consuming
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
+        // Build unified request context before consuming the request body.
+        // from_request extracts transport metadata and trace context from gRPC headers.
+        let mut ctx =
+            RequestContext::from_request("ReadService", "historical_read", &request, None);
+        ctx.set_operation_type(OperationType::Read);
+        if let Some(sampler) = &self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = &self.node_id {
+            ctx.set_node_id(*node_id);
+        }
+
         let req = request.into_inner();
 
         // Cross-region forwarding
@@ -1104,25 +1069,6 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         if !region.handle.is_leader() {
             return Err(self.not_leader_within_region(&region, "Not the leader for this region"));
         }
-
-        // Create logging context
-        let mut ctx = RequestContext::new("ReadService", "historical_read");
-        ctx.set_operation_type(OperationType::Read);
-        ctx.extract_transport_metadata(&grpc_metadata);
-        if let Some(sampler) = &self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = &self.node_id {
-            ctx.set_node_id(*node_id);
-        }
-
-        // Set trace context for distributed tracing correlation
-        ctx.set_trace_context(
-            &trace_ctx.trace_id,
-            &trace_ctx.span_id,
-            trace_ctx.parent_span_id.as_deref(),
-            trace_ctx.trace_flags,
-        );
 
         // Set read operation fields
         ctx.set_key(&req.key);

@@ -182,15 +182,15 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(ledger_write_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(ledger_grpc_request_latency_seconds_bucket{service=\"WriteService\"}[$__rate_interval])))",
           "legendFormat": "p50"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(ledger_write_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ledger_grpc_request_latency_seconds_bucket{service=\"WriteService\"}[$__rate_interval])))",
           "legendFormat": "p95"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(ledger_write_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ledger_grpc_request_latency_seconds_bucket{service=\"WriteService\"}[$__rate_interval])))",
           "legendFormat": "p99"
         }
       ]
@@ -217,15 +217,15 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(ledger_read_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(ledger_grpc_request_latency_seconds_bucket{service=\"ReadService\"}[$__rate_interval])))",
           "legendFormat": "p50"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(ledger_read_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ledger_grpc_request_latency_seconds_bucket{service=\"ReadService\"}[$__rate_interval])))",
           "legendFormat": "p95"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(ledger_read_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ledger_grpc_request_latency_seconds_bucket{service=\"ReadService\"}[$__rate_interval])))",
           "legendFormat": "p99"
         }
       ]
@@ -321,7 +321,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(ledger_writes_total[5m]))",
+          "expr": "sum(rate(ledger_grpc_requests_total{service=\"WriteService\"}[5m]))",
           "legendFormat": "Write Rate"
         }
       ]
@@ -336,7 +336,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(ledger_reads_total[5m]))",
+          "expr": "sum(rate(ledger_grpc_requests_total{service=\"ReadService\"}[5m]))",
           "legendFormat": "Read Rate"
         }
       ]

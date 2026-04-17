@@ -21,7 +21,6 @@ use inferadb_ledger_proto::proto::{
 };
 use inferadb_ledger_raft::{
     rate_limit::RateLimiter,
-    trace_context,
     types::{LedgerRequest, LedgerResponse},
 };
 use inferadb_ledger_state::system::{
@@ -224,25 +223,6 @@ impl TokenServiceImpl {
     fn hash_refresh_token(token: &str) -> [u8; 32] {
         Sha256::digest(token.as_bytes()).into()
     }
-
-    /// Emits an audit event if event recording is configured.
-    fn emit_event(
-        &self,
-        action: EventAction,
-        trace_ctx: &inferadb_ledger_raft::trace_context::TraceContext,
-    ) {
-        use inferadb_ledger_raft::event_writer::HandlerPhaseEmitter;
-
-        if let Some(node_id) = self.ctx.node_id {
-            self.ctx.record_handler_event(
-                HandlerPhaseEmitter::for_system(action, node_id)
-                    .principal("system")
-                    .trace_id(&trace_ctx.trace_id)
-                    .outcome(EventOutcomeType::Success)
-                    .build(self.ctx.default_ttl_days()),
-            );
-        }
-    }
 }
 
 // =============================================================================
@@ -261,16 +241,11 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx =
+            self.ctx.make_request_context_from("TokenService", "create_user_session", &request);
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = self.ctx.make_request_context(
-            "TokenService",
-            "create_user_session",
-            &grpc_metadata,
-            &trace_ctx,
-        );
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         // Resolve user slug → (UserId, UserSlug)
@@ -326,7 +301,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let refresh_expires_at =
             Utc::now() + chrono::Duration::seconds(self.jwt_config.session_refresh_ttl_secs as i64);
 
-        self.emit_event(EventAction::TokenCreated, &trace_ctx);
+        ctx.record_event(EventAction::TokenCreated, EventOutcomeType::Success, &[]);
         ctx.set_success();
 
         let token_pair = proto::TokenPair {
@@ -441,16 +416,10 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx =
+            self.ctx.make_request_context_from("TokenService", "create_vault_token", &request);
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
-
-        let mut ctx = self.ctx.make_request_context(
-            "TokenService",
-            "create_vault_token",
-            &grpc_metadata,
-            &trace_ctx,
-        );
 
         // Resolve slugs
         let resolver = self.resolver();
@@ -515,7 +484,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let refresh_expires_at =
             Utc::now() + chrono::Duration::seconds(self.jwt_config.vault_refresh_ttl_secs as i64);
 
-        self.emit_event(EventAction::TokenCreated, &trace_ctx);
+        ctx.record_event(EventAction::TokenCreated, EventOutcomeType::Success, &[]);
         ctx.set_success();
 
         let token_pair = proto::TokenPair {
@@ -538,16 +507,9 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx = self.ctx.make_request_context_from("TokenService", "refresh_token", &request);
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
-
-        let mut ctx = self.ctx.make_request_context(
-            "TokenService",
-            "refresh_token",
-            &grpc_metadata,
-            &trace_ctx,
-        );
 
         if req.refresh_token.is_empty() {
             return Err(Status::invalid_argument("refresh_token is required"));
@@ -689,7 +651,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
 
         let refresh_expires_at = Utc::now() + chrono::Duration::seconds(ttl_secs as i64);
 
-        self.emit_event(EventAction::TokenRefreshed, &trace_ctx);
+        ctx.record_event(EventAction::TokenRefreshed, EventOutcomeType::Success, &[]);
         ctx.set_success();
 
         let token_pair = proto::TokenPair {
@@ -712,16 +674,9 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx = self.ctx.make_request_context_from("TokenService", "revoke_token", &request);
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
-
-        let mut ctx = self.ctx.make_request_context(
-            "TokenService",
-            "revoke_token",
-            &grpc_metadata,
-            &trace_ctx,
-        );
 
         if req.refresh_token.is_empty() {
             return Err(Status::invalid_argument("refresh_token is required"));
@@ -740,7 +695,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let ledger_request = LedgerRequest::RevokeTokenFamily { family: token.family };
         self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
-        self.emit_event(EventAction::TokenRevoked, &trace_ctx);
+        ctx.record_event(EventAction::TokenRevoked, EventOutcomeType::Success, &[]);
         ctx.set_success();
 
         Ok(Response::new(RevokeTokenResponse {}))
@@ -756,16 +711,14 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx = self.ctx.make_request_context_from(
+            "TokenService",
+            "revoke_all_user_sessions",
+            &request,
+        );
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = self.ctx.make_request_context(
-            "TokenService",
-            "revoke_all_user_sessions",
-            &grpc_metadata,
-            &trace_ctx,
-        );
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let resolver = self.resolver();
@@ -785,7 +738,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
             },
         };
 
-        self.emit_event(EventAction::TokenRevoked, &trace_ctx);
+        ctx.record_event(EventAction::TokenRevoked, EventOutcomeType::Success, &[]);
         ctx.set_success();
 
         Ok(Response::new(RevokeAllUserSessionsResponse { revoked_count }))
@@ -801,16 +754,10 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx =
+            self.ctx.make_request_context_from("TokenService", "revoke_all_app_sessions", &request);
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
-
-        let mut ctx = self.ctx.make_request_context(
-            "TokenService",
-            "revoke_all_app_sessions",
-            &grpc_metadata,
-            &trace_ctx,
-        );
 
         let resolver = self.resolver();
         let app_slug = SlugResolver::extract_app_slug(&req.app)?;
@@ -833,7 +780,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
             },
         };
 
-        self.emit_event(EventAction::TokenRevoked, &trace_ctx);
+        ctx.record_event(EventAction::TokenRevoked, EventOutcomeType::Success, &[]);
         ctx.set_success();
 
         Ok(Response::new(RevokeAllAppSessionsResponse { revoked_count }))
@@ -847,16 +794,11 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx =
+            self.ctx.make_request_context_from("TokenService", "create_signing_key", &request);
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = self.ctx.make_request_context(
-            "TokenService",
-            "create_signing_key",
-            &grpc_metadata,
-            &trace_ctx,
-        );
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         // Parse scope
@@ -903,7 +845,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
             tracing::warn!(kid = %kid, error = %e, "Failed to cache signing key after creation");
         }
 
-        self.emit_event(EventAction::SigningKeyCreated, &trace_ctx);
+        ctx.record_event(EventAction::SigningKeyCreated, EventOutcomeType::Success, &[]);
         ctx.set_success();
 
         let info = Self::signing_key_to_public_info(&stored_key);
@@ -918,16 +860,11 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx =
+            self.ctx.make_request_context_from("TokenService", "rotate_signing_key", &request);
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = self.ctx.make_request_context(
-            "TokenService",
-            "rotate_signing_key",
-            &grpc_metadata,
-            &trace_ctx,
-        );
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         if req.kid.is_empty() {
@@ -985,7 +922,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
             self.jwt_engine.evict_key(&req.kid);
         }
 
-        self.emit_event(EventAction::SigningKeyRotated, &trace_ctx);
+        ctx.record_event(EventAction::SigningKeyRotated, EventOutcomeType::Success, &[]);
         ctx.set_success();
 
         let info = Self::signing_key_to_public_info(&stored_key);
@@ -1000,16 +937,11 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx =
+            self.ctx.make_request_context_from("TokenService", "revoke_signing_key", &request);
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = self.ctx.make_request_context(
-            "TokenService",
-            "revoke_signing_key",
-            &grpc_metadata,
-            &trace_ctx,
-        );
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         if req.kid.is_empty() {
@@ -1022,7 +954,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         // Evict from cache
         self.jwt_engine.evict_key(&req.kid);
 
-        self.emit_event(EventAction::SigningKeyRevoked, &trace_ctx);
+        ctx.record_event(EventAction::SigningKeyRevoked, EventOutcomeType::Success, &[]);
         ctx.set_success();
 
         Ok(Response::new(RevokeSigningKeyResponse {}))
@@ -1071,16 +1003,13 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let req = request.into_inner();
-
-        let mut ctx = self.ctx.make_request_context(
+        let mut ctx = self.ctx.make_request_context_from(
             "TokenService",
             "authenticate_client_assertion",
-            &grpc_metadata,
-            &trace_ctx,
+            &request,
         );
+        let grpc_metadata = request.metadata().clone();
+        let req = request.into_inner();
 
         if req.assertion_jwt.is_empty() {
             return Err(Status::invalid_argument("assertion_jwt is required"));
@@ -1183,7 +1112,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let refresh_expires_at =
             Utc::now() + chrono::Duration::seconds(self.jwt_config.vault_refresh_ttl_secs as i64);
 
-        self.emit_event(EventAction::TokenCreated, &trace_ctx);
+        ctx.record_event(EventAction::TokenCreated, EventOutcomeType::Success, &[]);
         ctx.set_success();
 
         let token_pair = proto::TokenPair {

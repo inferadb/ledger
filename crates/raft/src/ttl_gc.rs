@@ -153,6 +153,7 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
             return;
         }
 
+        let mut job = crate::logging::JobContext::new("ttl_gc", None);
         let trace_ctx = TraceContext::new();
         debug!(trace_id = %trace_ctx.trace_id, "Starting GC cycle");
 
@@ -174,6 +175,7 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
                 "Found expired entities"
             );
 
+            let expired_count = expired.len() as u64;
             if let Err(e) = self.expire_entities(organization, vault, expired).await {
                 warn!(
                     trace_id = %trace_ctx.trace_id,
@@ -182,6 +184,9 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
                     error = %e,
                     "GC cycle failed"
                 );
+                job.set_failure();
+            } else {
+                job.record_items(expired_count);
             }
         }
     }

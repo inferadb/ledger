@@ -36,6 +36,7 @@ For design rationale, correctness proofs, and internal layout, see the root-leve
 - [Organization metrics](operations/organization-metrics.md) — per-tenant resource tracking
 - [Background jobs](operations/background-jobs.md) — job observability and health
 - [Capacity planning](operations/capacity-planning.md) — sizing and resource estimation
+- [Datadog cost optimization](operations/datadog-cost-optimization.md) — controlling custom metric costs on Datadog
 
 ## Maintaining
 
@@ -55,9 +56,9 @@ For design rationale, correctness proofs, and internal layout, see the root-leve
 
 ## Quick reference
 
-| Task              | Command                                                            |
-| ----------------- | ------------------------------------------------------------------ |
-| Start single node | `inferadb-ledger --listen 127.0.0.1:9090 --data /tmp/ledger`      |
-| Initialize cluster| `inferadb-ledger init --host 127.0.0.1:9090`                      |
-| Health check      | `grpcurl -plaintext localhost:9090 ledger.v1.HealthService/Check`  |
-| View metrics      | `curl localhost:9091/metrics`                                      |
+| Task               | Command                                                           |
+| ------------------ | ----------------------------------------------------------------- |
+| Start single node  | `inferadb-ledger --listen 127.0.0.1:9090 --data /tmp/ledger`      |
+| Initialize cluster | `inferadb-ledger init --host 127.0.0.1:9090`                      |
+| Health check       | `grpcurl -plaintext localhost:9090 ledger.v1.HealthService/Check` |
+| View metrics       | `curl localhost:9091/metrics`                                     |

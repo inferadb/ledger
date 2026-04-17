@@ -220,6 +220,13 @@ impl inferadb_ledger_proto::proto::health_service_server::HealthService for Heal
             true
         };
 
+        // Include top-5 metrics by cardinality so operators can spot label leaks.
+        if let Some(tracker) = inferadb_ledger_raft::cardinality::tracker() {
+            for (name, count) in tracker.top_by_cardinality(5) {
+                details.insert(format!("cardinality:{name}"), count.to_string());
+            }
+        }
+
         // Determine health status based on node phase, Raft state, and dependencies
         let phase = self.health_state.phase();
         let (status, message) = match phase {

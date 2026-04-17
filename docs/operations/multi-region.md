@@ -214,8 +214,8 @@ Monitor each region independently:
 ```promql
 # Per-region write latency
 histogram_quantile(0.99,
-  sum by (le, region) (
-    ledger_write_latency_seconds_bucket{region="us-east"}
+  sum by (le) (
+    rate(ledger_grpc_request_latency_seconds_bucket{service="WriteService"}[5m])
   )
 )
 

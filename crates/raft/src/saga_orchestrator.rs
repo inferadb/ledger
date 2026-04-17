@@ -19,7 +19,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, atomic::Ordering},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use inferadb_ledger_state::{
@@ -54,9 +54,6 @@ use crate::{
     consensus_handle::ConsensusHandle,
     error::{SagaError, SerializationSnafu, StateReadSnafu},
     event_writer::{EventHandle, HandlerPhaseEmitter},
-    metrics::{
-        record_background_job_duration, record_background_job_items, record_background_job_run,
-    },
     raft_manager::RaftManager,
     trace_context::TraceContext,
     types::{LedgerNodeId, LedgerRequest, RaftPayload, SystemRequest},
@@ -2302,8 +2299,8 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             return;
         }
 
+        let mut job = crate::logging::JobContext::new("saga_orchestrator", None);
         let _trace_ctx = TraceContext::new();
-        let cycle_start = Instant::now();
 
         debug!("Starting saga poll cycle");
 
@@ -2340,17 +2337,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         }
 
         // Record cycle metrics regardless of saga count
-        let duration = cycle_start.elapsed().as_secs_f64();
-        record_background_job_duration("saga_orchestrator", duration);
-        record_background_job_run("saga_orchestrator", "success");
-        record_background_job_items("saga_orchestrator", saga_count);
-
-        // Emit PII cache sizes for operational visibility
-        crate::metrics::record_saga_pii_cache_sizes(
-            self.pii_cache.lock().len(),
-            self.org_pii_cache.lock().len(),
-            self.crypto_cache.lock().len(),
-        );
+        job.record_items(saga_count);
 
         // Update watchdog heartbeat
         if let Some(ref handle) = self.watchdog_handle {

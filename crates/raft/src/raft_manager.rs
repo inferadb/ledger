@@ -82,7 +82,6 @@ use crate::{
     event_writer::EventWriter,
     integrity_scrubber::IntegrityScrubberJob,
     log_storage::{AppliedStateAccessor, RaftLogStore},
-    metrics::record_region_node_count,
     region_storage::RegionStorageManager,
     ttl_gc::TtlGarbageCollector,
     types::{LedgerNodeId, LedgerRequest, LedgerResponse, RaftPayload},
@@ -861,9 +860,6 @@ impl RaftManager {
                 found: initial_members.len(),
             });
         }
-
-        // Emit region node count metric
-        record_region_node_count(region.as_str(), initial_members.len(), is_protected);
 
         info!(region = region.as_str(), "Starting region group");
 

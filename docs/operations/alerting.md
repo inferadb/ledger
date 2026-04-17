@@ -87,6 +87,25 @@ For each resource, monitor Utilization, Saturation, and Errors:
 | B-tree     | `ledger_btree_depth`                               | `rate(ledger_btree_page_splits_total)`          | Store errors in `ledger_grpc_requests_total{error_class="internal"}` |
 | Snapshots  | `ledger_snapshot_disk_bytes`                       | —                                               | Snapshot creation failures in logs                                   |
 
+## Cardinality Overflow
+
+A non-zero rate on this counter means a high-cardinality label set reached the Prometheus registry — always a code defect.
+
+```promql
+# Cardinality overflow (any non-zero rate = someone added a high-cardinality label)
+rate(ledger_metrics_cardinality_overflow_total[5m]) > 0
+```
+
+```yaml
+- alert: LedgerCardinalityOverflow
+  expr: rate(ledger_metrics_cardinality_overflow_total[5m]) > 0
+  labels:
+    severity: warning
+  annotations:
+    summary: "Metric cardinality cap exceeded for {{ $labels.metric_name }}"
+    description: "Label sets are being dropped. Check recent deployments for high-cardinality label additions."
+```
+
 ## Collection Interval
 
 Resource metrics are collected every 30 seconds by default. Alerting rules should use windows of at least `[5m]` to avoid false positives from transient spikes.

@@ -21,7 +21,7 @@
 use std::{
     collections::HashSet,
     sync::{Arc, atomic::Ordering},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use inferadb_ledger_state::StateLayer;
@@ -35,9 +35,6 @@ use crate::{
     consensus_handle::ConsensusHandle,
     error::OrphanCleanupError,
     log_storage::AppliedStateAccessor,
-    metrics::{
-        record_background_job_duration, record_background_job_items, record_background_job_run,
-    },
     trace_context::TraceContext,
     types::{LedgerRequest, RaftPayload},
 };
@@ -275,8 +272,8 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
             return;
         }
 
+        let mut job = crate::logging::JobContext::new("orphan_cleanup", None);
         let _trace_ctx = TraceContext::new();
-        let cycle_start = Instant::now();
 
         debug!("Starting orphan cleanup cycle");
 
@@ -284,11 +281,6 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
         let deleted_users = self.get_deleted_user_ids();
         if deleted_users.is_empty() {
             debug!("No deleted users found");
-
-            let duration = cycle_start.elapsed().as_secs_f64();
-            record_background_job_duration("orphan_cleanup", duration);
-            record_background_job_run("orphan_cleanup", "success");
-            record_background_job_items("orphan_cleanup", 0);
 
             if let Some(ref handle) = self.watchdog_handle {
                 handle.store(
@@ -351,10 +343,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
         }
 
         // Record cycle metrics
-        let duration = cycle_start.elapsed().as_secs_f64();
-        record_background_job_duration("orphan_cleanup", duration);
-        record_background_job_run("orphan_cleanup", "success");
-        record_background_job_items("orphan_cleanup", total_removed);
+        job.record_items(total_removed);
 
         // Update watchdog heartbeat
         if let Some(ref handle) = self.watchdog_handle {

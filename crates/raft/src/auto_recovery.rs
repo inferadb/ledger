@@ -13,10 +13,7 @@
 //!
 //! Recovery runs only on the leader to avoid duplicate work.
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 
 use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
 use inferadb_ledger_store::StorageBackend;
@@ -512,8 +509,8 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                         continue;
                     }
 
+                    let mut job = crate::logging::JobContext::new("auto_recovery", None);
                     let trace_ctx = TraceContext::new();
-                    let cycle_start = Instant::now();
                     let mut vaults_recovered = 0u64;
                     let mut had_failure = false;
 
@@ -562,15 +559,10 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                         }
                     }
 
-                    let duration = cycle_start.elapsed().as_secs_f64();
-                    crate::metrics::record_background_job_duration("auto_recovery", duration);
-                    crate::metrics::record_background_job_run(
-                        "auto_recovery",
-                        if had_failure { "failure" } else { "success" },
-                    );
-                    if vaults_recovered > 0 {
-                        crate::metrics::record_background_job_items("auto_recovery", vaults_recovered);
+                    if had_failure {
+                        job.set_failure();
                     }
+                    job.record_items(vaults_recovered);
                 }
                 _ = shutdown.recv() => {
                     info!("Auto-recovery job shutting down");

@@ -10,24 +10,35 @@
 
 use std::time::Instant;
 
-use inferadb_ledger_state::system::MIN_NODES_PER_PROTECTED_REGION;
 use inferadb_ledger_types::{OrganizationId, VaultId};
 use metrics::{counter, gauge, histogram};
+
+use crate::logging::fields;
+
+/// Gate a metric emission through the cardinality tracker.
+///
+/// If the tracker has not been initialized (pre-bootstrap) or admits the
+/// emission, execute `$body`. Otherwise the emission is silently dropped
+/// (Enforce mode) or admitted with overflow counting (Observe mode).
+macro_rules! gated {
+    ($metric_name:expr, $labels:expr, $body:block) => {
+        let admitted = match crate::cardinality::tracker() {
+            Some(tracker) => {
+                let fp = crate::cardinality::fingerprint_labels($labels);
+                tracker.admit($metric_name, fp)
+            },
+            None => true,
+        };
+        if admitted {
+            $body
+        }
+    };
+}
 
 // =============================================================================
 // Metric Names (constants for consistency)
 // =============================================================================
 
-// Write service metrics
-const WRITES_TOTAL: &str = "ledger_writes_total";
-const WRITES_LATENCY: &str = "ledger_write_latency_seconds";
-const BATCH_WRITES_TOTAL: &str = "ledger_batch_writes_total";
-const BATCH_SIZE: &str = "ledger_batch_size";
-
-// Read service metrics
-const READS_TOTAL: &str = "ledger_reads_total";
-const READS_LATENCY: &str = "ledger_read_latency_seconds";
-const VERIFIED_READS_TOTAL: &str = "ledger_verified_reads_total";
 // Data residency violation metrics
 const DATA_RESIDENCY_VIOLATION_TOTAL: &str = "ledger_data_residency_violation_total";
 
@@ -55,14 +66,11 @@ const STORAGE_OPERATIONS: &str = "ledger_storage_operations_total";
 // Snapshot metrics
 const SNAPSHOTS_CREATED: &str = "ledger_snapshots_created_total";
 const SNAPSHOT_SIZE_BYTES: &str = "ledger_snapshot_size_bytes";
-const SNAPSHOT_CREATE_LATENCY: &str = "ledger_snapshot_create_latency_seconds";
-const SNAPSHOT_RESTORE_LATENCY: &str = "ledger_snapshot_restore_latency_seconds";
+const SNAPSHOT_RESTORE_DURATION: &str = "ledger_snapshot_restore_duration_seconds";
 
 // Idempotency cache metrics
-const IDEMPOTENCY_HITS: &str = "ledger_idempotency_cache_hits_total";
-const IDEMPOTENCY_MISSES: &str = "ledger_idempotency_cache_misses_total";
+const IDEMPOTENCY_OPERATIONS: &str = "ledger_idempotency_operations_total";
 const IDEMPOTENCY_SIZE: &str = "ledger_idempotency_cache_size";
-const IDEMPOTENCY_EVICTIONS: &str = "ledger_idempotency_cache_evictions_total";
 
 // Connection metrics
 const ACTIVE_CONNECTIONS: &str = "ledger_active_connections";
@@ -90,7 +98,6 @@ const VAULT_HEALTH: &str = "ledger_vault_health";
 // Integrity scrubber metrics
 const INTEGRITY_PAGES_CHECKED: &str = "ledger_integrity_pages_checked_total";
 const INTEGRITY_ERRORS: &str = "ledger_integrity_errors_total";
-const INTEGRITY_SCAN_DURATION: &str = "ledger_integrity_scan_duration_seconds";
 
 // Learner refresh metrics
 const LEARNER_REFRESH_TOTAL: &str = "ledger_learner_refresh_total";
@@ -102,28 +109,18 @@ const LEARNER_VOTER_ERRORS: &str = "ledger_learner_voter_errors_total";
 // Write Service Metrics
 // =============================================================================
 
-/// Records a write operation.
+/// Records a rate limit exceeded event.
+///
+/// `ledger_rate_limit_exceeded_total{level, reason}`.
 #[inline]
-pub fn record_write(success: bool, latency_secs: f64) {
-    let status = if success { "success" } else { "error" };
-    counter!(WRITES_TOTAL, "status" => status).increment(1);
-    histogram!(WRITES_LATENCY, "status" => status).record(latency_secs);
-}
-
-/// Records a batch write operation.
-#[inline]
-pub fn record_batch_write(success: bool, batch_size: usize, latency_secs: f64) {
-    let status = if success { "success" } else { "error" };
-    counter!(BATCH_WRITES_TOTAL, "status" => status).increment(1);
-    histogram!(WRITES_LATENCY, "status" => status).record(latency_secs);
-    histogram!(BATCH_SIZE).record(batch_size as f64);
-}
-
-/// Records a rate limit exceeded event for a single organization.
-#[inline]
-pub fn record_rate_limit_exceeded(organization: OrganizationId) {
-    counter!(RATE_LIMIT_EXCEEDED, "organization_id" => organization.value().to_string())
+pub fn record_rate_limit_exceeded(level: &str, reason: &str) {
+    gated!(RATE_LIMIT_EXCEEDED, &[(fields::LEVEL, level), (fields::REASON, reason)], {
+        counter!(RATE_LIMIT_EXCEEDED,
+            fields::LEVEL => level.to_string(),
+            fields::REASON => reason.to_string()
+        )
         .increment(1);
+    });
 }
 
 /// Records a rate limit rejection with level and reason labels.
@@ -131,29 +128,15 @@ pub fn record_rate_limit_exceeded(organization: OrganizationId) {
 /// `ledger_rate_limit_rejected_total{level, reason}`.
 #[inline]
 pub fn record_rate_limit_rejected(level: &str, reason: &str) {
-    counter!(RATE_LIMIT_REJECTED, "level" => level.to_string(), "reason" => reason.to_string())
-        .increment(1);
+    gated!(RATE_LIMIT_REJECTED, &[(fields::LEVEL, level), (fields::REASON, reason)], {
+        counter!(RATE_LIMIT_REJECTED, fields::LEVEL => level.to_string(), fields::REASON => reason.to_string())
+            .increment(1);
+    });
 }
 
 // =============================================================================
 // Read Service Metrics
 // =============================================================================
-
-/// Records a read operation.
-#[inline]
-pub fn record_read(success: bool, latency_secs: f64) {
-    let status = if success { "success" } else { "error" };
-    counter!(READS_TOTAL, "status" => status).increment(1);
-    histogram!(READS_LATENCY, "status" => status).record(latency_secs);
-}
-
-/// Records a verified read operation.
-#[inline]
-pub fn record_verified_read(success: bool, latency_secs: f64) {
-    let status = if success { "success" } else { "error" };
-    counter!(VERIFIED_READS_TOTAL, "status" => status).increment(1);
-    histogram!(READS_LATENCY, "status" => status, "verified" => "true").record(latency_secs);
-}
 
 /// Records a data residency violation attempt.
 ///
@@ -162,11 +145,13 @@ pub fn record_verified_read(success: bool, latency_secs: f64) {
 /// for operational alerting.
 #[inline]
 pub fn record_data_residency_violation(region: &str) {
-    counter!(
-        DATA_RESIDENCY_VIOLATION_TOTAL,
-        "region" => region.to_string()
-    )
-    .increment(1);
+    gated!(DATA_RESIDENCY_VIOLATION_TOTAL, &[(fields::REGION, region)], {
+        counter!(
+            DATA_RESIDENCY_VIOLATION_TOTAL,
+            fields::REGION => region.to_string()
+        )
+        .increment(1);
+    });
 }
 
 // =============================================================================
@@ -221,10 +206,9 @@ pub fn set_is_leader(is_leader: bool) {
 
 /// Records a state root computation.
 #[inline]
-pub fn record_state_root_computation(vault: VaultId, latency_secs: f64) {
-    let vault_label = vault.value().to_string();
-    counter!(STATE_ROOT_COMPUTATIONS, "vault_id" => vault_label.clone()).increment(1);
-    histogram!(STATE_ROOT_LATENCY, "vault_id" => vault_label).record(latency_secs);
+pub fn record_state_root_computation(_vault: VaultId, latency_secs: f64) {
+    counter!(STATE_ROOT_COMPUTATIONS).increment(1);
+    histogram!(STATE_ROOT_LATENCY).record(latency_secs);
 }
 
 /// Records a successful state root verification (local matches leader commitment).
@@ -238,20 +222,14 @@ pub fn record_state_root_verification() {
 /// This is a critical alert — it indicates potential Byzantine behavior or a
 /// determinism bug in the state machine.
 #[inline]
-pub fn record_state_root_divergence(organization: OrganizationId, vault: VaultId) {
-    counter!(
-        STATE_ROOT_DIVERGENCES,
-        "organization_id" => organization.value().to_string(),
-        "vault_id" => vault.value().to_string(),
-    )
-    .increment(1);
+pub fn record_state_root_divergence(_organization: OrganizationId, _vault: VaultId) {
+    counter!(STATE_ROOT_DIVERGENCES).increment(1);
 }
 
 /// Sets the number of dirty buckets for a vault.
 #[inline]
-pub fn set_dirty_buckets(vault: VaultId, count: usize) {
-    let vault_label = vault.value().to_string();
-    gauge!(DIRTY_BUCKETS, "vault_id" => vault_label).set(count as f64);
+pub fn set_dirty_buckets(_vault: VaultId, count: usize) {
+    gauge!(DIRTY_BUCKETS).set(count as f64);
 }
 
 // =============================================================================
@@ -262,14 +240,14 @@ pub fn set_dirty_buckets(vault: VaultId, count: usize) {
 #[inline]
 pub fn record_storage_write(bytes: usize) {
     counter!(STORAGE_BYTES_WRITTEN).increment(bytes as u64);
-    counter!(STORAGE_OPERATIONS, "op" => "write").increment(1);
+    counter!(STORAGE_OPERATIONS, fields::OP => "write").increment(1);
 }
 
 /// Records bytes read from storage.
 #[inline]
 pub fn record_storage_read(bytes: usize) {
     counter!(STORAGE_BYTES_READ).increment(bytes as u64);
-    counter!(STORAGE_OPERATIONS, "op" => "read").increment(1);
+    counter!(STORAGE_OPERATIONS, fields::OP => "read").increment(1);
 }
 
 // =============================================================================
@@ -278,44 +256,37 @@ pub fn record_storage_read(bytes: usize) {
 
 /// Records a snapshot creation.
 #[inline]
-pub fn record_snapshot_created(size_bytes: usize, latency_secs: f64) {
+pub fn record_snapshot_created(size_bytes: usize) {
     counter!(SNAPSHOTS_CREATED).increment(1);
     histogram!(SNAPSHOT_SIZE_BYTES).record(size_bytes as f64);
-    histogram!(SNAPSHOT_CREATE_LATENCY).record(latency_secs);
 }
 
 /// Records a snapshot restore.
 #[inline]
 pub fn record_snapshot_restore(latency_secs: f64) {
-    histogram!(SNAPSHOT_RESTORE_LATENCY).record(latency_secs);
+    histogram!(SNAPSHOT_RESTORE_DURATION).record(latency_secs);
 }
 
 // =============================================================================
 // Idempotency Cache Metrics
 // =============================================================================
 
-/// Records an idempotency cache hit.
+/// Records an idempotency cache operation.
+///
+/// `result` must be one of `"hit"`, `"miss"`, or `"eviction"`.
+///
+/// `ledger_idempotency_operations_total{result}`.
 #[inline]
-pub fn record_idempotency_hit() {
-    counter!(IDEMPOTENCY_HITS).increment(1);
-}
-
-/// Records an idempotency cache miss.
-#[inline]
-pub fn record_idempotency_miss() {
-    counter!(IDEMPOTENCY_MISSES).increment(1);
+pub fn record_idempotency_operation(result: &str) {
+    gated!(IDEMPOTENCY_OPERATIONS, &[(fields::RESULT, result)], {
+        counter!(IDEMPOTENCY_OPERATIONS, fields::RESULT => result.to_string()).increment(1);
+    });
 }
 
 /// Sets the current idempotency cache size.
 #[inline]
 pub fn set_idempotency_cache_size(size: usize) {
     gauge!(IDEMPOTENCY_SIZE).set(size as f64);
-}
-
-/// Records idempotency cache evictions.
-#[inline]
-pub fn record_idempotency_evictions(count: usize) {
-    counter!(IDEMPOTENCY_EVICTIONS).increment(count as u64);
 }
 
 // =============================================================================
@@ -341,54 +312,28 @@ pub fn decrement_connections() {
 /// * `service` - gRPC service name (e.g., `"WriteService"`, `"ReadService"`).
 /// * `method` - RPC method name (e.g., `"write"`, `"read"`).
 /// * `status` - gRPC status code as a string (e.g., `"OK"`, `"Internal"`).
-/// * `error_class` - Error classification for error-budget tracking: `"timeout"`, `"unavailable"`,
-///   `"permission_denied"`, `"validation"`, `"rate_limited"`, `"internal"`, or `"none"` for
-///   successful requests. See [`error_class_from_grpc_code`] for the mapping.
 /// * `latency_secs` - Request latency in seconds.
-/// * `region` - Region identifier string (e.g., `"us-east-va"`, `"global"`).
 #[inline]
-pub fn record_grpc_request(
-    service: &str,
-    method: &str,
-    status: &str,
-    error_class: &str,
-    latency_secs: f64,
-    region: &str,
-) {
-    counter!(GRPC_REQUESTS_TOTAL,
-        "service" => service.to_string(),
-        "method" => method.to_string(),
-        "status" => status.to_string(),
-        "error_class" => error_class.to_string(),
-        "region" => region.to_string()
-    )
-    .increment(1);
-    histogram!(GRPC_REQUEST_LATENCY,
-        "service" => service.to_string(),
-        "method" => method.to_string(),
-        "region" => region.to_string()
-    )
-    .record(latency_secs);
-}
-
-/// Classifies a gRPC status code into an error class label for metrics.
-///
-/// Returns one of: `"none"`, `"timeout"`, `"unavailable"`, `"permission_denied"`,
-/// `"validation"`, `"rate_limited"`, `"internal"`.
-pub fn error_class_from_grpc_code(code: tonic::Code) -> &'static str {
-    match code {
-        tonic::Code::Ok => "none",
-        tonic::Code::DeadlineExceeded | tonic::Code::Cancelled => "timeout",
-        tonic::Code::Unavailable => "unavailable",
-        tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => "permission_denied",
-        tonic::Code::InvalidArgument
-        | tonic::Code::NotFound
-        | tonic::Code::AlreadyExists
-        | tonic::Code::FailedPrecondition
-        | tonic::Code::OutOfRange => "validation",
-        tonic::Code::ResourceExhausted => "rate_limited",
-        _ => "internal",
-    }
+pub fn record_grpc_request(service: &str, method: &str, status: &str, latency_secs: f64) {
+    gated!(
+        GRPC_REQUESTS_TOTAL,
+        &[(fields::SERVICE, service), (fields::METHOD, method), (fields::STATUS, status)],
+        {
+            counter!(GRPC_REQUESTS_TOTAL,
+                fields::SERVICE => service.to_string(),
+                fields::METHOD => method.to_string(),
+                fields::STATUS => status.to_string()
+            )
+            .increment(1);
+        }
+    );
+    gated!(GRPC_REQUEST_LATENCY, &[(fields::SERVICE, service), (fields::METHOD, method)], {
+        histogram!(GRPC_REQUEST_LATENCY,
+            fields::SERVICE => service.to_string(),
+            fields::METHOD => method.to_string()
+        )
+        .record(latency_secs);
+    });
 }
 
 // =============================================================================
@@ -429,74 +374,59 @@ pub fn record_timeout_commit() {
 
 /// Records a successful vault recovery.
 #[inline]
-pub fn record_recovery_success(organization: OrganizationId, vault: VaultId) {
-    counter!(
-        RECOVERY_SUCCESS_TOTAL,
-        "organization_id" => organization.value().to_string(),
-        "vault_id" => vault.value().to_string()
-    )
-    .increment(1);
+pub fn record_recovery_success(_organization: OrganizationId, _vault: VaultId) {
+    counter!(RECOVERY_SUCCESS_TOTAL).increment(1);
 }
 
 /// Records a failed vault recovery attempt.
 #[inline]
-pub fn record_recovery_failure(organization: OrganizationId, vault: VaultId, reason: &str) {
-    counter!(
-        RECOVERY_FAILURE_TOTAL,
-        "organization_id" => organization.value().to_string(),
-        "vault_id" => vault.value().to_string(),
-        "reason" => reason.to_string()
-    )
-    .increment(1);
+pub fn record_recovery_failure(_organization: OrganizationId, _vault: VaultId, reason: &str) {
+    gated!(RECOVERY_FAILURE_TOTAL, &[(fields::REASON, reason)], {
+        counter!(
+            RECOVERY_FAILURE_TOTAL,
+            fields::REASON => reason.to_string()
+        )
+        .increment(1);
+    });
 }
 
 /// Records a determinism bug detection (critical alert).
 #[inline]
-pub fn record_determinism_bug(organization: OrganizationId, vault: VaultId) {
-    counter!(
-        DETERMINISM_BUG_TOTAL,
-        "organization_id" => organization.value().to_string(),
-        "vault_id" => vault.value().to_string()
-    )
-    .increment(1);
+pub fn record_determinism_bug(_organization: OrganizationId, _vault: VaultId) {
+    counter!(DETERMINISM_BUG_TOTAL).increment(1);
 }
 
 /// Records a divergence recovery attempt with outcome.
 #[inline]
 pub fn record_recovery_attempt(
-    organization: OrganizationId,
-    vault: VaultId,
-    attempt: u8,
+    _organization: OrganizationId,
+    _vault: VaultId,
+    _attempt: u8,
     outcome: &str,
 ) {
-    counter!(
-        RECOVERY_ATTEMPTS_TOTAL,
-        "organization_id" => organization.value().to_string(),
-        "vault_id" => vault.value().to_string(),
-        "attempt" => attempt.to_string(),
-        "outcome" => outcome.to_string()
-    )
-    .increment(1);
+    gated!(RECOVERY_ATTEMPTS_TOTAL, &[(fields::OUTCOME, outcome)], {
+        counter!(
+            RECOVERY_ATTEMPTS_TOTAL,
+            fields::OUTCOME => outcome.to_string()
+        )
+        .increment(1);
+    });
 }
 
-/// Sets the vault health gauge for a specific vault.
+/// Sets the vault health gauge.
 ///
 /// State values: 0 = healthy, 1 = diverged, 2 = recovering.
 #[inline]
-pub fn set_vault_health(organization: OrganizationId, vault: VaultId, state: &str) {
+pub fn set_vault_health(_organization: OrganizationId, _vault: VaultId, state: &str) {
     let value = match state {
         "healthy" => 0.0,
         "diverged" => 1.0,
         "recovering" => 2.0,
         _ => -1.0,
     };
-    gauge!(
-        VAULT_HEALTH,
-        "organization_id" => organization.value().to_string(),
-        "vault_id" => vault.value().to_string(),
-        "state" => state.to_string()
-    )
-    .set(value);
+    gated!(VAULT_HEALTH, &[(fields::STATE, state)], {
+        gauge!(VAULT_HEALTH, fields::STATE => state.to_string()).set(value);
+    });
 }
 
 // =============================================================================
@@ -507,8 +437,10 @@ pub fn set_vault_health(organization: OrganizationId, vault: VaultId, state: &st
 #[inline]
 pub fn record_learner_refresh(success: bool, latency_secs: f64) {
     let status = if success { "success" } else { "error" };
-    counter!(LEARNER_REFRESH_TOTAL, "status" => status).increment(1);
-    histogram!(LEARNER_REFRESH_LATENCY, "status" => status).record(latency_secs);
+    gated!(LEARNER_REFRESH_TOTAL, &[(fields::STATUS, status)], {
+        counter!(LEARNER_REFRESH_TOTAL, fields::STATUS => status).increment(1);
+        histogram!(LEARNER_REFRESH_LATENCY, fields::STATUS => status).record(latency_secs);
+    });
 }
 
 /// Records a learner cache staleness event.
@@ -523,72 +455,24 @@ pub fn record_learner_cache_stale() {
 /// Records a voter connection error during learner refresh.
 #[inline]
 pub fn record_learner_voter_error(voter_id: u64, error_type: &str) {
-    counter!(
+    let voter_id_str = voter_id.to_string();
+    gated!(
         LEARNER_VOTER_ERRORS,
-        "voter_id" => voter_id.to_string(),
-        "error_type" => error_type.to_string()
-    )
-    .increment(1);
-}
-
-// =============================================================================
-// Serialization Metrics
-// =============================================================================
-
-// Metric names for serialization timing
-const SERIALIZATION_PROTO_DECODE: &str = "ledger_serialization_proto_decode_seconds";
-const SERIALIZATION_POSTCARD_ENCODE: &str = "ledger_serialization_postcard_encode_seconds";
-const SERIALIZATION_POSTCARD_DECODE: &str = "ledger_serialization_postcard_decode_seconds";
-const SERIALIZATION_BYTES: &str = "ledger_serialization_bytes";
-
-/// Records proto decoding latency (gRPC request → internal types).
-///
-/// This measures the time to convert protobuf messages to internal Rust types,
-/// which is part of the write path hot loop.
-#[inline]
-pub fn record_proto_decode(latency_secs: f64, operation: &str) {
-    histogram!(SERIALIZATION_PROTO_DECODE, "operation" => operation.to_string())
-        .record(latency_secs);
-}
-
-/// Records postcard encoding latency (internal types → Raft log).
-///
-/// This measures serialization time when appending entries to the Raft log.
-/// Internal types are postcard-serialized for efficient storage.
-#[inline]
-pub fn record_postcard_encode(latency_secs: f64, entry_type: &str) {
-    histogram!(SERIALIZATION_POSTCARD_ENCODE, "entry_type" => entry_type.to_string())
-        .record(latency_secs);
-}
-
-/// Records postcard decoding latency (Raft log → internal types).
-///
-/// This measures deserialization time when reading entries from the Raft log,
-/// used during log replay and snapshot restoration.
-#[inline]
-pub fn record_postcard_decode(latency_secs: f64, entry_type: &str) {
-    histogram!(SERIALIZATION_POSTCARD_DECODE, "entry_type" => entry_type.to_string())
-        .record(latency_secs);
-}
-
-/// Records serialization size in bytes.
-///
-/// Useful for correlating latency with payload size and detecting
-/// unexpectedly large serialized payloads.
-#[inline]
-pub fn record_serialization_bytes(bytes: usize, direction: &str, entry_type: &str) {
-    histogram!(
-        SERIALIZATION_BYTES,
-        "direction" => direction.to_string(),
-        "entry_type" => entry_type.to_string()
-    )
-    .record(bytes as f64);
+        &[(fields::VOTER_ID, &voter_id_str), (fields::ERROR_TYPE, error_type)],
+        {
+            counter!(
+                LEARNER_VOTER_ERRORS,
+                fields::VOTER_ID => voter_id_str.clone(),
+                fields::ERROR_TYPE => error_type.to_string()
+            )
+            .increment(1);
+        }
+    );
 }
 
 // B+ tree compaction metrics
 const BTREE_COMPACTION_RUNS_TOTAL: &str = "ledger_btree_compaction_runs_total";
-const BTREE_COMPACTION_PAGES_MERGED: &str = "ledger_btree_compaction_pages_merged";
-const BTREE_COMPACTION_PAGES_FREED: &str = "ledger_btree_compaction_pages_freed";
+const BTREE_OPERATIONS: &str = "ledger_btree_operations_total";
 
 /// Records a B+ tree compaction run.
 ///
@@ -596,8 +480,20 @@ const BTREE_COMPACTION_PAGES_FREED: &str = "ledger_btree_compaction_pages_freed"
 #[inline]
 pub fn record_btree_compaction(pages_merged: u64, pages_freed: u64) {
     counter!(BTREE_COMPACTION_RUNS_TOTAL).increment(1);
-    counter!(BTREE_COMPACTION_PAGES_MERGED).increment(pages_merged);
-    counter!(BTREE_COMPACTION_PAGES_FREED).increment(pages_freed);
+    counter!(BTREE_OPERATIONS, fields::KIND => "merge").increment(pages_merged);
+    counter!(BTREE_OPERATIONS, fields::KIND => "free").increment(pages_freed);
+}
+
+/// Records a B+ tree operation.
+///
+/// `kind` must be one of `"merge"`, `"free"`, or `"split"`.
+///
+/// `ledger_btree_operations_total{kind}`.
+#[inline]
+pub fn record_btree_operation(kind: &str) {
+    gated!(BTREE_OPERATIONS, &[(fields::KIND, kind)], {
+        counter!(BTREE_OPERATIONS, fields::KIND => kind.to_string()).increment(1);
+    });
 }
 
 // ─── Post-Erasure Compaction ──────────────────────────────────
@@ -610,37 +506,42 @@ const POST_ERASURE_COMPACTION_TRIGGERED_TOTAL: &str =
 
 /// Records a post-erasure compaction snapshot trigger.
 pub fn record_post_erasure_compaction_triggered(region: &str) {
-    counter!(
-        POST_ERASURE_COMPACTION_TRIGGERED_TOTAL,
-        "region" => region.to_string(),
-    )
-    .increment(1);
+    gated!(POST_ERASURE_COMPACTION_TRIGGERED_TOTAL, &[(fields::REGION, region)], {
+        counter!(
+            POST_ERASURE_COMPACTION_TRIGGERED_TOTAL,
+            fields::REGION => region.to_string(),
+        )
+        .increment(1);
+    });
 }
 
 // ─── Organization Purge ──────────────────────────────────────
 
-/// REGIONAL purge step failures.
-const ORG_PURGE_REGIONAL_FAILURES_TOTAL: &str = "ledger_org_purge_regional_failures_total";
+/// Organization purge failures (counter).
+///
+/// Labels: `tier` = global | regional, `exhausted` = true | false.
+const ORG_PURGE_FAILURES_TOTAL: &str = "ledger_org_purge_failures_total";
 
-/// GLOBAL purge step failures.
-const ORG_PURGE_GLOBAL_FAILURES_TOTAL: &str = "ledger_org_purge_global_failures_total";
-
-/// Organizations that failed all retry attempts.
-const ORG_PURGE_RETRY_EXHAUSTED_TOTAL: &str = "ledger_org_purge_retry_exhausted_total";
-
-/// Records a REGIONAL purge step failure.
-pub fn record_org_purge_regional_failure(region: &str) {
-    counter!(ORG_PURGE_REGIONAL_FAILURES_TOTAL, "region" => region.to_string()).increment(1);
-}
-
-/// Records a GLOBAL purge step failure.
-pub fn record_org_purge_global_failure() {
-    counter!(ORG_PURGE_GLOBAL_FAILURES_TOTAL).increment(1);
-}
-
-/// Records an organization whose purge retries were exhausted.
-pub fn record_org_purge_retry_exhausted() {
-    counter!(ORG_PURGE_RETRY_EXHAUSTED_TOTAL).increment(1);
+/// Records an organization purge failure.
+///
+/// `tier` must be `"global"` or `"regional"`.
+/// `exhausted` indicates whether all retry attempts were consumed.
+///
+/// `ledger_org_purge_failures_total{tier, exhausted}`.
+pub fn record_org_purge_failure(tier: &str, exhausted: bool) {
+    let exhausted_str = if exhausted { "true" } else { "false" };
+    gated!(
+        ORG_PURGE_FAILURES_TOTAL,
+        &[(fields::TIER, tier), (fields::EXHAUSTED, exhausted_str)],
+        {
+            counter!(
+                ORG_PURGE_FAILURES_TOTAL,
+                fields::TIER => tier.to_string(),
+                fields::EXHAUSTED => exhausted_str
+            )
+            .increment(1);
+        }
+    );
 }
 
 // ─── Hot Key Detection ────────────────────────────────────────
@@ -651,18 +552,11 @@ const HOT_KEY_DETECTED_TOTAL: &str = "ledger_hot_key_detected_total";
 /// Records a hot key detection event.
 ///
 /// Called whenever a key's access rate exceeds the configured threshold.
-/// Labels include vault_id and a hash of the key (not the key itself,
-/// to avoid high-cardinality label explosion).
+/// The vault, key, and rate are captured in the wide event; this counter
+/// is label-free to avoid cardinality explosion.
 #[inline]
-pub fn record_hot_key_detected(vault: VaultId, key: &str, ops_per_sec: f64) {
-    let key_hash = format!("{:016x}", seahash::hash(key.as_bytes()));
-    counter!(
-        HOT_KEY_DETECTED_TOTAL,
-        "vault_id" => vault.value().to_string(),
-        "key_hash" => key_hash,
-        "ops_per_sec" => format!("{:.0}", ops_per_sec)
-    )
-    .increment(1);
+pub fn record_hot_key_detected(_vault: VaultId, _key: &str, _ops_per_sec: f64) {
+    counter!(HOT_KEY_DETECTED_TOTAL).increment(1);
 }
 
 // ─── SLI/SLO Metrics ──────────────────────────────────────────
@@ -686,7 +580,9 @@ const LEADER_ELECTIONS_TOTAL: &str = "ledger_leader_elections_total";
 /// The `region` label identifies which region's batch writer is being measured.
 #[inline]
 pub fn set_batch_queue_depth(depth: usize, region: &str) {
-    gauge!(BATCH_QUEUE_DEPTH, "region" => region.to_string()).set(depth as f64);
+    gated!(BATCH_QUEUE_DEPTH, &[(fields::REGION, region)], {
+        gauge!(BATCH_QUEUE_DEPTH, fields::REGION => region.to_string()).set(depth as f64);
+    });
 }
 
 /// Sets the current rate limiter queue depth.
@@ -696,7 +592,9 @@ pub fn set_batch_queue_depth(depth: usize, region: &str) {
 /// The `region` label identifies which region's rate limiter is being measured.
 #[inline]
 pub fn set_rate_limit_queue_depth(depth: u64, region: &str) {
-    gauge!(RATE_LIMIT_QUEUE_DEPTH, "region" => region.to_string()).set(depth as f64);
+    gated!(RATE_LIMIT_QUEUE_DEPTH, &[(fields::REGION, region)], {
+        gauge!(RATE_LIMIT_QUEUE_DEPTH, fields::REGION => region.to_string()).set(depth as f64);
+    });
 }
 
 /// Sets the cluster quorum status.
@@ -740,8 +638,7 @@ const PAGE_CACHE_SIZE: &str = "ledger_page_cache_size";
 /// B-tree depth gauge (per-table label).
 const BTREE_DEPTH: &str = "ledger_btree_depth";
 
-/// B-tree page splits counter.
-const BTREE_PAGE_SPLITS_TOTAL: &str = "ledger_btree_page_splits_total";
+// BTREE_PAGE_SPLITS_TOTAL removed — splits now emitted via BTREE_OPERATIONS with kind="split".
 
 /// Compaction lag blocks gauge (free pages as a proxy for reclaimable space).
 const COMPACTION_LAG_BLOCKS: &str = "ledger_compaction_lag_blocks";
@@ -755,10 +652,12 @@ const SNAPSHOT_DISK_BYTES: &str = "ledger_snapshot_disk_bytes";
 /// The `region` label identifies which region's storage is being measured.
 #[inline]
 pub fn set_disk_bytes(total: u64, free: u64, region: &str) {
-    gauge!(DISK_BYTES_TOTAL, "region" => region.to_string()).set(total as f64);
-    gauge!(DISK_BYTES_FREE, "region" => region.to_string()).set(free as f64);
-    gauge!(DISK_BYTES_USED, "region" => region.to_string())
-        .set((total.saturating_sub(free)) as f64);
+    gated!(DISK_BYTES_TOTAL, &[(fields::REGION, region)], {
+        gauge!(DISK_BYTES_TOTAL, fields::REGION => region.to_string()).set(total as f64);
+        gauge!(DISK_BYTES_FREE, fields::REGION => region.to_string()).set(free as f64);
+        gauge!(DISK_BYTES_USED, fields::REGION => region.to_string())
+            .set((total.saturating_sub(free)) as f64);
+    });
 }
 
 /// Sets page cache counters.
@@ -767,9 +666,11 @@ pub fn set_disk_bytes(total: u64, free: u64, region: &str) {
 /// The `region` label identifies which region's database is being measured.
 #[inline]
 pub fn set_page_cache_metrics(hits: u64, misses: u64, size: usize, region: &str) {
-    counter!(PAGE_CACHE_HITS_TOTAL, "region" => region.to_string()).absolute(hits);
-    counter!(PAGE_CACHE_MISSES_TOTAL, "region" => region.to_string()).absolute(misses);
-    gauge!(PAGE_CACHE_SIZE, "region" => region.to_string()).set(size as f64);
+    gated!(PAGE_CACHE_HITS_TOTAL, &[(fields::REGION, region)], {
+        counter!(PAGE_CACHE_HITS_TOTAL, fields::REGION => region.to_string()).absolute(hits);
+        counter!(PAGE_CACHE_MISSES_TOTAL, fields::REGION => region.to_string()).absolute(misses);
+        gauge!(PAGE_CACHE_SIZE, fields::REGION => region.to_string()).set(size as f64);
+    });
 }
 
 /// Sets B-tree depth for a given table.
@@ -777,16 +678,22 @@ pub fn set_page_cache_metrics(hits: u64, misses: u64, size: usize, region: &str)
 /// The `region` label identifies which region's database is being measured.
 #[inline]
 pub fn set_btree_depth(table: &str, depth: u32, region: &str) {
-    gauge!(BTREE_DEPTH, "table" => table.to_string(), "region" => region.to_string())
-        .set(f64::from(depth));
+    gated!(BTREE_DEPTH, &[(fields::TABLE, table), (fields::REGION, region)], {
+        gauge!(BTREE_DEPTH, fields::TABLE => table.to_string(), fields::REGION => region.to_string())
+            .set(f64::from(depth));
+    });
 }
 
-/// Sets B-tree page splits total.
+/// Sets B-tree page splits total (cumulative since startup).
 ///
+/// Emits into `ledger_btree_operations_total{kind="split"}`.
 /// The `region` label identifies which region's database is being measured.
 #[inline]
 pub fn set_btree_page_splits(total: u64, region: &str) {
-    counter!(BTREE_PAGE_SPLITS_TOTAL, "region" => region.to_string()).absolute(total);
+    gated!(BTREE_OPERATIONS, &[(fields::KIND, "split"), (fields::REGION, region)], {
+        counter!(BTREE_OPERATIONS, fields::KIND => "split", fields::REGION => region.to_string())
+            .absolute(total);
+    });
 }
 
 /// Sets compaction lag blocks gauge.
@@ -796,7 +703,9 @@ pub fn set_btree_page_splits(total: u64, region: &str) {
 /// The `region` label identifies which region's database is being measured.
 #[inline]
 pub fn set_compaction_lag_blocks(blocks: usize, region: &str) {
-    gauge!(COMPACTION_LAG_BLOCKS, "region" => region.to_string()).set(blocks as f64);
+    gated!(COMPACTION_LAG_BLOCKS, &[(fields::REGION, region)], {
+        gauge!(COMPACTION_LAG_BLOCKS, fields::REGION => region.to_string()).set(blocks as f64);
+    });
 }
 
 /// Sets snapshot total disk bytes.
@@ -805,7 +714,9 @@ pub fn set_compaction_lag_blocks(blocks: usize, region: &str) {
 /// The `region` label identifies which region's snapshots are being measured.
 #[inline]
 pub fn set_snapshot_disk_bytes(bytes: u64, region: &str) {
-    gauge!(SNAPSHOT_DISK_BYTES, "region" => region.to_string()).set(bytes as f64);
+    gated!(SNAPSHOT_DISK_BYTES, &[(fields::REGION, region)], {
+        gauge!(SNAPSHOT_DISK_BYTES, fields::REGION => region.to_string()).set(bytes as f64);
+    });
 }
 
 /// SLI-aligned histogram bucket boundaries (in seconds).
@@ -871,13 +782,9 @@ pub fn record_integrity_pages_checked(count: u64) {
 /// B-tree invariant violations.
 #[inline]
 pub fn record_integrity_errors(error_type: &str, count: u64) {
-    counter!(INTEGRITY_ERRORS, "error_type" => error_type.to_string()).increment(count);
-}
-
-/// Records the duration of a scrub cycle in seconds.
-#[inline]
-pub fn record_integrity_scan_duration(duration_secs: f64) {
-    histogram!(INTEGRITY_SCAN_DURATION).record(duration_secs);
+    gated!(INTEGRITY_ERRORS, &[(fields::ERROR_TYPE, error_type)], {
+        counter!(INTEGRITY_ERRORS, fields::ERROR_TYPE => error_type.to_string()).increment(count);
+    });
 }
 
 // ─── Organization Resource Accounting Metrics ────────────────
@@ -892,43 +799,41 @@ const ORGANIZATION_OPERATIONS_TOTAL: &str = "ledger_organization_operations_tota
 const ORGANIZATION_LATENCY_SECONDS: &str = "ledger_organization_latency_seconds";
 
 /// Sets the current cumulative storage bytes for an organization.
-///
-/// Cardinality is bounded by the number of organizations, which is
-/// operator-controlled (typically < 100 in production).
 #[inline]
-pub fn set_organization_storage_bytes(organization: OrganizationId, bytes: u64) {
-    gauge!(ORGANIZATION_STORAGE_BYTES, "organization_id" => organization.value().to_string())
-        .set(bytes as f64);
+pub fn set_organization_storage_bytes(_organization: OrganizationId, bytes: u64) {
+    gauge!(ORGANIZATION_STORAGE_BYTES).set(bytes as f64);
 }
 
 /// Records an organization-level operation (read, write, or admin).
 ///
-/// Increments `ledger_organization_operations_total{organization_id, operation}`.
+/// Increments `ledger_organization_operations_total{operation}`.
 #[inline]
-pub fn record_organization_operation(organization: OrganizationId, operation: &str) {
-    counter!(
-        ORGANIZATION_OPERATIONS_TOTAL,
-        "organization_id" => organization.value().to_string(),
-        "operation" => operation.to_string()
-    )
-    .increment(1);
+pub fn record_organization_operation(_organization: OrganizationId, operation: &str) {
+    gated!(ORGANIZATION_OPERATIONS_TOTAL, &[(fields::OPERATION, operation)], {
+        counter!(
+            ORGANIZATION_OPERATIONS_TOTAL,
+            fields::OPERATION => operation.to_string()
+        )
+        .increment(1);
+    });
 }
 
 /// Records per-organization operation latency.
 ///
-/// Records into `ledger_organization_latency_seconds{organization_id, operation}`.
+/// Records into `ledger_organization_latency_seconds{operation}`.
 #[inline]
 pub fn record_organization_latency(
-    organization: OrganizationId,
+    _organization: OrganizationId,
     operation: &str,
     latency_secs: f64,
 ) {
-    histogram!(
-        ORGANIZATION_LATENCY_SECONDS,
-        "organization_id" => organization.value().to_string(),
-        "operation" => operation.to_string()
-    )
-    .record(latency_secs);
+    gated!(ORGANIZATION_LATENCY_SECONDS, &[(fields::OPERATION, operation)], {
+        histogram!(
+            ORGANIZATION_LATENCY_SECONDS,
+            fields::OPERATION => operation.to_string()
+        )
+        .record(latency_secs);
+    });
 }
 
 // ─── Background Job Observability Metrics ────────────────────
@@ -958,11 +863,13 @@ const BACKGROUND_JOB_ITEMS_PROCESSED_TOTAL: &str = "ledger_background_job_items_
 /// Records the duration of a background job cycle.
 #[inline]
 pub fn record_background_job_duration(job: &str, duration_secs: f64) {
-    histogram!(
-        BACKGROUND_JOB_DURATION_SECONDS,
-        "job" => job.to_string()
-    )
-    .record(duration_secs);
+    gated!(BACKGROUND_JOB_DURATION_SECONDS, &[(fields::JOB, job)], {
+        histogram!(
+            BACKGROUND_JOB_DURATION_SECONDS,
+            fields::JOB => job.to_string()
+        )
+        .record(duration_secs);
+    });
 }
 
 /// Records a completed background job cycle.
@@ -970,43 +877,26 @@ pub fn record_background_job_duration(job: &str, duration_secs: f64) {
 /// `result` must be `"success"` or `"failure"` — bounded cardinality.
 #[inline]
 pub fn record_background_job_run(job: &str, result: &str) {
-    counter!(
-        BACKGROUND_JOB_RUNS_TOTAL,
-        "job" => job.to_string(),
-        "result" => result.to_string()
-    )
-    .increment(1);
+    gated!(BACKGROUND_JOB_RUNS_TOTAL, &[(fields::JOB, job), (fields::RESULT, result)], {
+        counter!(
+            BACKGROUND_JOB_RUNS_TOTAL,
+            fields::JOB => job.to_string(),
+            fields::RESULT => result.to_string()
+        )
+        .increment(1);
+    });
 }
 
 /// Records items processed by a background job cycle.
 #[inline]
 pub fn record_background_job_items(job: &str, count: u64) {
-    counter!(
-        BACKGROUND_JOB_ITEMS_PROCESSED_TOTAL,
-        "job" => job.to_string()
-    )
-    .increment(count);
-}
-
-// ─── Saga PII Cache Metrics ───────────────────────────────────
-
-/// In-memory user PII entries held by the saga orchestrator (gauge).
-const SAGA_PII_CACHE_SIZE: &str = "ledger_saga_pii_cache_size";
-
-/// In-memory organization PII entries held by the saga orchestrator (gauge).
-const SAGA_ORG_PII_CACHE_SIZE: &str = "ledger_saga_org_pii_cache_size";
-
-/// In-memory crypto material entries held by the saga orchestrator (gauge).
-const SAGA_CRYPTO_CACHE_SIZE: &str = "ledger_saga_crypto_cache_size";
-
-/// Records the current size of each in-memory PII cache in the saga
-/// orchestrator. Called at the end of each `run_cycle()` for operational
-/// visibility into memory-resident PII.
-#[inline]
-pub fn record_saga_pii_cache_sizes(pii: usize, org_pii: usize, crypto: usize) {
-    gauge!(SAGA_PII_CACHE_SIZE).set(pii as f64);
-    gauge!(SAGA_ORG_PII_CACHE_SIZE).set(org_pii as f64);
-    gauge!(SAGA_CRYPTO_CACHE_SIZE).set(crypto as f64);
+    gated!(BACKGROUND_JOB_ITEMS_PROCESSED_TOTAL, &[(fields::JOB, job)], {
+        counter!(
+            BACKGROUND_JOB_ITEMS_PROCESSED_TOTAL,
+            fields::JOB => job.to_string()
+        )
+        .increment(count);
+    });
 }
 
 // ─── DEK Re-Wrapping Metrics ──────────────────────────────────
@@ -1016,9 +906,6 @@ const REWRAP_PAGES_TOTAL: &str = "ledger_rewrap_pages_total";
 
 /// Remaining pages to process during re-wrapping (gauge).
 const REWRAP_PAGES_REMAINING: &str = "ledger_rewrap_pages_remaining";
-
-/// Duration of a single re-wrapping batch in seconds (histogram).
-const REWRAP_DURATION_SECONDS: &str = "ledger_rewrap_duration_seconds";
 
 /// Records pages re-wrapped during a batch cycle.
 #[inline]
@@ -1030,12 +917,6 @@ pub fn record_rewrap_pages(count: u64) {
 #[inline]
 pub fn record_rewrap_remaining(remaining: u64) {
     gauge!(REWRAP_PAGES_REMAINING).set(remaining as f64);
-}
-
-/// Records re-wrapping batch duration.
-#[inline]
-pub fn record_rewrap_duration(duration_secs: f64) {
-    histogram!(REWRAP_DURATION_SECONDS).record(duration_secs);
 }
 
 // ─── Metric Cardinality Budget Metrics ────────────────────────
@@ -1052,7 +933,7 @@ const CARDINALITY_OVERFLOW_TOTAL: &str = "ledger_metrics_cardinality_overflow_to
 pub fn record_cardinality_overflow(metric_name: &str) {
     counter!(
         CARDINALITY_OVERFLOW_TOTAL,
-        "metric_name" => metric_name.to_string()
+        fields::METRIC_NAME => metric_name.to_string()
     )
     .increment(1);
 }
@@ -1082,32 +963,42 @@ const EVENTS_INGEST_DURATION_SECONDS: &str = "ledger_events_ingest_duration_seco
 /// Called by `IngestEvents` handler after processing a batch.
 #[inline]
 pub fn record_events_ingest(source_service: &str, outcome: &str, count: u32) {
-    counter!(
+    gated!(
         EVENTS_INGEST_TOTAL,
-        "source_service" => source_service.to_string(),
-        "outcome" => outcome.to_string()
-    )
-    .increment(u64::from(count));
+        &[(fields::SOURCE_SERVICE, source_service), (fields::OUTCOME, outcome)],
+        {
+            counter!(
+                EVENTS_INGEST_TOTAL,
+                fields::SOURCE_SERVICE => source_service.to_string(),
+                fields::OUTCOME => outcome.to_string()
+            )
+            .increment(u64::from(count));
+        }
+    );
 }
 
 /// Records the batch size of an ingestion request.
 #[inline]
 pub fn record_events_ingest_batch_size(source_service: &str, size: usize) {
-    histogram!(
-        EVENTS_INGEST_BATCH_SIZE,
-        "source_service" => source_service.to_string()
-    )
-    .record(size as f64);
+    gated!(EVENTS_INGEST_BATCH_SIZE, &[(fields::SOURCE_SERVICE, source_service)], {
+        histogram!(
+            EVENTS_INGEST_BATCH_SIZE,
+            fields::SOURCE_SERVICE => source_service.to_string()
+        )
+        .record(size as f64);
+    });
 }
 
 /// Records an ingestion rate limit rejection.
 #[inline]
 pub fn record_events_ingest_rate_limited(source_service: &str) {
-    counter!(
-        EVENTS_INGEST_RATE_LIMITED_TOTAL,
-        "source_service" => source_service.to_string()
-    )
-    .increment(1);
+    gated!(EVENTS_INGEST_RATE_LIMITED_TOTAL, &[(fields::SOURCE_SERVICE, source_service)], {
+        counter!(
+            EVENTS_INGEST_RATE_LIMITED_TOTAL,
+            fields::SOURCE_SERVICE => source_service.to_string()
+        )
+        .increment(1);
+    });
 }
 
 /// Records the duration of an ingestion request.
@@ -1131,23 +1022,19 @@ const EVENT_WRITES_TOTAL: &str = "ledger_event_writes_total";
 /// `scope` (system | organization), `action` (snake_case action string).
 #[inline]
 pub fn record_event_write(emission: &str, scope: &str, action: &str) {
-    counter!(
+    gated!(
         EVENT_WRITES_TOTAL,
-        "emission" => emission.to_string(),
-        "scope" => scope.to_string(),
-        "action" => action.to_string()
-    )
-    .increment(1);
-}
-
-/// Creates a timer for write operations.
-pub fn write_timer() -> Timer {
-    Timer::new(|secs| record_write(true, secs))
-}
-
-/// Creates a timer for read operations.
-pub fn read_timer() -> Timer {
-    Timer::new(|secs| record_read(true, secs))
+        &[(fields::EMISSION, emission), (fields::SCOPE, scope), (fields::ACTION, action)],
+        {
+            counter!(
+                EVENT_WRITES_TOTAL,
+                fields::EMISSION => emission.to_string(),
+                fields::SCOPE => scope.to_string(),
+                fields::ACTION => action.to_string()
+            )
+            .increment(1);
+        }
+    );
 }
 
 /// Creates a timer for Raft apply operations.
@@ -1156,17 +1043,7 @@ pub fn raft_apply_timer() -> Timer {
 }
 
 // ─── Events GC Metrics ──────────────────────────────────────
-
-/// Total event entries deleted by garbage collection (counter).
-const EVENTS_GC_ENTRIES_DELETED_TOTAL: &str = "ledger_events_gc_entries_deleted_total";
-
-/// Duration of each GC cycle in seconds (histogram).
-const EVENTS_GC_CYCLE_DURATION_SECONDS: &str = "ledger_events_gc_cycle_duration_seconds";
-
-/// Total GC cycles executed (counter).
-///
-/// Labels: `result` = success | failure.
-const EVENTS_GC_CYCLES_TOTAL: &str = "ledger_events_gc_cycles_total";
+// Covered by ledger_background_job_* family (JobContext). No standalone constants needed.
 
 // ---------------------------------------------------------------------------
 // Leader Transfer
@@ -1187,37 +1064,6 @@ const LEADER_TRANSFER_LATENCY: &str = "ledger_leader_transfer_latency_seconds";
 /// Labels: `result` = accepted | rejected.
 const TRIGGER_ELECTIONS_TOTAL: &str = "ledger_trigger_elections_total";
 
-/// Number of nodes in each region (gauge).
-///
-/// Labels: `region` = region identifier string.
-/// Emitted when membership changes. Protected regions emit a warning when
-/// the count drops below
-/// [`MIN_NODES_PER_PROTECTED_REGION`](inferadb_ledger_state::system::MIN_NODES_PER_PROTECTED_REGION)
-/// + 1.
-const REGION_NODE_COUNT: &str = "ledger_region_node_count";
-
-/// Records the number of expired event entries deleted in a GC cycle.
-#[inline]
-pub fn record_events_gc_entries_deleted(count: u64) {
-    counter!(EVENTS_GC_ENTRIES_DELETED_TOTAL).increment(count);
-}
-
-/// Records the duration of an events GC cycle.
-#[inline]
-pub fn record_events_gc_cycle_duration(duration_secs: f64) {
-    histogram!(EVENTS_GC_CYCLE_DURATION_SECONDS).record(duration_secs);
-}
-
-/// Records a completed events GC cycle.
-#[inline]
-pub fn record_events_gc_cycle(result: &str) {
-    counter!(
-        EVENTS_GC_CYCLES_TOTAL,
-        "result" => result.to_string()
-    )
-    .increment(1);
-}
-
 // ---------------------------------------------------------------------------
 // Leader Transfer
 // ---------------------------------------------------------------------------
@@ -1226,107 +1072,46 @@ pub fn record_events_gc_cycle(result: &str) {
 #[inline]
 pub fn record_leader_transfer(success: bool, latency_secs: f64) {
     let status = if success { "success" } else { "failure" };
-    counter!(LEADER_TRANSFERS_TOTAL, "status" => status).increment(1);
-    histogram!(LEADER_TRANSFER_LATENCY, "status" => status).record(latency_secs);
+    gated!(LEADER_TRANSFERS_TOTAL, &[(fields::STATUS, status)], {
+        counter!(LEADER_TRANSFERS_TOTAL, fields::STATUS => status).increment(1);
+        histogram!(LEADER_TRANSFER_LATENCY, fields::STATUS => status).record(latency_secs);
+    });
 }
 
 /// Records a trigger election request received by this node.
 #[inline]
 pub fn record_trigger_election(accepted: bool) {
     let result = if accepted { "accepted" } else { "rejected" };
-    counter!(TRIGGER_ELECTIONS_TOTAL, "result" => result).increment(1);
-}
-
-/// Records the current node count for a region and emits a warning if a
-/// protected region is critically low (below `min_threshold + 1`).
-#[inline]
-pub fn record_region_node_count(region: &str, count: usize, is_protected: bool) {
-    gauge!(REGION_NODE_COUNT, "region" => region.to_owned()).set(count as f64);
-    if is_protected && count < MIN_NODES_PER_PROTECTED_REGION + 1 {
-        tracing::warn!(
-            region,
-            count,
-            min_required = MIN_NODES_PER_PROTECTED_REGION,
-            "Protected region node count critically low"
-        );
-    }
+    gated!(TRIGGER_ELECTIONS_TOTAL, &[(fields::RESULT, result)], {
+        counter!(TRIGGER_ELECTIONS_TOTAL, fields::RESULT => result).increment(1);
+    });
 }
 
 // ---------------------------------------------------------------------------
 // Onboarding
 // ---------------------------------------------------------------------------
 
-/// Total email verification initiations (counter).
+/// Total onboarding requests (counter).
 ///
-/// Labels: `status` = success | failure.
-const ONBOARDING_INITIATION_TOTAL: &str = "ledger_onboarding_initiation_total";
+/// Labels: `stage` = initiate | verify | register, `status` = success | failure.
+const ONBOARDING_REQUESTS_TOTAL: &str = "ledger_onboarding_requests_total";
 
-/// Total email verification code attempts (counter).
+/// Records an onboarding request by stage and status.
 ///
-/// Labels: `status` = success | failure.
-const ONBOARDING_VERIFICATION_TOTAL: &str = "ledger_onboarding_verification_total";
-
-/// Total registration completions (counter).
+/// `stage` must be one of `"initiate"`, `"verify"`, or `"register"`.
+/// `status` must be one of `"success"` or `"failure"`.
 ///
-/// Labels: `status` = success | failure.
-const ONBOARDING_REGISTRATION_TOTAL: &str = "ledger_onboarding_registration_total";
-
-/// Records an email verification initiation attempt.
+/// `ledger_onboarding_requests_total{stage, status}`.
 #[inline]
-pub fn record_onboarding_initiation(status: &str) {
-    counter!(
-        ONBOARDING_INITIATION_TOTAL,
-        "status" => status.to_string()
-    )
-    .increment(1);
-}
-
-/// Records an email verification code attempt.
-#[inline]
-pub fn record_onboarding_verification(status: &str) {
-    counter!(
-        ONBOARDING_VERIFICATION_TOTAL,
-        "status" => status.to_string()
-    )
-    .increment(1);
-}
-
-/// Records a registration completion attempt.
-#[inline]
-pub fn record_onboarding_registration(status: &str) {
-    counter!(
-        ONBOARDING_REGISTRATION_TOTAL,
-        "status" => status.to_string()
-    )
-    .increment(1);
-}
-
-/// Total expired onboarding verification codes cleaned up by background GC (counter).
-const ONBOARDING_VERIFICATION_CODES_GC_TOTAL: &str =
-    "ledger_onboarding_verification_codes_gc_total";
-
-/// Total expired onboarding accounts cleaned up by background GC (counter).
-const ONBOARDING_ACCOUNTS_GC_TOTAL: &str = "ledger_onboarding_accounts_gc_total";
-
-/// Records expired onboarding verification codes deleted.
-#[inline]
-pub fn record_onboarding_gc_codes(count: u64) {
-    counter!(ONBOARDING_VERIFICATION_CODES_GC_TOTAL).increment(count);
-}
-
-/// Records expired onboarding accounts deleted.
-#[inline]
-pub fn record_onboarding_gc_accounts(count: u64) {
-    counter!(ONBOARDING_ACCOUNTS_GC_TOTAL).increment(count);
-}
-
-/// Total expired TOTP challenges cleaned up by background GC (counter).
-const TOTP_CHALLENGES_GC_TOTAL: &str = "ledger_totp_challenges_gc_total";
-
-/// Records expired TOTP challenges deleted.
-#[inline]
-pub fn record_totp_gc_challenges(count: u64) {
-    counter!(TOTP_CHALLENGES_GC_TOTAL).increment(count);
+pub fn record_onboarding_request(stage: &str, status: &str) {
+    gated!(ONBOARDING_REQUESTS_TOTAL, &[(fields::STAGE, stage), (fields::STATUS, status)], {
+        counter!(
+            ONBOARDING_REQUESTS_TOTAL,
+            fields::STAGE => stage.to_string(),
+            fields::STATUS => status.to_string()
+        )
+        .increment(1);
+    });
 }
 
 // =============================================================================
@@ -1337,7 +1122,11 @@ pub fn record_totp_gc_challenges(count: u64) {
 /// drain task in `consensus_transport::peer_sender`.
 #[inline]
 pub fn record_peer_send_latency(peer: u64, latency_secs: f64) {
-    histogram!("ledger_peer_send_latency_seconds", "peer" => peer.to_string()).record(latency_secs);
+    let peer_str = peer.to_string();
+    gated!("ledger_peer_send_latency_seconds", &[(fields::PEER, &peer_str)], {
+        histogram!("ledger_peer_send_latency_seconds", fields::PEER => peer_str)
+            .record(latency_secs);
+    });
 }
 
 /// Records a dropped outbound consensus message.
@@ -1347,12 +1136,19 @@ pub fn record_peer_send_latency(peer: u64, latency_secs: f64) {
 /// - `"task_shutdown"` — peer was removed while messages were still queued.
 #[inline]
 pub fn record_peer_send_drop(peer: u64, reason: &'static str) {
-    counter!(
+    let peer_str = peer.to_string();
+    gated!(
         "ledger_peer_send_drops_total",
-        "peer" => peer.to_string(),
-        "reason" => reason,
-    )
-    .increment(1);
+        &[(fields::PEER, &peer_str), (fields::REASON, reason)],
+        {
+            counter!(
+                "ledger_peer_send_drops_total",
+                fields::PEER => peer_str,
+                fields::REASON => reason,
+            )
+            .increment(1);
+        }
+    );
 }
 
 /// Sets the per-peer send queue depth gauge.
@@ -1360,7 +1156,10 @@ pub fn record_peer_send_drop(peer: u64, reason: &'static str) {
 pub fn record_peer_send_queue_depth(peer: u64, depth: usize) {
     #[allow(clippy::cast_precision_loss)]
     let depth_f64 = depth as f64;
-    gauge!("ledger_peer_send_queue_depth", "peer" => peer.to_string()).set(depth_f64);
+    let peer_str = peer.to_string();
+    gated!("ledger_peer_send_queue_depth", &[(fields::PEER, &peer_str)], {
+        gauge!("ledger_peer_send_queue_depth", fields::PEER => peer_str).set(depth_f64);
+    });
 }
 
 /// Records a consensus-stream reconnect attempt for a peer. Incremented
@@ -1369,7 +1168,10 @@ pub fn record_peer_send_queue_depth(peer: u64, depth: usize) {
 /// previously healthy stream broke and we are retrying.
 #[inline]
 pub fn record_peer_stream_reconnect(peer: u64) {
-    counter!("ledger_peer_stream_reconnects_total", "peer" => peer.to_string()).increment(1);
+    let peer_str = peer.to_string();
+    gated!("ledger_peer_stream_reconnects_total", &[(fields::PEER, &peer_str)], {
+        counter!("ledger_peer_stream_reconnects_total", fields::PEER => peer_str).increment(1);
+    });
 }
 
 /// Records a node connection registry lifecycle event.
@@ -1382,12 +1184,19 @@ pub fn record_peer_stream_reconnect(peer: u64) {
 ///   the new address.
 #[inline]
 pub fn record_node_connection_event(peer: u64, event: &'static str) {
-    counter!(
+    let peer_str = peer.to_string();
+    gated!(
         "ledger_node_connection_events_total",
-        "peer" => peer.to_string(),
-        "event" => event,
-    )
-    .increment(1);
+        &[(fields::PEER, &peer_str), (fields::EVENT, event)],
+        {
+            counter!(
+                "ledger_node_connection_events_total",
+                fields::PEER => peer_str,
+                fields::EVENT => event,
+            )
+            .increment(1);
+        }
+    );
 }
 
 /// Sets the active node-connection count gauge.
@@ -1396,6 +1205,50 @@ pub fn record_node_connections_active(count: usize) {
     #[allow(clippy::cast_precision_loss)]
     let count_f64 = count as f64;
     gauge!("ledger_node_connections_active").set(count_f64);
+}
+
+/// Increments the counter tracking invitation email-hash scans that exceeded the safety ceiling.
+///
+/// Emitted when the number of index entries for a given email hash reaches `SCAN_CEILING`,
+/// indicating a potential throughput-amplification pattern or stale index entries.
+pub fn record_invitation_scan_ceiling_breached() {
+    counter!("ledger_invitation_scan_ceiling_breached_total").increment(1);
+}
+
+// ============================================================================
+// Backup
+// ============================================================================
+
+const BACKUPS_CREATED_TOTAL: &str = "ledger_backups_created_total";
+const BACKUP_LAST_HEIGHT: &str = "ledger_backup_last_height";
+const BACKUP_LAST_SIZE_BYTES: &str = "ledger_backup_last_size_bytes";
+const BACKUP_FAILURES_TOTAL: &str = "ledger_backup_failures_total";
+const BACKUP_PRE_ERASURE_COUNT: &str = "ledger_backup_pre_erasure_count";
+
+/// Records a successful backup: increments the created counter and updates the
+/// last-height and last-size gauges.
+pub fn record_backup_created(height: u64, size_bytes: u64) {
+    #[allow(clippy::cast_precision_loss)]
+    {
+        counter!(BACKUPS_CREATED_TOTAL).increment(1);
+        gauge!(BACKUP_LAST_HEIGHT).set(height as f64);
+        gauge!(BACKUP_LAST_SIZE_BYTES).set(size_bytes as f64);
+    }
+}
+
+/// Increments the backup failure counter.
+pub fn record_backup_failed() {
+    counter!(BACKUP_FAILURES_TOTAL).increment(1);
+}
+
+/// Sets the count of backups created before the most recent erasure event for
+/// the given region.
+///
+/// Operators should monitor this gauge and retire pre-erasure backups within
+/// the configured `max_backup_retention_days` window.
+pub fn set_backup_pre_erasure_count(region: &str, count: u64) {
+    #[allow(clippy::cast_precision_loss)]
+    gauge!(BACKUP_PRE_ERASURE_COUNT, fields::REGION => region.to_string()).set(count as f64);
 }
 
 #[cfg(test)]
@@ -1408,26 +1261,6 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         let elapsed = timer.stop();
         assert!(elapsed >= 0.01);
-    }
-
-    #[test]
-    fn test_error_class_from_grpc_code() {
-        assert_eq!(error_class_from_grpc_code(tonic::Code::Ok), "none");
-        assert_eq!(error_class_from_grpc_code(tonic::Code::DeadlineExceeded), "timeout");
-        assert_eq!(error_class_from_grpc_code(tonic::Code::Cancelled), "timeout");
-        assert_eq!(error_class_from_grpc_code(tonic::Code::Unavailable), "unavailable");
-        assert_eq!(error_class_from_grpc_code(tonic::Code::PermissionDenied), "permission_denied");
-        assert_eq!(error_class_from_grpc_code(tonic::Code::Unauthenticated), "permission_denied");
-        assert_eq!(error_class_from_grpc_code(tonic::Code::InvalidArgument), "validation");
-        assert_eq!(error_class_from_grpc_code(tonic::Code::NotFound), "validation");
-        assert_eq!(error_class_from_grpc_code(tonic::Code::AlreadyExists), "validation");
-        assert_eq!(error_class_from_grpc_code(tonic::Code::FailedPrecondition), "validation");
-        assert_eq!(error_class_from_grpc_code(tonic::Code::OutOfRange), "validation");
-        assert_eq!(error_class_from_grpc_code(tonic::Code::ResourceExhausted), "rate_limited");
-        assert_eq!(error_class_from_grpc_code(tonic::Code::Internal), "internal");
-        assert_eq!(error_class_from_grpc_code(tonic::Code::DataLoss), "internal");
-        assert_eq!(error_class_from_grpc_code(tonic::Code::Unknown), "internal");
-        assert_eq!(error_class_from_grpc_code(tonic::Code::Unimplemented), "internal");
     }
 
     #[test]
@@ -1471,18 +1304,8 @@ mod tests {
 
     #[test]
     fn test_onboarding_metric_names() {
-        assert!(ONBOARDING_INITIATION_TOTAL.starts_with("ledger_"));
-        assert!(ONBOARDING_INITIATION_TOTAL.ends_with("_total"));
-        assert!(ONBOARDING_VERIFICATION_TOTAL.starts_with("ledger_"));
-        assert!(ONBOARDING_VERIFICATION_TOTAL.ends_with("_total"));
-        assert!(ONBOARDING_REGISTRATION_TOTAL.starts_with("ledger_"));
-        assert!(ONBOARDING_REGISTRATION_TOTAL.ends_with("_total"));
-        assert!(ONBOARDING_VERIFICATION_CODES_GC_TOTAL.starts_with("ledger_"));
-        assert!(ONBOARDING_VERIFICATION_CODES_GC_TOTAL.ends_with("_total"));
-        assert!(ONBOARDING_ACCOUNTS_GC_TOTAL.starts_with("ledger_"));
-        assert!(ONBOARDING_ACCOUNTS_GC_TOTAL.ends_with("_total"));
-        assert!(TOTP_CHALLENGES_GC_TOTAL.starts_with("ledger_"));
-        assert!(TOTP_CHALLENGES_GC_TOTAL.ends_with("_total"));
+        assert!(ONBOARDING_REQUESTS_TOTAL.starts_with("ledger_"));
+        assert!(ONBOARDING_REQUESTS_TOTAL.ends_with("_total"));
     }
 
     // =========================================================================
@@ -1492,40 +1315,15 @@ mod tests {
     // --- Write service ---
 
     #[test]
-    fn test_record_write_both_paths() {
-        record_write(true, 0.005);
-        record_write(false, 0.123);
-    }
-
-    #[test]
-    fn test_record_batch_write_both_paths() {
-        record_batch_write(true, 10, 0.01);
-        record_batch_write(false, 0, 1.5);
-    }
-
-    #[test]
     fn test_record_rate_limit_exceeded() {
-        record_rate_limit_exceeded(OrganizationId::new(1));
+        record_rate_limit_exceeded("global", "burst");
+        record_rate_limit_exceeded("organization", "sustained");
     }
 
     #[test]
     fn test_record_rate_limit_rejected() {
         record_rate_limit_rejected("global", "burst");
         record_rate_limit_rejected("organization", "sustained");
-    }
-
-    // --- Read service ---
-
-    #[test]
-    fn test_record_read_both_paths() {
-        record_read(true, 0.001);
-        record_read(false, 0.5);
-    }
-
-    #[test]
-    fn test_record_verified_read_both_paths() {
-        record_verified_read(true, 0.002);
-        record_verified_read(false, 0.3);
     }
 
     // --- Data residency tracking ---
@@ -1579,6 +1377,7 @@ mod tests {
     #[test]
     fn test_record_state_root_computation() {
         record_state_root_computation(VaultId::new(1), 0.002);
+        // vault parameter is intentionally ignored by the metric helper
     }
 
     #[test]
@@ -1612,7 +1411,7 @@ mod tests {
 
     #[test]
     fn test_record_snapshot_created() {
-        record_snapshot_created(1_000_000, 2.5);
+        record_snapshot_created(1_000_000);
     }
 
     #[test]
@@ -1623,23 +1422,15 @@ mod tests {
     // --- Idempotency cache ---
 
     #[test]
-    fn test_record_idempotency_hit() {
-        record_idempotency_hit();
-    }
-
-    #[test]
-    fn test_record_idempotency_miss() {
-        record_idempotency_miss();
+    fn test_record_idempotency_operation() {
+        record_idempotency_operation("hit");
+        record_idempotency_operation("miss");
+        record_idempotency_operation("eviction");
     }
 
     #[test]
     fn test_set_idempotency_cache_size() {
         set_idempotency_cache_size(128);
-    }
-
-    #[test]
-    fn test_record_idempotency_evictions() {
-        record_idempotency_evictions(10);
     }
 
     // --- Connections ---
@@ -1654,8 +1445,8 @@ mod tests {
 
     #[test]
     fn test_record_grpc_request() {
-        record_grpc_request("WriteService", "write", "OK", "none", 0.01, "us-east-va");
-        record_grpc_request("ReadService", "read", "Internal", "internal", 0.5, "global");
+        record_grpc_request("WriteService", "write", "OK", 0.01);
+        record_grpc_request("ReadService", "read", "Internal", 0.5);
     }
 
     // --- Batching ---
@@ -1685,6 +1476,7 @@ mod tests {
     #[test]
     fn test_record_recovery_success() {
         record_recovery_success(OrganizationId::new(1), VaultId::new(2));
+        // org and vault params are ignored by the metric helper
     }
 
     #[test]
@@ -1695,12 +1487,14 @@ mod tests {
     #[test]
     fn test_record_determinism_bug() {
         record_determinism_bug(OrganizationId::new(1), VaultId::new(2));
+        // org and vault params are ignored by the metric helper
     }
 
     #[test]
     fn test_record_recovery_attempt() {
         record_recovery_attempt(OrganizationId::new(1), VaultId::new(2), 1, "success");
         record_recovery_attempt(OrganizationId::new(1), VaultId::new(2), 3, "failure");
+        // org, vault, and attempt params are ignored by the metric helper
     }
 
     #[test]
@@ -1712,6 +1506,7 @@ mod tests {
         set_vault_health(org, vault, "recovering");
         // Unknown fallback
         set_vault_health(org, vault, "something_else");
+        // org and vault params are ignored by the metric helper
     }
 
     // --- Learner refresh ---
@@ -1732,34 +1527,18 @@ mod tests {
         record_learner_voter_error(42, "connection_refused");
     }
 
-    // --- Serialization ---
-
-    #[test]
-    fn test_record_proto_decode() {
-        record_proto_decode(0.001, "write");
-    }
-
-    #[test]
-    fn test_record_postcard_encode() {
-        record_postcard_encode(0.0005, "raft_entry");
-    }
-
-    #[test]
-    fn test_record_postcard_decode() {
-        record_postcard_decode(0.0003, "raft_entry");
-    }
-
-    #[test]
-    fn test_record_serialization_bytes() {
-        record_serialization_bytes(512, "encode", "raft_entry");
-        record_serialization_bytes(256, "decode", "snapshot");
-    }
-
     // --- B+ tree compaction ---
 
     #[test]
     fn test_record_btree_compaction() {
         record_btree_compaction(10, 5);
+    }
+
+    #[test]
+    fn test_record_btree_operation() {
+        record_btree_operation("merge");
+        record_btree_operation("free");
+        record_btree_operation("split");
     }
 
     // --- Post-erasure compaction ---
@@ -1772,18 +1551,11 @@ mod tests {
     // --- Organization purge ---
 
     #[test]
-    fn test_record_org_purge_regional_failure() {
-        record_org_purge_regional_failure("eu-central-de");
-    }
-
-    #[test]
-    fn test_record_org_purge_global_failure() {
-        record_org_purge_global_failure();
-    }
-
-    #[test]
-    fn test_record_org_purge_retry_exhausted() {
-        record_org_purge_retry_exhausted();
+    fn test_record_org_purge_failure() {
+        record_org_purge_failure("global", false);
+        record_org_purge_failure("global", true);
+        record_org_purge_failure("regional", false);
+        record_org_purge_failure("regional", true);
     }
 
     // --- Hot key detection ---
@@ -1791,6 +1563,7 @@ mod tests {
     #[test]
     fn test_record_hot_key_detected() {
         record_hot_key_detected(VaultId::new(1), "users:123", 500.0);
+        // vault, key, and ops_per_sec params are ignored by the metric helper
     }
 
     // --- SLI/SLO ---
@@ -1853,17 +1626,20 @@ mod tests {
     #[test]
     fn test_set_organization_storage_bytes() {
         set_organization_storage_bytes(OrganizationId::new(1), 1_000_000);
+        // org param is ignored by the metric helper
     }
 
     #[test]
     fn test_record_organization_operation() {
         record_organization_operation(OrganizationId::new(1), "write");
         record_organization_operation(OrganizationId::new(1), "read");
+        // org param is ignored by the metric helper
     }
 
     #[test]
     fn test_record_organization_latency() {
         record_organization_latency(OrganizationId::new(1), "write", 0.01);
+        // org param is ignored by the metric helper
     }
 
     // --- Background jobs ---
@@ -1884,13 +1660,6 @@ mod tests {
         record_background_job_items("integrity_scrub", 200);
     }
 
-    // --- Saga PII cache ---
-
-    #[test]
-    fn test_record_saga_pii_cache_sizes() {
-        record_saga_pii_cache_sizes(10, 5, 3);
-    }
-
     // --- DEK re-wrapping ---
 
     #[test]
@@ -1901,11 +1670,6 @@ mod tests {
     #[test]
     fn test_record_rewrap_remaining() {
         record_rewrap_remaining(500);
-    }
-
-    #[test]
-    fn test_record_rewrap_duration() {
-        record_rewrap_duration(0.25);
     }
 
     // --- Cardinality overflow ---
@@ -1949,18 +1713,6 @@ mod tests {
     // --- Timer factories ---
 
     #[test]
-    fn test_write_timer() {
-        let timer = write_timer();
-        drop(timer);
-    }
-
-    #[test]
-    fn test_read_timer() {
-        let timer = read_timer();
-        let _ = timer.stop();
-    }
-
-    #[test]
     fn test_raft_apply_timer() {
         let timer = raft_apply_timer();
         drop(timer);
@@ -1979,28 +1731,7 @@ mod tests {
         record_integrity_errors("structural", 1);
     }
 
-    #[test]
-    fn test_record_integrity_scan_duration() {
-        record_integrity_scan_duration(5.0);
-    }
-
-    // --- Events GC ---
-
-    #[test]
-    fn test_record_events_gc_entries_deleted() {
-        record_events_gc_entries_deleted(50);
-    }
-
-    #[test]
-    fn test_record_events_gc_cycle_duration() {
-        record_events_gc_cycle_duration(0.5);
-    }
-
-    #[test]
-    fn test_record_events_gc_cycle() {
-        record_events_gc_cycle("success");
-        record_events_gc_cycle("failure");
-    }
+    // --- Events GC --- (covered by ledger_background_job_* via JobContext)
 
     // --- Leader transfer ---
 
@@ -2016,58 +1747,16 @@ mod tests {
         record_trigger_election(false);
     }
 
-    // --- Region node count ---
-
-    #[test]
-    fn test_record_region_node_count_not_protected() {
-        // Non-protected region: no warning regardless of count
-        record_region_node_count("us-east-va", 1, false);
-    }
-
-    #[test]
-    fn test_record_region_node_count_protected_above_threshold() {
-        // Protected region with sufficient nodes: no warning
-        record_region_node_count("eu-central-de", MIN_NODES_PER_PROTECTED_REGION + 1, true);
-    }
-
-    #[test]
-    fn test_record_region_node_count_protected_below_threshold() {
-        // Protected region with critically low count: triggers warning log
-        record_region_node_count("eu-central-de", 1, true);
-    }
-
     // --- Onboarding ---
 
     #[test]
-    fn test_record_onboarding_initiation() {
-        record_onboarding_initiation("success");
-        record_onboarding_initiation("failure");
+    fn test_record_onboarding_request() {
+        record_onboarding_request("initiate", "success");
+        record_onboarding_request("initiate", "failure");
+        record_onboarding_request("verify", "success");
+        record_onboarding_request("verify", "failure");
+        record_onboarding_request("register", "success");
+        record_onboarding_request("register", "failure");
     }
 
-    #[test]
-    fn test_record_onboarding_verification() {
-        record_onboarding_verification("success");
-        record_onboarding_verification("failure");
-    }
-
-    #[test]
-    fn test_record_onboarding_registration() {
-        record_onboarding_registration("success");
-        record_onboarding_registration("failure");
-    }
-
-    #[test]
-    fn test_record_onboarding_gc_codes() {
-        record_onboarding_gc_codes(15);
-    }
-
-    #[test]
-    fn test_record_onboarding_gc_accounts() {
-        record_onboarding_gc_accounts(3);
-    }
-
-    #[test]
-    fn test_record_totp_gc_challenges() {
-        record_totp_gc_challenges(7);
-    }
 }

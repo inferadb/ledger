@@ -18,7 +18,7 @@ use inferadb_ledger_proto::proto::{
 };
 use inferadb_ledger_raft::{
     logging::RequestContext,
-    trace_context,
+    metrics,
     types::{LedgerRequest, LedgerResponse, SystemRequest},
 };
 use inferadb_ledger_state::system::{
@@ -106,7 +106,7 @@ impl InvitationService {
             .map_err(|e| error_classify::storage_error(&e))?;
 
         if entities.len() > SCAN_CEILING {
-            metrics::counter!("ledger_invitation_scan_ceiling_breached_total").increment(1);
+            metrics::record_invitation_scan_ceiling_breached();
             tracing::warn!(
                 hmac_prefix = %hmac_hex.get(..8).unwrap_or(hmac_hex),
                 scan_count = entities.len(),
@@ -512,18 +512,14 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        // 2. Extract trace context BEFORE consuming request
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx = self.ctx.make_request_context_from(
+            "InvitationService",
+            "create_organization_invite",
+            &request,
+        );
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // 3. Create RequestContext
-        let mut ctx = self.ctx.make_request_context(
-            "InvitationService",
-            "create_organization_invite",
-            &grpc_metadata,
-            &trace_ctx,
-        );
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         // 4. Input validation
@@ -757,16 +753,13 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
         &self,
         request: Request<ListOrganizationInvitesRequest>,
     ) -> Result<Response<ListOrganizationInvitesResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let req = request.into_inner();
-
-        let mut ctx = self.ctx.make_request_context(
+        let mut ctx = self.ctx.make_request_context_from(
             "InvitationService",
             "list_organization_invites",
-            &grpc_metadata,
-            &trace_ctx,
+            &request,
         );
+        let req = request.into_inner();
+
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -829,16 +822,13 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
         &self,
         request: Request<GetOrganizationInviteRequest>,
     ) -> Result<Response<GetOrganizationInviteResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let req = request.into_inner();
-
-        let mut ctx = self.ctx.make_request_context(
+        let mut ctx = self.ctx.make_request_context_from(
             "InvitationService",
             "get_organization_invite",
-            &grpc_metadata,
-            &trace_ctx,
+            &request,
         );
+        let req = request.into_inner();
+
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let index_entry = self.resolve_invite_slug_or_not_found(&req.slug, &mut ctx)?;
@@ -871,16 +861,14 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx = self.ctx.make_request_context_from(
+            "InvitationService",
+            "revoke_organization_invite",
+            &request,
+        );
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = self.ctx.make_request_context(
-            "InvitationService",
-            "revoke_organization_invite",
-            &grpc_metadata,
-            &trace_ctx,
-        );
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let index_entry = self.resolve_invite_slug_or_not_found(&req.slug, &mut ctx)?;
@@ -930,16 +918,13 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
         &self,
         request: Request<ListReceivedInvitationsRequest>,
     ) -> Result<Response<ListReceivedInvitationsResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let req = request.into_inner();
-
-        let mut ctx = self.ctx.make_request_context(
+        let mut ctx = self.ctx.make_request_context_from(
             "InvitationService",
             "list_received_invitations",
-            &grpc_metadata,
-            &trace_ctx,
+            &request,
         );
+        let req = request.into_inner();
+
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -1007,16 +992,13 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
         &self,
         request: Request<GetInvitationDetailsRequest>,
     ) -> Result<Response<GetInvitationDetailsResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
-        let req = request.into_inner();
-
-        let mut ctx = self.ctx.make_request_context(
+        let mut ctx = self.ctx.make_request_context_from(
             "InvitationService",
             "get_invitation_details",
-            &grpc_metadata,
-            &trace_ctx,
+            &request,
         );
+        let req = request.into_inner();
+
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let index_entry = self.resolve_invite_slug_or_not_found(&req.slug, &mut ctx)?;
@@ -1053,16 +1035,11 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx =
+            self.ctx.make_request_context_from("InvitationService", "accept_invitation", &request);
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = self.ctx.make_request_context(
-            "InvitationService",
-            "accept_invitation",
-            &grpc_metadata,
-            &trace_ctx,
-        );
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         // 2. Resolve slug with timing equalization
@@ -1197,16 +1174,11 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx =
+            self.ctx.make_request_context_from("InvitationService", "decline_invitation", &request);
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = self.ctx.make_request_context(
-            "InvitationService",
-            "decline_invitation",
-            &grpc_metadata,
-            &trace_ctx,
-        );
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let index_entry = self.resolve_invite_slug_or_not_found(&req.slug, &mut ctx)?;

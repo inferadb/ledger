@@ -26,10 +26,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     consensus_handle::ConsensusHandle,
-    metrics::{
-        record_background_job_duration, record_background_job_items, record_background_job_run,
-        record_rewrap_duration, record_rewrap_pages, record_rewrap_remaining,
-    },
+    metrics::{record_rewrap_pages, record_rewrap_remaining},
     trace_context::TraceContext,
 };
 
@@ -182,6 +179,7 @@ impl<B: StorageBackend + 'static> DekRewrapJob<B> {
             return;
         }
 
+        let mut job = crate::logging::JobContext::new("dek_rewrap", None);
         let trace_ctx = TraceContext::new();
         let cycle_start = Instant::now();
         let next_page = self.progress.next_page_id.load(Ordering::Acquire);
@@ -220,10 +218,7 @@ impl<B: StorageBackend + 'static> DekRewrapJob<B> {
 
                 // Record metrics
                 record_rewrap_pages(rewrapped as u64);
-                record_rewrap_duration(duration);
-                record_background_job_duration("dek_rewrap", duration);
-                record_background_job_run("dek_rewrap", "success");
-                record_background_job_items("dek_rewrap", rewrapped as u64);
+                job.record_items(rewrapped as u64);
 
                 if rewrapped > 0 {
                     info!(
@@ -244,8 +239,7 @@ impl<B: StorageBackend + 'static> DekRewrapJob<B> {
             },
             Err(e) => {
                 let duration = cycle_start.elapsed().as_secs_f64();
-                record_background_job_duration("dek_rewrap", duration);
-                record_background_job_run("dek_rewrap", "failure");
+                job.set_failure();
 
                 warn!(
                     trace_id = %trace_ctx.trace_id,

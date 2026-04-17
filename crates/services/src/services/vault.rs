@@ -13,12 +13,11 @@ use inferadb_ledger_proto::proto::{
     OrganizationSlug, UpdateVaultRequest, UpdateVaultResponse, VaultSlug as ProtoVaultSlug,
 };
 use inferadb_ledger_raft::{
-    metrics, trace_context,
+    metrics,
     types::{BlockRetentionMode, BlockRetentionPolicy, LedgerRequest, LedgerResponse},
 };
 use inferadb_ledger_types::{
-    OrganizationSlug as DomainOrganizationSlug, VaultEntry, VaultSlug as DomainVaultSlug,
-    ZERO_HASH,
+    VaultEntry, ZERO_HASH,
     events::{EventAction, EventOutcome as EventOutcomeType},
 };
 use tonic::{Request, Response, Status};
@@ -52,17 +51,10 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         // Reject if node is draining
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        // Extract trace context from gRPC metadata before consuming the request
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx = self.ctx.make_request_context_from("VaultService", "create_vault", &request);
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = self.ctx.make_request_context(
-            "VaultService",
-            "create_vault",
-            &grpc_metadata,
-            &trace_ctx,
-        );
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -108,21 +100,7 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
                     ctx.elapsed_secs(),
                 );
 
-                if let Some(node_id) = self.ctx.node_id {
-                    self.ctx.record_handler_event(
-                        inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
-                            EventAction::VaultCreated,
-                            organization_id,
-                            Some(DomainOrganizationSlug::new(organization_slug_val)),
-                            node_id,
-                        )
-                        .vault(slug)
-                        .principal("system")
-                        .trace_id(&trace_ctx.trace_id)
-                        .outcome(EventOutcomeType::Success)
-                        .build(self.ctx.default_ttl_days()),
-                    );
-                }
+                ctx.record_event(EventAction::VaultCreated, EventOutcomeType::Success, &[]);
 
                 // Get Raft metrics for leader_id and term
                 let (leader_id, current_term) = if let Some(raft_metrics) = self.ctx.raft_metrics()
@@ -204,17 +182,10 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         // Reject if node is draining
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        // Extract trace context from gRPC metadata before consuming the request
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx = self.ctx.make_request_context_from("VaultService", "delete_vault", &request);
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = self.ctx.make_request_context(
-            "VaultService",
-            "delete_vault",
-            &grpc_metadata,
-            &trace_ctx,
-        );
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -249,21 +220,7 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
                         ctx.elapsed_secs(),
                     );
 
-                    if let Some(node_id) = self.ctx.node_id {
-                        self.ctx.record_handler_event(
-                            inferadb_ledger_raft::event_writer::HandlerPhaseEmitter::for_organization(
-                                EventAction::VaultDeleted,
-                                organization_id,
-                                Some(DomainOrganizationSlug::new(organization_slug_val)),
-                                node_id,
-                            )
-                            .vault(DomainVaultSlug::new(vault_val))
-                            .principal("system")
-                            .trace_id(&trace_ctx.trace_id)
-                            .outcome(EventOutcomeType::Success)
-                            .build(self.ctx.default_ttl_days()),
-                        );
-                    }
+                    ctx.record_event(EventAction::VaultDeleted, EventOutcomeType::Success, &[]);
 
                     Ok(Response::new(DeleteVaultResponse {
                         deleted_at: Some(
@@ -293,16 +250,9 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         &self,
         request: Request<GetVaultRequest>,
     ) -> Result<Response<GetVaultResponse>, Status> {
-        // Extract trace context from gRPC metadata before consuming the request
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-
-        let mut ctx = self.ctx.make_request_context(
-            "VaultService",
-            "get_vault",
-            request.metadata(),
-            &trace_ctx,
-        );
+        let mut ctx = self.ctx.make_request_context_from("VaultService", "get_vault", &request);
         let req = request.into_inner();
+
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
@@ -355,16 +305,9 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         &self,
         request: Request<ListVaultsRequest>,
     ) -> Result<Response<ListVaultsResponse>, Status> {
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
-        let grpc_metadata = request.metadata().clone();
+        let mut ctx = self.ctx.make_request_context_from("VaultService", "list_vaults", &request);
         let req = request.into_inner();
 
-        let mut ctx = self.ctx.make_request_context(
-            "VaultService",
-            "list_vaults",
-            &grpc_metadata,
-            &trace_ctx,
-        );
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let page_size = crate::proto_compat::normalize_page_size(req.page_size);
@@ -427,16 +370,10 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
         super::helpers::check_not_draining(self.ctx.health_state.as_ref())?;
 
-        let trace_ctx = trace_context::extract_or_generate(request.metadata());
+        let mut ctx = self.ctx.make_request_context_from("VaultService", "update_vault", &request);
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        let mut ctx = self.ctx.make_request_context(
-            "VaultService",
-            "update_vault",
-            &grpc_metadata,
-            &trace_ctx,
-        );
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());

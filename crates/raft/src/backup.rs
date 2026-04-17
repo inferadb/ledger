@@ -914,27 +914,6 @@ pub struct PageBackupData {
     pub pages: Vec<(u64, Vec<u8>)>,
 }
 
-/// Metric recording for backup operations.
-pub fn record_backup_created(region_height: u64, size_bytes: u64) {
-    metrics::counter!("ledger_backups_created_total").increment(1);
-    metrics::gauge!("ledger_backup_last_height").set(region_height as f64);
-    metrics::gauge!("ledger_backup_last_size_bytes").set(size_bytes as f64);
-}
-
-/// Records a backup failure.
-pub fn record_backup_failed() {
-    metrics::counter!("ledger_backup_failures_total").increment(1);
-}
-
-/// Records the count of backups created before the most recent erasure event.
-///
-/// Operators should monitor this gauge and retire pre-erasure backups within
-/// the configured `max_backup_retention_days` window.
-pub fn record_pre_erasure_backup_count(region: &str, count: u64) {
-    metrics::gauge!("ledger_backup_pre_erasure_count", "region" => region.to_string())
-        .set(count as f64);
-}
-
 /// Automated backup background job.
 ///
 /// Periodically creates backups when this node is the leader. Follows the
@@ -973,6 +952,7 @@ impl BackupJob {
                 }
 
                 let cycle_start = Instant::now();
+                let mut job = crate::logging::JobContext::new("backup", None);
                 info!("Starting automated backup");
 
                 // Trigger a snapshot to ensure the latest committed state
@@ -994,41 +974,39 @@ impl BackupJob {
                     Ok(Some(snapshot)) => {
                         match self.backup_manager.create_backup(&snapshot, "auto") {
                             Ok(meta) => {
-                                let duration = cycle_start.elapsed().as_secs_f64();
-                                record_backup_created(meta.region_height, meta.size_bytes);
-                                crate::metrics::record_background_job_duration("backup", duration);
-                                crate::metrics::record_background_job_run("backup", "success");
-                                crate::metrics::record_background_job_items("backup", 1);
+                                let duration_secs = cycle_start.elapsed().as_secs_f64();
+                                crate::metrics::record_backup_created(
+                                    meta.region_height,
+                                    meta.size_bytes,
+                                );
+                                job.record_items(1);
                                 info!(
                                     backup_id = %meta.backup_id,
                                     region_height = meta.region_height,
                                     size_bytes = meta.size_bytes,
-                                    duration_secs = duration,
+                                    duration_secs,
                                     "Automated backup completed"
                                 );
                             },
                             Err(e) => {
-                                let duration = cycle_start.elapsed().as_secs_f64();
-                                error!(error = %e, duration_secs = duration, "Failed to write backup");
-                                record_backup_failed();
-                                crate::metrics::record_background_job_duration("backup", duration);
-                                crate::metrics::record_background_job_run("backup", "failure");
+                                let duration_secs = cycle_start.elapsed().as_secs_f64();
+                                error!(error = %e, duration_secs, "Failed to write backup");
+                                crate::metrics::record_backup_failed();
+                                job.set_failure();
                             },
                         }
                     },
                     Ok(None) => {
-                        let duration = cycle_start.elapsed().as_secs_f64();
-                        warn!(duration_secs = duration, "No snapshot available for backup");
-                        record_backup_failed();
-                        crate::metrics::record_background_job_duration("backup", duration);
-                        crate::metrics::record_background_job_run("backup", "failure");
+                        let duration_secs = cycle_start.elapsed().as_secs_f64();
+                        warn!(duration_secs, "No snapshot available for backup");
+                        crate::metrics::record_backup_failed();
+                        job.set_failure();
                     },
                     Err(e) => {
-                        let duration = cycle_start.elapsed().as_secs_f64();
-                        error!(error = %e, duration_secs = duration, "Failed to load snapshot for backup");
-                        record_backup_failed();
-                        crate::metrics::record_background_job_duration("backup", duration);
-                        crate::metrics::record_background_job_run("backup", "failure");
+                        let duration_secs = cycle_start.elapsed().as_secs_f64();
+                        error!(error = %e, duration_secs, "Failed to load snapshot for backup");
+                        crate::metrics::record_backup_failed();
+                        job.set_failure();
                     },
                 }
             }

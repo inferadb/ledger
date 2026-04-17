@@ -12,7 +12,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use inferadb_ledger_state::StateLayer;
@@ -22,10 +22,7 @@ use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use crate::{
-    metrics::{
-        record_background_job_duration, record_background_job_items, record_background_job_run,
-        record_integrity_errors, record_integrity_pages_checked, record_integrity_scan_duration,
-    },
+    metrics::{record_integrity_errors, record_integrity_pages_checked},
     trace_context::TraceContext,
 };
 
@@ -78,8 +75,8 @@ impl<B: StorageBackend + 'static> IntegrityScrubberJob<B> {
     /// Wraps the synchronous page I/O in `spawn_blocking` to avoid blocking
     /// the Tokio worker thread during large scans.
     async fn run_cycle(&self, cursor: &AtomicU64) {
+        let mut job = crate::logging::JobContext::new("integrity_scrub", None);
         let trace_ctx = TraceContext::new();
-        let cycle_start = Instant::now();
 
         let db = self.state.database().clone();
         let total_pages = db.total_page_count();
@@ -123,7 +120,7 @@ impl<B: StorageBackend + 'static> IntegrityScrubberJob<B> {
             Ok(results) => results,
             Err(e) => {
                 warn!(error = %e, "Integrity scrub spawn_blocking panicked");
-                record_background_job_run("integrity_scrub", "failure");
+                job.set_failure();
                 self.heartbeat();
                 return;
             },
@@ -135,7 +132,6 @@ impl<B: StorageBackend + 'static> IntegrityScrubberJob<B> {
             checksum_result.structural_errors + structural_result.structural_errors;
 
         // Record metrics
-        let duration = cycle_start.elapsed().as_secs_f64();
         record_integrity_pages_checked(total_checked);
         if total_checksum_errors > 0 {
             record_integrity_errors("checksum", total_checksum_errors);
@@ -143,16 +139,12 @@ impl<B: StorageBackend + 'static> IntegrityScrubberJob<B> {
         if total_structural_errors > 0 {
             record_integrity_errors("structural", total_structural_errors);
         }
-        record_integrity_scan_duration(duration);
-
         // Background job observability
         let has_errors = total_checksum_errors > 0 || total_structural_errors > 0;
-        record_background_job_duration("integrity_scrub", duration);
-        record_background_job_run(
-            "integrity_scrub",
-            if has_errors { "failure" } else { "success" },
-        );
-        record_background_job_items("integrity_scrub", total_checked);
+        if has_errors {
+            job.set_failure();
+        }
+        job.record_items(total_checked);
 
         // Log results
         if has_errors {

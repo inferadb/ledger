@@ -15,11 +15,7 @@ use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use crate::{
-    consensus_handle::ConsensusHandle,
-    metrics::{
-        record_background_job_duration, record_background_job_items, record_background_job_run,
-        record_btree_compaction,
-    },
+    consensus_handle::ConsensusHandle, metrics::record_btree_compaction,
     trace_context::TraceContext,
 };
 
@@ -78,43 +74,41 @@ impl<B: StorageBackend + 'static> BTreeCompactor<B> {
             return;
         }
 
+        let mut job = crate::logging::JobContext::new("btree_compaction", None);
         let trace_ctx = TraceContext::new();
         let cycle_start = Instant::now();
         debug!(trace_id = %trace_ctx.trace_id, "Starting B+ tree compaction cycle");
 
         match self.state.compact_tables(self.min_fill_factor) {
             Ok(stats) => {
-                let duration = cycle_start.elapsed().as_secs_f64();
+                let duration_secs = cycle_start.elapsed().as_secs_f64();
                 record_btree_compaction(stats.pages_merged, stats.pages_freed);
-                record_background_job_duration("compaction", duration);
-                record_background_job_run("compaction", "success");
-                record_background_job_items("compaction", stats.pages_merged);
+                job.record_items(stats.pages_merged);
 
                 if stats.pages_merged > 0 {
                     info!(
                         trace_id = %trace_ctx.trace_id,
                         pages_merged = stats.pages_merged,
                         pages_freed = stats.pages_freed,
-                        duration_secs = duration,
+                        duration_secs,
                         "B+ tree compaction cycle complete"
                     );
                 } else {
                     debug!(
                         trace_id = %trace_ctx.trace_id,
-                        duration_secs = duration,
+                        duration_secs,
                         "B+ tree compaction cycle complete (no pages merged)"
                     );
                 }
             },
             Err(e) => {
-                let duration = cycle_start.elapsed().as_secs_f64();
-                record_background_job_duration("compaction", duration);
-                record_background_job_run("compaction", "failure");
+                let duration_secs = cycle_start.elapsed().as_secs_f64();
+                job.set_failure();
 
                 warn!(
                     trace_id = %trace_ctx.trace_id,
                     error = %e,
-                    duration_secs = duration,
+                    duration_secs,
                     "B+ tree compaction cycle failed"
                 );
             },
