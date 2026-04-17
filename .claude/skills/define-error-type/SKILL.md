@@ -112,6 +112,7 @@ pub enum SdkError {
 ## References
 
 - `crates/types/src/error.rs`, `crates/types/src/error_code.rs`
-- `crates/raft/src/services/error_details.rs` — `build_error_details()`
-- `crates/raft/src/services/metadata.rs` — `status_with_correlation()`
+- `crates/services/src/services/error_details.rs` — `build_error_details()`
+- `crates/services/src/services/metadata.rs` — `status_with_correlation()`
+- `crates/services/src/services/error_classify.rs` — `classify_raft_error()` and friends
 - Agent: `snafu-error-reviewer` (runs proactively on error-type changes)

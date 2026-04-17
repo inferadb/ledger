@@ -1,30 +1,45 @@
-# store
+# CLAUDE.md — store
 
-B+ tree, pages, transactions, backends, crypto (key management). Byte-level persistence — everything above this crate reads and writes through `StorageEngine`.
+> Extends [root CLAUDE.md](../../CLAUDE.md). Root rules always take precedence.
 
-## Responsibilities
+## Purpose
 
-- B+ tree implementation: pages, leaves, internal nodes, splits, merges
-- Page cache and transaction management
-- Pluggable backends (memory, file, encrypted)
-- Per-vault crypto key management for AES-256-GCM WAL + page encryption
-- Crash recovery via `CrashInjector` (in `test-utils`)
+B+ tree, pages, transactions, pluggable backends, per-vault crypto key management. Byte-level persistence — every crate above reads and writes through `StorageEngine` (in the `state` crate). Bugs here corrupt committed data; treat every change to page layout, leaf invariants, or WAL handling as high-risk.
 
-## Invariants (read before editing the B+ tree)
+## Load-Bearing Files
 
-- **`leaf_fill_factor()` must iterate live cells.** `free_space()` gap doesn't account for dead data after deletes — compaction triggers off true live-fill.
-- **`merge_leaves()` rebuilds left page from scratch via `LeafNode::init()`** to reclaim dead space. Don't try to merge in-place.
-- **`compact()` re-collects `leaf_info` after each merge.** Stale info references freed pages.
-- **`Page::new()` sets only the page header.** Leaf nodes additionally require `LeafNode::init()`; `from_page()` assumes an initialized header.
-- **Secondary-index entries are transactional with primary writes** — erasure must delete both (crypto-shredding alone is not enough for `_idx:` keys; see state crate).
+These files are load-bearing — their invariants ripple beyond the local file. Not off-limits; use caution and understand the ramifications before editing.
 
-## Conventions
+| File                             | Reason                                                                                                                   |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `src/btree/node.rs`              | `LeafNode` / internal-node layout. `LeafNode::init` + `from_page` contract; changes silently break every persisted page. |
+| `src/btree/split.rs`             | Split logic. Race conditions here are hard to reproduce and cause silent data divergence.                                |
+| `src/page/mod.rs` and submodules | Page header layout and dual-slot commit. A stray byte here is a file-format break.                                       |
+| `src/backend/encrypted.rs`       | Per-vault AES-256-GCM envelope. Changing the nonce scheme or AAD breaks backward-compatible reads.                       |
+| `src/transaction.rs`             | Transaction semantics — atomicity assumed by `StorageEngine` above.                                                      |
 
-- `Table::KeyType` / `Table::ValueType` are generic. For `Entities`, both are `Vec<u8>` — pass `&Vec<u8>`, not `&[u8]` (the `insert`/`get` signatures take `&Table::KeyType`).
-- Benches: `btree_bench` in `benches/` — tracked by performance-regression CI.
-- Backend selection belongs at config boundaries, not inside hot-path code.
+## Owned Surface
 
-## Related tooling
+- **`StorageBackend` trait** + impls: `FileBackend`, `InMemoryBackend`, `EncryptedBackend<B>`.
+- **B+ tree**: `cursor.rs`, `node.rs`, `split.rs` under `src/btree/`.
+- **Page cache + commit**: `src/page/`.
+- **Crypto**: per-vault key management in `src/crypto/`.
+- **`StoreError`** (`src/error.rs`) — I/O, page-corruption, WAL-checksum, transaction-conflict variants.
+- **`CrashInjector`** — exposed through `crates/test-utils/`, not from here; store wires the injection points.
 
-- Agent: `unsafe-panic-auditor` (scrutinizes `.unwrap()` in non-test code)
-- Skill: `/just-ci-gate` — run before claiming store changes done
+## Test Patterns
+
+- Unit tests use `InMemoryBackend`. Integration / recovery tests use `FileBackend` wrapped in `EncryptedBackend`.
+- Crash recovery tests inject faults via `CrashInjector` from `test-utils` — never `panic!` in production code to simulate.
+- B+ tree proptests cover split/merge invariants; MerkleProof tests restrict to power-of-2 leaves (see `types` crate rules).
+- Benches: no performance-regression CI currently; benchmark additions must include a justifying doc comment.
+
+## Local Golden Rules
+
+1. **`leaf_fill_factor()` iterates live cells.** Never fall back to `free_space()` gap — after deletes, gap doesn't reflect dead-space reality.
+2. **`merge_leaves()` rebuilds the left page from scratch via `LeafNode::init()`.** In-place merge corrupts the dead-space accounting the next compaction round depends on.
+3. **`Page::new()` initializes only the page header.** Leaf pages additionally require `LeafNode::init()` before use; `from_page()` assumes an initialized header.
+4. **`compact()` re-collects `leaf_info` after each merge.** Stale `leaf_info` references freed pages; using it after a merge without re-collection is a use-after-free.
+5. **Table signatures take `&Table::KeyType` / `&Table::ValueType`.** For `Entities` both are `Vec<u8>` — pass `&Vec<u8>`, not `&[u8]`. The difference matters at the generic boundary.
+6. **Crypto-shredding leaves `_idx:` entries behind.** Erasure must delete the primary + every `_idx:` pointing at it. This invariant is enforced in the `state` crate; don't assume it's handled here.
+7. **Never `panic!` in production code to force a crash.** Use `CrashInjector` (`crates/test-utils`). Production panics bypass the orderly shutdown path.

@@ -10,7 +10,7 @@ You review gRPC boundary changes in InferaDB Ledger for consistency with the est
 
 - `proto/ledger/v1/*.proto` — service and message definitions
 - `crates/proto/src/convert/` — From/TryFrom conversions (`domain.rs`, `identifiers.rs`, `operations.rs`, `statuses.rs`, `tokens.rs`, `credentials.rs`)
-- `crates/services/src/` — all 13 gRPC service impls, `slug_resolver.rs`, `helpers.rs`, `metadata.rs`, JWT engine, server assembly
+- `crates/services/src/` — all 14 gRPC service impls (`TokenService` is `TokenServiceImpl`), plus `services/slug_resolver.rs`, `services/region_resolver.rs`, `services/helpers.rs`, `services/metadata.rs`, `services/error_details.rs`, `services/error_classify.rs`, `services/service_infra.rs`, JWT engine, server assembly
 - `crates/sdk/src/` — client-side equivalents (type parity)
 
 ## Invariants to check
@@ -42,7 +42,7 @@ You review gRPC boundary changes in InferaDB Ledger for consistency with the est
 **API version negotiation**
 
 - New services are subject to `ApiVersionLayer` unless explicitly exempt.
-- The exempt set is **only**: `Health`, `Discovery`, `Raft`. Flag additions to this exempt list with suspicion — requires justification (K8s probe, openraft, pre-negotiation).
+- The exempt set is **only**: `Health`, `SystemDiscovery`, `Raft`. Flag additions to this exempt list with suspicion — requires justification (K8s probes, pre-negotiation clients, or peer-to-peer Raft transport).
 - New services should respect the `x-ledger-api-version` header contract (see `docs/operations/api-versioning.md`).
 
 **Audit + validation**

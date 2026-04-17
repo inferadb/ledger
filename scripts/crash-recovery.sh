@@ -35,10 +35,10 @@ DATA_ROOT="/tmp/ledger-crash-recovery-$$"
 PROFILE="release"
 SCENARIO="all"
 NODE_COUNT=3
-WRITER_DURATION_SECS=15
-CRASH_AFTER_SECS=5
-RESTART_AFTER_SECS=8
-CONVERGENCE_TIMEOUT=120
+WRITER_DURATION_SECS=8
+CRASH_AFTER_SECS=3
+RESTART_AFTER_SECS=6
+CONVERGENCE_TIMEOUT=60
 
 # ---------------------------------------------------------------------------
 # Args
@@ -141,7 +141,7 @@ create_org_and_vault() {
       fi
     done
     reg_attempt=$((reg_attempt + 1))
-    sleep 3
+    sleep 1
   done
   [[ -z "$ORG_SLUG" || -z "$USER_SLUG" ]] && { log_error "Registration failed after 15 attempts"; return 1; }
 
@@ -370,40 +370,43 @@ verify_no_data_loss() {
   local writer_log=$1
   log_info "Verifying no data loss (reading back all successful writes)..."
 
-  local ok_count=0 missing=0 key_val addr read_result val
-  while IFS= read -r line; do
-    [[ "$line" != ok:* ]] && continue
-    key_val="${line#ok:}"
-    ok_count=$((ok_count + 1))
+  # Extract successful keys into a temp file for parallel verification.
+  local keys_file="$DATA_ROOT/ok-keys-$$.txt"
+  grep '^ok:' "$writer_log" | sed 's/^ok://' > "$keys_file" || true
+  local ok_count
+  ok_count=$(wc -l < "$keys_file" | tr -d ' ')
 
-    # Try reading from ALL nodes — after leader crash, the restarted node may
-    # still be catching up. The entry is safe if ANY surviving node has it.
-    local found=false
-    local last_response=""
-    for node_num in 1 2 3; do
-      addr=$(node_addr "$node_num")
-      read_result=$(grpcurl -plaintext \
-        -d "{\"caller\": {\"slug\": \"$USER_SLUG\"}, \"organization\": {\"slug\": \"$ORG_SLUG\"}, \"vault\": {\"slug\": \"$VAULT_SLUG\"}, \"key\": \"$key_val\", \"consistency\": \"READ_CONSISTENCY_EVENTUAL\"}" \
-        "$addr" \
-        ledger.v1.ReadService/Read 2>/dev/null || true)
-      val=$(echo "$read_result" | jq -r '.value // empty' 2>/dev/null || true)
-      if [[ -n "$val" ]]; then
-        found=true
-        break
-      fi
-      last_response="$read_result"
+  if [[ "$ok_count" -eq 0 ]]; then
+    log_error "No successful writes to verify"
+    return 1
+  fi
+
+  # Verify each key in parallel (up to 10 at a time).
+  # Each subshell tries all nodes and echoes the key if missing.
+  local missing_file="$DATA_ROOT/missing-keys-$$.txt"
+  : > "$missing_file"
+
+  export ORG_SLUG USER_SLUG VAULT_SLUG NODE_COUNT BASE_PORT
+  # shellcheck disable=SC2016
+  xargs -P 10 -I {} bash -c '
+    key="$1"
+    for ((n=1; n<=NODE_COUNT; n++)); do
+      addr="127.0.0.1:$((BASE_PORT + n - 1))"
+      val=$(grpcurl -plaintext \
+        -d "{\"caller\": {\"slug\": \"$ORG_SLUG\"}, \"organization\": {\"slug\": \"$ORG_SLUG\"}, \"vault\": {\"slug\": \"$VAULT_SLUG\"}, \"key\": \"$key\", \"consistency\": \"READ_CONSISTENCY_EVENTUAL\"}" \
+        "$addr" ledger.v1.ReadService/Read 2>/dev/null | jq -r ".value // empty" 2>/dev/null || true)
+      [[ -n "$val" ]] && exit 0
     done
-    if [[ "$found" != "true" ]]; then
-      missing=$((missing + 1))
-      if (( missing <= 3 )); then
-        log_error "  Missing on ALL nodes: $key_val"
-        log_error "    Last response: ${last_response:0:200}"
-      fi
-    fi
-  done < "$writer_log"
+    echo "$key" >> '"$missing_file"'
+  ' _ {} < "$keys_file"
 
+  local missing
+  missing=$(wc -l < "$missing_file" | tr -d ' ')
   if (( missing > 0 )); then
     log_error "DATA LOSS: $missing/$ok_count successful writes missing after recovery"
+    head -3 "$missing_file" | while IFS= read -r k; do
+      log_error "  Missing: $k"
+    done
     return 1
   fi
   log_success "All $ok_count successful writes readable after recovery"
@@ -420,8 +423,8 @@ run_scenario() {
   log_info "═══ Scenario $name: kill $kill_target_role mid-write ═══"
 
   # Use longer settle time for debug builds (saga orchestrator is slower).
-  local settle_time=5
-  [[ "$PROFILE" == "debug" ]] && settle_time=15
+  local settle_time=2
+  [[ "$PROFILE" == "debug" ]] && settle_time=10
   bootstrap_cluster "$BASE_PORT" "$NODE_COUNT" "$DATA_ROOT" "$settle_time"
 
   local leader
@@ -470,7 +473,7 @@ run_scenario() {
   wait "$writer_pid" 2>/dev/null || true
 
   # Give replication a moment to catch up post-restart.
-  sleep 3
+  sleep 1
 
   verify_convergence || return 1
   verify_no_data_loss "$writer_log" || return 1

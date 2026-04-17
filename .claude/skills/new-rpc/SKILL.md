@@ -11,7 +11,7 @@ Adding a gRPC method in this codebase touches 6–10 files across 4 crates. Miss
 
 Confirm with the user:
 
-1. **Service** — which of the 13 services (Read, Write, Admin, Organization, Vault, User, App, Token, Invitation, Events, Health, Discovery, Raft)?
+1. **Service** — which of the 14 services (Read, Write, Organization, Vault, Schema, Admin, User, Invitation, App, Token, Events, Health, SystemDiscovery, Raft)?
 2. **Mutation or read?** — determines audit hook, quota check, Raft proposal path.
 3. **Tenancy** — organization-scoped, vault-scoped, or global?
 4. **ID surface** — which slug types does it expose (`OrganizationSlug`, `VaultSlug`, etc.)?

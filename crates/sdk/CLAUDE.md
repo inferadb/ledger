@@ -1,32 +1,47 @@
-# sdk
+# CLAUDE.md — sdk
 
-Consumer-facing Rust client. **The one crate that does not use snafu** — public SDK types use `thiserror` (`SdkError`, `ResolverError`) for cleaner consumer error UX.
+> Extends [root CLAUDE.md](../../CLAUDE.md). Root rules always take precedence.
 
-## Key types
+## Purpose
 
-| Type | Purpose |
-| --- | --- |
-| `LedgerClient` | Public API: authenticate, read/write, admin calls |
-| `ClientConfig` | bon fallible builder — precedent for the pattern across the workspace |
-| `RegionLeaderCache` | Per-region leader endpoint cache with soft/hard TTLs, populated by `ResolveRegionLeader`, `NotLeader` hints, and `WatchLeader` push updates. All updates term-gated. |
-| `ConnectionPool` | Per-endpoint circuit breaker + connection metrics |
-| `SdkMetrics` trait | `NoopSdkMetrics` (default) or `MetricsSdkMetrics` (metrics crate facade). `Arc<dyn SdkMetrics>` — dynamic dispatch, not generics (avoids type-param infection). |
+Consumer-facing Rust client. Every external caller — first-party services, third-party integrators — uses this crate. **The one workspace crate that uses `thiserror` instead of `snafu`**, because error ergonomics matter more here than server-side diagnostic detail. Retry, cancellation, leader caching, and circuit-breaker behavior live here; a regression is visible to every consumer.
 
-## Conventions
+## Load-Bearing Files
 
-- **`thiserror` only in this crate.** Server crates use snafu; do not import snafu types into SDK error types.
-- **`ClientConfig` uses `#[bon::bon] impl ... { #[builder] pub fn new(...) -> Result<Self, _> }`.** Same precedent for `TlsConfig`, `CircuitBreakerConfig`. Tests call `::builder().build()`, not `::new().build()`.
-- **`Option<T>` setters on bon builders accept `T`, not `Option<T>`.** `.field(Some(x))` is a type error — use `.field(x)`. bon auto-infers the wrap.
-- **`#[builder(default)]` on `Option<T>` is redundant** — bon auto-infers `None` for `Option`. It also causes a compiler error, not a warning.
-- **`ServerErrorDetails` is boxed** (`Option<Box<ServerErrorDetails>>`) to keep `Result<T, SdkError>` small — clippy `result_large_err` otherwise.
-- **`with_retry_cancellable` signature requires `method: &str`** — 16 call sites in `client.rs` and 7 in `retry.rs` tests pass a method name string.
-- **Circuit-breaker metrics** are recorded at `ConnectionPool` level (has both circuit breaker + metrics handles).
+These files are load-bearing — their invariants ripple beyond the local file. Not off-limits; use caution and understand the ramifications before editing.
 
-## Leader routing
+| File                     | Reason                                                                                                                                                                 |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/error.rs`           | `SdkError` shape. `ServerErrorDetails` must stay `Box`-wrapped — bare `Option<ServerErrorDetails>` inflates `Result<T, SdkError>` and trips clippy `result_large_err`. |
+| `src/retry.rs`           | `with_retry_cancellable` loop. Retry ordering + cancellation via `tokio::select! { biased; }`; a naive `backon` retry loop cannot be cancelled.                        |
+| `src/client.rs`          | `LedgerClient` retry cycle, metrics emission, connection-pool integration.                                                                                             |
+| `src/circuit_breaker.rs` | State machine (Closed / Open / HalfOpen). A bug here either hammers failing endpoints or rejects healthy ones.                                                         |
 
-- Routing is redirect-only: when a server returns `NotLeader` + `LeaderHint`, the SDK reconnects directly to the leader. Server-side forwarding is **only** for saga orchestration.
-- Leader cache updates are term-gated — ignore hints for older terms.
+## Owned Surface
 
-## Related tooling
+- **`LedgerClient`** — public API: authenticate, read/write, admin, leader discovery.
+- **Config** (`src/config.rs`): `ClientConfig`, `TlsConfig`, `CircuitBreakerConfig` — all bon fallible builders.
+- **Errors** (`src/error.rs`): `SdkError`, `ResolverError` (thiserror).
+- **Connection layer**: `connection.rs`, `circuit_breaker.rs`, leader caching via `region_resolver.rs` / `discovery.rs`.
+- **Metrics**: `SdkMetrics` trait + `NoopSdkMetrics` / `MetricsSdkMetrics` in `src/metrics.rs`.
+- **Retry entry point**: `with_retry_cancellable(method, pool, ...)` in `src/retry.rs` — used by every RPC call in `client.rs`.
+- **Streaming / ops**: `src/streaming.rs`, `src/ops/`.
 
-- Skill: `/use-bon-builder` (builder precedent lives here)
+## Test Patterns
+
+- Unit tests use `mock` fixtures (`src/mock/`) and mocked `tonic::Channel`.
+- Retry tests use fake endpoints with known-failing addresses to exercise the `tokio::select!` cancellation path.
+- E2E tests (`tests/`) require a running cluster; they fail with transport errors in local dev by design.
+- Circuit-breaker tests parameterize thresholds; never assume production defaults.
+
+## Local Golden Rules
+
+1. **`thiserror` only.** Do not import `snafu` types into SDK error definitions. The crate boundary is contractual: server crates are snafu, SDK is thiserror.
+2. **`ServerErrorDetails` is boxed** — `Option<Box<ServerErrorDetails>>` on every error variant that carries it. Bare `Option<ServerErrorDetails>` inflates `Result<T, SdkError>` (clippy `result_large_err`).
+3. **`with_retry_cancellable` requires `method: &str`.** Used for retry metrics labels and circuit-breaker key. Call sites that pass `""` lose observability; call sites that pass a dynamic string blow up label cardinality.
+4. **bon `Option<T>` setters accept `T`, not `Option<T>`.** `.field(Some(x))` is a compile error — write `.field(x)`. bon auto-wraps.
+5. **`#[builder(default)]` on `Option<T>` is redundant.** bon auto-infers `None`; adding the attribute produces a compiler error.
+6. **Leader cache updates are term-gated.** Hints for older terms MUST be dropped — a stale reply reaching the cache first would overwrite a newer leader and cause a retry storm.
+7. **`SdkError::CircuitOpen` is non-retryable.** The retry loop exits immediately when the circuit opens; otherwise retries would hammer an open circuit.
+8. **Routing is redirect-only.** The SDK reconnects directly to the leader on `NotLeader` + `LeaderHint`. Never ask the server to forward client requests — server-side forwarding is reserved for saga orchestration (see root rule 11).
+9. **UDS endpoints bypass TCP keep-alive.** Endpoints starting with `/` are treated as Unix-socket paths; don't apply TCP-specific settings to them.

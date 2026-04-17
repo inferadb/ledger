@@ -95,5 +95,5 @@ If a field is load-bearing, do not give it a default. Force the caller to specif
 
 ## References
 
-- Workspace precedents: `crates/sdk/src/client.rs` (`ClientConfig`), `crates/sdk/src/tls.rs` (`TlsConfig`), `crates/types/src/config/` (fallible builders for storage/raft/batch configs).
+- Workspace precedents: `crates/sdk/src/config.rs` (`ClientConfig` and `TlsConfig` both live here), `crates/types/src/config/` (fallible builders for storage/raft/batch configs).
 - `CLAUDE.md` (types crate) — config dual pattern.

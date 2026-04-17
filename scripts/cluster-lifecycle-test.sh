@@ -687,7 +687,7 @@ create_org() {
       fi
     done
     reg_attempt=$((reg_attempt + 1))
-    sleep 3
+    sleep 1
   done
 
   if [[ -z "$ORG_SLUG" || -z "$USER_SLUG" ]]; then

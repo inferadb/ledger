@@ -8,16 +8,19 @@ You are a consensus/storage reviewer for InferaDB Ledger. You review code change
 
 ## Scope
 
-- `crates/consensus/src/` — `Shard` (event-driven Raft), `Reactor` (single-task event loop), `WalBackend` trait with `wal/{segmented,encrypted,memory,io_uring_backend}` impls, `engine.rs`, `bootstrap.rs`, `closed_ts.rs`, `committed.rs`, `circuit_breaker.rs`
-- `crates/raft/src/` — saga orchestrator, background jobs (`AutoRecoveryJob`, `BTreeCompactor`, `BlockCompactor`, `BackgroundJobWatchdog`), rate limiting, `ForwardClient`, `ConnectionTracker`, `DependencyHealthChecker`
+- `crates/consensus/src/` — `Shard` (event-driven Raft), `Reactor` (single-task event loop), `WalBackend` trait with `wal/{segmented,encrypted,memory,io_uring_backend}` impls, `engine.rs`, `bootstrap.rs`, `closed_ts.rs`, `committed.rs`, `circuit_breaker.rs`, `leadership.rs`, `lease.rs`, `idempotency.rs`, `recovery.rs`, `split.rs`, `snapshot_crypto.rs`, `transport.rs`, `network_outbox.rs`, `router.rs`, `simulation/`
+- `crates/raft/src/` — saga orchestrator, apply pipeline (`apply_pool.rs`, `apply_worker.rs`), consensus transport (`consensus_transport/`), background jobs (`auto_recovery.rs`, `btree_compaction.rs`, `block_compaction.rs`, `integrity_scrubber.rs`, `learner_refresh.rs`, `organization_purge.rs`, `events_gc.rs`, `invite_maintenance.rs`, `orphan_cleanup.rs`, `dek_rewrap.rs`, `BackgroundJobWatchdog`), rate limiting (`rate_limit.rs`), `NodeConnectionRegistry`, `DependencyHealthChecker`, `GracefulShutdown`/`ShutdownCoordinator`, leader primitives (`leader_lease.rs`, `leader_transfer.rs`)
 - Reference: `DESIGN.md`, `WHITEPAPER.md`, `docs/operations/`, `MANIFEST.md`
 
 ## Invariants to check
 
-**Raft / openraft**
+**Raft (custom in-house, not openraft)**
 
-- `LogId::new(CommittedLeaderId::new(term, node_id), index)` — never `LogId::new(term, index)`. openraft 0.9 has no `transfer_leader`; leader step-down is final-snapshot + shutdown.
+- Leader step-down is driven by the in-house transfer path (`leader_transfer.rs` + `leader_lease.rs`); do not introduce `openraft` or its types. The workspace has zero openraft dependency.
 - `Shard` must stay event-driven: returns `Action` values, performs no I/O directly. All I/O goes through the `Reactor`.
+- `ConsensusEngine` lives in `engine.rs` (not `lib.rs`); `lib.rs` re-exports the public surface.
+- New safety-critical modules to review changes against: `committed.rs` (commit-index safety), `idempotency.rs` (de-dup), `closed_ts.rs` (closed timestamps), `lease.rs` (leader lease), `snapshot_crypto.rs` (encrypted snapshots).
+- Deterministic simulation lives in `simulation/` (`harness.rs`, `multi_raft.rs`, `network.rs`) — new invariants should have matching simulation coverage where feasible.
 - `Reactor` batches WAL writes and network sends in a single task — flag any code path that spawns side tasks doing fsync or outbound send.
 - Raft message validation (Byzantine-fault tests in `raft.rs`) — any new message handler must validate term, log id, and sender identity before mutating state.
 

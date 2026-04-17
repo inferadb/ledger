@@ -1,32 +1,40 @@
-# server
+# CLAUDE.md — server
 
-Binary entrypoint. Thin — most logic lives in `services` and below. Integration tests also live here.
+> Extends [root CLAUDE.md](../../CLAUDE.md). Root rules always take precedence.
 
-## Bootstrap
+## Purpose
 
-CockroachDB-style: nodes auto-initialize on `start`, and the `init` CLI command confirms cluster membership. No `--single` / `--cluster` / `--peers` flags.
+Binary entrypoint. Thin — most logic lives in `services` and below. This crate owns the CLI, bootstrap, graceful shutdown wiring, and all server integration tests (consolidated into a single binary per root rule 13).
 
-`bootstrap_node()` takes `HealthState` + `watch::Receiver<bool>` as **inputs** — don't create them inside and try to extract them afterwards, the ownership gets tangled.
+## Load-Bearing Files
 
-`serve_with_shutdown()` accepts any `Future<Output = ()>`. A `watch::Receiver<bool>` waiting for `true` is the cleanest signal source.
+These files are load-bearing — their invariants ripple beyond the local file. Not off-limits; use caution and understand the ramifications before editing.
 
-## Integration tests
+| File                                                                 | Reason                                                                                                                             |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/integration.rs`                                               | Single-binary submodule registry. Files not registered here don't run; restructuring breaks the `test-isolation-auditor` contract. |
+| `tests/common/mod.rs`                                                | Shared test helpers (`allocate_ports`, `TestCluster`). Per-test copies of this diverge and leak.                                   |
+| `Cargo.toml` (`autotests = false` + `[[test]] name = "integration"`) | Consolidation discipline. Removing this splits tests back into per-file binaries, blowing up CI time and breaking `common` usage.  |
 
-Consolidated into a single binary via `autotests = false` in `Cargo.toml` + an explicit `[[test]] name = "integration"` entry. All 18 server test files are submodules of `tests/integration.rs`.
+## Owned Surface
 
-Test files use `use crate::common::` — **never** `mod common;` at the file top. The `test-isolation-auditor` agent enforces this on every change under `crates/server/tests/`.
+- **CLI + main**: `src/main.rs` — argument parsing, tracing setup, bootstrap call, shutdown wait.
+- **Bootstrap wiring**: `src/bootstrap.rs` / equivalent — wires `HealthState`, shutdown channels, service registration.
+- **Integration test binary**: `tests/integration.rs` + submodules.
 
-- `just test` — unit tests only (~8s)
-- `just test-integration` — integration tests
-- `just test-all` — full suite including `#[ignore]`
+## Test Patterns
 
-No `cargo nextest`. Standard `cargo test` only.
+- 24+ integration test modules as submodules of `tests/integration.rs`. Add a file → add `mod <name>;` to `integration.rs`.
+- Every test file starts with `use crate::common::` — **never** `mod common;` at the file top. Per-test `mod common;` copies silently diverge.
+- Port allocation via `allocate_ports` from `tests/common/mod.rs`. Hardcoded ports cause flaky tests under parallel cargo runs.
+- `TestCluster` drops all nodes before the test returns. Leaked clusters pollute subsequent tests.
+- Required clippy allows live at the top of each test file (e.g. `#![allow(clippy::unwrap_used)]`, `#![allow(clippy::panic)]`). Tests are exempt from the `unsafe-panic-auditor` discipline.
 
-## Toolchain reminder
+## Local Golden Rules
 
-`cargo +1.92` for build/clippy/test; `cargo +nightly` for fmt. The Justfile pins these — don't silently fall back to `cargo` without the flag.
-
-## Related tooling
-
-- Agent: `test-isolation-auditor`
-- Skill: `/debug-integration-test`
+1. **Integration tests use `use crate::common::`; never `mod common;`.** Audited by `test-isolation-auditor` on every change under `tests/`.
+2. **A new integration test file requires `mod <name>;` in `tests/integration.rs`.** Unregistered files silently don't run — the test you wrote provides zero coverage.
+3. **Port allocation goes through `allocate_ports`.** Hardcoded port literals cause flaky test runs under `cargo test --test-threads`.
+4. **`bootstrap_node()` takes `HealthState` + `watch::Receiver<bool>` as inputs.** Don't construct them inside and return them out — ownership gets tangled with the shutdown coordinator.
+5. **`serve_with_shutdown()` accepts any `Future<Output = ()>`.** A `watch::Receiver<bool>` awaiting `true` is the canonical shutdown signal; don't invent a new signal type.
+6. **Cross-test shared mutable state is forbidden.** Each test owns its own `TestCluster` and cleans up. Static `OnceCell<Cluster>` constructs are a bug — tests must not share state.

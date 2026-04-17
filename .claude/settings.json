@@ -39,6 +39,34 @@
           {
             "type": "command",
             "command": "if [[ \"$CLAUDE_FILE_PATH\" == *.proto ]]; then echo \"[reminder] .proto changed — run \\`just proto\\` to regenerate crates/proto/src/generated/ledger.v1.rs, then \\`just fmt\\` and \\`just clippy\\`.\"; fi"
+          },
+          {
+            "type": "command",
+            "command": "f=\"$CLAUDE_FILE_PATH\"; [[ -z \"$f\" || ! -f \"$f\" ]] && exit 0; if [[ \"$f\" == *.rs || \"$f\" == *.md ]]; then grep -qE '^[[:space:]/]*```ignore\\b' \"$f\" && echo \"[writing-check] fenced 'ignore' blocks are banned. Use 'no_run' for Rust examples (validated by cargo doc) or 'text' for non-Rust content.\"; fi; if [[ \"$f\" == *.md ]]; then bad=$(awk 'BEGIN{i=0;b=0} /^[[:space:]]*```/{if(i){i=0}else{if($0~/^[[:space:]]*```[[:space:]]*$/)b++;i=1}next} END{print b+0}' \"$f\"); [[ \"$bad\" -gt 0 ]] && echo \"[writing-check] $bad untagged code-fence opener(s) — language-tag every opener (e.g. rust, bash, text).\"; base=$(basename \"$f\" .md); case \"$base\" in CLAUDE|AGENTS|README|MEMORY|LICENSE*|CONTRIBUTING|CHANGELOG|SECURITY|CODEOWNERS|CODE_OF_CONDUCT|SPEC|DESIGN|WHITEPAPER|PII|PRD|NOTICE|TODO|SKILL) ;; *) [[ \"$base\" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || echo \"[writing-check] '$base.md' is not kebab-case (lowercase letters/digits separated by hyphens).\";; esac; fi; exit 0"
+          },
+          {
+            "type": "agent",
+            "prompt": "`crates/state/src/system/keys.rs` was just edited in the InferaDB Ledger workspace. Read `.claude/agents/data-residency-auditor.md` for the full audit checklist, then apply it to the current state of `crates/state/src/system/keys.rs` and any files it references. This is read-only verification — produce findings in the auditor's standard format (BLOCK / FIX / NOTE per finding, counts per severity, one-line verdict). Do not edit any file.",
+            "if": "Edit(crates/state/src/system/keys.rs)",
+            "timeout": 180
+          },
+          {
+            "type": "agent",
+            "prompt": "`crates/state/src/system/keys.rs` was just written in the InferaDB Ledger workspace. Read `.claude/agents/data-residency-auditor.md` for the full audit checklist, then apply it to the current state of `crates/state/src/system/keys.rs` and any files it references. This is read-only verification — produce findings in the auditor's standard format (BLOCK / FIX / NOTE per finding, counts per severity, one-line verdict). Do not edit any file.",
+            "if": "Write(crates/state/src/system/keys.rs)",
+            "timeout": 180
+          },
+          {
+            "type": "agent",
+            "prompt": "A file under `crates/server/tests/` was just edited in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nExtract `tool_input.file_path` from that JSON. Read `.claude/agents/test-isolation-auditor.md` for the full audit checklist, then apply it to the edited file and the surrounding `crates/server/tests/` directory. Focus on: `use crate::common::` vs `mod common;`, `autotests = false` + single `[[test]]` in Cargo.toml, port allocation via `allocate_ports`, `TestCluster` teardown, required clippy allows at file top, `mod X;` registration in `tests/integration.rs`. Read-only — produce findings in the auditor's standard format. Do not edit.",
+            "if": "Edit(crates/server/tests/**)",
+            "timeout": 180
+          },
+          {
+            "type": "agent",
+            "prompt": "A file under `crates/server/tests/` was just written in the InferaDB Ledger workspace. The hook input JSON is:\n\n$ARGUMENTS\n\nExtract `tool_input.file_path` from that JSON. Read `.claude/agents/test-isolation-auditor.md` for the full audit checklist, then apply it to the written file and the surrounding `crates/server/tests/` directory. Focus on: `use crate::common::` vs `mod common;`, `autotests = false` + single `[[test]]` in Cargo.toml, port allocation via `allocate_ports`, `TestCluster` teardown, required clippy allows at file top, `mod X;` registration in `tests/integration.rs`. Read-only — produce findings in the auditor's standard format. Do not edit.",
+            "if": "Write(crates/server/tests/**)",
+            "timeout": 180
           }
         ]
       }

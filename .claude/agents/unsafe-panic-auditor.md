@@ -43,8 +43,13 @@ Test utilities (`crates/test-utils/`) and `fuzz/` are exempt entirely — they e
    - `\bunsafe\b`, `\bpanic!\s*\(`, `\btodo!\s*\(`, `\bunimplemented!\s*\(`, `\bunreachable!\s*\(`
    - `\bTODO\b`, `\bFIXME\b`, `\bHACK\b`, `\bXXX\b`
    - `\.unwrap\(\)`, `\.expect\(`
-2. For each hit, open a small window of context (enough to determine whether it is inside `#[cfg(test)]` or `mod tests`).
-3. Classify as BLOCK, FIX, or NOTE per the rules above.
+2. Also sweep for the "no placeholder stubs / shims / feature flags" rule from `CLAUDE.md`:
+   - `#\[cfg\(feature\s*=` — every feature gate is suspect; flag each occurrence with its surrounding cfg so a human can confirm it is not a backwards-compat shim.
+   - `#\[deprecated`, `fn\s+\w*(_compat|_legacy|_deprecated|_old)\s*\(` — naming or attributes indicating retained-for-compat code.
+   - Function bodies that are `Default::default()` or `Vec::new()` / `HashMap::new()` as their only statement — likely a placeholder stub. Scan by opening candidate functions whose body is a single expression.
+   - Re-exports or wrapper modules tagged with comments like `// kept for backwards-compat`, `// legacy shim`, `// transitional` — flag the lines.
+3. For each hit, open a small window of context (enough to determine whether it is inside `#[cfg(test)]` or `mod tests`).
+4. Classify as BLOCK, FIX, or NOTE per the rules above.
 
 ## Output format
 
