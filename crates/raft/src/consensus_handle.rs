@@ -267,6 +267,14 @@ impl ConsensusHandle {
         self.engine.read_index(self.shard).await.context(ConsensusSnafu)
     }
 
+    /// Flushes all pending WAL frames to durable storage before shutdown.
+    ///
+    /// Call this in the pre-shutdown callback to ensure all committed
+    /// proposals are durable before the process exits.
+    pub async fn flush_for_shutdown(&self, timeout: Duration) -> Result<(), HandleError> {
+        self.engine.flush_for_shutdown(timeout).await.context(ConsensusSnafu)
+    }
+
     /// Requests consensus engine shutdown for this shard.
     ///
     /// The reactor will flush pending work and exit its event loop.

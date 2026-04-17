@@ -187,6 +187,7 @@ async fn main() -> Result<(), ServerError> {
     health_state.mark_ready();
 
     // Spawn shutdown handler
+    let consensus_handle = node.handle.clone();
     let graceful_shutdown = graceful_shutdown.with_handle(node.handle.clone());
     let shutdown_handle = tokio::spawn(async move {
         shutdown::shutdown_signal().await;
@@ -210,8 +211,15 @@ async fn main() -> Result<(), ServerError> {
 
         graceful_shutdown
             .execute(|| async move {
-                // Consensus engine shutdown is handled by dropping the handle.
-                // No explicit snapshot trigger needed — the engine flushes on drop.
+                // Explicitly flush the WAL before the consensus engine handle
+                // is dropped. This ensures all committed proposals are durable
+                // even if a crash occurs between gRPC server stop and handle drop.
+                let flush_timeout = std::time::Duration::from_secs(5);
+                if let Err(e) = consensus_handle.flush_for_shutdown(flush_timeout).await {
+                    tracing::warn!(error = %e, "WAL flush during shutdown failed");
+                } else {
+                    tracing::info!("WAL flushed successfully during shutdown");
+                }
             })
             .await;
     });

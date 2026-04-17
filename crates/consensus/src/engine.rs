@@ -363,6 +363,30 @@ impl ConsensusEngine {
             .map_err(|_| ConsensusError::ProposalQueueFull)
     }
 
+    /// Flushes all pending WAL frames to durable storage before shutdown.
+    ///
+    /// Sends a [`ReactorEvent::ShutdownFlush`] to the reactor and waits for
+    /// acknowledgment, bounded by the given timeout. Call this in the
+    /// pre-shutdown callback to ensure all committed proposals are durable
+    /// before the process exits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConsensusError::ProposalQueueFull`] if the reactor inbox is
+    /// full, the reactor has shut down, the WAL sync fails, or the timeout
+    /// elapses before the flush completes.
+    pub async fn flush_for_shutdown(&self, timeout: Duration) -> Result<(), ConsensusError> {
+        let (tx, rx) = oneshot::channel();
+        self.inbox
+            .send(ReactorEvent::ShutdownFlush { ack: tx })
+            .await
+            .map_err(|_| ConsensusError::ProposalQueueFull)?;
+        tokio::time::timeout(timeout, rx)
+            .await
+            .map_err(|_| ConsensusError::ProposalQueueFull)?
+            .map_err(|_| ConsensusError::ProposalQueueFull)?
+    }
+
     /// Gracefully shuts down the reactor and waits for it to finish.
     pub async fn shutdown(self) {
         let _ = self.inbox.send(ReactorEvent::Shutdown).await;
@@ -547,6 +571,33 @@ mod tests {
         );
 
         engine.shutdown().await;
+    }
+
+    /// `flush_for_shutdown` completes successfully on a fresh engine with no
+    /// pending work — verifying the round-trip through the reactor.
+    #[tokio::test]
+    async fn flush_for_shutdown_succeeds_on_idle_engine() {
+        let (engine, _commit_rx) = make_engine();
+
+        let result = engine.flush_for_shutdown(std::time::Duration::from_secs(1)).await;
+        assert!(result.is_ok(), "flush_for_shutdown should succeed on idle engine, got {result:?}");
+
+        engine.shutdown().await;
+    }
+
+    /// `flush_for_shutdown` fails after the reactor has shut down because the
+    /// inbox channel is closed.
+    #[tokio::test]
+    async fn flush_for_shutdown_fails_after_shutdown() {
+        let (engine, _commit_rx) = make_engine();
+
+        // Shut down the reactor first.
+        engine.request_shutdown().await;
+        // Give the reactor a moment to process the shutdown event.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let result = engine.flush_for_shutdown(std::time::Duration::from_secs(1)).await;
+        assert!(result.is_err(), "flush_for_shutdown should fail after shutdown, got {result:?}");
     }
 
     /// Different data produces a different cache key and reaches the reactor.

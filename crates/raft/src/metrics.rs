@@ -1758,5 +1758,4 @@ mod tests {
         record_onboarding_request("register", "success");
         record_onboarding_request("register", "failure");
     }
-
 }

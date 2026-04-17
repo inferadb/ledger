@@ -106,6 +106,14 @@ pub enum ReactorEvent {
         /// Channel to send the result back on.
         response: oneshot::Sender<Option<u64>>,
     },
+    /// Flush the WAL for all shards before shutdown.
+    ///
+    /// Forces an immediate WAL sync so all committed proposals are durable.
+    /// The reactor sends the result back on the oneshot channel.
+    ShutdownFlush {
+        /// Channel to acknowledge flush completion.
+        ack: oneshot::Sender<Result<(), ConsensusError>>,
+    },
     /// Graceful shutdown request.
     Shutdown,
 }
@@ -436,6 +444,41 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             ReactorEvent::QueryPeerState { shard, node, response } => {
                 let result = self.shards.get(&shard).and_then(|s| s.peer_match_index(node));
                 let _ = response.send(result);
+                vec![]
+            },
+            ReactorEvent::ShutdownFlush { ack } => {
+                // NOTE: This handler does not check `fsync_phase`. If an async-capable
+                // WAL backend is in use and an async fsync is in-flight, the sync()
+                // call below will still ensure durability (sync is a superset of
+                // async fsync completion). All current backends use synchronous fsync
+                // so this is a no-op concern today.
+
+                // Force-flush all pending WAL frames and sync to disk.
+                // This is intentionally synchronous (blocking the reactor)
+                // because we need durability confirmed before proceeding
+                // with shutdown.
+                let frames = std::mem::take(&mut self.pending_wal_frames);
+                if !frames.is_empty() && self.wal.append(&frames).is_err() {
+                    // Drain pending responses so waiters get a structured error
+                    // rather than a dropped-receiver error.
+                    for (_, _, resp) in self.pending_responses.drain(..) {
+                        let _ = resp.send(Err(ConsensusError::ProposalQueueFull));
+                    }
+                    self.pending_commits.clear();
+                    let _ = ack.send(Err(ConsensusError::ProposalQueueFull));
+                    return vec![];
+                }
+                let result = match self.wal.sync() {
+                    Ok(()) => Ok(()),
+                    Err(_e) => {
+                        for (_, _, resp) in self.pending_responses.drain(..) {
+                            let _ = resp.send(Err(ConsensusError::ProposalQueueFull));
+                        }
+                        self.pending_commits.clear();
+                        Err(ConsensusError::ProposalQueueFull)
+                    },
+                };
+                let _ = ack.send(result);
                 vec![]
             },
             ReactorEvent::Shutdown => {
