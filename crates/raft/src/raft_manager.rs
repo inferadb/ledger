@@ -230,7 +230,15 @@ impl RegionConfig {
 // ============================================================================
 
 /// Background job handles for a region.
+///
+/// Handles are stored to keep the spawned tasks alive — dropping a
+/// `JoinHandle` does not cancel the task, but we retain them for
+/// observability (e.g. detecting panicked tasks on shutdown).
+#[allow(dead_code)] // handles are stored for task lifetime, not read
 pub struct RegionBackgroundJobs {
+    /// Cancellation token for this region's jobs. Cancelling this signals all
+    /// child jobs to exit their loops gracefully.
+    region_token: CancellationToken,
     /// TTL garbage collector handle.
     gc_handle: Option<JoinHandle<()>>,
     /// Block compactor handle.
@@ -251,6 +259,7 @@ impl RegionBackgroundJobs {
     /// Creates with no jobs (used when background_jobs disabled).
     fn none() -> Self {
         Self {
+            region_token: CancellationToken::new(),
             gc_handle: None,
             compactor_handle: None,
             recovery_handle: None,
@@ -266,32 +275,19 @@ impl RegionBackgroundJobs {
         Arc::clone(&self.rewrap_progress)
     }
 
-    /// Aborts all running background jobs.
-    fn abort(&mut self) {
-        if let Some(handle) = self.gc_handle.take() {
-            handle.abort();
-        }
-        if let Some(handle) = self.compactor_handle.take() {
-            handle.abort();
-        }
-        if let Some(handle) = self.recovery_handle.take() {
-            handle.abort();
-        }
-        if let Some(handle) = self.btree_compactor_handle.take() {
-            handle.abort();
-        }
-        if let Some(handle) = self.integrity_scrubber_handle.take() {
-            handle.abort();
-        }
-        if let Some(handle) = self.dek_rewrap_handle.take() {
-            handle.abort();
-        }
+    /// Cancels the region token, signalling all child jobs to exit gracefully.
+    ///
+    /// Jobs observe cancellation via `tokio::select!` in their main loops and
+    /// will break out on the next tick. Handles are NOT awaited here because
+    /// `Drop` cannot be async — the tokio runtime will complete them.
+    fn cancel(&mut self) {
+        self.region_token.cancel();
     }
 }
 
 impl Drop for RegionBackgroundJobs {
     fn drop(&mut self) {
-        self.abort();
+        self.cancel();
     }
 }
 
@@ -1233,6 +1229,7 @@ impl RaftManager {
         info!(region = region.as_str(), "Started DEK re-wrapping job");
 
         RegionBackgroundJobs {
+            region_token: parent_token,
             gc_handle: Some(gc_handle),
             compactor_handle: Some(compactor_handle),
             recovery_handle: Some(recovery_handle),
@@ -1340,7 +1337,7 @@ impl RaftManager {
         // Abort background jobs first
         {
             let mut jobs = region_group.background_jobs.lock();
-            jobs.abort();
+            jobs.cancel();
             debug!(region = region.as_str(), "Aborted background jobs");
         }
 
@@ -1435,7 +1432,7 @@ impl RaftManager {
             return Ok(());
         }
 
-        group.background_jobs.lock().abort();
+        group.background_jobs.lock().cancel();
         info!(%region, "Region group hibernated");
         Ok(())
     }
@@ -1927,7 +1924,7 @@ mod tests {
     fn test_background_jobs_abort_empty() {
         let mut jobs = RegionBackgroundJobs::none();
         // Aborting empty jobs shouldn't panic
-        jobs.abort();
+        jobs.cancel();
         assert!(jobs.gc_handle.is_none());
         assert!(jobs.compactor_handle.is_none());
         assert!(jobs.recovery_handle.is_none());
