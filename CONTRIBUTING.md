@@ -1,6 +1,19 @@
 # Contributing to InferaDB Ledger
 
-We welcome contributions! Please read the guidelines below.
+Thanks for your interest in contributing. This guide covers what you need for a first PR to land cleanly. Reference material for advanced testing (fuzzing, property tests, simulation) lives in [`docs/testing/`](docs/testing/).
+
+- [Code of Conduct](#code-of-conduct)
+- [Reporting Issues](#reporting-issues)
+- [Development Setup](#development-setup)
+- [Before You Submit](#before-you-submit)
+- [Pull Requests](#pull-requests)
+- [Using AI Assistants](#using-ai-assistants)
+- [Project Conventions](#project-conventions)
+- [Advanced Testing](#advanced-testing)
+- [Troubleshooting](#troubleshooting)
+- [Review Process](#review-process)
+- [License](#license)
+- [Questions?](#questions)
 
 ## Code of Conduct
 
@@ -8,169 +21,111 @@ This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.
 
 ## Reporting Issues
 
-- **Bugs**: Search existing issues first. Include version, reproduction steps, expected vs actual behavior, and logs.
-- **Features**: Describe the use case, proposed solution, and alternatives.
+- **Bugs**: Search existing issues first. Include version, reproduction steps, expected vs. actual behavior, and logs.
+- **Features**: Describe the use case, proposed solution, and alternatives considered.
 - **Security**: Email [security@inferadb.com](mailto:security@inferadb.com). Do not open public issues.
-
-## Pull Requests
-
-1. Fork and branch from `main`
-2. Follow [Conventional Commits](https://www.conventionalcommits.org/)
-3. Run `just check` before submitting (format + lint + test)
-4. Update documentation for API or behavior changes
-5. Submit with a clear description
-
-**PR title must follow Conventional Commits format** (validated by CI):
-
-- `feat: add user authentication`
-- `fix(api): handle empty requests`
 
 ## Development Setup
 
 ```bash
-# Install tools
-mise trust && mise install
+# Clone
+git clone https://github.com/inferadb/ledger.git
+cd ledger
 
-# Build and test
-just build
-just test
+# Install toolchain (Rust 1.92 pinned + nightly for fmt, via mise)
+just setup
 
-# Pre-commit validation
+# Fast inner loop — fmt-check + clippy + unit tests
 just check
 
-# See all commands
-just
+# Full pre-PR gate — adds doc-check
+just ci
+
+# Everything the Justfile exposes
+just --list
 ```
 
-See [README.md](README.md) for prerequisites.
+Prerequisites: Rust 1.92+, [mise](https://mise.jdx.dev/), [just](https://github.com/casey/just). Platform notes are in [README.md](README.md).
 
-## Fuzzing
+## Before You Submit
 
-Fuzz tests use [cargo-fuzz](https://rust-fuzz.github.io/book/cargo-fuzz.html) with libFuzzer to test parsing and deserialization code paths against arbitrary input.
+Run through this checklist before opening a PR:
 
-### Setup
+- [ ] `just ci` passes locally (fmt-check + clippy + doc-check + unit tests)
+- [ ] PR title follows [Conventional Commits](https://www.conventionalcommits.org/) (e.g. `feat(api): ...`, `fix(storage): ...`)
+- [ ] New or changed behavior has a test (unit, integration, or proptest — pick the lightest level that exercises the change)
+- [ ] Any `.proto` edits were followed by `just proto` and the regenerated code is staged
+- [ ] No `unsafe`, `panic!`, `todo!()`, or `TODO`/`FIXME`/`HACK` comments in production code (enforced by the `unsafe-panic-auditor` agent)
+- [ ] New storage-key prefixes have a matching `KEY_REGISTRY` entry and a residency tier (`data-residency-auditor` will flag otherwise)
+- [ ] If you touched a golden rule surface (see [CLAUDE.md](CLAUDE.md)), the corresponding CLAUDE.md is still accurate
 
-```bash
-# Install cargo-fuzz (requires nightly Rust)
-cargo install cargo-fuzz
+## Pull Requests
 
-# List available fuzz targets
-cargo +nightly fuzz list --fuzz-dir fuzz
-```
+1. Fork and branch from `main`.
+2. Follow [Conventional Commits](https://www.conventionalcommits.org/) in both commits and the PR title (the PR title becomes the squashed commit message).
+3. Run `just ci` before submitting.
+4. Update docs for API or behavior changes.
+5. Submit with a description that covers the *why*, not just the *what*.
 
-### Running Fuzz Targets
+**Conventional Commit scope examples used in this repo:**
 
-```bash
-# Run a specific fuzz target (runs indefinitely until Ctrl+C)
-cargo +nightly fuzz run fuzz_proto_convert --fuzz-dir fuzz
+| Scope       | Surface                                |
+| ----------- | -------------------------------------- |
+| `api`       | gRPC services, proto                   |
+| `storage`   | B+ tree, pages, WAL                    |
+| `consensus` | Raft engine, reactor, shard, simulation|
+| `raft`      | Saga orchestrator, apply pipeline      |
+| `sdk`       | Rust client crate                      |
+| `docs`      | Any `*.md` or `crates/*/CLAUDE.md`     |
+| `ci`        | GitHub Actions, Justfile gates         |
 
-# Run for a limited time (300 seconds)
-cargo +nightly fuzz run fuzz_postcard_codec --fuzz-dir fuzz -- -max_total_time=300
+## Using AI Assistants
 
-# Run all targets as a smoke test (60 seconds each)
-for target in fuzz_proto_convert fuzz_postcard_codec fuzz_btree_keys fuzz_pagination_token fuzz_wal_frames fuzz_rkyv_entries; do
-    cargo +nightly fuzz run "$target" --fuzz-dir fuzz -- -max_total_time=60
-done
-```
+This codebase is structured for AI-assisted development. Claude Code, Codex, and Cursor all have what they need to contribute safely:
 
-### Fuzz Targets
+- **[CLAUDE.md](CLAUDE.md)** (symlinked as `AGENTS.md`) — 14 non-negotiable golden rules covering proto codegen, storage keys, PII residency, error handling, consensus I/O boundaries, and test hygiene. Read this before editing any of those surfaces.
+- **Per-crate `CLAUDE.md`** — `crates/*/CLAUDE.md` files extend the root rules with crate-specific invariants.
+- **Proactive audit agents** (`.claude/agents/`) — six reviewers (`consensus-reviewer`, `data-residency-auditor`, `proto-reviewer`, `snafu-error-reviewer`, `test-isolation-auditor`, `unsafe-panic-auditor`) fire on matching file changes and surface violations.
+- **Task skills** (`.claude/skills/`) — `/add-new-entity`, `/add-proto-conversion`, `/add-storage-key`, `/new-rpc`, `/define-error-type`, `/use-bon-builder`, `/debug-integration-test`, `/just-ci-gate`, `/audit-claude-md`. Use these instead of improvising when their trigger applies.
+- **Hooks** (`.claude/settings.json`) — block `git commit` from agents, block edits to generated proto and `Cargo.lock`, auto-run `cargo +nightly fmt` + `cargo +1.92 check` after `.rs` edits. These exist so agents cannot silently violate golden rules.
 
-| Target                  | Attack Surface                                       |
-| ----------------------- | ---------------------------------------------------- |
-| `fuzz_proto_convert`    | Protobuf deserialization (gRPC requests)             |
-| `fuzz_postcard_codec`   | Postcard codec for domain types                      |
-| `fuzz_btree_keys`       | B+ tree key encoding/decoding, varint                |
-| `fuzz_pagination_token` | HMAC-signed pagination token parsing                 |
-| `fuzz_wal_frames`       | WAL frame parsing, CRC validation, crash recovery    |
-| `fuzz_rkyv_entries`     | rkyv archived entry deserialization and validation    |
+If an agent review contradicts your judgment, surface the contradiction in the PR rather than overriding it — the audit rules exist because the class of bug has been observed at least twice.
 
-### Investigating Crashes
+## Project Conventions
 
-```bash
-# Reproduce a crash
-cargo +nightly fuzz run fuzz_proto_convert --fuzz-dir fuzz fuzz/artifacts/fuzz_proto_convert/crash-*
+Detailed conventions (toolchain invocation, identifier newtypes, storage-key families, doc-comment style, Serena MCP navigation) are in [CLAUDE.md](CLAUDE.md). One-line summary for humans skimming:
 
-# Minimize a crash input
-cargo +nightly fuzz tmin fuzz_proto_convert --fuzz-dir fuzz fuzz/artifacts/fuzz_proto_convert/crash-*
-```
+- `cargo +1.92` for build/clippy/test, `cargo +nightly` for fmt. Never unpinned `cargo`.
+- Server crates use `snafu` only; SDK uses `thiserror`; `anyhow` is banned.
+- Internal IDs are `{Entity}Id(i64)`; external slugs are `{Entity}Slug(u64)`. Translation happens at the gRPC boundary.
+- Storage-key prefixes: bare (primary), `_dir:`, `_idx:`, `_meta:`, `_shred:`, `_tmp:`, `_audit:`. Each has a residency tier.
 
-### CI
+## Advanced Testing
 
-Fuzz tests run nightly via GitHub Actions (`.github/workflows/fuzz.yml`), 5 minutes per target. Crash artifacts are uploaded on failure.
+Everyday tests are covered by `just test`, `just test-integration`, and `just test-proptest`. Deeper references live in [`docs/testing/`](docs/testing/):
 
-## Property Testing
+- [`docs/testing/fuzzing.md`](docs/testing/fuzzing.md) — cargo-fuzz targets, crash-artifact workflow
+- [`docs/testing/property.md`](docs/testing/property.md) — proptest suites and strategies
+- [`docs/testing/simulation.md`](docs/testing/simulation.md) — deterministic consensus simulation
 
-Property tests use [proptest](https://proptest-rs.github.io/proptest/) to verify invariants across randomly generated inputs. Unlike fuzz tests (which target crash-inducing inputs), property tests assert logical properties that must hold for all valid inputs.
+## Troubleshooting
 
-### Running Property Tests
+**`just test-integration` fails with `address already in use`.** The integration suite spawns real clusters on real ports. Parallelism is capped at 4 in the Justfile; don't override `--test-threads` upward without understanding `scripts/run-integration-tests.sh`.
 
-```bash
-# Run with default iterations (256 cases per test)
-cargo +1.92 test --workspace --lib -- proptest
+**`just proto` fails with "expected exactly one build output directory".** Previous build artifacts left multiple hash directories under `target/debug/build/inferadb-ledger-proto-*`. Run `cargo clean -p inferadb-ledger-proto` then `just proto` again.
 
-# Run with high iteration count (10k cases per test)
-just test-proptest
+**Clippy complains about formatting after `just check`.** Run `just fix` to auto-apply `cargo fmt` and `cargo clippy --fix`, then rerun `just check`.
 
-# Custom iteration count
-just test-proptest 50000
-```
+**An audit agent flagged my change and I think it's wrong.** Surface the contradiction in the PR description rather than working around it. Golden rules exist because the same class of bug has surfaced at least twice.
 
-### Test Suites
-
-| Suite                  | Crate       | Properties                                                                                                                                                            |
-| ---------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Codec roundtrip        | `types`     | Encode/decode cycle preserves all serializable types (Operation, Entity, Relationship, Transaction, BlockHeader, VaultBlock, VaultEntry, ShardBlock, ChainCommitment) |
-| Merkle proofs          | `types`     | Valid proofs always verify, tampered proofs never verify, wrong roots never verify, root computation is deterministic                                                 |
-| B+ tree invariants     | `store`     | Inserted keys retrievable, iteration returns sorted keys, deletes remove only target keys, updates overwrite correctly, get/iteration consistency                     |
-| Consensus determinism  | `consensus` | Same operations on two independent engines produce identical state, encrypted WAL roundtrips correctly, block hashes are deterministic across nodes                   |
-| WAL integrity          | `consensus` | Frame write/read roundtrip, segment rotation preserves entries, CRC catches corruption, crash recovery replays correctly                                              |
-| Split/merge roundtrip  | `consensus` | Split followed by merge preserves all data, router updates are consistent, organization boundaries are respected                                                      |
-
-### Writing New Property Tests
-
-1. Add strategies to `crates/test-utils/src/strategies.rs` for reusable input generators
-2. Place property tests in a `proptest_*` inner module within the test module of the target crate
-3. Name test functions with a `prop_` prefix so `cargo test -- proptest` filters correctly
-4. Use `inferadb-ledger-test-utils` strategies where possible to avoid duplication
-
-### CI
-
-Property tests run at default iterations (256) on every PR via the standard CI workflow. A dedicated nightly workflow (`.github/workflows/proptest.yml`) runs 10,000 iterations per test to catch rare edge cases.
-
-## Simulation Testing
-
-The consensus engine uses deterministic simulation testing. All nondeterminism (time, randomness, disk I/O) is abstracted behind injectable traits (`Clock`, `RngSource`, `WalBackend`), enabling reproducible multi-node tests in a single process.
-
-### Running Simulation Tests
-
-```bash
-# Run all simulation tests (default: 1000 seeds)
-cargo +1.92 test -p inferadb-ledger-consensus --test simulation
-
-# Run a specific simulation scenario
-cargo +1.92 test -p inferadb-ledger-consensus --test simulation linearizability
-
-# Reproduce a failing seed
-cargo +1.92 test -p inferadb-ledger-consensus --test simulation -- --seed 42
-```
-
-### Simulation Scenarios
-
-| Scenario         | What it tests                                                        |
-| ---------------- | -------------------------------------------------------------------- |
-| `linearizability`| Stale reads, partition recovery, lease expiry under network faults   |
-| `split_merge`    | Split/merge under crash, partition, clock skew                       |
-| `durability`     | WAL corruption, sync failures, recovery paths                        |
-| `closed_ts`      | Closed timestamp correctness under leader transitions                |
-
-Each test runs thousands of seeded iterations with fault injection (partitions, crashes, clock skew, slow disk). A failing test produces a seed that reproduces the exact failure.
+More operational issues: [`docs/faq.md`](docs/faq.md) and [`docs/operations/`](docs/operations/).
 
 ## Review Process
 
-1. CI runs tests, linters, and formatters
-2. A maintainer reviews your contribution
-3. Address feedback
-4. Maintainer merges on approval
+1. CI runs fmt-check, clippy, doc-check, and tests.
+2. A maintainer reviews. Expect initial feedback within a few working days; ping on Discord if a PR is stalled for more than a week.
+3. Address feedback. Force-push or push new commits — the PR will be squashed on merge, so history inside a PR is flexible.
+4. A maintainer merges on approval.
 
 ## License
 
