@@ -23,7 +23,8 @@ use inferadb_ledger_proto::proto::{
     GetSystemStateRequest, system_discovery_service_client::SystemDiscoveryServiceClient,
 };
 use parking_lot::RwLock;
-use tokio::{sync::mpsc, time::interval};
+use tokio::time::interval;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -113,6 +114,8 @@ pub struct LearnerRefreshJob {
     /// Watchdog heartbeat handle. Updated each cycle to prove liveness.
     #[builder(default)]
     watchdog_handle: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Cancellation token for graceful shutdown.
+    cancellation_token: CancellationToken,
 }
 
 impl LearnerRefreshJob {
@@ -257,7 +260,7 @@ impl LearnerRefreshJob {
     ///
     /// This should be spawned as a background task on learner nodes.
     /// It will periodically refresh state from voters until shutdown.
-    pub async fn run(self, mut shutdown: mpsc::Receiver<()>) {
+    async fn run(self) {
         if !self.config.enabled {
             info!("Learner refresh is disabled");
             return;
@@ -322,8 +325,8 @@ impl LearnerRefreshJob {
                         }
                     }
                 }
-                _ = shutdown.recv() => {
-                    info!("Learner refresh job shutting down");
+                _ = self.cancellation_token.cancelled() => {
+                    info!("LearnerRefreshJob shutting down");
                     break;
                 }
             }
@@ -332,18 +335,11 @@ impl LearnerRefreshJob {
 
     /// Starts the learner refresh job as a background task.
     ///
-    /// Returns a handle to the spawned task. The task runs until dropped.
-    /// For graceful shutdown, use `run()` with a shutdown channel instead.
+    /// Returns a handle to the spawned task. The task runs until the
+    /// cancellation token is cancelled.
     pub fn start(self) -> tokio::task::JoinHandle<()> {
-        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
         tokio::spawn(async move {
-            // Keep the sender alive for the task's lifetime so the shutdown
-            // branch in `run()` does not immediately fire when the sender is
-            // dropped at the caller (which would cause `recv()` to return
-            // `None` on the first tick). Callers needing graceful shutdown
-            // should call `run()` directly with a sender they retain.
-            let _shutdown_tx_keep_alive = shutdown_tx;
-            self.run(shutdown_rx).await;
+            self.run().await;
         })
     }
 }

@@ -15,6 +15,7 @@ use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{OrganizationId, config::OrganizationPurgeConfig};
 use tokio::time::{interval, sleep};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -60,6 +61,8 @@ pub struct OrganizationPurgeJob<B: StorageBackend + 'static> {
     /// Watchdog heartbeat handle. Updated each cycle to prove liveness.
     #[builder(default)]
     watchdog_handle: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Cancellation token for graceful shutdown.
+    cancellation_token: CancellationToken,
 }
 
 impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
@@ -68,8 +71,16 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
         handle: Arc<ConsensusHandle>,
         state: Arc<StateLayer<B>>,
         config: &OrganizationPurgeConfig,
+        cancellation_token: CancellationToken,
     ) -> Self {
-        Self { handle, state, config: config.clone(), manager: None, watchdog_handle: None }
+        Self {
+            handle,
+            state,
+            config: config.clone(),
+            manager: None,
+            watchdog_handle: None,
+            cancellation_token,
+        }
     }
 
     /// Checks if this node is the current leader.
@@ -350,8 +361,15 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
             let mut priority_retries: HashSet<OrganizationId> = HashSet::new();
 
             loop {
-                ticker.tick().await;
-                self.run_cycle(&mut priority_retries).await;
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        self.run_cycle(&mut priority_retries).await;
+                    }
+                    _ = self.cancellation_token.cancelled() => {
+                        info!("OrganizationPurgeJob shutting down");
+                        break;
+                    }
+                }
             }
         })
     }

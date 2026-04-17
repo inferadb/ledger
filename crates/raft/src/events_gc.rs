@@ -22,6 +22,7 @@ use inferadb_ledger_state::EventsDatabase;
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::events::EventConfig;
 use tokio::time::interval;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 /// Default interval between GC cycles (5 minutes).
@@ -58,6 +59,8 @@ pub struct EventsGarbageCollector<B: StorageBackend + 'static> {
     /// Watchdog heartbeat handle. Updated each cycle to prove liveness.
     #[builder(default)]
     watchdog_handle: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Cancellation token for graceful shutdown.
+    cancellation_token: CancellationToken,
 }
 
 impl<B: StorageBackend + 'static> EventsGarbageCollector<B> {
@@ -106,30 +109,36 @@ impl<B: StorageBackend + 'static> EventsGarbageCollector<B> {
             let mut ticker = interval(self.interval);
 
             loop {
-                ticker.tick().await;
-
-                // Update watchdog heartbeat
-                if let Some(ref handle) = self.watchdog_handle {
-                    handle.store(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                }
-
-                let mut job = crate::logging::JobContext::new("events_gc", None);
-                match self.run_cycle() {
-                    Ok(deleted) => {
-                        if deleted > 0 {
-                            job.record_items(deleted as u64);
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        // Update watchdog heartbeat
+                        if let Some(ref handle) = self.watchdog_handle {
+                            handle.store(
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs(),
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
                         }
-                    },
-                    Err(e) => {
-                        job.set_failure();
-                        warn!(error = %e, "Events GC cycle failed");
-                    },
+
+                        let mut job = crate::logging::JobContext::new("events_gc", None);
+                        match self.run_cycle() {
+                            Ok(deleted) => {
+                                if deleted > 0 {
+                                    job.record_items(deleted as u64);
+                                }
+                            },
+                            Err(e) => {
+                                job.set_failure();
+                                warn!(error = %e, "Events GC cycle failed");
+                            },
+                        }
+                    }
+                    _ = self.cancellation_token.cancelled() => {
+                        info!("EventsGarbageCollector shutting down");
+                        break;
+                    }
                 }
             }
         })
@@ -147,6 +156,7 @@ mod tests {
         OrganizationId,
         events::{EventAction, EventConfig, EventEmission, EventEntry, EventOutcome, EventScope},
     };
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
 
@@ -219,6 +229,7 @@ mod tests {
         let gc = EventsGarbageCollector::builder()
             .events_db(Arc::new(db.clone()))
             .config(default_config())
+            .cancellation_token(CancellationToken::new())
             .build();
 
         let deleted = gc.run_cycle().unwrap();
@@ -242,6 +253,7 @@ mod tests {
         let gc = EventsGarbageCollector::builder()
             .events_db(Arc::new(db.clone()))
             .config(default_config())
+            .cancellation_token(CancellationToken::new())
             .build();
 
         let deleted = gc.run_cycle().unwrap();
@@ -264,6 +276,7 @@ mod tests {
         let gc = EventsGarbageCollector::builder()
             .events_db(Arc::new(db.clone()))
             .config(default_config())
+            .cancellation_token(CancellationToken::new())
             .build();
 
         let deleted = gc.run_cycle().unwrap();
@@ -292,6 +305,7 @@ mod tests {
             .events_db(Arc::new(db.clone()))
             .config(default_config())
             .max_batch_size(3)
+            .cancellation_token(CancellationToken::new())
             .build();
 
         let deleted = gc.run_cycle().unwrap();
@@ -326,6 +340,7 @@ mod tests {
         let gc = EventsGarbageCollector::builder()
             .events_db(Arc::new(db.clone()))
             .config(default_config())
+            .cancellation_token(CancellationToken::new())
             .build();
 
         let deleted = gc.run_cycle().unwrap();
@@ -346,6 +361,7 @@ mod tests {
         let gc = EventsGarbageCollector::builder()
             .events_db(Arc::new(db.clone()))
             .config(disabled_config)
+            .cancellation_token(CancellationToken::new())
             .build();
 
         let deleted = gc.run_cycle().unwrap();
@@ -360,6 +376,7 @@ mod tests {
         let gc = EventsGarbageCollector::builder()
             .events_db(Arc::new(db.clone()))
             .config(default_config())
+            .cancellation_token(CancellationToken::new())
             .build();
 
         let deleted = gc.run_cycle().unwrap();

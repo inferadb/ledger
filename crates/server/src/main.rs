@@ -188,6 +188,7 @@ async fn main() -> Result<(), ServerError> {
 
     // Spawn shutdown handler
     let consensus_handle = node.handle.clone();
+    let coordinator = node.coordinator.clone();
     let graceful_shutdown = graceful_shutdown.with_handle(node.handle.clone());
     let shutdown_handle = tokio::spawn(async move {
         shutdown::shutdown_signal().await;
@@ -208,6 +209,12 @@ async fn main() -> Result<(), ServerError> {
             eprintln!("Shutdown watchdog: forcing process exit after 30s grace period");
             std::process::exit(0);
         });
+
+        // Drain background jobs BEFORE the WAL flush. Cancelling the
+        // coordinator's root token signals all child tokens, and
+        // `shutdown()` awaits each registered handle with a per-handle
+        // deadline so in-flight work completes cleanly.
+        coordinator.shutdown().await;
 
         graceful_shutdown
             .execute(|| async move {

@@ -129,9 +129,7 @@ impl ProposalService for RaftProposalService {
 
         match self.handle.propose_and_wait(payload, timeout).await {
             Ok(response) => Ok(response),
-            Err(HandleError::Consensus { source, .. }) => {
-                Err(consensus_error_to_status(source))
-            },
+            Err(HandleError::Consensus { source, .. }) => Err(consensus_error_to_status(source)),
             Err(HandleError::Timeout { .. }) => {
                 inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
                 Err(Status::deadline_exceeded(format!(
@@ -263,9 +261,7 @@ impl ProposalService for RaftProposalService {
                     format!("Not the leader for region {region} (lost leadership mid-propose)"),
                 ))
             },
-            Err(HandleError::Consensus { source, .. }) => {
-                Err(consensus_error_to_status(source))
-            },
+            Err(HandleError::Consensus { source, .. }) => Err(consensus_error_to_status(source)),
             Err(HandleError::Timeout { .. }) => {
                 inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
                 Err(Status::deadline_exceeded(format!(

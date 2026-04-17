@@ -32,6 +32,7 @@ inferadb-ledger-store.workspace = true
 
 # Async runtime
 tokio = { workspace = true, features = ["io-util", "net", "signal"] }
+tokio-util.workspace = true
 
 # gRPC
 tonic.workspace = true

@@ -18,6 +18,7 @@ use std::{
 use inferadb_ledger_state::BlockArchive;
 use inferadb_ledger_store::StorageBackend;
 use tokio::time::interval;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -47,6 +48,8 @@ pub struct BlockCompactor<B: StorageBackend + 'static> {
     /// Watchdog heartbeat handle. Updated each cycle to prove liveness.
     #[builder(default)]
     watchdog_handle: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Cancellation token for graceful shutdown.
+    cancellation_token: CancellationToken,
 }
 
 impl<B: StorageBackend + 'static> BlockCompactor<B> {
@@ -176,17 +179,24 @@ impl<B: StorageBackend + 'static> BlockCompactor<B> {
             let mut ticker = interval(self.interval);
 
             loop {
-                ticker.tick().await;
-                if let Some(ref handle) = self.watchdog_handle {
-                    handle.store(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        if let Some(ref handle) = self.watchdog_handle {
+                            handle.store(
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs(),
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                        }
+                        self.run_cycle().await;
+                    }
+                    _ = self.cancellation_token.cancelled() => {
+                        info!("BlockCompactor shutting down");
+                        break;
+                    }
                 }
-                self.run_cycle().await;
             }
         })
     }

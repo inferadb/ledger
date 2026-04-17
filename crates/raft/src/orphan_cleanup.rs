@@ -29,6 +29,7 @@ use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{ClientId, Operation, OrganizationId, Transaction, VaultId};
 use snafu::GenerateImplicitData;
 use tokio::time::interval;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -73,6 +74,8 @@ pub struct OrphanCleanupJob<B: StorageBackend + 'static> {
     /// Watchdog heartbeat handle. Updated each cycle to prove liveness.
     #[builder(default)]
     watchdog_handle: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Cancellation token for graceful shutdown.
+    cancellation_token: CancellationToken,
 }
 
 impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
@@ -367,8 +370,15 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
             info!(interval_secs = self.interval.as_secs(), "Orphan cleanup job started");
 
             loop {
-                ticker.tick().await;
-                self.run_cycle().await;
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        self.run_cycle().await;
+                    }
+                    _ = self.cancellation_token.cancelled() => {
+                        info!("OrphanCleanupJob shutting down");
+                        break;
+                    }
+                }
             }
         })
     }

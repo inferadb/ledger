@@ -77,6 +77,9 @@ impl ConsensusError {
 
     /// Whether the caller should retry this operation.
     pub fn is_retryable(&self) -> bool {
-        matches!(self, Self::NotLeader | Self::InboxFull | Self::ReactorShutdown | Self::LeaderNotReady)
+        matches!(
+            self,
+            Self::NotLeader | Self::InboxFull | Self::ReactorShutdown | Self::LeaderNotReady
+        )
     }
 }

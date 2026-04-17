@@ -21,6 +21,7 @@ use std::{
 
 use inferadb_ledger_types::{Region, config::PostErasureCompactionConfig};
 use tokio::time::interval;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -48,6 +49,8 @@ pub struct PostErasureCompactionJob {
     /// Watchdog heartbeat handle.
     #[builder(default)]
     watchdog_handle: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Cancellation token for graceful shutdown.
+    cancellation_token: CancellationToken,
 }
 
 impl PostErasureCompactionJob {
@@ -221,8 +224,15 @@ impl PostErasureCompactionJob {
             let mut last_snapshots: HashMap<String, Option<Instant>> = HashMap::new();
 
             loop {
-                ticker.tick().await;
-                self.run_cycle(&mut last_snapshots).await;
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        self.run_cycle(&mut last_snapshots).await;
+                    }
+                    _ = self.cancellation_token.cancelled() => {
+                        info!("PostErasureCompactionJob shutting down");
+                        break;
+                    }
+                }
             }
         })
     }

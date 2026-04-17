@@ -70,6 +70,7 @@ use inferadb_ledger_types::{NodeId, OrganizationId, Region};
 use parking_lot::RwLock;
 use snafu::Snafu;
 use tokio::{sync::broadcast, task::JoinHandle};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -498,6 +499,10 @@ pub struct RaftManager {
     /// Receiver half, taken once by bootstrap to hand to the
     /// `PlacementController`. `None` after the first `take_dr_event_rx()`.
     dr_event_rx: parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<()>>>,
+    /// Parent cancellation token for all per-region background jobs.
+    /// Set via [`set_cancellation_token`](Self::set_cancellation_token)
+    /// during bootstrap; defaults to an unlinked token.
+    cancellation_token: parking_lot::Mutex<CancellationToken>,
 }
 
 impl RaftManager {
@@ -520,7 +525,17 @@ impl RaftManager {
             registry,
             dr_event_tx: tx,
             dr_event_rx: parking_lot::Mutex::new(Some(rx)),
+            cancellation_token: parking_lot::Mutex::new(CancellationToken::new()),
         }
+    }
+
+    /// Sets the parent cancellation token for all per-region background jobs.
+    ///
+    /// Called during bootstrap to link the manager's jobs to the
+    /// [`ShutdownCoordinator`]'s token hierarchy. Child tokens are created
+    /// from this token for each per-region background job.
+    pub fn set_cancellation_token(&self, token: CancellationToken) {
+        *self.cancellation_token.lock() = token;
     }
 
     /// Returns the shared per-node connection registry.
@@ -1156,11 +1171,14 @@ impl RaftManager {
     ) -> RegionBackgroundJobs {
         info!(region = region.as_str(), "Starting background jobs for region");
 
+        let parent_token = self.cancellation_token.lock().clone();
+
         // TTL Garbage Collector
         let gc = TtlGarbageCollector::builder()
             .handle(handle.clone())
             .state(state.clone())
             .applied_state(applied_state.clone())
+            .cancellation_token(parent_token.child_token())
             .build();
         let gc_handle = gc.start();
         info!(region = region.as_str(), "Started TTL garbage collector");
@@ -1170,6 +1188,7 @@ impl RaftManager {
             .handle(handle.clone())
             .block_archive(block_archive.clone())
             .applied_state(applied_state.clone())
+            .cancellation_token(parent_token.child_token())
             .build();
         let compactor_handle = compactor.start();
         info!(region = region.as_str(), "Started block compactor");
@@ -1181,18 +1200,25 @@ impl RaftManager {
             .applied_state(applied_state)
             .state(state.clone())
             .block_archive(Some(block_archive))
+            .cancellation_token(parent_token.child_token())
             .build();
         let recovery_handle = recovery.start();
         info!(region = region.as_str(), "Started auto recovery job");
 
         // B+ Tree Compactor
-        let btree_compactor =
-            BTreeCompactor::builder().handle(handle.clone()).state(state.clone()).build();
+        let btree_compactor = BTreeCompactor::builder()
+            .handle(handle.clone())
+            .state(state.clone())
+            .cancellation_token(parent_token.child_token())
+            .build();
         let btree_compactor_handle = btree_compactor.start();
         info!(region = region.as_str(), "Started B+ tree compactor");
 
         // Integrity Scrubber
-        let integrity_scrubber = IntegrityScrubberJob::builder().state(state.clone()).build();
+        let integrity_scrubber = IntegrityScrubberJob::builder()
+            .state(state.clone())
+            .cancellation_token(parent_token.child_token())
+            .build();
         let integrity_scrubber_handle = integrity_scrubber.start();
         info!(region = region.as_str(), "Started integrity scrubber");
 

@@ -19,7 +19,8 @@ use inferadb_ledger_state::{BlockArchive, SnapshotManager, StateLayer};
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{OrganizationId, VaultId};
 use snafu::{GenerateImplicitData, ResultExt};
-use tokio::{sync::mpsc, time::interval};
+use tokio::time::interval;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -112,6 +113,8 @@ pub struct AutoRecoveryJob<B: StorageBackend + 'static> {
     /// Watchdog heartbeat handle. Updated each cycle to prove liveness.
     #[builder(default)]
     watchdog_handle: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Cancellation token for graceful shutdown.
+    cancellation_token: CancellationToken,
 }
 
 impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
@@ -475,7 +478,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
     ///
     /// This should be spawned as a background task. It will run until
     /// the shutdown signal is received.
-    pub async fn run(self, mut shutdown: mpsc::Receiver<()>) {
+    async fn run(self) {
         if !self.config.enabled {
             info!("Auto-recovery is disabled");
             return;
@@ -564,8 +567,8 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
                     }
                     job.record_items(vaults_recovered);
                 }
-                _ = shutdown.recv() => {
-                    info!("Auto-recovery job shutting down");
+                _ = self.cancellation_token.cancelled() => {
+                    info!("AutoRecoveryJob shutting down");
                     break;
                 }
             }
@@ -574,15 +577,11 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
 
     /// Starts the auto-recovery job as a background task.
     ///
-    /// Returns a handle to the spawned task. The task runs until dropped.
-    /// For graceful shutdown, use `run()` with a shutdown channel instead.
+    /// Returns a handle to the spawned task. The task runs until the
+    /// cancellation token is cancelled.
     pub fn start(self) -> tokio::task::JoinHandle<()> {
-        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
-        // Note: _shutdown_tx is dropped when this scope ends, but the receiver
-        // will never receive a message (recv returns None when all senders drop).
-        // The task will run until the JoinHandle is dropped or aborted.
         tokio::spawn(async move {
-            self.run(shutdown_rx).await;
+            self.run().await;
         })
     }
 }

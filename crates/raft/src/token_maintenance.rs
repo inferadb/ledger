@@ -15,6 +15,7 @@ use std::{
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
 use tokio::time::interval;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -67,6 +68,8 @@ pub struct TokenMaintenanceJob<B: StorageBackend + 'static> {
     /// Multi-region Raft manager for proposing cleanup to regional groups.
     #[builder(default)]
     manager: Option<Arc<RaftManager>>,
+    /// Cancellation token for graceful shutdown.
+    cancellation_token: CancellationToken,
 }
 
 impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
@@ -280,17 +283,24 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
             let mut ticker = interval(self.interval);
 
             loop {
-                ticker.tick().await;
-                if let Some(ref handle) = self.watchdog_handle {
-                    handle.store(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                        Ordering::Relaxed,
-                    );
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        if let Some(ref handle) = self.watchdog_handle {
+                            handle.store(
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs(),
+                                Ordering::Relaxed,
+                            );
+                        }
+                        self.run_cycle().await;
+                    }
+                    _ = self.cancellation_token.cancelled() => {
+                        info!("TokenMaintenanceJob shutting down");
+                        break;
+                    }
                 }
-                self.run_cycle().await;
             }
         })
     }

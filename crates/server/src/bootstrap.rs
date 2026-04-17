@@ -28,7 +28,6 @@ use inferadb_ledger_state::{
     TieredSnapshotManager,
 };
 use inferadb_ledger_store::FileBackend;
-
 use crate::config::Config;
 
 /// Errors during cluster bootstrap, including database, Raft, and coordination failures.
@@ -153,6 +152,9 @@ pub struct BootstrappedNode {
     /// Snapshot demotion background task handle (only active when warm tier is configured).
     #[allow(dead_code)] // retained to keep background task alive
     pub snapshot_demotion_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Shutdown coordinator that owns the cancellation token tree and tracks
+    /// all background task handles for coordinated drain during shutdown.
+    pub coordinator: Arc<crate::shutdown::ShutdownCoordinator>,
 }
 
 /// Bootstraps the node using the two-phase start+init pattern.
@@ -185,6 +187,10 @@ pub async fn bootstrap_node(
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     key_manager: Option<Arc<dyn inferadb_ledger_store::crypto::RegionKeyManager>>,
 ) -> Result<BootstrappedNode, BootstrapError> {
+    // Create the shutdown coordinator early so all spawned tasks can register
+    // child tokens and handles for coordinated drain during shutdown.
+    let coordinator = Arc::new(crate::shutdown::ShutdownCoordinator::new());
+
     // Validate configuration.
     config.validate().map_err(|e| BootstrapError::Config { message: e.to_string() })?;
 
@@ -226,6 +232,10 @@ pub async fn bootstrap_node(
     // reuse one channel per peer instead of opening a connection per region.
     let registry = Arc::new(inferadb_ledger_raft::node_registry::NodeConnectionRegistry::new());
     let manager = Arc::new(RaftManager::new(raft_manager_config, registry));
+
+    // Link per-region background jobs to the shutdown coordinator so they
+    // are cancelled when the coordinator's root token is cancelled.
+    manager.set_cancellation_token(coordinator.child_token("raft-manager-regions"));
 
     // Check whether this node has been initialized (cluster_id file exists).
     let cluster_id = crate::cluster_id::load_cluster_id(data_dir).map_err(|e| {
@@ -391,7 +401,8 @@ pub async fn bootstrap_node(
             let mgr = manager.clone();
             let liveness = peer_liveness.clone();
             let liveness_config = inferadb_ledger_raft::LivenessConfig::default();
-            tokio::spawn(async move {
+            let liveness_token = coordinator.child_token("peer-liveness");
+            let liveness_handle = tokio::spawn(async move {
                 tokio::time::sleep(liveness_config.liveness_check_interval).await;
                 loop {
                     if let Ok(global) = mgr.system_region()
@@ -400,9 +411,13 @@ pub async fn bootstrap_node(
                         check_peer_liveness_quorum(&mgr, &liveness, &global, &liveness_config)
                             .await;
                     }
-                    tokio::time::sleep(liveness_config.liveness_check_interval).await;
+                    tokio::select! {
+                        _ = liveness_token.cancelled() => break,
+                        _ = tokio::time::sleep(liveness_config.liveness_check_interval) => {}
+                    }
                 }
             });
+            coordinator.register_handle("peer-liveness", liveness_handle);
         }
     } // end: cluster_id.is_some() guard for background tasks
 
@@ -603,6 +618,7 @@ pub async fn bootstrap_node(
             manager: &manager,
             key_manager,
             storage_manager: &storage_manager,
+            coordinator: &coordinator,
         })?;
 
         health_state.mark_ready();
@@ -630,6 +646,7 @@ pub async fn bootstrap_node(
             invite_maintenance_handle: jobs.invite_maintenance_handle,
             post_erasure_compaction_handle: jobs.post_erasure_compaction_handle,
             snapshot_demotion_handle: jobs.snapshot_demotion_handle,
+            coordinator,
         })
     } else {
         // === Fresh node path ===
@@ -723,6 +740,7 @@ pub async fn bootstrap_node(
             manager: &manager,
             key_manager,
             storage_manager: &storage_manager,
+            coordinator: &coordinator,
         })?;
 
         health_state.mark_ready();
@@ -750,6 +768,7 @@ pub async fn bootstrap_node(
             invite_maintenance_handle: jobs.invite_maintenance_handle,
             post_erasure_compaction_handle: jobs.post_erasure_compaction_handle,
             snapshot_demotion_handle: jobs.snapshot_demotion_handle,
+            coordinator,
         })
     }
 }
@@ -967,6 +986,7 @@ struct StartJobsInput<'a> {
     manager: &'a Arc<RaftManager>,
     key_manager: Option<Arc<dyn inferadb_ledger_store::crypto::RegionKeyManager>>,
     storage_manager: &'a RegionStorageManager,
+    coordinator: &'a crate::shutdown::ShutdownCoordinator,
 }
 
 /// Output handles from starting all background jobs.
@@ -995,12 +1015,14 @@ struct StartJobsOutput {
 /// restart path and (in the future) the `InitCluster` handler.
 fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, BootstrapError> {
     let watchdog = input.health_state.watchdog();
+    let coord = input.coordinator;
 
     let gc_handle = TtlGarbageCollector::builder()
         .handle(input.handle.clone())
         .state(input.state.clone())
         .applied_state(input.applied_state_accessor.clone())
         .watchdog_handle(watchdog.map(|w| w.register("ttl_gc", 60)))
+        .cancellation_token(coord.child_token("ttl-gc"))
         .build()
         .start();
     tracing::info!("Started TTL garbage collector");
@@ -1010,6 +1032,7 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
         .block_archive(input.block_archive.clone())
         .applied_state(input.applied_state_accessor.clone())
         .watchdog_handle(watchdog.map(|w| w.register("block_compactor", 300)))
+        .cancellation_token(coord.child_token("block-compactor"))
         .build()
         .start();
     tracing::info!("Started block compactor");
@@ -1022,6 +1045,7 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
         .block_archive(Some(input.block_archive.clone()))
         .snapshot_manager(Some(input.snapshot_manager))
         .watchdog_handle(watchdog.map(|w| w.register("auto_recovery", 30)))
+        .cancellation_token(coord.child_token("auto-recovery"))
         .build()
         .start();
     tracing::info!("Started auto-recovery job with snapshot support");
@@ -1032,6 +1056,7 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
         .peer_addresses(Some(input.manager.peer_addresses().clone()))
         .registry(input.manager.registry())
         .watchdog_handle(watchdog.map(|w| w.register("learner_refresh", 5)))
+        .cancellation_token(coord.child_token("learner-refresh"))
         .build()
         .start();
     tracing::info!("Started learner refresh job");
@@ -1044,6 +1069,7 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
         .snapshot_dir(snapshot_dir_for_metrics)
         .region(input.config.region.as_str())
         .watchdog_handle(watchdog.map(|w| w.register("resource_metrics", 30)))
+        .cancellation_token(coord.child_token("resource-metrics"))
         .build()
         .start();
     tracing::info!("Started resource metrics collector");
@@ -1057,6 +1083,7 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
                 .snapshot_manager(input.snapshot_manager_for_backup)
                 .backup_manager(mgr)
                 .interval(Duration::from_secs(backup_config.interval_secs))
+                .cancellation_token(coord.child_token("backup"))
                 .build();
             let handle = job.start();
             tracing::info!(
@@ -1079,6 +1106,7 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
             .events_db(input.events_db.clone())
             .config(input.config.events.clone())
             .watchdog_handle(watchdog.map(|w| w.register("events_gc", 300)))
+            .cancellation_token(coord.child_token("events-gc"))
             .build();
         let handle = gc.start();
         tracing::info!("Started events garbage collector");
@@ -1096,6 +1124,7 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
         .watchdog_handle(watchdog.map(|w| w.register("saga_orchestrator", 60)))
         .manager(Some(input.manager.clone()))
         .key_manager(input.key_manager)
+        .cancellation_token(coord.child_token("saga-orchestrator"))
         .build()
         .start();
     tracing::info!("Started saga orchestrator");
@@ -1107,6 +1136,7 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
         .applied_state(input.applied_state_accessor.clone())
         .interval(Duration::from_secs(input.config.cleanup.interval_secs))
         .watchdog_handle(watchdog.map(|w| w.register("orphan_cleanup", 7200)))
+        .cancellation_token(coord.child_token("orphan-cleanup"))
         .build()
         .start();
     tracing::info!("Started orphan cleanup job");
@@ -1116,6 +1146,7 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
         .interval(Duration::from_secs(input.config.integrity.scrub_interval_secs))
         .pages_per_cycle_percent(input.config.integrity.pages_per_cycle_percent)
         .watchdog_handle(watchdog.map(|w| w.register("integrity_scrub", 7200)))
+        .cancellation_token(coord.child_token("integrity-scrub"))
         .build()
         .start();
     tracing::info!("Started integrity scrubber");
@@ -1125,6 +1156,7 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
         .state(input.state.clone())
         .manager(Some(input.manager.clone()))
         .watchdog_handle(watchdog.map(|w| w.register("org_purge", 7200)))
+        .cancellation_token(coord.child_token("org-purge"))
         .build()
         .start();
     tracing::info!("Started organization purge job");
@@ -1134,6 +1166,7 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
         .state(input.state.clone())
         .interval(Duration::from_secs(input.config.token_maintenance_interval_secs))
         .watchdog_handle(watchdog.map(|w| w.register("token_maintenance", 600)))
+        .cancellation_token(coord.child_token("token-maintenance"))
         .build()
         .start();
     tracing::info!("Started token maintenance job");
@@ -1143,6 +1176,7 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
         .state(input.state.clone())
         .manager(Some(input.manager.clone()))
         .watchdog_handle(watchdog.map(|w| w.register("invite_maintenance", 600)))
+        .cancellation_token(coord.child_token("invite-maintenance"))
         .build()
         .start();
     tracing::info!("Started invite maintenance job");
@@ -1151,16 +1185,22 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
         .handle(input.handle.clone())
         .manager(Some(input.manager.clone()))
         .watchdog_handle(watchdog.map(|w| w.register("post_erasure_compaction", 600)))
+        .cancellation_token(coord.child_token("post-erasure-compaction"))
         .build()
         .start();
     tracing::info!("Started post-erasure compaction job");
 
+    let snapshot_demotion_token = coord.child_token("snapshot-demotion");
     let snapshot_demotion_handle = input.tiered_manager.map(|mgr| {
         let interval = Duration::from_secs(input.demote_interval_secs);
+        let token = snapshot_demotion_token;
         let handle = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             loop {
-                ticker.tick().await;
+                tokio::select! {
+                    _ = token.cancelled() => break,
+                    _ = ticker.tick() => {}
+                }
                 match mgr.demote_to_warm() {
                     Ok(0) => {},
                     Ok(count) => {
@@ -1187,7 +1227,8 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
     // with a single event-driven loop that wakes on every GLOBAL apply batch.
     if let Some(rx) = input.manager.take_dr_event_rx() {
         let controller = crate::placement::PlacementController::new(input.manager.clone());
-        tokio::spawn(controller.run(rx));
+        let placement_handle = tokio::spawn(controller.run(rx));
+        coord.register_handle("placement-controller", placement_handle);
         tracing::info!("Started PlacementController (event-driven DR membership)");
     }
 

@@ -12,6 +12,7 @@ use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::config::BTreeCompactionConfig;
 use tokio::time::interval;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -43,6 +44,8 @@ pub struct BTreeCompactor<B: StorageBackend + 'static> {
     /// Interval between compaction cycles.
     #[builder(default = DEFAULT_COMPACTION_INTERVAL)]
     interval: Duration,
+    /// Cancellation token for graceful shutdown.
+    cancellation_token: CancellationToken,
 }
 
 impl<B: StorageBackend + 'static> BTreeCompactor<B> {
@@ -51,12 +54,14 @@ impl<B: StorageBackend + 'static> BTreeCompactor<B> {
         handle: Arc<ConsensusHandle>,
         state: Arc<StateLayer<B>>,
         config: &BTreeCompactionConfig,
+        cancellation_token: CancellationToken,
     ) -> Self {
         Self {
             handle,
             state,
             min_fill_factor: config.min_fill_factor,
             interval: Duration::from_secs(config.interval_secs),
+            cancellation_token,
         }
     }
 
@@ -123,8 +128,15 @@ impl<B: StorageBackend + 'static> BTreeCompactor<B> {
             let mut ticker = interval(self.interval);
 
             loop {
-                ticker.tick().await;
-                self.run_cycle();
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        self.run_cycle();
+                    }
+                    _ = self.cancellation_token.cancelled() => {
+                        info!("BTreeCompactor shutting down");
+                        break;
+                    }
+                }
             }
         })
     }

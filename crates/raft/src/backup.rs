@@ -23,6 +23,7 @@ use inferadb_ledger_store::{Database, StorageBackend, TableId};
 use inferadb_ledger_types::{Hash, Region, config::BackupConfig, hash::sha256};
 use snafu::{ResultExt, Snafu};
 use tokio::time::interval;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::consensus_handle::ConsensusHandle;
@@ -934,6 +935,8 @@ pub struct BackupJob {
     backup_manager: Arc<BackupManager>,
     /// Interval between backup cycles.
     interval: Duration,
+    /// Cancellation token for graceful shutdown.
+    cancellation_token: CancellationToken,
 }
 
 impl BackupJob {
@@ -943,7 +946,13 @@ impl BackupJob {
             let mut ticker = interval(self.interval);
 
             loop {
-                ticker.tick().await;
+                tokio::select! {
+                    _ = ticker.tick() => {}
+                    _ = self.cancellation_token.cancelled() => {
+                        info!("BackupJob shutting down");
+                        break;
+                    }
+                }
 
                 // Only the leader creates backups
                 if !self.handle.is_leader() {

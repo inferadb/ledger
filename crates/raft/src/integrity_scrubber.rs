@@ -19,6 +19,7 @@ use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::{IntegrityScrubber, StorageBackend};
 use inferadb_ledger_types::config::IntegrityConfig;
 use tokio::time::interval;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -57,16 +58,23 @@ pub struct IntegrityScrubberJob<B: StorageBackend + 'static> {
     /// Watchdog heartbeat handle. Updated each cycle to prove liveness.
     #[builder(default)]
     watchdog_handle: Option<Arc<AtomicU64>>,
+    /// Cancellation token for graceful shutdown.
+    cancellation_token: CancellationToken,
 }
 
 impl<B: StorageBackend + 'static> IntegrityScrubberJob<B> {
     /// Creates from a configuration struct.
-    pub fn from_config(state: Arc<StateLayer<B>>, config: &IntegrityConfig) -> Self {
+    pub fn from_config(
+        state: Arc<StateLayer<B>>,
+        config: &IntegrityConfig,
+        cancellation_token: CancellationToken,
+    ) -> Self {
         Self {
             state,
             interval: Duration::from_secs(config.scrub_interval_secs),
             pages_per_cycle_percent: config.pages_per_cycle_percent,
             watchdog_handle: None,
+            cancellation_token,
         }
     }
 
@@ -202,8 +210,15 @@ impl<B: StorageBackend + 'static> IntegrityScrubberJob<B> {
             );
 
             loop {
-                ticker.tick().await;
-                self.run_cycle(&cursor).await;
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        self.run_cycle(&cursor).await;
+                    }
+                    _ = self.cancellation_token.cancelled() => {
+                        info!("IntegrityScrubberJob shutting down");
+                        break;
+                    }
+                }
             }
         })
     }

@@ -22,6 +22,7 @@ use inferadb_ledger_types::{
     InvitationStatus, InviteEmailEntry, InviteId, OrganizationId, Region, decode,
 };
 use tokio::time::interval;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -84,6 +85,8 @@ pub struct InviteMaintenanceJob<B: StorageBackend + 'static> {
     /// REGIONAL updates.
     #[builder(default)]
     manager: Option<Arc<RaftManager>>,
+    /// Cancellation token for graceful shutdown.
+    cancellation_token: CancellationToken,
 }
 
 /// Parsed email hash index entry with metadata extracted from the key.
@@ -469,17 +472,24 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
             let mut ticker = interval(self.interval);
 
             loop {
-                ticker.tick().await;
-                if let Some(ref handle) = self.watchdog_handle {
-                    handle.store(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                        Ordering::Relaxed,
-                    );
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        if let Some(ref handle) = self.watchdog_handle {
+                            handle.store(
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs(),
+                                Ordering::Relaxed,
+                            );
+                        }
+                        self.run_cycle().await;
+                    }
+                    _ = self.cancellation_token.cancelled() => {
+                        info!("InviteMaintenanceJob shutting down");
+                        break;
+                    }
                 }
-                self.run_cycle().await;
             }
         })
     }

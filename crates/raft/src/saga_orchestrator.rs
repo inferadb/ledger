@@ -47,6 +47,7 @@ use inferadb_ledger_types::{
 use parking_lot::Mutex;
 use snafu::{GenerateImplicitData, ResultExt};
 use tokio::{sync::mpsc, time::interval};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
@@ -298,6 +299,8 @@ pub struct SagaOrchestrator<B: StorageBackend + 'static> {
     #[builder(default)]
     notify_cache:
         Mutex<HashMap<SagaId, tokio::sync::oneshot::Sender<Result<SagaOutput, SagaError>>>>,
+    /// Cancellation token for graceful shutdown.
+    cancellation_token: CancellationToken,
 }
 
 impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
@@ -2370,9 +2373,17 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             info!(interval_secs = self.interval.as_secs(), "Saga orchestrator started");
 
             loop {
-                ticker.tick().await;
-                self.drain_submissions(&mut rx).await;
-                self.run_cycle().await;
+                tokio::select! {
+                    biased;
+                    _ = ticker.tick() => {
+                        self.drain_submissions(&mut rx).await;
+                        self.run_cycle().await;
+                    }
+                    _ = self.cancellation_token.cancelled() => {
+                        info!("SagaOrchestrator shutting down");
+                        break;
+                    }
+                }
             }
         });
 
