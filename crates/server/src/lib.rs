@@ -19,5 +19,7 @@ pub mod discovery;
 pub mod dr_scheduler;
 /// Snowflake-based node ID generation and persistence.
 pub mod node_id;
+/// Event-driven data region membership controller (TiKV-style Placement Driver).
+pub mod placement;
 /// Graceful shutdown coordination.
 pub mod shutdown;

@@ -493,12 +493,12 @@ pub struct RaftManager {
     /// `Arc` so that all regions share a single channel per peer instead of
     /// each region opening its own connection.
     registry: Arc<crate::node_registry::NodeConnectionRegistry>,
-    /// Notifier for data region membership changes.
-    ///
-    /// Fired when a GLOBAL membership change completes (e.g. `JoinCluster`)
-    /// so the DR scheduler can immediately reconcile data region membership
-    /// instead of waiting for the next timer tick.
-    dr_membership_notify: Arc<tokio::sync::Notify>,
+    /// Sender half of the DR event channel. Cloned into the GLOBAL apply
+    /// worker and called from `notify_dr_membership_change`.
+    dr_event_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    /// Receiver half, taken once by bootstrap to hand to the
+    /// `PlacementController`. `None` after the first `take_dr_event_rx()`.
+    dr_event_rx: parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<()>>>,
 }
 
 impl RaftManager {
@@ -512,13 +512,15 @@ impl RaftManager {
         registry: Arc<crate::node_registry::NodeConnectionRegistry>,
     ) -> Self {
         let storage_manager = RegionStorageManager::new(config.data_dir.clone());
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         Self {
             config,
             storage_manager,
             regions: RwLock::new(HashMap::new()),
             peer_addresses: crate::peer_address_map::PeerAddressMap::new(),
             registry,
-            dr_membership_notify: Arc::new(tokio::sync::Notify::new()),
+            dr_event_tx: tx,
+            dr_event_rx: parking_lot::Mutex::new(Some(rx)),
         }
     }
 
@@ -589,22 +591,16 @@ impl RaftManager {
         self.regions.read().keys().copied().collect()
     }
 
-    /// Returns the data region membership change notifier.
-    ///
-    /// The DR scheduler `select!`s on this alongside its timer so it can
-    /// react immediately when a GLOBAL membership change occurs (e.g. a new
-    /// node joins via `JoinCluster`).
-    pub fn dr_membership_notify(&self) -> Arc<tokio::sync::Notify> {
-        Arc::clone(&self.dr_membership_notify)
+    /// Takes the DR event receiver. Called once by bootstrap to pass to the
+    /// PlacementController. Returns `None` on subsequent calls.
+    pub fn take_dr_event_rx(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<()>> {
+        self.dr_event_rx.lock().take()
     }
 
-    /// Fires the data region membership notifier.
-    ///
-    /// Call after a GLOBAL membership change (JoinCluster, LeaveCluster) so
-    /// the DR scheduler wakes up and reconciles data region membership
-    /// immediately instead of waiting for the next timer tick.
+    /// Fires a DR membership event. Wakes the PlacementController to
+    /// reconcile data region membership immediately.
     pub fn notify_dr_membership_change(&self) {
-        self.dr_membership_notify.notify_waiters();
+        let _ = self.dr_event_tx.send(());
     }
 
     /// Checks if a region is active.
@@ -1108,16 +1104,15 @@ impl RaftManager {
         tokio::spawn(divergence_handler.run());
 
         // Spawn the apply worker — bridges consensus commits to state machine.
-        // The GLOBAL region's worker gets the DR membership notification so
-        // that data region schedulers on ALL nodes (including remote DR leaders)
-        // wake up when GLOBAL membership changes are applied locally.
+        // The GLOBAL region's worker gets the DR event sender so the
+        // PlacementController wakes when GLOBAL membership changes are applied.
         let mut apply_worker = crate::apply_worker::ApplyWorker::new(
             log_store,
             handle.response_map().clone(),
             handle.spillover().clone(),
         );
         if region == inferadb_ledger_types::Region::GLOBAL {
-            apply_worker = apply_worker.with_dr_notify(self.dr_membership_notify());
+            apply_worker = apply_worker.with_dr_event_tx(self.dr_event_tx.clone());
         }
         tokio::spawn(apply_worker.run(commit_rx));
 

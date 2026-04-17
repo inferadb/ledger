@@ -1,8 +1,8 @@
-//! Data region membership scheduler — TiKV-style checker/scheduler separation.
+//! Data region membership operator library.
 //!
-//! The checker detects problems (dead/decommissioning voters). The scheduler
-//! detects growth opportunities (missing voters, promotable learners).
-//! Both produce operators that are executed one at a time per DR.
+//! Pure functions for computing and executing DR membership operators.
+//! The `PlacementController` in `placement.rs` calls these functions
+//! from its event-driven reconciliation loop.
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -308,9 +308,15 @@ pub async fn execute_operator(
             }
         },
         OperatorAction::AddLearner { node_id } => {
-            // Register transport channel for the new learner if address is known.
-            if let Some(addr) = manager.peer_addresses().get(*node_id)
-                && let Some(transport) = group.consensus_transport()
+            let Some(addr) = manager.peer_addresses().get(*node_id) else {
+                tracing::debug!(
+                    node_id,
+                    region = op.region.as_str(),
+                    "Skipping AddLearner — peer address not yet registered"
+                );
+                return;
+            };
+            if let Some(transport) = group.consensus_transport()
                 && let Err(e) = transport.set_peer_via_registry(*node_id, &addr).await
             {
                 tracing::warn!(
@@ -502,86 +508,3 @@ async fn report_membership_to_global(
 
 /// Per-region learner first-seen tracking for stall detection.
 pub type LearnerFirstSeen = HashMap<(inferadb_ledger_types::Region, u64), Instant>;
-
-/// Runs one checker cycle for all data regions on this node.
-///
-/// For each DR where this node is leader: detects problems (dead/decommissioning
-/// voters, stalled learners) and executes the highest-priority repair operator.
-///
-/// `learner_first_seen` is maintained across calls to track learner stall
-/// timeouts. The caller should create it once and pass it into every cycle.
-pub async fn run_checker_cycle(manager: &RaftManager, learner_first_seen: &mut LearnerFirstSeen) {
-    let Some(reader) = manager.system_state_reader() else { return };
-    let Ok(global) = manager.system_region() else { return };
-    let global_state = global.handle().shard_state();
-    let global_voters: Vec<u64> = global_state.voters.iter().map(|n| n.0).collect();
-    let local_node_id = manager.config().node_id;
-
-    for region in manager.list_regions() {
-        if region == inferadb_ledger_types::Region::GLOBAL {
-            continue;
-        }
-        let Ok(group) = manager.get_region_group(region) else { continue };
-        if !group.handle().is_leader() {
-            continue;
-        }
-
-        // Build a per-region view of the learner_first_seen map.
-        let mut region_learners: HashMap<u64, Instant> = learner_first_seen
-            .iter()
-            .filter_map(|(&(r, node), &t)| if r == region { Some((node, t)) } else { None })
-            .collect();
-
-        let desired = desired_dr_voters(&reader, &global_voters);
-        let mut ops = check_dr_health(
-            &group,
-            &desired,
-            &reader,
-            local_node_id,
-            region,
-            1,
-            &mut region_learners,
-        );
-        ops.sort_by_key(|op| op.priority);
-
-        // Write back the per-region learner state.
-        learner_first_seen.retain(|&(r, _), _| r != region);
-        for (node, t) in region_learners {
-            learner_first_seen.insert((region, node), t);
-        }
-
-        if let Some(op) = ops.first() {
-            execute_operator(&group, op, &reader, manager).await;
-        }
-    }
-}
-
-/// Runs one scheduler cycle for all data regions on this node.
-///
-/// For each DR where this node is leader: detects growth opportunities
-/// (missing voters, promotable learners) and executes the highest-priority
-/// growth operator.
-pub async fn run_scheduler_cycle(manager: &RaftManager) {
-    let Some(reader) = manager.system_state_reader() else { return };
-    let Ok(global) = manager.system_region() else { return };
-    let global_state = global.handle().shard_state();
-    let global_voters: Vec<u64> = global_state.voters.iter().map(|n| n.0).collect();
-
-    for region in manager.list_regions() {
-        if region == inferadb_ledger_types::Region::GLOBAL {
-            continue;
-        }
-        let Ok(group) = manager.get_region_group(region) else { continue };
-        if !group.handle().is_leader() {
-            continue;
-        }
-
-        let desired = desired_dr_voters(&reader, &global_voters);
-        let mut ops = schedule_dr_growth(&group, &desired, region);
-        ops.sort_by_key(|op| op.priority);
-
-        if let Some(op) = ops.first() {
-            execute_operator(&group, op, &reader, manager).await;
-        }
-    }
-}

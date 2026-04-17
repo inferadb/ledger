@@ -25,6 +25,7 @@ mod coordinator;
 mod discovery;
 mod dr_scheduler;
 mod node_id;
+mod placement;
 mod shutdown;
 
 use std::{io::IsTerminal, net::SocketAddr};

@@ -6,7 +6,7 @@
 // The schemars `JsonSchema` derive macro internally uses `.unwrap()`.
 #![allow(clippy::disallowed_methods)]
 
-use std::{net::SocketAddr, path::PathBuf, time::Duration};
+use std::{net::SocketAddr, path::PathBuf};
 
 use bon::Builder;
 use clap::Parser;
@@ -48,59 +48,6 @@ impl LoggingConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.otel.validate()?;
         Ok(())
-    }
-}
-
-/// Configuration for background job startup timing.
-///
-/// Controls how long to wait before starting the first background task after
-/// bootstrap, and the stagger delay between successive task starts.
-#[derive(Debug, Clone, Deserialize, JsonSchema, Builder)]
-#[builder(derive(Debug))]
-pub struct BackgroundJobTimingConfig {
-    /// Initial delay (seconds) before starting the first background job after bootstrap.
-    ///
-    /// Allows Raft leader election and cluster stabilization to complete before
-    /// background tasks begin contending for resources.
-    #[serde(default = "default_background_initial_delay_secs")]
-    #[builder(default = default_background_initial_delay_secs())]
-    pub initial_delay_secs: u64,
-
-    /// Delay (seconds) between starting successive background jobs.
-    ///
-    /// Staggers job startup to spread initial load across several seconds rather
-    /// than bursting all tasks simultaneously.
-    #[serde(default = "default_background_stagger_delay_secs")]
-    #[builder(default = default_background_stagger_delay_secs())]
-    pub stagger_delay_secs: u64,
-}
-
-fn default_background_initial_delay_secs() -> u64 {
-    2
-}
-
-fn default_background_stagger_delay_secs() -> u64 {
-    5
-}
-
-impl BackgroundJobTimingConfig {
-    /// Returns the initial delay as a `Duration`.
-    pub fn initial_delay(&self) -> Duration {
-        Duration::from_secs(self.initial_delay_secs)
-    }
-
-    /// Returns the stagger delay as a `Duration`.
-    pub fn stagger_delay(&self) -> Duration {
-        Duration::from_secs(self.stagger_delay_secs)
-    }
-}
-
-impl Default for BackgroundJobTimingConfig {
-    fn default() -> Self {
-        Self {
-            initial_delay_secs: default_background_initial_delay_secs(),
-            stagger_delay_secs: default_background_stagger_delay_secs(),
-        }
     }
 }
 
@@ -390,17 +337,6 @@ pub struct Config {
     #[serde(default = "default_token_maintenance_interval_secs")]
     #[builder(default = default_token_maintenance_interval_secs())]
     pub token_maintenance_interval_secs: u64,
-
-    // === Background Job Timing ===
-    /// Background job startup timing configuration.
-    ///
-    /// Controls the initial delay before the first background job starts and the
-    /// stagger interval between successive job starts. Defaults preserve the
-    /// original 2s initial / 5s stagger behavior.
-    #[arg(skip)]
-    #[serde(default)]
-    #[builder(default)]
-    pub background_jobs: BackgroundJobTimingConfig,
 }
 
 // Default value functions
@@ -449,7 +385,6 @@ impl Default for Config {
             rate_limit: None,
             token_maintenance_interval_secs: default_token_maintenance_interval_secs(),
             email_blinding_key: None,
-            background_jobs: BackgroundJobTimingConfig::default(),
         }
     }
 }

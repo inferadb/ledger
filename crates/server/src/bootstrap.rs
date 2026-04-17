@@ -327,7 +327,7 @@ pub async fn bootstrap_node(
 
                             // Register in the consensus transport so heartbeats
                             // can flow immediately rather than waiting for the
-                            // 1s reconcile_transport_channels cycle.
+                            // next PlacementController reconciliation cycle.
                             if let Some(ref transport) = ct
                                 && let Err(e) =
                                     transport.set_peer_via_registry(info.node_id, &addr_str).await
@@ -383,219 +383,6 @@ pub async fn bootstrap_node(
                     },
                 }
             }
-        }
-
-        let bg_initial_delay = config.background_jobs.initial_delay();
-        let bg_stagger_delay = config.background_jobs.stagger_delay();
-
-        // Spawn DR checker task (1s cadence) — reactive repair for dead/decommissioning voters.
-        // Also wakes immediately when notified of membership changes (e.g.
-        // LeaveCluster marks a node Decommissioning) so the checker can
-        // propose RemoveVoter without waiting for the next timer tick.
-        {
-            let mgr = manager.clone();
-            let notify = mgr.dr_membership_notify();
-            tokio::spawn(async move {
-                let mut learner_first_seen: crate::dr_scheduler::LearnerFirstSeen =
-                    std::collections::HashMap::new();
-                tokio::time::sleep(bg_initial_delay).await;
-                loop {
-                    reconcile_transport_channels(&mgr).await;
-                    crate::dr_scheduler::run_checker_cycle(&mgr, &mut learner_first_seen).await;
-                    tokio::select! {
-                        () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
-                        () = notify.notified() => {
-                            tracing::debug!(
-                                "DR checker woken by membership change notification"
-                            );
-                        },
-                    }
-                }
-            });
-        }
-
-        // Spawn DR scheduler task (5s cadence) — proactive growth (learner add/promote).
-        // Also wakes immediately when notified of GLOBAL membership changes
-        // (e.g. JoinCluster) so new nodes are added to data regions without
-        // waiting for the next timer tick.
-        {
-            let mgr = manager.clone();
-            let notify = mgr.dr_membership_notify();
-            tokio::spawn(async move {
-                // Use the same initial delay as the checker (not the longer
-                // stagger delay) so the growth scheduler starts promptly.
-                // Event-driven notifications wake the scheduler immediately
-                // when GLOBAL membership changes; the timer is just a fallback.
-                tokio::time::sleep(bg_initial_delay).await;
-                loop {
-                    crate::dr_scheduler::run_scheduler_cycle(&mgr).await;
-                    tokio::select! {
-                        () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
-                        () = notify.notified() => {
-                            tracing::debug!(
-                                "DR scheduler woken by membership change notification"
-                            );
-                        },
-                    }
-                }
-            });
-        }
-
-        // Spawn DR membership reporter — DR leaders propose RegionMembershipReport
-        // to GLOBAL so the drain monitor can track decommission progress.
-        {
-            let mgr = manager.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(bg_stagger_delay).await;
-                loop {
-                    if let Ok(global) = mgr.system_region() {
-                        for region in mgr.list_regions() {
-                            if region == inferadb_ledger_types::Region::GLOBAL {
-                                continue;
-                            }
-                            let Ok(group) = mgr.get_region_group(region) else { continue };
-                            if !group.handle().is_leader() {
-                                continue;
-                            }
-                            let state = group.handle().shard_state();
-                            let report = inferadb_ledger_raft::types::LedgerRequest::System(
-                            inferadb_ledger_raft::types::SystemRequest::RegionMembershipReport {
-                                region,
-                                voters: state.voters.iter().map(|n| n.0).collect(),
-                                learners: state.learners.iter().map(|n| n.0).collect(),
-                                conf_epoch: state.conf_epoch,
-                            },
-                        );
-                            let _ = global
-                                .handle()
-                                .propose_and_wait(
-                                    inferadb_ledger_raft::types::RaftPayload::system(report),
-                                    std::time::Duration::from_secs(5),
-                                )
-                                .await;
-                        }
-                    }
-                    // Spec says 10s for the periodic backstop, but faster cadence (2s)
-                    // ensures the drain monitor sees fresh reports promptly when the
-                    // event-driven reporter can't reach GLOBAL (DR leader ≠ GLOBAL leader).
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                }
-            });
-        }
-
-        // Spawn drain monitor — checks decommissioning/dead nodes and removes
-        // them from GLOBAL once all DR replicas are drained.
-        {
-            let mgr = manager.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(bg_stagger_delay).await;
-                loop {
-                    if let Ok(global) = mgr.system_region()
-                        && global.handle().is_leader()
-                        && let Some(reader) = mgr.system_state_reader()
-                    {
-                        let statuses = reader.all_node_statuses();
-                        if !statuses.is_empty() {
-                            tracing::debug!(
-                                count = statuses.len(),
-                                "Drain monitor: scanning node statuses"
-                            );
-                        }
-                        for &(node_id, status) in &statuses {
-                            if status != inferadb_ledger_raft::types::NodeStatus::Decommissioning
-                                && status != inferadb_ledger_raft::types::NodeStatus::Dead
-                            {
-                                continue;
-                            }
-
-                            // Check whether this node still has DR replicas.
-                            // Deviation from spec: the spec says "check GLOBAL-stored DR membership
-                            // reports — NOT local list_regions()." However, GLOBAL-only reports lag
-                            // significantly when the DR leader ≠ GLOBAL leader (the DR leader can't
-                            // propose reports to GLOBAL as a follower). The hybrid approach — local
-                            // authoritative state for DRs where we're the leader, GLOBAL reports
-                            // for remote DRs — provides faster drain convergence while maintaining
-                            // correctness for regulated regions this node doesn't host.
-                            let mut has_replicas = false;
-                            let target = inferadb_ledger_consensus::types::NodeId(node_id);
-                            for region in mgr.list_regions() {
-                                if region == inferadb_ledger_types::Region::GLOBAL {
-                                    continue;
-                                }
-                                if let Ok(group) = mgr.get_region_group(region)
-                                    && group.handle().is_leader()
-                                {
-                                    let s = group.handle().shard_state();
-                                    if s.voters.contains(&target) || s.learners.contains(&target) {
-                                        has_replicas = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            // For DRs where we're not the leader: check GLOBAL reports.
-                            if !has_replicas {
-                                let memberships = reader.region_memberships();
-                                has_replicas = memberships
-                                    .iter()
-                                    .any(|(_, members)| members.contains(&node_id));
-                            }
-
-                            tracing::debug!(
-                                node_id,
-                                has_replicas,
-                                ?status,
-                                "Drain monitor: checking node"
-                            );
-                            if !has_replicas {
-                                tracing::info!(
-                                    node_id,
-                                    ?status,
-                                    "Drain complete — removing from GLOBAL"
-                                );
-                                // Remove from GLOBAL Raft membership. Only one
-                                // membership change at a time — skip this cycle on
-                                // conflict (the next cycle will retry).
-                                match global.handle().remove_node(node_id).await {
-                                    Ok(()) => {
-                                        // Mark as Removed in the node status store.
-                                        let set_removed =
-                                        inferadb_ledger_raft::types::LedgerRequest::System(
-                                            inferadb_ledger_raft::types::SystemRequest::SetNodeStatus {
-                                                node_id,
-                                                status:
-                                                    inferadb_ledger_raft::types::NodeStatus::Removed,
-                                            },
-                                        );
-                                        let _ = global
-                                            .handle()
-                                            .propose_and_wait(
-                                                inferadb_ledger_raft::types::RaftPayload::system(
-                                                    set_removed,
-                                                ),
-                                                std::time::Duration::from_secs(5),
-                                            )
-                                            .await;
-                                        // Continue to process remaining drainable nodes
-                                        // in the same cycle (each remove_node awaits commit).
-                                    },
-                                    Err(e) => {
-                                        let msg = e.to_string();
-                                        if !msg.contains("no-op") {
-                                            tracing::debug!(
-                                                node_id,
-                                                error = %e,
-                                                "Drain monitor: GLOBAL remove_node deferred"
-                                            );
-                                        }
-                                        // Conflict or already removed — skip this node.
-                                    },
-                                }
-                            }
-                        }
-                    }
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                }
-            });
         }
 
         // Spawn dead node detection — GLOBAL leader checks peer liveness with
@@ -1351,6 +1138,15 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
         handle
     });
 
+    // Spawn PlacementController — event-driven DR membership management.
+    // Replaces the timer-based checker, scheduler, reporter, and drain monitor
+    // with a single event-driven loop that wakes on every GLOBAL apply batch.
+    if let Some(rx) = input.manager.take_dr_event_rx() {
+        let controller = crate::placement::PlacementController::new(input.manager.clone());
+        tokio::spawn(controller.run(rx));
+        tracing::info!("Started PlacementController (event-driven DR membership)");
+    }
+
     Ok(StartJobsOutput {
         gc_handle,
         compactor_handle,
@@ -1404,7 +1200,7 @@ async fn process_region_event(
         if let Some((_, tag)) = initial_members.first()
             && tag == "reconcile_transport"
         {
-            reconcile_transport_channels(mgr).await;
+            crate::placement::reconcile_transport_channels(mgr).await;
         }
         return;
     }
@@ -1424,7 +1220,7 @@ async fn process_region_event(
     match mgr.start_data_region(region_config).await {
         Ok(_) => {
             tracing::info!(region = region.as_str(), "Data region created via Raft consensus");
-            reconcile_transport_channels(mgr).await;
+            crate::placement::reconcile_transport_channels(mgr).await;
 
             // Late-joiner: this node is NOT in the initial membership for this
             // data region. The shard starts as a non-member observer that can't
@@ -1447,38 +1243,6 @@ async fn process_region_event(
                 "Failed to create data region from Raft consensus"
             );
         },
-    }
-}
-
-/// Ensures all regions' consensus transports have channels to known peers.
-///
-/// Iterates all peer addresses and registers transport channels for any peers
-/// that are missing from any region's transport. This is especially important
-/// for followers that only have a channel to the leader — without channels to
-/// other voters, leader transfer elections fail (VoteRequest can't reach peers).
-async fn reconcile_transport_channels(manager: &inferadb_ledger_raft::RaftManager) {
-    let peer_addrs = manager.peer_addresses().iter_peers();
-    let regions = manager.list_regions();
-
-    for region in regions {
-        let Ok(group) = manager.get_region_group(region) else { continue };
-        let Some(transport) = group.consensus_transport() else { continue };
-        let known_peers = transport.peers();
-        let local_node = group.handle().node_id();
-
-        for (node_id, addr) in &peer_addrs {
-            if *node_id == local_node || known_peers.contains(node_id) {
-                continue;
-            }
-            if let Err(e) = transport.set_peer_via_registry(*node_id, addr).await {
-                tracing::warn!(
-                    node_id = *node_id,
-                    addr = %addr,
-                    error = %e,
-                    "Failed to register peer via registry"
-                );
-            }
-        }
     }
 }
 
