@@ -213,9 +213,15 @@ impl TestCluster {
 
     /// Creates a cluster using TCP transport instead of UDS.
     ///
-    /// Required for tests that need `SocketAddr` (e.g., `discover_node_info`).
+    /// Required for tests that need `SocketAddr` (e.g., `discover_node_info`)
+    /// or TCP channel caching validation (port consumption tests).
     pub async fn with_tcp(size: usize) -> Self {
         Self::build_full(size, 1, true, None, TestTransport::Tcp).await
+    }
+
+    /// Creates a multi-region cluster using TCP transport.
+    pub async fn with_tcp_data_regions(size: usize, num_data_regions: usize) -> Self {
+        Self::build_full(size, num_data_regions, true, None, TestTransport::Tcp).await
     }
 
     /// Creates a cluster with a custom rate limit config.

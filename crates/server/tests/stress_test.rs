@@ -940,7 +940,7 @@ async fn run_stress_test_with_cluster_size(cluster_size: usize, mut config: Stre
 
     // Start cluster
     println!("📦 Creating {}-node cluster...", cluster_size);
-    let cluster = TestCluster::new(cluster_size).await;
+    let cluster = TestCluster::with_tcp(cluster_size).await;
     let leader_id = cluster.wait_for_leader().await;
     println!("   Leader elected: node {}", leader_id);
 
@@ -1199,7 +1199,7 @@ async fn run_multi_region_stress_test(num_nodes: usize, num_regions: usize, conf
 
     // Start multi-region cluster
     println!("📦 Creating {}-node, {}-region cluster...", num_nodes, num_regions);
-    let cluster = TestCluster::with_data_regions(num_nodes, num_regions).await;
+    let cluster = TestCluster::with_tcp_data_regions(num_nodes, num_regions).await;
 
     // Wait for all regions to have leaders
     let leaders_ready = cluster.wait_for_leaders(Duration::from_secs(10)).await;
