@@ -6,6 +6,7 @@
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use metrics::counter;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::{
@@ -282,6 +283,10 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                     let _ = response.send(Err(ConsensusError::ShardUnavailable { shard }));
                     return vec![];
                 };
+                if s.is_failed() {
+                    let _ = response.send(Err(ConsensusError::ShardUnavailable { shard }));
+                    return vec![];
+                }
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     s.handle_propose(data)
                 })) {
@@ -306,6 +311,8 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                     Err(payload) => {
                         let msg = panic_message(&payload);
                         tracing::error!(shard = shard.0, panic = %msg, "Shard panicked — marking as Failed");
+                        counter!("consensus_shard_panic_total", "shard_id" => shard.0.to_string())
+                            .increment(1);
                         s.mark_failed();
                         let _ = response.send(Err(ConsensusError::ShardUnavailable { shard }));
                         vec![shard]
@@ -317,6 +324,10 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                     let _ = response.send(Err(ConsensusError::ShardUnavailable { shard }));
                     return vec![];
                 };
+                if s.is_failed() {
+                    let _ = response.send(Err(ConsensusError::ShardUnavailable { shard }));
+                    return vec![];
+                }
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     s.handle_propose_batch(entries)
                 })) {
@@ -341,6 +352,8 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                     Err(payload) => {
                         let msg = panic_message(&payload);
                         tracing::error!(shard = shard.0, panic = %msg, "Shard panicked — marking as Failed");
+                        counter!("consensus_shard_panic_total", "shard_id" => shard.0.to_string())
+                            .increment(1);
                         s.mark_failed();
                         let _ = response.send(Err(ConsensusError::ShardUnavailable { shard }));
                         vec![shard]
@@ -349,6 +362,9 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             },
             ReactorEvent::PeerMessage { shard, from, message } => {
                 if let Some(s) = self.shards.get_mut(&shard) {
+                    if s.is_failed() {
+                        return vec![];
+                    }
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         s.handle_message(from, message)
                     })) {
@@ -359,6 +375,11 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                         Err(payload) => {
                             let msg = panic_message(&payload);
                             tracing::error!(shard = shard.0, panic = %msg, "Shard panicked — marking as Failed");
+                            counter!(
+                                "consensus_shard_panic_total",
+                                "shard_id" => shard.0.to_string()
+                            )
+                            .increment(1);
                             s.mark_failed();
                             vec![shard]
                         },
@@ -369,6 +390,10 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             },
             ReactorEvent::MembershipChange { shard, change, response } => {
                 if let Some(s) = self.shards.get_mut(&shard) {
+                    if s.is_failed() {
+                        let _ = response.send(Err(ConsensusError::ShardUnavailable { shard }));
+                        return vec![];
+                    }
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         s.handle_membership_change(change)
                     })) {
@@ -384,6 +409,11 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                         Err(payload) => {
                             let msg = panic_message(&payload);
                             tracing::error!(shard = shard.0, panic = %msg, "Shard panicked — marking as Failed");
+                            counter!(
+                                "consensus_shard_panic_total",
+                                "shard_id" => shard.0.to_string()
+                            )
+                            .increment(1);
                             s.mark_failed();
                             let _ = response.send(Err(ConsensusError::ShardUnavailable { shard }));
                             vec![shard]
@@ -405,6 +435,10 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             },
             ReactorEvent::TransferLeader { shard, target, response } => {
                 if let Some(s) = self.shards.get_mut(&shard) {
+                    if s.is_failed() {
+                        let _ = response.send(Err(ConsensusError::ShardUnavailable { shard }));
+                        return vec![];
+                    }
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         s.handle_transfer_leader(target)
                     })) {
@@ -420,6 +454,11 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                         Err(payload) => {
                             let msg = panic_message(&payload);
                             tracing::error!(shard = shard.0, panic = %msg, "Shard panicked — marking as Failed");
+                            counter!(
+                                "consensus_shard_panic_total",
+                                "shard_id" => shard.0.to_string()
+                            )
+                            .increment(1);
                             s.mark_failed();
                             let _ = response.send(Err(ConsensusError::ShardUnavailable { shard }));
                             vec![shard]
@@ -519,29 +558,47 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             if let Some(shard) = self.shards.get_mut(&shard_id) {
                 let actions = match kind {
                     TimerKind::Election => {
-                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            shard.handle_election_timeout()
-                        })) {
-                            Ok(actions) => actions,
-                            Err(payload) => {
-                                let msg = panic_message(&payload);
-                                tracing::error!(shard = shard_id.0, panic = %msg, "Shard panicked — marking as Failed");
-                                shard.mark_failed();
-                                Vec::new()
-                            },
+                        if shard.is_failed() {
+                            Vec::new()
+                        } else {
+                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                shard.handle_election_timeout()
+                            })) {
+                                Ok(actions) => actions,
+                                Err(payload) => {
+                                    let msg = panic_message(&payload);
+                                    tracing::error!(shard = shard_id.0, panic = %msg, "Shard panicked — marking as Failed");
+                                    counter!(
+                                        "consensus_shard_panic_total",
+                                        "shard_id" => shard_id.0.to_string()
+                                    )
+                                    .increment(1);
+                                    shard.mark_failed();
+                                    Vec::new()
+                                },
+                            }
                         }
                     },
                     TimerKind::Heartbeat => {
-                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            shard.handle_heartbeat_timeout()
-                        })) {
-                            Ok(actions) => actions,
-                            Err(payload) => {
-                                let msg = panic_message(&payload);
-                                tracing::error!(shard = shard_id.0, panic = %msg, "Shard panicked — marking as Failed");
-                                shard.mark_failed();
-                                Vec::new()
-                            },
+                        if shard.is_failed() {
+                            Vec::new()
+                        } else {
+                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                shard.handle_heartbeat_timeout()
+                            })) {
+                                Ok(actions) => actions,
+                                Err(payload) => {
+                                    let msg = panic_message(&payload);
+                                    tracing::error!(shard = shard_id.0, panic = %msg, "Shard panicked — marking as Failed");
+                                    counter!(
+                                        "consensus_shard_panic_total",
+                                        "shard_id" => shard_id.0.to_string()
+                                    )
+                                    .increment(1);
+                                    shard.mark_failed();
+                                    Vec::new()
+                                },
+                            }
                         }
                     },
                     TimerKind::Cleanup => {
@@ -1557,6 +1614,96 @@ mod tests {
 
         let result = resp_rx.try_recv().expect("response should be available");
         assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ShardId(1) })));
+    }
+
+    #[test]
+    fn test_handle_event_propose_batch_failed_shard_returns_shard_unavailable() {
+        let (mut reactor, _tx, _rx) = make_reactor();
+
+        let clock = reactor.clock.clone();
+        let mut shard = make_shard(ShardId(1), clock);
+        shard.mark_failed();
+        reactor.add_shard(ShardId(1), shard);
+
+        let (resp_tx, mut resp_rx) = oneshot::channel();
+        reactor.handle_event(ReactorEvent::ProposeBatch {
+            shard: ShardId(1),
+            entries: vec![vec![1], vec![2]],
+            response: resp_tx,
+        });
+
+        let result = resp_rx.try_recv().expect("response should be available");
+        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ShardId(1) })));
+    }
+
+    #[test]
+    fn test_handle_event_membership_change_failed_shard_returns_shard_unavailable() {
+        let (mut reactor, _tx, _rx) = make_reactor();
+
+        let clock = reactor.clock.clone();
+        let mut shard = make_shard(ShardId(1), clock);
+        shard.mark_failed();
+        reactor.add_shard(ShardId(1), shard);
+
+        let (resp_tx, mut resp_rx) = oneshot::channel();
+        reactor.handle_event(ReactorEvent::MembershipChange {
+            shard: ShardId(1),
+            change: MembershipChange::AddLearner {
+                node_id: NodeId(2),
+                promotable: false,
+                expected_conf_epoch: None,
+            },
+            response: resp_tx,
+        });
+
+        let result = resp_rx.try_recv().expect("response should be available");
+        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ShardId(1) })));
+    }
+
+    #[test]
+    fn test_handle_event_transfer_leader_failed_shard_returns_shard_unavailable() {
+        let (mut reactor, _tx, _rx) = make_reactor();
+
+        let clock = reactor.clock.clone();
+        let mut shard = make_shard(ShardId(1), clock);
+        shard.mark_failed();
+        reactor.add_shard(ShardId(1), shard);
+
+        let (resp_tx, mut resp_rx) = oneshot::channel();
+        reactor.handle_event(ReactorEvent::TransferLeader {
+            shard: ShardId(1),
+            target: NodeId(2),
+            response: resp_tx,
+        });
+
+        let result = resp_rx.try_recv().expect("response should be available");
+        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ShardId(1) })));
+    }
+
+    #[test]
+    fn test_handle_event_peer_message_failed_shard_silently_dropped() {
+        let (mut reactor, _tx, _rx) = make_reactor();
+
+        let clock = reactor.clock.clone();
+        let mut shard = make_shard(ShardId(1), clock);
+        shard.mark_failed();
+        reactor.add_shard(ShardId(1), shard);
+
+        // PeerMessage has no response channel — verify it returns empty affected list
+        // without modifying shard state (the shard remains failed, not doubly-failed).
+        let affected = reactor.handle_event(ReactorEvent::PeerMessage {
+            shard: ShardId(1),
+            from: NodeId(2),
+            message: crate::message::Message::VoteRequest {
+                term: 1,
+                candidate_id: NodeId(2),
+                last_log_index: 0,
+                last_log_term: 0,
+            },
+        });
+
+        assert!(affected.is_empty(), "failed shard peer message should return no affected shards");
+        assert!(reactor.shards.get(&ShardId(1)).unwrap().is_failed(), "shard should remain failed");
     }
 
     // ── Shard isolation ────────────────────────────────────────────

@@ -1684,6 +1684,7 @@ dependencies = [
  "aes-gcm",
  "blake3",
  "crc32fast",
+ "metrics",
  "parking_lot",
  "proptest",
  "rand 0.10.0",

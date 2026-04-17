@@ -161,6 +161,15 @@ impl<C: Clock + Clone, R: RngSource> Shard<C, R> {
         self.state
     }
 
+    /// Returns `true` if this shard has been marked as failed.
+    ///
+    /// A failed shard no longer processes events and must not enter
+    /// `catch_unwind` dispatch paths.
+    #[inline]
+    pub fn is_failed(&self) -> bool {
+        self.state == NodeState::Failed
+    }
+
     /// Returns the current term.
     #[inline]
     pub fn current_term(&self) -> u64 {
