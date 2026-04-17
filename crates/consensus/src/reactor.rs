@@ -530,20 +530,20 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                     // Drain pending responses so waiters get a structured error
                     // rather than a dropped-receiver error.
                     for (_, _, resp) in self.pending_responses.drain(..) {
-                        let _ = resp.send(Err(ConsensusError::ProposalQueueFull));
+                        let _ = resp.send(Err(ConsensusError::WalWriteError));
                     }
                     self.pending_commits.clear();
-                    let _ = ack.send(Err(ConsensusError::ProposalQueueFull));
+                    let _ = ack.send(Err(ConsensusError::WalWriteError));
                     return vec![];
                 }
                 let result = match self.wal.sync() {
                     Ok(()) => Ok(()),
                     Err(_e) => {
                         for (_, _, resp) in self.pending_responses.drain(..) {
-                            let _ = resp.send(Err(ConsensusError::ProposalQueueFull));
+                            let _ = resp.send(Err(ConsensusError::WalWriteError));
                         }
                         self.pending_commits.clear();
-                        Err(ConsensusError::ProposalQueueFull)
+                        Err(ConsensusError::WalWriteError)
                     },
                 };
                 let _ = ack.send(result);
@@ -915,7 +915,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             // Append entry frames (may be empty if only commits this cycle).
             if !frames.is_empty() && self.wal.append(&frames).is_err() {
                 for (_, _, resp) in self.pending_responses.drain(..) {
-                    let _ = resp.send(Err(ConsensusError::ProposalQueueFull));
+                    let _ = resp.send(Err(ConsensusError::WalWriteError));
                 }
                 self.pending_commits.clear();
                 self.outbox = NetworkOutbox::new();
@@ -938,7 +938,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                 // Async path: submit fsync and return — poll for completion next cycle.
                 if self.wal.submit_async_fsync().is_err() {
                     for (_, _, resp) in self.pending_responses.drain(..) {
-                        let _ = resp.send(Err(ConsensusError::ProposalQueueFull));
+                        let _ = resp.send(Err(ConsensusError::WalWriteError));
                     }
                     self.pending_commits.clear();
                     self.outbox = NetworkOutbox::new();
@@ -952,7 +952,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             if self.wal.sync().is_err() {
                 // WAL failure — reject all pending proposals and membership changes.
                 for (_, _, resp) in self.pending_responses.drain(..) {
-                    let _ = resp.send(Err(ConsensusError::ProposalQueueFull));
+                    let _ = resp.send(Err(ConsensusError::WalWriteError));
                 }
                 self.pending_commits.clear();
                 self.outbox = NetworkOutbox::new();
@@ -1435,11 +1435,11 @@ mod tests {
 
         reactor.flush().await;
 
-        // Pending response should receive an error (ProposalQueueFull).
+        // Pending response should receive an error (WalWriteError).
         let result = resp_rx.await.expect("response channel should not be dropped");
         assert!(
-            matches!(result, Err(ConsensusError::ProposalQueueFull)),
-            "expected ProposalQueueFull, got {result:?}"
+            matches!(result, Err(ConsensusError::WalWriteError)),
+            "expected WalWriteError, got {result:?}"
         );
 
         // WAL buffer should be drained (frames were taken out before append).
@@ -1474,7 +1474,7 @@ mod tests {
         reactor.flush().await;
 
         let result1 = resp_rx1.await.expect("response channel should not be dropped");
-        assert!(matches!(result1, Err(ConsensusError::ProposalQueueFull)));
+        assert!(matches!(result1, Err(ConsensusError::WalWriteError)));
 
         // Second flush: clear the error, propose a real entry that commits
         // immediately (single-node quorum).
@@ -1901,8 +1901,8 @@ mod tests {
         // Assert: response rejected, commits cleared, phase stays Idle.
         let result = resp_rx.await.expect("channel should not be dropped");
         assert!(
-            matches!(result, Err(ConsensusError::ProposalQueueFull)),
-            "expected ProposalQueueFull, got {result:?}"
+            matches!(result, Err(ConsensusError::WalWriteError)),
+            "expected WalWriteError, got {result:?}"
         );
         assert!(reactor.pending_commits.is_empty());
         assert_eq!(reactor.fsync_phase, FsyncPhase::Idle);
@@ -1971,8 +1971,8 @@ mod tests {
         // Assert: response rejected, commits cleared.
         let result = resp_rx.await.expect("channel should not be dropped");
         assert!(
-            matches!(result, Err(ConsensusError::ProposalQueueFull)),
-            "expected ProposalQueueFull on sync failure, got {result:?}"
+            matches!(result, Err(ConsensusError::WalWriteError)),
+            "expected WalWriteError on sync failure, got {result:?}"
         );
         assert!(reactor.pending_commits.is_empty());
     }

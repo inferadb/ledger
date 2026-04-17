@@ -8,7 +8,6 @@ use std::{sync::Arc, time::Duration};
 
 use inferadb_ledger_raft::{
     ConsensusHandle, HandleError,
-    error::classify_raft_error,
     raft_manager::RaftManager,
     types::{LedgerRequest, LedgerResponse, RaftPayload},
 };
@@ -83,6 +82,22 @@ pub(crate) trait ProposalService: Send + Sync {
     }
 }
 
+/// Converts a [`ConsensusError`](inferadb_ledger_consensus::ConsensusError) into
+/// the appropriate [`tonic::Status`] using the error's structured `grpc_code()`.
+pub(crate) fn consensus_error_to_status(err: inferadb_ledger_consensus::ConsensusError) -> Status {
+    let message = format!("Raft error: {err}");
+    let code = match err.grpc_code() {
+        3 => tonic::Code::InvalidArgument,
+        6 => tonic::Code::AlreadyExists,
+        8 => tonic::Code::ResourceExhausted,
+        9 => tonic::Code::FailedPrecondition,
+        13 => tonic::Code::Internal,
+        14 => tonic::Code::Unavailable,
+        _ => tonic::Code::Internal,
+    };
+    Status::new(code, message)
+}
+
 /// Production [`ProposalService`] backed by [`ConsensusHandle`] and [`RaftManager`].
 ///
 /// Owns the consensus handle and manager reference, delegating proposal
@@ -115,7 +130,7 @@ impl ProposalService for RaftProposalService {
         match self.handle.propose_and_wait(payload, timeout).await {
             Ok(response) => Ok(response),
             Err(HandleError::Consensus { source, .. }) => {
-                Err(classify_raft_error(&source.to_string()))
+                Err(consensus_error_to_status(source))
             },
             Err(HandleError::Timeout { .. }) => {
                 inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
@@ -249,7 +264,7 @@ impl ProposalService for RaftProposalService {
                 ))
             },
             Err(HandleError::Consensus { source, .. }) => {
-                Err(classify_raft_error(&source.to_string()))
+                Err(consensus_error_to_status(source))
             },
             Err(HandleError::Timeout { .. }) => {
                 inferadb_ledger_raft::metrics::record_raft_proposal_timeout();

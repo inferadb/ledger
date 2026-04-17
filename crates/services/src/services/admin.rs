@@ -25,7 +25,6 @@ use inferadb_ledger_proto::proto::{
 };
 use inferadb_ledger_raft::{
     ConsensusHandle, HandleError, NodeStatus,
-    error::classify_raft_error,
     log_storage::{AppliedStateAccessor, VaultHealthStatus},
     logging::{OperationType, RequestContext, Sampler},
     metrics,
@@ -307,7 +306,7 @@ impl AdminService {
             Ok(response) => Ok(response),
             Err(HandleError::Consensus { source, .. }) => {
                 ctx.set_error("RaftError", &source.to_string());
-                Err(classify_raft_error(&source.to_string()))
+                Err(crate::proposal::consensus_error_to_status(source))
             },
             Err(HandleError::Timeout { .. }) => {
                 inferadb_ledger_raft::metrics::record_raft_proposal_timeout();

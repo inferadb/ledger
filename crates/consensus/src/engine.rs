@@ -172,8 +172,8 @@ impl ConsensusEngine {
         self.inbox
             .send(ReactorEvent::Propose { shard, data, response: tx })
             .await
-            .map_err(|_| ConsensusError::ProposalQueueFull)?;
-        let result = rx.await.map_err(|_| ConsensusError::ProposalQueueFull)?;
+            .map_err(|_| ConsensusError::InboxFull)?;
+        let result = rx.await.map_err(|_| ConsensusError::ReactorShutdown)?;
 
         // Cache successful proposals.
         if let Ok(commit_index) = &result {
@@ -209,8 +209,8 @@ impl ConsensusEngine {
         self.inbox
             .send(ReactorEvent::ProposeBatch { shard, entries, response: tx })
             .await
-            .map_err(|_| ConsensusError::ProposalQueueFull)?;
-        rx.await.map_err(|_| ConsensusError::ProposalQueueFull)?
+            .map_err(|_| ConsensusError::InboxFull)?;
+        rx.await.map_err(|_| ConsensusError::ReactorShutdown)?
     }
 
     /// Delivers a peer message to the reactor for the given shard.
@@ -223,7 +223,7 @@ impl ConsensusEngine {
         self.inbox
             .send(ReactorEvent::PeerMessage { shard, from, message })
             .await
-            .map_err(|_| ConsensusError::ProposalQueueFull)
+            .map_err(|_| ConsensusError::InboxFull)
     }
 
     /// Adds a learner to a shard.
@@ -245,8 +245,8 @@ impl ConsensusEngine {
                 response: tx,
             })
             .await
-            .map_err(|_| ConsensusError::ProposalQueueFull)?;
-        rx.await.map_err(|_| ConsensusError::ProposalQueueFull)?
+            .map_err(|_| ConsensusError::InboxFull)?;
+        rx.await.map_err(|_| ConsensusError::ReactorShutdown)?
     }
 
     /// Promotes a learner to voter.
@@ -259,8 +259,8 @@ impl ConsensusEngine {
                 response: tx,
             })
             .await
-            .map_err(|_| ConsensusError::ProposalQueueFull)?;
-        rx.await.map_err(|_| ConsensusError::ProposalQueueFull)?
+            .map_err(|_| ConsensusError::InboxFull)?;
+        rx.await.map_err(|_| ConsensusError::ReactorShutdown)?
     }
 
     /// Removes a node from a shard.
@@ -273,8 +273,8 @@ impl ConsensusEngine {
                 response: tx,
             })
             .await
-            .map_err(|_| ConsensusError::ProposalQueueFull)?;
-        rx.await.map_err(|_| ConsensusError::ProposalQueueFull)?
+            .map_err(|_| ConsensusError::InboxFull)?;
+        rx.await.map_err(|_| ConsensusError::ReactorShutdown)?
     }
 
     /// Transfers leadership of a shard to the specified target voter.
@@ -287,7 +287,7 @@ impl ConsensusEngine {
     ///
     /// Returns [`ConsensusError::NotLeader`] if this node is not the leader,
     /// [`ConsensusError::ShardUnavailable`] if the shard is not registered
-    /// or the target is not a voter, or [`ConsensusError::ProposalQueueFull`]
+    /// or the target is not a voter, or [`ConsensusError::InboxFull`]
     /// if the reactor inbox is full.
     pub async fn transfer_leader(
         &self,
@@ -298,8 +298,8 @@ impl ConsensusEngine {
         self.inbox
             .send(ReactorEvent::TransferLeader { shard, target, response: tx })
             .await
-            .map_err(|_| ConsensusError::ProposalQueueFull)?;
-        rx.await.map_err(|_| ConsensusError::ProposalQueueFull)?
+            .map_err(|_| ConsensusError::InboxFull)?;
+        rx.await.map_err(|_| ConsensusError::ReactorShutdown)?
     }
 
     /// Triggers a snapshot on a shard.
@@ -311,15 +311,15 @@ impl ConsensusEngine {
     /// # Errors
     ///
     /// Returns [`ConsensusError::ShardUnavailable`] if the shard is not
-    /// registered, or [`ConsensusError::ProposalQueueFull`] if the reactor
+    /// registered, or [`ConsensusError::InboxFull`] if the reactor
     /// inbox is full.
     pub async fn trigger_snapshot(&self, shard: ShardId) -> Result<(u64, u64), ConsensusError> {
         let (tx, rx) = oneshot::channel();
         self.inbox
             .send(ReactorEvent::TriggerSnapshot { shard, response: tx })
             .await
-            .map_err(|_| ConsensusError::ProposalQueueFull)?;
-        rx.await.map_err(|_| ConsensusError::ProposalQueueFull)?
+            .map_err(|_| ConsensusError::InboxFull)?;
+        rx.await.map_err(|_| ConsensusError::ReactorShutdown)?
     }
 
     /// Notifies the reactor that a snapshot has been successfully persisted.
@@ -330,8 +330,9 @@ impl ConsensusEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`ConsensusError::ProposalQueueFull`] if the reactor inbox is
-    /// full or the reactor has shut down.
+    /// Returns [`ConsensusError::InboxFull`] if the reactor inbox is
+    /// full, or [`ConsensusError::ReactorShutdown`] if the reactor has
+    /// shut down.
     pub async fn notify_snapshot_completed(
         &self,
         shard: ShardId,
@@ -340,7 +341,7 @@ impl ConsensusEngine {
         self.inbox
             .send(ReactorEvent::SnapshotCompleted { shard, last_included_index })
             .await
-            .map_err(|_| ConsensusError::ProposalQueueFull)
+            .map_err(|_| ConsensusError::InboxFull)
     }
 
     /// Returns the current committed index for a shard.
@@ -352,15 +353,15 @@ impl ConsensusEngine {
     /// # Errors
     ///
     /// Returns [`ConsensusError::ShardUnavailable`] if the shard is not
-    /// registered with this engine, or [`ConsensusError::ProposalQueueFull`]
+    /// registered with this engine, or [`ConsensusError::InboxFull`]
     /// if the reactor inbox is full or the reactor has shut down.
     pub async fn read_index(&self, shard: ShardId) -> Result<u64, ConsensusError> {
         let (tx, rx) = oneshot::channel();
         self.inbox
             .send(ReactorEvent::ReadIndex { shard, response: tx })
             .await
-            .map_err(|_| ConsensusError::ProposalQueueFull)?;
-        rx.await.map_err(|_| ConsensusError::ProposalQueueFull)?
+            .map_err(|_| ConsensusError::InboxFull)?;
+        rx.await.map_err(|_| ConsensusError::ReactorShutdown)?
     }
 
     /// Queries a peer's match_index for a shard.
@@ -369,7 +370,7 @@ impl ConsensusEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`ConsensusError::ProposalQueueFull`] if the reactor inbox is
+    /// Returns [`ConsensusError::InboxFull`] if the reactor inbox is
     /// full or the reactor has shut down.
     pub async fn query_peer_state(
         &self,
@@ -380,7 +381,7 @@ impl ConsensusEngine {
         self.inbox
             .send(ReactorEvent::QueryPeerState { shard, node, response })
             .await
-            .map_err(|_| ConsensusError::ProposalQueueFull)
+            .map_err(|_| ConsensusError::InboxFull)
     }
 
     /// Flushes all pending WAL frames to durable storage before shutdown.
@@ -392,19 +393,20 @@ impl ConsensusEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`ConsensusError::ProposalQueueFull`] if the reactor inbox is
-    /// full, the reactor has shut down, the WAL sync fails, or the timeout
-    /// elapses before the flush completes.
+    /// Returns [`ConsensusError::InboxFull`] if the reactor inbox is
+    /// full, [`ConsensusError::ReactorShutdown`] if the reactor has shut
+    /// down or the timeout elapses before the flush completes, or
+    /// [`ConsensusError::WalWriteError`] if the WAL sync fails.
     pub async fn flush_for_shutdown(&self, timeout: Duration) -> Result<(), ConsensusError> {
         let (tx, rx) = oneshot::channel();
         self.inbox
             .send(ReactorEvent::ShutdownFlush { ack: tx })
             .await
-            .map_err(|_| ConsensusError::ProposalQueueFull)?;
+            .map_err(|_| ConsensusError::InboxFull)?;
         tokio::time::timeout(timeout, rx)
             .await
-            .map_err(|_| ConsensusError::ProposalQueueFull)?
-            .map_err(|_| ConsensusError::ProposalQueueFull)?
+            .map_err(|_| ConsensusError::ReactorShutdown)?
+            .map_err(|_| ConsensusError::ReactorShutdown)?
     }
 
     /// Gracefully shuts down the reactor and waits for it to finish.
