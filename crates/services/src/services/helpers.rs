@@ -360,7 +360,7 @@ pub(crate) fn error_code_to_status(code: ErrorCode, message: String) -> Status {
 ///
 /// On follower nodes, data from recent GLOBAL proposals (vault creation, org
 /// provisioning, slug registration) may not have replicated yet. This function
-/// calls ReadIndex on the GLOBAL leader to learn the leader's committed index,
+/// calls CommittedIndex on the GLOBAL leader to learn the leader's committed index,
 /// then waits for the local applied index to reach it.
 ///
 /// On the leader, this is a no-op. Typically completes in <5ms when caught up.
@@ -373,7 +373,7 @@ pub(crate) async fn ensure_global_consistency(
         return;
     }
 
-    // Get the leader's actual committed index via ReadIndex RPC.
+    // Get the leader's actual committed index via CommittedIndex RPC.
     let leader_id = match global.handle().current_leader() {
         Some(id) => id,
         None => return,
@@ -404,7 +404,7 @@ pub(crate) async fn ensure_global_consistency(
     .await;
 }
 
-/// Calls ReadIndex RPC on the GLOBAL leader to get its committed index.
+/// Calls CommittedIndex RPC on the GLOBAL leader to get its committed index.
 ///
 /// The gRPC channel is resolved through the node-level
 /// `NodeConnectionRegistry` on the `RaftManager`, so HTTP/2 multiplexing
@@ -421,7 +421,9 @@ async fn read_index_from_leader(
 
     let mut client = RaftServiceClient::new(channel);
     let resp = client
-        .read_index(inferadb_ledger_proto::proto::ReadIndexRequest { region: String::new() })
+        .committed_index(inferadb_ledger_proto::proto::CommittedIndexRequest {
+            region: String::new(),
+        })
         .await
         .ok()?;
 

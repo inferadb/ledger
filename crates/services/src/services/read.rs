@@ -233,7 +233,7 @@ impl ReadService {
     /// Follower ReadIndex: ask leader for committed index, wait for local apply.
     ///
     /// 1. Obtain a gRPC channel to the current leader.
-    /// 2. Call `ReadIndex` RPC to get the leader's committed index.
+    /// 2. Call `CommittedIndex` RPC to get the leader's committed index.
     /// 3. Wait for this node's applied index to reach that committed index.
     async fn follower_read_index(&self, ctx: &RegionContext) -> Result<(), Status> {
         use inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient;
@@ -242,9 +242,11 @@ impl ReadService {
         let mut client = RaftServiceClient::new(channel);
 
         let response = client
-            .read_index(inferadb_ledger_proto::proto::ReadIndexRequest { region: String::new() })
+            .committed_index(inferadb_ledger_proto::proto::CommittedIndexRequest {
+                region: String::new(),
+            })
             .await
-            .map_err(|e| Status::unavailable(format!("ReadIndex RPC failed: {e}")))?;
+            .map_err(|e| Status::unavailable(format!("CommittedIndex RPC failed: {e}")))?;
 
         let committed_index = response.into_inner().committed_index;
 
@@ -262,7 +264,7 @@ impl ReadService {
     }
 
     /// Opens a gRPC channel to the current leader of this region for the
-    /// internal `ReadIndex` consensus RPC used by linearizable follower reads.
+    /// internal `CommittedIndex` consensus RPC used by linearizable follower reads.
     ///
     /// This helper is consensus-internal: the only caller is
     /// [`Self::follower_read_index`], which uses the channel to ask the leader

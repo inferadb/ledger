@@ -17,8 +17,8 @@ use std::{
 };
 
 use inferadb_ledger_proto::proto::{
-    ConsensusAck, ConsensusEnvelope, ReadIndexRequest, ReadIndexResponse, RegionalProposalRequest,
-    RegionalProposalResult,
+    CommittedIndexRequest, CommittedIndexResponse, ConsensusAck, ConsensusEnvelope,
+    RegionalProposalRequest, RegionalProposalResult,
     raft_service_server::{RaftService, RaftServiceServer},
 };
 use tokio_stream::wrappers::ReceiverStream;
@@ -29,12 +29,12 @@ use crate::{turmoil_common, turmoil_common::incoming_stream};
 
 /// Simple counter for tracking RPC calls
 struct RpcCounter {
-    read_index_received: AtomicU64,
+    committed_index_received: AtomicU64,
 }
 
 impl RpcCounter {
     fn new() -> Self {
-        Self { read_index_received: AtomicU64::new(0) }
+        Self { committed_index_received: AtomicU64::new(0) }
     }
 }
 
@@ -47,27 +47,27 @@ struct MinimalRaftService {
 
 #[tonic::async_trait]
 impl RaftService for MinimalRaftService {
-    async fn read_index(
+    async fn committed_index(
         &self,
-        _request: Request<ReadIndexRequest>,
-    ) -> Result<Response<ReadIndexResponse>, Status> {
-        self.counter.read_index_received.fetch_add(1, Ordering::SeqCst);
-        Ok(Response::new(ReadIndexResponse { committed_index: 0, leader_term: 1 }))
+        _request: Request<CommittedIndexRequest>,
+    ) -> Result<Response<CommittedIndexResponse>, Status> {
+        self.counter.committed_index_received.fetch_add(1, Ordering::SeqCst);
+        Ok(Response::new(CommittedIndexResponse { committed_index: 0, leader_term: 1 }))
     }
 
-    type ConsensusStreamStream = ReceiverStream<Result<ConsensusAck, Status>>;
+    type ReplicateStream = ReceiverStream<Result<ConsensusAck, Status>>;
 
-    async fn consensus_stream(
+    async fn replicate(
         &self,
         _request: Request<tonic::Streaming<ConsensusEnvelope>>,
-    ) -> Result<Response<Self::ConsensusStreamStream>, Status> {
-        Err(Status::unimplemented("ConsensusStream not supported in mock"))
+    ) -> Result<Response<Self::ReplicateStream>, Status> {
+        Err(Status::unimplemented("Replicate not supported in mock"))
     }
-    async fn submit_regional_proposal(
+    async fn regional_proposal(
         &self,
         _request: Request<RegionalProposalRequest>,
     ) -> Result<Response<RegionalProposalResult>, Status> {
-        Err(Status::unimplemented("SubmitRegionalProposal not supported in mock"))
+        Err(Status::unimplemented("RegionalProposal not supported in mock"))
     }
 }
 
@@ -150,12 +150,18 @@ fn test_network_partition_blocks_communication() {
             let mut client2 = create_raft_client("node2").await.expect("connect to node2");
             let mut client3 = create_raft_client("node3").await.expect("connect to node3");
 
-            // Send read_index requests to all nodes
-            let req = ReadIndexRequest { region: String::new() };
+            // Send committed_index requests to all nodes
+            let req = CommittedIndexRequest { region: String::new() };
 
-            client1.read_index(req.clone()).await.expect("read_index to node1 should succeed");
-            client2.read_index(req.clone()).await.expect("read_index to node2 should succeed");
-            client3.read_index(req).await.expect("read_index to node3 should succeed");
+            client1
+                .committed_index(req.clone())
+                .await
+                .expect("committed_index to node1 should succeed");
+            client2
+                .committed_index(req.clone())
+                .await
+                .expect("committed_index to node2 should succeed");
+            client3.committed_index(req).await.expect("committed_index to node3 should succeed");
         }
 
         // Phase 2: Partition node3 from nodes 1 and 2, and from test client
@@ -173,10 +179,13 @@ fn test_network_partition_blocks_communication() {
             let result = create_raft_client("node3").await;
             match result {
                 Ok(mut client) => {
-                    let req = ReadIndexRequest { region: String::new() };
-                    let read_result = client.read_index(req).await;
+                    let req = CommittedIndexRequest { region: String::new() };
+                    let read_result = client.committed_index(req).await;
                     // The connection or RPC should fail due to partition
-                    assert!(read_result.is_err(), "read_index to partitioned node3 should fail");
+                    assert!(
+                        read_result.is_err(),
+                        "committed_index to partitioned node3 should fail"
+                    );
                 },
                 Err(_) => {
                     // Connection failed - expected behavior during partition
@@ -187,15 +196,15 @@ fn test_network_partition_blocks_communication() {
             let mut client1 = create_raft_client("node1").await.expect("connect to node1");
             let mut client2 = create_raft_client("node2").await.expect("connect to node2");
 
-            let req = ReadIndexRequest { region: String::new() };
+            let req = CommittedIndexRequest { region: String::new() };
             client1
-                .read_index(req.clone())
+                .committed_index(req.clone())
                 .await
-                .expect("read_index to node1 should succeed during partition");
+                .expect("committed_index to node1 should succeed during partition");
             client2
-                .read_index(req)
+                .committed_index(req)
                 .await
-                .expect("read_index to node2 should succeed during partition");
+                .expect("committed_index to node2 should succeed during partition");
         }
 
         // Phase 3: Heal partition
@@ -209,8 +218,11 @@ fn test_network_partition_blocks_communication() {
 
             let mut client3 =
                 create_raft_client("node3").await.expect("connect to node3 after heal");
-            let req = ReadIndexRequest { region: String::new() };
-            client3.read_index(req).await.expect("read_index to node3 should succeed after heal");
+            let req = CommittedIndexRequest { region: String::new() };
+            client3
+                .committed_index(req)
+                .await
+                .expect("committed_index to node3 should succeed after heal");
         }
 
         Ok(())
@@ -229,7 +241,7 @@ fn test_network_partition_blocks_communication() {
 fn test_majority_partition_continues_operating() {
     let mut sim = Builder::new().build();
 
-    // Shared state for tracking which nodes received read_index
+    // Shared state for tracking which nodes received committed_index
     let node1_ri_count = Arc::new(AtomicU64::new(0));
     let node2_ri_count = Arc::new(AtomicU64::new(0));
     let node3_ri_count = Arc::new(AtomicU64::new(0));
@@ -238,34 +250,34 @@ fn test_majority_partition_continues_operating() {
     let n2_count = node2_ri_count.clone();
     let n3_count = node3_ri_count.clone();
 
-    // Custom service that tracks read_index calls
+    // Custom service that tracks committed_index calls
     struct CountingRaftService {
         ri_count: Arc<AtomicU64>,
     }
 
     #[tonic::async_trait]
     impl RaftService for CountingRaftService {
-        async fn read_index(
+        async fn committed_index(
             &self,
-            _request: Request<ReadIndexRequest>,
-        ) -> Result<Response<ReadIndexResponse>, Status> {
+            _request: Request<CommittedIndexRequest>,
+        ) -> Result<Response<CommittedIndexResponse>, Status> {
             self.ri_count.fetch_add(1, Ordering::SeqCst);
-            Ok(Response::new(ReadIndexResponse { committed_index: 1, leader_term: 1 }))
+            Ok(Response::new(CommittedIndexResponse { committed_index: 1, leader_term: 1 }))
         }
 
-        type ConsensusStreamStream = ReceiverStream<Result<ConsensusAck, Status>>;
+        type ReplicateStream = ReceiverStream<Result<ConsensusAck, Status>>;
 
-        async fn consensus_stream(
+        async fn replicate(
             &self,
             _request: Request<tonic::Streaming<ConsensusEnvelope>>,
-        ) -> Result<Response<Self::ConsensusStreamStream>, Status> {
-            Err(Status::unimplemented("ConsensusStream not supported in mock"))
+        ) -> Result<Response<Self::ReplicateStream>, Status> {
+            Err(Status::unimplemented("Replicate not supported in mock"))
         }
-        async fn submit_regional_proposal(
+        async fn regional_proposal(
             &self,
             _request: Request<RegionalProposalRequest>,
         ) -> Result<Response<RegionalProposalResult>, Status> {
-            Err(Status::unimplemented("SubmitRegionalProposal not supported in mock"))
+            Err(Status::unimplemented("RegionalProposal not supported in mock"))
         }
     }
 
@@ -321,21 +333,21 @@ fn test_majority_partition_continues_operating() {
         // Wait for servers to start
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // Simulate leader sending read_index to all nodes
-        async fn send_read_index(host: &str) -> bool {
+        // Simulate leader sending committed_index to all nodes
+        async fn send_committed_index(host: &str) -> bool {
             match create_raft_client(host).await {
                 Ok(mut client) => {
-                    let req = ReadIndexRequest { region: String::new() };
-                    client.read_index(req).await.is_ok()
+                    let req = CommittedIndexRequest { region: String::new() };
+                    client.committed_index(req).await.is_ok()
                 },
                 Err(_) => false,
             }
         }
 
         // Before partition: all nodes should respond
-        assert!(send_read_index("node1").await, "node1 should respond");
-        assert!(send_read_index("node2").await, "node2 should respond");
-        assert!(send_read_index("node3").await, "node3 should respond");
+        assert!(send_committed_index("node1").await, "node1 should respond");
+        assert!(send_committed_index("node2").await, "node2 should respond");
+        assert!(send_committed_index("node3").await, "node3 should respond");
 
         // Partition node3 (minority)
         turmoil::partition("node3", "node1");
@@ -346,12 +358,12 @@ fn test_majority_partition_continues_operating() {
         // Majority partition (nodes 1 and 2) should still work
         // Send multiple requests to majority to create a count difference
         for _ in 0..3 {
-            assert!(send_read_index("node1").await, "node1 should respond during partition");
-            assert!(send_read_index("node2").await, "node2 should respond during partition");
+            assert!(send_committed_index("node1").await, "node1 should respond during partition");
+            assert!(send_committed_index("node2").await, "node2 should respond during partition");
         }
 
         // Minority partition (node3) should not respond
-        assert!(!send_read_index("node3").await, "node3 should NOT respond during partition");
+        assert!(!send_committed_index("node3").await, "node3 should NOT respond during partition");
 
         // Heal partition
         turmoil::repair("node3", "node1");
@@ -360,7 +372,7 @@ fn test_majority_partition_continues_operating() {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // After healing, node3 should be reachable again
-        assert!(send_read_index("node3").await, "node3 should respond after heal");
+        assert!(send_committed_index("node3").await, "node3 should respond after heal");
 
         Ok(())
     });
@@ -369,7 +381,7 @@ fn test_majority_partition_continues_operating() {
     sim.run().expect("simulation should complete");
 
     // Verify final counts
-    // Node3 should have fewer read_index calls than nodes 1 and 2 due to partition
+    // Node3 should have fewer committed_index calls than nodes 1 and 2 due to partition
     let n1_final = final_n1.load(Ordering::SeqCst);
     let n2_final = final_n2.load(Ordering::SeqCst);
     let n3_final = final_n3.load(Ordering::SeqCst);
@@ -416,8 +428,8 @@ fn test_message_hold_and_release() {
         // First, verify connection works
         {
             let mut client = create_raft_client("node1").await.expect("connect");
-            let req = ReadIndexRequest { region: String::new() };
-            let resp = client.read_index(req).await;
+            let req = CommittedIndexRequest { region: String::new() };
+            let resp = client.committed_index(req).await;
             assert!(resp.is_ok(), "initial request should succeed");
         }
 
@@ -428,8 +440,8 @@ fn test_message_hold_and_release() {
         let partition_result: Result<(), ()> = async {
             match create_raft_client("node1").await {
                 Ok(mut client) => {
-                    let req = ReadIndexRequest { region: String::new() };
-                    client.read_index(req).await.map(|_| ()).map_err(|_| ())
+                    let req = CommittedIndexRequest { region: String::new() };
+                    client.committed_index(req).await.map(|_| ()).map_err(|_| ())
                 },
                 Err(_) => Err(()),
             }
@@ -445,8 +457,8 @@ fn test_message_hold_and_release() {
         // Requests should succeed after repair
         {
             let mut client = create_raft_client("node1").await.expect("reconnect");
-            let req = ReadIndexRequest { region: String::new() };
-            let resp = client.read_index(req).await;
+            let req = CommittedIndexRequest { region: String::new() };
+            let resp = client.committed_index(req).await;
             assert!(resp.is_ok(), "request after repair should succeed");
         }
 
@@ -456,10 +468,10 @@ fn test_message_hold_and_release() {
     sim.run().expect("simulation should complete");
 
     // Verify server received requests
-    let received = final_counter.read_index_received.load(Ordering::SeqCst);
+    let received = final_counter.committed_index_received.load(Ordering::SeqCst);
     assert!(
         received >= 2,
-        "server should have received at least 2 read_index requests, got {}",
+        "server should have received at least 2 committed_index requests, got {}",
         received
     );
 }
@@ -482,27 +494,27 @@ fn test_intermittent_connectivity() {
 
     #[tonic::async_trait]
     impl RaftService for CountingService {
-        async fn read_index(
+        async fn committed_index(
             &self,
-            _request: Request<ReadIndexRequest>,
-        ) -> Result<Response<ReadIndexResponse>, Status> {
+            _request: Request<CommittedIndexRequest>,
+        ) -> Result<Response<CommittedIndexResponse>, Status> {
             self.counter.fetch_add(1, Ordering::SeqCst);
-            Ok(Response::new(ReadIndexResponse { committed_index: 0, leader_term: 1 }))
+            Ok(Response::new(CommittedIndexResponse { committed_index: 0, leader_term: 1 }))
         }
 
-        type ConsensusStreamStream = ReceiverStream<Result<ConsensusAck, Status>>;
+        type ReplicateStream = ReceiverStream<Result<ConsensusAck, Status>>;
 
-        async fn consensus_stream(
+        async fn replicate(
             &self,
             _request: Request<tonic::Streaming<ConsensusEnvelope>>,
-        ) -> Result<Response<Self::ConsensusStreamStream>, Status> {
-            Err(Status::unimplemented("ConsensusStream not supported in mock"))
+        ) -> Result<Response<Self::ReplicateStream>, Status> {
+            Err(Status::unimplemented("Replicate not supported in mock"))
         }
-        async fn submit_regional_proposal(
+        async fn regional_proposal(
             &self,
             _request: Request<RegionalProposalRequest>,
         ) -> Result<Response<RegionalProposalResult>, Status> {
-            Err(Status::unimplemented("SubmitRegionalProposal not supported in mock"))
+            Err(Status::unimplemented("RegionalProposal not supported in mock"))
         }
     }
 
@@ -534,8 +546,8 @@ fn test_intermittent_connectivity() {
             let result: Result<(), ()> = async {
                 match create_raft_client("node1").await {
                     Ok(mut client) => {
-                        let req = ReadIndexRequest { region: String::new() };
-                        client.read_index(req).await.map(|_| ()).map_err(|_| ())
+                        let req = CommittedIndexRequest { region: String::new() };
+                        client.committed_index(req).await.map(|_| ()).map_err(|_| ())
                     },
                     Err(_) => Err(()),
                 }
@@ -565,8 +577,8 @@ fn test_intermittent_connectivity() {
         let final_result: Result<(), ()> = async {
             match create_raft_client("node1").await {
                 Ok(mut client) => {
-                    let req = ReadIndexRequest { region: String::new() };
-                    client.read_index(req).await.map(|_| ()).map_err(|_| ())
+                    let req = CommittedIndexRequest { region: String::new() };
+                    client.committed_index(req).await.map(|_| ()).map_err(|_| ())
                 },
                 Err(_) => Err(()),
             }
@@ -633,10 +645,10 @@ fn test_asymmetric_partition() {
             let mut c1 = create_raft_client("node1").await.expect("connect node1");
             let mut c2 = create_raft_client("node2").await.expect("connect node2");
 
-            let req = ReadIndexRequest { region: String::new() };
+            let req = CommittedIndexRequest { region: String::new() };
 
-            c1.read_index(req.clone()).await.expect("read_index to node1");
-            c2.read_index(req).await.expect("read_index to node2");
+            c1.committed_index(req.clone()).await.expect("committed_index to node1");
+            c2.committed_index(req).await.expect("committed_index to node2");
         }
 
         // Create asymmetric partition: test -> node1 blocked, but test -> node2 OK
@@ -648,8 +660,8 @@ fn test_asymmetric_partition() {
         let n1_result = create_raft_client("node1").await;
         match n1_result {
             Ok(mut client) => {
-                let req = ReadIndexRequest { region: String::new() };
-                assert!(client.read_index(req).await.is_err(), "node1 should be unreachable");
+                let req = CommittedIndexRequest { region: String::new() };
+                assert!(client.committed_index(req).await.is_err(), "node1 should be unreachable");
             },
             Err(_) => {
                 // Connection failed - expected
@@ -658,16 +670,16 @@ fn test_asymmetric_partition() {
 
         // node2 should still be reachable
         let mut c2 = create_raft_client("node2").await.expect("connect node2");
-        let req = ReadIndexRequest { region: String::new() };
-        c2.read_index(req).await.expect("node2 should still be reachable");
+        let req = CommittedIndexRequest { region: String::new() };
+        c2.committed_index(req).await.expect("node2 should still be reachable");
 
         // Repair and verify node1 is reachable again
         turmoil::repair("test", "node1");
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let mut c1 = create_raft_client("node1").await.expect("reconnect node1 after repair");
-        let req = ReadIndexRequest { region: String::new() };
-        c1.read_index(req).await.expect("node1 should be reachable after repair");
+        let req = CommittedIndexRequest { region: String::new() };
+        c1.committed_index(req).await.expect("node1 should be reachable after repair");
 
         Ok(())
     });
@@ -700,8 +712,8 @@ fn test_connection_timeout_handling() {
         // Verify node is reachable first
         {
             let mut client = create_raft_client("node1").await.expect("connect");
-            let req = ReadIndexRequest { region: String::new() };
-            client.read_index(req).await.expect("initial read_index");
+            let req = CommittedIndexRequest { region: String::new() };
+            client.committed_index(req).await.expect("initial committed_index");
         }
 
         // Partition the node
@@ -713,8 +725,8 @@ fn test_connection_timeout_handling() {
             let client_result = create_raft_client("node1").await;
             match client_result {
                 Ok(mut client) => {
-                    let req = ReadIndexRequest { region: String::new() };
-                    client.read_index(req).await
+                    let req = CommittedIndexRequest { region: String::new() };
+                    client.committed_index(req).await
                 },
                 Err(e) => Err(tonic::Status::unavailable(format!("Connection failed: {}", e))),
             }
@@ -741,8 +753,8 @@ fn test_connection_timeout_handling() {
             tokio::time::timeout(Duration::from_millis(500), async {
                 match create_raft_client("node1").await {
                     Ok(mut client) => {
-                        let req = ReadIndexRequest { region: String::new() };
-                        client.read_index(req).await
+                        let req = CommittedIndexRequest { region: String::new() };
+                        client.committed_index(req).await
                     },
                     Err(e) => Err(tonic::Status::unavailable(format!("Connection failed: {}", e))),
                 }

@@ -2,7 +2,7 @@
 //!
 //! Owns one [`PeerConnection`] per peer `NodeId`, shared across all
 //! server-to-server subsystems: consensus transport (Phase 2 bidi stream),
-//! saga orchestration (`SubmitRegionalProposal`), follower `ReadIndex`
+//! saga orchestration (`RegionalProposal`), follower `CommittedIndex`
 //! consistency queries, and discovery announcements. HTTP/2 multiplexing
 //! means a single TCP connection per peer serves every subsystem,
 //! replacing the previous per-region, per-subsystem channel duplication.

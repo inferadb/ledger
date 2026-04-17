@@ -10,7 +10,7 @@ how leader changes are propagated to SDK clients mid-session.
 Explains the Phase 5 redirect-based routing model: the SDK — not the server —
 is responsible for discovering and connecting directly to the regional
 leader. Server-side forwarding of client requests has been removed; the only
-remaining cross-node proposal path (`SubmitRegionalProposal`) is reserved
+remaining cross-node proposal path (`RegionalProposal`) is reserved
 for saga orchestration and does not carry client traffic.
 
 ## Model
@@ -72,7 +72,7 @@ and (3) server-initiated push updates over the `WatchLeader` bidirectional
 stream. Each source is term-gated so stale hints cannot overwrite fresher
 state.
 
-**Saga orchestration is unchanged.** The `SubmitRegionalProposal` RPC
+**Saga orchestration is unchanged.** The `RegionalProposal` RPC
 remains for server-to-server proposal forwarding during cross-region saga
 steps (e.g., `MigrateOrganization`). This is a coordination primitive
 between nodes, not a client-request proxy, and its semantics are out of

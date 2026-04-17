@@ -6,7 +6,7 @@
 //! heartbeats because retries arrive on the next heartbeat cycle.
 //!
 //! The drain task holds one long-lived bidirectional gRPC stream
-//! (`ConsensusStream`) per peer and feeds the queue's contents into
+//! (`Replicate`) per peer and feeds the queue's contents into
 //! it. A concurrent ack-reader discards server responses to keep the
 //! HTTP/2 flow-control window open. On any stream error we tear the stream
 //! down and reconnect with exponential backoff (100ms → cap 5s), resetting
@@ -259,7 +259,7 @@ async fn run_drain_loop(
         >(inner.capacity);
         let req_stream = ReceiverStream::new(req_rx);
 
-        let ack_stream = match client.consensus_stream(req_stream).await {
+        let ack_stream = match client.replicate(req_stream).await {
             Ok(resp) => resp.into_inner(),
             Err(e) => {
                 tracing::debug!(

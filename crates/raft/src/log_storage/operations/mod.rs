@@ -6663,7 +6663,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             },
 
             LedgerRequest::AddRegionLearner { node_id, .. } => {
-                // AddRegionLearner is intercepted by submit_regional_proposal
+                // AddRegionLearner is intercepted by regional_proposal
                 // and handled as a direct membership change. It should never
                 // reach the apply handler through the Raft log.
                 tracing::error!(

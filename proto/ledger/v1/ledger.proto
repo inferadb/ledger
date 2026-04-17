@@ -3441,12 +3441,12 @@ message LeaderUpdate {
 // =============================================================================
 
 // Internal Raft RPC service for consensus protocol.
-// Used for inter-node communication: consensus streaming, read index, regional proposals.
+// Used for inter-node communication: replication streaming, committed index queries, regional proposals.
 service RaftService {
   // Query committed index for follower ReadIndex protocol.
   // Followers call this on the leader to confirm the committed index,
   // then wait locally for their applied index to catch up.
-  rpc ReadIndex(ReadIndexRequest) returns (ReadIndexResponse);
+  rpc CommittedIndex(CommittedIndexRequest) returns (CommittedIndexResponse);
 
   // Bidirectional consensus-message transport between peers. Carries Raft
   // protocol messages (vote, append-entries, heartbeat, etc.) serialized in
@@ -3454,7 +3454,7 @@ service RaftService {
   // connection setup and enable HTTP/2 flow-controlled backpressure.
   // Fire-and-forget — the server acknowledges each envelope but the client
   // discards the acks.
-  rpc ConsensusStream(stream ConsensusEnvelope) returns (stream ConsensusAck);
+  rpc Replicate(stream ConsensusEnvelope) returns (stream ConsensusAck);
 
   // Submit a regional proposal to a region's Raft leader.
   //
@@ -3466,7 +3466,7 @@ service RaftService {
   //
   // Not for client use; client writes reach their target region via
   // `NotLeader` + hint redirect, not this RPC.
-  rpc SubmitRegionalProposal(RegionalProposalRequest) returns (RegionalProposalResult);
+  rpc RegionalProposal(RegionalProposalRequest) returns (RegionalProposalResult);
 }
 
 // Raft vote (term + node_id + committed flag).
@@ -3521,21 +3521,21 @@ message TransferLeadershipResponse {
 }
 
 
-// ReadIndex request: follower asks leader to confirm committed index.
-message ReadIndexRequest {
+// CommittedIndex request: follower asks leader to confirm committed index.
+message CommittedIndexRequest {
   // Region for multi-region routing (defaults to GLOBAL).
   string region = 1;
 }
 
-// ReadIndex response: leader returns its committed index and term.
-message ReadIndexResponse {
+// CommittedIndex response: leader returns its committed index and term.
+message CommittedIndexResponse {
   uint64 committed_index = 1;
   uint64 leader_term = 2;
 }
 
 
 // Envelope wrapping a consensus-engine message sent between peers over
-// the ConsensusStream bidirectional RPC.
+// the Replicate bidirectional RPC.
 message ConsensusEnvelope {
   // Shard (consensus group) this message targets.
   uint64 shard_id = 1;

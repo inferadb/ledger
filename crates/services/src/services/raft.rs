@@ -2,14 +2,14 @@
 //!
 //! This service handles incoming consensus protocol messages from peer nodes.
 //! Active consensus messaging uses the bidirectional streaming
-//! `consensus_stream` RPC — one long-lived stream per peer with
+//! `replicate` RPC — one long-lived stream per peer with
 //! HTTP/2 flow-controlled backpressure.
 
 use std::{net::SocketAddr, str::FromStr, sync::Arc};
 
 use inferadb_ledger_proto::proto::{
-    ConsensusAck, ConsensusEnvelope, ReadIndexRequest, ReadIndexResponse, RegionalProposalRequest,
-    RegionalProposalResult,
+    CommittedIndexRequest, CommittedIndexResponse, ConsensusAck, ConsensusEnvelope,
+    RegionalProposalRequest, RegionalProposalResult,
 };
 use inferadb_ledger_raft::{
     raft_manager::RaftManager,
@@ -21,9 +21,9 @@ use tonic::{Request, Response, Status};
 
 /// Handles incoming consensus RPCs from peer nodes.
 ///
-/// Routes `ConsensusStream` bidi traffic to the correct region's consensus
-/// engine. Also serves `SubmitRegionalProposal` for server-to-server
-/// saga orchestration (peer-identity gated) and `ReadIndex` for follower
+/// Routes `Replicate` bidi traffic to the correct region's consensus
+/// engine. Also serves `RegionalProposal` for server-to-server
+/// saga orchestration (peer-identity gated) and `CommittedIndex` for follower
 /// read consistency.
 pub struct RaftService {
     manager: Arc<RaftManager>,
@@ -51,7 +51,7 @@ impl RaftService {
 
     /// Returns true if `addr` matches the IP of any known cluster peer.
     ///
-    /// Used to authenticate `SubmitRegionalProposal` callers. The cluster
+    /// Used to authenticate `RegionalProposal` callers. The cluster
     /// runs on a trusted (private / WireGuard) network, so IP-match against
     /// the peer address map is the pragmatic guard — ports differ between
     /// inbound (ephemeral client port) and outbound (configured server port),
@@ -65,7 +65,7 @@ impl RaftService {
             // misconfiguration in production is visible.
             tracing::warn!(
                 remote = %addr,
-                "is_known_peer: empty peer_addresses map; allowing SubmitRegionalProposal unauthenticated"
+                "is_known_peer: empty peer_addresses map; allowing RegionalProposal unauthenticated"
             );
             return true;
         }
@@ -207,10 +207,10 @@ impl RaftService {
 
 #[tonic::async_trait]
 impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftService {
-    async fn read_index(
+    async fn committed_index(
         &self,
-        request: Request<ReadIndexRequest>,
-    ) -> Result<Response<ReadIndexResponse>, Status> {
+        request: Request<CommittedIndexRequest>,
+    ) -> Result<Response<CommittedIndexResponse>, Status> {
         let req = request.into_inner();
 
         // Resolve region from string field — empty means GLOBAL, non-empty must parse.
@@ -228,7 +228,7 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
 
         let handle = group.handle();
 
-        // Must be leader to serve ReadIndex.
+        // Must be leader to serve CommittedIndex.
         if !handle.is_leader() {
             return Err(super::metadata::not_leader_status_from_handle(
                 handle.as_ref(),
@@ -239,7 +239,7 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
 
         // Fast path: valid lease means we're still the leader without a quorum check.
         if group.leader_lease().is_valid() {
-            return Ok(Response::new(ReadIndexResponse {
+            return Ok(Response::new(CommittedIndexResponse {
                 committed_index: handle.commit_index(),
                 leader_term: handle.current_term(),
             }));
@@ -251,17 +251,20 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
         let committed_index = handle
             .engine_read_index()
             .await
-            .map_err(|e| Status::unavailable(format!("ReadIndex quorum check failed: {e}")))?;
+            .map_err(|e| Status::unavailable(format!("CommittedIndex quorum check failed: {e}")))?;
 
-        Ok(Response::new(ReadIndexResponse { committed_index, leader_term: handle.current_term() }))
+        Ok(Response::new(CommittedIndexResponse {
+            committed_index,
+            leader_term: handle.current_term(),
+        }))
     }
 
-    type ConsensusStreamStream = ReceiverStream<Result<ConsensusAck, Status>>;
+    type ReplicateStream = ReceiverStream<Result<ConsensusAck, Status>>;
 
-    async fn consensus_stream(
+    async fn replicate(
         &self,
         request: Request<tonic::Streaming<ConsensusEnvelope>>,
-    ) -> Result<Response<Self::ConsensusStreamStream>, Status> {
+    ) -> Result<Response<Self::ReplicateStream>, Status> {
         let mut inbound = request.into_inner();
         // Bounded ack channel — bidi backpressure prevents unbounded fan-out.
         // Capacity mirrors the peer-sender queue capacity (1024) so an active
@@ -293,23 +296,23 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
         Ok(Response::new(ReceiverStream::new(ack_rx)))
     }
 
-    async fn submit_regional_proposal(
+    async fn regional_proposal(
         &self,
         request: Request<RegionalProposalRequest>,
     ) -> Result<Response<RegionalProposalResult>, Status> {
-        // Verify the caller is a known cluster peer. `SubmitRegionalProposal`
+        // Verify the caller is a known cluster peer. `RegionalProposal`
         // is an internal server-to-server RPC used by saga orchestration;
         // allowing unauthenticated external callers would let them forge
         // arbitrary LedgerRequest payloads and bypass JWT / org scoping /
         // rate limiting.
         let Some(remote_addr) = request.remote_addr() else {
             return Err(Status::unauthenticated(
-                "SubmitRegionalProposal requires a known peer source address",
+                "RegionalProposal requires a known peer source address",
             ));
         };
         if !self.is_known_peer(&remote_addr) {
             return Err(Status::unauthenticated(format!(
-                "SubmitRegionalProposal from unknown peer {remote_addr}"
+                "RegionalProposal from unknown peer {remote_addr}"
             )));
         }
 

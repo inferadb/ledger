@@ -3908,23 +3908,23 @@ pub struct TransferLeadershipResponse {
     #[prost(string, tag = "3")]
     pub message: ::prost::alloc::string::String,
 }
-/// ReadIndex request: follower asks leader to confirm committed index.
+/// CommittedIndex request: follower asks leader to confirm committed index.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ReadIndexRequest {
+pub struct CommittedIndexRequest {
     /// Region for multi-region routing (defaults to GLOBAL).
     #[prost(string, tag = "1")]
     pub region: ::prost::alloc::string::String,
 }
-/// ReadIndex response: leader returns its committed index and term.
+/// CommittedIndex response: leader returns its committed index and term.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ReadIndexResponse {
+pub struct CommittedIndexResponse {
     #[prost(uint64, tag = "1")]
     pub committed_index: u64,
     #[prost(uint64, tag = "2")]
     pub leader_term: u64,
 }
 /// Envelope wrapping a consensus-engine message sent between peers over
-/// the ConsensusStream bidirectional RPC.
+/// the Replicate bidirectional RPC.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ConsensusEnvelope {
     /// Shard (consensus group) this message targets.
@@ -19188,7 +19188,7 @@ pub mod raft_service_client {
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
     /// Internal Raft RPC service for consensus protocol.
-    /// Used for inter-node communication: consensus streaming, read index, regional proposals.
+    /// Used for inter-node communication: replication streaming, committed index queries, regional proposals.
     #[derive(Debug, Clone)]
     pub struct RaftServiceClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -19272,11 +19272,11 @@ pub mod raft_service_client {
         /// Query committed index for follower ReadIndex protocol.
         /// Followers call this on the leader to confirm the committed index,
         /// then wait locally for their applied index to catch up.
-        pub async fn read_index(
+        pub async fn committed_index(
             &mut self,
-            request: impl tonic::IntoRequest<super::ReadIndexRequest>,
+            request: impl tonic::IntoRequest<super::CommittedIndexRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::ReadIndexResponse>,
+            tonic::Response<super::CommittedIndexResponse>,
             tonic::Status,
         > {
             self.inner
@@ -19289,11 +19289,11 @@ pub mod raft_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/ledger.v1.RaftService/ReadIndex",
+                "/ledger.v1.RaftService/CommittedIndex",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("ledger.v1.RaftService", "ReadIndex"));
+                .insert(GrpcMethod::new("ledger.v1.RaftService", "CommittedIndex"));
             self.inner.unary(req, path, codec).await
         }
         /// Bidirectional consensus-message transport between peers. Carries Raft
@@ -19302,7 +19302,7 @@ pub mod raft_service_client {
         /// connection setup and enable HTTP/2 flow-controlled backpressure.
         /// Fire-and-forget — the server acknowledges each envelope but the client
         /// discards the acks.
-        pub async fn consensus_stream(
+        pub async fn replicate(
             &mut self,
             request: impl tonic::IntoStreamingRequest<Message = super::ConsensusEnvelope>,
         ) -> std::result::Result<
@@ -19319,11 +19319,11 @@ pub mod raft_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/ledger.v1.RaftService/ConsensusStream",
+                "/ledger.v1.RaftService/Replicate",
             );
             let mut req = request.into_streaming_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("ledger.v1.RaftService", "ConsensusStream"));
+                .insert(GrpcMethod::new("ledger.v1.RaftService", "Replicate"));
             self.inner.streaming(req, path, codec).await
         }
         /// Submit a regional proposal to a region's Raft leader.
@@ -19336,7 +19336,7 @@ pub mod raft_service_client {
         ///
         /// Not for client use; client writes reach their target region via
         /// `NotLeader` + hint redirect, not this RPC.
-        pub async fn submit_regional_proposal(
+        pub async fn regional_proposal(
             &mut self,
             request: impl tonic::IntoRequest<super::RegionalProposalRequest>,
         ) -> std::result::Result<
@@ -19353,13 +19353,11 @@ pub mod raft_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/ledger.v1.RaftService/SubmitRegionalProposal",
+                "/ledger.v1.RaftService/RegionalProposal",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("ledger.v1.RaftService", "SubmitRegionalProposal"),
-                );
+                .insert(GrpcMethod::new("ledger.v1.RaftService", "RegionalProposal"));
             self.inner.unary(req, path, codec).await
         }
     }
@@ -19380,15 +19378,15 @@ pub mod raft_service_server {
         /// Query committed index for follower ReadIndex protocol.
         /// Followers call this on the leader to confirm the committed index,
         /// then wait locally for their applied index to catch up.
-        async fn read_index(
+        async fn committed_index(
             &self,
-            request: tonic::Request<super::ReadIndexRequest>,
+            request: tonic::Request<super::CommittedIndexRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::ReadIndexResponse>,
+            tonic::Response<super::CommittedIndexResponse>,
             tonic::Status,
         >;
-        /// Server streaming response type for the ConsensusStream method.
-        type ConsensusStreamStream: tonic::codegen::tokio_stream::Stream<
+        /// Server streaming response type for the Replicate method.
+        type ReplicateStream: tonic::codegen::tokio_stream::Stream<
                 Item = std::result::Result<super::ConsensusAck, tonic::Status>,
             >
             + std::marker::Send
@@ -19399,13 +19397,10 @@ pub mod raft_service_server {
         /// connection setup and enable HTTP/2 flow-controlled backpressure.
         /// Fire-and-forget — the server acknowledges each envelope but the client
         /// discards the acks.
-        async fn consensus_stream(
+        async fn replicate(
             &self,
             request: tonic::Request<tonic::Streaming<super::ConsensusEnvelope>>,
-        ) -> std::result::Result<
-            tonic::Response<Self::ConsensusStreamStream>,
-            tonic::Status,
-        >;
+        ) -> std::result::Result<tonic::Response<Self::ReplicateStream>, tonic::Status>;
         /// Submit a regional proposal to a region's Raft leader.
         ///
         /// Used exclusively by the saga orchestrator on the GLOBAL leader to commit
@@ -19416,7 +19411,7 @@ pub mod raft_service_server {
         ///
         /// Not for client use; client writes reach their target region via
         /// `NotLeader` + hint redirect, not this RPC.
-        async fn submit_regional_proposal(
+        async fn regional_proposal(
             &self,
             request: tonic::Request<super::RegionalProposalRequest>,
         ) -> std::result::Result<
@@ -19425,7 +19420,7 @@ pub mod raft_service_server {
         >;
     }
     /// Internal Raft RPC service for consensus protocol.
-    /// Used for inter-node communication: consensus streaming, read index, regional proposals.
+    /// Used for inter-node communication: replication streaming, committed index queries, regional proposals.
     #[derive(Debug)]
     pub struct RaftServiceServer<T> {
         inner: Arc<T>,
@@ -19502,25 +19497,25 @@ pub mod raft_service_server {
         }
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             match req.uri().path() {
-                "/ledger.v1.RaftService/ReadIndex" => {
+                "/ledger.v1.RaftService/CommittedIndex" => {
                     #[allow(non_camel_case_types)]
-                    struct ReadIndexSvc<T: RaftService>(pub Arc<T>);
+                    struct CommittedIndexSvc<T: RaftService>(pub Arc<T>);
                     impl<
                         T: RaftService,
-                    > tonic::server::UnaryService<super::ReadIndexRequest>
-                    for ReadIndexSvc<T> {
-                        type Response = super::ReadIndexResponse;
+                    > tonic::server::UnaryService<super::CommittedIndexRequest>
+                    for CommittedIndexSvc<T> {
+                        type Response = super::CommittedIndexResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
                             tonic::Status,
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::ReadIndexRequest>,
+                            request: tonic::Request<super::CommittedIndexRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as RaftService>::read_index(&inner, request).await
+                                <T as RaftService>::committed_index(&inner, request).await
                             };
                             Box::pin(fut)
                         }
@@ -19531,7 +19526,7 @@ pub mod raft_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = ReadIndexSvc(inner);
+                        let method = CommittedIndexSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -19547,15 +19542,15 @@ pub mod raft_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/ledger.v1.RaftService/ConsensusStream" => {
+                "/ledger.v1.RaftService/Replicate" => {
                     #[allow(non_camel_case_types)]
-                    struct ConsensusStreamSvc<T: RaftService>(pub Arc<T>);
+                    struct ReplicateSvc<T: RaftService>(pub Arc<T>);
                     impl<
                         T: RaftService,
                     > tonic::server::StreamingService<super::ConsensusEnvelope>
-                    for ConsensusStreamSvc<T> {
+                    for ReplicateSvc<T> {
                         type Response = super::ConsensusAck;
-                        type ResponseStream = T::ConsensusStreamStream;
+                        type ResponseStream = T::ReplicateStream;
                         type Future = BoxFuture<
                             tonic::Response<Self::ResponseStream>,
                             tonic::Status,
@@ -19568,7 +19563,7 @@ pub mod raft_service_server {
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as RaftService>::consensus_stream(&inner, request).await
+                                <T as RaftService>::replicate(&inner, request).await
                             };
                             Box::pin(fut)
                         }
@@ -19579,7 +19574,7 @@ pub mod raft_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = ConsensusStreamSvc(inner);
+                        let method = ReplicateSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -19595,13 +19590,13 @@ pub mod raft_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/ledger.v1.RaftService/SubmitRegionalProposal" => {
+                "/ledger.v1.RaftService/RegionalProposal" => {
                     #[allow(non_camel_case_types)]
-                    struct SubmitRegionalProposalSvc<T: RaftService>(pub Arc<T>);
+                    struct RegionalProposalSvc<T: RaftService>(pub Arc<T>);
                     impl<
                         T: RaftService,
                     > tonic::server::UnaryService<super::RegionalProposalRequest>
-                    for SubmitRegionalProposalSvc<T> {
+                    for RegionalProposalSvc<T> {
                         type Response = super::RegionalProposalResult;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
@@ -19613,11 +19608,7 @@ pub mod raft_service_server {
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as RaftService>::submit_regional_proposal(
-                                        &inner,
-                                        request,
-                                    )
-                                    .await
+                                <T as RaftService>::regional_proposal(&inner, request).await
                             };
                             Box::pin(fut)
                         }
@@ -19628,7 +19619,7 @@ pub mod raft_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = SubmitRegionalProposalSvc(inner);
+                        let method = RegionalProposalSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

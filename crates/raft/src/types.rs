@@ -691,9 +691,9 @@ pub enum LedgerRequest {
 
     /// Adds a node as a learner to a data region's Raft group.
     ///
-    /// Sent via `SubmitRegionalProposal` from the GLOBAL leader to the data
+    /// Sent via `RegionalProposal` from the GLOBAL leader to the data
     /// region leader when the GLOBAL leader is not the DR leader. The
-    /// `submit_regional_proposal` handler intercepts this variant and calls
+    /// `regional_proposal` handler intercepts this variant and calls
     /// `add_learner` + `promote_voter` directly (membership changes bypass
     /// the Raft log). This variant must never reach the apply handler.
     AddRegionLearner {
@@ -4018,7 +4018,7 @@ mod tests {
             LedgerRequest::System { .. } => RaftScope::Global,
             LedgerRequest::EncryptedUserSystem(_) => RaftScope::Regional,
             LedgerRequest::EncryptedOrgSystem(_) => RaftScope::Regional,
-            // AddRegionLearner is intercepted by submit_regional_proposal
+            // AddRegionLearner is intercepted by regional_proposal
             // before reaching the Raft log. It carries no PII.
             LedgerRequest::AddRegionLearner { .. } => RaftScope::Global,
         }

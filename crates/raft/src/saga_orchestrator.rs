@@ -373,7 +373,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                             })?;
                         let mut client = peer.raft_client();
                         let resp = client
-                            .submit_regional_proposal(
+                            .regional_proposal(
                                 inferadb_ledger_proto::proto::RegionalProposalRequest {
                                     region: Some(proto_region as i32),
                                     request_payload,

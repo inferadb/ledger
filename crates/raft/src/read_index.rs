@@ -1,7 +1,7 @@
 //! ReadIndex protocol helpers for follower linearizable reads.
 //!
 //! The ReadIndex protocol allows followers to serve linearizable reads:
-//! 1. Follower calls `ReadIndex` RPC on the leader to get the committed index.
+//! 1. Follower calls `CommittedIndex` RPC on the leader to get the committed index.
 //! 2. Follower waits until its local applied index catches up to the committed index.
 //! 3. Follower serves the read from local state.
 //!

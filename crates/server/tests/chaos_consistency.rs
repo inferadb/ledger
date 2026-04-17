@@ -31,8 +31,8 @@ use std::{
 };
 
 use inferadb_ledger_proto::proto::{
-    ConsensusAck, ConsensusEnvelope, ReadIndexRequest, ReadIndexResponse, RegionalProposalRequest,
-    RegionalProposalResult,
+    CommittedIndexRequest, CommittedIndexResponse, ConsensusAck, ConsensusEnvelope,
+    RegionalProposalRequest, RegionalProposalResult,
     raft_service_server::{RaftService, RaftServiceServer},
 };
 use parking_lot::Mutex;
@@ -138,7 +138,7 @@ pub struct NodeState {
 
 /// Mock Raft service that tracks state for split-brain detection.
 ///
-/// Uses `read_index` as the connectivity probe since the legacy unary
+/// Uses `committed_index` as the connectivity probe since the legacy unary
 /// RPCs (vote, append_entries, etc.) have been removed.
 struct SplitBrainDetectionService {
     node_id: u64,
@@ -148,29 +148,29 @@ struct SplitBrainDetectionService {
 
 #[tonic::async_trait]
 impl RaftService for SplitBrainDetectionService {
-    async fn read_index(
+    async fn committed_index(
         &self,
-        _request: Request<ReadIndexRequest>,
-    ) -> Result<Response<ReadIndexResponse>, Status> {
-        // Use read_index as a connectivity probe — return current term
+        _request: Request<CommittedIndexRequest>,
+    ) -> Result<Response<CommittedIndexResponse>, Status> {
+        // Use committed_index as a connectivity probe — return current term
         // to allow split-brain detection logic to observe cluster state.
         let term = self.state.current_term.load(Ordering::SeqCst);
-        Ok(Response::new(ReadIndexResponse { committed_index: 0, leader_term: term }))
+        Ok(Response::new(CommittedIndexResponse { committed_index: 0, leader_term: term }))
     }
 
-    type ConsensusStreamStream = ReceiverStream<Result<ConsensusAck, Status>>;
+    type ReplicateStream = ReceiverStream<Result<ConsensusAck, Status>>;
 
-    async fn consensus_stream(
+    async fn replicate(
         &self,
         _request: Request<tonic::Streaming<ConsensusEnvelope>>,
-    ) -> Result<Response<Self::ConsensusStreamStream>, Status> {
-        Err(Status::unimplemented("ConsensusStream not supported in mock"))
+    ) -> Result<Response<Self::ReplicateStream>, Status> {
+        Err(Status::unimplemented("Replicate not supported in mock"))
     }
-    async fn submit_regional_proposal(
+    async fn regional_proposal(
         &self,
         _request: Request<RegionalProposalRequest>,
     ) -> Result<Response<RegionalProposalResult>, Status> {
-        Err(Status::unimplemented("SubmitRegionalProposal not supported in mock"))
+        Err(Status::unimplemented("RegionalProposal not supported in mock"))
     }
 }
 
@@ -236,8 +236,8 @@ fn test_minority_cannot_elect_leader() {
             .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
             .expect("connect to node3");
 
-        let read_req = ReadIndexRequest { region: String::new() };
-        client3.read_index(read_req).await.expect("majority should still be operational");
+        let read_req = CommittedIndexRequest { region: String::new() };
+        client3.committed_index(read_req).await.expect("majority should still be operational");
 
         // Repair partition
         turmoil::repair("node1", "node3");
@@ -281,7 +281,7 @@ fn test_write_fails_in_minority_partition() {
     let attempts_clone = write_attempts.clone();
     let successes_clone = write_successes.clone();
 
-    // Mock service that simulates quorum-based writes via read_index
+    // Mock service that simulates quorum-based writes via committed_index
     struct QuorumWriteService {
         node_id: u64,
         is_partitioned: Arc<Mutex<bool>>,
@@ -291,10 +291,10 @@ fn test_write_fails_in_minority_partition() {
 
     #[tonic::async_trait]
     impl RaftService for QuorumWriteService {
-        async fn read_index(
+        async fn committed_index(
             &self,
-            _request: Request<ReadIndexRequest>,
-        ) -> Result<Response<ReadIndexResponse>, Status> {
+            _request: Request<CommittedIndexRequest>,
+        ) -> Result<Response<CommittedIndexResponse>, Status> {
             self.write_attempts.fetch_add(1, Ordering::SeqCst);
 
             // Simulate: partitioned node cannot achieve quorum
@@ -304,23 +304,23 @@ fn test_write_fails_in_minority_partition() {
                 Err(Status::unavailable("Cannot achieve quorum during partition"))
             } else {
                 self.write_successes.fetch_add(1, Ordering::SeqCst);
-                Ok(Response::new(ReadIndexResponse { committed_index: 1, leader_term: 1 }))
+                Ok(Response::new(CommittedIndexResponse { committed_index: 1, leader_term: 1 }))
             }
         }
 
-        type ConsensusStreamStream = ReceiverStream<Result<ConsensusAck, Status>>;
+        type ReplicateStream = ReceiverStream<Result<ConsensusAck, Status>>;
 
-        async fn consensus_stream(
+        async fn replicate(
             &self,
             _request: Request<tonic::Streaming<ConsensusEnvelope>>,
-        ) -> Result<Response<Self::ConsensusStreamStream>, Status> {
-            Err(Status::unimplemented("ConsensusStream not supported in mock"))
+        ) -> Result<Response<Self::ReplicateStream>, Status> {
+            Err(Status::unimplemented("Replicate not supported in mock"))
         }
-        async fn submit_regional_proposal(
+        async fn regional_proposal(
             &self,
             _request: Request<RegionalProposalRequest>,
         ) -> Result<Response<RegionalProposalResult>, Status> {
-            Err(Status::unimplemented("SubmitRegionalProposal not supported in mock"))
+            Err(Status::unimplemented("RegionalProposal not supported in mock"))
         }
     }
 
@@ -362,9 +362,9 @@ fn test_write_fails_in_minority_partition() {
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
-            let req = ReadIndexRequest { region: String::new() };
-            let resp = client.read_index(req).await;
-            assert!(resp.is_ok(), "read_index before partition should succeed");
+            let req = CommittedIndexRequest { region: String::new() };
+            let resp = client.committed_index(req).await;
+            assert!(resp.is_ok(), "committed_index before partition should succeed");
         }
 
         // Phase 2: Simulate partition (set flag to make reads fail)
@@ -377,9 +377,9 @@ fn test_write_fails_in_minority_partition() {
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
-            let req = ReadIndexRequest { region: String::new() };
-            let resp = client.read_index(req).await;
-            assert!(resp.is_err(), "read_index during partition should fail");
+            let req = CommittedIndexRequest { region: String::new() };
+            let resp = client.committed_index(req).await;
+            assert!(resp.is_err(), "committed_index during partition should fail");
         }
 
         // Phase 3: Heal partition
@@ -392,9 +392,9 @@ fn test_write_fails_in_minority_partition() {
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
-            let req = ReadIndexRequest { region: String::new() };
-            let resp = client.read_index(req).await;
-            assert!(resp.is_ok(), "read_index after heal should succeed");
+            let req = CommittedIndexRequest { region: String::new() };
+            let resp = client.committed_index(req).await;
+            assert!(resp.is_ok(), "committed_index after heal should succeed");
         }
 
         Ok(())
@@ -406,8 +406,8 @@ fn test_write_fails_in_minority_partition() {
     let attempts = final_attempts.load(Ordering::SeqCst);
     let successes = final_successes.load(Ordering::SeqCst);
 
-    assert_eq!(attempts, 3, "should have 3 read_index attempts");
-    assert_eq!(successes, 2, "should have 2 successful read_index calls");
+    assert_eq!(attempts, 3, "should have 3 committed_index attempts");
+    assert_eq!(successes, 2, "should have 2 successful committed_index calls");
 }
 
 /// Tests consistency verification after partition healing.
@@ -436,27 +436,27 @@ fn test_consistency_after_partition_heals() {
 
     #[tonic::async_trait]
     impl RaftService for StatefulService {
-        async fn read_index(
+        async fn committed_index(
             &self,
-            _request: Request<ReadIndexRequest>,
-        ) -> Result<Response<ReadIndexResponse>, Status> {
-            // Simulate successful read_index — the node is reachable
-            Ok(Response::new(ReadIndexResponse { committed_index: 1, leader_term: 1 }))
+            _request: Request<CommittedIndexRequest>,
+        ) -> Result<Response<CommittedIndexResponse>, Status> {
+            // Simulate successful committed_index — the node is reachable
+            Ok(Response::new(CommittedIndexResponse { committed_index: 1, leader_term: 1 }))
         }
 
-        type ConsensusStreamStream = ReceiverStream<Result<ConsensusAck, Status>>;
+        type ReplicateStream = ReceiverStream<Result<ConsensusAck, Status>>;
 
-        async fn consensus_stream(
+        async fn replicate(
             &self,
             _request: Request<tonic::Streaming<ConsensusEnvelope>>,
-        ) -> Result<Response<Self::ConsensusStreamStream>, Status> {
-            Err(Status::unimplemented("ConsensusStream not supported in mock"))
+        ) -> Result<Response<Self::ReplicateStream>, Status> {
+            Err(Status::unimplemented("Replicate not supported in mock"))
         }
-        async fn submit_regional_proposal(
+        async fn regional_proposal(
             &self,
             _request: Request<RegionalProposalRequest>,
         ) -> Result<Response<RegionalProposalResult>, Status> {
-            Err(Status::unimplemented("SubmitRegionalProposal not supported in mock"))
+            Err(Status::unimplemented("RegionalProposal not supported in mock"))
         }
     }
 
@@ -498,8 +498,8 @@ fn test_consistency_after_partition_heals() {
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
-            let req = ReadIndexRequest { region: String::new() };
-            client.read_index(req).await.expect("initial probe");
+            let req = CommittedIndexRequest { region: String::new() };
+            client.committed_index(req).await.expect("initial probe");
         }
 
         // Create partition
@@ -513,8 +513,8 @@ fn test_consistency_after_partition_heals() {
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
-            let req = ReadIndexRequest { region: String::new() };
-            client.read_index(req).await.expect("probe during partition");
+            let req = CommittedIndexRequest { region: String::new() };
+            client.committed_index(req).await.expect("probe during partition");
         }
 
         // Heal partition
@@ -529,9 +529,9 @@ fn test_consistency_after_partition_heals() {
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect after heal");
 
-            let req = ReadIndexRequest { region: String::new() };
+            let req = CommittedIndexRequest { region: String::new() };
             client
-                .read_index(req)
+                .committed_index(req)
                 .await
                 .unwrap_or_else(|_| panic!("{} should be reachable after heal", node));
         }
@@ -575,29 +575,29 @@ fn test_network_delay_request_completion() {
 
     #[tonic::async_trait]
     impl RaftService for SlowService {
-        async fn read_index(
+        async fn committed_index(
             &self,
-            _request: Request<ReadIndexRequest>,
-        ) -> Result<Response<ReadIndexResponse>, Status> {
+            _request: Request<CommittedIndexRequest>,
+        ) -> Result<Response<CommittedIndexResponse>, Status> {
             // Introduce delay (in simulated time)
             tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
             self.requests_completed.fetch_add(1, Ordering::SeqCst);
-            Ok(Response::new(ReadIndexResponse { committed_index: 0, leader_term: 1 }))
+            Ok(Response::new(CommittedIndexResponse { committed_index: 0, leader_term: 1 }))
         }
 
-        type ConsensusStreamStream = ReceiverStream<Result<ConsensusAck, Status>>;
+        type ReplicateStream = ReceiverStream<Result<ConsensusAck, Status>>;
 
-        async fn consensus_stream(
+        async fn replicate(
             &self,
             _request: Request<tonic::Streaming<ConsensusEnvelope>>,
-        ) -> Result<Response<Self::ConsensusStreamStream>, Status> {
-            Err(Status::unimplemented("ConsensusStream not supported in mock"))
+        ) -> Result<Response<Self::ReplicateStream>, Status> {
+            Err(Status::unimplemented("Replicate not supported in mock"))
         }
-        async fn submit_regional_proposal(
+        async fn regional_proposal(
             &self,
             _request: Request<RegionalProposalRequest>,
         ) -> Result<Response<RegionalProposalResult>, Status> {
-            Err(Status::unimplemented("SubmitRegionalProposal not supported in mock"))
+            Err(Status::unimplemented("RegionalProposal not supported in mock"))
         }
     }
 
@@ -643,8 +643,8 @@ fn test_network_delay_request_completion() {
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect to fast node");
 
-            let req = ReadIndexRequest { region: String::new() };
-            client.read_index(req).await.expect("fast node should respond");
+            let req = CommittedIndexRequest { region: String::new() };
+            client.committed_index(req).await.expect("fast node should respond");
         }
 
         // Request to slow node (should complete despite delay)
@@ -654,8 +654,8 @@ fn test_network_delay_request_completion() {
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect to slow node");
 
-            let req = ReadIndexRequest { region: String::new() };
-            client.read_index(req).await.expect("slow node should eventually respond");
+            let req = CommittedIndexRequest { region: String::new() };
+            client.committed_index(req).await.expect("slow node should eventually respond");
         }
 
         Ok(())

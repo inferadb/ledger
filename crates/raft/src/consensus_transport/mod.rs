@@ -2,7 +2,7 @@
 //!
 //! Implements [`NetworkTransport`] by serializing consensus messages to
 //! postcard bytes and shipping them over a long-lived bidirectional stream
-//! (`ConsensusStream`) per peer. The stream amortizes connection
+//! (`Replicate`) per peer. The stream amortizes connection
 //! setup across every message and leverages HTTP/2 flow control for
 //! transport-level backpressure.
 
@@ -23,7 +23,7 @@ use crate::{node_registry::NodeConnectionRegistry, types::LedgerNodeId};
 /// that owns a bounded outbound queue and a single drain task. `send_batch`
 /// enqueues messages to the per-peer queue (drop-oldest on overflow); the
 /// drain task serializes and ships them via a long-lived bidirectional
-/// `ConsensusStream` RPC. Acks are discarded — messages are fire-and-forget
+/// `Replicate` RPC. Acks are discarded — messages are fire-and-forget
 /// and the consensus engine handles retries via heartbeats.
 #[derive(Clone)]
 pub struct GrpcConsensusTransport {
