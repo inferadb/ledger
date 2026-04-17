@@ -351,7 +351,7 @@ pub struct Config {
     ///
     /// Prevents a misconfigured or isolated fresh node from waiting forever. After the timeout
     /// elapses with no initialization signal, `bootstrap_node` returns
-    /// [`BootstrapError::InitTimeout`]. Defaults to 600 seconds (10 minutes). Set to 0 to
+    /// `BootstrapError::InitTimeout`. Defaults to 600 seconds (10 minutes). Set to 0 to
     /// disable the timeout (wait indefinitely).
     #[arg(
         long = "init-wait-timeout",

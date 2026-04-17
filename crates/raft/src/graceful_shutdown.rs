@@ -279,10 +279,7 @@ impl HealthState {
     /// closes or the handler task exits unexpectedly. Once attached, the
     /// readiness probe fails whenever the flag is `false`.
     #[must_use]
-    pub fn with_region_handler(
-        mut self,
-        flag: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Self {
+    pub fn with_region_handler(mut self, flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
         self.region_handler_healthy = Some(flag);
         self
     }

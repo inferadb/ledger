@@ -158,6 +158,7 @@ impl SystemKeys {
         key_entry!(ONBOARD_VERIFY_PREFIX, Regional, Temporary),
         key_entry!(ONBOARD_ACCOUNT_PREFIX, Regional, Temporary),
         key_entry!(TOTP_CHALLENGE_PREFIX, Regional, Temporary),
+        key_entry!(SAGA_PII_PREFIX, Regional, Temporary),
         // -- _audit: Compliance (GLOBAL) --
         key_entry!(ERASURE_AUDIT_PREFIX, Global, Audit),
         key_entry!(SIGNING_KEY_AUDIT_PREFIX, Global, Audit),
@@ -927,6 +928,22 @@ impl SystemKeys {
 
     /// Prefix for TOTP challenge keys (ephemeral, REGIONAL).
     pub const TOTP_CHALLENGE_PREFIX: &'static str = "_tmp:totp_challenge:";
+
+    /// Prefix for saga PII scratch keys (ephemeral, REGIONAL).
+    ///
+    /// Pattern: `_tmp:saga_pii:{saga_id}` → JSON-serialized `SagaPii`
+    ///
+    /// Stored in a REGIONAL Raft group with 24-hour TTL. Written during saga
+    /// submission and consumed by the first step that needs PII. Survives
+    /// leader crashes unlike the previous in-memory cache.
+    pub const SAGA_PII_PREFIX: &'static str = "_tmp:saga_pii:";
+
+    /// Key for a saga PII scratch record (ephemeral, REGIONAL).
+    ///
+    /// Pattern: `_tmp:saga_pii:{saga_id}`
+    pub fn saga_pii_key(saga_id: &str) -> String {
+        format!("_tmp:saga_pii:{saga_id}")
+    }
 
     // ========================================================================
     // Signing Key Keys
@@ -1967,7 +1984,7 @@ mod tests {
     /// a new constant, preventing silent omissions.
     #[test]
     fn test_key_registry_completeness() {
-        const EXPECTED_COUNT: usize = 65;
+        const EXPECTED_COUNT: usize = 66;
         assert_eq!(
             SystemKeys::KEY_REGISTRY.len(),
             EXPECTED_COUNT,

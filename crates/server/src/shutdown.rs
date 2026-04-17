@@ -1,8 +1,8 @@
 //! Graceful shutdown handling.
 //!
 //! Provides signal handling and coordinated shutdown for clean server termination.
-//! The [`ShutdownCoordinator`] distributes cancellation via a root
-//! [`CancellationToken`] and tracks spawned task handles so they can be
+//! The `ShutdownCoordinator` distributes cancellation via a root
+//! `CancellationToken` and tracks spawned task handles so they can be
 //! awaited with a per-handle deadline during shutdown.
 
 use std::time::Duration;

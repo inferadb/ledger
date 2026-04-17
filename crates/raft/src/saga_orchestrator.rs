@@ -32,7 +32,7 @@ use inferadb_ledger_state::{
         CreateSigningKeySaga, CreateSigningKeySagaState, CreateUserSaga, CreateUserSagaState,
         DeleteUserSaga, DeleteUserSagaState, MigrateOrgSaga, MigrateOrgSagaState, MigrateUserSaga,
         MigrateUserSagaState, OrganizationStatus, SAGA_POLL_INTERVAL, Saga, SagaId, SagaLockKey,
-        SigningKeyScope,
+        SigningKeyScope, SystemKeys,
     },
 };
 use inferadb_ledger_store::{
@@ -74,13 +74,13 @@ const SYSTEM_ORGANIZATION_ID: OrganizationId = OrganizationId::new(0);
 /// System vault ID (vault 0 in _system organization).
 const SYSTEM_VAULT_ID: VaultId = VaultId::new(0);
 
-/// PII context for onboarding saga — held in-memory only.
+/// PII context for onboarding saga — persisted to REGIONAL scratch storage.
 ///
 /// This data is passed from the service handler to the saga orchestrator
-/// via `SagaSubmission.pii`. It is NOT persisted in the GLOBAL Raft log
-/// or saga state. If the leader crashes, this data is lost and the saga
-/// compensates (rolls back step 0 reservations).
-#[derive(Clone)]
+/// via `SagaSubmission.pii`. It is persisted to REGIONAL storage under
+/// `_tmp:saga_pii:{saga_id}` with a 24-hour TTL, surviving leader crashes.
+/// NOT persisted in the GLOBAL Raft log or saga state.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct OnboardingPii {
     /// Email address (used to write `UserEmail` record in step 1).
     pub email: String,
@@ -100,12 +100,12 @@ impl std::fmt::Debug for OnboardingPii {
     }
 }
 
-/// PII context for organization creation — held in-memory only.
+/// PII context for organization creation — persisted to REGIONAL scratch storage.
 ///
 /// Organization names are PII that must not appear in the GLOBAL Raft log.
-/// Passed via `SagaSubmission.org_pii` and consumed by step 1 of
-/// `CreateOrganizationSaga` to construct `WriteOrganizationProfile`.
-#[derive(Clone)]
+/// Passed via `SagaSubmission.org_pii` and persisted to REGIONAL storage
+/// under `_tmp:saga_pii:{saga_id}` with a 24-hour TTL.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct OrgPii {
     /// Organization display name (PII, written regionally in step 1).
     pub name: String,
@@ -114,6 +114,27 @@ pub struct OrgPii {
 impl std::fmt::Debug for OrgPii {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OrgPii").field("name", &"[REDACTED]").finish()
+    }
+}
+
+/// Combined PII envelope for REGIONAL scratch persistence.
+///
+/// Wraps both PII types so a single `_tmp:saga_pii:{saga_id}` key can
+/// store either variant. JSON-serialized to REGIONAL storage with 24h TTL.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub enum SagaPii {
+    /// Onboarding saga PII (email, name, organization_name).
+    Onboarding(OnboardingPii),
+    /// Organization creation saga PII (organization_name).
+    Organization(OrgPii),
+}
+
+impl std::fmt::Debug for SagaPii {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SagaPii::Onboarding(pii) => pii.fmt(f),
+            SagaPii::Organization(pii) => pii.fmt(f),
+        }
     }
 }
 
@@ -282,15 +303,6 @@ pub struct SagaOrchestrator<B: StorageBackend + 'static> {
     /// Short-circuits future `check_global_signing_key_bootstrap` calls to O(1).
     #[builder(default)]
     global_key_confirmed: std::sync::atomic::AtomicBool,
-    /// In-memory PII cache for onboarding sagas. Keyed by saga ID.
-    /// PII is NOT persisted — if the leader crashes, entries are lost and
-    /// the orchestrator compensates affected sagas.
-    #[builder(default)]
-    pii_cache: Mutex<HashMap<SagaId, OnboardingPii>>,
-    /// In-memory PII cache for organization creation sagas. Keyed by saga ID.
-    /// Organization names are PII that must not appear in the GLOBAL Raft log.
-    #[builder(default)]
-    org_pii_cache: Mutex<HashMap<SagaId, OrgPii>>,
     /// In-memory crypto material cache for onboarding sagas. Keyed by saga ID.
     /// Generated during step 1, consumed when building `SagaOutput` after step 2.
     #[builder(default)]
@@ -552,6 +564,71 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
         let operation = Operation::SetEntity { key, value, expires_at: None, condition: None };
         self.propose_write(SYSTEM_ORGANIZATION_ID, SYSTEM_VAULT_ID, vec![operation]).await
+    }
+
+    /// Persists saga PII to REGIONAL scratch storage.
+    ///
+    /// Writes to `_tmp:saga_pii:{saga_id}` with a 24-hour TTL. The PII
+    /// survives leader crashes and is consumed by the saga step that needs it.
+    async fn persist_saga_pii(
+        &self,
+        saga_id: &SagaId,
+        region: Region,
+        pii: &SagaPii,
+    ) -> Result<(), SagaError> {
+        let key = SystemKeys::saga_pii_key(saga_id.value());
+        let value = serde_json::to_vec(pii).context(SerializationSnafu)?;
+        let expires_at_ts = (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp() as u64;
+        let expires_at = Some(expires_at_ts);
+
+        let operation = Operation::SetEntity { key, value, expires_at, condition: None };
+        let transaction = Self::build_transaction(vec![operation]);
+        let request = LedgerRequest::Write {
+            organization: SYSTEM_ORGANIZATION_ID,
+            vault: SYSTEM_VAULT_ID,
+            transactions: vec![transaction],
+            idempotency_key: [0; 16],
+            request_hash: 0,
+        };
+        self.propose_to_region(region, request).await?;
+        Ok(())
+    }
+
+    /// Loads saga PII from REGIONAL scratch storage.
+    ///
+    /// Reads `_tmp:saga_pii:{saga_id}` from the regional state layer.
+    /// Falls back to GLOBAL state when no `RaftManager` is configured
+    /// (single-node test setups).
+    fn load_saga_pii(&self, saga_id: &SagaId, region: Region) -> Option<SagaPii> {
+        let key = SystemKeys::saga_pii_key(saga_id.value());
+        let entity = if let Some(ref mgr) = self.manager {
+            if let Ok(rg) = mgr.get_region_group(region) {
+                rg.state().get_entity(SYSTEM_VAULT_ID, key.as_bytes()).ok()?
+            } else {
+                self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).ok()?
+            }
+        } else {
+            self.state.get_entity(SYSTEM_VAULT_ID, key.as_bytes()).ok()?
+        };
+        let entity = entity?;
+        serde_json::from_slice(&entity.value).ok()
+    }
+
+    /// Deletes saga PII from REGIONAL scratch storage after consumption.
+    async fn delete_saga_pii(&self, saga_id: &SagaId, region: Region) {
+        let key = SystemKeys::saga_pii_key(saga_id.value());
+        let operation = Operation::DeleteEntity { key };
+        let transaction = Self::build_transaction(vec![operation]);
+        let request = LedgerRequest::Write {
+            organization: SYSTEM_ORGANIZATION_ID,
+            vault: SYSTEM_VAULT_ID,
+            transactions: vec![transaction],
+            idempotency_key: [0; 16],
+            request_hash: 0,
+        };
+        if let Err(e) = self.propose_to_region(region, request).await {
+            warn!(saga_id = %saga_id, error = %e, "Failed to delete saga PII scratch key");
+        }
     }
 
     /// Executes a single step of a DeleteUser saga.
@@ -1152,11 +1229,19 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                         admin: user_id,
                     },
                 );
-                // Cache org name as PII — passed in-memory, not in GLOBAL Raft log
-                self.org_pii_cache.lock().insert(
-                    org_saga_id.clone(),
-                    OrgPii { name: saga.input.organization_name.clone() },
-                );
+                // Persist org name as PII to REGIONAL scratch storage
+                let org_pii =
+                    SagaPii::Organization(OrgPii { name: saga.input.organization_name.clone() });
+                if let Err(e) =
+                    self.persist_saga_pii(&org_saga_id, saga.input.region, &org_pii).await
+                {
+                    warn!(
+                        saga_id = %saga.id,
+                        org_saga_id = %org_saga_id,
+                        error = %e,
+                        "CreateUser: failed to persist org PII for CreateOrganizationSaga"
+                    );
+                }
                 if let Err(e) = self.save_saga(&Saga::CreateOrganization(org_saga)).await {
                     warn!(
                         saga_id = %saga.id,
@@ -1268,15 +1353,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 organization_slug,
             } => {
                 // Step 1 (REGIONAL): Write organization profile + ownership
-                // Organization name is PII — read from in-memory cache (NOT removed yet;
-                // removal happens after the REGIONAL write succeeds to avoid PiiLost
-                // on transient Raft failures like leader-not-ready).
-                let name = match self.org_pii_cache.lock().get(&saga.id) {
-                    Some(pii) => pii.name.clone(),
-                    None => {
+                // Organization name is PII — read from REGIONAL scratch storage.
+                let name = match self.load_saga_pii(&saga.id, saga.input.region) {
+                    Some(SagaPii::Organization(pii)) => pii.name,
+                    _ => {
                         warn!(
                             saga_id = %saga.id,
-                            "Org PII lost (crash/leader transfer) — compensating"
+                            "Org PII not found in REGIONAL storage — compensating"
                         );
                         return Err(SagaError::PiiLost);
                     },
@@ -1302,8 +1385,8 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 });
                 self.propose_to_region(saga.input.region, request).await?;
 
-                // REGIONAL write succeeded — now safe to remove PII from cache
-                self.org_pii_cache.lock().remove(&saga.id);
+                // REGIONAL write succeeded — delete PII scratch key
+                self.delete_saga_pii(&saga.id, saga.input.region).await;
 
                 saga.transition(CreateOrganizationSagaState::ProfileWritten {
                     organization_id,
@@ -1815,14 +1898,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             },
 
             CreateOnboardingUserSagaState::IdsAllocated { user_id, organization_id } => {
-                // Step 1 (REGIONAL): Write PII using in-memory PII from submission
-                let pii = self.take_pii(&saga.id);
-                let pii = match pii {
-                    Some(p) => p,
-                    None => {
+                // Step 1 (REGIONAL): Write PII from REGIONAL scratch storage
+                let pii = match self.load_saga_pii(&saga.id, saga.input.region) {
+                    Some(SagaPii::Onboarding(p)) => p,
+                    _ => {
                         warn!(
                             saga_id = %saga.id,
-                            "PII lost (crash/leader transfer) — compensating"
+                            "PII not found in REGIONAL storage — compensating"
                         );
                         return Err(SagaError::PiiLost);
                     },
@@ -1892,6 +1974,9 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     crate::types::LedgerResponse::OnboardingUserProfileWritten {
                         refresh_token_id,
                     } => {
+                        // PII consumed — delete scratch key from REGIONAL storage
+                        self.delete_saga_pii(&saga.id, saga.input.region).await;
+
                         // Stash crypto material for SagaOutput construction after step 2
                         self.crypto_cache.lock().insert(
                             saga.id.clone(),
@@ -2143,9 +2228,17 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             // Take crypto cache BEFORE cleanup — needed for SagaOutput
             let crypto = self.crypto_cache.lock().remove(&saga_id);
 
-            // Clean up remaining in-memory caches
-            self.pii_cache.lock().remove(&saga_id);
-            self.org_pii_cache.lock().remove(&saga_id);
+            // Best-effort cleanup of PII scratch key from REGIONAL storage
+            // (may already be deleted by the consuming step)
+            let pii_region = match &saga {
+                Saga::CreateOnboardingUser(s) => Some(s.input.region),
+                Saga::CreateOrganization(s) => Some(s.input.region),
+                Saga::CreateUser(s) => Some(s.input.region),
+                _ => None,
+            };
+            if let Some(region) = pii_region {
+                self.delete_saga_pii(&saga_id, region).await;
+            }
 
             // Send result through notification channel if present
             if let Some(notify) = self.notify_cache.lock().remove(&saga_id) {
@@ -2250,20 +2343,11 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         }
     }
 
-    /// Takes PII from the in-memory cache for a saga.
-    ///
-    /// Returns `Some(pii)` if PII is cached, `None` if lost (crash/leader transfer).
-    /// The PII is removed from the cache — it should only be consumed once
-    /// (when constructing the step 1 request).
-    fn take_pii(&self, saga_id: &SagaId) -> Option<OnboardingPii> {
-        self.pii_cache.lock().remove(saga_id)
-    }
-
     /// Drains pending submissions from the mpsc channel.
     ///
     /// For each submission:
     /// 1. Saves the saga record to storage (so it survives crashes)
-    /// 2. Caches PII in-memory (if present) for step 1 construction
+    /// 2. Persists PII to REGIONAL scratch storage (if present) for step 1 construction
     /// 3. Caches the notification sender (if present) for result delivery
     async fn drain_submissions(&self, rx: &mut mpsc::Receiver<SagaSubmission>) {
         while let Ok(submission) = rx.try_recv() {
@@ -2281,12 +2365,29 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
             debug!(saga_id = %saga_id, has_pii = submission.pii.is_some(), "Accepted saga submission");
 
-            // Cache PII in-memory (NOT persisted — lost on crash)
+            // Persist PII to REGIONAL scratch storage (survives leader crashes)
             if let Some(pii) = submission.pii {
-                self.pii_cache.lock().insert(saga_id.clone(), pii);
+                let region = match &submission.record {
+                    Saga::CreateOnboardingUser(s) => s.input.region,
+                    Saga::CreateUser(s) => s.input.region,
+                    _ => Region::GLOBAL,
+                };
+                if let Err(e) =
+                    self.persist_saga_pii(&saga_id, region, &SagaPii::Onboarding(pii)).await
+                {
+                    warn!(saga_id = %saga_id, error = %e, "Failed to persist onboarding PII");
+                }
             }
             if let Some(org_pii) = submission.org_pii {
-                self.org_pii_cache.lock().insert(saga_id.clone(), org_pii);
+                let region = match &submission.record {
+                    Saga::CreateOrganization(s) => s.input.region,
+                    _ => Region::GLOBAL,
+                };
+                if let Err(e) =
+                    self.persist_saga_pii(&saga_id, region, &SagaPii::Organization(org_pii)).await
+                {
+                    warn!(saga_id = %saga_id, error = %e, "Failed to persist org PII");
+                }
             }
 
             // Cache notification sender
