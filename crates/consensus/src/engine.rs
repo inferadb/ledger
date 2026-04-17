@@ -152,12 +152,11 @@ impl ConsensusEngine {
         }
 
         // Pre-proposal idempotency check.
-        // Use seahash of the data as the 16-byte key.
-        let hash1 = seahash::hash(&data);
-        let hash2 = hash1 ^ (data.len() as u64).wrapping_mul(0x517cc1b727220a95);
+        // Blake3 always produces 32 bytes; copy the first 16 into the cache key.
+        let full_hash = blake3::hash(&data);
+        let hash_bytes = full_hash.as_bytes();
         let mut key = [0u8; 16];
-        key[..8].copy_from_slice(&hash1.to_le_bytes());
-        key[8..].copy_from_slice(&hash2.to_le_bytes());
+        key.copy_from_slice(&hash_bytes[..16]);
 
         {
             let cache = self.idempotency.lock();
@@ -436,6 +435,7 @@ impl ConsensusEngine {
 mod tests {
     use std::sync::Arc;
 
+    use proptest::prelude::*;
     use tokio::sync::mpsc;
 
     use super::*;
@@ -476,11 +476,10 @@ mod tests {
     /// Seeds the idempotency cache with a key derived from `data`, as if the
     /// data had been committed at `commit_index`.
     fn seed_cache(engine: &ConsensusEngine, data: &[u8], commit_index: u64) {
-        let hash1 = seahash::hash(data);
-        let hash2 = hash1 ^ (data.len() as u64).wrapping_mul(0x517cc1b727220a95);
+        let full_hash = blake3::hash(data);
+        let hash_bytes = full_hash.as_bytes();
         let mut key = [0u8; 16];
-        key[..8].copy_from_slice(&hash1.to_le_bytes());
-        key[8..].copy_from_slice(&hash2.to_le_bytes());
+        key.copy_from_slice(&hash_bytes[..16]);
         engine.idempotency.lock().insert(key, commit_index);
     }
 
@@ -639,5 +638,34 @@ mod tests {
         assert_eq!(engine.idempotency_cache_len(), 1, "failed propose must not be cached");
 
         engine.shutdown().await;
+    }
+
+    proptest! {
+        /// Blake3-derived cache keys for `data` and `data + extra_byte` must
+        /// never collide regardless of content. A regression back to the old
+        /// seahash scheme (where `hash2` was fully determined by `hash1` and
+        /// `data.len()`) would make same-length payloads with a seahash
+        /// collision produce identical keys.
+        #[test]
+        fn idempotency_key_no_collision_on_extension(
+            data in proptest::collection::vec(any::<u8>(), 0..512),
+            extra_byte in any::<u8>(),
+        ) {
+            let full_base = blake3::hash(&data);
+            let mut key_base = [0u8; 16];
+            key_base.copy_from_slice(&full_base.as_bytes()[..16]);
+
+            let mut extended = data.clone();
+            extended.push(extra_byte);
+            let full_extended = blake3::hash(&extended);
+            let mut key_extended = [0u8; 16];
+            key_extended.copy_from_slice(&full_extended.as_bytes()[..16]);
+
+            prop_assert_ne!(
+                key_base,
+                key_extended,
+                "blake3 keys for data and data+byte must not collide",
+            );
+        }
     }
 }

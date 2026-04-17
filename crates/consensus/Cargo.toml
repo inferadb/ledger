@@ -10,7 +10,7 @@ crc32fast = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
 rkyv = { workspace = true }
-seahash = { workspace = true }
+blake3 = { workspace = true }
 serde = { workspace = true, features = ["rc"] }
 snafu = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "macros", "rt"] }
@@ -21,6 +21,7 @@ default = []
 io-uring = []
 
 [dev-dependencies]
+proptest = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]
