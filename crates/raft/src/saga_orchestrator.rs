@@ -18,9 +18,12 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    panic::AssertUnwindSafe,
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
+
+use futures::FutureExt as _;
 
 use inferadb_ledger_state::{
     StateLayer,
@@ -48,7 +51,7 @@ use parking_lot::Mutex;
 use snafu::{GenerateImplicitData, ResultExt};
 use tokio::{sync::mpsc, time::interval};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use zeroize::Zeroizing;
 
 use crate::{
@@ -2377,7 +2380,15 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                     biased;
                     _ = ticker.tick() => {
                         self.drain_submissions(&mut rx).await;
-                        self.run_cycle().await;
+                        if let Err(panic_payload) = AssertUnwindSafe(self.run_cycle()).catch_unwind().await {
+                            let msg = panic_payload
+                                .downcast_ref::<&str>()
+                                .copied()
+                                .or_else(|| panic_payload.downcast_ref::<String>().map(String::as_str))
+                                .unwrap_or("<non-string panic>");
+                            error!(panic_message = msg, "Saga orchestrator run_cycle panicked; continuing");
+                            metrics::counter!("saga_orchestrator_panic_total").increment(1);
+                        }
                     }
                     _ = self.cancellation_token.cancelled() => {
                         info!("SagaOrchestrator shutting down");
