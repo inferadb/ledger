@@ -53,6 +53,31 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use zeroize::Zeroizing;
 
+/// Whether a tonic `Status` from `RegionalProposal` is worth retrying.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RegionalProposalClassification {
+    /// Transient infrastructure error — safe to retry with backoff.
+    Retryable,
+    /// Permanent client or protocol error — retrying cannot help.
+    Permanent,
+}
+
+/// Classifies a tonic `Status` code for `propose_to_region` retry logic.
+///
+/// Retryable codes indicate transient infrastructure failures (leader election,
+/// network blip, back-pressure). Permanent codes indicate a logical error in
+/// the request or the server's invariants — retrying would be pointless.
+fn classify_regional_proposal_status(status: &tonic::Status) -> RegionalProposalClassification {
+    match status.code() {
+        tonic::Code::Unavailable
+        | tonic::Code::DeadlineExceeded
+        | tonic::Code::ResourceExhausted
+        | tonic::Code::Aborted
+        | tonic::Code::Internal => RegionalProposalClassification::Retryable,
+        _ => RegionalProposalClassification::Permanent,
+    }
+}
+
 use crate::{
     consensus_handle::ConsensusHandle,
     error::{SagaError, SerializationSnafu, StateReadSnafu},
@@ -386,21 +411,77 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                                 backtrace: snafu::Backtrace::generate(),
                             })?;
                         let mut client = peer.raft_client();
-                        let resp = client
-                            .regional_proposal(
-                                inferadb_ledger_proto::proto::RegionalProposalRequest {
-                                    region: Some(proto_region as i32),
-                                    request_payload,
-                                    caller: 0,
-                                    timeout_ms: 30_000,
+
+                        const MAX_ATTEMPTS: u32 = 3;
+                        const BASE_BACKOFF_MS: u64 = 100;
+
+                        let mut attempt = 0u32;
+                        let resp = loop {
+                            attempt += 1;
+
+                            let rpc_result = client
+                                .regional_proposal(
+                                    inferadb_ledger_proto::proto::RegionalProposalRequest {
+                                        region: Some(proto_region as i32),
+                                        request_payload: request_payload.clone(),
+                                        caller: 0,
+                                        timeout_ms: 30_000,
+                                    },
+                                )
+                                .await;
+
+                            match rpc_result {
+                                Ok(response) => {
+                                    metrics::counter!(
+                                        "saga_regional_proposal_attempts_total",
+                                        "classification" => "success"
+                                    )
+                                    .increment(1);
+                                    break response.into_inner();
                                 },
-                            )
-                            .await
-                            .map_err(|e| SagaError::SagaRaftWrite {
-                                message: format!("forward to leader: {e}"),
-                                backtrace: snafu::Backtrace::generate(),
-                            })?
-                            .into_inner();
+                                Err(ref status)
+                                    if attempt < MAX_ATTEMPTS
+                                        && classify_regional_proposal_status(status)
+                                            == RegionalProposalClassification::Retryable =>
+                                {
+                                    metrics::counter!(
+                                        "saga_regional_proposal_attempts_total",
+                                        "classification" => "retry"
+                                    )
+                                    .increment(1);
+                                    let backoff = Duration::from_millis(
+                                        BASE_BACKOFF_MS * (1u64 << (attempt - 1)),
+                                    );
+                                    warn!(
+                                        attempt,
+                                        region = region.as_str(),
+                                        leader_id,
+                                        error = %status,
+                                        backoff_ms = backoff.as_millis(),
+                                        "Transient error forwarding saga proposal; retrying"
+                                    );
+                                    if self.cancellation_token.is_cancelled() {
+                                        return Err(SagaError::SagaRaftWrite {
+                                            message: "shutdown during regional proposal retry"
+                                                .to_string(),
+                                            backtrace: snafu::Backtrace::generate(),
+                                        });
+                                    }
+                                    tokio::time::sleep(backoff).await;
+                                },
+                                Err(status) => {
+                                    metrics::counter!(
+                                        "saga_regional_proposal_attempts_total",
+                                        "classification" => "permanent_failure"
+                                    )
+                                    .increment(1);
+                                    return Err(SagaError::SagaRaftWrite {
+                                        message: format!("forward to leader: {status}"),
+                                        backtrace: snafu::Backtrace::generate(),
+                                    });
+                                },
+                            }
+                        };
 
                         if resp.status_code != 0 {
                             return Err(SagaError::SagaRaftWrite {

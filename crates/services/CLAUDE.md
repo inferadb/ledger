@@ -41,7 +41,7 @@ These files are load-bearing — their invariants ripple beyond the local file. 
 1. **Every RPC resolves slugs at the top of the handler via `SlugResolver`.** Passing a `*Slug` into `StorageEngine` or `StateLayer` is a bug caught by `proto-reviewer`.
 2. **All gRPC errors return via `status_with_correlation()`** (root rule 12). `tonic::Status::new(...)` or `Status::internal(...)` by hand loses `ErrorDetails`, correlation ID, trace ID, and classification metadata.
 3. **Version-exempt list is exactly `Health`, `SystemDiscovery`, `Raft`.** Adding a service to the exempt list requires a written justification (K8s probe, peer-to-peer Raft transport, pre-negotiation client). Audited by `proto-reviewer`.
-4. **`SubmitRegionalProposal` is the only forwarding RPC.** Do not extend it into general cross-region proxying or add a second forwarding RPC.
+4. **`RegionalProposal` is the only forwarding RPC.** Do not extend it into general cross-region proxying or add a second forwarding RPC.
 5. **Mutations emit `AuditEvent` via `AuditLogger`.** Every new mutating RPC on `WriteService` or `AdminService` needs an audit hook. Read-only RPCs (get / list) are not audited.
 6. **User-controlled strings go through `ValidationConfig`** — character whitelist + length + size limits in `helpers.rs`. Don't accept raw user input into state without validation.
 7. **Set `RequestContext` domain fields at the top of the handler**, before `request.into_inner()` consumes metadata. `set_vault_slug`, `set_user_id`, etc. enable canonical log lines; order matters.

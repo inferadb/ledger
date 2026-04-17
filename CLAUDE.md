@@ -66,7 +66,7 @@ Each crate has its own `CLAUDE.md` (symlinked to `AGENTS.md`) with crate-specifi
 
 10. **`Shard` in `crates/consensus/src/shard.rs` returns `Action` values and performs no I/O.** Any blocking call, disk read, or network send inside `Shard` is a correctness bug. All I/O executes in `Reactor` (`crates/consensus/src/reactor.rs`). WAL writes are batched with a single `fsync` per batch — never per proposal.
 
-11. **External gRPC messages use `{Entity}Slug { slug: u64 }`, never internal `{Entity}Id(i64)`.** Server-side request forwarding is allowed **only** for saga orchestration — the `SubmitRegionalProposal` RPC. All other cross-region / cross-leader traffic uses redirect-only routing: return `NotLeader` + `LeaderHint` inside `ErrorDetails` and let the SDK's `RegionLeaderCache` reconnect.
+11. **External gRPC messages use `{Entity}Slug { slug: u64 }`, never internal `{Entity}Id(i64)`.** Server-side request forwarding is allowed **only** for saga orchestration — the `RegionalProposal` RPC. All other cross-region / cross-leader traffic uses redirect-only routing: return `NotLeader` + `LeaderHint` inside `ErrorDetails` and let the SDK's `RegionLeaderCache` reconnect.
 
 12. **All gRPC error responses go through `status_with_correlation()` in `crates/services/src/services/metadata.rs`.** Never construct `tonic::Status` manually — the helper auto-attaches `ErrorDetails` built by `build_error_details()` in the same directory. Errors without `ErrorDetails` lose retryability, error-code, and suggested-action metadata on the SDK side.
 

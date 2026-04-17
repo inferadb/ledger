@@ -44,7 +44,7 @@ These files are load-bearing — their invariants ripple beyond the local file. 
 3. **Graceful shutdown phases are ordered.** The `CancellationToken` propagates through phases 1→6 in sequence; reordering (e.g., draining before closing the listener) leaks tasks or drops in-flight requests.
 4. **`NodeConnectionRegistry` is the only place to create peer `tonic::Channel`s.** Every subsystem (consensus, discovery, admin, saga) shares channels via this registry — HTTP/2 multiplexes them all through one TCP connection per peer. Per-subsystem channels cause connection storms.
 5. **Rate limiter + hot-key detector atomic fields are `AtomicU64`.** Non-atomic fields can't be reconfigured via `RuntimeConfigHandle` at runtime.
-6. **Client routing is redirect-only.** `SubmitRegionalProposal` is the only server-to-server forwarding RPC and exists solely for saga orchestration (root rule 11). Don't extend it.
+6. **Client routing is redirect-only.** `RegionalProposal` is the only server-to-server forwarding RPC and exists solely for saga orchestration (root rule 11). Don't extend it.
 7. **Service-layer helpers live in `crates/services/src/services/`, not here.** `helpers.rs`, `metadata.rs`, `error_details.rs`, `error_classify.rs` are in `services`. Don't introduce a `src/services/` subdirectory under raft.
 8. **`HotKeyDetector` is observational only.** It exposes Prometheus metrics; it does not reject traffic. Adding rejection logic tied to hot-key output is a different RFC.
 9. **Background jobs emit lifecycle logs + metrics.** A job that silently runs is a debugging nightmare — every job needs `info!("<job> starting")` / `"<job> finished"` + a Prometheus counter.
