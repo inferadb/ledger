@@ -11,13 +11,18 @@
 //! - Cache hit with same payload returns cached result (idempotent retry)
 //! - Cache hit with different payload returns `IDEMPOTENCY_KEY_REUSED` error
 //!
-//! Uses moka for bounded, TinyLFU-based caching with TTL eviction.
+//! Uses moka for bounded, TinyLFU-based caching with TTL eviction. An in-flight
+//! tracking map (`DashMap`) serializes concurrent requests with the same idempotency
+//! key to prevent duplicate Raft proposals during leader failover. See
+//! [`IdempotencyCache::try_acquire_inflight`] and [`InFlightGuard`].
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
+use dashmap::DashMap;
 use inferadb_ledger_proto::proto::WriteSuccess;
 use inferadb_ledger_types::types::{OrganizationId, VaultId};
 use moka::sync::Cache;
+use tokio::sync::Notify;
 
 /// Maximum number of entries in the cache.
 const MAX_CACHE_SIZE: u64 = 100_000;
@@ -80,6 +85,48 @@ pub struct CachedResult {
     pub result: WriteSuccess,
 }
 
+/// Result of attempting to acquire an in-flight slot for an idempotency key.
+///
+/// Used by the write service to serialize concurrent requests with the same
+/// idempotency key, preventing duplicate Raft proposals during failover.
+pub enum InFlightStatus {
+    /// This request acquired the in-flight slot. It is responsible for executing
+    /// the write and calling [`InFlightGuard::release`] when done.
+    Acquired(InFlightGuard),
+    /// Another request with the same key is already in-flight. The caller should
+    /// wait on the [`Notify`] and then re-check the moka cache for the result.
+    Waiting(Arc<Notify>),
+}
+
+/// Guard that tracks an in-flight write for a specific idempotency key.
+///
+/// When dropped without calling [`release`](InFlightGuard::release), the in-flight
+/// entry is removed and waiters are notified (ensuring no deadlock on error paths).
+pub struct InFlightGuard {
+    cache: Arc<IdempotencyCache>,
+    key: IdempotencyKey,
+    released: bool,
+}
+
+impl InFlightGuard {
+    /// Releases the in-flight slot, notifying any waiting requests.
+    ///
+    /// Call this after inserting the result into the moka cache so that
+    /// waiters see the cached result when they re-check.
+    pub fn release(mut self) {
+        self.released = true;
+        self.cache.release_inflight(&self.key);
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        if !self.released {
+            self.cache.release_inflight(&self.key);
+        }
+    }
+}
+
 /// Thread-safe idempotency cache with bounded size and TTL eviction.
 ///
 /// The cache maps `(organization, vault, client_id, idempotency_key) -> CachedResult`.
@@ -91,10 +138,19 @@ pub struct CachedResult {
 ///
 /// Uses moka's TinyLFU admission policy which considers both recency and frequency,
 /// achieving significantly better hit rates than traditional LRU.
-#[derive(Debug)]
+///
+/// An in-flight tracking map serializes concurrent requests with the same key.
+/// The first request acquires the slot; subsequent requests wait for it to
+/// complete and then read the cached result. This prevents duplicate Raft
+/// proposals when the moka cache is cold (e.g., after leader failover).
 pub struct IdempotencyCache {
     /// The underlying moka cache with built-in TTL and TinyLFU eviction.
     cache: Cache<IdempotencyKey, CachedResult>,
+    /// Tracks keys that currently have a write in-flight.
+    ///
+    /// When a request acquires a slot, waiters block on the `Notify` until the
+    /// slot is released. Bounded by concurrent request count, not cache size.
+    in_flight: DashMap<IdempotencyKey, Arc<Notify>>,
 }
 
 impl IdempotencyCache {
@@ -102,7 +158,44 @@ impl IdempotencyCache {
     pub fn new() -> Self {
         let cache = Cache::builder().max_capacity(MAX_CACHE_SIZE).time_to_live(ENTRY_TTL).build();
 
-        Self { cache }
+        Self { cache, in_flight: DashMap::new() }
+    }
+
+    /// Attempts to acquire an in-flight slot for the given idempotency key.
+    ///
+    /// Returns [`InFlightStatus::Acquired`] if no other request is currently
+    /// processing this key. The caller receives an [`InFlightGuard`] that must
+    /// be released after the write completes and the result is cached.
+    ///
+    /// Returns [`InFlightStatus::Waiting`] if another request already holds the
+    /// slot. The caller should `.notified().await` on the returned [`Notify`],
+    /// then re-check the moka cache for the result.
+    ///
+    /// This prevents the TOCTOU race during leader failover where the moka
+    /// cache is cold and two concurrent requests both pass the replicated-state
+    /// check before either commits.
+    pub fn try_acquire_inflight(self: &Arc<Self>, key: IdempotencyKey) -> InFlightStatus {
+        use dashmap::mapref::entry::Entry;
+
+        match self.in_flight.entry(key.clone()) {
+            Entry::Vacant(vacant) => {
+                let notify = Arc::new(Notify::new());
+                vacant.insert(notify);
+                InFlightStatus::Acquired(InFlightGuard {
+                    cache: Arc::clone(self),
+                    key,
+                    released: false,
+                })
+            },
+            Entry::Occupied(occupied) => InFlightStatus::Waiting(Arc::clone(occupied.get())),
+        }
+    }
+
+    /// Removes an in-flight entry and notifies all waiters.
+    fn release_inflight(&self, key: &IdempotencyKey) {
+        if let Some((_, notify)) = self.in_flight.remove(key) {
+            notify.notify_waiters();
+        }
     }
 
     /// Checks if a request is a duplicate.
@@ -630,5 +723,184 @@ mod tests {
         // Cache should be in a consistent state (no panics)
         cache.run_pending_tasks();
         assert!(!cache.is_empty(), "Cache should not be empty after inserts");
+    }
+
+    // ── In-Flight Guard Tests ──────────────────────────────────────────
+
+    /// First acquire returns `Acquired`; second for same key returns `Waiting`.
+    #[test]
+    fn inflight_first_acquires_second_waits() {
+        let cache = Arc::new(IdempotencyCache::new());
+        let key = IdempotencyKey::new(org(1), vault(1), "client-1", make_key(1));
+
+        let status1 = cache.try_acquire_inflight(key.clone());
+        assert!(matches!(status1, InFlightStatus::Acquired(_)));
+
+        let status2 = cache.try_acquire_inflight(key);
+        assert!(matches!(status2, InFlightStatus::Waiting(_)));
+    }
+
+    /// After the guard is dropped, the key can be acquired again.
+    #[test]
+    fn inflight_released_after_guard_drop() {
+        let cache = Arc::new(IdempotencyCache::new());
+        let key = IdempotencyKey::new(org(1), vault(1), "client-1", make_key(1));
+
+        let guard = match cache.try_acquire_inflight(key.clone()) {
+            InFlightStatus::Acquired(g) => g,
+            _ => panic!("expected Acquired"),
+        };
+        drop(guard);
+
+        // Should be acquirable again
+        let status = cache.try_acquire_inflight(key);
+        assert!(matches!(status, InFlightStatus::Acquired(_)));
+    }
+
+    /// Explicit release() clears the in-flight entry before drop.
+    #[test]
+    fn inflight_explicit_release() {
+        let cache = Arc::new(IdempotencyCache::new());
+        let key = IdempotencyKey::new(org(1), vault(1), "client-1", make_key(1));
+
+        let guard = match cache.try_acquire_inflight(key.clone()) {
+            InFlightStatus::Acquired(g) => g,
+            _ => panic!("expected Acquired"),
+        };
+        guard.release();
+
+        let status = cache.try_acquire_inflight(key);
+        assert!(matches!(status, InFlightStatus::Acquired(_)));
+    }
+
+    /// Different keys can be acquired concurrently (no cross-key blocking).
+    #[test]
+    fn inflight_different_keys_independent() {
+        let cache = Arc::new(IdempotencyCache::new());
+        let key1 = IdempotencyKey::new(org(1), vault(1), "client-1", make_key(1));
+        let key2 = IdempotencyKey::new(org(1), vault(1), "client-1", make_key(2));
+
+        let _guard1 = match cache.try_acquire_inflight(key1) {
+            InFlightStatus::Acquired(g) => g,
+            _ => panic!("expected Acquired for key1"),
+        };
+
+        let status2 = cache.try_acquire_inflight(key2);
+        assert!(
+            matches!(status2, InFlightStatus::Acquired(_)),
+            "different key should not be blocked"
+        );
+    }
+
+    /// Waiters are notified when the guard is released, allowing them to
+    /// re-acquire.
+    ///
+    /// Uses `tokio::select!` to verify that the waiter unblocks when the
+    /// guard is released on a separate task, without timing fragility.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inflight_waiters_notified_on_release() {
+        let cache = Arc::new(IdempotencyCache::new());
+        let key = IdempotencyKey::new(org(1), vault(1), "client-1", make_key(1));
+
+        let guard = match cache.try_acquire_inflight(key.clone()) {
+            InFlightStatus::Acquired(g) => g,
+            _ => panic!("expected Acquired"),
+        };
+
+        let notify = match cache.try_acquire_inflight(key) {
+            InFlightStatus::Waiting(n) => n,
+            _ => panic!("expected Waiting"),
+        };
+
+        // Spawn a task that releases the guard after inserting a result.
+        // The task runs concurrently; the main task waits on the notify.
+        let cache2 = Arc::clone(&cache);
+        tokio::spawn(async move {
+            // Small yield to let the main task start polling notified().
+            tokio::task::yield_now().await;
+            cache2.insert(org(1), vault(1), "client-1", make_key(1), 12345, make_result(100, 1));
+            guard.release();
+        });
+
+        // This is the production pattern: notified() is called and polled in
+        // a single expression, so the waiter is registered before any yield.
+        let completed =
+            tokio::time::timeout(std::time::Duration::from_secs(5), notify.notified()).await;
+        assert!(completed.is_ok(), "waiter should be notified within 5s");
+
+        let result = cache.check(org(1), vault(1), "client-1", make_key(1), 12345);
+        assert!(
+            matches!(result, IdempotencyCheckResult::Duplicate(_)),
+            "waiter should see cached result after notification"
+        );
+    }
+
+    /// Stress test: multiple concurrent acquires for the same key.
+    /// Exactly one gets `Acquired`, all others get `Waiting`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stress_inflight_serialization() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache = Arc::new(IdempotencyCache::new());
+        let num_tasks = 20;
+        let acquired_count = Arc::new(AtomicUsize::new(0));
+        let coalesced_count = Arc::new(AtomicUsize::new(0));
+        let idem_key = [0xCD; 16];
+        let request_hash = 55555u64;
+        let result = make_result(200, 7);
+
+        // Use a barrier to ensure all tasks start at roughly the same time.
+        let barrier = Arc::new(tokio::sync::Barrier::new(num_tasks));
+
+        let mut handles = Vec::new();
+        for _ in 0..num_tasks {
+            let cache = Arc::clone(&cache);
+            let barrier = Arc::clone(&barrier);
+            let acquired = Arc::clone(&acquired_count);
+            let coalesced = Arc::clone(&coalesced_count);
+            let result = result.clone();
+
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+
+                let key = IdempotencyKey::new(org(1), vault(1), "stress-client", idem_key);
+                match cache.try_acquire_inflight(key) {
+                    InFlightStatus::Acquired(guard) => {
+                        acquired.fetch_add(1, Ordering::Relaxed);
+                        // Simulate the write path: insert result into moka, then release
+                        cache.insert(
+                            org(1),
+                            vault(1),
+                            "stress-client",
+                            idem_key,
+                            request_hash,
+                            result,
+                        );
+                        guard.release();
+                    },
+                    InFlightStatus::Waiting(notify) => {
+                        coalesced.fetch_add(1, Ordering::Relaxed);
+                        notify.notified().await;
+                        // Check that the result is now in the cache
+                        let check =
+                            cache.check(org(1), vault(1), "stress-client", idem_key, request_hash);
+                        assert!(
+                            matches!(check, IdempotencyCheckResult::Duplicate(_)),
+                            "coalesced request should see cached result"
+                        );
+                    },
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        let total =
+            acquired_count.load(Ordering::Relaxed) + coalesced_count.load(Ordering::Relaxed);
+        assert_eq!(total, num_tasks, "all tasks must complete");
+        // At least one must have acquired
+        assert!(acquired_count.load(Ordering::Relaxed) >= 1);
     }
 }

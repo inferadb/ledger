@@ -550,8 +550,96 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         ctx.set_write_operation(req.operations.len(), operation_types, req.include_tx_proof);
         ctx.set_bytes_written(Self::estimate_operations_bytes(&req.operations));
 
-        // Check idempotency cache for duplicate
-        use inferadb_ledger_raft::idempotency::IdempotencyCheckResult;
+        // Serialize concurrent requests with the same idempotency key.
+        //
+        // Without this, during leader failover the moka cache is cold and two
+        // concurrent requests can both pass the replicated-state check before
+        // either commits, resulting in duplicate Raft proposals. The in-flight
+        // guard ensures only one request proceeds; others wait and re-check.
+        use inferadb_ledger_raft::idempotency::{
+            IdempotencyCheckResult, IdempotencyKey, InFlightStatus,
+        };
+        let _inflight_guard = loop {
+            let inflight_key =
+                IdempotencyKey::new(organization_id, vault_id, client_id.as_str(), idempotency_key);
+            match self.idempotency.try_acquire_inflight(inflight_key) {
+                InFlightStatus::Acquired(guard) => break guard,
+                InFlightStatus::Waiting(notify) => {
+                    // Another request with this key is in-flight. Wait for it to
+                    // complete, then re-check the moka cache for the result.
+                    notify.notified().await;
+                    metrics::record_idempotency_operation("coalesced");
+
+                    // The first request should have populated the moka cache.
+                    match self.idempotency.check(
+                        organization_id,
+                        vault_id,
+                        &client_id,
+                        idempotency_key,
+                        request_hash,
+                    ) {
+                        IdempotencyCheckResult::Duplicate(cached) => {
+                            ctx.set_idempotency_hit(true);
+                            ctx.set_cached();
+                            if let Some(ref header) = cached.block_header
+                                && let Some(ref state_root) = header.state_root
+                            {
+                                ctx.set_state_root(&Self::bytes_to_hex(&state_root.value));
+                            }
+                            ctx.set_block_height(cached.block_height);
+                            metrics::record_idempotency_operation("hit");
+                            return Ok(response_with_correlation(
+                                WriteResponse {
+                                    result: Some(
+                                        inferadb_ledger_proto::proto::write_response::Result::Success(
+                                            cached,
+                                        ),
+                                    ),
+                                },
+                                &ctx.request_id(),
+                                ctx.trace_id(),
+                            ));
+                        },
+                        IdempotencyCheckResult::KeyReused => {
+                            ctx.set_error(
+                                "IdempotencyKeyReused",
+                                "Idempotency key reused with different payload",
+                            );
+                            return Ok(response_with_correlation(
+                                WriteResponse {
+                                    result: Some(
+                                        inferadb_ledger_proto::proto::write_response::Result::Error(
+                                            WriteError {
+                                                code: WriteErrorCode::IdempotencyKeyReused.into(),
+                                                key: String::new(),
+                                                current_version: None,
+                                                current_value: None,
+                                                message:
+                                                    "Idempotency key was already used with a different request payload"
+                                                        .to_string(),
+                                                committed_tx_id: None,
+                                                committed_block_height: None,
+                                                assigned_sequence: None,
+                                            },
+                                        ),
+                                    ),
+                                },
+                                &ctx.request_id(),
+                                ctx.trace_id(),
+                            ));
+                        },
+                        IdempotencyCheckResult::NewRequest => {
+                            // The first request failed and didn't cache a result.
+                            // Loop back to acquire a fresh in-flight slot so this
+                            // request is properly serialized against other waiters.
+                            continue;
+                        },
+                    }
+                },
+            }
+        };
+
+        // Check idempotency cache for duplicate (fast path — moka hit)
         match self.idempotency.check(
             organization_id,
             vault_id,
@@ -1093,8 +1181,84 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         ctx.set_batch_info(false, batch_size);
         ctx.set_bytes_written(Self::estimate_operations_bytes(&all_operations));
 
-        // Check idempotency cache for duplicate
-        use inferadb_ledger_raft::idempotency::IdempotencyCheckResult;
+        // Serialize concurrent requests with the same idempotency key.
+        // See the write() handler for detailed rationale.
+        use inferadb_ledger_raft::idempotency::{
+            IdempotencyCheckResult, IdempotencyKey, InFlightStatus,
+        };
+        let _inflight_guard = loop {
+            let inflight_key =
+                IdempotencyKey::new(organization_id, vault_id, client_id.as_str(), idempotency_key);
+            match self.idempotency.try_acquire_inflight(inflight_key) {
+                InFlightStatus::Acquired(guard) => break guard,
+                InFlightStatus::Waiting(notify) => {
+                    notify.notified().await;
+                    metrics::record_idempotency_operation("coalesced");
+
+                    match self.idempotency.check(
+                        organization_id,
+                        vault_id,
+                        &client_id,
+                        idempotency_key,
+                        request_hash,
+                    ) {
+                        IdempotencyCheckResult::Duplicate(cached) => {
+                            ctx.set_idempotency_hit(true);
+                            ctx.set_cached();
+                            if let Some(ref header) = cached.block_header
+                                && let Some(ref state_root) = header.state_root
+                            {
+                                ctx.set_state_root(&Self::bytes_to_hex(&state_root.value));
+                            }
+                            ctx.set_block_height(cached.block_height);
+                            metrics::record_idempotency_operation("hit");
+                            return Ok(response_with_correlation(
+                                BatchWriteResponse {
+                                    result: Some(
+                                        inferadb_ledger_proto::proto::batch_write_response::Result::Success(
+                                            BatchWriteSuccess {
+                                                tx_id: cached.tx_id,
+                                                block_height: cached.block_height,
+                                                block_header: cached.block_header,
+                                                tx_proof: cached.tx_proof,
+                                                assigned_sequence: cached.assigned_sequence,
+                                            },
+                                        ),
+                                    ),
+                                },
+                                &ctx.request_id(),
+                                ctx.trace_id(),
+                            ));
+                        },
+                        IdempotencyCheckResult::KeyReused => {
+                            ctx.set_error(
+                                "IdempotencyKeyReused",
+                                "Idempotency key reused with different payload",
+                            );
+                            return Ok(response_with_correlation(BatchWriteResponse {
+                                result: Some(inferadb_ledger_proto::proto::batch_write_response::Result::Error(WriteError {
+                                    code: WriteErrorCode::IdempotencyKeyReused.into(),
+                                    key: String::new(),
+                                    current_version: None,
+                                    current_value: None,
+                                    message:
+                                        "Idempotency key was already used with a different request payload"
+                                            .to_string(),
+                                    committed_tx_id: None,
+                                    committed_block_height: None,
+                                    assigned_sequence: None,
+                                })),
+                            }, &ctx.request_id(), ctx.trace_id()));
+                        },
+                        IdempotencyCheckResult::NewRequest => {
+                            continue;
+                        },
+                    }
+                },
+            }
+        };
+
+        // Check idempotency cache for duplicate (fast path — moka hit)
         match self.idempotency.check(
             organization_id,
             vault_id,
