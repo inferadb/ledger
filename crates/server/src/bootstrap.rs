@@ -305,7 +305,7 @@ pub async fn bootstrap_node(
         });
     }
 
-    let _ = region_handler_healthy;
+    let health_state = health_state.with_region_handler(region_handler_healthy);
 
     // Shared peer liveness map — updated by the Raft service on every incoming
     // consensus message, read by the admin service's CheckPeerLiveness RPC and

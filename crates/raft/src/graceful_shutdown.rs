@@ -243,6 +243,10 @@ pub struct HealthState {
     connection_tracker: ConnectionTracker,
     /// Background job watchdog for liveness monitoring.
     watchdog: Option<BackgroundJobWatchdog>,
+    /// Region handler health flag. Set to `false` when the region-creation
+    /// handler channel closes or the handler task exits unexpectedly. ANDed
+    /// into the readiness check so load balancers stop routing to this node.
+    region_handler_healthy: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Default for HealthState {
@@ -258,6 +262,7 @@ impl HealthState {
             phase: Arc::new(AtomicU8::new(NodePhase::Starting as u8)),
             connection_tracker: ConnectionTracker::new(),
             watchdog: None,
+            region_handler_healthy: None,
         }
     }
 
@@ -265,6 +270,20 @@ impl HealthState {
     #[must_use]
     pub fn with_watchdog(mut self, watchdog: BackgroundJobWatchdog) -> Self {
         self.watchdog = Some(watchdog);
+        self
+    }
+
+    /// Attaches a region-handler health flag to the health state.
+    ///
+    /// The flag is cleared (`false`) when the region-creation handler channel
+    /// closes or the handler task exits unexpectedly. Once attached, the
+    /// readiness probe fails whenever the flag is `false`.
+    #[must_use]
+    pub fn with_region_handler(
+        mut self,
+        flag: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.region_handler_healthy = Some(flag);
         self
     }
 
@@ -352,11 +371,20 @@ impl HealthState {
 
     /// Readiness probe: passes when the node can serve traffic.
     ///
-    /// Returns `true` only when the node is in the `Ready` phase.
-    /// Both `Draining` and `ShuttingDown` fail readiness so load balancers
-    /// stop routing traffic to this node.
+    /// Returns `true` only when the node is in the `Ready` phase AND the
+    /// region-handler task (if attached) is still healthy. Both `Draining`
+    /// and `ShuttingDown` fail readiness so load balancers stop routing
+    /// traffic to this node.
     pub fn readiness_check(&self) -> bool {
-        self.phase() == NodePhase::Ready
+        if self.phase() != NodePhase::Ready {
+            return false;
+        }
+        if let Some(flag) = &self.region_handler_healthy
+            && !flag.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        true
     }
 }
 
@@ -763,6 +791,58 @@ mod tests {
     #[test]
     fn test_node_phase_from_u8_unknown() {
         assert_eq!(NodePhase::from_u8(255), NodePhase::Starting);
+    }
+
+    // ─── Region Handler Health Flag Tests ───────────────────────
+
+    #[test]
+    fn test_readiness_passes_when_region_handler_healthy() {
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let state = HealthState::new().with_region_handler(flag);
+        state.mark_ready();
+        assert!(state.readiness_check(), "readiness should pass when handler flag is true");
+    }
+
+    #[test]
+    fn test_readiness_fails_when_region_handler_unhealthy() {
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let state = HealthState::new().with_region_handler(flag.clone());
+        state.mark_ready();
+        assert!(state.readiness_check(), "readiness should pass before handler exits");
+
+        // Simulate the handler task exiting (channel closed).
+        flag.store(false, Ordering::Release);
+
+        assert!(!state.readiness_check(), "readiness should fail after handler flag cleared");
+    }
+
+    #[test]
+    fn test_readiness_without_region_handler_flag_unaffected() {
+        // No flag attached — existing behaviour is preserved.
+        let state = HealthState::new();
+        state.mark_ready();
+        assert!(state.readiness_check(), "readiness should pass without a region handler flag");
+    }
+
+    #[test]
+    fn test_liveness_unaffected_by_region_handler_flag() {
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let state = HealthState::new().with_region_handler(flag);
+        state.mark_ready();
+        // Liveness must NOT be gated on the region handler flag.
+        assert!(state.liveness_check(), "liveness should be independent of region handler flag");
+    }
+
+    #[test]
+    fn test_readiness_flag_shared_via_arc() {
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let state = HealthState::new().with_region_handler(flag.clone());
+        let clone = state.clone();
+        state.mark_ready();
+
+        // Both the original and the clone observe the same underlying flag.
+        flag.store(false, Ordering::Release);
+        assert!(!clone.readiness_check(), "cloned state should reflect flag change");
     }
 
     // ─── ConnectionTracker Tests ─────────────────────────────
