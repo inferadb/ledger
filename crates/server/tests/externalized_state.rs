@@ -216,7 +216,6 @@ async fn test_snapshot_with_deleted_entities() {
     // Wait for replication (global + data region).
     let synced = cluster.wait_for_sync(Duration::from_secs(15)).await;
     assert!(synced, "cluster should sync after deletions");
-    cluster.wait_for_data_region_sync(Duration::from_secs(5)).await;
 
     // Verify on a follower that:
     // 1. org1/v1a data is still readable.
@@ -285,7 +284,6 @@ async fn test_leader_failover_mid_batch_no_data_loss() {
     // Wait for replication (global + data region).
     let synced = cluster.wait_for_sync(Duration::from_secs(10)).await;
     assert!(synced, "cluster should sync before failover");
-    cluster.wait_for_data_region_sync(Duration::from_secs(5)).await;
 
     // Find a follower to verify data from after "failover" (we verify from
     // a follower, which simulates reading from a new leader after the old
@@ -440,7 +438,6 @@ async fn test_sequence_counters_persisted_and_restored() {
     // Wait for replication (global + data region).
     let synced = cluster.wait_for_sync(Duration::from_secs(15)).await;
     assert!(synced, "cluster should sync after sequence operations");
-    cluster.wait_for_data_region_sync(Duration::from_secs(5)).await;
 
     // After replication, create additional resources to verify sequences
     // didn't reset. If sequences were corrupted, these would get duplicate IDs
@@ -665,7 +662,6 @@ async fn test_snapshot_install_events_best_effort() {
     // Wait for all nodes to be in sync (global + data region).
     let synced = cluster.wait_for_sync(Duration::from_secs(15)).await;
     assert!(synced, "all nodes should sync");
-    cluster.wait_for_data_region_sync(Duration::from_secs(5)).await;
 
     // Verify data is present on both followers.
     for follower in cluster.followers() {

@@ -143,9 +143,8 @@ async fn test_committed_write_survives_leader_crash() {
     let block_height = extract_block_height(response);
     assert!(block_height > 0, "write should be committed");
 
-    // Wait for replication to followers (both GLOBAL and data region)
+    // Wait for replication to followers (GLOBAL + data region)
     cluster.wait_for_sync(Duration::from_secs(5)).await;
-    cluster.wait_for_data_region_sync(Duration::from_secs(5)).await;
 
     // Verify all nodes have the same last_applied before we check data
     let applied_indices: Vec<u64> = cluster.nodes().iter().map(|n| n.last_applied()).collect();
@@ -205,7 +204,6 @@ async fn test_read_consistency_after_leader_change() {
 
     // Wait for replication (global + data region)
     cluster.wait_for_sync(Duration::from_secs(5)).await;
-    cluster.wait_for_data_region_sync(Duration::from_secs(5)).await;
 
     // Read from all nodes - they should all return the same values
     for node in cluster.nodes() {
@@ -513,7 +511,6 @@ async fn test_key_overwrite_consistency() {
 
     // Wait for replication (global + data region)
     cluster.wait_for_sync(Duration::from_secs(5)).await;
-    cluster.wait_for_data_region_sync(Duration::from_secs(5)).await;
 
     // All nodes should see the updated value
     for node in cluster.nodes() {

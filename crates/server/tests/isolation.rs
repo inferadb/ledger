@@ -522,7 +522,6 @@ async fn test_isolation_across_replicas() {
     // Wait for replication (global + data region)
     let synced = cluster.wait_for_sync(Duration::from_secs(5)).await;
     assert!(synced, "cluster should sync");
-    cluster.wait_for_data_region_sync(Duration::from_secs(5)).await;
 
     // Verify isolation on each follower
     for follower in cluster.followers() {

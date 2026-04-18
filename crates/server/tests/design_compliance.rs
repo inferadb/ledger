@@ -585,7 +585,6 @@ async fn test_diverged_vault_returns_unavailable() {
 
     // Wait for replication (global + data region)
     cluster.wait_for_sync(Duration::from_secs(5)).await;
-    cluster.wait_for_data_region_sync(Duration::from_secs(5)).await;
 
     // Simulate vault divergence using the admin API
     let mut admin_client =
@@ -833,7 +832,6 @@ async fn test_idempotency_survives_leader_failover() {
 
     // Wait for replication to all followers before triggering failover (global + data region)
     cluster.wait_for_sync(Duration::from_secs(5)).await;
-    cluster.wait_for_data_region_sync(Duration::from_secs(5)).await;
 
     // Trigger leader failover: transfer GLOBAL leadership to a follower first,
     // then have the new leader remove the old node via LeaveCluster. This avoids
