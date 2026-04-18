@@ -299,7 +299,7 @@ impl<P: PageProvider> BTree<P> {
                 match leaf.search(key) {
                     SearchResult::Found(idx) => {
                         old_value = Some(leaf.value(idx).to_vec());
-                        if !leaf.update(idx, value) {
+                        if !leaf.update(idx, value)? {
                             // Value grew - need to delete and reinsert
                             leaf.delete(idx)?;
                             if leaf.can_insert(key, value) {

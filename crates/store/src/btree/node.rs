@@ -372,9 +372,21 @@ impl<'a> LeafNode<'a> {
 
     /// Updates the value at the given cell index in place.
     ///
-    /// Returns `true` if the update succeeded (same size or smaller value).
-    /// Returns `false` if the new value is larger and cannot fit in place.
-    pub fn update(&mut self, index: usize, value: &[u8]) -> bool {
+    /// Returns `Ok(true)` if the update succeeded (same size or smaller value).
+    /// Returns `Ok(false)` if the new value is larger and cannot fit in place —
+    /// the caller must delete and reinsert.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ValueTooLarge`] if `value.len() > u16::MAX`. The cell
+    /// header stores the value length as a `u16`, so larger inputs would
+    /// silently truncate on cast.
+    pub fn update(&mut self, index: usize, value: &[u8]) -> Result<bool> {
+        let value_len: u16 = value
+            .len()
+            .try_into()
+            .map_err(|_| Error::ValueTooLarge { size: value.len(), max: u16::MAX as usize })?;
+
         let cell_offset = self.cell_ptr(index);
         let key_len = read_u16_le(&self.page.data, cell_offset) as usize;
         let old_val_len = read_u16_le(&self.page.data, cell_offset + 2) as usize;
@@ -385,21 +397,21 @@ impl<'a> LeafNode<'a> {
                 self.page.data[cell_offset + 4 + key_len..cell_offset + 4 + key_len + value.len()]
                     .copy_from_slice(value);
                 self.page.dirty = true;
-                true
+                Ok(true)
             },
             std::cmp::Ordering::Less => {
                 // Value shrunk - update in place, leave dead space
                 self.page.data[cell_offset + 2..cell_offset + 4]
-                    .copy_from_slice(&(value.len() as u16).to_le_bytes());
+                    .copy_from_slice(&value_len.to_le_bytes());
                 self.page.data[cell_offset + 4 + key_len..cell_offset + 4 + key_len + value.len()]
                     .copy_from_slice(value);
                 self.page.dirty = true;
-                true
+                Ok(true)
             },
             std::cmp::Ordering::Greater => {
                 // Value grew - need to check if we have space
                 // For simplicity, we reinsert (could optimize later with compaction)
-                false
+                Ok(false)
             },
         }
     }
@@ -973,6 +985,22 @@ mod tests {
         let mut node = LeafNode::init(&mut page);
         let oversized_value = vec![0u8; u16::MAX as usize + 1];
         let err = node.insert(0, b"k", &oversized_value).unwrap_err();
+        match err {
+            Error::ValueTooLarge { size, max } => {
+                assert_eq!(size, u16::MAX as usize + 1);
+                assert_eq!(max, u16::MAX as usize);
+            },
+            other => panic!("expected ValueTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_leaf_update_rejects_oversized_value() {
+        let mut page = make_leaf_page(0);
+        let mut node = LeafNode::init(&mut page);
+        node.insert(0, b"k", b"v").unwrap();
+        let oversized_value = vec![0u8; u16::MAX as usize + 1];
+        let err = node.update(0, &oversized_value).unwrap_err();
         match err {
             Error::ValueTooLarge { size, max } => {
                 assert_eq!(size, u16::MAX as usize + 1);
