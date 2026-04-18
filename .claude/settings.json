@@ -248,7 +248,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"Serena MCP is available for this Rust workspace. Call mcp__plugin_serena_serena__activate_project with project=/Users/evan/Developer/inferadb/ledger once at the start of any code navigation or editing work — it enables symbolic tools (find_symbol, replace_symbol_body, get_symbols_overview, find_referencing_symbols) that the project CLAUDE.md relies on for safe edits.\"}}'"
+            "command": "jq -nc --arg dir \"${CLAUDE_PROJECT_DIR:-$PWD}\" '{hookSpecificOutput:{hookEventName:\"SessionStart\",additionalContext:(\"MANDATORY FIRST ACTION: before any code navigation, reading, or editing tool use in this Rust workspace, invoke mcp__plugin_serena_serena__activate_project with project=\" + $dir + \". This is non-optional — it enables symbolic tools (find_symbol, replace_symbol_body, get_symbols_overview, find_referencing_symbols) that CLAUDE.md requires for safe edits. Call it NOW if you have not already.\")}}'"
           }
         ]
       }
