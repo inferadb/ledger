@@ -88,7 +88,7 @@ create_org_and_vault() {
 
   # Phase 1: InitiateEmailVerification — retry across cluster nodes.
   # Non-leader nodes return NotLeader (redirect model), so we try each.
-  local code="" working_addr=""
+  local code=""
   local attempt=0
   while [[ -z "$code" && $attempt -lt 30 ]]; do
     local i
@@ -101,24 +101,33 @@ create_org_and_vault() {
         "$addr" \
         ledger.v1.UserService/InitiateEmailVerification 2>&1 || true)
       code=$(echo "$init_result" | jq -r '.code // empty' 2>/dev/null || true)
-      if [[ -n "$code" ]]; then
-        working_addr="$addr"
-        break
-      fi
+      [[ -n "$code" ]] && break
     done
     attempt=$((attempt + 1))
     sleep 1
   done
   [[ -z "$code" ]] && { log_error "InitiateEmailVerification failed after 30 attempts"; return 1; }
 
-  local verify_result
-  verify_result=$(grpcurl -plaintext \
-    -d "{\"email\": \"$email\", \"code\": \"$code\", \"region\": 10}" \
-    "$working_addr" \
-    ledger.v1.UserService/VerifyEmailCode 2>&1 || true)
-  local token
-  token=$(echo "$verify_result" | jq -r '.newUser.onboardingToken // empty' 2>/dev/null || true)
-  [[ -z "$token" ]] && { log_error "VerifyEmailCode failed: $verify_result"; return 1; }
+  # Phase 2: VerifyEmailCode requires the regional leader. Retry across nodes
+  # because the regional leader can transition between Phase 1 and Phase 2
+  # (e.g., during initial cluster stabilization).
+  local token="" verify_result=""
+  local verify_attempt=0
+  while [[ -z "$token" && $verify_attempt -lt 15 ]]; do
+    local i
+    for ((i=1; i<=NODE_COUNT; i++)); do
+      local addr
+      addr=$(node_addr "$i")
+      verify_result=$(grpcurl -plaintext \
+        -d "{\"email\": \"$email\", \"code\": \"$code\", \"region\": 10}" \
+        "$addr" \
+        ledger.v1.UserService/VerifyEmailCode 2>&1 || true)
+      token=$(echo "$verify_result" | jq -r '.newUser.onboardingToken // empty' 2>/dev/null || true)
+      [[ -n "$token" ]] && break
+    done
+    [[ -z "$token" ]] && { verify_attempt=$((verify_attempt + 1)); sleep 1; }
+  done
+  [[ -z "$token" ]] && { log_error "VerifyEmailCode failed after 15 attempts: $verify_result"; return 1; }
 
   # CompleteRegistration submits a saga that runs on the GLOBAL leader.
   # The GLOBAL leader may differ from the regional leader, so try all nodes.

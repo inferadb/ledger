@@ -236,15 +236,34 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
     }
 
     /// Runs the reactor event loop until a [`ReactorEvent::Shutdown`] is received.
+    ///
+    /// The select is biased toward control and proposal ingest so client
+    /// traffic is picked up promptly, but periodic WAL flush and timer
+    /// expiration processing run *outside* the select on every loop
+    /// iteration. Handling them inside the biased select would let a
+    /// saturated control or proposal arm starve them indefinitely — which
+    /// would stall commit dispatch, outbound-message sends, and leadership
+    /// timers under sustained catch-up traffic.
     pub async fn run(&mut self) {
         let mut flush_ticker = tokio::time::interval(self.flush_interval);
         flush_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Consume the immediate first tick; the wall-clock guard below takes
+        // over from here.
+        flush_ticker.tick().await;
+
+        // Real wall-clock tracking for flush gating. Intentionally independent
+        // of `self.clock` (which can be a `SimulatedClock`) so simulation
+        // tests that don't advance the injected clock still see flushes fire
+        // on the tokio runtime's wall-clock timeline.
+        let mut last_flush = std::time::Instant::now();
 
         loop {
             let sleep_duration = self.timers.next_deadline().map(|d| {
                 let now = self.clock.now();
                 if d <= now { Duration::ZERO } else { d.duration_since(now) }
             });
+
+            let mut exit = false;
 
             tokio::select! {
                 // `biased` polls arms in listed order every iteration so
@@ -257,11 +276,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                 //    shutdown, peer messages, read-index).
                 event = self.control_inbox.recv() => {
                     match event {
-                        Some(ReactorEvent::Shutdown) | None => {
-                            // Flush any pending work before exiting.
-                            self.flush().await;
-                            break;
-                        }
+                        Some(ReactorEvent::Shutdown) | None => { exit = true; }
                         Some(ev) => {
                             let affected = self.handle_event(ev);
                             self.broadcast_shard_states(&affected);
@@ -269,7 +284,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                     }
                 }
 
-                // 2) Proposals — ranked above timers/flush so normal-load
+                // 2) Proposals — ranked above flush/timers so normal-load
                 //    scheduling matches the pre-split reactor (client writes
                 //    are picked up promptly). The priority split only
                 //    protects control traffic from adversarial proposal
@@ -281,30 +296,44 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                             let affected = self.handle_event(ev);
                             self.broadcast_shard_states(&affected);
                         }
-                        None => {
-                            // Engine dropped; treat as shutdown.
-                            self.flush().await;
-                            break;
-                        }
+                        None => { exit = true; }
                     }
                 }
 
-                // 3) Periodic WAL flush.
-                _ = flush_ticker.tick() => {
-                    self.flush().await;
-                }
+                // 3) Wake-up: periodic flush interval. The actual flush runs
+                //    below (outside the select) so it cannot be starved by
+                //    the biased ordering.
+                _ = flush_ticker.tick() => {}
 
-                // 4) Timer expirations (elections, heartbeats).
+                // 4) Wake-up: next timer deadline. Expiration processing runs
+                //    below (outside the select) for the same reason.
                 _ = async {
                     match sleep_duration {
                         Some(d) if d.is_zero() => {},
                         Some(d) => tokio::time::sleep(d).await,
                         None => std::future::pending::<()>().await,
                     }
-                } => {
-                    let affected = self.process_expired_timers();
-                    self.broadcast_shard_states(&affected);
-                }
+                } => {}
+            }
+
+            // Post-select work runs on EVERY iteration regardless of which
+            // arm fired. Biased select cannot starve this.
+            let affected = self.process_expired_timers();
+            self.broadcast_shard_states(&affected);
+
+            // Flush on interval or on exit. The wall-clock guard preserves
+            // batching under heavy load — entries accumulate across events in
+            // a single flush_interval window and sync together — and runs
+            // unconditionally (outside the select) so control/proposal traffic
+            // cannot starve commit dispatch or outbound-message delivery.
+            let now = std::time::Instant::now();
+            if exit || now.duration_since(last_flush) >= self.flush_interval {
+                self.flush().await;
+                last_flush = now;
+            }
+
+            if exit {
+                break;
             }
         }
     }

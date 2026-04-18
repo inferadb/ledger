@@ -56,7 +56,11 @@ cleanup_cluster() {
   fi
 
   if [[ -n "$_CLUSTER_DATA_ROOT" && -d "$_CLUSTER_DATA_ROOT" ]]; then
-    rm -rf "$_CLUSTER_DATA_ROOT"
+    if [[ -n "${KEEP_LOGS:-}" ]]; then
+      log_warn "KEEP_LOGS set; preserving $_CLUSTER_DATA_ROOT"
+    else
+      rm -rf "$_CLUSTER_DATA_ROOT"
+    fi
   fi
 
   return "$exit_code"
