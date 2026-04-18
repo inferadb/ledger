@@ -112,9 +112,21 @@ async fn main() -> Result<(), ServerError> {
         }
     }
 
+    // Capture the flamegraph-spans path BEFORE moving `cli.config`, then init
+    // logging. On the `profiling` feature, `init_logging` returns a
+    // `FlushGuard` whose `Drop` flushes pending span events to the
+    // folded-stack file — it must outlive `serve_with_shutdown().await`.
+    // Kept in `main`'s scope with a leading underscore to silence unused
+    // warnings without triggering early drop.
+    #[cfg(feature = "profiling")]
+    let flamegraph_spans = cli.flamegraph_spans.clone();
+
     let config = cli.config;
 
     // Initialize logging based on config
+    #[cfg(feature = "profiling")]
+    let _flame_guard = init_logging(&config, flamegraph_spans.as_deref())?;
+    #[cfg(not(feature = "profiling"))]
     init_logging(&config);
 
     // Initialize OpenTelemetry if configured
@@ -254,6 +266,85 @@ async fn main() -> Result<(), ServerError> {
 /// - `Text`: Human-readable format (development)
 /// - `Json`: JSON structured logging (production)
 /// - `Auto`: JSON for non-TTY stdout, text otherwise
+///
+/// When the `profiling` feature is enabled and `flamegraph_spans` is `Some`, a
+/// `tracing_flame::FlameLayer` is composed into the subscriber chain. The
+/// returned `FlushGuard` (wrapped in `Option`) flushes pending span events to
+/// the folded-stack file on `Drop`; the caller must keep it alive for the
+/// lifetime of the server.
+#[cfg(feature = "profiling")]
+fn init_logging(
+    config: &Config,
+    flamegraph_spans: Option<&std::path::Path>,
+) -> Result<Option<tracing_flame::FlushGuard<std::io::BufWriter<std::fs::File>>>, ServerError> {
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let use_json = match config.log_format {
+        LogFormat::Json => true,
+        LogFormat::Text => false,
+        LogFormat::Auto => !std::io::stdout().is_terminal(),
+    };
+
+    // Inline `FlameLayer::with_file` in each branch so the layer's subscriber
+    // type parameter is inferred independently per stack shape (json vs text).
+    // Lifting it into a shared helper would unify the types across branches
+    // and fail to compile.
+    let flame_guard = match (flamegraph_spans, use_json) {
+        (Some(path), true) => {
+            let (flame_layer, guard) = tracing_flame::FlameLayer::with_file(path)
+                .map_err(|e| flame_open_error(path, e))?;
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(fmt::layer().json().flatten_event(true).with_current_span(false))
+                .with(flame_layer)
+                .init();
+            tracing::info!(path = %path.display(), "tracing-flame enabled");
+            Some(guard)
+        },
+        (Some(path), false) => {
+            let (flame_layer, guard) = tracing_flame::FlameLayer::with_file(path)
+                .map_err(|e| flame_open_error(path, e))?;
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(fmt::layer())
+                .with(flame_layer)
+                .init();
+            tracing::info!(path = %path.display(), "tracing-flame enabled");
+            Some(guard)
+        },
+        (None, true) => {
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(fmt::layer().json().flatten_event(true).with_current_span(false))
+                .init();
+            None
+        },
+        (None, false) => {
+            tracing_subscriber::registry().with(env_filter).with(fmt::layer()).init();
+            None
+        },
+    };
+
+    Ok(flame_guard)
+}
+
+/// Wraps a tracing-flame file-open failure in a `ServerError`.
+#[cfg(feature = "profiling")]
+fn flame_open_error(path: &std::path::Path, e: tracing_flame::Error) -> ServerError {
+    ServerError::Server(Box::new(std::io::Error::other(format!(
+        "failed to open flamegraph-spans file '{}': {}",
+        path.display(),
+        e
+    ))))
+}
+
+/// Initializes the logging system based on configuration.
+///
+/// Supports three formats:
+/// - `Text`: Human-readable format (development)
+/// - `Json`: JSON structured logging (production)
+/// - `Auto`: JSON for non-TTY stdout, text otherwise
+#[cfg(not(feature = "profiling"))]
 fn init_logging(config: &Config) {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 

@@ -52,6 +52,11 @@ humantime-serde.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 proptest.workspace = true
+criterion = { version = "0.5", default-features = false, features = ["html_reports", "cargo_bench_support"] }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "merkle"
+harness = false

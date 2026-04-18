@@ -35,7 +35,8 @@ ledger/
 │   ├── services/          # 14 gRPC services, SlugResolver, JwtEngine, server assembly.
 │   ├── server/            # Binary entrypoint + single-binary integration tests.
 │   ├── sdk/               # Consumer Rust client (the one crate using thiserror).
-│   └── test-utils/        # Shared test scaffolding, CrashInjector, proptest strategies.
+│   ├── test-utils/        # Shared test scaffolding, CrashInjector, proptest strategies.
+│   └── profile/           # Profiling workload driver — SDK-consumer CLI.
 ```
 
 Each crate has its own `CLAUDE.md` (symlinked to `AGENTS.md`) with crate-specific invariants that **extend — never relax — the golden rules below**. When a crate-level rule conflicts with a root rule, **the root rule wins**.

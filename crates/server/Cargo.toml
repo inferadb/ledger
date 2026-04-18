@@ -64,9 +64,18 @@ bon.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+# Profiling (opt-in, feature-gated; never in default build graph)
+tracing-flame = { version = "0.2", optional = true }
+
 # Metrics
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
+
+[features]
+default = []
+# Enables tracing-flame span-sampling via the `--flamegraph-spans` CLI flag.
+# Consumed by `scripts/profile-server.sh spans`. Adds no cost when off.
+profiling = ["dep:tracing-flame"]
 
 [dev-dependencies]
 tempfile.workspace = true

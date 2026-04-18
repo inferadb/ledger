@@ -11,6 +11,7 @@ members = [
     "crates/sdk",
     "crates/test-utils",
     "crates/consensus",
+    "crates/profile",
 ]
 
 [workspace.package]
@@ -145,6 +146,7 @@ inferadb-ledger-services = { version = "0.1.0", path = "crates/services" }
 inferadb-ledger-server = { path = "crates/server" }
 inferadb-ledger-sdk = { version = "0.1.0", path = "crates/sdk" }
 inferadb-ledger-test-utils = { path = "crates/test-utils" }
+inferadb-ledger-profile = { path = "crates/profile" }
 
 # Hashing (for inferadb-ledger-store)
 xxhash-rust = { version = "0.8", features = ["xxh32", "xxh3"] }
@@ -173,3 +175,8 @@ debug = true
 
 [profile.test]
 opt-level = 1
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false

@@ -18,7 +18,8 @@ default:
     @echo "  just proto          # regenerate proto code (run after .proto edits)"
     @echo ""
     @echo "Troubleshooting:"
-    @echo "  just doctor         # check toolchain, ports, disk"
+    @echo "  just doctor             # check toolchain, ports, disk"
+    @echo "  just doctor-profiling   # check cargo-flamegraph + platform prereqs"
     @echo ""
     @echo "Full catalog:  just --list"
 
@@ -353,3 +354,34 @@ cover:
 # Run workspace benchmarks. Store has the most mature suite (btree_bench).
 bench:
     cargo +{{rust}} bench --workspace
+
+# ============================================================================
+# Profiling (opt-in; requires cargo-flamegraph or samply)
+# ============================================================================
+
+# Verify profiling prerequisites (tool + platform permissions).
+doctor-profiling:
+    ./scripts/profile.sh doctor
+
+# Profile a criterion benchmark. Produces profiles/bench-<crate>-<bench>-<ts>.<ext>.
+# Example: just profile-bench types merkle
+profile-bench CRATE BENCH:
+    ./scripts/profile.sh bench {{CRATE}} {{BENCH}}
+
+# Profile a single integration test. Produces profiles/test-<crate>-<name>-<ts>.<ext>.
+# Example: just profile-test server onboarding::test_verify_email_code_new_user
+profile-test CRATE NAME:
+    ./scripts/profile.sh test {{CRATE}} {{NAME}}
+
+# Profile the server under a workload — stack-sampling lens.
+# Produces profiles/server-<workload>-<ts>.<ext>.
+# WORKLOAD: throughput-writes (default) | mixed-rw | check-heavy
+# SECS: measured-phase duration (default 60)
+profile-server WORKLOAD="throughput-writes" SECS="60":
+    ./scripts/profile-server.sh sampling {{WORKLOAD}} {{SECS}}
+
+# Profile the server under a workload — semantic-span lens via tracing-flame.
+# Produces profiles/server-spans-<workload>-<ts>.svg.
+# Requires: cargo install inferno (for folded-stack → SVG post-processing).
+profile-server-spans WORKLOAD="throughput-writes" SECS="60":
+    ./scripts/profile-server.sh spans {{WORKLOAD}} {{SECS}}

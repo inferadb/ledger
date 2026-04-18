@@ -563,6 +563,16 @@ pub struct Cli {
     /// Server configuration (flattened so flags appear at top level).
     #[command(flatten)]
     pub config: Config,
+
+    /// Path to write tracing-flame folded-stack output for span-based profiling.
+    ///
+    /// Only present when the `profiling` feature is enabled. When set, the server
+    /// installs a `tracing_flame::FlameLayer` into the tracing subscriber and
+    /// flushes the folded-stack file at graceful shutdown. Consumed by
+    /// `scripts/profile-server.sh spans`.
+    #[cfg(feature = "profiling")]
+    #[arg(long, value_name = "PATH")]
+    pub flamegraph_spans: Option<PathBuf>,
 }
 
 /// CLI subcommands for configuration management.

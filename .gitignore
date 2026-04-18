@@ -1,4 +1,6 @@
 target/
+profiles/
+target/profiling-data/
 .DS_Store
 .zed/
 .vscode/
