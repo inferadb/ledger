@@ -1273,6 +1273,24 @@ impl<C: Clock + Clone, R: RngSource> Shard<C, R> {
     }
 
     /// Checks newly committed entries for membership changes and applies them.
+    ///
+    /// Processes each membership entry in the committed range, updating
+    /// `self.membership`, emitting a per-entry `MembershipChanged` action,
+    /// and stepping down if the local leader was removed. A single
+    /// `ShardRemoved` action is emitted at most once per call, and only
+    /// when the **final** membership after processing the entire batch
+    /// excludes the local node.
+    ///
+    /// Checking only the final membership — rather than every intermediate
+    /// configuration — prevents spurious `Shutdown` cycles on late-joiners
+    /// catching up through a history of configuration churn. A late-joiner
+    /// typically replays entries shaped like
+    /// `{A} → {A,B} → {A,B,C-learner} → {A,B,C-voter}`: intermediate
+    /// entries transiently exclude node C before later entries add it
+    /// back. Emitting `ShardRemoved` per entry would mark the shard
+    /// `Shutdown` for a 30s grace period even though the final
+    /// configuration includes C, blocking replication until the cleanup
+    /// timer expires.
     fn apply_committed_membership(
         &mut self,
         old_commit: u64,
@@ -1327,17 +1345,18 @@ impl<C: Clock + Clone, R: RngSource> Shard<C, R> {
                 {
                     self.was_ever_member = true;
                 }
-
-                // If we were previously a member and are no longer in this
-                // shard's membership, signal removal. Skip the signal during
-                // log replay when the local node hasn't been added yet.
-                if self.was_ever_member
-                    && !self.membership.is_voter(self.node_id)
-                    && !self.membership.is_learner(self.node_id)
-                {
-                    actions.push(Action::ShardRemoved { shard: self.id });
-                }
             }
+        }
+
+        // Emit ShardRemoved once, based on the final membership after
+        // processing the entire batch. Guarded by `was_ever_member` so log
+        // replay on a brand-new node (which has never been a member) does
+        // not signal removal.
+        if self.was_ever_member
+            && !self.membership.is_voter(self.node_id)
+            && !self.membership.is_learner(self.node_id)
+        {
+            actions.push(Action::ShardRemoved { shard: self.id });
         }
     }
 
@@ -2816,6 +2835,129 @@ mod tests {
         );
 
         assert!(actions.is_empty());
+    }
+
+    // ── ShardRemoved emission on final membership only ─────────────
+
+    #[test]
+    fn test_catchup_through_historical_configs_does_not_emit_spurious_shard_removed() {
+        // Regression test for the late-joiner shutdown cycle. A node whose
+        // shard is initialized with a membership that includes itself
+        // (`was_ever_member = true`) must not be marked Shutdown while
+        // replaying a history of intermediate configurations — even if some
+        // of those configurations transiently exclude the node — so long as
+        // the *final* membership after the batch includes it.
+        //
+        // Before the fix, each intermediate membership entry in the catch-up
+        // batch that excluded Node 3 emitted its own Action::ShardRemoved.
+        // The reactor then marked the shard Shutdown and scheduled a 30s
+        // cleanup timer, blocking replication until the timer expired —
+        // even though the final entry in the same batch re-added the node.
+        let clock = make_clock();
+        // Shard is created with all three nodes in the initial membership,
+        // so `was_ever_member` starts true on Node 3.
+        let mut shard = make_shard(NodeId(3), clock.clone(), make_rng(), make_membership_3());
+
+        // Catch-up history replayed from the leader. The intermediate
+        // configs exclude Node 3; the final config re-adds it as a voter.
+        let entries: Arc<[Entry]> = Arc::from(vec![
+            Entry {
+                term: 1,
+                index: 1,
+                data: Arc::from(Vec::<u8>::new()),
+                kind: EntryKind::Membership(Membership::new([NodeId(1)])),
+            },
+            Entry {
+                term: 1,
+                index: 2,
+                data: Arc::from(Vec::<u8>::new()),
+                kind: EntryKind::Membership(Membership::new([NodeId(1), NodeId(2)])),
+            },
+            Entry {
+                term: 1,
+                index: 3,
+                data: Arc::from(Vec::<u8>::new()),
+                kind: EntryKind::Membership({
+                    let mut m = Membership::new([NodeId(1), NodeId(2)]);
+                    m.add_learner(NodeId(3));
+                    m
+                }),
+            },
+            Entry {
+                term: 1,
+                index: 4,
+                data: Arc::from(Vec::<u8>::new()),
+                kind: EntryKind::Membership(Membership::new([NodeId(1), NodeId(2), NodeId(3)])),
+            },
+        ]);
+
+        let actions = shard.handle_message(
+            NodeId(1),
+            Message::AppendEntries {
+                term: 1,
+                leader_id: NodeId(1),
+                prev_log_index: 0,
+                prev_log_term: 0,
+                entries,
+                leader_commit: 4,
+                closed_ts_nanos: 0,
+            },
+        );
+
+        // Log + commit index advanced as expected.
+        assert_eq!(shard.commit_index(), 4);
+        assert_eq!(shard.log_len(), 4);
+
+        // Final membership includes Node 3 as voter.
+        assert!(shard.membership().is_voter(NodeId(3)));
+
+        // No spurious ShardRemoved, even though intermediate configs
+        // excluded Node 3.
+        let shard_removed_count =
+            actions.iter().filter(|a| matches!(a, Action::ShardRemoved { .. })).count();
+        assert_eq!(
+            shard_removed_count, 0,
+            "catch-up through intermediate configs must not emit ShardRemoved when \
+             the final membership includes the local node"
+        );
+    }
+
+    #[test]
+    fn test_genuine_removal_still_emits_shard_removed() {
+        // Counterpart to the above: when the batch's *final* membership
+        // actually excludes the local node, ShardRemoved must still fire.
+        let clock = make_clock();
+        let mut shard = make_shard(NodeId(3), clock.clone(), make_rng(), make_membership_3());
+
+        let entries: Arc<[Entry]> = Arc::from(vec![Entry {
+            term: 1,
+            index: 1,
+            data: Arc::from(Vec::<u8>::new()),
+            kind: EntryKind::Membership(Membership::new([NodeId(1), NodeId(2)])),
+        }]);
+
+        let actions = shard.handle_message(
+            NodeId(1),
+            Message::AppendEntries {
+                term: 1,
+                leader_id: NodeId(1),
+                prev_log_index: 0,
+                prev_log_term: 0,
+                entries,
+                leader_commit: 1,
+                closed_ts_nanos: 0,
+            },
+        );
+
+        assert!(!shard.membership().is_voter(NodeId(3)));
+        assert!(!shard.membership().is_learner(NodeId(3)));
+        let shard_removed_count =
+            actions.iter().filter(|a| matches!(a, Action::ShardRemoved { .. })).count();
+        assert_eq!(
+            shard_removed_count, 1,
+            "genuine removal where the final membership excludes the local node \
+             must still emit exactly one ShardRemoved action"
+        );
     }
 
     // ── Self-removal guard ────────────────────────────────────────
