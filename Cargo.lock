@@ -1741,6 +1741,7 @@ dependencies = [
  "inferadb-ledger-types",
  "metrics",
  "metrics-exporter-dogstatsd",
+ "metrics-util",
  "moka",
  "opentelemetry",
  "opentelemetry-otlp",

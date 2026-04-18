@@ -888,6 +888,12 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         let metadata_only =
             !source_region.requires_residency() && !target_region.requires_residency();
 
+        // Capture the originating W3C `traceparent` so the saga can propagate
+        // it into downstream regional proposals (keeps distributed traces
+        // linked across the GLOBAL → regional hop).
+        let traceparent =
+            grpc_metadata.get("traceparent").and_then(|v| v.to_str().ok()).map(str::to_owned);
+
         // Build the migration saga for the orchestrator to drive.
         // The saga starts in MigrationStarted state because StartMigration
         // sets the organization status to Migrating atomically in the same
@@ -905,7 +911,8 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
                 acknowledge_residency_downgrade: req.acknowledge_residency_downgrade,
                 metadata_only,
             },
-        );
+        )
+        .with_traceparent(traceparent);
 
         let saga_key = format!("_meta:saga:{}", saga.id);
         let saga_wrapped = inferadb_ledger_state::system::Saga::MigrateOrg(saga);

@@ -98,6 +98,11 @@ dogstatsd = ["dep:metrics-exporter-dogstatsd"]
 inferadb-ledger-test-utils.workspace = true
 tracing-subscriber.workspace = true
 proptest.workspace = true
+# Used by hot_key_detector tests to assert `ledger_hot_key_nan_total`
+# increments via a scoped `DebuggingRecorder`. Already in the lock file as a
+# transitive dep of `metrics-exporter-prometheus`; pinned here for the direct
+# `metrics_util::debugging` path used in tests.
+metrics-util = "0.20"
 
 [lints]
 workspace = true

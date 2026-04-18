@@ -414,6 +414,12 @@ impl proto::user_service_server::UserService for UserService {
             .map(crate::proto_compat::organization_tier_from_proto)
             .unwrap_or(inferadb_ledger_state::system::OrganizationTier::Free);
 
+        // Capture the originating W3C `traceparent` so the saga can propagate
+        // it into downstream regional proposals (keeps distributed traces
+        // linked across the GLOBAL → regional hop).
+        let traceparent =
+            grpc_metadata.get("traceparent").and_then(|v| v.to_str().ok()).map(str::to_owned);
+
         // Create the saga for the orchestrator to drive
         let saga_id = SagaId::new(uuid::Uuid::new_v4().to_string());
         let saga = CreateUserSaga::new(
@@ -425,7 +431,8 @@ impl proto::user_service_server::UserService for UserService {
                 organization_name: req.organization_name.clone(),
                 default_org_tier,
             },
-        );
+        )
+        .with_traceparent(traceparent);
         let saga_key = format!("_meta:saga:{saga_id}");
         let saga_wrapped = Saga::CreateUser(saga);
         let saga_bytes = serde_json::to_vec(&saga_wrapped)
@@ -1252,11 +1259,18 @@ impl proto::user_service_server::UserService for UserService {
             }
         }
 
+        // Capture the originating W3C `traceparent` so the saga can propagate
+        // it into downstream regional proposals (keeps distributed traces
+        // linked across the GLOBAL → regional hop).
+        let traceparent =
+            grpc_metadata.get("traceparent").and_then(|v| v.to_str().ok()).map(str::to_owned);
+
         let saga_id = SagaId::new(uuid::Uuid::new_v4().to_string());
         let saga = MigrateUserSaga::new(
             saga_id,
             MigrateUserInput { user: user_id, source_region, target_region },
-        );
+        )
+        .with_traceparent(traceparent);
 
         let saga_key = format!("_meta:saga:{}", saga.id);
         let saga_wrapped = Saga::MigrateUser(saga);

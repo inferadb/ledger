@@ -365,7 +365,7 @@ impl std::fmt::Debug for HotKeyDetector {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::disallowed_methods, clippy::expect_used, clippy::unwrap_used)]
+    #![allow(clippy::disallowed_methods, clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
     use super::*;
 
@@ -774,5 +774,60 @@ mod tests {
         // Pull top entries — still must not panic and must be ordered.
         let top = detector.get_top_hot_keys(10);
         assert!(top.len() >= 2, "pre-injected entries should remain visible");
+    }
+
+    /// Contract test: the `cmp_or_nan` fallback path must increment the
+    /// `ledger_hot_key_nan_total` counter every time `partial_cmp` returns
+    /// `None`. Without this end-to-end metric assertion, a future refactor
+    /// could drop the `::metrics::counter!(...).increment(1)` call while
+    /// keeping the `Ordering::Equal` fallback, and the behavioural NaN tests
+    /// above would still pass — silently losing the operator signal that a
+    /// NaN has leaked into `ops_per_sec` accounting.
+    ///
+    /// We install a scoped [`DebuggingRecorder`] for the duration of the
+    /// closure (`with_local_recorder`), exercise the NaN path twice by
+    /// injecting NaN entries and calling `get_top_hot_keys`, then assert the
+    /// counter recorded at least one increment. The exact value is bounded
+    /// below — sort comparisons pair each element against multiple others,
+    /// so the concrete count depends on the sort algorithm and is not
+    /// contracted.
+    #[test]
+    fn cmp_or_nan_emits_hot_key_nan_total_metric() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            let config = test_config();
+            let detector = HotKeyDetector::new(&config);
+
+            // Mix NaN and finite rates so sort_by must compare NaN against
+            // at least one finite operand, forcing cmp_or_nan's None branch.
+            detector.inject_for_test(VaultId::new(1), "nan_key_a", f64::NAN);
+            detector.inject_for_test(VaultId::new(1), "finite_hi", 100.0);
+            detector.inject_for_test(VaultId::new(1), "nan_key_b", f64::NAN);
+            detector.inject_for_test(VaultId::new(1), "finite_lo", 1.0);
+
+            let _ = detector.get_top_hot_keys(10);
+        });
+
+        let snapshot = snapshotter.snapshot();
+        let value = snapshot.into_vec().into_iter().find_map(|(ck, _, _, value)| {
+            if ck.key().name() == HOT_KEY_NAN_TOTAL { Some(value) } else { None }
+        });
+
+        match value {
+            Some(DebugValue::Counter(n)) => assert!(
+                n >= 1,
+                "ledger_hot_key_nan_total must be incremented at least once when NaN flows \
+                 through cmp_or_nan; got {n}"
+            ),
+            Some(other) => panic!("ledger_hot_key_nan_total should be a Counter, got {other:?}"),
+            None => panic!(
+                "ledger_hot_key_nan_total counter was not recorded — either the metric name \
+                 changed or the increment call in cmp_or_nan was removed"
+            ),
+        }
     }
 }

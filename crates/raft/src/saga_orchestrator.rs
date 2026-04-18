@@ -2274,6 +2274,9 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         let saga_id = SagaId::new(uuid::Uuid::new_v4().to_string());
         let saga = CreateSigningKeySaga::new(saga_id.clone(), CreateSigningKeyInput { scope });
 
+        // Internal bootstrap path: no originating gRPC request exists, so
+        // `traceparent` stays `None`. Downstream regional proposals will
+        // create a fresh trace rooted at the orchestrator's poll cycle.
         self.save_saga(&Saga::CreateSigningKey(saga)).await?;
         info!(
             saga_id = %saga_id,
@@ -3430,6 +3433,59 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .expect("traceparent should be present");
         // The downstream span's parent trace_id matches the saga's origin.
+        let parts: Vec<&str> = injected.split('-').collect();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[1], origin_trace_id);
+    }
+
+    /// End-to-end chain: a `SagaSubmission` carrying a `traceparent` is
+    /// stamped onto the saga record (mirroring `drain_submissions`), the
+    /// record is round-tripped through the JSON encoding `save_saga` uses
+    /// for `_meta:saga:` persistence, and the persisted record produces a
+    /// `RegionalProposal` metadata map carrying the same header.
+    ///
+    /// This guards the full `submit_saga → drain_submissions → save_saga →
+    /// propose_to_region` seam without requiring real Raft or gRPC transport.
+    #[test]
+    fn submission_traceparent_flows_through_persistence_to_regional_metadata() {
+        let origin_trace_id = "4bf92f3577b34da6a3ce929d0e0e4736";
+        let tp = format!("00-{origin_trace_id}-00f067aa0ba902b7-01");
+
+        // Step 1 — service handler builds the submission with the captured
+        // gRPC `traceparent`.
+        let submission = SagaSubmission {
+            record: Saga::DeleteUser(DeleteUserSaga::new(
+                SagaId::new("e2e-trace"),
+                DeleteUserInput { user: UserId::new(42), organization_ids: vec![] },
+            )),
+            pii: None,
+            org_pii: None,
+            notify: None,
+            traceparent: Some(tp.clone()),
+        };
+
+        // Step 2 — `drain_submissions` stamps the record before persistence.
+        let mut record = submission.record;
+        if let Some(trace) = submission.traceparent.clone() {
+            record.set_traceparent(Some(trace));
+        }
+        assert_eq!(record.traceparent(), Some(tp.as_str()));
+
+        // Step 3 — `save_saga` serializes via JSON into `_meta:saga:<id>`;
+        // the round-trip mirrors a leader reload from storage.
+        let encoded = serde_json::to_vec(&record).expect("saga serializes");
+        let persisted: Saga = serde_json::from_slice(&encoded).expect("saga deserializes");
+        assert_eq!(persisted.traceparent(), Some(tp.as_str()));
+
+        // Step 4 — `propose_to_region` builds the outgoing metadata from the
+        // persisted record's trace context. The downstream `RegionalProposal`
+        // RPC carries the originating trace header end-to-end.
+        let metadata = build_regional_proposal_metadata(persisted.traceparent());
+        let injected = metadata
+            .get(crate::trace_context::TRACEPARENT_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .expect("traceparent should survive the full chain");
+        assert_eq!(injected, tp);
         let parts: Vec<&str> = injected.split('-').collect();
         assert_eq!(parts.len(), 4);
         assert_eq!(parts[1], origin_trace_id);
