@@ -1620,12 +1620,17 @@ pub struct CreateVaultRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct BlockRetentionPolicy {
-    #[prost(enumeration = "BlockRetentionMode", tag = "1")]
-    pub mode: i32,
+    /// Both fields are `optional` (proto3 optional / explicit presence) so the
+    /// wire format can distinguish "not set" from "set to zero / UNSPECIFIED".
+    /// `TryFrom<proto::BlockRetentionPolicy>` rejects messages with either field
+    /// absent instead of silently substituting defaults — a malformed client
+    /// cannot quietly configure the wrong retention policy.
+    #[prost(enumeration = "BlockRetentionMode", optional, tag = "1")]
+    pub mode: ::core::option::Option<i32>,
     /// For COMPACTED mode: blocks newer than tip - retention_blocks keep full transactions.
-    /// Ignored for FULL mode. Default: 10000 blocks.
-    #[prost(uint64, tag = "2")]
-    pub retention_blocks: u64,
+    /// Ignored for FULL mode.
+    #[prost(uint64, optional, tag = "2")]
+    pub retention_blocks: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateVaultResponse {

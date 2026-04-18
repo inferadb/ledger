@@ -66,15 +66,22 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
 
         ctx.set_organization(organization_slug_val);
 
-        // Convert proto retention policy to internal type
-        let retention_policy = req.retention_policy.map(|proto_policy| {
-            let policy = BlockRetentionPolicy::from(&proto_policy);
+        // Convert proto retention policy to internal type. Rejects messages that omit
+        // either wire-level `optional` field — see `TryFrom<&proto::BlockRetentionPolicy>`.
+        let retention_policy = req
+            .retention_policy
+            .as_ref()
+            .map(BlockRetentionPolicy::try_from)
+            .transpose()
+            .inspect_err(|status: &Status| {
+                ctx.set_error("InvalidArgument", status.message());
+            })?;
+        if let Some(policy) = retention_policy.as_ref() {
             match policy.mode {
                 BlockRetentionMode::Full => ctx.set_retention_mode("full"),
                 BlockRetentionMode::Compacted => ctx.set_retention_mode("compacted"),
             }
-            policy
-        });
+        }
 
         // Generate vault slug via Snowflake before Raft proposal
         let vault = inferadb_ledger_types::snowflake::generate_vault_slug()
@@ -390,19 +397,16 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         let vault_val = req.vault.as_ref().map_or(0, |v| v.slug);
         ctx.set_target(organization_slug_val, vault_val);
 
-        // Convert proto retention policy to domain type
-        let retention_policy = req.retention_policy.map(|p| {
-            let mode = match p.mode() {
-                inferadb_ledger_proto::proto::BlockRetentionMode::Unspecified
-                | inferadb_ledger_proto::proto::BlockRetentionMode::Full => {
-                    BlockRetentionMode::Full
-                },
-                inferadb_ledger_proto::proto::BlockRetentionMode::Compacted => {
-                    BlockRetentionMode::Compacted
-                },
-            };
-            BlockRetentionPolicy { mode, retention_blocks: p.retention_blocks }
-        });
+        // Convert proto retention policy to domain type. Rejects messages that omit
+        // either wire-level `optional` field — see `TryFrom<&proto::BlockRetentionPolicy>`.
+        let retention_policy = req
+            .retention_policy
+            .as_ref()
+            .map(BlockRetentionPolicy::try_from)
+            .transpose()
+            .inspect_err(|status: &Status| {
+                ctx.set_error("InvalidArgument", status.message());
+            })?;
 
         let ledger_request = LedgerRequest::UpdateVault {
             organization: organization_id,

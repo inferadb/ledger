@@ -15,7 +15,28 @@ use std::{
 use parking_lot::Mutex;
 
 use super::types::{CRYPTO_METADATA_SIZE, CryptoMetadata};
-use crate::error::Result;
+use crate::error::{Error, Result};
+
+/// Computes the byte offset of a page's crypto metadata in the sidecar.
+///
+/// The sidecar stores fixed-size crypto metadata at
+/// `page_id * CRYPTO_METADATA_SIZE`. Multiplication is overflow-checked;
+/// with the 64-bit compile-time guard in `backend::mod.rs` the overflow is
+/// only reachable via synthetic inputs.
+#[inline]
+fn sidecar_offset(page_id: u64) -> Result<u64> {
+    page_id
+        .checked_mul(CRYPTO_METADATA_SIZE as u64)
+        .ok_or(Error::Overflow { context: "sidecar offset: page_id * CRYPTO_METADATA_SIZE" })
+}
+
+/// Computes the exclusive end byte-offset of a page's crypto metadata.
+#[inline]
+fn sidecar_end_offset(page_id: u64) -> Result<u64> {
+    sidecar_offset(page_id)?
+        .checked_add(CRYPTO_METADATA_SIZE as u64)
+        .ok_or(Error::Overflow { context: "sidecar offset: start + CRYPTO_METADATA_SIZE" })
+}
 
 /// Sidecar storage for per-page crypto metadata.
 ///
@@ -62,12 +83,13 @@ impl CryptoSidecar {
     pub fn read(&self, page_id: u64) -> Result<Option<CryptoMetadata>> {
         match self {
             Self::File { file, .. } => {
-                let offset = page_id * CRYPTO_METADATA_SIZE as u64;
+                let offset = sidecar_offset(page_id)?;
+                let required_len = sidecar_end_offset(page_id)?;
                 let mut buf = [0u8; CRYPTO_METADATA_SIZE];
 
                 // Check file size — page may not exist yet
                 let file_len = file.metadata()?.len();
-                if offset + CRYPTO_METADATA_SIZE as u64 > file_len {
+                if required_len > file_len {
                     return Ok(None);
                 }
 
@@ -94,10 +116,10 @@ impl CryptoSidecar {
 
         match self {
             Self::File { file, .. } => {
-                let offset = page_id * CRYPTO_METADATA_SIZE as u64;
+                let offset = sidecar_offset(page_id)?;
+                let required_len = sidecar_end_offset(page_id)?;
 
                 // Extend file if needed
-                let required_len = offset + CRYPTO_METADATA_SIZE as u64;
                 let file_len = file.metadata()?.len();
                 if required_len > file_len {
                     file.set_len(required_len)?;

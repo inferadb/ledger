@@ -137,6 +137,19 @@ pub enum Error {
         /// The page whose authentication check failed.
         page_id: PageId,
     },
+
+    /// Integer overflow during offset or size arithmetic.
+    ///
+    /// The compile-time guard at the top of `backend/mod.rs` ensures
+    /// `usize` is at least 64 bits, so overflow of `page_id * page_size`
+    /// requires astronomically large page IDs (≈ 4.6 quintillion for a
+    /// 4 KiB page size). Returned rather than panicking so production
+    /// code remains unwind-free per the no-`.expect()` policy.
+    #[snafu(display("Arithmetic overflow in {context}"))]
+    Overflow {
+        /// Short identifier of the site that overflowed.
+        context: &'static str,
+    },
 }
 
 /// Automatic conversion from [`io::Error`] for ergonomic `?` usage.
@@ -213,6 +226,10 @@ mod tests {
             (
                 Error::AuthenticationFailed { page_id: 7 },
                 "Authentication failed for page 7: data may be tampered or wrong key",
+            ),
+            (
+                Error::Overflow { context: "page offset: page_id * page_size" },
+                "Arithmetic overflow in page offset: page_id * page_size",
             ),
         ];
 

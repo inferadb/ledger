@@ -1483,10 +1483,15 @@ enum BlockRetentionMode {
 }
 
 message BlockRetentionPolicy {
-  BlockRetentionMode mode = 1;
+  // Both fields are `optional` (proto3 optional / explicit presence) so the
+  // wire format can distinguish "not set" from "set to zero / UNSPECIFIED".
+  // `TryFrom<proto::BlockRetentionPolicy>` rejects messages with either field
+  // absent instead of silently substituting defaults — a malformed client
+  // cannot quietly configure the wrong retention policy.
+  optional BlockRetentionMode mode = 1;
   // For COMPACTED mode: blocks newer than tip - retention_blocks keep full transactions.
-  // Ignored for FULL mode. Default: 10000 blocks.
-  uint64 retention_blocks = 2;
+  // Ignored for FULL mode.
+  optional uint64 retention_blocks = 2;
 }
 
 message CreateVaultResponse {

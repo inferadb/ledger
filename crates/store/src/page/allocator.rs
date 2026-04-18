@@ -145,9 +145,22 @@ impl PageAllocator {
     }
 
     /// Calculates required file size in bytes for current allocation state.
-    pub fn required_file_size(&self, header_size: usize) -> u64 {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::Error::Overflow`] if
+    /// `header_size + next_page_id * page_size` would overflow a `u64`.
+    /// With the 64-bit compile-time guard in the backend module this is
+    /// only reachable via synthetic test inputs.
+    pub fn required_file_size(&self, header_size: usize) -> crate::error::Result<u64> {
+        use crate::error::Error;
         let next_page = self.next_page_id();
-        header_size as u64 + (next_page * self.page_size as u64)
+        let scaled = next_page
+            .checked_mul(self.page_size as u64)
+            .ok_or(Error::Overflow { context: "required_file_size: next_page * page_size" })?;
+        (header_size as u64)
+            .checked_add(scaled)
+            .ok_or(Error::Overflow { context: "required_file_size: header_size + scaled" })
     }
 }
 
@@ -213,7 +226,7 @@ mod tests {
         let allocator = PageAllocator::new(4096, 0);
 
         // Header only
-        assert_eq!(allocator.required_file_size(512), 512);
+        assert_eq!(allocator.required_file_size(512).unwrap(), 512);
 
         // Allocate 3 pages
         allocator.allocate();
@@ -221,7 +234,22 @@ mod tests {
         allocator.allocate();
 
         // 512 header + 3 * 4096 pages
-        assert_eq!(allocator.required_file_size(512), 512 + 3 * 4096);
+        assert_eq!(allocator.required_file_size(512).unwrap(), 512 + 3 * 4096);
+    }
+
+    /// `required_file_size` returns `Overflow` instead of wrapping when the
+    /// synthetic allocator state overflows a `u64`. The compile-time 64-bit
+    /// guard makes this unreachable from real allocation, but the check is
+    /// part of the no-silent-truncation invariant.
+    #[test]
+    fn test_required_file_size_overflow() {
+        use crate::error::Error;
+
+        let allocator = PageAllocator::new(4096, 0);
+        // Force the next_page high enough that next_page * page_size overflows.
+        allocator.set_next_page(u64::MAX);
+        let err = allocator.required_file_size(512).unwrap_err();
+        assert!(matches!(err, Error::Overflow { .. }), "expected Overflow, got {err:?}");
     }
 
     /// A double-free must not cause two separate allocations to return the same page.

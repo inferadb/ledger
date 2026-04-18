@@ -14,13 +14,20 @@
 //! This ensures there's ALWAYS one valid slot to recover from, even if a crash
 //! occurs during the header write.
 
+// Compile-time guard: page offsets rely on `usize` being wide enough to hold
+// `page_id * page_size`. On a 32-bit target this silently truncates. Building
+// for non-64-bit targets is rejected outright rather than risking disk
+// corruption from a silently-narrowed offset.
+const _: () =
+    assert!(core::mem::size_of::<usize>() >= 8, "InferaDB Ledger requires a 64-bit target");
+
 mod file;
 mod memory;
 
 pub use file::FileBackend;
 pub use memory::InMemoryBackend;
 
-use crate::error::{PageId, Result};
+use crate::error::{Error, PageId, Result};
 
 /// Default page size power: 12 (meaning 2^12 = 4KB).
 pub const DEFAULT_PAGE_SIZE_POWER: u8 = 12;
@@ -36,6 +43,43 @@ pub const MAGIC: &[u8; 8] = b"INFERADB";
 
 /// Current format version (2 = dual-slot commit).
 pub const FORMAT_VERSION: u16 = 2;
+
+/// Computes the byte offset of a page's start in the backing store.
+///
+/// The offset is `HEADER_SIZE + page_id * page_size`. Every multiplication and
+/// addition is checked; overflow returns `Error::Overflow` rather than
+/// silently truncating. With the 64-bit compile-time guard at the top of this
+/// module, overflow requires astronomically large page IDs (≈ 4.6 quintillion
+/// for a 4 KiB page size), but the check remains as a defense-in-depth
+/// against corrupt input and future page-size changes.
+///
+/// # Errors
+///
+/// Returns [`Error::Overflow`] if the computation overflows a `u64`.
+#[inline]
+pub fn page_offset(page_id: PageId, page_size: usize) -> Result<u64> {
+    let scaled = page_id
+        .checked_mul(page_size as u64)
+        .ok_or(Error::Overflow { context: "page offset: page_id * page_size" })?;
+    (HEADER_SIZE as u64)
+        .checked_add(scaled)
+        .ok_or(Error::Overflow { context: "page offset: HEADER_SIZE + scaled" })
+}
+
+/// Computes the exclusive end-byte-offset of a page.
+///
+/// Equivalent to `page_offset(page_id, page_size) + page_size`, with overflow
+/// checked on the final addition too.
+///
+/// # Errors
+///
+/// Returns [`Error::Overflow`] if the computation overflows a `u64`.
+#[inline]
+pub fn page_end_offset(page_id: PageId, page_size: usize) -> Result<u64> {
+    page_offset(page_id, page_size)?
+        .checked_add(page_size as u64)
+        .ok_or(Error::Overflow { context: "page end offset: start + page_size" })
+}
 
 /// Storage backend trait for abstracting file I/O.
 pub trait StorageBackend: Send + Sync {
@@ -94,8 +138,21 @@ pub trait StorageBackend: Send + Sync {
     fn page_size(&self) -> usize;
 
     /// Calculates the byte offset for a page ID.
-    fn page_offset(&self, page_id: PageId) -> u64 {
-        HEADER_SIZE as u64 + (page_id * self.page_size() as u64)
+    ///
+    /// Returns `Error::Overflow` if `HEADER_SIZE + page_id * page_size`
+    /// would overflow a `u64`. See [`page_offset`] for the standalone helper.
+    fn page_offset(&self, page_id: PageId) -> Result<u64> {
+        page_offset(page_id, self.page_size())
+    }
+
+    /// Calculates the exclusive end-byte-offset for a page ID.
+    ///
+    /// Equivalent to `self.page_offset(page_id) + self.page_size()`, with
+    /// overflow checked on every addition.
+    ///
+    /// Returns `Error::Overflow` if the computation would overflow a `u64`.
+    fn page_end_offset(&self, page_id: PageId) -> Result<u64> {
+        page_end_offset(page_id, self.page_size())
     }
 
     /// Re-wraps a batch of pages' crypto metadata to a target RMK version.
@@ -417,6 +474,65 @@ impl DatabaseHeader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The compile-time guard at the top of this module is always present in a
+    /// normal build (it refuses to compile on 32-bit targets). This test just
+    /// asserts the runtime invariant it encodes — if this ever fails, the
+    /// const assert would have already failed to compile.
+    #[test]
+    fn test_usize_is_at_least_64_bits() {
+        assert!(core::mem::size_of::<usize>() >= 8);
+    }
+
+    /// `page_offset` returns a checked offset and refuses to overflow silently.
+    #[test]
+    fn test_page_offset_basic_and_overflow() {
+        // Normal case — page 5 at 4 KiB pages is HEADER_SIZE + 5*4096.
+        let off = page_offset(5, 4096).expect("5 × 4096 must not overflow");
+        assert_eq!(off, HEADER_SIZE as u64 + 5 * 4096);
+
+        // Largest safe page_id at 4 KiB: u64::MAX / 4096. One past should overflow.
+        let max_safe = u64::MAX / 4096;
+        // max_safe × 4096 fits; then adding HEADER_SIZE may still overflow — both
+        // are legitimate Overflow cases. We just need to see *some* overflow.
+        let overflow = page_offset(u64::MAX, 4096);
+        assert!(
+            matches!(overflow, Err(Error::Overflow { .. })),
+            "page_offset(u64::MAX, 4096) must return Overflow, got {overflow:?}"
+        );
+        // One extra sanity check: multiplying u64::MAX by an even larger page
+        // size still traps.
+        let overflow2 = page_offset(max_safe, 65_536);
+        assert!(
+            matches!(overflow2, Err(Error::Overflow { .. })),
+            "page_offset(u64::MAX/4096, 65536) must return Overflow, got {overflow2:?}"
+        );
+    }
+
+    /// `page_end_offset` checks the trailing `+ page_size` too.
+    #[test]
+    fn test_page_end_offset_overflow() {
+        // Start with a page_id whose start fits but whose end overflows.
+        // start = HEADER_SIZE + page_id * page_size. We want start to fit in
+        // u64 but start + page_size to overflow.
+        let page_size: usize = 4096;
+        // page_id such that HEADER_SIZE + page_id * page_size = u64::MAX - 1
+        // → start + page_size overflows.
+        // page_id = (u64::MAX - 1 - HEADER_SIZE) / page_size (truncating).
+        let page_id = (u64::MAX - 1 - HEADER_SIZE as u64) / page_size as u64;
+        let start = page_offset(page_id, page_size).expect("start must fit");
+        // start + page_size should overflow (or nearly so) — verify end-offset
+        // catches it.
+        let end = page_end_offset(page_id + 1, page_size);
+        assert!(
+            matches!(end, Err(Error::Overflow { .. }))
+                || start.checked_add(page_size as u64).is_some(),
+            "expected page_end_offset to trap overflow, got {end:?}"
+        );
+        // A clearly-overflowing call must fail.
+        let overflow = page_end_offset(u64::MAX, page_size);
+        assert!(matches!(overflow, Err(Error::Overflow { .. })));
+    }
 
     #[test]
     fn test_header_round_trip() {

@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use inferadb_ledger_types::{
     BlockRetentionMode, BlockRetentionPolicy, VaultSlug, merkle::MerkleProof as InternalMerkleProof,
 };
+use tonic::Status;
 
 use crate::proto;
 
@@ -70,33 +71,47 @@ impl From<BlockRetentionMode> for proto::BlockRetentionMode {
 /// Converts a protobuf [`BlockRetentionPolicy`](proto::BlockRetentionPolicy) reference to the
 /// domain type.
 ///
-/// Unspecified mode defaults to `Full`. Zero `retention_blocks` defaults to 10,000.
-impl From<&proto::BlockRetentionPolicy> for BlockRetentionPolicy {
-    fn from(proto_policy: &proto::BlockRetentionPolicy) -> Self {
-        let mode = match proto_policy.mode() {
-            proto::BlockRetentionMode::Unspecified | proto::BlockRetentionMode::Full => {
-                BlockRetentionMode::Full
+/// Both `mode` and `retention_blocks` are wire-level `optional` (proto3 explicit presence).
+/// This conversion requires both fields: a missing `mode` or `retention_blocks` returns
+/// [`Status::invalid_argument`] rather than silently substituting a default. An `Unspecified`
+/// mode is likewise rejected — every caller must declare the retention mode explicitly.
+impl TryFrom<&proto::BlockRetentionPolicy> for BlockRetentionPolicy {
+    type Error = Status;
+
+    fn try_from(proto_policy: &proto::BlockRetentionPolicy) -> Result<Self, Self::Error> {
+        let retention_blocks = proto_policy.retention_blocks.ok_or_else(|| {
+            Status::invalid_argument("BlockRetentionPolicy missing retention_blocks")
+        })?;
+
+        let raw_mode = proto_policy
+            .mode
+            .ok_or_else(|| Status::invalid_argument("BlockRetentionPolicy missing mode"))?;
+        let proto_mode = proto::BlockRetentionMode::try_from(raw_mode).map_err(|_| {
+            Status::invalid_argument(format!("BlockRetentionPolicy has unknown mode: {raw_mode}"))
+        })?;
+        let mode = match proto_mode {
+            proto::BlockRetentionMode::Unspecified => {
+                return Err(Status::invalid_argument(
+                    "BlockRetentionPolicy mode must be specified",
+                ));
             },
+            proto::BlockRetentionMode::Full => BlockRetentionMode::Full,
             proto::BlockRetentionMode::Compacted => BlockRetentionMode::Compacted,
         };
 
-        BlockRetentionPolicy {
-            mode,
-            retention_blocks: if proto_policy.retention_blocks > 0 {
-                proto_policy.retention_blocks
-            } else {
-                10_000 // Default
-            },
-        }
+        Ok(BlockRetentionPolicy { mode, retention_blocks })
     }
 }
 
 /// Converts an owned domain [`BlockRetentionPolicy`] to its protobuf representation.
+///
+/// Both fields are always populated on the wire (`Some(..)`), reflecting the explicit-presence
+/// guarantee that `TryFrom<&proto::BlockRetentionPolicy>` enforces in the reverse direction.
 impl From<BlockRetentionPolicy> for proto::BlockRetentionPolicy {
     fn from(policy: BlockRetentionPolicy) -> Self {
         proto::BlockRetentionPolicy {
-            mode: proto::BlockRetentionMode::from(policy.mode).into(),
-            retention_blocks: policy.retention_blocks,
+            mode: Some(proto::BlockRetentionMode::from(policy.mode) as i32),
+            retention_blocks: Some(policy.retention_blocks),
         }
     }
 }

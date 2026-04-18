@@ -612,9 +612,12 @@ fn test_retention_policy_full_roundtrip() {
     use inferadb_ledger_types::{BlockRetentionMode, BlockRetentionPolicy};
     let policy = BlockRetentionPolicy { mode: BlockRetentionMode::Full, retention_blocks: 10_000 };
     let proto_policy: proto::BlockRetentionPolicy = policy.into();
-    let recovered = BlockRetentionPolicy::from(&proto_policy);
+    let recovered = BlockRetentionPolicy::try_from(&proto_policy).unwrap();
     assert_eq!(recovered.mode, BlockRetentionMode::Full);
     assert_eq!(recovered.retention_blocks, 10_000);
+    // Reverse direction must emit both fields as Some(..) — explicit-presence round-trip.
+    assert!(proto_policy.mode.is_some());
+    assert!(proto_policy.retention_blocks.is_some());
 }
 
 #[test]
@@ -623,31 +626,67 @@ fn test_retention_policy_compacted_roundtrip() {
     let policy =
         BlockRetentionPolicy { mode: BlockRetentionMode::Compacted, retention_blocks: 5_000 };
     let proto_policy: proto::BlockRetentionPolicy = policy.into();
-    let recovered = BlockRetentionPolicy::from(&proto_policy);
+    let recovered = BlockRetentionPolicy::try_from(&proto_policy).unwrap();
     assert_eq!(recovered.mode, BlockRetentionMode::Compacted);
     assert_eq!(recovered.retention_blocks, 5_000);
 }
 
 #[test]
-fn test_retention_policy_zero_blocks_defaults() {
+fn test_retention_policy_missing_retention_blocks_is_rejected() {
     use inferadb_ledger_types::BlockRetentionPolicy;
     let proto_policy = proto::BlockRetentionPolicy {
-        mode: proto::BlockRetentionMode::Full.into(),
-        retention_blocks: 0,
+        mode: Some(proto::BlockRetentionMode::Full as i32),
+        retention_blocks: None,
     };
-    let recovered = BlockRetentionPolicy::from(&proto_policy);
-    assert_eq!(recovered.retention_blocks, 10_000); // Default
+    let err = BlockRetentionPolicy::try_from(&proto_policy).unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(
+        err.message().contains("retention_blocks"),
+        "expected missing-field message, got: {}",
+        err.message()
+    );
 }
 
 #[test]
-fn test_retention_mode_unspecified_defaults_to_full() {
-    use inferadb_ledger_types::{BlockRetentionMode, BlockRetentionPolicy};
+fn test_retention_policy_missing_mode_is_rejected() {
+    use inferadb_ledger_types::BlockRetentionPolicy;
+    let proto_policy = proto::BlockRetentionPolicy { mode: None, retention_blocks: Some(10_000) };
+    let err = BlockRetentionPolicy::try_from(&proto_policy).unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(
+        err.message().contains("mode"),
+        "expected missing-field message, got: {}",
+        err.message()
+    );
+}
+
+#[test]
+fn test_retention_policy_zero_blocks_is_preserved_not_defaulted() {
+    use inferadb_ledger_types::BlockRetentionPolicy;
+    // Explicitly set retention_blocks=0 — conversion must honor the caller's value
+    // instead of silently substituting 10_000.
     let proto_policy = proto::BlockRetentionPolicy {
-        mode: proto::BlockRetentionMode::Unspecified.into(),
-        retention_blocks: 100,
+        mode: Some(proto::BlockRetentionMode::Full as i32),
+        retention_blocks: Some(0),
     };
-    let recovered = BlockRetentionPolicy::from(&proto_policy);
-    assert_eq!(recovered.mode, BlockRetentionMode::Full);
+    let recovered = BlockRetentionPolicy::try_from(&proto_policy).unwrap();
+    assert_eq!(recovered.retention_blocks, 0);
+}
+
+#[test]
+fn test_retention_mode_unspecified_is_rejected() {
+    use inferadb_ledger_types::BlockRetentionPolicy;
+    let proto_policy = proto::BlockRetentionPolicy {
+        mode: Some(proto::BlockRetentionMode::Unspecified as i32),
+        retention_blocks: Some(100),
+    };
+    let err = BlockRetentionPolicy::try_from(&proto_policy).unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(
+        err.message().contains("mode"),
+        "expected mode-specified message, got: {}",
+        err.message()
+    );
 }
 
 // -------------------------------------------------------------------------

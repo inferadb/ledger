@@ -314,16 +314,19 @@ async fn test_complete_registration_without_verify() {
         .await
         .expect_err("complete without verify should fail");
 
+    // Task 4.1 unified every onboarding-auth failure mode to
+    // `Unauthenticated: Authentication failed` — the specific shape (missing
+    // account vs. wrong token) is deliberately not leaked over the wire.
     assert_eq!(
         err.code(),
-        tonic::Code::NotFound,
-        "expected NOT_FOUND, got {:?}: {}",
+        tonic::Code::Unauthenticated,
+        "expected UNAUTHENTICATED, got {:?}: {}",
         err.code(),
         err.message()
     );
 }
 
-/// Complete registration with wrong token hash returns PERMISSION_DENIED.
+/// Complete registration with wrong token hash returns UNAUTHENTICATED.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_complete_registration_wrong_token_hash() {
     let cluster = TestCluster::new(1).await;
@@ -351,10 +354,13 @@ async fn test_complete_registration_wrong_token_hash() {
         .await
         .expect_err("wrong token hash should fail");
 
+    // Task 4.1 unified every onboarding-auth failure mode to
+    // `Unauthenticated: Authentication failed`, so a wrong token hash is
+    // indistinguishable from any other auth failure from the client's side.
     assert_eq!(
         err.code(),
-        tonic::Code::PermissionDenied,
-        "expected PERMISSION_DENIED for wrong token, got {:?}: {}",
+        tonic::Code::Unauthenticated,
+        "expected UNAUTHENTICATED for wrong token, got {:?}: {}",
         err.code(),
         err.message()
     );

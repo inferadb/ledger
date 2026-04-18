@@ -135,11 +135,12 @@ impl StorageBackend for FileBackend {
     }
 
     fn read_page(&self, page_id: PageId) -> Result<Vec<u8>> {
-        let offset = self.page_offset(page_id);
+        let offset = self.page_offset(page_id)?;
+        let required_len = self.page_end_offset(page_id)?;
 
         // Check file size without a lock — metadata() takes &self.
         let file_len = self.file.metadata()?.len();
-        if offset + self.page_size as u64 > file_len {
+        if required_len > file_len {
             // Page is beyond current file size; return zeros.
             return Ok(vec![0u8; self.page_size]);
         }
@@ -161,13 +162,13 @@ impl StorageBackend for FileBackend {
             });
         }
 
-        let offset = self.page_offset(page_id);
+        let offset = self.page_offset(page_id)?;
+        let required_len = self.page_end_offset(page_id)?;
 
         let _guard = self.write_lock.lock();
 
         // Extend file if needed.
         let file_len = self.file.metadata()?.len();
-        let required_len = offset + self.page_size as u64;
         if file_len < required_len {
             self.file.set_len(required_len)?;
         }

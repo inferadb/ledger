@@ -106,11 +106,13 @@ impl StorageBackend for InMemoryBackend {
             });
         }
 
+        // Compute the required file size before mutating state so an overflow
+        // error aborts cleanly without leaving a half-applied write.
+        let required_size = self.page_end_offset(page_id)?;
+
         self.pages.write().insert(page_id, data.to_vec());
 
         // Update simulated file size
-        let offset = self.page_offset(page_id);
-        let required_size = offset + self.page_size as u64;
         let mut file_size = self.file_size.write();
         if *file_size < required_size {
             *file_size = required_size;
