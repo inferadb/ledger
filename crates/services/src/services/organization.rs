@@ -428,6 +428,10 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             "create_organization",
             &request,
         );
+        // Capture the originating W3C `traceparent` before the request is
+        // consumed — the saga propagates it into downstream regional proposals.
+        let traceparent =
+            request.metadata().get("traceparent").and_then(|v| v.to_str().ok()).map(str::to_owned);
         let req = request.into_inner();
 
         super::helpers::extract_caller(&mut ctx, &req.caller);
@@ -511,6 +515,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
                 pii: None,
                 org_pii: Some(inferadb_ledger_raft::OrgPii { name: req.name.clone() }),
                 notify: None, // fire-and-forget — client gets slug immediately
+                traceparent,
             })
             .await
             .map_err(|e| Status::unavailable(format!("Failed to submit saga: {e}")))?;

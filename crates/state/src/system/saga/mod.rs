@@ -304,6 +304,39 @@ impl Saga {
         }
     }
 
+    /// Returns the W3C `traceparent` header value captured when the saga
+    /// was originally submitted, if any.
+    ///
+    /// Propagated into `RegionalProposal` RPCs so downstream spans link
+    /// back to the originating request span.
+    pub fn traceparent(&self) -> Option<&str> {
+        match self {
+            Saga::DeleteUser(s) => s.traceparent.as_deref(),
+            Saga::MigrateOrg(s) => s.traceparent.as_deref(),
+            Saga::MigrateUser(s) => s.traceparent.as_deref(),
+            Saga::CreateUser(s) => s.traceparent.as_deref(),
+            Saga::CreateOrganization(s) => s.traceparent.as_deref(),
+            Saga::CreateSigningKey(s) => s.traceparent.as_deref(),
+            Saga::CreateOnboardingUser(s) => s.traceparent.as_deref(),
+        }
+    }
+
+    /// Replaces the saga's `traceparent` header value.
+    ///
+    /// Used by the saga orchestrator to stamp the submission-time trace context
+    /// onto the saga record before persistence.
+    pub fn set_traceparent(&mut self, traceparent: Option<String>) {
+        match self {
+            Saga::DeleteUser(s) => s.traceparent = traceparent,
+            Saga::MigrateOrg(s) => s.traceparent = traceparent,
+            Saga::MigrateUser(s) => s.traceparent = traceparent,
+            Saga::CreateUser(s) => s.traceparent = traceparent,
+            Saga::CreateOrganization(s) => s.traceparent = traceparent,
+            Saga::CreateSigningKey(s) => s.traceparent = traceparent,
+            Saga::CreateOnboardingUser(s) => s.traceparent = traceparent,
+        }
+    }
+
     /// Returns the entity lock keys held by this saga.
     ///
     /// Used to reject concurrent sagas targeting the same entity.

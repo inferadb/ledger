@@ -1858,6 +1858,12 @@ impl proto::user_service_server::UserService for UserService {
             Status::unavailable("Saga orchestrator not ready — try again shortly")
         })?;
 
+        // Capture the originating W3C `traceparent` so the saga can propagate
+        // it into downstream regional proposals (keeps distributed traces
+        // linked across the GLOBAL → regional hop).
+        let traceparent =
+            grpc_metadata.get("traceparent").and_then(|v| v.to_str().ok()).map(str::to_owned);
+
         // Submit saga
         saga_handle
             .submit_saga(SagaSubmission {
@@ -1869,6 +1875,7 @@ impl proto::user_service_server::UserService for UserService {
                 }),
                 org_pii: None,
                 notify: Some(notify_tx),
+                traceparent,
             })
             .await
             .map_err(|e| Status::unavailable(format!("Failed to submit saga: {e}")))?;

@@ -72,6 +72,9 @@ pub struct MigrateUserSaga {
     pub retries: u8,
     /// Next retry time (for exponential backoff).
     pub next_retry_at: Option<DateTime<Utc>>,
+    /// W3C `traceparent` of the originating request, propagated into
+    /// downstream regional proposals so distributed traces stay linked.
+    pub traceparent: Option<String>,
 }
 
 impl MigrateUserSaga {
@@ -86,7 +89,15 @@ impl MigrateUserSaga {
             updated_at: now,
             retries: 0,
             next_retry_at: None,
+            traceparent: None,
         }
+    }
+
+    /// Attaches a W3C `traceparent` header value to this saga.
+    #[must_use]
+    pub fn with_traceparent(mut self, traceparent: Option<String>) -> Self {
+        self.traceparent = traceparent;
+        self
     }
 
     /// Checks if the saga is in a terminal state.
