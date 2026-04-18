@@ -757,17 +757,45 @@ impl TestCluster {
         &self.nodes
     }
 
-    /// Waits for all nodes to have the same last applied index.
+    /// Waits for all nodes to have the same applied index on GLOBAL **and**
+    /// every active data region.
+    ///
+    /// Entity writes commit through regional Raft, not GLOBAL, so a sync
+    /// helper that only checks GLOBAL can return `true` before regional
+    /// replication has finished — producing false-negative reads from
+    /// followers in tests. This helper waits for apply-level convergence
+    /// across every region the cluster owns.
+    ///
+    /// For callers that genuinely only need GLOBAL convergence (e.g.
+    /// membership-only assertions) use [`wait_for_global_sync`]. For
+    /// data-region-only convergence use [`wait_for_data_region_sync`].
     #[allow(dead_code)]
     pub async fn wait_for_sync(&self, timeout_duration: Duration) -> bool {
         timeout(timeout_duration, async {
             loop {
-                let indices: Vec<u64> = self.nodes.iter().map(|n| n.last_applied()).collect();
-
-                if !indices.is_empty() && indices.iter().all(|&i| i == indices[0] && i > 0) {
+                if self.global_synced() && self.data_regions_synced() {
                     return true;
                 }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or(false)
+    }
 
+    /// Waits for the GLOBAL Raft group to converge across all nodes.
+    ///
+    /// Narrow counterpart to [`wait_for_sync`]. Use when the assertion under
+    /// test only depends on GLOBAL state (e.g. cluster membership,
+    /// orchestrator state) and waiting for data-region convergence would
+    /// add unnecessary latency.
+    #[allow(dead_code)]
+    pub async fn wait_for_global_sync(&self, timeout_duration: Duration) -> bool {
+        timeout(timeout_duration, async {
+            loop {
+                if self.global_synced() {
+                    return true;
+                }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -777,33 +805,13 @@ impl TestCluster {
 
     /// Waits for data region Raft groups to sync across all nodes.
     ///
-    /// Checks that all nodes' data regions have the same last_applied index.
-    /// This is separate from `wait_for_sync` which only checks GLOBAL Raft.
+    /// Narrow counterpart to [`wait_for_sync`]. Prefer [`wait_for_sync`]
+    /// unless the assertion under test only depends on data-region state.
     #[allow(dead_code)]
     pub async fn wait_for_data_region_sync(&self, timeout_duration: Duration) -> bool {
-        let data_regions = &inferadb_ledger_types::ALL_REGIONS[1..];
         timeout(timeout_duration, async {
             loop {
-                let mut all_synced = true;
-                for &dr in data_regions.iter().take(self.num_data_regions) {
-                    // Compare applied index (state-machine visible) rather than
-                    // commit index: EVENTUAL reads serve from applied state, so
-                    // callers of this helper need apply-level convergence.
-                    let mut indices = Vec::new();
-                    for node in &self.nodes {
-                        if let Some(rg) = node.region_group(dr) {
-                            indices.push(*rg.applied_index_watch().borrow());
-                        }
-                    }
-                    if indices.len() < self.nodes.len()
-                        || indices.is_empty()
-                        || !indices.iter().all(|&i| i == indices[0] && i > 0)
-                    {
-                        all_synced = false;
-                        break;
-                    }
-                }
-                if all_synced {
+                if self.data_regions_synced() {
                     return true;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -811,6 +819,36 @@ impl TestCluster {
         })
         .await
         .unwrap_or(false)
+    }
+
+    /// Returns `true` when every node's GLOBAL commit index matches and is
+    /// positive.
+    fn global_synced(&self) -> bool {
+        let indices: Vec<u64> = self.nodes.iter().map(|n| n.last_applied()).collect();
+        !indices.is_empty() && indices.iter().all(|&i| i == indices[0] && i > 0)
+    }
+
+    /// Returns `true` when every data region's applied index matches across
+    /// all nodes and is positive. Compares applied (state-machine visible)
+    /// rather than commit index: EVENTUAL reads serve from applied state,
+    /// so callers need apply-level convergence.
+    fn data_regions_synced(&self) -> bool {
+        let data_regions = &inferadb_ledger_types::ALL_REGIONS[1..];
+        for &dr in data_regions.iter().take(self.num_data_regions) {
+            let mut indices = Vec::new();
+            for node in &self.nodes {
+                if let Some(rg) = node.region_group(dr) {
+                    indices.push(*rg.applied_index_watch().borrow());
+                }
+            }
+            if indices.len() < self.nodes.len()
+                || indices.is_empty()
+                || !indices.iter().all(|&i| i == indices[0] && i > 0)
+            {
+                return false;
+            }
+        }
+        true
     }
 
     /// Returns any node (convenience for single-node clusters or when
