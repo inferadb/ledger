@@ -21,6 +21,31 @@ const MAX_LIST_ERASURE_AUDITS: usize = 100_000;
 impl<B: StorageBackend> SystemOrganizationService<B> {
     /// Erases a user's PII via crypto-shredding finalization sequence.
     ///
+    /// # Scope
+    ///
+    /// This operation erases **user-level** PII only: the user record,
+    /// email records, credentials, TOTP challenges, and the per-user shred
+    /// key. It does **not** cascade to organization-level PII (app profiles,
+    /// organization profiles, teams) because:
+    ///
+    /// 1. Those records are organization-scoped, not user-scoped — deleting them during a single
+    ///    user's erasure would affect other users who share the organization.
+    /// 2. Organization-scoped cleanup runs through the separate `PurgeOrganizationRegional` system
+    ///    request, which handles `app_profile:`, `org_profile:`, team records, and assertion name
+    ///    indices atomically. That request is triggered when the organization itself is deleted,
+    ///    not when a member is erased.
+    ///
+    /// # Ownership model limitation
+    ///
+    /// The state layer does not currently track user-to-organization
+    /// membership (users have a global `role` field, not per-org roles), so
+    /// "sole admin" cascade logic cannot be expressed here. If an
+    /// organization becomes orphaned because its only admin was erased, the
+    /// operator must explicitly purge the organization via the admin API.
+    /// Extending to per-org roles is a separate RFC.
+    ///
+    /// # Sequence
+    ///
     /// Forward-only, idempotent on crash-resume. Steps:
     /// 1. Read directory entry to capture slug.
     /// 2. Mark directory entry as `Deleted`.
@@ -651,6 +676,78 @@ mod tests {
         assert!(svc.list_user_credentials(user_id, None).unwrap().is_empty());
         assert!(svc.get_user_credential(other_user, other_cred.id).unwrap().is_some());
         assert!(svc.get_totp_challenge(other_user, &[0xB0; 32]).unwrap().is_some());
+    }
+
+    /// Documents and enforces the scope boundary: user erasure must NOT
+    /// cascade to organization-scoped PII (app profiles, org profiles).
+    /// Those records belong to the organization, not the user, and are
+    /// cleaned up via `PurgeOrganizationRegional` when the org itself is
+    /// deleted. See the `erase_user` doc comment for rationale.
+    #[test]
+    fn test_erase_user_does_not_cascade_to_org_scoped_pii() {
+        use inferadb_ledger_types::AppId;
+
+        let svc = create_test_service();
+        let user_id = UserId::new(300);
+        let org_id = OrganizationId::new(301);
+        let app_id = AppId::new(302);
+
+        svc.register_user_directory(&make_directory_entry(300, 10300, Region::US_EAST_VA)).unwrap();
+        write_flat_user(&svc, &make_test_user(300, 10300, Region::US_EAST_VA));
+
+        // Write an app_profile entry for an org the user could be a member of.
+        let app_profile_key = SystemKeys::app_profile_key(org_id, app_id);
+        svc.state
+            .apply_operations(
+                SYSTEM_VAULT_ID,
+                &[Operation::SetEntity {
+                    key: app_profile_key.clone(),
+                    value: b"organizational-pii-payload".to_vec(),
+                    condition: None,
+                    expires_at: None,
+                }],
+                0,
+            )
+            .unwrap();
+
+        // Write an org_profile entry.
+        let org_profile_key = SystemKeys::organization_profile_key(org_id);
+        svc.state
+            .apply_operations(
+                SYSTEM_VAULT_ID,
+                &[Operation::SetEntity {
+                    key: org_profile_key.clone(),
+                    value: b"org-name-pii-payload".to_vec(),
+                    condition: None,
+                    expires_at: None,
+                }],
+                0,
+            )
+            .unwrap();
+
+        // Erase the user.
+        svc.erase_user(user_id, Region::US_EAST_VA, Utc::now()).unwrap();
+
+        // User-level records are gone.
+        assert!(svc.get_user(user_id).unwrap().is_none());
+        assert!(svc.get_erasure_audit(user_id).unwrap().is_some());
+
+        // Org-scoped PII remains intact — the organization continues to
+        // exist and its profile PII must not be collateral damage of a
+        // single member's erasure.
+        let app_profile =
+            svc.state.get_entity(SYSTEM_VAULT_ID, app_profile_key.as_bytes()).unwrap();
+        assert!(
+            app_profile.is_some(),
+            "user erasure must not cascade to app_profile (org-scoped PII)"
+        );
+
+        let org_profile =
+            svc.state.get_entity(SYSTEM_VAULT_ID, org_profile_key.as_bytes()).unwrap();
+        assert!(
+            org_profile.is_some(),
+            "user erasure must not cascade to org_profile (org-scoped PII)"
+        );
     }
 
     #[test]

@@ -1809,18 +1809,27 @@ impl proto::user_service_server::UserService for UserService {
                 }
             }
             found.ok_or_else(|| {
-                Status::not_found("No onboarding account found — verify email first")
+                super::auth_errors::unified_auth_error(
+                    super::auth_errors::AuthFailureReason::OnboardingRecordMissing,
+                )
             })?
         };
 
-        // Validate token hash (constant-time comparison)
+        // Validate token hash (constant-time comparison).
+        // Unified with "record missing" and "expired" so probes cannot
+        // distinguish "this email has a pending onboarding" from "wrong token"
+        // from "expired" — all three return identical responses.
         if !inferadb_ledger_types::hash_eq(&token_hash, &account.token_hash) {
-            return Err(Status::permission_denied("Invalid onboarding token"));
+            return Err(super::auth_errors::unified_auth_error(
+                super::auth_errors::AuthFailureReason::OnboardingTokenInvalid,
+            ));
         }
 
-        // Check expiration
+        // Check expiration.
         if Utc::now() > account.expires_at {
-            return Err(Status::failed_precondition("Onboarding token has expired"));
+            return Err(super::auth_errors::unified_auth_error(
+                super::auth_errors::AuthFailureReason::OnboardingTokenInvalid,
+            ));
         }
 
         // Generate slugs for the new user and organization

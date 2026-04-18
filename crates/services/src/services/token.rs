@@ -193,29 +193,37 @@ impl TokenServiceImpl {
 
         use crate::jwt::JwtError;
 
+        // All token-validation failures return a unified unauthenticated
+        // response. The specific reason is logged but not exposed, preventing
+        // attackers from probing token/key/claim state.
         match &err {
-            JwtError::Token { source, .. } => match source {
-                TokenError::Expired => Status::unauthenticated("Token expired"),
-                TokenError::InvalidSignature => Status::unauthenticated("Invalid token"),
-                TokenError::InvalidAudience { expected } => {
-                    Status::permission_denied(format!("Invalid audience: expected {expected}"))
-                },
-                TokenError::MissingClaim { claim } => {
-                    Status::invalid_argument(format!("Missing required claim: {claim}"))
-                },
-                TokenError::InvalidTokenType { expected } => {
-                    Status::invalid_argument(format!("Invalid token type: expected {expected}"))
-                },
-                TokenError::SigningKeyNotFound { .. } => Status::not_found("Signing key not found"),
-                TokenError::SigningKeyExpired { .. } => {
-                    Status::failed_precondition("Signing key expired")
-                },
+            JwtError::Token { source, .. } => {
+                use super::auth_errors::{AuthFailureReason, unified_auth_error};
+                let reason = match source {
+                    TokenError::Expired => AuthFailureReason::SigningKeyExpired,
+                    TokenError::InvalidSignature => AuthFailureReason::ClientAssertionInvalid,
+                    TokenError::InvalidAudience { .. } => AuthFailureReason::ClientAssertionInvalid,
+                    TokenError::MissingClaim { .. } => AuthFailureReason::ClientAssertionInvalid,
+                    TokenError::InvalidTokenType { .. } => {
+                        AuthFailureReason::ClientAssertionInvalid
+                    },
+                    TokenError::SigningKeyNotFound { .. } => AuthFailureReason::SigningKeyRevoked,
+                    TokenError::SigningKeyExpired { .. } => AuthFailureReason::SigningKeyExpired,
+                };
+                tracing::debug!(token_error = ?source, "JWT validation failed");
+                unified_auth_error(reason)
             },
             JwtError::Signing { .. } | JwtError::KeyEncryption | JwtError::KeyDecryption => {
-                Status::internal(err.to_string())
+                tracing::error!(error = %err, "Internal JWT error");
+                Status::internal("Internal token processing error")
             },
-            JwtError::Decoding { .. } => Status::unauthenticated("Invalid token"),
-            JwtError::StateLookup { .. } => Status::internal(err.to_string()),
+            JwtError::Decoding { .. } => super::auth_errors::unified_auth_error(
+                super::auth_errors::AuthFailureReason::ClientAssertionInvalid,
+            ),
+            JwtError::StateLookup { .. } => {
+                tracing::error!(error = %err, "State lookup failure during JWT validation");
+                Status::internal("Internal token processing error")
+            },
         }
     }
 
@@ -344,7 +352,9 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
                     match key.status {
                         SigningKeyStatus::Revoked => {
                             self.jwt_engine.evict_key(&kid);
-                            return Err(Status::unauthenticated("Signing key has been revoked"));
+                            return Err(super::auth_errors::unified_auth_error(
+                                super::auth_errors::AuthFailureReason::SigningKeyRevoked,
+                            ));
                         },
                         SigningKeyStatus::Rotated => {
                             // Check if the grace period has expired
@@ -352,8 +362,8 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
                                 && chrono::Utc::now() > valid_until
                             {
                                 self.jwt_engine.evict_key(&kid);
-                                return Err(Status::unauthenticated(
-                                    "Signing key rotation grace period expired",
+                                return Err(super::auth_errors::unified_auth_error(
+                                    super::auth_errors::AuthFailureReason::SigningKeyExpired,
                                 ));
                             }
                         },
@@ -366,7 +376,9 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
                 if let Ok(Some(key)) = sys.get_signing_key_by_kid(&kid) {
                     use inferadb_ledger_state::system::SigningKeyStatus;
                     if key.status == SigningKeyStatus::Revoked {
-                        return Err(Status::unauthenticated("Signing key has been revoked"));
+                        return Err(super::auth_errors::unified_auth_error(
+                            super::auth_errors::AuthFailureReason::SigningKeyRevoked,
+                        ));
                     }
                     if let Err(e) = self.ensure_key_cached(&key) {
                         tracing::warn!(kid = %kid, error = %e, "Failed to cache signing key during validation");
@@ -389,16 +401,24 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
             let user = sys
                 .get_user(user_id)
                 .map_err(|e| error_classify::storage_error(&e))?
-                .ok_or_else(|| Status::unauthenticated("User not found"))?;
+                .ok_or_else(|| {
+                    super::auth_errors::unified_auth_error(
+                        super::auth_errors::AuthFailureReason::UserNotFound,
+                    )
+                })?;
 
             // Defense-in-depth: reject suspended/deactivated users even if
             // TokenVersion hasn't been bumped yet.
             if user.status != inferadb_ledger_types::UserStatus::Active {
-                return Err(Status::unauthenticated("User is not active"));
+                return Err(super::auth_errors::unified_auth_error(
+                    super::auth_errors::AuthFailureReason::UserInactive,
+                ));
             }
 
             if user.version != claims.version {
-                return Err(Status::unauthenticated("Session invalidated"));
+                return Err(super::auth_errors::unified_auth_error(
+                    super::auth_errors::AuthFailureReason::SessionInvalidated,
+                ));
             }
         }
 
@@ -523,7 +543,11 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let old_token = sys
             .get_refresh_token_by_hash(&old_hash)
             .map_err(|e| error_classify::storage_error(&e))?
-            .ok_or_else(|| Status::unauthenticated("Invalid refresh token"))?;
+            .ok_or_else(|| {
+                super::auth_errors::unified_auth_error(
+                    super::auth_errors::AuthFailureReason::InvalidRefreshToken,
+                )
+            })?;
 
         // Determine the signing key scope and expected_version
         let (scope, expected_version) = match old_token.token_type {
@@ -540,7 +564,11 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
                 let user = sys
                     .get_user(user_id)
                     .map_err(|e| error_classify::storage_error(&e))?
-                    .ok_or_else(|| Status::unauthenticated("User not found"))?;
+                    .ok_or_else(|| {
+                        super::auth_errors::unified_auth_error(
+                            super::auth_errors::AuthFailureReason::UserNotFound,
+                        )
+                    })?;
                 (SigningKeyScope::Global, Some(user.version))
             },
             TokenType::VaultAccess => {
@@ -607,7 +635,11 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
                     .system_service()
                     .get_user(user_id)
                     .map_err(|e| error_classify::storage_error(&e))?
-                    .ok_or_else(|| Status::unauthenticated("User not found"))?;
+                    .ok_or_else(|| {
+                        super::auth_errors::unified_auth_error(
+                            super::auth_errors::AuthFailureReason::UserNotFound,
+                        )
+                    })?;
                 let role = match user.role {
                     UserRole::Admin => "admin",
                     UserRole::User => "user",
@@ -689,7 +721,11 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let token = sys
             .get_refresh_token_by_hash(&hash)
             .map_err(|e| error_classify::storage_error(&e))?
-            .ok_or_else(|| Status::unauthenticated("Invalid refresh token"))?;
+            .ok_or_else(|| {
+                super::auth_errors::unified_auth_error(
+                    super::auth_errors::AuthFailureReason::InvalidRefreshToken,
+                )
+            })?;
 
         // Propose RevokeTokenFamily through Raft
         let ledger_request = LedgerRequest::RevokeTokenFamily { family: token.family };
@@ -1032,35 +1068,45 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         // Parse unverified payload to extract iss (app slug) for app lookup
         let app_slug = Self::extract_issuer_from_jwt(&req.assertion_jwt)?;
 
-        // Resolve the app from the issuer claim
+        // Resolve the app from the issuer claim.
+        // All auth failures below return unified_auth_error to prevent
+        // enumeration of org/app/assertion state.
         let (resolved_org, app_id) = resolver.resolve_app(app_slug)?;
         if org_id != resolved_org {
-            return Err(Status::unauthenticated("App not found in the specified organization"));
-        }
-
-        // Load the app and verify it is enabled
-        let app = self.load_app(org_id, app_id)?;
-        if !app.enabled {
-            return Err(Status::failed_precondition("App is disabled"));
-        }
-
-        // Verify client assertion authentication is enabled for this app
-        if !app.credentials.client_assertion.enabled {
-            return Err(Status::failed_precondition(
-                "Client assertion authentication is not enabled for this app",
+            return Err(super::auth_errors::unified_auth_error(
+                super::auth_errors::AuthFailureReason::AppNotFound,
             ));
         }
 
-        // Look up the specific assertion entry by kid
+        // Load the app and verify it is enabled.
+        let app = self.load_app(org_id, app_id)?;
+        if !app.enabled {
+            return Err(super::auth_errors::unified_auth_error(
+                super::auth_errors::AuthFailureReason::AppNotFound,
+            ));
+        }
+
+        // Verify client assertion authentication is enabled for this app.
+        if !app.credentials.client_assertion.enabled {
+            return Err(super::auth_errors::unified_auth_error(
+                super::auth_errors::AuthFailureReason::ClientAssertionDisabled,
+            ));
+        }
+
+        // Look up the specific assertion entry by kid.
         let entry = self.load_assertion_entry(org_id, app_id, assertion_id)?;
 
         if !entry.enabled {
-            return Err(Status::unauthenticated("Client assertion entry is disabled"));
+            return Err(super::auth_errors::unified_auth_error(
+                super::auth_errors::AuthFailureReason::ClientAssertionDisabled,
+            ));
         }
 
-        // Check assertion entry expiry
+        // Check assertion entry expiry.
         if entry.expires_at < Utc::now() {
-            return Err(Status::unauthenticated("Client assertion entry has expired"));
+            return Err(super::auth_errors::unified_auth_error(
+                super::auth_errors::AuthFailureReason::ClientAssertionExpired,
+            ));
         }
 
         // Verify JWT signature and validate claims against the assertion's public key
@@ -1131,65 +1177,63 @@ impl TokenServiceImpl {
     /// validates the algorithm is `EdDSA`.
     ///
     /// Returns `(kid_string, ClientAssertionId)` on success.
+    ///
+    /// All parse errors collapse to a single `unified_auth_error` to prevent
+    /// probing JWT structure. The specific reason is logged via the
+    /// `unified_auth_error` helper.
     fn parse_assertion_header(token: &str) -> Result<(String, ClientAssertionId), Status> {
-        let header_part = token
-            .split('.')
-            .next()
-            .ok_or_else(|| Status::unauthenticated("Invalid assertion JWT format"))?;
+        use super::auth_errors::{AuthFailureReason, unified_auth_error};
+
+        let invalid = || unified_auth_error(AuthFailureReason::ClientAssertionInvalid);
+
+        let header_part = token.split('.').next().ok_or_else(invalid)?;
 
         let header_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(header_part)
             .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(header_part))
-            .map_err(|_| Status::unauthenticated("Invalid assertion JWT header encoding"))?;
+            .map_err(|_| invalid())?;
 
-        let header: serde_json::Value = serde_json::from_slice(&header_bytes)
-            .map_err(|_| Status::unauthenticated("Invalid assertion JWT header"))?;
+        let header: serde_json::Value =
+            serde_json::from_slice(&header_bytes).map_err(|_| invalid())?;
 
-        // Reject any algorithm other than EdDSA
-        let alg = header
-            .get("alg")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| Status::unauthenticated("Missing alg in assertion JWT header"))?;
+        // Reject any algorithm other than EdDSA.
+        let alg = header.get("alg").and_then(|v| v.as_str()).ok_or_else(invalid)?;
         if alg != "EdDSA" {
-            return Err(Status::unauthenticated("Unsupported algorithm in assertion JWT"));
+            tracing::debug!(alg, "Assertion JWT rejected: unsupported algorithm");
+            return Err(invalid());
         }
 
-        let kid_str = header
-            .get("kid")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| Status::unauthenticated("Missing kid in assertion JWT header"))?;
+        let kid_str = header.get("kid").and_then(|v| v.as_str()).ok_or_else(invalid)?;
 
-        let kid_i64: i64 = kid_str
-            .parse()
-            .map_err(|_| Status::unauthenticated("Invalid kid format in assertion JWT header"))?;
+        let kid_i64: i64 = kid_str.parse().map_err(|_| invalid())?;
 
         Ok((kid_str.to_string(), ClientAssertionId::new(kid_i64)))
     }
 
     /// Extracts the `iss` (issuer) claim from an unverified JWT payload and
-    /// parses it as an `AppSlug`.
+    /// parses it as an `AppSlug`. All parse errors collapse to a single
+    /// `unified_auth_error` response.
     fn extract_issuer_from_jwt(token: &str) -> Result<AppSlug, Status> {
+        use super::auth_errors::{AuthFailureReason, unified_auth_error};
+
+        let invalid = || unified_auth_error(AuthFailureReason::ClientAssertionInvalid);
+
         let parts: Vec<&str> = token.split('.').collect();
         if parts.len() != 3 {
-            return Err(Status::unauthenticated("Invalid assertion JWT format"));
+            return Err(invalid());
         }
 
         let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(parts[1])
             .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(parts[1]))
-            .map_err(|_| Status::unauthenticated("Invalid assertion JWT payload encoding"))?;
+            .map_err(|_| invalid())?;
 
-        let payload: serde_json::Value = serde_json::from_slice(&payload_bytes)
-            .map_err(|_| Status::unauthenticated("Invalid assertion JWT payload"))?;
+        let payload: serde_json::Value =
+            serde_json::from_slice(&payload_bytes).map_err(|_| invalid())?;
 
-        let iss = payload
-            .get("iss")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| Status::unauthenticated("Missing iss claim in assertion JWT"))?;
+        let iss = payload.get("iss").and_then(|v| v.as_str()).ok_or_else(invalid)?;
 
-        let slug_u64: u64 = iss.parse().map_err(|_| {
-            Status::unauthenticated("Invalid iss claim in assertion JWT: expected app slug")
-        })?;
+        let slug_u64: u64 = iss.parse().map_err(|_| invalid())?;
 
         Ok(AppSlug::new(slug_u64))
     }
@@ -1207,7 +1251,11 @@ impl TokenServiceImpl {
             .state
             .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
             .map_err(|e| error_classify::storage_error(&e))?
-            .ok_or_else(|| Status::unauthenticated("Unknown client assertion"))?;
+            .ok_or_else(|| {
+                super::auth_errors::unified_auth_error(
+                    super::auth_errors::AuthFailureReason::ClientAssertionUnknown,
+                )
+            })?;
 
         decode::<ClientAssertionEntry>(&entity.value)
             .map_err(|e| error_classify::serialization_error(&e))
@@ -1232,7 +1280,14 @@ impl TokenServiceImpl {
         let mut validation = Validation::new(Algorithm::EdDSA);
         validation.set_issuer(&[&expected_app_slug.value().to_string()]);
         validation.set_audience(&[ledger_issuer]);
-        validation.leeway = 30; // 30 seconds clock skew tolerance
+        // 5 seconds clock skew tolerance. Server-to-server clocks should be
+        // NTP-synchronized; a larger window allows replay near expiry.
+        validation.leeway = 5;
+        // Enforce "not before" — reject tokens whose nbf is in the future.
+        validation.validate_nbf = true;
+        // Require nbf claim presence. Without this, absent nbf bypasses the
+        // validate_nbf check entirely (jsonwebtoken treats missing nbf as valid).
+        validation.set_required_spec_claims(&["exp", "nbf", "iss", "aud"]);
 
         let token_data = jsonwebtoken::decode::<serde_json::Value>(
             token,
@@ -1373,7 +1428,10 @@ mod tests {
             location: snafu::location!(),
         };
         let status = TokenServiceImpl::jwt_error_to_status(err);
-        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        // Unified auth error: invalid audience cannot be distinguished from
+        // other JWT validation failures.
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+        assert_eq!(status.message(), "Authentication failed");
     }
 
     #[test]
@@ -1387,7 +1445,9 @@ mod tests {
             location: snafu::location!(),
         };
         let status = TokenServiceImpl::jwt_error_to_status(err);
-        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        // Unified auth error: missing claim cannot be distinguished.
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+        assert_eq!(status.message(), "Authentication failed");
     }
 
     #[test]
@@ -1439,8 +1499,9 @@ mod tests {
             location: snafu::location!(),
         };
         let status = TokenServiceImpl::jwt_error_to_status(err);
-        assert_eq!(status.code(), tonic::Code::InvalidArgument);
-        assert!(status.message().contains("access"));
+        // Unified auth error — expected token type is not leaked.
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+        assert_eq!(status.message(), "Authentication failed");
     }
 
     #[test]
@@ -1454,7 +1515,10 @@ mod tests {
             location: snafu::location!(),
         };
         let status = TokenServiceImpl::jwt_error_to_status(err);
-        assert_eq!(status.code(), tonic::Code::NotFound);
+        // Unified auth error — "signing key not found" is indistinguishable
+        // from other auth failures to prevent kid enumeration.
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+        assert_eq!(status.message(), "Authentication failed");
     }
 
     #[test]
@@ -1468,7 +1532,9 @@ mod tests {
             location: snafu::location!(),
         };
         let status = TokenServiceImpl::jwt_error_to_status(err);
-        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        // Unified auth error.
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+        assert_eq!(status.message(), "Authentication failed");
     }
 
     #[test]
@@ -1506,8 +1572,9 @@ mod tests {
         let header = serde_json::json!({ "alg": "RS256", "kid": "123" });
         let token = format!("{}.payload.signature", encode_jwt_part(&header));
         let status = TokenServiceImpl::parse_assertion_header(&token).unwrap_err();
+        // Unified auth error: the rejection reason is not leaked.
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
-        assert!(status.message().contains("Unsupported algorithm"));
+        assert_eq!(status.message(), "Authentication failed");
     }
 
     #[test]
@@ -1516,7 +1583,7 @@ mod tests {
         let token = format!("{}.payload.signature", encode_jwt_part(&header));
         let status = TokenServiceImpl::parse_assertion_header(&token).unwrap_err();
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
-        assert!(status.message().contains("Missing alg"));
+        assert_eq!(status.message(), "Authentication failed");
     }
 
     #[test]
@@ -1525,7 +1592,7 @@ mod tests {
         let token = format!("{}.payload.signature", encode_jwt_part(&header));
         let status = TokenServiceImpl::parse_assertion_header(&token).unwrap_err();
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
-        assert!(status.message().contains("Missing kid"));
+        assert_eq!(status.message(), "Authentication failed");
     }
 
     #[test]
@@ -1534,7 +1601,7 @@ mod tests {
         let token = format!("{}.payload.signature", encode_jwt_part(&header));
         let status = TokenServiceImpl::parse_assertion_header(&token).unwrap_err();
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
-        assert!(status.message().contains("Invalid kid format"));
+        assert_eq!(status.message(), "Authentication failed");
     }
 
     #[test]
@@ -1571,8 +1638,10 @@ mod tests {
         let token =
             format!("{}.{}.signature", encode_jwt_part(&header), encode_jwt_part(&payload),);
         let status = TokenServiceImpl::extract_issuer_from_jwt(&token).unwrap_err();
+        // Unified auth error: missing iss is indistinguishable from other
+        // parse failures, preventing JWT structure probing.
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
-        assert!(status.message().contains("Missing iss"));
+        assert_eq!(status.message(), "Authentication failed");
     }
 
     #[test]
@@ -1583,14 +1652,15 @@ mod tests {
             format!("{}.{}.signature", encode_jwt_part(&header), encode_jwt_part(&payload),);
         let status = TokenServiceImpl::extract_issuer_from_jwt(&token).unwrap_err();
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
-        assert!(status.message().contains("Invalid iss"));
+        assert_eq!(status.message(), "Authentication failed");
     }
 
     #[test]
     fn extract_issuer_wrong_part_count() {
         let status = TokenServiceImpl::extract_issuer_from_jwt("only.two").unwrap_err();
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
-        assert!(status.message().contains("Invalid assertion JWT format"));
+        // Unified auth error: message is generic, not structural.
+        assert_eq!(status.message(), "Authentication failed");
     }
 
     #[test]

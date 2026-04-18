@@ -17,6 +17,7 @@
 
 mod admin;
 mod app;
+pub(crate) mod auth_errors;
 mod discovery;
 pub(crate) mod error_classify;
 pub(crate) mod error_details;
