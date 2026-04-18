@@ -138,8 +138,8 @@ pub use types::{
         ReceivedInvitationInfo, ReceivedInvitationPage,
     },
     query::{
-        Entity, ListEntitiesOpts, ListRelationshipsOpts, ListResourcesOpts, Operation, PagedResult,
-        Relationship, SetCondition, VerifiedValue,
+        CheckRelationshipOutcome, Entity, ListEntitiesOpts, ListRelationshipsOpts,
+        ListResourcesOpts, Operation, PagedResult, Relationship, SetCondition, VerifiedValue,
     },
     read::{ReadConsistency, WriteSuccess},
     streaming::BlockAnnouncement,

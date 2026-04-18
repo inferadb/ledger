@@ -409,6 +409,13 @@ service ReadService {
   // Query relationships with optional filters (uses dual indexes)
   rpc ListRelationships(ListRelationshipsRequest) returns (ListRelationshipsResponse);
 
+  // Returns whether a direct relationship tuple (resource, relation, subject)
+  // exists in the vault. This is the storage-primitive existence check —
+  // it does NOT evaluate authorization policy, userset rewrites, or schema
+  // inheritance. Policy evaluation happens in the Engine layer above;
+  // Ledger only answers "is this tuple stored?"
+  rpc CheckRelationship(CheckRelationshipRequest) returns (CheckRelationshipResponse);
+
   // List distinct resources matching a type prefix
   rpc ListResources(ListResourcesRequest) returns (ListResourcesResponse);
 
@@ -596,6 +603,22 @@ message ListRelationshipsResponse {
   repeated Relationship relationships = 1;
   uint64 block_height = 2;
   string next_page_token = 3; // Opaque cursor for next page; empty if no more results
+}
+
+message CheckRelationshipRequest {
+  OrganizationSlug organization = 1;
+  VaultSlug vault = 2;
+  string resource = 3;              // Format: "type:id" (max 512 chars total)
+  string relation = 4;              // Relation name (max 64 chars)
+  string subject = 5;               // Format: "type:id" or "type:id#relation" (max 512 chars)
+  ReadConsistency consistency = 6;  // Default: EVENTUAL
+  UserSlug caller = 7;              // Auth identity of the caller
+  optional uint64 at_height = 8;    // Historical check; 0 or omit = current height
+}
+
+message CheckRelationshipResponse {
+  bool exists = 1;                  // True iff the exact tuple is present
+  uint64 checked_at_height = 2;     // Block height at which the check was evaluated
 }
 
 message ListResourcesRequest {

@@ -95,6 +95,16 @@ impl Relationship {
     }
 }
 
+/// Result of a [`LedgerClient::check_relationship`](crate::LedgerClient::check_relationship) call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct CheckRelationshipOutcome {
+    /// Whether the exact tuple was found in the vault at the evaluated height.
+    pub exists: bool,
+    /// Block height at which the check was evaluated.
+    pub checked_at_height: u64,
+}
+
 /// Options for listing entities.
 ///
 /// Builder pattern for configuring entity list queries with optional filters.

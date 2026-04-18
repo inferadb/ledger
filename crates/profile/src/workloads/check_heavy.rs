@@ -1,19 +1,14 @@
-//! check-heavy: 90% reads over a seeded relationship graph, 10% writes.
+//! check-heavy: 90% relationship existence checks, 10% relationship writes.
 //!
-//! Seeds 1,000 relationships at startup (10 resources x 10 relations x 10
-//! subjects), then cycles through them with a fixed mix. The read path stands
-//! in for the authorization-check path — the SDK does not currently expose a
-//! `check` / `check_permission` method on `LedgerClient`, so this preset falls
-//! back to reading a synthetic `check:{resource}:{relation}:{subject}` key.
-//! Occasional writes exercise the relationship-mutation path so flamegraphs
-//! still include both read-heavy and write-heavy stacks.
-//!
-//! If/when the SDK gains a first-class check method, swap the else branch to
-//! call it directly — the seed phase already lays down the relationships.
+//! Seeds 1,000 relationships at startup (10 resources × 10 relations × 10
+//! subjects), then cycles through them with a fixed 9:1 check:write mix.
+//! The check path invokes `LedgerClient::check_relationship`, the
+//! storage-primitive existence check the Engine layer hammers when serving
+//! authorization decisions.
 
 use std::time::{Duration, Instant};
 
-use inferadb_ledger_sdk::Operation;
+use inferadb_ledger_sdk::{Operation, ReadConsistency};
 
 use crate::harness::{Harness, Summary};
 
@@ -22,9 +17,6 @@ const RELATIONS: u64 = 10;
 const SUBJECTS: u64 = 10;
 
 pub async fn run(harness: &Harness, duration: Duration) -> Summary {
-    // Seed relationships. If the seed fails, reads during the measured phase
-    // will miss and return None — still a hot path worth profiling. Seed
-    // failures surface via the error counter on Summary.
     if let Err(e) = seed(harness).await {
         tracing::warn!(error = %e, "seed failed; proceeding with whatever state exists");
     }
@@ -41,7 +33,6 @@ pub async fn run(harness: &Harness, duration: Duration) -> Summary {
         let subject = format!("subject:{}", (idx / (RESOURCES * RELATIONS)) % SUBJECTS);
 
         let outcome = if idx.is_multiple_of(10) {
-            // Write path: (re-)create a relationship every 10th iter.
             let ops = vec![Operation::create_relationship(resource, relation, subject)];
             harness
                 .client
@@ -49,11 +40,19 @@ pub async fn run(harness: &Harness, duration: Duration) -> Summary {
                 .await
                 .map(|_| ())
         } else {
-            // Check fallback: read a synthetic key shaped after the tuple.
-            let key = format!("check:{resource}:{relation}:{subject}");
             harness
                 .client
-                .read(harness.user, harness.organization, Some(harness.vault), key, None, None)
+                .check_relationship(
+                    harness.user,
+                    harness.organization,
+                    harness.vault,
+                    resource,
+                    relation,
+                    subject,
+                    ReadConsistency::Eventual,
+                    None,
+                    None,
+                )
                 .await
                 .map(|_| ())
         };

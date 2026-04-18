@@ -731,6 +731,40 @@ pub struct ListRelationshipsResponse {
     pub next_page_token: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CheckRelationshipRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub vault: ::core::option::Option<VaultSlug>,
+    /// Format: "type:id" (max 512 chars total)
+    #[prost(string, tag = "3")]
+    pub resource: ::prost::alloc::string::String,
+    /// Relation name (max 64 chars)
+    #[prost(string, tag = "4")]
+    pub relation: ::prost::alloc::string::String,
+    /// Format: "type:id" or "type:id#relation" (max 512 chars)
+    #[prost(string, tag = "5")]
+    pub subject: ::prost::alloc::string::String,
+    /// Default: EVENTUAL
+    #[prost(enumeration = "ReadConsistency", tag = "6")]
+    pub consistency: i32,
+    /// Auth identity of the caller
+    #[prost(message, optional, tag = "7")]
+    pub caller: ::core::option::Option<UserSlug>,
+    /// Historical check; 0 or omit = current height
+    #[prost(uint64, optional, tag = "8")]
+    pub at_height: ::core::option::Option<u64>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CheckRelationshipResponse {
+    /// True iff the exact tuple is present
+    #[prost(bool, tag = "1")]
+    pub exists: bool,
+    /// Block height at which the check was evaluated
+    #[prost(uint64, tag = "2")]
+    pub checked_at_height: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ListResourcesRequest {
     #[prost(message, optional, tag = "1")]
     pub organization: ::core::option::Option<OrganizationSlug>,
@@ -5450,6 +5484,35 @@ pub mod read_service_client {
                 .insert(GrpcMethod::new("ledger.v1.ReadService", "ListRelationships"));
             self.inner.unary(req, path, codec).await
         }
+        /// Returns whether a direct relationship tuple (resource, relation, subject)
+        /// exists in the vault. This is the storage-primitive existence check —
+        /// it does NOT evaluate authorization policy, userset rewrites, or schema
+        /// inheritance. Policy evaluation happens in the Engine layer above;
+        /// Ledger only answers "is this tuple stored?"
+        pub async fn check_relationship(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CheckRelationshipRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CheckRelationshipResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.ReadService/CheckRelationship",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.ReadService", "CheckRelationship"));
+            self.inner.unary(req, path, codec).await
+        }
         /// List distinct resources matching a type prefix
         pub async fn list_resources(
             &mut self,
@@ -5599,6 +5662,18 @@ pub mod read_service_server {
             request: tonic::Request<super::ListRelationshipsRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ListRelationshipsResponse>,
+            tonic::Status,
+        >;
+        /// Returns whether a direct relationship tuple (resource, relation, subject)
+        /// exists in the vault. This is the storage-primitive existence check —
+        /// it does NOT evaluate authorization policy, userset rewrites, or schema
+        /// inheritance. Policy evaluation happens in the Engine layer above;
+        /// Ledger only answers "is this tuple stored?"
+        async fn check_relationship(
+            &self,
+            request: tonic::Request<super::CheckRelationshipRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CheckRelationshipResponse>,
             tonic::Status,
         >;
         /// List distinct resources matching a type prefix
@@ -6129,6 +6204,52 @@ pub mod read_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = ListRelationshipsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.ReadService/CheckRelationship" => {
+                    #[allow(non_camel_case_types)]
+                    struct CheckRelationshipSvc<T: ReadService>(pub Arc<T>);
+                    impl<
+                        T: ReadService,
+                    > tonic::server::UnaryService<super::CheckRelationshipRequest>
+                    for CheckRelationshipSvc<T> {
+                        type Response = super::CheckRelationshipResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CheckRelationshipRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ReadService>::check_relationship(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CheckRelationshipSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

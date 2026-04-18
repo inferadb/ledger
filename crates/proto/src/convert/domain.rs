@@ -1,13 +1,111 @@
 //! Domain model conversions: `Entity`, `Relationship`, `BlockRetentionMode/Policy`,
-//! `MerkleProof`, `VaultEntry`, and timestamp helpers.
+//! `MerkleProof`, `VaultEntry`, `CheckRelationship` request/response, and timestamp helpers.
 
 use chrono::{DateTime, Utc};
 use inferadb_ledger_types::{
-    BlockRetentionMode, BlockRetentionPolicy, VaultSlug, merkle::MerkleProof as InternalMerkleProof,
+    BlockRetentionMode, BlockRetentionPolicy, OrganizationSlug, UserSlug, VaultSlug,
+    merkle::MerkleProof as InternalMerkleProof,
 };
 use tonic::Status;
 
 use crate::proto;
+
+// =============================================================================
+// CheckRelationship domain types
+// =============================================================================
+
+/// Domain representation of a [`proto::CheckRelationshipRequest`].
+///
+/// Constructed from the wire type via [`TryFrom`]; holds decoded slug values and
+/// the resolved [`proto::ReadConsistency`] enum rather than the raw `i32`.
+#[derive(Debug)]
+pub struct CheckRelationshipDomainRequest {
+    /// Organization that owns the vault.
+    pub organization: OrganizationSlug,
+    /// Vault within which to check the relationship.
+    pub vault: VaultSlug,
+    /// Fully-qualified resource identifier, e.g. `"document:42"`.
+    pub resource: String,
+    /// Relation name, e.g. `"viewer"`.
+    pub relation: String,
+    /// Subject identifier, e.g. `"user:7"` or `"group:admins#member"`.
+    pub subject: String,
+    /// Read consistency level (defaults to `Eventual` when unspecified).
+    pub consistency: proto::ReadConsistency,
+    /// Auth identity of the caller.
+    pub caller: UserSlug,
+    /// If `Some`, evaluate the relationship at this historical block height.
+    pub at_height: Option<u64>,
+}
+
+/// Domain representation of a [`proto::CheckRelationshipResponse`].
+#[derive(Debug)]
+pub struct CheckRelationshipDomainResponse {
+    /// `true` iff the exact `(resource, relation, subject)` tuple is present.
+    pub exists: bool,
+    /// Block height at which the check was evaluated.
+    pub checked_at_height: u64,
+}
+
+// =============================================================================
+// CheckRelationship conversions (proto -> domain)
+// =============================================================================
+
+/// Converts a [`proto::CheckRelationshipRequest`] to the domain type.
+///
+/// Returns [`Status::invalid_argument`] if any required message field (`organization`,
+/// `vault`, `caller`) is absent. An unrecognised `consistency` value falls back to
+/// [`proto::ReadConsistency::Eventual`].
+impl TryFrom<proto::CheckRelationshipRequest> for CheckRelationshipDomainRequest {
+    type Error = Status;
+
+    fn try_from(req: proto::CheckRelationshipRequest) -> Result<Self, Self::Error> {
+        let organization = req
+            .organization
+            .ok_or_else(|| {
+                Status::invalid_argument("CheckRelationshipRequest missing organization")
+            })
+            .map(|o| OrganizationSlug::new(o.slug))?;
+
+        let vault = req
+            .vault
+            .ok_or_else(|| Status::invalid_argument("CheckRelationshipRequest missing vault"))
+            .map(|v| VaultSlug::new(v.slug))?;
+
+        let caller = req
+            .caller
+            .ok_or_else(|| Status::invalid_argument("CheckRelationshipRequest missing caller"))
+            .map(|u| UserSlug::new(u.slug))?;
+
+        let consistency = proto::ReadConsistency::try_from(req.consistency)
+            .unwrap_or(proto::ReadConsistency::Eventual);
+
+        Ok(Self {
+            organization,
+            vault,
+            resource: req.resource,
+            relation: req.relation,
+            subject: req.subject,
+            consistency,
+            caller,
+            at_height: req.at_height,
+        })
+    }
+}
+
+// =============================================================================
+// CheckRelationship conversions (domain -> proto)
+// =============================================================================
+
+/// Converts a [`CheckRelationshipDomainResponse`] to its protobuf representation.
+impl From<CheckRelationshipDomainResponse> for proto::CheckRelationshipResponse {
+    fn from(resp: CheckRelationshipDomainResponse) -> Self {
+        proto::CheckRelationshipResponse {
+            exists: resp.exists,
+            checked_at_height: resp.checked_at_height,
+        }
+    }
+}
 
 // =============================================================================
 // Entity conversions (inferadb_ledger_types::Entity -> proto::Entity)

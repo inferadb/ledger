@@ -1427,6 +1427,99 @@ fn validate_token_response_proto_to_domain_vault_access() {
     }
 }
 
+// -------------------------------------------------------------------------
+// CheckRelationship conversion tests
+// -------------------------------------------------------------------------
+
+#[test]
+fn check_relationship_request_converts_fully_populated() {
+    let proto_req = proto::CheckRelationshipRequest {
+        organization: Some(proto::OrganizationSlug { slug: 100 }),
+        vault: Some(proto::VaultSlug { slug: 200 }),
+        resource: "document:42".to_string(),
+        relation: "viewer".to_string(),
+        subject: "user:7".to_string(),
+        consistency: proto::ReadConsistency::Linearizable as i32,
+        caller: Some(proto::UserSlug { slug: 999 }),
+        at_height: Some(123),
+    };
+
+    let domain: super::CheckRelationshipDomainRequest = proto_req.try_into().unwrap();
+    assert_eq!(domain.organization.value(), 100);
+    assert_eq!(domain.vault.value(), 200);
+    assert_eq!(domain.resource, "document:42");
+    assert_eq!(domain.relation, "viewer");
+    assert_eq!(domain.subject, "user:7");
+    assert!(matches!(domain.consistency, proto::ReadConsistency::Linearizable));
+    assert_eq!(domain.caller.value(), 999);
+    assert_eq!(domain.at_height, Some(123));
+}
+
+#[test]
+fn check_relationship_request_missing_organization_rejected() {
+    let proto_req = proto::CheckRelationshipRequest {
+        organization: None,
+        vault: Some(proto::VaultSlug { slug: 1 }),
+        resource: "r".into(),
+        relation: "rel".into(),
+        subject: "s".into(),
+        consistency: proto::ReadConsistency::Eventual as i32,
+        caller: Some(proto::UserSlug { slug: 1 }),
+        at_height: None,
+    };
+    let err = super::CheckRelationshipDomainRequest::try_from(proto_req).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.to_lowercase().contains("organization"),
+        "error should mention organization: {msg}"
+    );
+}
+
+#[test]
+fn check_relationship_request_missing_vault_rejected() {
+    let proto_req = proto::CheckRelationshipRequest {
+        organization: Some(proto::OrganizationSlug { slug: 1 }),
+        vault: None,
+        resource: "r".into(),
+        relation: "rel".into(),
+        subject: "s".into(),
+        consistency: proto::ReadConsistency::Eventual as i32,
+        caller: Some(proto::UserSlug { slug: 1 }),
+        at_height: None,
+    };
+    let err = super::CheckRelationshipDomainRequest::try_from(proto_req).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.to_lowercase().contains("vault"), "error should mention vault: {msg}");
+}
+
+#[test]
+fn check_relationship_request_missing_caller_rejected() {
+    let proto_req = proto::CheckRelationshipRequest {
+        organization: Some(proto::OrganizationSlug { slug: 1 }),
+        vault: Some(proto::VaultSlug { slug: 1 }),
+        resource: "r".into(),
+        relation: "rel".into(),
+        subject: "s".into(),
+        consistency: proto::ReadConsistency::Eventual as i32,
+        caller: None,
+        at_height: None,
+    };
+    let err = super::CheckRelationshipDomainRequest::try_from(proto_req).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.to_lowercase().contains("caller") || msg.to_lowercase().contains("user"),
+        "error should mention caller/user: {msg}"
+    );
+}
+
+#[test]
+fn check_relationship_response_roundtrips() {
+    let domain = super::CheckRelationshipDomainResponse { exists: true, checked_at_height: 555 };
+    let proto_resp: proto::CheckRelationshipResponse = domain.into();
+    assert!(proto_resp.exists);
+    assert_eq!(proto_resp.checked_at_height, 555);
+}
+
 #[test]
 fn validate_token_response_missing_claims_rejected() {
     let resp = proto::ValidateTokenResponse {

@@ -880,8 +880,23 @@ mod tests {
                     },
                     InFlightStatus::Waiting(notify) => {
                         coalesced.fetch_add(1, Ordering::Relaxed);
-                        notify.notified().await;
-                        // Check that the result is now in the cache
+
+                        // Register waiter synchronously before any yield; the acquirer
+                        // inserts before releasing, so a late waiter's cache re-check
+                        // is guaranteed to see the result. See coalesced_waiter_sees_late_notify
+                        // for the deterministic regression test of this race.
+                        let notified = notify.notified();
+                        tokio::pin!(notified);
+                        notified.as_mut().enable();
+
+                        // Short-circuit: if notify_waiters() already fired, cache is populated.
+                        let check =
+                            cache.check(org(1), vault(1), "stress-client", idem_key, request_hash);
+                        if matches!(check, IdempotencyCheckResult::Duplicate(_)) {
+                            return;
+                        }
+
+                        notified.await;
                         let check =
                             cache.check(org(1), vault(1), "stress-client", idem_key, request_hash);
                         assert!(
@@ -902,5 +917,68 @@ mod tests {
         assert_eq!(total, num_tasks, "all tasks must complete");
         // At least one must have acquired
         assert!(acquired_count.load(Ordering::Relaxed) >= 1);
+    }
+
+    /// Regression test for the lost-wakeup race in the idempotency cache.
+    ///
+    /// The naive `notify.notified().await` pattern hangs when `notify_waiters()`
+    /// fires before the waiter's `Notified` future registers. This test drives
+    /// the race deterministically: it retains a notify Arc from a Waiting response,
+    /// releases the acquirer (which fires `notify_waiters()` with no registered
+    /// waiter), then runs the fixed waiter pattern against that stale Arc.
+    ///
+    /// Without the fix, this test hits the 100ms timeout. With the fix, it
+    /// completes synchronously via the pre-await cache re-check.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn coalesced_waiter_sees_late_notify() {
+        use std::time::Duration;
+
+        let cache = Arc::new(IdempotencyCache::new());
+        let idem_key = [0xEE; 16];
+        let request_hash = 77777u64;
+        let result = make_result(300, 11);
+
+        let key = IdempotencyKey::new(org(1), vault(1), "late-notify-client", idem_key);
+
+        // First call acquires the slot; second call on the same key returns
+        // Waiting, giving us an Arc<Notify> to drive the lost-wakeup race against.
+        let guard = match cache.try_acquire_inflight(key.clone()) {
+            InFlightStatus::Acquired(g) => g,
+            _ => panic!("expected Acquired on first call"),
+        };
+        let notify = match cache.try_acquire_inflight(key) {
+            InFlightStatus::Waiting(n) => n,
+            _ => panic!("expected Waiting on second call"),
+        };
+
+        // Populate the cache, then release — fires notify_waiters() with no waiter.
+        cache.insert(org(1), vault(1), "late-notify-client", idem_key, request_hash, result);
+        guard.release();
+
+        // Apply the fixed waiter pattern against the (now stale) notify Arc.
+        // Wrap in a 100ms timeout: without the fix, notified().await hangs forever.
+        let outcome = tokio::time::timeout(Duration::from_millis(100), async {
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            // Short-circuit: cache is already populated, no need to await.
+            match cache.check(org(1), vault(1), "late-notify-client", idem_key, request_hash) {
+                IdempotencyCheckResult::Duplicate(_) => "short_circuit",
+                IdempotencyCheckResult::KeyReused => panic!("unexpected KeyReused"),
+                IdempotencyCheckResult::NewRequest => {
+                    notified.await;
+                    "awaited"
+                },
+            }
+        })
+        .await;
+
+        match outcome {
+            Ok("short_circuit") => {},
+            Ok("awaited") => panic!("expected short-circuit path, got awaited path"),
+            Ok(other) => panic!("unexpected path: {other}"),
+            Err(_) => panic!("lost wakeup: waiter timed out — the fix is not applied"),
+        }
     }
 }

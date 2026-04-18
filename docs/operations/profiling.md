@@ -136,9 +136,12 @@ for structural analysis, not absolute-throughput measurements.
 - `throughput-writes` — tight write loop, 10k-entry key-space, exercises the
   update path.
 - `mixed-rw` — 70/30 writes-to-reads against a pre-seeded vault.
-- `check-heavy` — 90% read-path lookups simulating authorization checks
-  (pending an SDK `check()` method), 10% relationship writes against a
-  pre-seeded relationship set.
+- `check-heavy` — 90% `CheckRelationship` RPC calls against a 1,000-tuple
+  pre-seeded relationship set (10 resources × 10 relations × 10 subjects),
+  10% relationship writes. Exercises the storage-primitive existence check
+  the Engine layer calls into when serving authorization decisions. The
+  right target for read-path latency, slug resolution, validation, and
+  state-layer lookup regressions.
 
 All workloads use fixed concurrency and fixed key-space size so the flame
 graph shape is stable across runs.

@@ -293,6 +293,31 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for MockRead
         }))
     }
 
+    async fn check_relationship(
+        &self,
+        request: Request<proto::CheckRelationshipRequest>,
+    ) -> Result<Response<proto::CheckRelationshipResponse>, Status> {
+        self.state.check_injection().await?;
+
+        self.state.read_count.fetch_add(1, Ordering::SeqCst);
+
+        let req = request.into_inner();
+        let organization = OrganizationSlug::new(req.organization.map_or(0, |n| n.slug));
+        let vault = VaultSlug::new(req.vault.map_or(0, |v| v.slug));
+
+        let relationships = self.state.relationships.read();
+        let exists = relationships.get(&(organization, vault)).is_some_and(|rels| {
+            rels.iter().any(|r| {
+                r.resource == req.resource && r.relation == req.relation && r.subject == req.subject
+            })
+        });
+
+        Ok(Response::new(proto::CheckRelationshipResponse {
+            exists,
+            checked_at_height: self.state.block_height.load(Ordering::SeqCst),
+        }))
+    }
+
     async fn list_resources(
         &self,
         request: Request<proto::ListResourcesRequest>,

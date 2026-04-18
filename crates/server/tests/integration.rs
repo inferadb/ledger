@@ -11,6 +11,7 @@ mod turmoil_common;
 mod backup_restore;
 mod bootstrap_coordination;
 mod chaos_consistency;
+mod check_relationship;
 mod design_compliance;
 mod election;
 mod externalized_state;

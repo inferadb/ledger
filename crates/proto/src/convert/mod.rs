@@ -38,7 +38,8 @@ pub use credentials::{
     totp_algorithm_from_i32, user_credential_to_proto, validate_credential_info_type,
 };
 pub use domain::{
-    datetime_to_proto_timestamp, proto_timestamp_to_datetime, vault_entry_to_proto_block,
+    CheckRelationshipDomainRequest, CheckRelationshipDomainResponse, datetime_to_proto_timestamp,
+    proto_timestamp_to_datetime, vault_entry_to_proto_block,
 };
 pub use statuses::{
     invitation_status_from_i32, region_from_i32, signing_key_scope_from_i32, user_role_from_i32,

@@ -57,7 +57,7 @@ pub use snapshot::{
     Snapshot, SnapshotChainParams, SnapshotError, SnapshotManager, SnapshotStateData,
     VaultSnapshotMeta,
 };
-pub use state::{StateError, StateLayer};
+pub use state::{CheckRelationshipOutcome, StateError, StateLayer};
 pub use tiered_storage::{
     LocalBackend, ObjectStorageBackend, StorageBackend, StorageTier, TieredSnapshotManager,
     TieredStorageConfig, TieredStorageError,

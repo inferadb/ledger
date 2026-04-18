@@ -31,14 +31,17 @@ use std::{
 
 use futures::StreamExt;
 use inferadb_ledger_proto::{
-    convert::vault_entry_to_proto_block,
+    convert::{
+        CheckRelationshipDomainRequest, CheckRelationshipDomainResponse, vault_entry_to_proto_block,
+    },
     proto::{
-        BlockAnnouncement, GetBlockRangeRequest, GetBlockRangeResponse, GetBlockRequest,
-        GetBlockResponse, GetClientStateRequest, GetClientStateResponse, GetTipRequest,
-        GetTipResponse, HistoricalReadRequest, HistoricalReadResponse, ListEntitiesRequest,
-        ListEntitiesResponse, ListRelationshipsRequest, ListRelationshipsResponse,
-        ListResourcesRequest, ListResourcesResponse, ReadConsistency, ReadRequest, ReadResponse,
-        VerifiedReadRequest, VerifiedReadResponse, WatchBlocksRequest,
+        BlockAnnouncement, CheckRelationshipRequest, CheckRelationshipResponse,
+        GetBlockRangeRequest, GetBlockRangeResponse, GetBlockRequest, GetBlockResponse,
+        GetClientStateRequest, GetClientStateResponse, GetTipRequest, GetTipResponse,
+        HistoricalReadRequest, HistoricalReadResponse, ListEntitiesRequest, ListEntitiesResponse,
+        ListRelationshipsRequest, ListRelationshipsResponse, ListResourcesRequest,
+        ListResourcesResponse, ReadConsistency, ReadRequest, ReadResponse, VerifiedReadRequest,
+        VerifiedReadResponse, WatchBlocksRequest,
     },
 };
 use inferadb_ledger_raft::{
@@ -58,6 +61,7 @@ use tracing::{debug, warn};
 
 use super::{
     helpers::storage_err,
+    metadata::{response_with_correlation, status_with_correlation},
     region_resolver::{RegionContext, RegionResolver, ResolveResult},
     slug_resolver::SlugResolver,
 };
@@ -87,6 +91,42 @@ fn parse_relationship_cursor(cursor: &str) -> Option<inferadb_ledger_types::Rela
     let relation = &cursor[hash_pos + 1..at_pos];
     let subject = &cursor[at_pos + 1..];
     Some(inferadb_ledger_types::Relationship::new(resource, relation, subject))
+}
+
+/// Validates a `(resource, relation, subject)` triple against a
+/// [`ValidationConfig`](inferadb_ledger_types::config::ValidationConfig).
+///
+/// Returns `Status::invalid_argument` (carrying structured `ErrorDetails` via
+/// `build_error_details`) on the first field that fails the character
+/// whitelist, length bound, or non-empty check. Lives as a free function so
+/// the tests module can exercise it without assembling a full `ReadService`.
+fn validate_relationship_triple(
+    resource: &str,
+    relation: &str,
+    subject: &str,
+    config: &inferadb_ledger_types::config::ValidationConfig,
+) -> Result<(), Status> {
+    use inferadb_ledger_types::validation;
+    for (value, field) in [(resource, "resource"), (relation, "relation"), (subject, "subject")] {
+        if let Err(err) = validation::validate_relationship_string(value, field, config) {
+            let mut context = std::collections::HashMap::new();
+            context.insert("field".to_owned(), field.to_owned());
+            let details = super::error_details::build_error_details(
+                inferadb_ledger_types::DiagnosticCode::AppInvalidArgument.as_u16(),
+                false,
+                None,
+                context,
+                Some(inferadb_ledger_types::DiagnosticCode::AppInvalidArgument.suggested_action()),
+            );
+            let encoded = prost::Message::encode_to_vec(&details);
+            return Err(Status::with_details(
+                tonic::Code::InvalidArgument,
+                err.to_string(),
+                encoded.into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// gRPC handler for read operations.
@@ -127,6 +167,12 @@ pub struct ReadService {
     /// Used by read forwarding to resolve the leader's address.
     #[builder(default)]
     peer_addresses: Option<inferadb_ledger_raft::PeerAddressMap>,
+    /// Input validation configuration for request field limits.
+    ///
+    /// Currently consumed by the `check_relationship` handler to validate the
+    /// user-supplied `resource`, `relation`, and `subject` strings.
+    #[builder(default = Arc::new(inferadb_ledger_types::config::ValidationConfig::default()))]
+    validation_config: Arc<inferadb_ledger_types::config::ValidationConfig>,
 }
 
 /// RAII guard that decrements the active stream counter on drop.
@@ -183,6 +229,36 @@ impl ReadService {
     ) -> Result<(OrganizationId, VaultId, RegionContext), Status> {
         super::helpers::ensure_global_consistency(self.manager.as_deref()).await;
         self.resolve_org_vault(organization, vault)
+    }
+
+    /// Attaches input validation configuration for request field limits.
+    ///
+    /// Used by [`check_relationship`](Self::check_relationship) to enforce the
+    /// relationship-string character whitelist and length bound on the
+    /// user-supplied `resource`, `relation`, and `subject`.
+    #[must_use]
+    pub fn with_validation_config(
+        mut self,
+        config: Arc<inferadb_ledger_types::config::ValidationConfig>,
+    ) -> Self {
+        self.validation_config = config;
+        self
+    }
+
+    /// Validates `resource`, `relation`, and `subject` against the attached
+    /// [`ValidationConfig`](inferadb_ledger_types::config::ValidationConfig).
+    ///
+    /// Returns `Status::invalid_argument` on the first field that fails the
+    /// character whitelist, length bound, or non-empty check. The returned
+    /// status carries structured [`ErrorDetails`] via `build_error_details`
+    /// with `ErrorCode::InvalidArgument`.
+    fn validate_relationship_triple(
+        &self,
+        resource: &str,
+        relation: &str,
+        subject: &str,
+    ) -> Result<(), Status> {
+        validate_relationship_triple(resource, relation, subject, &self.validation_config)
     }
 
     /// Checks if this node is the current Raft leader for the given region context.
@@ -1831,6 +1907,191 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         }))
     }
 
+    /// Checks whether the exact `(resource, relation, subject)` relationship
+    /// tuple exists in the given vault.
+    ///
+    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
+    /// User-supplied `resource`, `relation`, and `subject` are validated against
+    /// the configured `ValidationConfig`. On followers, `Linearizable`
+    /// consistency executes the ReadIndex protocol; other levels serve locally.
+    ///
+    /// Note: historical `at_height` checks are not yet supported at the state
+    /// layer; the check always runs against current committed state. The
+    /// response's `checked_at_height` reflects the vault's current applied
+    /// block height, sourced from the same mechanism `list_relationships`
+    /// uses (`AppliedStateAccessor::vault_height`).
+    async fn check_relationship(
+        &self,
+        request: Request<CheckRelationshipRequest>,
+    ) -> Result<Response<CheckRelationshipResponse>, Status> {
+        // Build unified request context before consuming the request body.
+        // from_request extracts transport metadata and trace context from gRPC headers.
+        let grpc_deadline = inferadb_ledger_raft::deadline::extract_deadline(&request);
+        let mut ctx =
+            RequestContext::from_request("ReadService", "check_relationship", &request, None);
+        ctx.set_operation_type(OperationType::Read);
+        if let Some(sampler) = &self.sampler {
+            ctx.set_sampler(sampler.clone());
+        }
+        if let Some(node_id) = &self.node_id {
+            ctx.set_node_id(*node_id);
+        }
+
+        // Convert proto → domain. This also validates that organization, vault,
+        // and caller messages are present.
+        let req = request.into_inner();
+        let domain: CheckRelationshipDomainRequest = req.try_into().map_err(|e: Status| {
+            ctx.set_error("invalid_argument", e.message());
+            status_with_correlation(e, &ctx.request_id(), ctx.trace_id())
+        })?;
+
+        // Cross-region forwarding: if the organization lives on a remote region,
+        // redirect the client rather than proxying the RPC. Only sagas forward.
+        if self.resolver.supports_forwarding() {
+            let system = self.resolver.system_region().map_err(|e| {
+                ctx.set_error("system_region", e.message());
+                status_with_correlation(e, &ctx.request_id(), ctx.trace_id())
+            })?;
+            let organization_id = SlugResolver::new(system.applied_state)
+                .resolve(domain.organization)
+                .map_err(|e| {
+                    ctx.set_error("slug_resolve", e.message());
+                    status_with_correlation(e, &ctx.request_id(), ctx.trace_id())
+                })?;
+            if let ResolveResult::Redirect(remote) =
+                self.resolver.resolve_with_redirect(organization_id).map_err(|e| {
+                    ctx.set_error("resolve_with_redirect", e.message());
+                    status_with_correlation(e, &ctx.request_id(), ctx.trace_id())
+                })?
+            {
+                return Err(status_with_correlation(
+                    super::metadata::not_leader_remote_region(
+                        &remote,
+                        "Organization hosted by a remote region; reconnect to that region",
+                    ),
+                    &ctx.request_id(),
+                    ctx.trace_id(),
+                ));
+            }
+        }
+
+        // Resolve organization + vault slugs to internal IDs and locate the
+        // region context. Mirrors the resolve_org_vault_consistent pattern
+        // used by `read` and `list_relationships`.
+        super::helpers::ensure_global_consistency(self.manager.as_deref()).await;
+        let system = self.resolver.system_region().map_err(|e| {
+            ctx.set_error("system_region", e.message());
+            status_with_correlation(e, &ctx.request_id(), ctx.trace_id())
+        })?;
+        let organization_id = SlugResolver::new(system.applied_state.clone())
+            .resolve(domain.organization)
+            .map_err(|e| {
+                ctx.set_error("slug_resolve", e.message());
+                status_with_correlation(e, &ctx.request_id(), ctx.trace_id())
+            })?;
+        let region = self.resolver.resolve(organization_id).map_err(|e| {
+            ctx.set_error("resolve_region", e.message());
+            status_with_correlation(e, &ctx.request_id(), ctx.trace_id())
+        })?;
+        // Vault slug indexes are in GLOBAL applied state, not the data region's.
+        let vault_id =
+            SlugResolver::new(system.applied_state).resolve_vault(domain.vault).map_err(|e| {
+                ctx.set_error("slug_resolve_vault", e.message());
+                status_with_correlation(e, &ctx.request_id(), ctx.trace_id())
+            })?;
+
+        // Populate canonical log line with caller + target identity.
+        ctx.set_caller(domain.caller.value());
+        ctx.set_target(domain.organization.value(), domain.vault.value());
+
+        // Validate resource/relation/subject against character whitelist and
+        // length bounds from ValidationConfig.
+        if let Err(status) =
+            self.validate_relationship_triple(&domain.resource, &domain.relation, &domain.subject)
+        {
+            ctx.set_error("invalid_argument", status.message());
+            return Err(status_with_correlation(status, &ctx.request_id(), ctx.trace_id()));
+        }
+
+        // Record the probed tuple on the canonical log line's `key` field in
+        // the same `{resource}#{relation}@{subject}` shape that
+        // `list_relationships` uses for cursor encoding, so log-tail tools can
+        // parse both surfaces identically.
+        let tuple_key = format!("{}#{}@{}", domain.resource, domain.relation, domain.subject);
+        ctx.set_key(&tuple_key);
+
+        let consistency = match domain.consistency {
+            ReadConsistency::Linearizable => "linearizable",
+            _ => "eventual",
+        };
+        ctx.set_consistency(consistency);
+        ctx.set_include_proof(false);
+        if let Some(h) = domain.at_height {
+            ctx.set_at_height(h);
+        }
+
+        // Enforce consistency. On followers + Linearizable, this blocks on
+        // ReadIndex; on leaders, it's a lease check; on Eventual, a no-op.
+        if let Err(e) =
+            self.resolve_read_consistency(&region, domain.consistency as i32, grpc_deadline).await
+        {
+            ctx.set_error("consistency_error", e.message());
+            return Err(status_with_correlation(e, &ctx.request_id(), ctx.trace_id()));
+        }
+
+        // Reject reads against diverged vaults.
+        let health = region.applied_state.vault_health(organization_id, vault_id);
+        if let VaultHealthStatus::Diverged { at_height, .. } = &health {
+            let msg = format!(
+                "Vault {}:{} has diverged at height {}",
+                organization_id, vault_id, at_height
+            );
+            ctx.set_error("vault_diverged", &msg);
+            return Err(status_with_correlation(
+                Status::unavailable(msg),
+                &ctx.request_id(),
+                ctx.trace_id(),
+            ));
+        }
+
+        ctx.start_storage_timer();
+        let outcome = region
+            .state
+            .relationship_exists(
+                vault_id,
+                &domain.resource,
+                &domain.relation,
+                &domain.subject,
+                domain.at_height,
+            )
+            .map_err(|e| {
+                ctx.end_storage_timer();
+                let status = storage_err(&e);
+                ctx.set_error("storage_error", status.message());
+                status_with_correlation(status, &ctx.request_id(), ctx.trace_id())
+            })?;
+        ctx.end_storage_timer();
+
+        // Source the current applied block height the same way `list_relationships`
+        // does — the state layer currently reports `outcome.checked_at_height` as
+        // `0` (no persisted height counter), so we override with the region's
+        // applied height to produce a meaningful response field.
+        let block_height = region.applied_state.vault_height(organization_id, vault_id);
+        ctx.set_block_height(block_height);
+        ctx.set_found(outcome.exists);
+
+        metrics::record_organization_operation(organization_id, "check_relationship");
+        let elapsed = ctx.elapsed_secs();
+        metrics::record_organization_latency(organization_id, "check_relationship", elapsed);
+        ctx.set_success();
+
+        let response = CheckRelationshipResponse::from(CheckRelationshipDomainResponse {
+            exists: outcome.exists,
+            checked_at_height: block_height,
+        });
+        Ok(response_with_correlation(response, &ctx.request_id(), ctx.trace_id()))
+    }
+
     /// Lists distinct resource identifiers in a vault, optionally filtered by resource type.
     ///
     /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
@@ -2177,5 +2438,56 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
         assert!(status.message().contains("500ms"), "message: {}", status.message());
         assert!(status.message().contains("ReadIndex timed out"));
+    }
+
+    // ── check_relationship validation ───────────────────────────────────────
+    //
+    // These tests exercise the validation helper used by the
+    // `check_relationship` handler. Full end-to-end handler coverage lives in
+    // the server integration binary (`crates/server/tests/integration.rs`)
+    // alongside sibling RPC tests; this module follows the sibling-handler
+    // test style (pure-function coverage here, handler coverage in the server
+    // integration binary).
+
+    #[test]
+    fn check_relationship_accepts_valid_triple() {
+        let config = inferadb_ledger_types::config::ValidationConfig::default();
+        let result = validate_relationship_triple("doc:1", "viewer", "user:42", &config);
+        assert!(result.is_ok(), "expected valid triple to pass, got {result:?}");
+    }
+
+    #[test]
+    fn check_relationship_rejects_oversize_subject_with_invalid_argument() {
+        let config = inferadb_ledger_types::config::ValidationConfig::default();
+        // Default max is 1024 bytes; 2 + 1024 = 1026 bytes trips the bound.
+        let subject = format!("u:{}", "x".repeat(1024));
+        assert!(subject.len() > config.max_relationship_string_bytes);
+
+        let result = validate_relationship_triple("doc:1", "viewer", &subject, &config);
+        let err = result.expect_err("oversize subject should fail validation");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("exceeds maximum"), "message: {}", err.message());
+        // ErrorDetails is attached via build_error_details.
+        assert!(!err.details().is_empty(), "ErrorDetails should be present");
+    }
+
+    #[test]
+    fn check_relationship_rejects_empty_resource() {
+        let config = inferadb_ledger_types::config::ValidationConfig::default();
+        let result = validate_relationship_triple("", "viewer", "user:42", &config);
+        let err = result.expect_err("empty resource should fail validation");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("resource"), "message: {}", err.message());
+    }
+
+    #[test]
+    fn check_relationship_rejects_invalid_char_in_relation() {
+        let config = inferadb_ledger_types::config::ValidationConfig::default();
+        // Spaces are not in the [a-zA-Z0-9:/_.-#] whitelist.
+        let result = validate_relationship_triple("doc:1", "has viewer", "user:42", &config);
+        let err = result.expect_err("invalid character should fail validation");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("invalid character"), "message: {}", err.message());
+        assert!(err.message().contains("relation"), "message: {}", err.message());
     }
 }
