@@ -186,13 +186,7 @@ impl<B: StorageBackend + 'static> IntegrityScrubberJob<B> {
     /// Updates the watchdog heartbeat timestamp.
     fn heartbeat(&self) {
         if let Some(ref handle) = self.watchdog_handle {
-            handle.store(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0),
-                Ordering::Relaxed,
-            );
+            handle.store(crate::graceful_shutdown::watchdog_now_nanos(), Ordering::Relaxed);
         }
     }
 

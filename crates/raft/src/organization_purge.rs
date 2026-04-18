@@ -301,10 +301,7 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
         // Update watchdog heartbeat
         if let Some(ref handle) = self.watchdog_handle {
             handle.store(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
+                crate::graceful_shutdown::watchdog_now_nanos(),
                 std::sync::atomic::Ordering::Release,
             );
         }

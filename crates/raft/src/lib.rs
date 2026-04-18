@@ -169,7 +169,9 @@ pub use dogstatsd::{DogStatsdError, init_dogstatsd};
 #[doc(hidden)]
 pub use events_gc::EventsGarbageCollector;
 #[doc(hidden)]
-pub use graceful_shutdown::{BackgroundJobWatchdog, GracefulShutdown, HealthState};
+pub use graceful_shutdown::{
+    BackgroundJobWatchdog, GracefulShutdown, HealthState, watchdog_now_nanos,
+};
 #[doc(hidden)]
 pub use hot_key_detector::HotKeyDetector;
 #[doc(hidden)]

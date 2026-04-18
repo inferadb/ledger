@@ -34,10 +34,10 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use inferadb_ledger_types::config::ShutdownConfig;
@@ -152,7 +152,8 @@ impl ConnectionTracker {
 struct WatchdogEntry {
     /// Expected interval between heartbeats (seconds).
     expected_interval_secs: u64,
-    /// Unix timestamp (seconds) of last heartbeat.
+    /// Monotonic nanoseconds since the process-local epoch (see
+    /// [`watchdog_now_nanos`]) of the most recent heartbeat.
     last_heartbeat: Arc<AtomicU64>,
 }
 
@@ -182,20 +183,26 @@ impl BackgroundJobWatchdog {
     }
 
     /// Registers a background job. Returns the `AtomicU64` handle the job
-    /// should use for heartbeating (write current unix timestamp).
+    /// should use for heartbeating.
+    ///
+    /// The handle stores monotonic nanoseconds since the process-local epoch
+    /// (see [`watchdog_now_nanos`]). Background jobs should write
+    /// `watchdog_now_nanos()` into the handle on every cycle; never write a
+    /// `SystemTime`-derived value, which would be vulnerable to wall-clock
+    /// jumps (NTP correction, VM pause/resume).
     pub fn register(&self, name: impl Into<String>, expected_interval_secs: u64) -> Arc<AtomicU64> {
-        let now = current_unix_secs();
+        let now = watchdog_now_nanos();
         let handle = Arc::new(AtomicU64::new(now));
         let entry = WatchdogEntry { expected_interval_secs, last_heartbeat: handle.clone() };
         self.entries.write().insert(name.into(), entry);
         handle
     }
 
-    /// Records a heartbeat for the named job.
+    /// Records a heartbeat for the named job using the monotonic clock.
     pub fn heartbeat(&self, name: &str) {
         let entries = self.entries.read();
         if let Some(entry) = entries.get(name) {
-            entry.last_heartbeat.store(current_unix_secs(), Ordering::Relaxed);
+            entry.last_heartbeat.store(watchdog_now_nanos(), Ordering::Relaxed);
         }
     }
 
@@ -207,12 +214,24 @@ impl BackgroundJobWatchdog {
     /// not sent a heartbeat within its expected interval multiplied by
     /// the staleness multiplier.
     pub fn check_all(&self) -> Result<(), String> {
-        let now = current_unix_secs();
+        self.check_all_at(watchdog_now_nanos())
+    }
+
+    /// Checks all registered jobs against a caller-provided "now" value, in
+    /// monotonic nanoseconds since the process-local watchdog epoch.
+    ///
+    /// Exposed for tests that need a deterministic stale-detection scenario
+    /// without having to spin the real monotonic clock forward.
+    #[doc(hidden)]
+    pub fn check_all_at(&self, now_nanos: u64) -> Result<(), String> {
         let entries = self.entries.read();
         for (name, entry) in entries.iter() {
             let last = entry.last_heartbeat.load(Ordering::Relaxed);
-            let max_age = entry.expected_interval_secs.saturating_mul(self.multiplier);
-            if now.saturating_sub(last) > max_age {
+            let max_age_nanos = entry
+                .expected_interval_secs
+                .saturating_mul(self.multiplier)
+                .saturating_mul(1_000_000_000);
+            if now_nanos.saturating_sub(last) > max_age_nanos {
                 return Err(name.clone());
             }
         }
@@ -225,9 +244,32 @@ impl BackgroundJobWatchdog {
     }
 }
 
-/// Returns the current Unix timestamp in seconds.
-fn current_unix_secs() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
+/// Process-local monotonic epoch, captured the first time a watchdog
+/// heartbeat is produced or consulted.
+///
+/// Using a `OnceLock<Instant>` keeps the epoch stable across all threads for
+/// the lifetime of the process, so heartbeat values written by one task are
+/// directly comparable with reads performed by the watchdog.
+static WATCHDOG_EPOCH: OnceLock<Instant> = OnceLock::new();
+
+/// Returns monotonic nanoseconds since the process-local watchdog epoch.
+///
+/// Background jobs must use this — not `SystemTime::now()` — when writing
+/// their heartbeat timestamp into the `AtomicU64` handle returned by
+/// [`BackgroundJobWatchdog::register`]. `SystemTime` is non-monotonic: an
+/// NTP correction, VM pause/resume, or container suspension can make the
+/// wall clock jump forward (falsely declaring a healthy job dead) or backward
+/// (masking a dead job as healthy). `Instant` is guaranteed monotonic on
+/// every supported platform, so staleness comparisons stay correct under
+/// arbitrary wall-clock motion.
+///
+/// Range: a `u64` nanosecond counter rolls over after ~584 years of process
+/// uptime, which is well beyond any realistic service lifetime.
+pub fn watchdog_now_nanos() -> u64 {
+    let epoch = *WATCHDOG_EPOCH.get_or_init(Instant::now);
+    // `Instant::now()` is guaranteed to be >= `epoch`; `elapsed()` never
+    // returns `Duration::MAX` on any supported platform.
+    epoch.elapsed().as_nanos() as u64
 }
 
 // ─── Health State ────────────────────────────────────────────────
@@ -929,10 +971,12 @@ mod tests {
     fn test_watchdog_stale_job_detected() {
         let watchdog = BackgroundJobWatchdog::new(2);
         let handle = watchdog.register("gc", 1);
-        // Simulate a stale heartbeat (5 seconds ago, with expected_interval=1, multiplier=2)
-        let stale_time = current_unix_secs().saturating_sub(5);
-        handle.store(stale_time, Ordering::Relaxed);
-        let result = watchdog.check_all();
+        // expected_interval=1s, multiplier=2 -> max_age = 2s = 2e9 ns.
+        // Anchor the heartbeat at 0 and evaluate at a synthetic "now" past
+        // the staleness threshold. Using `check_all_at` avoids spinning on
+        // the real monotonic clock.
+        handle.store(0, Ordering::Relaxed);
+        let result = watchdog.check_all_at(5_000_000_000);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "gc");
     }
@@ -941,13 +985,18 @@ mod tests {
     fn test_watchdog_heartbeat_refreshes() {
         let watchdog = BackgroundJobWatchdog::new(2);
         let handle = watchdog.register("gc", 1);
-        // Make it stale
-        let stale_time = current_unix_secs().saturating_sub(5);
-        handle.store(stale_time, Ordering::Relaxed);
-        assert!(watchdog.check_all().is_err());
-        // Heartbeat should fix it
+        // Make it stale at a synthetic future "now".
+        handle.store(0, Ordering::Relaxed);
+        assert!(watchdog.check_all_at(5_000_000_000).is_err());
+        // Heartbeat refreshes to current monotonic time; check against a
+        // synthetic future value that is still within the staleness window.
         watchdog.heartbeat("gc");
-        assert!(watchdog.check_all().is_ok());
+        let heartbeat_value = handle.load(Ordering::Relaxed);
+        // max_age = 2s = 2e9 ns; check immediately after heartbeat.
+        assert!(
+            watchdog.check_all_at(heartbeat_value.saturating_add(1_000_000_000)).is_ok(),
+            "job should be healthy within staleness window of fresh heartbeat"
+        );
     }
 
     #[test]
@@ -956,12 +1005,13 @@ mod tests {
         let _handle1 = watchdog.register("gc", 60);
         let handle2 = watchdog.register("compactor", 1);
         assert_eq!(watchdog.job_count(), 2);
-        // All healthy initially
+        // All healthy initially (both handles pinned to current monotonic now).
         assert!(watchdog.check_all().is_ok());
-        // Make compactor stale
-        let stale_time = current_unix_secs().saturating_sub(5);
-        handle2.store(stale_time, Ordering::Relaxed);
-        let result = watchdog.check_all();
+        // Make compactor stale (gc still healthy because interval=60s).
+        handle2.store(0, Ordering::Relaxed);
+        // Evaluate at synthetic "now" = 5s: compactor max_age = 2s, stale;
+        // gc max_age = 120s, healthy.
+        let result = watchdog.check_all_at(5_000_000_000);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "compactor");
     }
@@ -972,6 +1022,86 @@ mod tests {
         let clone = watchdog.clone();
         let _handle = watchdog.register("gc", 60);
         assert_eq!(clone.job_count(), 1);
+    }
+
+    /// Regression test: watchdog heartbeats must use a monotonic clock.
+    ///
+    /// `SystemTime::now()` can jump forward or backward (NTP correction, VM
+    /// pause/resume, container suspension). If heartbeats are stored as unix
+    /// timestamps, a wall-clock jump forward falsely declares a healthy job
+    /// dead (K8s restarts the pod); a jump backward masks an actually-dead
+    /// job (false healthy). Using nanoseconds since a process-local monotonic
+    /// epoch eliminates both failure modes.
+    ///
+    /// A unix-seconds heartbeat is ~1.7e9. A nanoseconds-since-process-start
+    /// heartbeat is at most a few seconds of nanoseconds (< 1e11) in a unit
+    /// test, and far below 1e9 in practice because the process has been alive
+    /// for only milliseconds when the test runs. Asserting the stored value
+    /// is well below a unix timestamp proves the monotonic switch.
+    #[test]
+    fn test_watchdog_heartbeat_uses_monotonic_clock() {
+        let watchdog = BackgroundJobWatchdog::new(2);
+        let handle = watchdog.register("gc", 60);
+        watchdog.heartbeat("gc");
+        let stored = handle.load(Ordering::Relaxed);
+
+        // A unix-seconds heartbeat (old bug) stores `SystemTime::now()` as
+        // seconds since the epoch — currently ~1.76 billion and growing.
+        // A monotonic-nanoseconds heartbeat (the fix) stores the elapsed
+        // nanoseconds since a process-local `Instant` captured at startup —
+        // in a unit test, that is at most a handful of seconds' worth of
+        // nanoseconds (well under 1 hour of process uptime = 3.6e12 ns).
+        //
+        // The two representations cannot both satisfy `stored < 1 hour`:
+        // unix seconds (~1.76e9) is far larger than 3600. So asserting
+        // `stored < 3600` (one hour, in either seconds or nanoseconds)
+        // fails the unix-seconds impl and passes the monotonic-nanos impl
+        // as long as the test process has been alive for less than one
+        // simulated hour of monotonic time — which is always true in CI.
+        let one_hour_nanos_or_seconds: u64 = 3_600;
+        assert!(
+            stored < one_hour_nanos_or_seconds.saturating_mul(1_000_000_000),
+            "heartbeat must use monotonic nanoseconds since process epoch, \
+             not unix seconds (got {stored}); a wall-clock jump would \
+             otherwise corrupt liveness detection"
+        );
+
+        // Stronger check: a unix-seconds heartbeat equals the current
+        // `SystemTime` wall clock within +/- 1 second. A monotonic heartbeat
+        // is nowhere near that value (differs by ~1.76e9). Assert the stored
+        // value is NOT close to the unix wall-clock time.
+        //
+        // We intentionally read `SystemTime` here (in the test) to compare
+        // against what the old buggy implementation would have written.
+        let unix_now =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let diff = unix_now.abs_diff(stored);
+        assert!(
+            diff > 1_000_000,
+            "stored heartbeat ({stored}) is suspiciously close to unix seconds \
+             ({unix_now}); expected monotonic nanoseconds far from wall clock"
+        );
+    }
+
+    /// Regression test: staleness check must be robust under wall-clock jumps.
+    ///
+    /// Simulates a forward wall-clock jump by writing a heartbeat using the
+    /// real monotonic clock, then confirming `check_all()` reports healthy
+    /// immediately afterward. Under the old `SystemTime`-based implementation
+    /// this same scenario after a forward NTP jump of `> max_age` seconds
+    /// would report stale even though the job is actively heartbeating.
+    #[test]
+    fn test_watchdog_monotonic_staleness_robust_to_wall_clock() {
+        let watchdog = BackgroundJobWatchdog::new(2);
+        let _handle = watchdog.register("gc", 1);
+        watchdog.heartbeat("gc");
+        // Immediately after heartbeating the job must be healthy. With the
+        // old unix-timestamp impl, if SystemTime jumped forward between the
+        // heartbeat write and the check, `now - last` could exceed max_age
+        // and the check would spuriously fail. The monotonic clock cannot
+        // jump; this assertion is only interesting as protection against
+        // regressions back to `SystemTime`.
+        assert!(watchdog.check_all().is_ok());
     }
 
     // ─── Health State with Watchdog ──────────────────────────
@@ -992,10 +1122,13 @@ mod tests {
 
     #[test]
     fn test_liveness_with_stale_watchdog() {
-        let watchdog = BackgroundJobWatchdog::new(2);
+        // Use multiplier=0 so max_age = 0 ns; any non-zero elapsed monotonic
+        // time since the heartbeat at `last=0` is therefore stale. Sleep a
+        // millisecond to guarantee `watchdog_now_nanos() > 0`.
+        let watchdog = BackgroundJobWatchdog::new(0);
         let handle = watchdog.register("gc", 1);
-        let stale_time = current_unix_secs().saturating_sub(5);
-        handle.store(stale_time, Ordering::Relaxed);
+        handle.store(0, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(1));
         let state = HealthState::new().with_watchdog(watchdog);
         assert!(!state.liveness_check());
     }

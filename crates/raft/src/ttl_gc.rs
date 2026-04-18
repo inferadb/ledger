@@ -206,10 +206,7 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
                     _ = ticker.tick() => {
                         if let Some(ref handle) = self.watchdog_handle {
                             handle.store(
-                                std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs(),
+                                crate::graceful_shutdown::watchdog_now_nanos(),
                                 std::sync::atomic::Ordering::Relaxed,
                             );
                         }
