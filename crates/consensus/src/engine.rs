@@ -19,6 +19,16 @@ type ValidatorFn = dyn Fn(&[u8]) -> Result<(), String> + Send + Sync;
 
 static PROPOSE_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// Capacity of the control-plane channel (membership, snapshot, shutdown,
+/// peer messages, read-index). Small because these events are low volume
+/// and we want fast backpressure if something is wrong.
+const CONTROL_QUEUE_CAPACITY: usize = 256;
+
+/// Capacity of the proposal channel. When full, `propose` / `propose_batch`
+/// return [`ConsensusError::InboxFull`] so callers can retry or reject
+/// rather than blocking the reactor.
+const PROPOSAL_QUEUE_CAPACITY: usize = 2048;
+
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::{
@@ -42,7 +52,14 @@ use crate::{
 /// Dropping all clones of the sender (i.e. dropping the engine) causes the
 /// reactor to shut down on the next event loop iteration.
 pub struct ConsensusEngine {
-    inbox: mpsc::Sender<ReactorEvent>,
+    /// Control-plane sender — membership changes, snapshots, shutdown,
+    /// peer messages, read-index. Sized small (256) because these are low
+    /// volume and must never be blocked by proposal backpressure.
+    control_inbox: mpsc::Sender<ReactorEvent>,
+    /// Proposal sender — `Propose`, `ProposeBatch`. Sized for bulk write
+    /// traffic. A full proposal channel backpressures clients with
+    /// [`ConsensusError::InboxFull`] so they can retry or reject.
+    proposal_inbox: mpsc::Sender<ReactorEvent>,
     reactor_handle: tokio::task::JoinHandle<()>,
     /// Pre-proposal idempotency cache. Checked before sending to reactor.
     idempotency: parking_lot::Mutex<crate::idempotency::IdempotencyCache>,
@@ -78,10 +95,16 @@ impl ConsensusEngine {
         W: WalBackend + Send + 'static,
         T: NetworkTransport,
     {
-        let (inbox_tx, inbox_rx) = mpsc::channel(10_000);
+        // Priority split: control traffic gets a small dedicated channel so
+        // membership / snapshot / shutdown events can't be starved by a
+        // proposal flood. Proposals get the larger bulk channel with
+        // backpressure.
+        let (control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
+        let (proposal_tx, proposal_rx) = mpsc::channel(PROPOSAL_QUEUE_CAPACITY);
         let (commit_tx, commit_rx) = mpsc::channel(10_000);
 
-        let mut reactor = Reactor::new(inbox_rx, wal, clock, transport, commit_tx, flush_interval);
+        let mut reactor =
+            Reactor::new(control_rx, proposal_rx, wal, clock, transport, commit_tx, flush_interval);
         let mut state_receivers = HashMap::new();
 
         for shard in shards {
@@ -102,7 +125,13 @@ impl ConsensusEngine {
         ));
 
         (
-            Self { inbox: inbox_tx, reactor_handle, idempotency, validator: None },
+            Self {
+                control_inbox: control_tx,
+                proposal_inbox: proposal_tx,
+                reactor_handle,
+                idempotency,
+                validator: None,
+            },
             commit_rx,
             state_receivers,
         )
@@ -169,7 +198,7 @@ impl ConsensusEngine {
 
         // Not a duplicate — proceed with consensus.
         let (tx, rx) = oneshot::channel();
-        self.inbox
+        self.proposal_inbox
             .send(ReactorEvent::Propose { shard, data, response: tx })
             .await
             .map_err(|_| ConsensusError::InboxFull)?;
@@ -206,7 +235,7 @@ impl ConsensusEngine {
         }
 
         let (tx, rx) = oneshot::channel();
-        self.inbox
+        self.proposal_inbox
             .send(ReactorEvent::ProposeBatch { shard, entries, response: tx })
             .await
             .map_err(|_| ConsensusError::InboxFull)?;
@@ -220,7 +249,7 @@ impl ConsensusEngine {
         from: NodeId,
         message: Message,
     ) -> Result<(), ConsensusError> {
-        self.inbox
+        self.control_inbox
             .send(ReactorEvent::PeerMessage { shard, from, message })
             .await
             .map_err(|_| ConsensusError::InboxFull)
@@ -234,7 +263,7 @@ impl ConsensusEngine {
         promotable: bool,
     ) -> Result<(), ConsensusError> {
         let (tx, rx) = oneshot::channel();
-        self.inbox
+        self.control_inbox
             .send(ReactorEvent::MembershipChange {
                 shard,
                 change: MembershipChange::AddLearner {
@@ -252,7 +281,7 @@ impl ConsensusEngine {
     /// Promotes a learner to voter.
     pub async fn promote_voter(&self, shard: ShardId, node: NodeId) -> Result<(), ConsensusError> {
         let (tx, rx) = oneshot::channel();
-        self.inbox
+        self.control_inbox
             .send(ReactorEvent::MembershipChange {
                 shard,
                 change: MembershipChange::PromoteVoter { node_id: node, expected_conf_epoch: None },
@@ -266,7 +295,7 @@ impl ConsensusEngine {
     /// Removes a node from a shard.
     pub async fn remove_node(&self, shard: ShardId, node: NodeId) -> Result<(), ConsensusError> {
         let (tx, rx) = oneshot::channel();
-        self.inbox
+        self.control_inbox
             .send(ReactorEvent::MembershipChange {
                 shard,
                 change: MembershipChange::RemoveNode { node_id: node, expected_conf_epoch: None },
@@ -295,7 +324,7 @@ impl ConsensusEngine {
         target: NodeId,
     ) -> Result<(), ConsensusError> {
         let (tx, rx) = oneshot::channel();
-        self.inbox
+        self.control_inbox
             .send(ReactorEvent::TransferLeader { shard, target, response: tx })
             .await
             .map_err(|_| ConsensusError::InboxFull)?;
@@ -315,7 +344,7 @@ impl ConsensusEngine {
     /// inbox is full.
     pub async fn trigger_snapshot(&self, shard: ShardId) -> Result<(u64, u64), ConsensusError> {
         let (tx, rx) = oneshot::channel();
-        self.inbox
+        self.control_inbox
             .send(ReactorEvent::TriggerSnapshot { shard, response: tx })
             .await
             .map_err(|_| ConsensusError::InboxFull)?;
@@ -338,7 +367,7 @@ impl ConsensusEngine {
         shard: ShardId,
         last_included_index: u64,
     ) -> Result<(), ConsensusError> {
-        self.inbox
+        self.control_inbox
             .send(ReactorEvent::SnapshotCompleted { shard, last_included_index })
             .await
             .map_err(|_| ConsensusError::InboxFull)
@@ -357,7 +386,7 @@ impl ConsensusEngine {
     /// if the reactor inbox is full or the reactor has shut down.
     pub async fn read_index(&self, shard: ShardId) -> Result<u64, ConsensusError> {
         let (tx, rx) = oneshot::channel();
-        self.inbox
+        self.control_inbox
             .send(ReactorEvent::ReadIndex { shard, response: tx })
             .await
             .map_err(|_| ConsensusError::InboxFull)?;
@@ -378,7 +407,7 @@ impl ConsensusEngine {
         node: NodeId,
         response: oneshot::Sender<Option<u64>>,
     ) -> Result<(), ConsensusError> {
-        self.inbox
+        self.control_inbox
             .send(ReactorEvent::QueryPeerState { shard, node, response })
             .await
             .map_err(|_| ConsensusError::InboxFull)
@@ -399,7 +428,7 @@ impl ConsensusEngine {
     /// [`ConsensusError::WalWriteError`] if the WAL sync fails.
     pub async fn flush_for_shutdown(&self, timeout: Duration) -> Result<(), ConsensusError> {
         let (tx, rx) = oneshot::channel();
-        self.inbox
+        self.control_inbox
             .send(ReactorEvent::ShutdownFlush { ack: tx })
             .await
             .map_err(|_| ConsensusError::InboxFull)?;
@@ -411,7 +440,7 @@ impl ConsensusEngine {
 
     /// Gracefully shuts down the reactor and waits for it to finish.
     pub async fn shutdown(self) {
-        let _ = self.inbox.send(ReactorEvent::Shutdown).await;
+        let _ = self.control_inbox.send(ReactorEvent::Shutdown).await;
         let _ = self.reactor_handle.await;
     }
 
@@ -420,7 +449,7 @@ impl ConsensusEngine {
     /// Unlike `shutdown()` which takes ownership, this can be called through
     /// shared references (e.g., when the engine is behind an Arc).
     pub async fn request_shutdown(&self) {
-        let _ = self.inbox.send(ReactorEvent::Shutdown).await;
+        let _ = self.control_inbox.send(ReactorEvent::Shutdown).await;
     }
 
     /// Returns the number of entries currently held in the idempotency cache.

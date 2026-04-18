@@ -138,7 +138,14 @@ pub enum ReactorEvent {
 pub struct Reactor<C: Clock, R: RngSource, W: WalBackend, T: NetworkTransport> {
     shards: HashMap<ShardId, Shard<C, R>>,
     timers: TimerWheel,
-    inbox: mpsc::Receiver<ReactorEvent>,
+    /// Control-plane events (membership, snapshots, shutdown, peer messages,
+    /// read-index). Polled with higher priority in the event loop so that a
+    /// flood of proposals cannot starve leadership-critical traffic.
+    control_inbox: mpsc::Receiver<ReactorEvent>,
+    /// Proposal events (`Propose`, `ProposeBatch`). Kept separate from
+    /// control so bulk write traffic has its own bounded queue and
+    /// backpressure signal.
+    proposal_inbox: mpsc::Receiver<ReactorEvent>,
     wal: W,
     clock: C,
     transport: T,
@@ -171,7 +178,8 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
     /// - `commit_tx` — channel to notify the apply worker of committed batches.
     /// - `flush_interval` — how often to flush pending WAL frames and resolve responses.
     pub fn new(
-        inbox: mpsc::Receiver<ReactorEvent>,
+        control_inbox: mpsc::Receiver<ReactorEvent>,
+        proposal_inbox: mpsc::Receiver<ReactorEvent>,
         wal: W,
         clock: C,
         transport: T,
@@ -181,7 +189,8 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
         Self {
             shards: HashMap::new(),
             timers: TimerWheel::new(),
-            inbox,
+            control_inbox,
+            proposal_inbox,
             wal,
             clock,
             transport,
@@ -238,9 +247,15 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             });
 
             tokio::select! {
+                // `biased` polls arms in listed order every iteration so
+                // control-plane events always win over proposals when both
+                // are ready. This prevents a proposal flood from starving
+                // leadership/membership traffic.
                 biased;
 
-                event = self.inbox.recv() => {
+                // 1) Control plane — highest priority (membership, snapshots,
+                //    shutdown, peer messages, read-index).
+                event = self.control_inbox.recv() => {
                     match event {
                         Some(ReactorEvent::Shutdown) | None => {
                             // Flush any pending work before exiting.
@@ -254,10 +269,32 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                     }
                 }
 
+                // 2) Proposals — ranked above timers/flush so normal-load
+                //    scheduling matches the pre-split reactor (client writes
+                //    are picked up promptly). The priority split only
+                //    protects control traffic from adversarial proposal
+                //    saturation; during normal operation it is not intended
+                //    to starve proposals.
+                event = self.proposal_inbox.recv() => {
+                    match event {
+                        Some(ev) => {
+                            let affected = self.handle_event(ev);
+                            self.broadcast_shard_states(&affected);
+                        }
+                        None => {
+                            // Engine dropped; treat as shutdown.
+                            self.flush().await;
+                            break;
+                        }
+                    }
+                }
+
+                // 3) Periodic WAL flush.
                 _ = flush_ticker.tick() => {
                     self.flush().await;
                 }
 
+                // 4) Timer expirations (elections, heartbeats).
                 _ = async {
                     match sleep_duration {
                         Some(d) if d.is_zero() => {},
@@ -1123,19 +1160,32 @@ mod tests {
         }
     }
 
+    /// Test helper returning a reactor plus senders for both control and
+    /// proposal inboxes. Tests that only exercise one path can ignore the
+    /// other; tests that want to exercise priority ordering use both.
+    #[allow(clippy::type_complexity)]
     fn make_reactor() -> (
         Reactor<Arc<SimulatedClock>, SimulatedRng, InMemoryWalBackend, InMemoryTransport>,
-        mpsc::Sender<ReactorEvent>,
+        mpsc::Sender<ReactorEvent>, // control
+        mpsc::Sender<ReactorEvent>, // proposal
         mpsc::Receiver<CommittedBatch>,
     ) {
-        let (inbox_tx, inbox_rx) = mpsc::channel(64);
+        let (control_tx, control_rx) = mpsc::channel(64);
+        let (proposal_tx, proposal_rx) = mpsc::channel(64);
         let (commit_tx, commit_rx) = mpsc::channel(64);
         let clock = Arc::new(SimulatedClock::new());
         let wal = InMemoryWalBackend::new();
         let transport = InMemoryTransport::new();
-        let reactor =
-            Reactor::new(inbox_rx, wal, clock, transport, commit_tx, Duration::from_millis(10));
-        (reactor, inbox_tx, commit_rx)
+        let reactor = Reactor::new(
+            control_rx,
+            proposal_rx,
+            wal,
+            clock,
+            transport,
+            commit_tx,
+            Duration::from_millis(10),
+        );
+        (reactor, control_tx, proposal_tx, commit_rx)
     }
 
     fn make_shard(
@@ -1184,7 +1234,7 @@ mod tests {
 
     #[test]
     fn test_add_shard_increases_count() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         assert_eq!(reactor.shard_count(), 0);
 
@@ -1199,7 +1249,7 @@ mod tests {
 
     #[test]
     fn test_process_actions_non_vote_send_enqueues_to_outbox() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let actions =
             vec![Action::Send { to: NodeId(2), shard: ShardId(1), msg: Message::TimeoutNow }];
@@ -1211,7 +1261,7 @@ mod tests {
 
     #[test]
     fn test_process_actions_vote_send_bypasses_outbox() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let actions = vec![Action::Send {
             to: NodeId(2),
@@ -1231,7 +1281,7 @@ mod tests {
 
     #[test]
     fn test_process_actions_persist_entries_collects_wal_frames() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let entry = Entry {
             term: 1,
@@ -1252,7 +1302,7 @@ mod tests {
 
     #[test]
     fn test_process_actions_schedule_timer_registers_timer() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let deadline = reactor.clock.now() + Duration::from_millis(100);
 
@@ -1268,7 +1318,7 @@ mod tests {
 
     #[test]
     fn test_process_actions_committed_collects_pending_commits() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         reactor.process_actions(vec![Action::Committed { shard: ShardId(1), up_to: 5 }]);
 
@@ -1278,7 +1328,7 @@ mod tests {
 
     #[test]
     fn test_process_actions_noop_variants_do_not_panic() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         reactor.process_actions(vec![
             Action::RenewLease { shard: ShardId(1) },
@@ -1303,7 +1353,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flush_persists_wal_frames_and_drains_buffer() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let entry = Entry {
             term: 1,
@@ -1328,7 +1378,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flush_resolves_committed_responses() {
-        let (mut reactor, _tx, mut _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, mut _rx) = make_reactor();
 
         // Set up a leader shard so proposals can commit.
         add_leader_shard(&mut reactor, ShardId(1));
@@ -1360,7 +1410,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flush_dispatches_committed_batches() {
-        let (mut reactor, _tx, mut commit_rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, mut commit_rx) = make_reactor();
 
         reactor.pending_commits.push((ShardId(1), 10));
 
@@ -1373,7 +1423,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flush_drains_outbox() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         reactor.outbox.enqueue(NodeId(2), ShardId(1), Message::TimeoutNow);
         assert_eq!(reactor.outbox.len(), 1);
@@ -1387,7 +1437,7 @@ mod tests {
     async fn test_flush_writes_checkpoint_when_commits_present() {
         use crate::wal_backend::WalBackend as _;
 
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         reactor.pending_commits.push((ShardId(1), 7));
 
@@ -1402,7 +1452,7 @@ mod tests {
     async fn test_flush_no_checkpoint_when_no_commits() {
         use crate::wal_backend::WalBackend as _;
 
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         reactor.flush().await;
 
@@ -1414,7 +1464,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flush_wal_append_failure_rejects_pending_responses() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         // Queue a WAL frame and a pending response.
         let entry = Entry {
@@ -1450,7 +1500,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flush_wal_append_failure_recovery_after_clear() {
-        let (mut reactor, _tx, mut _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, mut _rx) = make_reactor();
 
         // Set up a leader shard so responses can be resolved after commit.
         add_leader_shard(&mut reactor, ShardId(1));
@@ -1504,7 +1554,7 @@ mod tests {
 
     #[test]
     fn test_handle_event_propose_missing_shard_returns_shard_unavailable() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
         reactor.handle_event(ReactorEvent::Propose {
@@ -1519,7 +1569,7 @@ mod tests {
 
     #[test]
     fn test_handle_event_propose_batch_missing_shard_returns_shard_unavailable() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
         reactor.handle_event(ReactorEvent::ProposeBatch {
@@ -1534,7 +1584,7 @@ mod tests {
 
     #[test]
     fn test_handle_event_membership_change_missing_shard_returns_shard_unavailable() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
         reactor.handle_event(ReactorEvent::MembershipChange {
@@ -1553,7 +1603,7 @@ mod tests {
 
     #[test]
     fn test_handle_event_transfer_leader_missing_shard_returns_shard_unavailable() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
         reactor.handle_event(ReactorEvent::TransferLeader {
@@ -1568,7 +1618,7 @@ mod tests {
 
     #[test]
     fn test_handle_event_trigger_snapshot_missing_shard_returns_shard_unavailable() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
         reactor
@@ -1582,7 +1632,7 @@ mod tests {
 
     #[test]
     fn test_handle_event_read_index_known_shard_returns_commit_index() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let clock = reactor.clock.clone();
         let shard = make_shard(ShardId(1), clock);
@@ -1597,7 +1647,7 @@ mod tests {
 
     #[test]
     fn test_handle_event_read_index_unknown_shard_returns_shard_unavailable() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
         reactor.handle_event(ReactorEvent::ReadIndex { shard: ShardId(99), response: resp_tx });
@@ -1610,7 +1660,7 @@ mod tests {
 
     #[test]
     fn test_handle_event_propose_failed_shard_returns_shard_unavailable() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let clock = reactor.clock.clone();
         let mut shard = make_shard(ShardId(1), clock);
@@ -1630,7 +1680,7 @@ mod tests {
 
     #[test]
     fn test_handle_event_propose_batch_failed_shard_returns_shard_unavailable() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let clock = reactor.clock.clone();
         let mut shard = make_shard(ShardId(1), clock);
@@ -1650,7 +1700,7 @@ mod tests {
 
     #[test]
     fn test_handle_event_membership_change_failed_shard_returns_shard_unavailable() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let clock = reactor.clock.clone();
         let mut shard = make_shard(ShardId(1), clock);
@@ -1674,7 +1724,7 @@ mod tests {
 
     #[test]
     fn test_handle_event_transfer_leader_failed_shard_returns_shard_unavailable() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let clock = reactor.clock.clone();
         let mut shard = make_shard(ShardId(1), clock);
@@ -1694,7 +1744,7 @@ mod tests {
 
     #[test]
     fn test_handle_event_peer_message_failed_shard_silently_dropped() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let clock = reactor.clock.clone();
         let mut shard = make_shard(ShardId(1), clock);
@@ -1724,7 +1774,7 @@ mod tests {
     fn test_healthy_shard_unaffected_when_another_is_failed() {
         use crate::types::NodeState;
 
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
         let clock = reactor.clock.clone();
 
         let mut failed_shard = make_shard(ShardId(1), clock.clone());
@@ -1750,7 +1800,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_shutdown_exits_run_loop() {
-        let (mut reactor, tx, _rx) = make_reactor();
+        let (mut reactor, tx, _proposal_tx, _rx) = make_reactor();
 
         tx.send(ReactorEvent::Shutdown).await.expect("send should succeed");
 
@@ -1761,24 +1811,34 @@ mod tests {
 
     // ── Async fsync lifecycle ─────────────────────────────────────
 
+    #[allow(clippy::type_complexity)]
     fn make_async_reactor() -> (
         Reactor<Arc<SimulatedClock>, SimulatedRng, AsyncMockWalBackend, InMemoryTransport>,
-        mpsc::Sender<ReactorEvent>,
+        mpsc::Sender<ReactorEvent>, // control
+        mpsc::Sender<ReactorEvent>, // proposal
         mpsc::Receiver<CommittedBatch>,
     ) {
-        let (inbox_tx, inbox_rx) = mpsc::channel(64);
+        let (control_tx, control_rx) = mpsc::channel(64);
+        let (proposal_tx, proposal_rx) = mpsc::channel(64);
         let (commit_tx, commit_rx) = mpsc::channel(64);
         let clock = Arc::new(SimulatedClock::new());
         let wal = AsyncMockWalBackend::new();
         let transport = InMemoryTransport::new();
-        let reactor =
-            Reactor::new(inbox_rx, wal, clock, transport, commit_tx, Duration::from_millis(10));
-        (reactor, inbox_tx, commit_rx)
+        let reactor = Reactor::new(
+            control_rx,
+            proposal_rx,
+            wal,
+            clock,
+            transport,
+            commit_tx,
+            Duration::from_millis(10),
+        );
+        (reactor, control_tx, proposal_tx, commit_rx)
     }
 
     #[tokio::test]
     async fn test_flush_async_fsync_defers_responses_until_completion() {
-        let (mut reactor, _tx, mut _rx) = make_async_reactor();
+        let (mut reactor, _tx, _proposal_tx, mut _rx) = make_async_reactor();
 
         // Set up a leader shard for commit-based response resolution.
         add_leader_shard(&mut reactor, ShardId(1));
@@ -1823,7 +1883,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flush_async_fsync_flushes_outbox_while_waiting() {
-        let (mut reactor, _tx, _rx) = make_async_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_async_reactor();
 
         // Arrange: queue a WAL frame (so flush enters the async path) and an outbox message.
         let entry = Entry {
@@ -1848,7 +1908,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flush_async_fsync_outbox_flushed_on_poll_while_waiting() {
-        let (mut reactor, _tx, _rx) = make_async_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_async_reactor();
 
         // Arrange: enter Submitted state.
         let entry = Entry {
@@ -1877,7 +1937,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flush_async_fsync_submit_failure_rejects_responses() {
-        let (mut reactor, _tx, _rx) = make_async_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_async_reactor();
 
         // Arrange: inject submit error.
         reactor.wal.inject_submit_error = true;
@@ -1910,7 +1970,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flush_async_fsync_dispatches_commits_on_completion() {
-        let (mut reactor, _tx, mut commit_rx) = make_async_reactor();
+        let (mut reactor, _tx, _proposal_tx, mut commit_rx) = make_async_reactor();
 
         // Arrange: add a shard so commit dispatch can look up entries.
         let clock = reactor.clock.clone();
@@ -1947,7 +2007,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flush_wal_sync_failure_rejects_pending_responses() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         // Arrange: queue a WAL frame and a pending response, inject sync error.
         let entry = Entry {
@@ -1981,7 +2041,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flush_commit_channel_closed_marks_shard_failed() {
-        let (mut reactor, _tx, commit_rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, commit_rx) = make_reactor();
 
         // Arrange: register a shard, queue a commit, then close the channel.
         let clock = reactor.clock.clone();
@@ -2002,7 +2062,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flush_async_commit_channel_closed_marks_shard_failed() {
-        let (mut reactor, _tx, commit_rx) = make_async_reactor();
+        let (mut reactor, _tx, _proposal_tx, commit_rx) = make_async_reactor();
 
         // Arrange: register a shard, queue WAL + commit, drop receiver.
         let clock = reactor.clock.clone();
@@ -2065,7 +2125,7 @@ mod tests {
 
     #[test]
     fn add_shard_with_committed_index_initializes_last_applied() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
         let clock = Arc::new(SimulatedClock::new());
         let membership = Membership::new([NodeId(1)]);
         let config = ShardConfig::default();
@@ -2086,7 +2146,7 @@ mod tests {
 
     #[test]
     fn add_shard_with_zero_committed_index_does_not_set_last_applied() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
         let shard = make_shard(ShardId(1), Arc::new(SimulatedClock::new()));
 
         reactor.add_shard(ShardId(1), shard);
@@ -2103,7 +2163,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_response_not_sent_before_commit() {
-        let (mut reactor, _tx, mut _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, mut _rx) = make_reactor();
 
         // Register a follower shard (not leader — proposals would fail at
         // handle_propose, but we're testing the flush path directly).
@@ -2128,7 +2188,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_node_proposal_resolves_in_one_flush() {
-        let (mut reactor, _tx, mut _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, mut _rx) = make_reactor();
 
         // Set up a leader shard (single-node cluster commits immediately).
         add_leader_shard(&mut reactor, ShardId(1));
@@ -2163,7 +2223,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_leadership_loss_rejects_pending_responses() {
-        let (mut reactor, _tx, mut _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, mut _rx) = make_reactor();
 
         // Create a 3-node shard so proposals need quorum (2 of 3) to commit.
         let clock = reactor.clock.clone();
@@ -2249,7 +2309,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_uncommitted_response_stays_pending_across_flushes() {
-        let (mut reactor, _tx, mut _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, mut _rx) = make_reactor();
 
         // Set up a leader shard.
         add_leader_shard(&mut reactor, ShardId(1));
@@ -2276,7 +2336,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_shard_rejects_pending_response() {
-        let (mut reactor, _tx, _rx) = make_reactor();
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         // Push a response for a shard that doesn't exist.
         let (resp_tx, resp_rx) = oneshot::channel();
