@@ -130,6 +130,22 @@ pub struct Database<B: StorageBackend> {
     pub(super) generation: AtomicU64,
     /// Tracks which generation each page was last written in.
     pub(super) page_generations: Mutex<HashMap<PageId, u64>>,
+    /// Raw `SnapshotId` of the most recent committed state that has been
+    /// persisted to disk via [`Database::sync_state`]. In-memory commits via
+    /// [`WriteTransaction::commit_in_memory`] can advance `committed_state`
+    /// beyond this snapshot without touching the dual-slot state pointer on
+    /// disk; `last_synced_snapshot_id` lags in that case until the next
+    /// `sync_state` drain.
+    ///
+    /// Used by the coalesce path inside `sync_state`: if a concurrent caller
+    /// has already synced past the snapshot this call observed, this call
+    /// returns immediately (no redundant fsync).
+    pub(super) last_synced_snapshot_id: AtomicU64,
+    /// Serializes `sync_state` callers so the coalesce-by-snapshot-id check
+    /// happens under mutual exclusion. Held across `.await` points (the
+    /// `spawn_blocking` join), which is why this is `tokio::sync::Mutex`
+    /// rather than `parking_lot::Mutex`.
+    pub(super) sync_state_mutex: tokio::sync::Mutex<()>,
 }
 
 impl Database<FileBackend> {
@@ -269,6 +285,12 @@ impl<B: StorageBackend> Database<B> {
         let allocator = PageAllocator::new(config.page_size, next_page);
         let tracker = TransactionTracker::new(initial_state.snapshot_id.next());
 
+        // The dual-slot persist protocol ensures that whatever snapshot we
+        // just loaded from disk IS the last durable one — seed
+        // `last_synced_snapshot_id` with it so the coalesce path in
+        // `sync_state` has the correct baseline. Fresh DB = 0.
+        let initial_synced = initial_state.snapshot_id.raw();
+
         let db = Self {
             backend: RwLock::new(backend),
             cache,
@@ -282,6 +304,8 @@ impl<B: StorageBackend> Database<B> {
             dirty_bitmap: Mutex::new(DirtyBitmap::new()),
             generation: AtomicU64::new(0),
             page_generations: Mutex::new(HashMap::new()),
+            last_synced_snapshot_id: AtomicU64::new(initial_synced),
+            sync_state_mutex: tokio::sync::Mutex::new(()),
         };
 
         // Restore free list: use persisted list if available, otherwise rebuild
@@ -822,6 +846,36 @@ impl<B: StorageBackend> Database<B> {
         self.dirty_bitmap.lock().count()
     }
 
+    /// Returns the count of dirty pages currently held in the process-local
+    /// page cache (pages written via `commit` / `commit_in_memory` that have
+    /// not yet been flushed to the backend).
+    ///
+    /// Distinct from [`Database::dirty_page_count`], which tracks pages
+    /// modified since the last BACKUP checkpoint for incremental-backup
+    /// bookkeeping. That count resets on backup completion, not on sync.
+    ///
+    /// Used by `StateCheckpointer` (added in Sprint 1B2 Task 2A) to trigger
+    /// a checkpoint when accumulated dirty pages exceed a threshold — back-
+    /// pressure against unbounded cache growth under sustained
+    /// [`WriteTransaction::commit_in_memory`] load.
+    pub fn cache_dirty_page_count(&self) -> usize {
+        self.cache.stats().dirty_count
+    }
+
+    /// Returns the raw `SnapshotId` of the most recent committed state that
+    /// has been persisted to disk via [`Database::sync_state`].
+    ///
+    /// In-memory commits via [`WriteTransaction::commit_in_memory`] may have
+    /// advanced the in-memory committed state beyond this snapshot without
+    /// advancing the on-disk dual-slot state pointer. On crash before the
+    /// next `sync_state`, the database rolls back to this snapshot id;
+    /// durability of in-flight in-memory commits is the WAL's responsibility
+    /// (per the Sprint 1B2 durability contract — see
+    /// `docs/superpowers/specs/2026-04-19-sprint-1b2-apply-batching-design.md`).
+    pub fn last_synced_snapshot_id(&self) -> u64 {
+        self.last_synced_snapshot_id.load(Ordering::Acquire)
+    }
+
     /// Clears the dirty bitmap after a successful backup.
     ///
     /// Called by the backup system after writing all dirty pages to a backup
@@ -926,6 +980,94 @@ impl<B: StorageBackend> Database<B> {
     pub(super) fn free_page(&self, page_id: PageId) {
         self.allocator.lock().free(page_id);
         self.cache.remove(page_id);
+    }
+
+    /// Returns the total number of page IDs currently deferred in
+    /// `pending_frees` (pages queued for release after no reader references
+    /// their snapshot).
+    ///
+    /// Test-only accessor. Used by regression tests that verify the
+    /// deferred-drain invariant of `WriteTransaction::commit_in_memory`:
+    /// unlike `commit`, it must NOT drain `pending_frees`, because the
+    /// on-disk god byte still points at the pre-commit root graph.
+    #[cfg(test)]
+    pub(crate) fn pending_frees_len(&self) -> usize {
+        self.pending_frees.lock().pending_count()
+    }
+
+    /// Durably persists the current in-memory committed state to disk.
+    ///
+    /// Pairs with [`WriteTransaction::commit_in_memory`]: in-memory commits
+    /// accumulate dirty pages in the process-local page cache without
+    /// advancing the on-disk dual-slot state pointer. `sync_state` is the
+    /// drain — it flushes dirty pages to the backend, runs the dual-slot
+    /// persist (two fsyncs), advances `last_synced_snapshot_id`, and drains
+    /// pages queued in `pending_frees` that are now safe to reclaim because
+    /// the on-disk god byte now references a root graph that no longer
+    /// points at them.
+    ///
+    /// Concurrent callers are coalesced via `last_synced_snapshot_id`: if a
+    /// parallel caller has already synced past the snapshot this call
+    /// observed, this call returns immediately without a redundant fsync.
+    /// The `sync_state_mutex` serializes the read-then-act check.
+    ///
+    /// The fsync-heavy inner work runs on a [`tokio::task::spawn_blocking`]
+    /// thread so runtime worker threads are not pinned for the ~10–50ms per
+    /// call the dual-slot persist typically takes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if `flush_pages` or `persist_state_to_disk`
+    /// fails, or if the `spawn_blocking` task panics. On error,
+    /// `last_synced_snapshot_id` is NOT advanced, and `pending_frees` is
+    /// NOT drained — a retry will re-attempt the full persist against the
+    /// same (or newer) committed state.
+    pub async fn sync_state(self: std::sync::Arc<Self>) -> Result<()>
+    where
+        B: 'static,
+    {
+        // 1. Snapshot the current committed state. Capturing BEFORE acquiring the mutex is fine:
+        //    the coalesce check below makes us a no-op if another caller has already advanced past
+        //    this snapshot, and any concurrent advance of `committed_state` by a later
+        //    `commit_in_memory` is captured by a later sync call.
+        let committed = self.committed_state.load_full();
+        let target_snapshot_id = committed.snapshot_id;
+        let target_table_roots = committed.table_roots;
+
+        // 2. Serialize sync callers. Held across the spawn_blocking await so an overlapping caller
+        //    blocks here, then short-circuits via the coalesce check.
+        let _guard = self.sync_state_mutex.lock().await;
+        if self.last_synced_snapshot_id.load(Ordering::Acquire) >= target_snapshot_id.raw() {
+            return Ok(());
+        }
+
+        // 3. Run the blocking fsync work off the runtime workers. Arc clone into the closure so the
+        //    owning future can be dropped without invalidating the captured handle.
+        let db = std::sync::Arc::clone(&self);
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            // `commit_in_memory` leaves freshly-dirtied pages sitting in the
+            // in-process cache without writing them to the backend. Flush
+            // those pages BEFORE advancing the dual-slot pointer so recovery
+            // from the new pointer finds consistent page data.
+            db.flush_pages()?;
+            db.persist_state_to_disk(&target_table_roots, target_snapshot_id)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| Error::Io {
+            source: std::io::Error::other(format!("sync_state spawn_blocking join failed: {e}")),
+        })??;
+
+        // 4. Advance the synced-snapshot pointer. Release ordering pairs with the Acquire load at
+        //    the top of the coalesce check.
+        self.last_synced_snapshot_id.store(target_snapshot_id.raw(), Ordering::Release);
+
+        // 5. Drain pages queued by in-memory commits whose snapshot is now covered by the on-disk
+        //    god byte. Pages that CoW freed at snapshot <= target are safe to reclaim now that the
+        //    durable root no longer references them.
+        self.try_free_pending_pages();
+
+        Ok(())
     }
 
     /// Attempts to free pages that are no longer referenced by any reader.

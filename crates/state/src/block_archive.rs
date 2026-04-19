@@ -153,15 +153,32 @@ impl<B: StorageBackend> BlockArchive<B> {
 
     /// Appends a block to the archive.
     ///
+    /// Idempotent by `region_height`: if a block at this height is already
+    /// archived, both the b-tree insert and the segment-file append are
+    /// skipped. This is required because WAL replay under the apply-batching
+    /// checkpoint regime may re-execute `append_block` calls whose effects
+    /// were already durably persisted, and `append_to_segment` is an
+    /// unconditional seek-to-end write that would otherwise produce duplicate
+    /// bytes in the segment file.
+    ///
     /// # Errors
     ///
     /// Returns [`BlockArchiveError::Codec`] if serialization of the block fails.
     /// Returns [`BlockArchiveError::Store`] if the write transaction or commit fails.
     /// Returns [`BlockArchiveError::Io`] if writing to a segment file fails.
     pub fn append_block(&self, block: &RegionBlock) -> Result<()> {
+        let mut txn = self.db.write().context(StoreSnafu)?;
+
+        // Idempotency probe: if a block at this height is already archived,
+        // this is a replay. Drop the txn and skip the segment-file append to
+        // preserve archive integrity. Probe + insert share the same write
+        // transaction, so no concurrent writer can insert between them.
+        if txn.get::<tables::Blocks>(&block.region_height).context(StoreSnafu)?.is_some() {
+            return Ok(());
+        }
+
         let encoded = encode(block).context(CodecSnafu)?;
 
-        let mut txn = self.db.write().context(StoreSnafu)?;
         txn.insert::<tables::Blocks>(&block.region_height, &encoded).context(StoreSnafu)?;
 
         for entry in &block.vault_entries {
@@ -865,5 +882,74 @@ mod tests {
             .expect("find")
             .expect("should exist");
         assert_eq!(region_height, 100);
+    }
+
+    // =========================================================================
+    // Idempotency Tests
+    // =========================================================================
+
+    #[test]
+    fn append_block_idempotent_by_height() {
+        // Backing DB in-memory; segment files in a tempdir so we can measure
+        // on-disk size before and after the replay call.
+        let engine = InMemoryStorageEngine::open().expect("open engine");
+        let blocks_dir = tempfile::tempdir().expect("tempdir");
+        let archive =
+            BlockArchive::with_segment_files(engine.db(), blocks_dir.path().to_path_buf())
+                .expect("open archive with segment files");
+
+        // First append at height=1.
+        let block1 = create_block_with_transactions(1, 2);
+        archive.append_block(&block1).expect("first append");
+
+        // Snapshot segment-file size after the first append.
+        let segment_path = archive.segment_path(1 / SEGMENT_SIZE);
+        let size_after_first =
+            fs::metadata(&segment_path).expect("segment file exists after first append").len();
+        assert!(size_after_first > 0, "segment file should have bytes after first append");
+
+        // The DB row is present.
+        let loaded_first = archive.read_block(1).expect("read first append");
+        assert_eq!(loaded_first.vault_entries[0].transactions.len(), 2);
+
+        // Re-append a DIFFERENT block at the SAME height. Idempotency is by
+        // height, not content: this call must be a no-op for both the b-tree
+        // row and the segment file.
+        let mut block1_replay = create_block_with_transactions(1, 5);
+        block1_replay.term = 999; // ensure it's materially different
+        archive.append_block(&block1_replay).expect("idempotent re-append");
+
+        // DB row is unchanged (still the first-append contents).
+        let loaded_after_replay = archive.read_block(1).expect("read after replay");
+        assert_eq!(
+            loaded_after_replay.vault_entries[0].transactions.len(),
+            2,
+            "b-tree row must not be overwritten by replay"
+        );
+        assert_eq!(loaded_after_replay.term, 1, "term must match original block, not replay block");
+
+        // Segment-file size is unchanged — no duplicate bytes.
+        let size_after_replay =
+            fs::metadata(&segment_path).expect("segment file exists after replay").len();
+        assert_eq!(
+            size_after_replay, size_after_first,
+            "segment file size must not grow on idempotent replay"
+        );
+
+        // A distinct height still appends normally.
+        let block2 = create_block_with_transactions(2, 1);
+        archive.append_block(&block2).expect("append distinct height");
+
+        let loaded_second = archive.read_block(2).expect("read second append");
+        assert_eq!(loaded_second.region_height, 2);
+
+        let size_after_distinct =
+            fs::metadata(&segment_path).expect("segment file exists after distinct append").len();
+        assert!(
+            size_after_distinct > size_after_first,
+            "segment file must grow for a distinct height (was {}, now {})",
+            size_after_first,
+            size_after_distinct,
+        );
     }
 }

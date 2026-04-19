@@ -1814,4 +1814,553 @@ mod tests {
 
         assert!(db.tracked_page_count() > 0);
     }
+
+    // -----------------------------------------------------------------------
+    // commit_in_memory (Sprint 1B2 Task 1A)
+    // -----------------------------------------------------------------------
+
+    /// `commit_in_memory` makes writes observable to future read transactions
+    /// in the same process, without touching the backend's state pointer.
+    #[test]
+    fn commit_in_memory_visible_in_process() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::RaftLog>(&1u64, &vec![1u8, 2, 3]).unwrap();
+            txn.insert::<tables::RaftLog>(&2u64, &vec![4u8, 5, 6]).unwrap();
+            txn.commit_in_memory().unwrap();
+        }
+
+        let txn = db.read().unwrap();
+        assert_eq!(txn.get::<tables::RaftLog>(&1u64).unwrap(), Some(vec![1u8, 2, 3]));
+        assert_eq!(txn.get::<tables::RaftLog>(&2u64).unwrap(), Some(vec![4u8, 5, 6]));
+        assert_eq!(txn.get::<tables::RaftLog>(&3u64).unwrap(), None);
+    }
+
+    /// `commit_in_memory` still bumps the in-memory generation so dirty-page
+    /// tracking and compaction-style bookkeeping advances. This is a proxy for
+    /// "bookkeeping parity with `commit` minus the two skipped disk ops."
+    #[test]
+    fn commit_in_memory_bumps_generation() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+        let gen_before = db.current_generation();
+
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::RaftLog>(&1u64, &vec![9u8]).unwrap();
+            txn.commit_in_memory().unwrap();
+        }
+
+        assert!(
+            db.current_generation() > gen_before,
+            "generation must advance after commit_in_memory"
+        );
+    }
+
+    /// `commit_in_memory` does NOT advance the dual-slot state pointer on disk.
+    ///
+    /// Task 1A cannot fully verify this (no `last_synced_snapshot_id` accessor
+    /// yet — Task 1B adds it). For Task 1A we use the strongest observable
+    /// available: after a `commit_in_memory`-only session, reopening the same
+    /// file MUST NOT surface the write. That's exactly the durability gap
+    /// the lazy-persist design introduces, and is the behavior `sync_state`
+    /// will close in Task 1B.
+    #[test]
+    fn commit_in_memory_does_not_persist_state_pointer() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("commit_in_memory_no_persist.ink");
+
+        {
+            let db = Database::<FileBackend>::create(&db_path).unwrap();
+
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::RaftLog>(&42u64, &vec![0xAA, 0xBB]).unwrap();
+            txn.commit_in_memory().unwrap();
+
+            // In-process: visible.
+            let read_txn = db.read().unwrap();
+            assert_eq!(
+                read_txn.get::<tables::RaftLog>(&42u64).unwrap(),
+                Some(vec![0xAA, 0xBB]),
+                "write must be visible in-process immediately after commit_in_memory"
+            );
+        }
+
+        // Reopen: the in-memory-only commit was never flushed nor had the
+        // state pointer advanced, so the reopened database must not contain
+        // the key. A durable `commit` would have surfaced it.
+        let db = Database::<FileBackend>::open(&db_path).unwrap();
+        let txn = db.read().unwrap();
+        assert_eq!(
+            txn.get::<tables::RaftLog>(&42u64).unwrap(),
+            None,
+            "commit_in_memory write must not survive reopen (no sync_state called)"
+        );
+    }
+
+    /// A `commit_in_memory` followed by a durable `commit` from a later txn
+    /// must materialize both writes on disk. The durable `commit` flushes
+    /// every dirty page currently sitting in the cache (including ones left
+    /// behind by `commit_in_memory`) and advances the dual-slot pointer to
+    /// cover both snapshots.
+    #[test]
+    fn commit_in_memory_then_commit_is_equivalent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("commit_in_memory_then_commit.ink");
+
+        {
+            let db = Database::<FileBackend>::create(&db_path).unwrap();
+
+            // First write: commit_in_memory only.
+            {
+                let mut txn = db.write().unwrap();
+                txn.insert::<tables::RaftLog>(&1u64, &vec![1u8]).unwrap();
+                txn.commit_in_memory().unwrap();
+            }
+
+            // Second write: durable commit.
+            {
+                let mut txn = db.write().unwrap();
+                txn.insert::<tables::RaftLog>(&2u64, &vec![2u8]).unwrap();
+                txn.commit().unwrap();
+            }
+
+            // In-process: both visible.
+            let read_txn = db.read().unwrap();
+            assert_eq!(read_txn.get::<tables::RaftLog>(&1u64).unwrap(), Some(vec![1u8]));
+            assert_eq!(read_txn.get::<tables::RaftLog>(&2u64).unwrap(), Some(vec![2u8]));
+        }
+
+        // After reopen: both must still be present, because the durable
+        // commit captured both snapshots via `flush_pages` +
+        // `persist_state_to_disk`.
+        let db = Database::<FileBackend>::open(&db_path).unwrap();
+        let txn = db.read().unwrap();
+        assert_eq!(
+            txn.get::<tables::RaftLog>(&1u64).unwrap(),
+            Some(vec![1u8]),
+            "commit_in_memory write must survive reopen once a later commit flushes"
+        );
+        assert_eq!(
+            txn.get::<tables::RaftLog>(&2u64).unwrap(),
+            Some(vec![2u8]),
+            "durable commit write must survive reopen"
+        );
+    }
+
+    /// Multiple successive `commit_in_memory` calls followed by a single
+    /// durable `commit` must materialize every prior write. This mirrors
+    /// the production apply-batching shape: N entries committed in-memory,
+    /// one checkpoint flush at the end.
+    #[test]
+    fn multiple_commit_in_memory_then_one_commit() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("multi_commit_in_memory.ink");
+
+        {
+            let db = Database::<FileBackend>::create(&db_path).unwrap();
+
+            // Three in-memory commits.
+            for i in 1..=3u64 {
+                let mut txn = db.write().unwrap();
+                txn.insert::<tables::RaftLog>(&i, &vec![i as u8]).unwrap();
+                txn.commit_in_memory().unwrap();
+            }
+
+            // Fourth write, durable.
+            {
+                let mut txn = db.write().unwrap();
+                txn.insert::<tables::RaftLog>(&4u64, &vec![4u8]).unwrap();
+                txn.commit().unwrap();
+            }
+
+            // In-process: all four visible.
+            let read_txn = db.read().unwrap();
+            for i in 1..=4u64 {
+                assert_eq!(
+                    read_txn.get::<tables::RaftLog>(&i).unwrap(),
+                    Some(vec![i as u8]),
+                    "key {i} must be visible in-process",
+                );
+            }
+        }
+
+        // After reopen: all four persist, thanks to the final durable commit.
+        let db = Database::<FileBackend>::open(&db_path).unwrap();
+        let txn = db.read().unwrap();
+        for i in 1..=4u64 {
+            assert_eq!(
+                txn.get::<tables::RaftLog>(&i).unwrap(),
+                Some(vec![i as u8]),
+                "key {i} must survive reopen",
+            );
+        }
+    }
+
+    /// Regression test for the deferred-drain invariant of
+    /// `commit_in_memory` (Sprint 1B2 Task 1A follow-up).
+    ///
+    /// `commit_in_memory` MUST record CoW-freed pages in `pending_frees` but
+    /// MUST NOT call `try_free_pending_pages`, because the on-disk god byte
+    /// still references the pre-commit root graph. Releasing the freed page
+    /// IDs back to the allocator now would let a subsequent durable `commit`
+    /// reuse them and silently overwrite pages that crash recovery would
+    /// walk from the old root.
+    ///
+    /// As a contrast, the durable `commit` variant DOES drain
+    /// `pending_frees` — that's the existing behavior under test.
+    ///
+    /// Scenario: seed a table with one entry via a durable commit (leaf
+    /// page is now owned by a prior snapshot). In a second transaction,
+    /// delete that entry — this empties the root leaf, which makes the
+    /// B+ tree call `free_page` on it. Because the leaf was NOT allocated
+    /// inside the current transaction, `BufferedWritePageProvider` records
+    /// it in `pages_to_free` for CoW-safe deferred cleanup.
+    #[test]
+    fn commit_in_memory_defers_page_free_to_sync() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        // Seed the database with a durable commit so the leaf page we will
+        // later empty belongs to a prior snapshot (a precondition for
+        // CoW to record the old page in pages_to_free instead of freeing
+        // it immediately as a same-txn allocation).
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::RaftLog>(&1u64, &vec![0xAAu8]).unwrap();
+            txn.commit().unwrap();
+        }
+
+        // After the durable commit, pending_frees is drained.
+        assert_eq!(db.pending_frees_len(), 0, "durable commit must drain pending_frees");
+
+        // Delete the sole entry so the root leaf empties and enters
+        // pages_to_free via CoW, then commit_in_memory.
+        {
+            let mut txn = db.write().unwrap();
+            txn.delete::<tables::RaftLog>(&1u64).unwrap();
+            txn.commit_in_memory().unwrap();
+        }
+
+        // The freed page ID MUST still be sitting in pending_frees,
+        // waiting for `sync_state` to drain it after the god byte advances.
+        assert!(
+            db.pending_frees_len() > 0,
+            "commit_in_memory must record freed pages in pending_frees \
+             without draining them (god byte has not advanced)"
+        );
+
+        // Contrast: a subsequent durable commit (which DOES advance the
+        // god byte) drains pending_frees as part of its tail work.
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::RaftLog>(&2u64, &vec![0xEEu8]).unwrap();
+            txn.commit().unwrap();
+        }
+        assert_eq!(
+            db.pending_frees_len(),
+            0,
+            "durable commit must drain pending_frees after advancing the god byte"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // sync_state (Sprint 1B2 Task 1B)
+    // -----------------------------------------------------------------------
+
+    /// `sync_state` advances `last_synced_snapshot_id` to the raw snapshot id
+    /// of whatever `committed_state` it observes, for both `InMemoryBackend`
+    /// (where `flush_pages` + `persist_state_to_disk` are still called but
+    /// do no fsync work) and, implicitly, `FileBackend` (tested in the
+    /// durability + reopen test below).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_state_advances_last_synced() {
+        let db = std::sync::Arc::new(Database::<InMemoryBackend>::open_in_memory().unwrap());
+
+        // Fresh DB: last_synced starts at 0, and an in-memory commit bumps
+        // `committed_state.snapshot_id` without touching last_synced.
+        let before = db.last_synced_snapshot_id();
+
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::RaftLog>(&1u64, &vec![0xAA]).unwrap();
+            txn.commit_in_memory().unwrap();
+        }
+
+        // committed_state has advanced, but last_synced has not — that's
+        // exactly the gap `sync_state` is designed to close.
+        let committed_after = db.committed_state.load_full().snapshot_id.raw();
+        assert!(
+            committed_after > before,
+            "commit_in_memory must advance committed_state snapshot id"
+        );
+        assert_eq!(
+            db.last_synced_snapshot_id(),
+            before,
+            "last_synced must NOT advance on commit_in_memory alone"
+        );
+
+        // Drain: sync_state captures committed_state and publishes it to
+        // last_synced_snapshot_id.
+        std::sync::Arc::clone(&db).sync_state().await.unwrap();
+
+        assert_eq!(
+            db.last_synced_snapshot_id(),
+            committed_after,
+            "sync_state must advance last_synced to committed_state snapshot id"
+        );
+    }
+
+    /// Durable `WriteTransaction::commit` already persists the god byte to
+    /// disk, so it MUST also advertise that fact by advancing
+    /// `last_synced_snapshot_id`. Otherwise, a mixed workload
+    /// (e.g. `save_vote` via `commit`, interleaved with `commit_in_memory`)
+    /// leaves `last_synced` stale and causes a subsequent `sync_state` to
+    /// redundantly re-run `flush_pages` + `persist_state_to_disk` against
+    /// state that is already on disk — wasted fsyncs, no correctness bug.
+    ///
+    /// Observable via the `last_synced_snapshot_id()` accessor: after every
+    /// durable commit, it must equal the committed snapshot's raw id. A
+    /// second durable commit must advance it again (no regression, no stall).
+    #[test]
+    fn commit_advances_last_synced_snapshot_id() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        // Fresh DB: last_synced starts at 0 and no commits have occurred.
+        assert_eq!(
+            db.last_synced_snapshot_id(),
+            0,
+            "fresh DB must start with last_synced_snapshot_id == 0"
+        );
+
+        // First durable commit: must advance last_synced to the committed
+        // snapshot id, since persist_state_to_disk has already moved the
+        // god byte forward.
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::RaftLog>(&1u64, &vec![0xAA]).unwrap();
+            txn.commit().unwrap();
+        }
+
+        let committed_after_first = db.committed_state.load_full().snapshot_id.raw();
+        assert!(
+            committed_after_first > 0,
+            "durable commit must advance committed_state snapshot id"
+        );
+        assert_eq!(
+            db.last_synced_snapshot_id(),
+            committed_after_first,
+            "durable commit must advertise the now-on-disk snapshot id via \
+             last_synced_snapshot_id so a later sync_state can coalesce"
+        );
+
+        // Second durable commit: last_synced must advance again in lockstep
+        // with committed_state.
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::RaftLog>(&2u64, &vec![0xBB]).unwrap();
+            txn.commit().unwrap();
+        }
+
+        let committed_after_second = db.committed_state.load_full().snapshot_id.raw();
+        assert!(
+            committed_after_second > committed_after_first,
+            "second durable commit must advance committed_state snapshot id further"
+        );
+        assert_eq!(
+            db.last_synced_snapshot_id(),
+            committed_after_second,
+            "each durable commit must advance last_synced_snapshot_id"
+        );
+    }
+
+    /// Back-to-back `sync_state` calls with no intervening write must not
+    /// regress `last_synced_snapshot_id`, and the second call must be a
+    /// no-op per the coalesce-by-snapshot-id pattern.
+    ///
+    /// Limitation: without instrumentation hooks, we cannot PROVE the second
+    /// call skipped the inner `flush_pages` + `persist_state_to_disk` work
+    /// from outside. What we CAN observe is that `last_synced_snapshot_id`
+    /// equals the committed snapshot after the first call, does not move
+    /// on the second call (because there's nothing newer), and the second
+    /// call succeeds. The internal short-circuit is inspected in
+    /// `sync_state_concurrent_callers_coalesce` via a concurrent-race
+    /// shape where both callers observe the same snapshot.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_state_coalesce_returns_fast_when_up_to_date() {
+        let db = std::sync::Arc::new(Database::<InMemoryBackend>::open_in_memory().unwrap());
+
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::RaftLog>(&7u64, &vec![0x07]).unwrap();
+            txn.commit_in_memory().unwrap();
+        }
+
+        std::sync::Arc::clone(&db).sync_state().await.unwrap();
+        let synced_after_first = db.last_synced_snapshot_id();
+        let committed = db.committed_state.load_full().snapshot_id.raw();
+        assert_eq!(
+            synced_after_first, committed,
+            "first sync_state must catch last_synced up to committed"
+        );
+
+        // Second call: no new commits, so committed_state is unchanged.
+        // The coalesce branch must return Ok(()) without regressing state.
+        std::sync::Arc::clone(&db).sync_state().await.unwrap();
+        assert_eq!(
+            db.last_synced_snapshot_id(),
+            synced_after_first,
+            "second sync_state must not regress last_synced"
+        );
+    }
+
+    /// End-to-end durability: a `commit_in_memory` followed by `sync_state`
+    /// SURVIVES a reopen. This is the exact gap `sync_state` is designed
+    /// to close, and is the contrast case for the Task 1A regression
+    /// `commit_in_memory_does_not_persist_state_pointer`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_state_durability_across_reopen() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("sync_state_durability.ink");
+
+        {
+            let db = std::sync::Arc::new(Database::<FileBackend>::create(&db_path).unwrap());
+
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::RaftLog>(&99u64, &vec![0xDE, 0xAD]).unwrap();
+            txn.commit_in_memory().unwrap();
+
+            // Durability drain.
+            std::sync::Arc::clone(&db).sync_state().await.unwrap();
+        }
+
+        // Reopen: because `sync_state` ran `flush_pages` +
+        // `persist_state_to_disk`, the write must be visible.
+        let db = Database::<FileBackend>::open(&db_path).unwrap();
+        let txn = db.read().unwrap();
+        assert_eq!(
+            txn.get::<tables::RaftLog>(&99u64).unwrap(),
+            Some(vec![0xDE, 0xAD]),
+            "commit_in_memory + sync_state must survive reopen"
+        );
+    }
+
+    /// `sync_state` drains `pending_frees` after the dual-slot pointer has
+    /// advanced — the same deferred-drain invariant that
+    /// `commit_in_memory_defers_page_free_to_sync` covers from the
+    /// `commit_in_memory` side. Together they verify the full lifecycle:
+    /// in-memory commit queues freed pages; sync_state releases them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_state_drains_pending_frees() {
+        let db = std::sync::Arc::new(Database::<InMemoryBackend>::open_in_memory().unwrap());
+
+        // Seed so the leaf page we later empty belongs to a prior snapshot
+        // and therefore enters pages_to_free via CoW, as in the Task 1A
+        // regression scenario.
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::RaftLog>(&1u64, &vec![0xAA]).unwrap();
+            txn.commit().unwrap();
+        }
+        assert_eq!(db.pending_frees_len(), 0, "seed durable commit drains pending_frees");
+
+        // Delete + commit_in_memory: old leaf enters pending_frees because
+        // `commit_in_memory` cannot drain it (god byte hasn't moved yet).
+        {
+            let mut txn = db.write().unwrap();
+            txn.delete::<tables::RaftLog>(&1u64).unwrap();
+            txn.commit_in_memory().unwrap();
+        }
+        assert!(
+            db.pending_frees_len() > 0,
+            "commit_in_memory must leave freed pages in pending_frees"
+        );
+
+        // Sync: advances the god byte, then drains pending_frees.
+        std::sync::Arc::clone(&db).sync_state().await.unwrap();
+        assert_eq!(
+            db.pending_frees_len(),
+            0,
+            "sync_state must drain pending_frees after advancing the god byte"
+        );
+    }
+
+    /// Concurrent `sync_state` callers must coalesce: both observe the same
+    /// `committed_state` snapshot, and the outcome is identical to a single
+    /// call. Without internal instrumentation we cannot directly observe
+    /// that one of them short-circuited via the `last_synced_snapshot_id`
+    /// check, but we CAN observe:
+    ///
+    /// - Both calls return `Ok(())`.
+    /// - `last_synced_snapshot_id` advances to the committed snapshot exactly once (no regression,
+    ///   no double-advance — advance is idempotent).
+    /// - No deadlock on the `sync_state_mutex`.
+    ///
+    /// The coalesce logic is the load-bearing piece; proving it under
+    /// adversarial scheduling belongs to the simulation harness that
+    /// Task 3B adds.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_state_concurrent_callers_coalesce() {
+        let db = std::sync::Arc::new(Database::<InMemoryBackend>::open_in_memory().unwrap());
+
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::RaftLog>(&42u64, &vec![0x42]).unwrap();
+            txn.commit_in_memory().unwrap();
+        }
+
+        let committed = db.committed_state.load_full().snapshot_id.raw();
+        assert_eq!(
+            db.last_synced_snapshot_id(),
+            0,
+            "fresh in-memory DB plus commit_in_memory: last_synced still 0"
+        );
+
+        // Spawn two concurrent sync calls and wait for both. They MUST
+        // serialize on `sync_state_mutex`; the second one observes the
+        // already-advanced `last_synced_snapshot_id` and short-circuits.
+        let a = std::sync::Arc::clone(&db);
+        let b = std::sync::Arc::clone(&db);
+        let (ra, rb) = tokio::join!(a.sync_state(), b.sync_state());
+        ra.unwrap();
+        rb.unwrap();
+
+        assert_eq!(
+            db.last_synced_snapshot_id(),
+            committed,
+            "concurrent sync_state callers must converge on the committed snapshot id"
+        );
+    }
+
+    /// `cache_dirty_page_count` reflects pages sitting in the process-local
+    /// cache waiting for `flush_pages`. After a `commit_in_memory`, dirty
+    /// pages remain in the cache; after a durable `commit` (which calls
+    /// `flush_pages`), they are marked clean.
+    #[test]
+    fn cache_dirty_page_count_tracks_cache_state() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+
+        assert_eq!(db.cache_dirty_page_count(), 0, "fresh DB has no dirty pages");
+
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::RaftLog>(&1u64, &vec![0x01]).unwrap();
+            txn.commit_in_memory().unwrap();
+        }
+        assert!(
+            db.cache_dirty_page_count() > 0,
+            "commit_in_memory must leave dirty pages in the cache"
+        );
+
+        {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::RaftLog>(&2u64, &vec![0x02]).unwrap();
+            txn.commit().unwrap();
+        }
+        assert_eq!(
+            db.cache_dirty_page_count(),
+            0,
+            "durable commit must flush every dirty page in the cache"
+        );
+    }
 }

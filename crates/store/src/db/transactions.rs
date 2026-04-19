@@ -552,6 +552,14 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
         // This includes the necessary syncs for crash safety
         self.db.persist_state_to_disk(&self.table_roots, self.snapshot_id)?;
 
+        // Advertise that the god byte now references this snapshot, so a
+        // concurrent `Database::sync_state` can coalesce against it instead
+        // of redundantly re-running `flush_pages` + `persist_state_to_disk`.
+        // Release pairs with the `Acquire` load in `sync_state`'s coalesce
+        // check (see `Database::sync_state` in `db/mod.rs`). Mirrors the
+        // store done at the end of `sync_state` on the successful path.
+        self.db.last_synced_snapshot_id.store(self.snapshot_id.raw(), Ordering::Release);
+
         let new_state =
             CommittedState { table_roots: self.table_roots, snapshot_id: self.snapshot_id };
 
@@ -568,6 +576,96 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
 
         // Attempt to free old pages that are no longer referenced
         self.db.try_free_pending_pages();
+
+        self.db.tracker.end_write_transaction(self.snapshot_id);
+
+        self.committed = true;
+        Ok(())
+    }
+
+    /// Commits the transaction to the in-memory committed state WITHOUT
+    /// running the dual-slot on-disk persist.
+    ///
+    /// After this returns:
+    /// - Dirty pages have been moved into the shared page cache, making them visible to future
+    ///   [`ReadTransaction`] instances in this process.
+    /// - `committed_state` has been atomically swapped to include this txn's table roots.
+    ///   In-process reads observe the new state immediately.
+    /// - On-disk backend state (pages + dual-slot state pointer) has NOT been touched. The on-disk
+    ///   state pointer still references the previous synced snapshot.
+    ///
+    /// Durability is deferred to the next `Database::sync_state` call
+    /// (added in Sprint 1B2 Task 1B). `sync_state` runs periodically via
+    /// `StateCheckpointer`, and is forced synchronously before snapshot
+    /// creation, before backup creation, and during graceful shutdown.
+    ///
+    /// Intended only for callers whose writes are reconstructible from
+    /// the WAL on crash recovery — see the "API surface and
+    /// commit-durability classification" table in the Sprint 1B2 design
+    /// doc (`docs/superpowers/specs/2026-04-19-sprint-1b2-apply-batching-design.md`).
+    /// Callers that need strict on-disk durability on return (e.g.
+    /// `save_vote`) MUST use [`WriteTransaction::commit`] instead.
+    ///
+    /// # Errors
+    ///
+    /// Currently infallible; returns `Result<()>` for signature symmetry with
+    /// [`WriteTransaction::commit`] and for forward compatibility if future
+    /// bookkeeping steps become fallible.
+    pub fn commit_in_memory(mut self) -> Result<()> {
+        // Collect dirty page IDs before pages are moved to the cache.
+        let dirty_page_ids: Vec<PageId> = self.dirty_pages.keys().copied().collect();
+
+        // Record modified page IDs in the backup dirty bitmap before draining.
+        // This enables incremental backups to capture exactly which pages changed.
+        {
+            let mut bitmap = self.db.dirty_bitmap.lock();
+            for &page_id in &dirty_page_ids {
+                bitmap.mark(page_id);
+            }
+        }
+
+        // Move all buffered dirty pages into the shared cache
+        for (_, page) in self.dirty_pages.drain() {
+            self.db.cache.insert(page);
+        }
+
+        // Increment generation and record which pages were modified.
+        let current_gen = self.db.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        {
+            let mut page_gens = self.db.page_generations.lock();
+            for &page_id in &dirty_page_ids {
+                page_gens.insert(page_id, current_gen);
+            }
+        }
+
+        // NOTE: `flush_pages` and `persist_state_to_disk` are intentionally
+        // skipped here — that is the entire point of this variant. Pages
+        // stay in the in-process cache until the next `sync_state` flushes
+        // them, and the dual-slot state pointer on disk continues to
+        // reference the previous synced snapshot.
+
+        let new_state =
+            CommittedState { table_roots: self.table_roots, snapshot_id: self.snapshot_id };
+
+        // Atomically swap the committed state - this is the magic moment
+        // where our changes become visible to new read transactions
+        self.db.committed_state.store(Arc::new(new_state));
+
+        // Record pages to be freed for deferred cleanup
+        // These can only be freed once no readers reference this snapshot
+        if !self.pages_to_free.is_empty() {
+            let pages = std::mem::take(&mut self.pages_to_free);
+            self.db.pending_frees.lock().record_freed_pages(self.snapshot_id, pages);
+        }
+
+        // NOTE: do NOT call try_free_pending_pages() here. Unlike `commit`, this
+        // method does not advance the on-disk god byte, so the durable state
+        // pointer still references the pre-commit root graph. Releasing freed
+        // page IDs to the allocator now would let a subsequent durable `commit`
+        // reuse them and overwrite pages that recovery would walk from the old
+        // root. The drain runs in `Database::sync_state` AFTER
+        // `persist_state_to_disk` advances the god byte. See the Sprint 1B2
+        // design doc's "Invariants that MUST be preserved" section.
 
         self.db.tracker.end_write_transaction(self.snapshot_id);
 

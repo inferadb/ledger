@@ -39,6 +39,10 @@ aes-kw = { workspace = true }
 zeroize = { workspace = true }
 rand = { workspace = true }
 
+# Async primitives for Database::sync_state (tokio::sync::Mutex across .await,
+# tokio::task::spawn_blocking for the fsync-heavy dual-slot persist).
+tokio = { workspace = true, features = ["sync", "rt", "macros"] }
+
 # DEK cache (bounded LRU with concurrent access)
 moka = { workspace = true }
 
@@ -53,6 +57,9 @@ serde_json = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = { workspace = true }
+# Multi-threaded runtime for async tests that call Database::sync_state
+# (spawn_blocking requires a runtime).
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 
 [features]
 default = []
