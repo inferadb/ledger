@@ -2020,12 +2020,13 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
 
             let meta = backup_manager
                 .create_incremental_backup(
-                    db.as_ref(),
+                    db,
                     &base_backup_id,
                     base_meta.region,
                     region_height,
                     &tag,
                 )
+                .await
                 .map_err(|e| {
                     ctx.set_error("BackupError", &e.to_string());
                     error_classify::storage_error(&e)
@@ -2046,6 +2047,15 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 NUM_BUCKETS, Snapshot, SnapshotChainParams, SnapshotStateData, VaultSnapshotMeta,
             };
             use inferadb_ledger_types::EMPTY_HASH;
+
+            // Sprint 1B2 Task 2C: `create_backup` takes a pre-built
+            // `Snapshot`; per its contract, the caller must sync the state DB
+            // first so the `StateLayer` reads below observe durable state.
+            let db = self.state.database();
+            Arc::clone(db).sync_state().await.map_err(|e| {
+                ctx.set_error("SyncStateError", &e.to_string());
+                error_classify::storage_error(&e)
+            })?;
 
             let region_height = self.applied_state.region_height();
             let all_vaults = self.applied_state.all_vaults();

@@ -248,6 +248,15 @@ pub async fn bootstrap_node(
     // are cancelled when the coordinator's root token is cancelled.
     manager.set_cancellation_token(coordinator.child_token("raft-manager-regions"));
 
+    // Create the runtime-config handle early and plumb it into the manager
+    // BEFORE the first region starts. Per-region `StateCheckpointer` tasks
+    // (Sprint 1B2 Task 2B) read `CheckpointConfig` off this handle on every
+    // tick so live `UpdateConfig` RPCs adjust thresholds without a restart.
+    // The handle is cloned later into `LedgerServer` so the admin UpdateConfig
+    // RPC writes into the same ArcSwap.
+    let runtime_config = RuntimeConfigHandle::default();
+    manager.set_runtime_config(runtime_config.clone());
+
     // Check whether this node has been initialized (cluster_id file exists).
     let cluster_id = crate::cluster_id::load_cluster_id(data_dir).map_err(|e| {
         BootstrapError::Database { message: format!("failed to load cluster_id: {e}") }
@@ -466,8 +475,10 @@ pub async fn bootstrap_node(
             None
         };
 
-    // Create runtime config handle for hot-reloadable settings.
-    let runtime_config = RuntimeConfigHandle::default();
+    // `runtime_config` is created earlier (before the first region starts) so
+    // per-region `StateCheckpointer` tasks receive the live handle. It's
+    // passed through to `LedgerServer` below so the admin `UpdateConfig` RPC
+    // writes into the same ArcSwap that every checkpointer re-reads on tick.
 
     // Create backup manager if configured.
     let backup_manager = config

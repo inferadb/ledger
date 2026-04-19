@@ -29,7 +29,7 @@ mod types;
 
 pub use accessor::*;
 use inferadb_ledger_types::Hash;
-pub use raft_impl::LedgerSnapshotBuilder;
+pub use raft_impl::{LedgerSnapshotBuilder, RecoveryStats};
 pub use store::*;
 pub use types::*;
 
@@ -12292,5 +12292,240 @@ mod tests {
         let vote2 = Vote { term: 2, node_id: 42, committed: false };
         store.save_vote(&vote2).await.expect("save vote2");
         assert_eq!(store.read_vote().await.expect("read"), Some(vote2));
+    }
+
+    // ========================================================================
+    // Sprint 1B2 Task 2C: snapshot-build sync hook test
+    // ========================================================================
+
+    /// `LedgerSnapshotBuilder::build_snapshot` (via `get_current_snapshot`)
+    /// must force `sync_state` at the top so the snapshot captures durable
+    /// state. Proved by: in-memory-commit a write directly to the state DB
+    /// bypassing `save_vote`/etc., confirm the synced id is stale, call
+    /// `get_current_snapshot`, and observe the synced id advanced.
+    ///
+    /// The `save_state_core` FLIP + `save_vote` KEEP classification are
+    /// covered by dedicated tests in `log_storage::store::tests` (see
+    /// `save_state_core_commits_in_memory_only_then_sync_advances_snapshot`
+    /// and `save_vote_is_durable_before_returning`).
+    #[tokio::test]
+    async fn build_snapshot_forces_sync_state() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+
+        // Directly commit_in_memory a single write against the state DB so
+        // `committed_state` is ahead of the durable dual-slot. Bypasses the
+        // apply pipeline; we only care about exercising the sync hook here.
+        {
+            let mut txn = store.db.write().expect("begin write txn");
+            txn.insert::<tables::RaftState>(
+                &"task_2c_sync_hook_probe".to_string(),
+                &b"probe-value".to_vec(),
+            )
+            .expect("insert");
+            txn.commit_in_memory().expect("commit_in_memory");
+        }
+
+        // `last_synced_snapshot_id` is still whatever it was on open — the
+        // commit_in_memory above did not advance it.
+        let synced_before = store.db.last_synced_snapshot_id();
+
+        // Trigger a snapshot build. Must call `sync_state` at the top.
+        let _snapshot = store.get_current_snapshot().await.expect("get snapshot");
+
+        let synced_after = store.db.last_synced_snapshot_id();
+        assert!(
+            synced_after > synced_before,
+            "build_snapshot must advance last_synced_snapshot_id (Task 2C \
+             sync hook): before={synced_before} after={synced_after}"
+        );
+    }
+
+    // ========================================================================
+    // Sprint 1B2 Task 2D — replay_crash_gap
+    // ========================================================================
+    //
+    // These tests drive `RaftLogStore::replay_crash_gap` directly against an
+    // `InMemoryWalBackend`. The apply path they invoke uses `EntryKind::Normal`
+    // with empty payload (a Raft §5.4.2 no-op) so `apply_committed_entries`
+    // exercises the replay wiring (state.last_applied advance, post-replay
+    // sync_state) without depending on state_layer / block_archive machinery.
+
+    /// Helper: produce a WAL frame for the given shard + index (no-op entry).
+    fn replay_wal_frame(
+        shard_id: inferadb_ledger_consensus::types::ShardId,
+        index: u64,
+        term: u64,
+    ) -> inferadb_ledger_consensus::wal_backend::WalFrame {
+        inferadb_ledger_consensus::wal_backend::WalFrame {
+            shard_id,
+            index,
+            term,
+            // Empty data => EntryKind::Normal no-op in apply_committed_entries
+            data: std::sync::Arc::from(Vec::new().as_slice()),
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_crash_gap_empty_log_is_noop() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+
+        // Fresh WAL with no checkpoint and no frames.
+        let wal = inferadb_ledger_consensus::wal::InMemoryWalBackend::new();
+        let shard_id = inferadb_ledger_consensus::types::ShardId(42);
+
+        let synced_before = store.db.last_synced_snapshot_id();
+        let stats = store.replay_crash_gap(&wal, shard_id).await.expect("replay");
+
+        assert_eq!(stats.replayed_entries, 0, "empty WAL must replay zero entries");
+        assert_eq!(stats.applied_durable, 0, "fresh store has applied_durable = 0");
+        assert_eq!(stats.last_committed, 0, "no checkpoint means last_committed = 0");
+        let synced_after = store.db.last_synced_snapshot_id();
+        assert_eq!(
+            synced_after, synced_before,
+            "empty-log fast-path must NOT fire sync_state \
+             (before={synced_before}, after={synced_after})",
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_crash_gap_caught_up_is_noop() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+
+        let shard_id = inferadb_ledger_consensus::types::ShardId(7);
+
+        // Pre-populate the WAL with frames 1..=3 and a checkpoint at
+        // committed_index=3. Simulate "state DB already caught up" by
+        // setting `applied_state.last_applied.index = 3` directly.
+        let mut wal = inferadb_ledger_consensus::wal::InMemoryWalBackend::new();
+        use inferadb_ledger_consensus::wal_backend::WalBackend;
+        wal.append(&[
+            replay_wal_frame(shard_id, 1, 1),
+            replay_wal_frame(shard_id, 2, 1),
+            replay_wal_frame(shard_id, 3, 1),
+        ])
+        .expect("append frames");
+        wal.write_checkpoint(&inferadb_ledger_consensus::wal_backend::CheckpointFrame {
+            committed_index: 3,
+            term: 1,
+            voted_for: None,
+        })
+        .expect("write checkpoint");
+        wal.sync().expect("sync");
+
+        // Seed applied_state.last_applied.index to match the checkpoint —
+        // simulates a clean shutdown where `sync_all_state_dbs` drove the
+        // gap to zero.
+        {
+            let current = store.applied_state.load_full();
+            let mut new_state = (*current).clone();
+            new_state.last_applied = Some(LogId::new(1, 0, 3));
+            store.applied_state.store(Arc::new(new_state));
+        }
+
+        let stats = store.replay_crash_gap(&wal, shard_id).await.expect("replay");
+
+        assert_eq!(
+            stats.replayed_entries, 0,
+            "applied_durable == last_committed must replay zero entries",
+        );
+        assert_eq!(stats.applied_durable, 3);
+        assert_eq!(stats.last_committed, 3);
+    }
+
+    #[tokio::test]
+    async fn replay_crash_gap_replays_tail_and_syncs() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+
+        let shard_id = inferadb_ledger_consensus::types::ShardId(11);
+
+        // WAL has frames 1..=5 committed. State DB simulates a crash mid-way:
+        // applied_durable = 2, so indexes 3..=5 must be replayed.
+        let mut wal = inferadb_ledger_consensus::wal::InMemoryWalBackend::new();
+        use inferadb_ledger_consensus::wal_backend::WalBackend;
+        wal.append(&[
+            replay_wal_frame(shard_id, 1, 1),
+            replay_wal_frame(shard_id, 2, 1),
+            replay_wal_frame(shard_id, 3, 1),
+            replay_wal_frame(shard_id, 4, 1),
+            replay_wal_frame(shard_id, 5, 1),
+        ])
+        .expect("append frames");
+        wal.write_checkpoint(&inferadb_ledger_consensus::wal_backend::CheckpointFrame {
+            committed_index: 5,
+            term: 1,
+            voted_for: None,
+        })
+        .expect("write checkpoint");
+        wal.sync().expect("sync");
+
+        // Seed a partial recovery: applied_durable = 2.
+        {
+            let current = store.applied_state.load_full();
+            let mut new_state = (*current).clone();
+            new_state.last_applied = Some(LogId::new(1, 0, 2));
+            store.applied_state.store(Arc::new(new_state));
+        }
+
+        let synced_before = store.db.last_synced_snapshot_id();
+        let stats = store.replay_crash_gap(&wal, shard_id).await.expect("replay");
+
+        assert_eq!(stats.replayed_entries, 3, "must replay 3..=5");
+        assert_eq!(stats.applied_durable, 2);
+        assert_eq!(stats.last_committed, 5);
+
+        // State DB now reflects index 5.
+        let state_after = store.applied_state.load();
+        assert_eq!(
+            state_after.last_applied.as_ref().map(|id| id.index),
+            Some(5),
+            "applied_state.last_applied must advance past the replay window",
+        );
+
+        // Post-replay sync_state must have advanced the durable dual-slot.
+        let synced_after = store.db.last_synced_snapshot_id();
+        assert!(
+            synced_after > synced_before,
+            "post-replay sync_state must advance last_synced_snapshot_id \
+             (before={synced_before} after={synced_after})",
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_crash_gap_is_idempotent_across_double_call() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
+
+        let shard_id = inferadb_ledger_consensus::types::ShardId(99);
+
+        let mut wal = inferadb_ledger_consensus::wal::InMemoryWalBackend::new();
+        use inferadb_ledger_consensus::wal_backend::WalBackend;
+        wal.append(&[replay_wal_frame(shard_id, 1, 1), replay_wal_frame(shard_id, 2, 1)])
+            .expect("append frames");
+        wal.write_checkpoint(&inferadb_ledger_consensus::wal_backend::CheckpointFrame {
+            committed_index: 2,
+            term: 1,
+            voted_for: None,
+        })
+        .expect("write checkpoint");
+        wal.sync().expect("sync");
+
+        // First call replays everything.
+        let stats1 = store.replay_crash_gap(&wal, shard_id).await.expect("replay #1");
+        assert_eq!(stats1.replayed_entries, 2, "first call replays both entries");
+
+        // Second call: applied_durable is now 2, so nothing to replay.
+        let stats2 = store.replay_crash_gap(&wal, shard_id).await.expect("replay #2");
+        assert_eq!(stats2.replayed_entries, 0, "idempotent: second call must replay zero entries",);
+        assert_eq!(stats2.applied_durable, 2);
+        assert_eq!(stats2.last_committed, 2);
     }
 }

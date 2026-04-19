@@ -254,6 +254,16 @@ impl BackupManager {
     /// Returns the backup metadata. Old backups are pruned according to the
     /// retention count.
     ///
+    /// Sprint 1B2 Task 2C: no `Database::sync_state` hook here. This function
+    /// accepts a pre-built `Snapshot` value and writes it plus a sidecar to
+    /// the backup directory. The sync-before-read guarantee is the caller's
+    /// responsibility: any caller that builds the `Snapshot` from live state
+    /// must call `Database::sync_state` first. The snapshot-build hook on
+    /// `LedgerSnapshotBuilder::build_snapshot` covers the Raft snapshot path;
+    /// other callers (e.g. `AdminService::create_backup` assembling a
+    /// `Snapshot` from `StateLayer` + `AppliedState`) must sync before
+    /// calling in.
+    ///
     /// # Errors
     ///
     /// Returns [`BackupError`] if the snapshot file or metadata sidecar cannot
@@ -450,14 +460,22 @@ impl BackupManager {
     /// Returns [`BackupError::NotFound`] if the base backup does not exist,
     /// [`BackupError::Invalid`] if the base is incremental or there are no
     /// dirty pages, or [`BackupError::Io`] if the file cannot be written.
-    pub fn create_incremental_backup<B: StorageBackend>(
+    pub async fn create_incremental_backup<B: StorageBackend + 'static>(
         &self,
-        db: &Database<B>,
+        db: &Arc<Database<B>>,
         base_backup_id: &str,
         region: Region,
         region_height: u64,
         tag: &str,
     ) -> Result<BackupMetadata> {
+        // Sprint 1B2 Task 2C: force `sync_state` so the backend's last-synced
+        // state matches `committed_state`. Incremental backups read directly
+        // from the backend (`dirty_page_ids` + `export_pages`); under lazy
+        // commits those dirty pages may still be in the in-process cache,
+        // not yet persisted. Syncing first guarantees the emitted pages are
+        // the same bytes a fresh reader would see on disk.
+        Arc::clone(db).sync_state().await.context(StorageSnafu)?;
+
         // Verify the base backup exists
         let base_meta = self.get_metadata(base_backup_id)?;
 
@@ -834,14 +852,21 @@ impl BackupManager {
     ///
     /// Returns [`BackupError::Io`] if the backup file cannot be created or
     /// written, or [`BackupError::Serialization`] if metadata serialization fails.
-    pub fn create_full_page_backup<B: StorageBackend>(
+    pub async fn create_full_page_backup<B: StorageBackend + 'static>(
         &self,
-        db: &Database<B>,
+        db: &Arc<Database<B>>,
         region: Region,
         region_height: u64,
         chain_commitment_hash: Hash,
         tag: &str,
     ) -> Result<BackupMetadata> {
+        // Sprint 1B2 Task 2C: force `sync_state` before reading the backend.
+        // A full page backup exports every live page; under lazy commits
+        // some of those pages may be dirty in the in-process cache and
+        // therefore not yet written via `flush_pages`. Syncing first
+        // guarantees the backup captures durable bytes.
+        Arc::clone(db).sync_state().await.context(StorageSnafu)?;
+
         let total_pages = db.total_page_count();
         let all_page_ids: Vec<u64> = (0..total_pages).collect();
         let pages = db.export_pages(&all_page_ids);
@@ -1279,9 +1304,10 @@ mod tests {
     // --- Incremental backup tests ---
 
     fn create_test_db_with_data()
-    -> inferadb_ledger_store::Database<inferadb_ledger_store::InMemoryBackend> {
-        let db =
-            inferadb_ledger_store::Database::open_in_memory().expect("create in-memory database");
+    -> Arc<inferadb_ledger_store::Database<inferadb_ledger_store::InMemoryBackend>> {
+        let db = Arc::new(
+            inferadb_ledger_store::Database::open_in_memory().expect("create in-memory database"),
+        );
         {
             let mut txn = db.write().expect("begin write txn");
             txn.insert::<inferadb_ledger_store::tables::Entities>(
@@ -1299,8 +1325,8 @@ mod tests {
         db
     }
 
-    #[test]
-    fn test_full_page_backup_create_and_load() {
+    #[tokio::test]
+    async fn test_full_page_backup_create_and_load() {
         let temp = TempDir::new().expect("create temp dir");
         let config = create_test_backup_config(temp.path());
         let manager = BackupManager::new(&config).expect("create manager");
@@ -1308,6 +1334,7 @@ mod tests {
 
         let meta = manager
             .create_full_page_backup(&db, Region::GLOBAL, 100, [5u8; 32], "full-test")
+            .await
             .expect("create full page backup");
 
         assert_eq!(meta.backup_type, BackupType::Full);
@@ -1325,8 +1352,8 @@ mod tests {
         assert!(!loaded.pages.is_empty());
     }
 
-    #[test]
-    fn test_incremental_backup_captures_dirty_pages() {
+    #[tokio::test]
+    async fn test_incremental_backup_captures_dirty_pages() {
         let temp = TempDir::new().expect("create temp dir");
         let config = BackupConfig::builder()
             .destination(temp.path().display().to_string())
@@ -1339,6 +1366,7 @@ mod tests {
         // Create full page backup and clear dirty bitmap
         let full_meta = manager
             .create_full_page_backup(&db, Region::GLOBAL, 100, [5u8; 32], "base")
+            .await
             .expect("create full page backup");
         db.clear_dirty_bitmap();
 
@@ -1357,6 +1385,7 @@ mod tests {
 
         let inc_meta = manager
             .create_incremental_backup(&db, &full_meta.backup_id, Region::GLOBAL, 200, "incr")
+            .await
             .expect("create incremental backup");
 
         assert_eq!(inc_meta.backup_type, BackupType::Incremental);
@@ -1373,8 +1402,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_incremental_backup_rejects_incremental_base() {
+    #[tokio::test]
+    async fn test_incremental_backup_rejects_incremental_base() {
         let temp = TempDir::new().expect("create temp dir");
         let config = BackupConfig::builder()
             .destination(temp.path().display().to_string())
@@ -1387,6 +1416,7 @@ mod tests {
         // Create full → incremental chain
         let full_meta = manager
             .create_full_page_backup(&db, Region::GLOBAL, 100, [5u8; 32], "base")
+            .await
             .expect("create full");
         db.clear_dirty_bitmap();
 
@@ -1402,6 +1432,7 @@ mod tests {
 
         let inc_meta = manager
             .create_incremental_backup(&db, &full_meta.backup_id, Region::GLOBAL, 200, "incr1")
+            .await
             .expect("create incremental");
         db.clear_dirty_bitmap();
 
@@ -1416,21 +1447,17 @@ mod tests {
             txn.commit().expect("commit");
         }
 
-        let result = manager.create_incremental_backup(
-            &db,
-            &inc_meta.backup_id,
-            Region::GLOBAL,
-            300,
-            "incr2",
-        );
+        let result = manager
+            .create_incremental_backup(&db, &inc_meta.backup_id, Region::GLOBAL, 300, "incr2")
+            .await;
         assert!(
             matches!(result, Err(BackupError::Invalid { .. })),
             "Should reject incremental base"
         );
     }
 
-    #[test]
-    fn test_incremental_backup_no_dirty_pages() {
+    #[tokio::test]
+    async fn test_incremental_backup_no_dirty_pages() {
         let temp = TempDir::new().expect("create temp dir");
         let config = create_test_backup_config(temp.path());
         let manager = BackupManager::new(&config).expect("create manager");
@@ -1438,20 +1465,22 @@ mod tests {
 
         let full_meta = manager
             .create_full_page_backup(&db, Region::GLOBAL, 100, [5u8; 32], "")
+            .await
             .expect("create full");
         db.clear_dirty_bitmap();
 
         // No writes → no dirty pages → should error
-        let result =
-            manager.create_incremental_backup(&db, &full_meta.backup_id, Region::GLOBAL, 200, "");
+        let result = manager
+            .create_incremental_backup(&db, &full_meta.backup_id, Region::GLOBAL, 200, "")
+            .await;
         assert!(
             matches!(result, Err(BackupError::Invalid { .. })),
             "Should reject when no dirty pages"
         );
     }
 
-    #[test]
-    fn test_resolve_backup_chain() {
+    #[tokio::test]
+    async fn test_resolve_backup_chain() {
         let temp = TempDir::new().expect("create temp dir");
         let config = BackupConfig::builder()
             .destination(temp.path().display().to_string())
@@ -1463,6 +1492,7 @@ mod tests {
 
         let full_meta = manager
             .create_full_page_backup(&db, Region::GLOBAL, 100, [5u8; 32], "")
+            .await
             .expect("create full");
         db.clear_dirty_bitmap();
 
@@ -1479,6 +1509,7 @@ mod tests {
 
         let inc_meta = manager
             .create_incremental_backup(&db, &full_meta.backup_id, Region::GLOBAL, 200, "")
+            .await
             .expect("create incremental");
 
         // Resolve chain from incremental → should be [full, incremental]
@@ -1494,8 +1525,8 @@ mod tests {
         assert_eq!(chain[0], full_meta.backup_id);
     }
 
-    #[test]
-    fn test_restore_page_chain_full_only() {
+    #[tokio::test]
+    async fn test_restore_page_chain_full_only() {
         let temp = TempDir::new().expect("create temp dir");
         let config = create_test_backup_config(temp.path());
         let manager = BackupManager::new(&config).expect("create manager");
@@ -1503,6 +1534,7 @@ mod tests {
 
         let full_meta = manager
             .create_full_page_backup(&db, Region::GLOBAL, 100, [5u8; 32], "")
+            .await
             .expect("create full");
 
         // Create a fresh database and restore into it
@@ -1516,8 +1548,8 @@ mod tests {
         assert_eq!(restored_height, 100);
     }
 
-    #[test]
-    fn test_restore_page_chain_with_incremental() {
+    #[tokio::test]
+    async fn test_restore_page_chain_with_incremental() {
         let temp = TempDir::new().expect("create temp dir");
         let config = BackupConfig::builder()
             .destination(temp.path().display().to_string())
@@ -1529,6 +1561,7 @@ mod tests {
 
         let full_meta = manager
             .create_full_page_backup(&db, Region::GLOBAL, 100, [5u8; 32], "")
+            .await
             .expect("create full");
         db.clear_dirty_bitmap();
 
@@ -1545,6 +1578,7 @@ mod tests {
 
         let inc_meta = manager
             .create_incremental_backup(&db, &full_meta.backup_id, Region::GLOBAL, 200, "")
+            .await
             .expect("create incremental");
 
         // Restore the full chain into a fresh database
@@ -1557,8 +1591,8 @@ mod tests {
         assert_eq!(restored_height, 200);
     }
 
-    #[test]
-    fn test_page_backup_checksum_verification() {
+    #[tokio::test]
+    async fn test_page_backup_checksum_verification() {
         let temp = TempDir::new().expect("create temp dir");
         let config = create_test_backup_config(temp.path());
         let manager = BackupManager::new(&config).expect("create manager");
@@ -1566,6 +1600,7 @@ mod tests {
 
         let meta = manager
             .create_full_page_backup(&db, Region::GLOBAL, 100, [5u8; 32], "")
+            .await
             .expect("create full page backup");
 
         // Corrupt the page backup file
@@ -1617,8 +1652,8 @@ mod tests {
         assert_eq!(decoded.pages.len(), 1);
     }
 
-    #[test]
-    fn test_incremental_backup_listed_with_type() {
+    #[tokio::test]
+    async fn test_incremental_backup_listed_with_type() {
         let temp = TempDir::new().expect("create temp dir");
         let config = BackupConfig::builder()
             .destination(temp.path().display().to_string())
@@ -1635,6 +1670,7 @@ mod tests {
         // Create full page backup
         let page_meta = manager
             .create_full_page_backup(&db, Region::GLOBAL, 200, [5u8; 32], "page-full")
+            .await
             .expect("page backup");
         db.clear_dirty_bitmap();
 
@@ -1651,6 +1687,7 @@ mod tests {
 
         let _inc_meta = manager
             .create_incremental_backup(&db, &page_meta.backup_id, Region::GLOBAL, 300, "incr")
+            .await
             .expect("incremental backup");
 
         let backups = manager.list_backups(0).expect("list all");
@@ -2024,5 +2061,87 @@ mod tests {
         assert_eq!(decoded.page_size, 4096);
         assert!(decoded.pages.is_empty());
         assert!(decoded.base_backup_id.is_none());
+    }
+
+    // ========================================================================
+    // Sprint 1B2 Task 2C: backup-path sync hooks fire before reading the backend
+    // ========================================================================
+
+    /// Helper: commit a write in-memory only (no dual-slot persist), simulating
+    /// an apply-path commit under Task 2C.
+    fn commit_in_memory_one<B: inferadb_ledger_store::StorageBackend>(
+        db: &Arc<Database<B>>,
+        key: &[u8],
+        value: &[u8],
+    ) {
+        let mut txn = db.write().expect("begin write txn");
+        txn.insert::<inferadb_ledger_store::tables::Entities>(&key.to_vec(), &value.to_vec())
+            .expect("insert");
+        txn.commit_in_memory().expect("commit_in_memory");
+    }
+
+    /// `create_full_page_backup` must force `sync_state` at the top so the
+    /// backend's durable state matches the in-memory `committed_state` before
+    /// any pages are exported. Proved by asserting
+    /// `last_synced_snapshot_id` advances past where it was after the
+    /// most recent in-memory commit.
+    #[tokio::test]
+    async fn create_full_page_backup_forces_sync_state() {
+        let temp = TempDir::new().expect("create temp dir");
+        let config = create_test_backup_config(temp.path());
+        let manager = BackupManager::new(&config).expect("create manager");
+        let db = create_test_db_with_data();
+
+        // Commit an in-memory-only write on top of the test-data commit.
+        // After this, `committed_state` is ahead of the durable dual-slot.
+        commit_in_memory_one(&db, b"sync-hook-probe", b"v1");
+        let synced_before = db.last_synced_snapshot_id();
+
+        let _meta = manager
+            .create_full_page_backup(&db, Region::GLOBAL, 100, [5u8; 32], "sync-hook")
+            .await
+            .expect("full page backup");
+
+        let synced_after = db.last_synced_snapshot_id();
+        assert!(
+            synced_after > synced_before,
+            "create_full_page_backup must advance last_synced_snapshot_id \
+             (Task 2C sync hook): before={synced_before} after={synced_after}"
+        );
+    }
+
+    /// Same coverage for `create_incremental_backup`.
+    #[tokio::test]
+    async fn create_incremental_backup_forces_sync_state() {
+        let temp = TempDir::new().expect("create temp dir");
+        let config = BackupConfig::builder()
+            .destination(temp.path().display().to_string())
+            .retention_count(10_usize)
+            .build()
+            .expect("valid config");
+        let manager = BackupManager::new(&config).expect("create manager");
+        let db = create_test_db_with_data();
+
+        let full_meta = manager
+            .create_full_page_backup(&db, Region::GLOBAL, 100, [5u8; 32], "base")
+            .await
+            .expect("full backup");
+        db.clear_dirty_bitmap();
+
+        // In-memory-only write: committed_state ahead of disk.
+        commit_in_memory_one(&db, b"incremental-sync-probe", b"v1");
+        let synced_before = db.last_synced_snapshot_id();
+
+        let _inc_meta = manager
+            .create_incremental_backup(&db, &full_meta.backup_id, Region::GLOBAL, 200, "incr")
+            .await
+            .expect("incremental backup");
+
+        let synced_after = db.last_synced_snapshot_id();
+        assert!(
+            synced_after > synced_before,
+            "create_incremental_backup must advance last_synced_snapshot_id \
+             (Task 2C sync hook): before={synced_before} after={synced_after}"
+        );
     }
 }

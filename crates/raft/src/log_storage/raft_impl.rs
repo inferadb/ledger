@@ -56,7 +56,24 @@ pub struct LedgerSnapshotBuilder {
 
 impl LedgerSnapshotBuilder {
     /// Builds a snapshot file and returns the file handle plus metadata.
+    ///
+    /// Sprint 1B2 Task 2C: forces `Database::sync_state` before reading the
+    /// state DB so the snapshot captures a durable dual-slot-consistent state.
+    /// Under Task 2C's lazy-commit regime, `committed_state` can be ahead of
+    /// the last synced disk state; shipping a snapshot at an unsynced
+    /// `applied` index to followers risks follower WAL truncation of entries
+    /// the local node still needs on crash recovery.
+    ///
+    /// This narrows the race window rather than eliminating it: a concurrent
+    /// apply on the `ApplyWorker` can land a `commit_in_memory` between this
+    /// `sync_state` call and the subsequent `db.read()`, leaving the captured
+    /// `last_applied` one or more entries ahead of the synced dual-slot. The
+    /// `StateCheckpointer` re-syncs on its 500ms cadence, so the residual
+    /// window collapses quickly under steady state; Task 3A's crash-recovery
+    /// tests will confirm whether a tighter post-read re-sync loop is needed.
     pub async fn build_snapshot(&mut self) -> Result<(tokio::fs::File, SnapshotMeta), StoreError> {
+        Arc::clone(&self.db).sync_state().await.map_err(|e| to_storage_error(&e))?;
+
         let (org_ids, last_ts) = extract_snapshot_event_context(&self.db)?;
 
         let event_entries = collect_snapshot_events(
@@ -347,6 +364,29 @@ fn collect_snapshot_events(
 // ============================================================================
 // Apply Logic (CommittedEntry-based)
 // ============================================================================
+
+/// Outcome of a call to [`RaftLogStore::replay_crash_gap`].
+///
+/// The caller (`RaftManager::start_region`) uses this to emit the
+/// `ledger_state_recovery_*` metrics and log a single lifecycle line for
+/// the recovery sweep. `replay_crash_gap` itself emits no metrics —
+/// keeping the metrics contract at the caller avoids a circular
+/// dependency between `log_storage` and the `metrics` module's
+/// region-labelled helpers.
+#[derive(Debug, Clone, Copy)]
+pub struct RecoveryStats {
+    /// Number of WAL entries replayed through `apply_committed_entries`.
+    /// Zero on clean shutdown or empty WAL.
+    pub replayed_entries: u64,
+    /// Wall-clock time spent inside `replay_crash_gap`, including the
+    /// post-replay `Database::sync_state` when any entries were replayed.
+    pub duration: std::time::Duration,
+    /// Highest log index durably captured in the synced state DB at the
+    /// start of recovery (i.e. `applied_durable`).
+    pub applied_durable: u64,
+    /// Highest committed log index known to the WAL checkpoint.
+    pub last_committed: u64,
+}
 
 impl RaftLogStore {
     /// Applies a batch of committed entries from the consensus engine.
@@ -698,6 +738,133 @@ impl RaftLogStore {
         Ok(responses)
     }
 
+    /// Replays WAL entries from `(applied_durable, last_committed]` through the
+    /// normal apply pipeline, then forces a [`Database::sync_state`] so the
+    /// recovered state is durable before the node begins serving traffic.
+    ///
+    /// Sprint 1B2 Task 2D: closes the crash-recovery gap widened by the
+    /// `commit_in_memory` apply path (Task 2C). `apply_committed_entries` now
+    /// commits in-memory and leaves durability to the periodic
+    /// `StateCheckpointer`; on crash, up to ~500ms of committed applies can
+    /// sit between the synced dual-slot and the WAL tail. This method
+    /// re-drives those entries through the same apply pipeline a live shard
+    /// would use, leaning on the idempotency audit captured in
+    /// `docs/superpowers/specs/2026-04-19-sprint-1b2-apply-batching-design.md`.
+    ///
+    /// # Lifecycle
+    ///
+    /// Called by `RaftManager::start_region` AFTER [`RaftLogStore::open`] +
+    /// builder wiring, and BEFORE [`ConsensusEngine::start`] consumes the WAL
+    /// and the apply worker is spawned. The apply worker not being live
+    /// during replay is load-bearing: it prevents concurrent modification of
+    /// the same `applied_state` ArcSwap while we re-drive the pipeline.
+    ///
+    /// # Idempotency
+    ///
+    /// Replay is safe against partially-checkpointed batches: every field
+    /// reconstructed by `apply_committed_entries` is either CAS-idempotent or
+    /// monotonic-per-log-index, and `BlockArchive::append_block` became
+    /// idempotent-by-height in Task 1C. See the design doc's
+    /// "Replay idempotency audit" table for the field-by-field proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the WAL scan, any replayed apply, or the
+    /// post-replay `sync_state` fails. A failure here should abort region
+    /// startup — a region that can't recover must not start serving reads.
+    pub async fn replay_crash_gap<W>(
+        &mut self,
+        wal: &W,
+        shard_id: inferadb_ledger_consensus::types::ShardId,
+    ) -> Result<RecoveryStats, StoreError>
+    where
+        W: inferadb_ledger_consensus::WalBackend,
+    {
+        use inferadb_ledger_consensus::recovery::recover_from_wal;
+
+        let start = std::time::Instant::now();
+
+        // 1. Read applied_durable. `RaftLogStore::open` runs `load_caches`,
+        // which populates `applied_state` from the synced state DB, so the
+        // ArcSwap already reflects disk state at this point.
+        let applied_durable =
+            self.applied_state.load().last_applied.as_ref().map_or(0, |id| id.index);
+
+        // 2. Read last_committed via the consensus recovery helper. This
+        // consults the WAL checkpoint and only surfaces entries in
+        // (applied_durable, committed_index]. Treats a missing checkpoint
+        // (fresh cluster, no commits yet) as a no-op.
+        let mut applied_map = std::collections::HashMap::new();
+        applied_map.insert(shard_id, applied_durable);
+
+        let recovery = recover_from_wal(wal, &applied_map).map_err(|e| to_storage_error(&e))?;
+        let last_committed = recovery.committed_index;
+
+        // Fast-path: nothing to replay. Either fresh boot (no checkpoint),
+        // clean shutdown (Task 2B's `sync_all_state_dbs` drove the gap to
+        // zero), or a restart into an already-caught-up state DB.
+        if recovery.replay_count == 0 {
+            tracing::info!(
+                region = self.region.as_str(),
+                applied_durable,
+                last_committed,
+                "RaftLogStore::replay_crash_gap: no entries to replay",
+            );
+            return Ok(RecoveryStats {
+                replayed_entries: 0,
+                duration: start.elapsed(),
+                applied_durable,
+                last_committed,
+            });
+        }
+
+        // 3. Slow-path: re-drive the apply pipeline. `recover_from_wal`
+        // returns one batch per shard; for this region's shard we feed the
+        // entries through in chunks sized to match the normal steady-state
+        // apply batch. This keeps per-batch overhead (save_state_core, block
+        // announcements, event flushes) amortized the same way live applies
+        // experience.
+        let mut total_replayed: u64 = 0;
+        const REPLAY_CHUNK_SIZE: usize = 256;
+
+        for batch in recovery.entries_to_replay {
+            if batch.shard != shard_id {
+                // Another shard's entries — not our responsibility. The
+                // shard-owning region's `replay_crash_gap` handles them when
+                // that region starts.
+                continue;
+            }
+            if batch.entries.is_empty() {
+                continue;
+            }
+
+            for chunk in batch.entries.chunks(REPLAY_CHUNK_SIZE) {
+                // `leader_node = None` is correct for recovery: we're not
+                // acting as leader during replay, and `apply_committed_entries`
+                // uses `leader_node` only to decide whether to renew the
+                // leader lease (which is meaningless for a node that hasn't
+                // started serving yet).
+                self.apply_committed_entries(chunk, None).await?;
+                total_replayed = total_replayed.saturating_add(chunk.len() as u64);
+            }
+        }
+
+        // 4. Post-replay sync: the replayed applies all went through
+        // `commit_in_memory`. Force one `sync_state` now so that the
+        // recovered state is durably captured before the node begins
+        // serving traffic — otherwise a second crash during the
+        // server-startup window could regress state past the recovered
+        // point again.
+        Arc::clone(&self.db).sync_state().await.map_err(|e| to_storage_error(&e))?;
+
+        Ok(RecoveryStats {
+            replayed_entries: total_replayed,
+            duration: start.elapsed(),
+            applied_durable,
+            last_committed,
+        })
+    }
+
     /// Returns a snapshot builder.
     pub fn get_snapshot_builder(&self) -> LedgerSnapshotBuilder {
         LedgerSnapshotBuilder {
@@ -712,6 +879,13 @@ impl RaftLogStore {
     ///
     /// Streams decompressed data directly into B-trees and restores the
     /// in-memory state from the committed tables.
+    ///
+    /// Sprint 1B2 Task 2C: no `Database::sync_state` hook here. Installing a
+    /// snapshot is a receive path (we're absorbing state shipped by the
+    /// leader), not a ship path. The write transaction at the end of the
+    /// streaming sync phase (`write_txn.commit()` at the end of the
+    /// `block_in_place` below) is itself a durable commit and captures the
+    /// restored state on disk, so there is nothing local to flush first.
     pub async fn install_snapshot(
         &mut self,
         meta: &SnapshotMeta,
@@ -897,6 +1071,23 @@ impl RaftLogStore {
     pub async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<(tokio::fs::File, SnapshotMeta)>, StoreError> {
+        // Sprint 1B2 Task 2C: force `Database::sync_state` before reading
+        // the state DB so the snapshot captures a durable
+        // dual-slot-consistent state. Under Task 2C's lazy-commit regime
+        // `committed_state` can be ahead of the last synced disk state;
+        // shipping a snapshot at an unsynced `applied` index to followers
+        // risks follower WAL truncation of entries the local node still
+        // needs on crash recovery.
+        //
+        // This narrows the race rather than eliminating it: a concurrent
+        // apply can land a `commit_in_memory` between this `sync_state`
+        // and the subsequent `db.read()`, leaving the captured
+        // `last_applied` ahead of the synced dual-slot. The
+        // `StateCheckpointer`'s 500ms cadence closes the residual gap;
+        // Task 3A's crash-recovery tests will confirm whether a tighter
+        // post-read re-sync loop is needed.
+        Arc::clone(&self.db).sync_state().await.map_err(|e| to_storage_error(&e))?;
+
         // Check whether any state has been applied
         {
             let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;

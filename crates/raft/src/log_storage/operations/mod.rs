@@ -336,7 +336,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         // Mark dirty before commit: dirty marks are conservative
                         // (trigger re-hash from storage). Safe on commit failure.
                         state_layer.mark_dirty_keys(*vault, &all_dirty_keys);
-                        if let Err(e) = write_txn.commit() {
+                        // Sprint 1B2 Task 2C: hot-path apply commit uses
+                        // `commit_in_memory` so no dual-slot persist (2 fsyncs)
+                        // runs per entry. Durability is realized by
+                        // `Database::sync_state` driven by `StateCheckpointer`
+                        // (periodic) and forced before snapshots / backups /
+                        // shutdown. On crash, every write in the gap is
+                        // WAL-replayable via `apply_committed_entries`.
+                        if let Err(e) = write_txn.commit_in_memory() {
                             return (
                                 LedgerResponse::Error {
                                     code: ErrorCode::Internal,

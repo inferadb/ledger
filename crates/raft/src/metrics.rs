@@ -778,6 +778,18 @@ pub const LEDGER_STATE_PAGE_CACHE_LEN: &str = "ledger_state_page_cache_len";
 /// Most recent snapshot id durably persisted to disk (gauge). Labels: `region`.
 pub const LEDGER_STATE_LAST_SYNCED_SNAPSHOT_ID: &str = "ledger_state_last_synced_snapshot_id";
 
+/// Number of WAL entries replayed during the post-open crash-recovery sweep
+/// (counter, Sprint 1B2 Task 2D). Fired exactly once per region on startup,
+/// with value 0 on clean shutdown. Labels: `region`.
+pub const LEDGER_STATE_RECOVERY_REPLAY_COUNT_TOTAL: &str =
+    "ledger_state_recovery_replay_count_total";
+
+/// Duration of the post-open crash-recovery sweep (histogram, seconds).
+/// Fired exactly once per region on startup, regardless of whether any
+/// entries were replayed — operators can watch p99 for pathological recovery
+/// windows. Labels: `region`.
+pub const LEDGER_STATE_RECOVERY_DURATION_SECONDS: &str = "ledger_state_recovery_duration_seconds";
+
 /// Records a state checkpoint attempt.
 ///
 /// `trigger` is one of `"time"`, `"applies"`, `"dirty"` (emitted by the
@@ -858,6 +870,38 @@ pub fn set_state_checkpoint_last_timestamp(region: &str, unix_secs: f64) {
             fields::REGION => region.to_string(),
         )
         .set(unix_secs);
+    });
+}
+
+/// Records the number of WAL entries replayed by `RaftLogStore::replay_crash_gap`.
+///
+/// Called exactly once per region on startup, with `count = 0` on clean
+/// shutdowns. Surfacing zero-count recoveries is deliberate: dashboards can
+/// plot `rate()` to see restarts per deploy.
+#[inline]
+pub fn record_state_recovery_replay(region: &str, count: u64) {
+    gated!(LEDGER_STATE_RECOVERY_REPLAY_COUNT_TOTAL, &[(fields::REGION, region)], {
+        counter!(
+            LEDGER_STATE_RECOVERY_REPLAY_COUNT_TOTAL,
+            fields::REGION => region.to_string(),
+        )
+        .increment(count);
+    });
+}
+
+/// Records the duration of the post-open crash-recovery sweep.
+///
+/// Fires unconditionally — even a zero-entry recovery did some work
+/// (reading the last-applied sentinel + coalescing a no-op sync). Samples
+/// land in `SLI_HISTOGRAM_BUCKETS`; pathological long recoveries alert on p99.
+#[inline]
+pub fn record_state_recovery_duration(region: &str, duration: std::time::Duration) {
+    gated!(LEDGER_STATE_RECOVERY_DURATION_SECONDS, &[(fields::REGION, region)], {
+        histogram!(
+            LEDGER_STATE_RECOVERY_DURATION_SECONDS,
+            fields::REGION => region.to_string(),
+        )
+        .record(duration.as_secs_f64());
     });
 }
 

@@ -201,6 +201,11 @@ async fn main() -> Result<(), ServerError> {
     // Spawn shutdown handler
     let consensus_handle = node.handle.clone();
     let coordinator = node.coordinator.clone();
+    // Clone the RaftManager so the `pre_shutdown` closure can force a final
+    // `sync_state` on every region's state DB AFTER the WAL flush
+    // (Sprint 1B2 Task 2B). This narrows the post-restart WAL replay to zero
+    // entries on clean shutdown.
+    let manager_for_shutdown = node.manager.clone();
     let graceful_shutdown = graceful_shutdown.with_handle(node.handle.clone());
     let shutdown_handle = tokio::spawn(async move {
         shutdown::shutdown_signal().await;
@@ -239,6 +244,18 @@ async fn main() -> Result<(), ServerError> {
                 } else {
                     tracing::info!("WAL flushed successfully during shutdown");
                 }
+
+                // Force a final `sync_state` on every region's state DB AFTER
+                // the WAL flush so the dual-slot god byte captures every apply
+                // that happened between the last `StateCheckpointer` tick and
+                // now. On clean shutdown this drives post-restart WAL replay
+                // to zero entries (Sprint 1B2 Task 2B). Proceed even if the
+                // WAL flush above failed — the god byte may still succeed on
+                // a prefix that the WAL flush missed, narrowing the crash
+                // gap. `sync_all_state_dbs` logs per-region success/failure
+                // internally and never aborts the sweep on a single region's
+                // error.
+                manager_for_shutdown.sync_all_state_dbs(std::time::Duration::from_secs(5)).await;
             })
             .await;
     });

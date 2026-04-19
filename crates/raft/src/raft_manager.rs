@@ -57,6 +57,7 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
+    time::Duration,
 };
 
 use inferadb_ledger_consensus::WalBackend as _;
@@ -83,7 +84,10 @@ use crate::{
     event_writer::EventWriter,
     integrity_scrubber::IntegrityScrubberJob,
     log_storage::{AppliedStateAccessor, RaftLogStore},
+    metrics,
     region_storage::RegionStorageManager,
+    runtime_config::RuntimeConfigHandle,
+    state_checkpointer::StateCheckpointer,
     ttl_gc::TtlGarbageCollector,
     types::{LedgerNodeId, LedgerRequest, LedgerResponse, RaftPayload},
 };
@@ -251,6 +255,11 @@ pub struct RegionBackgroundJobs {
     integrity_scrubber_handle: Option<JoinHandle<()>>,
     /// DEK re-wrapping job handle.
     dek_rewrap_handle: Option<JoinHandle<()>>,
+    /// State-DB checkpointer handle (Sprint 1B2 Task 2B). Drives
+    /// [`Database::sync_state`](inferadb_ledger_store::Database::sync_state)
+    /// on a time / apply-count / dirty-page trigger policy so state-DB
+    /// durability is amortized across many in-memory commits.
+    state_checkpointer_handle: Option<JoinHandle<()>>,
     /// Shared re-wrapping progress (read by admin service).
     rewrap_progress: Arc<RewrapProgress>,
 }
@@ -266,6 +275,7 @@ impl RegionBackgroundJobs {
             btree_compactor_handle: None,
             integrity_scrubber_handle: None,
             dek_rewrap_handle: None,
+            state_checkpointer_handle: None,
             rewrap_progress: Arc::new(RewrapProgress::new()),
         }
     }
@@ -499,6 +509,14 @@ pub struct RaftManager {
     /// Set via [`set_cancellation_token`](Self::set_cancellation_token)
     /// during bootstrap; defaults to an unlinked token.
     cancellation_token: parking_lot::Mutex<CancellationToken>,
+    /// Runtime-config handle plumbed into per-region [`StateCheckpointer`]
+    /// tasks so live `UpdateConfig` RPCs adjust checkpoint thresholds on the
+    /// next tick. Set via [`set_runtime_config`](Self::set_runtime_config)
+    /// during bootstrap; tests that never call the setter fall back to
+    /// [`RuntimeConfigHandle::default`] (checkpointer uses
+    /// [`CheckpointConfig::default`](inferadb_ledger_types::config::CheckpointConfig::default)
+    /// thresholds).
+    runtime_config: parking_lot::Mutex<Option<RuntimeConfigHandle>>,
 }
 
 impl RaftManager {
@@ -522,6 +540,7 @@ impl RaftManager {
             dr_event_tx: tx,
             dr_event_rx: parking_lot::Mutex::new(Some(rx)),
             cancellation_token: parking_lot::Mutex::new(CancellationToken::new()),
+            runtime_config: parking_lot::Mutex::new(None),
         }
     }
 
@@ -532,6 +551,19 @@ impl RaftManager {
     /// from this token for each per-region background job.
     pub fn set_cancellation_token(&self, token: CancellationToken) {
         *self.cancellation_token.lock() = token;
+    }
+
+    /// Sets the runtime-config handle used by per-region [`StateCheckpointer`]
+    /// tasks to read live `CheckpointConfig` thresholds on every tick.
+    ///
+    /// Called during bootstrap **before** the first region is started so every
+    /// region's checkpointer receives the live handle rather than a detached
+    /// default. Tests that don't exercise the checkpoint path may skip this
+    /// call; the checkpointer falls back to
+    /// [`CheckpointConfig::default`](inferadb_ledger_types::config::CheckpointConfig::default)
+    /// thresholds via a local [`RuntimeConfigHandle::default`] if unset.
+    pub fn set_runtime_config(&self, handle: RuntimeConfigHandle) {
+        *self.runtime_config.lock() = Some(handle);
     }
 
     /// Returns the shared per-node connection registry.
@@ -879,8 +911,14 @@ impl RaftManager {
         let (divergence_sender, divergence_receiver) = tokio::sync::mpsc::unbounded_channel();
 
         // Open storage via RegionStorageManager (creates directory + databases + RaftLogStore)
-        let (state, block_archive, log_store, block_announcements, events_db, region_creation_rx) =
-            self.open_region_storage(region, event_writer, events_config, divergence_sender)?;
+        let (
+            state,
+            block_archive,
+            mut log_store,
+            block_announcements,
+            events_db,
+            region_creation_rx,
+        ) = self.open_region_storage(region, event_writer, events_config, divergence_sender)?;
 
         // Get accessor, commitment buffer, leader lease, and applied index watch
         // before log_store is consumed by Adaptor.
@@ -994,6 +1032,35 @@ impl RaftManager {
             },
         };
 
+        // Sprint 1B2 Task 2D: close the crash-recovery gap widened by Task 2C.
+        // `commit_in_memory` leaves the state DB lagging the WAL by up to one
+        // checkpoint interval on an unclean shutdown; replay WAL entries in
+        // `(applied_durable, last_committed]` through the normal apply
+        // pipeline, then force a `sync_state` so recovery is durable before
+        // we serve traffic. MUST run BEFORE `ConsensusEngine::start` consumes
+        // the WAL AND BEFORE the apply worker is spawned, so there's no
+        // concurrent modifier of `applied_state`.
+        match log_store.replay_crash_gap(&wal, shard_id).await {
+            Ok(stats) => {
+                metrics::record_state_recovery_replay(region.as_str(), stats.replayed_entries);
+                metrics::record_state_recovery_duration(region.as_str(), stats.duration);
+                info!(
+                    region = region.as_str(),
+                    applied_durable = stats.applied_durable,
+                    last_committed = stats.last_committed,
+                    replayed_entries = stats.replayed_entries,
+                    duration_ms = stats.duration.as_millis() as u64,
+                    "Crash-recovery replay complete",
+                );
+            },
+            Err(e) => {
+                return Err(RaftManagerError::Storage {
+                    region,
+                    message: format!("crash-recovery replay failed: {e}"),
+                });
+            },
+        }
+
         let consensus_shard = inferadb_ledger_consensus::Shard::new(
             shard_id,
             inferadb_ledger_consensus::types::NodeId(self.config.node_id),
@@ -1096,6 +1163,7 @@ impl RaftManager {
                 state.clone(),
                 block_archive.clone(),
                 applied_state.clone(),
+                applied_index_rx.clone(),
             )
         } else {
             RegionBackgroundJobs::none()
@@ -1164,6 +1232,7 @@ impl RaftManager {
         state: Arc<StateLayer<FileBackend>>,
         block_archive: Arc<BlockArchive<FileBackend>>,
         applied_state: AppliedStateAccessor,
+        applied_index_rx: tokio::sync::watch::Receiver<u64>,
     ) -> RegionBackgroundJobs {
         info!(region = region.as_str(), "Starting background jobs for region");
 
@@ -1210,6 +1279,28 @@ impl RaftManager {
         let btree_compactor_handle = btree_compactor.start();
         info!(region = region.as_str(), "Started B+ tree compactor");
 
+        // State-DB Checkpointer (Sprint 1B2 Task 2B).
+        //
+        // Drives `Database::sync_state` against in-memory commits produced by
+        // `WriteTransaction::commit_in_memory`. Task 2C flips the apply path
+        // to use `commit_in_memory`; until 2C lands the checkpointer still
+        // runs but has nothing dirty to flush because the apply path remains
+        // fully-durable-per-entry.
+        //
+        // Falls back to a fresh `RuntimeConfigHandle::default()` if
+        // `set_runtime_config` was never called (test harnesses). The
+        // checkpointer then uses `CheckpointConfig::default()` thresholds.
+        let runtime_config = self.runtime_config.lock().clone().unwrap_or_default();
+        let state_checkpointer = StateCheckpointer::from_config(
+            state.database().clone(),
+            runtime_config,
+            applied_index_rx,
+            parent_token.child_token(),
+            region.as_str().to_string(),
+        );
+        let state_checkpointer_handle = state_checkpointer.start();
+        info!(region = region.as_str(), "Started state checkpointer");
+
         // Integrity Scrubber
         let integrity_scrubber = IntegrityScrubberJob::builder()
             .state(state.clone())
@@ -1236,6 +1327,7 @@ impl RaftManager {
             btree_compactor_handle: Some(btree_compactor_handle),
             integrity_scrubber_handle: Some(integrity_scrubber_handle),
             dek_rewrap_handle: Some(dek_rewrap_handle),
+            state_checkpointer_handle: Some(state_checkpointer_handle),
             rewrap_progress,
         }
     }
@@ -1369,6 +1461,80 @@ impl RaftManager {
         info!("Raft Manager shutdown complete");
     }
 
+    /// Forces a checkpoint-style `sync_state` on every region's state DB.
+    ///
+    /// Called from the graceful-shutdown `pre_shutdown` closure **after** the
+    /// WAL flush so that on clean shutdown the post-restart WAL replay is
+    /// zero entries: the god-byte pointer captures every apply that happened
+    /// between the last [`StateCheckpointer`] tick and the final drain.
+    ///
+    /// Errors are logged per-region but do not abort the sweep — one region's
+    /// disk-full must not block the remaining regions from reaching
+    /// durability. The caller treats this as best-effort.
+    ///
+    /// `total_timeout` is the **total** budget across all regions; each
+    /// region gets a proportional share with a 1s floor. A single timed-out
+    /// region does not consume the remaining regions' budgets.
+    pub async fn sync_all_state_dbs(&self, total_timeout: Duration) {
+        let regions = self.list_regions();
+        if regions.is_empty() {
+            info!("sync_all_state_dbs: no regions open, skipping");
+            return;
+        }
+
+        let per_region_timeout = total_timeout
+            .checked_div(regions.len() as u32)
+            .unwrap_or(Duration::from_secs(1))
+            .max(Duration::from_secs(1));
+
+        info!(
+            regions = regions.len(),
+            per_region_timeout_ms = per_region_timeout.as_millis() as u64,
+            "sync_all_state_dbs: forcing final state-DB sync across all regions"
+        );
+
+        for region in regions {
+            // Snapshot the region group under the read lock, drop the lock
+            // before awaiting so the shutdown sweep never contends with
+            // other readers for the regions map.
+            let group = self.regions.read().get(&region).cloned();
+            let Some(group) = group else {
+                debug!(
+                    region = region.as_str(),
+                    "sync_all_state_dbs: region vanished between list and lookup, skipping"
+                );
+                continue;
+            };
+            let db = group.state().database().clone();
+            // `sync_state` consumes an `Arc<Self>`, so clone for the await
+            // and reuse the original to read `last_synced_snapshot_id` on
+            // success without re-holding the region lock.
+            match tokio::time::timeout(per_region_timeout, Arc::clone(&db).sync_state()).await {
+                Ok(Ok(())) => {
+                    info!(
+                        region = region.as_str(),
+                        last_synced_snapshot_id = db.last_synced_snapshot_id(),
+                        "sync_all_state_dbs: final state-DB sync complete"
+                    );
+                },
+                Ok(Err(e)) => {
+                    warn!(
+                        region = region.as_str(),
+                        error = %e,
+                        "sync_all_state_dbs: final state-DB sync failed; crash gap narrowed but not zero"
+                    );
+                },
+                Err(_) => {
+                    warn!(
+                        region = region.as_str(),
+                        timeout_ms = per_region_timeout.as_millis() as u64,
+                        "sync_all_state_dbs: final state-DB sync timed out; continuing with remaining regions"
+                    );
+                },
+            }
+        }
+    }
+
     /// Gracefully shut down all region groups with leadership handoff.
     ///
     /// For each region where this node is the leader, triggers a final
@@ -1470,6 +1636,7 @@ impl RaftManager {
             group.state().clone(),
             group.block_archive().clone(),
             group.applied_state().clone(),
+            group.applied_index_watch(),
         );
         *group.background_jobs.lock() = jobs;
         info!(%region, "Region group woken from hibernation");
@@ -1918,6 +2085,7 @@ mod tests {
         assert!(jobs.btree_compactor_handle.is_none());
         assert!(jobs.integrity_scrubber_handle.is_none());
         assert!(jobs.dek_rewrap_handle.is_none());
+        assert!(jobs.state_checkpointer_handle.is_none());
     }
 
     #[test]
@@ -1931,6 +2099,7 @@ mod tests {
         assert!(jobs.btree_compactor_handle.is_none());
         assert!(jobs.integrity_scrubber_handle.is_none());
         assert!(jobs.dek_rewrap_handle.is_none());
+        assert!(jobs.state_checkpointer_handle.is_none());
     }
 
     #[tokio::test]
@@ -1952,6 +2121,10 @@ mod tests {
         assert!(jobs.gc_handle.is_none());
         assert!(jobs.compactor_handle.is_none());
         assert!(jobs.recovery_handle.is_none());
+        assert!(
+            jobs.state_checkpointer_handle.is_none(),
+            "checkpointer should not be spawned when background jobs are disabled"
+        );
     }
 
     #[tokio::test]
@@ -1973,6 +2146,62 @@ mod tests {
         assert!(jobs.gc_handle.is_some(), "GC job should be started");
         assert!(jobs.compactor_handle.is_some(), "Compactor job should be started");
         assert!(jobs.recovery_handle.is_some(), "Recovery job should be started");
+        assert!(
+            jobs.state_checkpointer_handle.is_some(),
+            "state checkpointer should be spawned for every region when background jobs are enabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_all_state_dbs_noop_when_no_regions() {
+        // Sanity check: with no regions open, sync_all_state_dbs must not
+        // divide-by-zero or panic. It should return promptly after logging.
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        // No regions started yet.
+        assert!(manager.list_regions().is_empty());
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            manager.sync_all_state_dbs(std::time::Duration::from_secs(5)),
+        )
+        .await
+        .expect("sync_all_state_dbs should return promptly with zero regions");
+    }
+
+    #[tokio::test]
+    async fn test_sync_all_state_dbs_advances_snapshot_id_for_every_region() {
+        // Start the GLOBAL region with background jobs disabled so the
+        // StateCheckpointer doesn't race with our manual sync_all_state_dbs
+        // call. Confirm that sync_all_state_dbs advances
+        // last_synced_snapshot_id even without an explicit prior write —
+        // sync_state short-circuits to a no-op when there's nothing dirty,
+        // but it still completes Ok(()) which is what this test asserts.
+        //
+        // A deeper test that commits-in-memory and asserts the snapshot id
+        // actually advances belongs in Task 3A (crash-recovery integration),
+        // where the full apply pipeline is in scope.
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        let mut region_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        region_config.enable_background_jobs = false;
+        manager.start_system_region(region_config).await.expect("start system");
+
+        let region = manager.get_region_group(Region::GLOBAL).expect("get region");
+        let db = region.state().database().clone();
+        let before = db.last_synced_snapshot_id();
+
+        manager.sync_all_state_dbs(std::time::Duration::from_secs(5)).await;
+
+        let after = db.last_synced_snapshot_id();
+        assert!(
+            after >= before,
+            "sync_all_state_dbs must not regress last_synced_snapshot_id (before={before}, after={after})"
+        );
     }
 
     #[tokio::test]

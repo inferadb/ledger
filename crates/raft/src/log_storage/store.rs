@@ -572,6 +572,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
         write_txn
             .insert::<tables::RaftState>(&super::KEY_VOTE.to_string(), &vote_data)
             .map_err(|e| to_storage_error(&e))?;
+        // DO NOT flip to `commit_in_memory` — Raft election safety (Sprint 1B2
+        // Task 2C audit). A node that voted for A in term T, crashed, and
+        // recovered with the vote lost could vote for B in term T, producing
+        // split-brain.
         write_txn.commit().map_err(|e| to_storage_error(&e))?;
         *self.vote_cache.write() = Some(*vote);
         Ok(())
@@ -802,8 +806,15 @@ impl<B: StorageBackend> RaftLogStore<B> {
         // Flush all external table writes in the same transaction
         Self::flush_external_writes(pending, &mut write_txn)?;
 
-        // Single atomic commit
-        write_txn.commit().map_err(|e| to_storage_error(&e))?;
+        // Sprint 1B2 Task 2C: per-batch Raft metadata commit uses
+        // `commit_in_memory`. Every field in this transaction (last_applied,
+        // membership, sequences, slug tables, region_height,
+        // previous_region_hash, organization/vault/team/app/user metadata)
+        // is WAL-replayable via the normal apply pipeline. Flipping this
+        // saves 2 fsyncs per committed batch; durability is realized by
+        // `Database::sync_state` at checkpoint, pre-snapshot/backup, or
+        // graceful-shutdown time.
+        write_txn.commit_in_memory().map_err(|e| to_storage_error(&e))?;
 
         Ok(())
     }
@@ -2127,5 +2138,81 @@ mod tests {
         assert_eq!(loaded.region_height, 999);
         assert_eq!(loaded.organizations.len(), 1);
         assert!(loaded.organizations.contains_key(&org_id));
+    }
+
+    // ========================================================================
+    // Sprint 1B2 Task 2C: commit-durability classification tests
+    // ========================================================================
+
+    /// The FLIP: `save_state_core` uses `commit_in_memory` now. After the call
+    /// the core blob + external tables are visible in-process, but
+    /// `last_synced_snapshot_id` has NOT advanced (no dual-slot persist fired).
+    /// A subsequent `sync_state` must advance the synced id past whatever
+    /// snapshot the commit produced.
+    ///
+    /// Invariant this test relies on: `save_state_core` performs exactly one
+    /// `WriteTransaction::commit_in_memory` as the terminal operation (see
+    /// `save_state_core` above — `flush_external_writes` reuses the parent
+    /// write txn and does not open a child commit). If that ever changes,
+    /// the `synced_after_commit == synced_before` assertion could drift.
+    #[tokio::test]
+    async fn save_state_core_commits_in_memory_only_then_sync_advances_snapshot() {
+        let dir = tempdir().unwrap();
+        let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft.db")).unwrap();
+
+        let synced_before = store.db.last_synced_snapshot_id();
+
+        let state = build_populated_state();
+        let pending = build_pending_from_state(&state);
+        store.save_state_core(&state, &pending).unwrap();
+
+        // In-process read-your-own-writes: the external tables are populated
+        // and `load_state_from_tables` returns the just-written state.
+        let loaded = store.load_state_from_tables().unwrap();
+        assert_states_equal(&state, &loaded);
+
+        // But `last_synced_snapshot_id` has NOT advanced — no fsync fired
+        // in `save_state_core` under Task 2C.
+        let synced_after_commit = store.db.last_synced_snapshot_id();
+        assert_eq!(
+            synced_after_commit, synced_before,
+            "save_state_core must not advance last_synced_snapshot_id \
+             (Task 2C: commit_in_memory skips the dual-slot persist)"
+        );
+
+        // Forcing a sync advances the synced id.
+        store.db.clone().sync_state().await.unwrap();
+        let synced_after_sync = store.db.last_synced_snapshot_id();
+        assert!(
+            synced_after_sync > synced_before,
+            "sync_state must advance last_synced_snapshot_id past the \
+             in-memory commit (before={synced_before} after={synced_after_sync})"
+        );
+    }
+
+    /// The KEEP: `save_vote` must commit durably before returning. After the
+    /// call returns, `last_synced_snapshot_id` must be at or past the
+    /// snapshot id the durable commit produced — i.e. strictly greater than
+    /// the synced id before the call. Raft election safety.
+    #[tokio::test]
+    async fn save_vote_is_durable_before_returning() {
+        let dir = tempdir().unwrap();
+        let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft.db")).unwrap();
+
+        let synced_before = store.db.last_synced_snapshot_id();
+
+        let vote = Vote { term: 7, node_id: 3, committed: false };
+        store.save_vote(&vote).await.unwrap();
+
+        let synced_after = store.db.last_synced_snapshot_id();
+        assert!(
+            synced_after > synced_before,
+            "save_vote MUST advance last_synced_snapshot_id before returning \
+             (Raft election safety): before={synced_before} after={synced_after}"
+        );
+
+        // And the vote is readable after the call.
+        let read_back = store.read_vote().await.unwrap();
+        assert_eq!(read_back, Some(vote));
     }
 }
