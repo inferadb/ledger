@@ -9,3 +9,4 @@ fuzz/artifacts/
 fuzz/corpus/
 fuzz/target/
 .claude/scheduled_tasks.lock
+/cargo-flamegraph.trace
