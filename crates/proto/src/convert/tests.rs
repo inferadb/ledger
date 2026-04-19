@@ -1441,7 +1441,6 @@ fn check_relationship_request_converts_fully_populated() {
         subject: "user:7".to_string(),
         consistency: proto::ReadConsistency::Linearizable as i32,
         caller: Some(proto::UserSlug { slug: 999 }),
-        at_height: Some(123),
     };
 
     let domain: super::CheckRelationshipDomainRequest = proto_req.try_into().unwrap();
@@ -1452,7 +1451,6 @@ fn check_relationship_request_converts_fully_populated() {
     assert_eq!(domain.subject, "user:7");
     assert!(matches!(domain.consistency, proto::ReadConsistency::Linearizable));
     assert_eq!(domain.caller.value(), 999);
-    assert_eq!(domain.at_height, Some(123));
 }
 
 #[test]
@@ -1465,7 +1463,6 @@ fn check_relationship_request_missing_organization_rejected() {
         subject: "s".into(),
         consistency: proto::ReadConsistency::Eventual as i32,
         caller: Some(proto::UserSlug { slug: 1 }),
-        at_height: None,
     };
     let err = super::CheckRelationshipDomainRequest::try_from(proto_req).unwrap_err();
     let msg = format!("{err}");
@@ -1485,7 +1482,6 @@ fn check_relationship_request_missing_vault_rejected() {
         subject: "s".into(),
         consistency: proto::ReadConsistency::Eventual as i32,
         caller: Some(proto::UserSlug { slug: 1 }),
-        at_height: None,
     };
     let err = super::CheckRelationshipDomainRequest::try_from(proto_req).unwrap_err();
     let msg = format!("{err}");
@@ -1502,7 +1498,6 @@ fn check_relationship_request_missing_caller_rejected() {
         subject: "s".into(),
         consistency: proto::ReadConsistency::Eventual as i32,
         caller: None,
-        at_height: None,
     };
     let err = super::CheckRelationshipDomainRequest::try_from(proto_req).unwrap_err();
     let msg = format!("{err}");

@@ -1915,11 +1915,10 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
     /// the configured `ValidationConfig`. On followers, `Linearizable`
     /// consistency executes the ReadIndex protocol; other levels serve locally.
     ///
-    /// Note: historical `at_height` checks are not yet supported at the state
-    /// layer; the check always runs against current committed state. The
-    /// response's `checked_at_height` reflects the vault's current applied
-    /// block height, sourced from the same mechanism `list_relationships`
-    /// uses (`AppliedStateAccessor::vault_height`).
+    /// The check evaluates against current committed state. The response's
+    /// `checked_at_height` is sourced from the vault's applied block height
+    /// (`AppliedStateAccessor::vault_height`) — the same mechanism
+    /// `list_relationships` uses.
     async fn check_relationship(
         &self,
         request: Request<CheckRelationshipRequest>,
@@ -2026,9 +2025,6 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         };
         ctx.set_consistency(consistency);
         ctx.set_include_proof(false);
-        if let Some(h) = domain.at_height {
-            ctx.set_at_height(h);
-        }
 
         // Enforce consistency. On followers + Linearizable, this blocks on
         // ReadIndex; on leaders, it's a lease check; on Eventual, a no-op.
@@ -2055,15 +2051,9 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         }
 
         ctx.start_storage_timer();
-        let outcome = region
+        let exists = region
             .state
-            .relationship_exists(
-                vault_id,
-                &domain.resource,
-                &domain.relation,
-                &domain.subject,
-                domain.at_height,
-            )
+            .relationship_exists(vault_id, &domain.resource, &domain.relation, &domain.subject)
             .map_err(|e| {
                 ctx.end_storage_timer();
                 let status = storage_err(&e);
@@ -2073,12 +2063,10 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         ctx.end_storage_timer();
 
         // Source the current applied block height the same way `list_relationships`
-        // does — the state layer currently reports `outcome.checked_at_height` as
-        // `0` (no persisted height counter), so we override with the region's
-        // applied height to produce a meaningful response field.
+        // does, so the response carries a meaningful `checked_at_height`.
         let block_height = region.applied_state.vault_height(organization_id, vault_id);
         ctx.set_block_height(block_height);
-        ctx.set_found(outcome.exists);
+        ctx.set_found(exists);
 
         metrics::record_organization_operation(organization_id, "check_relationship");
         let elapsed = ctx.elapsed_secs();
@@ -2086,7 +2074,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         ctx.set_success();
 
         let response = CheckRelationshipResponse::from(CheckRelationshipDomainResponse {
-            exists: outcome.exists,
+            exists,
             checked_at_height: block_height,
         });
         Ok(response_with_correlation(response, &ctx.request_id(), ctx.trace_id()))

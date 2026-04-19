@@ -19,9 +19,9 @@
 #   ./scripts/run-integration-tests.sh server --release --nodes 1
 #   ./scripts/run-integration-tests.sh server test_voter_detection
 
-# shellcheck source=./lib/cluster-bootstrap.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck source=scripts/lib/cluster-bootstrap.sh
 source "$(dirname "$0")/lib/cluster-bootstrap.sh"
 
 # ---------------------------------------------------------------------------

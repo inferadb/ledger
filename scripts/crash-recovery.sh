@@ -24,6 +24,7 @@
 # shellcheck source=./lib/cluster-bootstrap.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck source=scripts/lib/cluster-bootstrap.sh
 source "$(dirname "$0")/lib/cluster-bootstrap.sh"
 
 # ---------------------------------------------------------------------------
@@ -82,7 +83,6 @@ node_addr() { echo "127.0.0.1:$((BASE_PORT + $1 - 1))"; }
 node_port() { echo $((BASE_PORT + $1 - 1)); }
 
 create_org_and_vault() {
-  local initial_addr=$1
   local email
   email="crash-test-$(uuidgen | tr '[:upper:]' '[:lower:]')@recovery.local"
 
@@ -441,7 +441,7 @@ run_scenario() {
   [[ -z "$leader" ]] && { log_error "No leader found after bootstrap"; return 1; }
   log_info "Initial leader: node $leader"
 
-  create_org_and_vault "$(node_addr "$leader")"
+  create_org_and_vault
 
   # Prewrite a small baseline so crash happens after steady state.
   log_info "Writing 20 baseline entities..."

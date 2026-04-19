@@ -34,8 +34,6 @@ pub struct CheckRelationshipDomainRequest {
     pub consistency: proto::ReadConsistency,
     /// Auth identity of the caller.
     pub caller: UserSlug,
-    /// If `Some`, evaluate the relationship at this historical block height.
-    pub at_height: Option<u64>,
 }
 
 /// Domain representation of a [`proto::CheckRelationshipResponse`].
@@ -88,7 +86,6 @@ impl TryFrom<proto::CheckRelationshipRequest> for CheckRelationshipDomainRequest
             subject: req.subject,
             consistency,
             caller,
-            at_height: req.at_height,
         })
     }
 }

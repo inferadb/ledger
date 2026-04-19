@@ -29,7 +29,6 @@ impl LedgerClient {
     /// * `relation` - Relation name.
     /// * `subject` - Subject identifier (format `"type:id"` or `"type:id#relation"`).
     /// * `consistency` - `Eventual` (any replica) or `Linearizable` (leader).
-    /// * `at_height` - Historical check at the given block height; `None` for current.
     /// * `token` - Optional per-request cancellation token.
     ///
     /// # Returns
@@ -57,7 +56,6 @@ impl LedgerClient {
     ///     "user:7",
     ///     ReadConsistency::Eventual,
     ///     None,
-    ///     None,
     /// ).await?;
     /// if outcome.exists {
     ///     println!("user:7 is a viewer of doc:123 at height {}", outcome.checked_at_height);
@@ -75,7 +73,6 @@ impl LedgerClient {
         relation: impl Into<String>,
         subject: impl Into<String>,
         consistency: ReadConsistency,
-        at_height: Option<u64>,
         token: Option<CancellationToken>,
     ) -> Result<CheckRelationshipOutcome> {
         self.check_shutdown(token.as_ref())?;
@@ -105,7 +102,6 @@ impl LedgerClient {
                         subject: subject.clone(),
                         consistency: consistency.to_proto() as i32,
                         caller: Some(proto::UserSlug { slug: caller.value() }),
-                        at_height,
                     };
 
                     let response =
@@ -166,7 +162,6 @@ mod tests {
                 "user:7",
                 ReadConsistency::Eventual,
                 None,
-                None,
             )
             .await
             .unwrap();
@@ -189,7 +184,6 @@ mod tests {
                 "viewer",
                 "user:7",
                 ReadConsistency::Eventual,
-                None,
                 None,
             )
             .await
@@ -214,37 +208,10 @@ mod tests {
                 "user:99",
                 ReadConsistency::Linearizable,
                 None,
-                None,
             )
             .await
             .unwrap();
 
-        assert!(outcome.exists);
-    }
-
-    #[tokio::test]
-    async fn check_relationship_with_at_height() {
-        let server = MockLedgerServer::start().await.unwrap();
-        server.add_relationship(ORG, VAULT, "doc:10", "owner", "user:5");
-        let client = create_client(&server).await;
-
-        // The mock ignores at_height but the field is forwarded correctly.
-        let outcome = client
-            .check_relationship(
-                CALLER,
-                ORG,
-                VAULT,
-                "doc:10",
-                "owner",
-                "user:5",
-                ReadConsistency::Eventual,
-                Some(100),
-                None,
-            )
-            .await
-            .unwrap();
-
-        // exists is determined by mock state regardless of height in the mock
         assert!(outcome.exists);
     }
 
@@ -264,7 +231,6 @@ mod tests {
                 "editor",
                 "user:7",
                 ReadConsistency::Eventual,
-                None,
                 None,
             )
             .await

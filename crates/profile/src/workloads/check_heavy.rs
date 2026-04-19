@@ -51,7 +51,6 @@ pub async fn run(harness: &Harness, duration: Duration) -> Summary {
                     subject,
                     ReadConsistency::Eventual,
                     None,
-                    None,
                 )
                 .await
                 .map(|_| ())

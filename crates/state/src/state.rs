@@ -92,29 +92,6 @@ pub enum StateError {
 /// Result type for state operations.
 pub type Result<T> = std::result::Result<T, StateError>;
 
-/// Result of a [`StateLayer::relationship_exists`] check.
-///
-/// Bundles the boolean existence answer together with the block height at
-/// which the check was evaluated, so callers can include that metadata in
-/// gRPC responses without a second round-trip.
-///
-/// Note: historical `at_height` reads are not yet supported for
-/// relationships; the check always runs against the current committed state
-/// regardless of the `at_height` argument. The returned
-/// `checked_at_height` reflects that — it is always `0` until the
-/// state layer gains a persisted, queryable block-height counter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CheckRelationshipOutcome {
-    /// Whether the exact tuple was found in the vault at the evaluated height.
-    pub exists: bool,
-    /// Block height at which the check was evaluated.
-    ///
-    /// Currently always `0` because the `StateLayer` does not maintain a
-    /// queryable current-height counter. When historical reads become
-    /// available this field will carry the evaluated block height.
-    pub checked_at_height: u64,
-}
-
 /// State layer managing per-vault materialized state.
 ///
 /// Provides entity/relationship CRUD and incremental state root computation
@@ -646,37 +623,16 @@ impl<B: StorageBackend> StateLayer<B> {
     /// to the B+ tree if the vault is not yet indexed or the dictionary
     /// cannot resolve the triple's components.
     ///
-    /// If `at_height` is `Some(h)`, the intent is to evaluate at block height
-    /// `h`. Historical reads are not yet supported at the state-layer level;
-    /// the check always runs against current committed state regardless of the
-    /// `at_height` value. The returned
-    /// [`CheckRelationshipOutcome::checked_at_height`] is always `0` until a
-    /// queryable height counter is added to `StateLayer`.
+    /// The state layer evaluates against the current committed state. Block
+    /// height is a raft-apply-layer concern — callers that need to annotate
+    /// the response with a `checked_at_height` source it separately from
+    /// `AppliedStateAccessor::vault_height`.
     ///
     /// # Errors
     ///
     /// Returns [`StateError::Store`] if the read transaction fails.
     /// Returns [`StateError::Relationship`] on dictionary or storage failure.
     pub fn relationship_exists(
-        &self,
-        vault: VaultId,
-        resource: &str,
-        relation: &str,
-        subject: &str,
-        _at_height: Option<u64>,
-    ) -> Result<CheckRelationshipOutcome> {
-        // Historical reads are not yet supported; always evaluate at current state.
-        // checked_at_height remains 0 until StateLayer gains a persisted height counter.
-        let exists = self.relationship_exists_inner(vault, resource, relation, subject)?;
-        Ok(CheckRelationshipOutcome { exists, checked_at_height: 0 })
-    }
-
-    /// Inner implementation of the relationship existence check.
-    ///
-    /// Attempts the in-memory hash index first for O(1) lookups. Falls back
-    /// to the B+ tree if the vault is not yet indexed or the dictionary
-    /// cannot resolve the triple's components.
-    fn relationship_exists_inner(
         &self,
         vault: VaultId,
         resource: &str,
@@ -1276,12 +1232,7 @@ mod tests {
         let statuses = state.apply_operations(vault, &ops, 1).unwrap();
         assert_eq!(statuses, vec![WriteStatus::Created]);
 
-        assert!(
-            state
-                .relationship_exists(vault, "doc:123", "viewer", "user:alice", None)
-                .unwrap()
-                .exists
-        );
+        assert!(state.relationship_exists(vault, "doc:123", "viewer", "user:alice").unwrap());
 
         // Create again should return AlreadyExists
         let statuses = state.apply_operations(vault, &ops, 2).unwrap();
@@ -1310,12 +1261,7 @@ mod tests {
         let statuses = state.apply_operations(vault, &ops, 2).unwrap();
         assert_eq!(statuses, vec![WriteStatus::Deleted]);
 
-        assert!(
-            !state
-                .relationship_exists(vault, "doc:123", "viewer", "user:alice", None)
-                .unwrap()
-                .exists
-        );
+        assert!(!state.relationship_exists(vault, "doc:123", "viewer", "user:alice").unwrap());
     }
 
     /// Verifies list_relationships returns all relationships across all buckets.
@@ -1395,9 +1341,8 @@ mod tests {
 
         assert!(
             state
-                .relationship_exists(vault, "document:seq-test", "viewer", "user:seq-test", None)
+                .relationship_exists(vault, "document:seq-test", "viewer", "user:seq-test")
                 .unwrap()
-                .exists
         );
 
         // Concurrent writes
@@ -1430,10 +1375,8 @@ mod tests {
                         &format!("document:concurrent-{}", i),
                         "viewer",
                         &format!("user:concurrent-{}", i),
-                        None,
                     )
-                    .unwrap()
-                    .exists,
+                    .unwrap(),
                 "Direct read failed for concurrent-{}",
                 i
             );
@@ -1551,9 +1494,7 @@ mod tests {
         // Verify data exists in vault 1
         assert!(state.get_entity(vault, b"entity1").unwrap().is_some());
         assert!(state.get_entity(vault, b"entity2").unwrap().is_some());
-        assert!(
-            state.relationship_exists(vault, "doc:1", "viewer", "user:alice", None).unwrap().exists
-        );
+        assert!(state.relationship_exists(vault, "doc:1", "viewer", "user:alice").unwrap());
 
         // Clear vault 1
         state.clear_vault(vault).unwrap();
@@ -1561,12 +1502,7 @@ mod tests {
         // Verify vault 1 data is gone
         assert!(state.get_entity(vault, b"entity1").unwrap().is_none());
         assert!(state.get_entity(vault, b"entity2").unwrap().is_none());
-        assert!(
-            !state
-                .relationship_exists(vault, "doc:1", "viewer", "user:alice", None)
-                .unwrap()
-                .exists
-        );
+        assert!(!state.relationship_exists(vault, "doc:1", "viewer", "user:alice").unwrap());
 
         // Verify vault 2 data is still there (isolation)
         assert!(state.get_entity(VaultId::new(2), b"entity_v2").unwrap().is_some());
@@ -2578,12 +2514,8 @@ mod tests {
         assert_eq!(statuses2, vec![WriteStatus::Created]);
 
         // Verify both relationships exist
-        assert!(
-            state.relationship_exists(vault, "doc:1", "viewer", "user:alice", None).unwrap().exists
-        );
-        assert!(
-            state.relationship_exists(vault, "doc:2", "viewer", "user:bob", None).unwrap().exists
-        );
+        assert!(state.relationship_exists(vault, "doc:1", "viewer", "user:alice").unwrap());
+        assert!(state.relationship_exists(vault, "doc:2", "viewer", "user:bob").unwrap());
     }
 
     #[test]
@@ -2598,20 +2530,13 @@ mod tests {
             subject: "user:alice".to_string(),
         }];
         state.apply_operations(vault, &ops, 1).unwrap();
-        assert!(
-            state.relationship_exists(vault, "doc:1", "viewer", "user:alice", None).unwrap().exists
-        );
+        assert!(state.relationship_exists(vault, "doc:1", "viewer", "user:alice").unwrap());
 
         // Clear vault — should evict dictionary cache
         state.clear_vault(vault).unwrap();
 
         // Verify data is gone
-        assert!(
-            !state
-                .relationship_exists(vault, "doc:1", "viewer", "user:alice", None)
-                .unwrap()
-                .exists
-        );
+        assert!(!state.relationship_exists(vault, "doc:1", "viewer", "user:alice").unwrap());
 
         // Re-create a relationship — should work with a fresh dictionary
         let ops2 = vec![Operation::CreateRelationship {
@@ -2621,9 +2546,7 @@ mod tests {
         }];
         let statuses = state.apply_operations(vault, &ops2, 2).unwrap();
         assert_eq!(statuses, vec![WriteStatus::Created]);
-        assert!(
-            state.relationship_exists(vault, "doc:2", "editor", "user:bob", None).unwrap().exists
-        );
+        assert!(state.relationship_exists(vault, "doc:2", "editor", "user:bob").unwrap());
     }
 
     #[test]
@@ -2658,13 +2581,11 @@ mod tests {
         }];
         let statuses = state.apply_operations(vault, &ops2, 3).unwrap();
         assert_eq!(statuses, vec![WriteStatus::Created]);
-        assert!(
-            state.relationship_exists(vault, "doc:1", "viewer", "user:alice", None).unwrap().exists
-        );
+        assert!(state.relationship_exists(vault, "doc:1", "viewer", "user:alice").unwrap());
     }
 
     // =========================================================================
-    // CheckRelationshipOutcome tests
+    // relationship_exists tests
     // =========================================================================
 
     #[test]
@@ -2679,11 +2600,7 @@ mod tests {
         }];
         state.apply_operations(vault, &ops, 1).unwrap();
 
-        let outcome =
-            state.relationship_exists(vault, "doc:1", "viewer", "user:alice", None).unwrap();
-        assert!(outcome.exists);
-        // checked_at_height is 0 until a queryable height counter is added.
-        assert_eq!(outcome.checked_at_height, 0);
+        assert!(state.relationship_exists(vault, "doc:1", "viewer", "user:alice").unwrap());
     }
 
     #[test]
@@ -2699,19 +2616,13 @@ mod tests {
         state.apply_operations(vault, &ops, 1).unwrap();
 
         // Typo'd resource
-        let outcome =
-            state.relationship_exists(vault, "doc:TYPO", "viewer", "user:alice", None).unwrap();
-        assert!(!outcome.exists);
+        assert!(!state.relationship_exists(vault, "doc:TYPO", "viewer", "user:alice").unwrap());
 
         // Typo'd relation
-        let outcome =
-            state.relationship_exists(vault, "doc:1", "TYPO", "user:alice", None).unwrap();
-        assert!(!outcome.exists);
+        assert!(!state.relationship_exists(vault, "doc:1", "TYPO", "user:alice").unwrap());
 
         // Typo'd subject
-        let outcome =
-            state.relationship_exists(vault, "doc:1", "viewer", "user:TYPO", None).unwrap();
-        assert!(!outcome.exists);
+        assert!(!state.relationship_exists(vault, "doc:1", "viewer", "user:TYPO").unwrap());
     }
 
     #[test]
@@ -2720,8 +2631,6 @@ mod tests {
         let vault = VaultId::new(42);
 
         // No relationships have been created — must return false, not an error.
-        let outcome =
-            state.relationship_exists(vault, "doc:1", "viewer", "user:alice", None).unwrap();
-        assert!(!outcome.exists);
+        assert!(!state.relationship_exists(vault, "doc:1", "viewer", "user:alice").unwrap());
     }
 }

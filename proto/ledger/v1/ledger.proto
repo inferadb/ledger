@@ -613,7 +613,6 @@ message CheckRelationshipRequest {
   string subject = 5;               // Format: "type:id" or "type:id#relation" (max 512 chars)
   ReadConsistency consistency = 6;  // Default: EVENTUAL
   UserSlug caller = 7;              // Auth identity of the caller
-  optional uint64 at_height = 8;    // Historical check; 0 or omit = current height
 }
 
 message CheckRelationshipResponse {

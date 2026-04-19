@@ -48,7 +48,9 @@ cleanup_cluster() {
 
   if [[ ${#CLUSTER_PIDS[@]} -gt 0 ]]; then
     for pid in "${CLUSTER_PIDS[@]}"; do
-      kill -0 "$pid" 2>/dev/null && kill "$pid" 2>/dev/null || true
+      if kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+      fi
     done
     for pid in "${CLUSTER_PIDS[@]}"; do
       wait "$pid" 2>/dev/null || true

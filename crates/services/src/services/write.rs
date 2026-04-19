@@ -633,6 +633,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                             }
                             ctx.set_block_height(cached.block_height);
                             metrics::record_idempotency_operation("coalesced_fast");
+                            metrics::record_idempotency_operation("hit");
                             return Ok(response_with_correlation(
                                 WriteResponse {
                                     result: Some(
@@ -1339,6 +1340,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                             }
                             ctx.set_block_height(cached.block_height);
                             metrics::record_idempotency_operation("coalesced_fast");
+                            metrics::record_idempotency_operation("hit");
                             return Ok(response_with_correlation(
                                 BatchWriteResponse {
                                     result: Some(

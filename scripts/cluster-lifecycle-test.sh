@@ -607,7 +607,6 @@ create_org() {
 
   # Phase 1: InitiateEmailVerification — retry across endpoints
   local code=""
-  local working_addr=""
   local attempt=0
   while [[ -z "$code" && $attempt -lt 30 ]]; do
     # Try each listening port in the cluster
@@ -625,7 +624,6 @@ create_org() {
       extracted_code=$(echo "$result" | jq -r '.code // empty' 2>/dev/null || true)
       if [[ -n "$extracted_code" ]]; then
         code="$extracted_code"
-        working_addr="$addr"
         break
       fi
     done

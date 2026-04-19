@@ -102,7 +102,6 @@ async fn check_relationship_returns_true_for_existing_tuple() {
                 subject: "user:42".to_string(),
                 consistency: inferadb_ledger_proto::proto::ReadConsistency::Eventual as i32,
                 caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: 1 }),
-                at_height: None,
             },
         ))
         .await
@@ -143,7 +142,6 @@ async fn check_relationship_returns_false_for_missing_tuple() {
                 subject: "user:42".to_string(),
                 consistency: inferadb_ledger_proto::proto::ReadConsistency::Eventual as i32,
                 caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: 1 }),
-                at_height: None,
             },
         ))
         .await
@@ -185,7 +183,6 @@ async fn check_relationship_partial_match_returns_false() {
                 subject: "user:42".to_string(),
                 consistency: inferadb_ledger_proto::proto::ReadConsistency::Eventual as i32,
                 caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: 1 }),
-                at_height: None,
             },
         ))
         .await
@@ -226,7 +223,6 @@ async fn check_relationship_rejects_oversize_subject() {
                 subject: oversize_subject,
                 consistency: inferadb_ledger_proto::proto::ReadConsistency::Eventual as i32,
                 caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: 1 }),
-                at_height: None,
             },
         ))
         .await;

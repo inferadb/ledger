@@ -78,14 +78,21 @@ async fn write_entity(
 }
 
 /// Maximum retries for transient write failures (leader election, forwarding).
-const WRITE_MAX_RETRIES: u32 = 5;
+const WRITE_MAX_RETRIES: u32 = 15;
 
 /// Delay between write retries.
 const WRITE_RETRY_DELAY: Duration = Duration::from_millis(500);
 
-/// Writes via an existing client, retrying on transient UNAVAILABLE errors
-/// (leader elections, forwarding gaps). Panics after exhausting retries.
+/// Writes via a leader-bound client, retrying on transient UNAVAILABLE errors.
+///
+/// Long-running stress tests can outlive a single leader: under sustained write
+/// pressure the raft leader may briefly lose quorum heartbeat and elections can
+/// fire. When this happens, the bound client returns "NotLeader" and its
+/// bound address is now stale — retrying against the same channel cannot
+/// succeed. On each UNAVAILABLE, we wait for cluster-wide leader agreement and
+/// reconnect to whichever node is currently leader (may be the same).
 async fn write_with_retry(
+    cluster: &TestCluster,
     client: &mut proto::write_service_client::WriteServiceClient<tonic::transport::Channel>,
     request: proto::WriteRequest,
     label: &str,
@@ -105,6 +112,12 @@ async fn write_with_retry(
                 if status.code() == tonic::Code::Unavailable && attempt < WRITE_MAX_RETRIES =>
             {
                 tokio::time::sleep(WRITE_RETRY_DELAY).await;
+                cluster.wait_for_leader().await;
+                if let Some(leader) = cluster.leader()
+                    && let Ok(fresh) = create_write_client(&leader.addr).await
+                {
+                    *client = fresh;
+                }
             },
             Err(e) => panic!("{label}: write failed after {attempt} retries: {e}"),
         }
@@ -158,6 +171,7 @@ async fn test_snapshot_over_10k_entities_per_vault_no_data_loss() {
     let mut write_client = create_write_client(&leader.addr).await.expect("connect");
     for i in 0..entity_count {
         write_with_retry(
+            &cluster,
             &mut write_client,
             proto::WriteRequest {
                 client_id: Some(proto::ClientId { id: "10k-writer".to_string() }),
@@ -229,6 +243,7 @@ async fn test_10k_writes_replicated_state_roots_match() {
     let mut write_client = create_write_client(&leader.addr).await.expect("connect");
     for i in 0..10_000 {
         write_with_retry(
+            &cluster,
             &mut write_client,
             proto::WriteRequest {
                 client_id: Some(proto::ClientId { id: "bulk-writer".to_string() }),
