@@ -292,6 +292,35 @@ Snapshot and cache settings. Configured via `UpdateConfig` RPC at runtime.
 
 **Compression level trade-offs**: Level 3 (default) balances speed and ratio well for typical workloads (~3–4x compression). Higher levels (6–10) yield marginally better compression at increasing CPU cost. Levels above 10 are rarely worthwhile for Ledger's data patterns.
 
+## State-DB Checkpointing
+
+Controls the per-region `StateCheckpointer` background task that drives `Database::sync_state()` on the state DB and the Raft log DB. Writes are WAL-durable on response; state-DB materialization is amortized via this checkpointer. See [durability.md](durability.md) for the full contract.
+
+| Field                   | Type | Default  | Description                                              |
+| ----------------------- | ---- | -------- | -------------------------------------------------------- |
+| `interval_ms`           | u64  | `500`    | Time trigger — fire at least this often (50–60,000 ms)   |
+| `applies_threshold`     | u64  | `5000`   | Apply-count trigger — fire after N entries applied (≥1)  |
+| `dirty_pages_threshold` | u64  | `10000`  | Dirty-page trigger — fire when cache dirty-pages ≥ N (≥1) |
+
+The three triggers are OR'd — the checkpointer fires on whichever threshold hits first. Checkpoints coalesce across concurrent callers by `last_synced_snapshot_id`, so forced syncs (snapshot / backup / graceful shutdown) never duplicate work an in-flight checkpoint already covered.
+
+**Tuning trade-offs**:
+- **Tighter thresholds** (lower `interval_ms` / `applies_threshold`) — shorter post-crash replay window; more fsync pressure on the disk.
+- **Looser thresholds** — less fsync churn; post-crash WAL replay runs longer at startup.
+- **`dirty_pages_threshold`** is the backpressure safety valve. If applies outrun the time/apply triggers, this bounds the in-memory page cache growth.
+
+Do not set any threshold to 0 — validation rejects it. If you want to effectively disable a trigger, set it near its maximum (`u64::MAX` for count-based, `60_000` for `interval_ms`).
+
+**Runtime reconfiguration**: all three fields are hot-reloadable via the `UpdateConfig` RPC. Changes take effect on the checkpointer's next wake-up (≤ 1 second after the update).
+
+```bash
+grpcurl -plaintext -d '{
+  "config_json": "{\"state_checkpoint\":{\"interval_ms\":250,\"applies_threshold\":2000,\"dirty_pages_threshold\":5000}}"
+}' localhost:9090 ledger.v1.AdminService/UpdateConfig
+```
+
+Monitor the effect via `ledger_state_checkpoints_total{trigger}`, `ledger_state_checkpoint_duration_seconds`, `ledger_state_dirty_pages`, and `ledger_state_applies_since_checkpoint` — see [metrics-reference.md](metrics-reference.md#state-durability) for the full metric set.
+
 ## Client Sequence Eviction
 
 Controls how expired client sequence entries are purged from the replicated state. These entries enable cross-failover idempotency deduplication within the TTL window.
