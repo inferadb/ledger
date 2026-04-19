@@ -136,12 +136,26 @@ fi
 
 # --- cleanup trap -----------------------------------------------------------
 
+# SERVER_PID is the wrapper bash spawned with `&` — in sampling mode that's
+# samply/cargo-flamegraph, in spans mode it's the server itself. TARGET_PID
+# is the actual inferadb-ledger process that should receive SIGINT for
+# graceful shutdown. In spans mode they're equal; in sampling mode the
+# wrapper doesn't reliably propagate SIGINT to its child, so we signal the
+# child directly.
 SERVER_PID=""
+TARGET_PID=""
 cleanup() {
     local exit_code=$?
     if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
-        echo "==> cleanup: stopping server PID $SERVER_PID"
-        kill -INT "$SERVER_PID" 2>/dev/null || true
+        if [[ -n "$TARGET_PID" ]] && kill -0 "$TARGET_PID" 2>/dev/null; then
+            echo "==> cleanup: SIGINT server PID $TARGET_PID (wrapper $SERVER_PID)"
+            kill -INT "$TARGET_PID" 2>/dev/null || true
+        else
+            # Target couldn't be resolved or has already exited; fall back
+            # to signaling the wrapper.
+            echo "==> cleanup: SIGINT wrapper PID $SERVER_PID"
+            kill -INT "$SERVER_PID" 2>/dev/null || true
+        fi
         # Give graceful shutdown up to 10s, then kill -9.
         for _ in 1 2 3 4 5 6 7 8 9 10; do
             kill -0 "$SERVER_PID" 2>/dev/null || break
@@ -232,6 +246,35 @@ for i in $(seq 1 60); do
 done
 echo "==> server listening"
 
+# --- resolve the actual server PID for shutdown signals ---------------------
+
+# In sampling mode, $SERVER_PID is the wrapper (samply or cargo-flamegraph),
+# which doesn't reliably propagate SIGINT to its child. Find the real
+# inferadb-ledger process so graceful shutdown is triggered directly on it.
+# In spans mode, no wrapper — $SERVER_PID already IS the server.
+#
+# `pgrep -P $wrapper` returns only direct children of the wrapper process.
+# That's what we want: samply spawns the server as its one child. We can't
+# use `pgrep -f` here because samply's own command line contains the server
+# binary path (as its argv after `--`) and would match first.
+if [[ "$MODE" == "spans" ]]; then
+    TARGET_PID="$SERVER_PID"
+else
+    for _ in 1 2 3 4 5; do
+        TARGET_PID=$(pgrep -P "$SERVER_PID" 2>/dev/null | head -1 || true)
+        if [[ -n "$TARGET_PID" && "$TARGET_PID" != "$SERVER_PID" ]]; then
+            break
+        fi
+        TARGET_PID=""
+        sleep 1
+    done
+    if [[ -z "$TARGET_PID" ]]; then
+        echo "error: could not locate inferadb-ledger PID under wrapper $SERVER_PID within 5s" >&2
+        exit 1
+    fi
+    echo "==> wrapper PID: $SERVER_PID, server PID: $TARGET_PID"
+fi
+
 # --- bootstrap cluster -------------------------------------------------------
 
 echo "==> running init subcommand"
@@ -271,9 +314,11 @@ fi
 
 # --- shutdown ---------------------------------------------------------------
 
-echo "==> sending SIGINT to server PID $SERVER_PID"
-kill -INT "$SERVER_PID" || true
-# In spans mode, wait for the FlushGuard to drop (graceful shutdown completes).
-# In sampling mode, wait for the profiler to write its output as the server exits.
+echo "==> sending SIGINT to server PID $TARGET_PID (wrapper: $SERVER_PID)"
+kill -INT "$TARGET_PID" 2>/dev/null || true
+# Wait for the wrapper process (samply / cargo-flamegraph / bare server) to
+# exit. In sampling mode the wrapper finalizes its output file after its
+# child exits; in spans mode the FlushGuard drops during graceful shutdown.
 wait "$SERVER_PID" 2>/dev/null || true
 SERVER_PID=""
+TARGET_PID=""
