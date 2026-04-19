@@ -31,6 +31,13 @@ impl ReadConsistency {
 ///
 /// Contains the transaction ID, block height, and server-assigned sequence number
 /// for the committed write.
+///
+/// A `WriteSuccess` value implies **WAL durability**: the Raft log has fsynced
+/// the committed entry and every replica has applied it in-memory. State-DB
+/// materialization is lazy and lands on the next checkpointer tick. Crash
+/// recovery replays the WAL tail to rebuild any unpersisted state; replay is
+/// idempotent and preserves batch atomicity. See
+/// `docs/operations/durability.md` for the full contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WriteSuccess {

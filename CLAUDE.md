@@ -4,6 +4,8 @@
 
 InferaDB Ledger is a blockchain database for cryptographically verifiable authorization. Every write produces a Merkle-chained block; every authorization check is provable. The system is always multi-Raft in production and handles PII under strict data-residency rules (EU-region data must stay in EU-region storage). Treat every change to storage keys, gRPC surfaces, error handling, or consensus primitives with that level of seriousness — a silent data-residency violation is a compliance incident, and a silent consensus bug is data loss.
 
+Writes are WAL-durable on response; state-DB materialization is lazy via `StateCheckpointer` (per-region, `crates/raft/src/state_checkpointer.rs`) and forced on shutdown, snapshot, and backup boundaries. On crash, state is re-derived by replaying `(applied_durable, last_committed]` from the WAL — see [`docs/operations/durability.md`](docs/operations/durability.md).
+
 ## Tech Stack
 
 | Layer                  | Technology                                   | Version / Notes                                                               |

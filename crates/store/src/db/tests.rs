@@ -2363,4 +2363,258 @@ mod tests {
             "durable commit must flush every dirty page in the cache"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // sync_state coalesce + fault-injection (Sprint 1B2 Task 3B)
+    // -----------------------------------------------------------------------
+
+    /// Concurrent-caller coalesce property (Task 3B Test 2).
+    ///
+    /// Spawns N concurrent `sync_state` callers racing against M
+    /// `commit_in_memory` writers. After the race, `last_synced_snapshot_id`
+    /// must equal the maximum `committed_state.snapshot_id` observed across
+    /// all calls. No caller observes a regression, and no call panics or
+    /// deadlocks.
+    ///
+    /// `PROPTEST_CASES=32` override: the proptest spins a fresh tokio
+    /// runtime per case, which is relatively expensive; 32 cases sweeps the
+    /// state space enough to catch regressions while keeping the lib-test
+    /// runtime under a few seconds.
+    mod sync_state_coalesce_proptest {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(32))]
+
+            #[test]
+            fn concurrent_callers_converge_on_committed_snapshot(
+                num_callers in 2usize..=8usize,
+                num_writes in 1usize..=20usize,
+            ) {
+                // A dedicated single-threaded runtime per case so proptest's
+                // synchronous closure can drive async work. Scheduling inside
+                // the runtime is multi-task; we spawn across tokio tasks so
+                // the coalesce branch + sync_state_mutex contention are both
+                // exercised.
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime");
+
+                let observed_max = rt.block_on(async move {
+                    let db = std::sync::Arc::new(
+                        Database::<InMemoryBackend>::open_in_memory().unwrap(),
+                    );
+
+                    // Warm-up write so there is at least one snapshot to sync.
+                    {
+                        let mut txn = db.write().unwrap();
+                        txn.insert::<tables::RaftLog>(&0u64, &vec![0xAA]).unwrap();
+                        txn.commit_in_memory().unwrap();
+                    }
+
+                    // Kick off N sync-state callers. Each records the synced
+                    // snapshot id it observes *after* its call returns.
+                    let mut sync_handles = Vec::with_capacity(num_callers);
+                    for _ in 0..num_callers {
+                        let handle = std::sync::Arc::clone(&db);
+                        sync_handles.push(tokio::spawn(async move {
+                            handle.clone().sync_state().await.map(|_| {
+                                handle.last_synced_snapshot_id()
+                            })
+                        }));
+                    }
+
+                    // Interleave M writer rounds. Each advances
+                    // `committed_state.snapshot_id` without touching the
+                    // on-disk pointer.
+                    for i in 0..num_writes {
+                        // Yield so some sync tasks get polled in between.
+                        tokio::task::yield_now().await;
+                        let mut txn = db.write().unwrap();
+                        txn.insert::<tables::RaftLog>(&((i as u64) + 1), &vec![i as u8]).unwrap();
+                        txn.commit_in_memory().unwrap();
+                    }
+
+                    // Drain one final sync so the max-committed snapshot is
+                    // guaranteed to be observable.
+                    std::sync::Arc::clone(&db).sync_state().await.unwrap();
+
+                    // Collect per-caller observations. Every caller must have
+                    // succeeded; none may report a synced id greater than the
+                    // final committed snapshot.
+                    let mut observed = Vec::with_capacity(num_callers);
+                    for h in sync_handles {
+                        let synced = h.await.expect("join").expect("sync_state");
+                        observed.push(synced);
+                    }
+
+                    let final_committed = db.committed_state.load_full().snapshot_id.raw();
+                    let final_synced = db.last_synced_snapshot_id();
+
+                    (final_committed, final_synced, observed)
+                });
+
+                let (final_committed, final_synced, observed) = observed_max;
+
+                prop_assert_eq!(
+                    final_synced,
+                    final_committed,
+                    "last_synced_snapshot_id must equal committed snapshot id after the final sync"
+                );
+                for obs in &observed {
+                    prop_assert!(
+                        *obs <= final_synced,
+                        "no caller may observe a synced id beyond the final synced id"
+                    );
+                    prop_assert!(
+                        *obs <= final_committed,
+                        "no caller may observe a synced id beyond the final committed id"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Disk-full fault injection during `sync_state` (Task 3B Test 3).
+    ///
+    /// Wraps `InMemoryBackend` with a toggleable `FaultyBackend` that returns
+    /// `Error::Io` on writes when armed. Assertions:
+    ///
+    ///  1. Pre-fault: `commit_in_memory` advances committed state; the synced pointer still trails.
+    ///  2. Armed sync: `sync_state` fails with `Err(Io)`; the synced pointer is NOT advanced, and
+    ///     dirty pages remain in the cache (per the Task 1B contract: `try_free_pending_pages` is
+    ///     gated on a successful pointer advance).
+    ///  3. Disarmed retry: `sync_state` succeeds; the synced pointer catches up to committed, and
+    ///     the dirty pages that survived the failed call are now durable (durability surviving a
+    ///     reopen is not observable here because the fault backend is in-memory, but the
+    ///     snapshot-id + dirty-page invariants are).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_state_disk_full_preserves_invariants_and_retries() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        use crate::{
+            StorageBackend,
+            backend::InMemoryBackend,
+            error::{Error, PageId, Result as StoreResult},
+        };
+
+        /// Thin wrapper around `InMemoryBackend` that can be flipped to return
+        /// `Error::Io` on every write (`write_page`, `write_header`, `sync`,
+        /// `extend`). Reads always pass through so recovery logic in
+        /// `from_backend` sees a consistent view.
+        struct FaultyBackend {
+            inner: InMemoryBackend,
+            inject: Arc<AtomicBool>,
+        }
+
+        impl FaultyBackend {
+            fn new(inject: Arc<AtomicBool>) -> Self {
+                Self { inner: InMemoryBackend::new(), inject }
+            }
+            fn fail_if_armed(&self) -> StoreResult<()> {
+                if self.inject.load(Ordering::SeqCst) {
+                    Err(Error::Io {
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::StorageFull,
+                            "simulated disk full",
+                        ),
+                    })
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        impl StorageBackend for FaultyBackend {
+            fn read_header(&self) -> StoreResult<Vec<u8>> {
+                self.inner.read_header()
+            }
+            fn write_header(&self, header: &[u8]) -> StoreResult<()> {
+                self.fail_if_armed()?;
+                self.inner.write_header(header)
+            }
+            fn read_page(&self, page_id: PageId) -> StoreResult<Vec<u8>> {
+                self.inner.read_page(page_id)
+            }
+            fn write_page(&self, page_id: PageId, data: &[u8]) -> StoreResult<()> {
+                self.fail_if_armed()?;
+                self.inner.write_page(page_id, data)
+            }
+            fn sync(&self) -> StoreResult<()> {
+                self.fail_if_armed()?;
+                self.inner.sync()
+            }
+            fn file_size(&self) -> StoreResult<u64> {
+                self.inner.file_size()
+            }
+            fn extend(&self, new_size: u64) -> StoreResult<()> {
+                self.fail_if_armed()?;
+                self.inner.extend(new_size)
+            }
+            fn page_size(&self) -> usize {
+                self.inner.page_size()
+            }
+        }
+
+        let inject = Arc::new(AtomicBool::new(false));
+        let backend = FaultyBackend::new(Arc::clone(&inject));
+        let db = std::sync::Arc::new(
+            Database::from_backend(backend, DatabaseConfig::default()).unwrap(),
+        );
+
+        // Phase 1: in-memory commits advance committed_state; synced still 0.
+        for i in 0..5u64 {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::RaftLog>(&(i + 1), &vec![i as u8]).unwrap();
+            txn.commit_in_memory().unwrap();
+        }
+        let committed_before = db.committed_state.load_full().snapshot_id.raw();
+        assert_eq!(
+            db.last_synced_snapshot_id(),
+            0,
+            "fresh DB + commit_in_memory-only: synced pointer still at 0"
+        );
+        let dirty_before = db.cache_dirty_page_count();
+        assert!(dirty_before > 0, "commit_in_memory must leave dirty pages pending");
+
+        // Phase 2: arm the fault. sync_state must return Err(Io), leaving the
+        // synced pointer unadvanced and the dirty pages in the cache.
+        inject.store(true, Ordering::SeqCst);
+        let err = std::sync::Arc::clone(&db).sync_state().await.expect_err("arm: must fail");
+        assert!(
+            matches!(err, Error::Io { .. }),
+            "disk-full fault must surface as Error::Io, got {err:?}"
+        );
+        assert_eq!(
+            db.last_synced_snapshot_id(),
+            0,
+            "failed sync_state must NOT advance last_synced_snapshot_id"
+        );
+        assert!(
+            db.cache_dirty_page_count() >= dirty_before,
+            "failed sync_state must NOT drain dirty pages (retry requires them)"
+        );
+
+        // Phase 3: clear the fault and retry. sync_state must succeed, the
+        // synced pointer catches up to committed, and dirty pages are flushed.
+        inject.store(false, Ordering::SeqCst);
+        std::sync::Arc::clone(&db).sync_state().await.expect("retry: must succeed");
+        assert_eq!(
+            db.last_synced_snapshot_id(),
+            committed_before,
+            "retry sync_state must catch synced up to the observed committed id"
+        );
+        assert_eq!(
+            db.cache_dirty_page_count(),
+            0,
+            "retry sync_state must flush dirty pages once the fault clears"
+        );
+    }
 }

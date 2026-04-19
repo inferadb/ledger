@@ -215,6 +215,35 @@ Note: `organization_id` and `vault_id` are not labels — they appear in the str
 ledger_determinism_bug_total > 0
 ```
 
+## State Durability
+
+Lazy-commit + periodic-checkpoint durability (Sprint 1B2). Operator tuning + interpretation reference: [durability.md](durability.md).
+
+| Metric                                           | Type      | Labels                         | Description                                                                                                       |
+| ------------------------------------------------ | --------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| `ledger_state_checkpoints_total`                 | Counter   | `region`, `trigger`, `status`  | `StateCheckpointer` attempts. `trigger` ∈ `time`/`applies`/`dirty`/`snapshot`/`backup`/`shutdown`; `status` ∈ `ok`/`error` |
+| `ledger_state_checkpoint_duration_seconds`       | Histogram | `region`, `trigger`            | Per-checkpoint dual-slot fsync latency                                                                            |
+| `ledger_state_checkpoint_last_timestamp_seconds` | Gauge     | `region`                       | Unix seconds of the most recent successful checkpoint                                                             |
+| `ledger_state_applies_since_checkpoint`          | Gauge     | `region`                       | In-memory applies accumulated since last checkpoint                                                               |
+| `ledger_state_dirty_pages`                       | Gauge     | `region`                       | Dirty pages sampled at the last checkpointer wake-up                                                              |
+| `ledger_state_page_cache_len`                    | Gauge     | `region`                       | Total pages resident in the state-DB page cache                                                                   |
+| `ledger_state_last_synced_snapshot_id`           | Gauge     | `region`                       | Most recent snapshot id durably persisted to disk (monotonic)                                                     |
+| `ledger_state_recovery_replay_count_total`       | Counter   | `region`                       | WAL entries replayed on startup by `RaftLogStore::replay_crash_gap`. Fires once per region (0 on clean shutdown)  |
+| `ledger_state_recovery_duration_seconds`         | Histogram | `region`                       | Duration of the post-open crash-recovery sweep                                                                    |
+
+### Key Indicators
+
+```promql
+# Checkpoint fsync p99 per region — disk slowness alert threshold
+histogram_quantile(0.99, sum by (region, le) (rate(ledger_state_checkpoint_duration_seconds_bucket[5m])))
+
+# Crash-gap recovery p99 — a wide gap means checkpoint window was too loose
+histogram_quantile(0.99, sum by (region, le) (rate(ledger_state_recovery_duration_seconds_bucket[1h])))
+
+# Checkpointer health — dirty pages should cycle; unbounded growth = stalled
+ledger_state_dirty_pages
+```
+
 ## Learner Refresh
 
 | Metric                                   | Type      | Labels                   | Description              |

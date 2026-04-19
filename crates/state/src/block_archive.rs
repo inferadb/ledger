@@ -952,4 +952,148 @@ mod tests {
             size_after_distinct,
         );
     }
+
+    // =========================================================================
+    // Property-based idempotency (Sprint 1B2 Task 3B)
+    // =========================================================================
+
+    /// Replay-idempotency invariant covered as a proptest.
+    ///
+    /// WAL replay on recovery (Task 2D) can re-execute `append_block` calls
+    /// whose effects were already durably persisted. The single-case unit test
+    /// `append_block_idempotent_by_height` covers the scalar property for one
+    /// block; this proptest sweeps arbitrary-length block chains and arbitrary
+    /// prefix-replay lengths.
+    ///
+    /// Property: given a chain of blocks (strictly increasing heights), an
+    /// initial full append followed by a re-append of an arbitrary prefix
+    /// produces a `Blocks`-table state byte-identical to a single full
+    /// append. Segment-file bytes are also asserted byte-identical.
+    mod proptest_replay_idempotency {
+        use chrono::TimeZone;
+        use inferadb_ledger_store::tables;
+        use proptest::prelude::*;
+
+        use super::*;
+
+        /// Builds a chain of `n` blocks with strictly increasing heights and
+        /// the previous-hash chain wired up. `timestamp` is fixed so that two
+        /// chains generated from the same inputs serialize identically.
+        fn chain_of(n: usize, seed: u8) -> Vec<RegionBlock> {
+            let fixed_ts = Utc.timestamp_opt(1_700_000_000, 0).single().expect("valid ts");
+            let mut blocks = Vec::with_capacity(n);
+            let mut prev_hash = [0u8; 32];
+            for i in 0..n {
+                let height = (i as u64) + 1;
+                let block = RegionBlock {
+                    region: Region::US_EAST_VA,
+                    region_height: height,
+                    previous_region_hash: prev_hash,
+                    vault_entries: vec![VaultEntry {
+                        organization: OrganizationId::new(1),
+                        vault: VaultId::new(1),
+                        vault_height: height,
+                        previous_vault_hash: prev_hash,
+                        transactions: vec![inferadb_ledger_types::Transaction {
+                            id: [seed ^ (i as u8); 16],
+                            client_id: ClientId::new(format!("client-{seed}")),
+                            sequence: height,
+                            operations: vec![inferadb_ledger_types::Operation::SetEntity {
+                                key: format!("k{i}"),
+                                value: vec![seed, i as u8],
+                                condition: None,
+                                expires_at: None,
+                            }],
+                            timestamp: fixed_ts,
+                        }],
+                        tx_merkle_root: [seed; 32],
+                        state_root: [(height % 256) as u8; 32],
+                    }],
+                    timestamp: fixed_ts,
+                    leader_id: NodeId::new("node-1"),
+                    term: 1,
+                    committed_index: height,
+                };
+                // Next previous_region_hash is a deterministic function of the
+                // current block height so the chain is reproducible.
+                prev_hash = [height as u8; 32];
+                blocks.push(block);
+            }
+            blocks
+        }
+
+        /// Reads every block row from the backing Blocks table, in height
+        /// order, and returns the raw encoded bytes for each. Used as the
+        /// byte-level equality probe.
+        fn snapshot_blocks_table<B: StorageBackend>(
+            db: &std::sync::Arc<Database<B>>,
+        ) -> Vec<Vec<u8>> {
+            let txn = db.read().expect("read txn");
+            let it = txn.iter::<tables::Blocks>().expect("iter");
+            it.map(|(_k, v)| v).collect()
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            /// Full chain append followed by an arbitrary prefix re-append
+            /// leaves the Blocks table byte-identical and the segment file
+            /// bytes byte-identical. Exercises the idempotency probe + the
+            /// skip-segment-append path under WAL-replay-shaped patterns.
+            #[test]
+            fn replay_prefix_is_byte_identical(
+                n in 1usize..25usize,
+                seed in any::<u8>(),
+                prefix in 0usize..26usize,
+            ) {
+                let prefix = prefix.min(n);
+                let chain = chain_of(n, seed);
+
+                // Workload A: single full append on a fresh archive.
+                let engine_a = InMemoryStorageEngine::open().expect("open engine A");
+                let dir_a = tempfile::tempdir().expect("tempdir A");
+                let archive_a =
+                    BlockArchive::with_segment_files(engine_a.db(), dir_a.path().to_path_buf())
+                        .expect("open archive A");
+                for b in &chain {
+                    archive_a.append_block(b).expect("append A");
+                }
+                let table_a = snapshot_blocks_table(&engine_a.db());
+                let segment_path_a = archive_a.segment_path(0);
+                let seg_bytes_a = std::fs::read(&segment_path_a).expect("read seg A");
+
+                // Workload B: full append + prefix replay on a fresh archive.
+                let engine_b = InMemoryStorageEngine::open().expect("open engine B");
+                let dir_b = tempfile::tempdir().expect("tempdir B");
+                let archive_b =
+                    BlockArchive::with_segment_files(engine_b.db(), dir_b.path().to_path_buf())
+                        .expect("open archive B");
+                for b in &chain {
+                    archive_b.append_block(b).expect("append B");
+                }
+                for b in chain.iter().take(prefix) {
+                    archive_b.append_block(b).expect("replay prefix B");
+                }
+                let table_b = snapshot_blocks_table(&engine_b.db());
+                let segment_path_b = archive_b.segment_path(0);
+                let seg_bytes_b = std::fs::read(&segment_path_b).expect("read seg B");
+
+                prop_assert_eq!(
+                    table_a,
+                    table_b,
+                    "Blocks table must be byte-identical after prefix replay"
+                );
+                prop_assert_eq!(
+                    seg_bytes_a.len(),
+                    seg_bytes_b.len(),
+                    "segment file must have identical length after prefix replay"
+                );
+                prop_assert_eq!(
+                    seg_bytes_a,
+                    seg_bytes_b,
+                    "segment file must be byte-identical after prefix replay"
+                );
+            }
+        }
+    }
 }

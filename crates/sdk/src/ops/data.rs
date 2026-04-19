@@ -254,6 +254,19 @@ impl LedgerClient {
     /// * `operations` - The operations to apply atomically.
     /// * `token` - Optional per-request cancellation token.
     ///
+    /// # Durability
+    ///
+    /// A successful response indicates the write is **WAL-durable**: the Raft
+    /// log has fsynced the committed entry (durable against crash) and every
+    /// replica has applied it in-memory. State-DB materialization (the B-tree
+    /// dual-slot persist) lands on the next `StateCheckpointer` tick —
+    /// typically within 500ms — or immediately on a graceful shutdown,
+    /// snapshot, or backup.
+    ///
+    /// On crash, the state DB is rebuilt by replaying the WAL tail during
+    /// recovery; replay is idempotent and transparent to callers. See
+    /// `docs/operations/durability.md` for the full contract.
+    ///
     /// # Returns
     ///
     /// Returns [`WriteSuccess`] containing the transaction ID, block height, and
@@ -473,6 +486,19 @@ impl LedgerClient {
     /// * `token` - Optional per-request cancellation token. If `None`, the client-level
     ///   cancellation token is used.
     ///
+    /// # Durability
+    ///
+    /// A successful response indicates the entire batch is **WAL-durable** as a
+    /// single atomic unit: the Raft log has fsynced the committed entry (durable
+    /// against crash) and every replica has applied it in-memory. State-DB
+    /// materialization (the B-tree dual-slot persist) lands on the next
+    /// `StateCheckpointer` tick — typically within 500ms — or immediately on a
+    /// graceful shutdown, snapshot, or backup.
+    ///
+    /// On crash, the state DB is rebuilt by replaying the WAL tail during
+    /// recovery; replay is idempotent and preserves batch atomicity. See
+    /// `docs/operations/durability.md` for the full contract.
+    ///
     /// # Returns
     ///
     /// Returns [`WriteSuccess`] containing the transaction ID, block height, and
@@ -680,7 +706,7 @@ impl LedgerClient {
     ///
     /// Convenience wrapper around [`write`](Self::write) for the common case of
     /// setting a single key-value pair. Generates an idempotency key
-    /// automatically.
+    /// automatically. See [`write`](Self::write) for durability semantics.
     ///
     /// # Arguments
     ///
@@ -742,7 +768,7 @@ impl LedgerClient {
     /// Deletes a single entity.
     ///
     /// Convenience wrapper around [`write`](Self::write) for deleting a single
-    /// key.
+    /// key. See [`write`](Self::write) for durability semantics.
     ///
     /// # Arguments
     ///

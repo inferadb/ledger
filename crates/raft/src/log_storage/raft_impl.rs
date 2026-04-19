@@ -850,12 +850,25 @@ impl RaftLogStore {
         }
 
         // 4. Post-replay sync: the replayed applies all went through
-        // `commit_in_memory`. Force one `sync_state` now so that the
-        // recovered state is durably captured before the node begins
-        // serving traffic — otherwise a second crash during the
-        // server-startup window could regress state past the recovered
-        // point again.
-        Arc::clone(&self.db).sync_state().await.map_err(|e| to_storage_error(&e))?;
+        // `commit_in_memory` on BOTH raft.db (via `save_state_core` →
+        // `KEY_APPLIED_STATE`) AND state.db (via `apply_request_with_events`
+        // → entity/relationship tables). Force a `sync_state` on both
+        // concurrently so the recovered state is durably captured before
+        // the node begins serving traffic — otherwise a second crash during
+        // the server-startup window could regress state past the recovered
+        // point again. Missing the state.db sync would specifically leak
+        // entity writes that just got replayed.
+        let state_db = self.state_layer.as_ref().map(|sl| Arc::clone(sl.database()));
+        if let Some(state_db) = state_db {
+            let (raft_res, state_res) =
+                tokio::join!(Arc::clone(&self.db).sync_state(), state_db.sync_state());
+            raft_res.map_err(|e| to_storage_error(&e))?;
+            state_res.map_err(|e| to_storage_error(&e))?;
+        } else {
+            // No state layer configured (test harnesses that only exercise
+            // the raft-log half). Sync raft.db alone.
+            Arc::clone(&self.db).sync_state().await.map_err(|e| to_storage_error(&e))?;
+        }
 
         Ok(RecoveryStats {
             replayed_entries: total_replayed,

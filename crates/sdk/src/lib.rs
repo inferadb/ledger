@@ -13,6 +13,16 @@
 //! - **Cancellation support**: Per-request and client-level cancellation via `CancellationToken`
 //! - **Minimal-overhead abstractions**: Efficient serialization and connection pooling
 //!
+//! # Durability
+//!
+//! A successful write response implies **WAL durability**: the Raft log has
+//! fsynced the committed entry and every replica has applied it in-memory.
+//! State-DB materialization (the B-tree dual-slot persist) is lazy — it lands
+//! on the next checkpointer tick, or immediately on graceful shutdown,
+//! snapshot, or backup. Crash recovery replays the WAL tail to rebuild
+//! any unpersisted state; replay is idempotent. See
+//! `docs/operations/durability.md` for the full contract.
+//!
 //! # Quick Start
 //!
 //! ```no_run

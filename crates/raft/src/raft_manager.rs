@@ -66,7 +66,7 @@ use inferadb_ledger_state::{
     BlockArchive, StateLayer,
     system::{MIN_NODES_PER_PROTECTED_REGION, SystemOrganizationService},
 };
-use inferadb_ledger_store::FileBackend;
+use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::{NodeId, OrganizationId, Region};
 use parking_lot::RwLock;
 use snafu::Snafu;
@@ -83,7 +83,7 @@ use crate::{
     dek_rewrap::{DekRewrapJob, RewrapProgress},
     event_writer::EventWriter,
     integrity_scrubber::IntegrityScrubberJob,
-    log_storage::{AppliedStateAccessor, RaftLogStore},
+    log_storage::{AppliedStateAccessor, RaftLogStore, RecoveryStats},
     metrics,
     region_storage::RegionStorageManager,
     runtime_config::RuntimeConfigHandle,
@@ -313,6 +313,17 @@ pub struct RegionGroup {
     handle: Arc<ConsensusHandle>,
     /// Shared state layer for this region.
     state: Arc<StateLayer<FileBackend>>,
+    /// `raft.db` handle for this region.
+    ///
+    /// Shared between the [`StateCheckpointer`] (which syncs it on every
+    /// checkpoint tick) and [`RaftManager::sync_all_state_dbs`] (which syncs
+    /// it at graceful shutdown). Both flush paths are required because
+    /// `save_state_core` (Task 2C FLIP) writes `KEY_APPLIED_STATE` to
+    /// raft.db via `commit_in_memory` — leaving raft.db unsynced causes
+    /// clean-shutdown restarts to read `applied_durable = 0` and replay
+    /// the entire WAL. See the Task 3A follow-up in
+    /// `docs/superpowers/specs/2026-04-19-commit-durability-audit.md`.
+    raft_db: Arc<Database<FileBackend>>,
     /// Block archive for historical blocks.
     block_archive: Arc<BlockArchive<FileBackend>>,
     /// Accessor for applied state.
@@ -364,6 +375,16 @@ impl RegionGroup {
     #[must_use]
     pub fn state(&self) -> &Arc<StateLayer<FileBackend>> {
         &self.state
+    }
+
+    /// Returns the `raft.db` handle for this region.
+    ///
+    /// Used by [`RaftManager::sync_all_state_dbs`] and the
+    /// [`StateCheckpointer`] to force the `KEY_APPLIED_STATE` blob to disk.
+    /// See [`RegionGroup::raft_db`] for the full durability rationale.
+    #[must_use]
+    pub fn raft_db(&self) -> &Arc<Database<FileBackend>> {
+        &self.raft_db
     }
 
     /// Returns the block archive.
@@ -517,6 +538,14 @@ pub struct RaftManager {
     /// [`CheckpointConfig::default`](inferadb_ledger_types::config::CheckpointConfig::default)
     /// thresholds).
     runtime_config: parking_lot::Mutex<Option<RuntimeConfigHandle>>,
+    /// Last crash-recovery replay stats per region, captured inside
+    /// [`start_region`] immediately after `RaftLogStore::replay_crash_gap`.
+    ///
+    /// Populated whether or not any entries were replayed. Used by the
+    /// crash-recovery integration test suite to assert replay counts
+    /// without parsing tracing output; production callers may also read
+    /// this to surface recovery statistics via an admin RPC in the future.
+    recovery_stats: RwLock<HashMap<Region, RecoveryStats>>,
 }
 
 impl RaftManager {
@@ -541,7 +570,20 @@ impl RaftManager {
             dr_event_rx: parking_lot::Mutex::new(Some(rx)),
             cancellation_token: parking_lot::Mutex::new(CancellationToken::new()),
             runtime_config: parking_lot::Mutex::new(None),
+            recovery_stats: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Returns the last crash-recovery replay stats captured for `region`, if any.
+    ///
+    /// Populated by `start_region` immediately after
+    /// `RaftLogStore::replay_crash_gap` returns. Returns `None` if the
+    /// region has not been started on this manager since process start, or
+    /// if the region was stopped. Used by the crash-recovery integration
+    /// test suite (`crates/server/tests/checkpoint_crash_recovery.rs`) to
+    /// assert replay counts programmatically without parsing tracing output.
+    pub fn last_recovery_stats(&self, region: Region) -> Option<RecoveryStats> {
+        self.recovery_stats.read().get(&region).copied()
     }
 
     /// Sets the parent cancellation token for all per-region background jobs.
@@ -673,6 +715,7 @@ impl RaftManager {
         region: Region,
         handle: Arc<ConsensusHandle>,
         state: Arc<StateLayer<FileBackend>>,
+        raft_db: Arc<Database<FileBackend>>,
         block_archive: Arc<BlockArchive<FileBackend>>,
         applied_state: AppliedStateAccessor,
         block_announcements: broadcast::Sender<BlockAnnouncement>,
@@ -689,6 +732,7 @@ impl RaftManager {
 
             handle,
             state: state.clone(),
+            raft_db,
             block_archive,
             applied_state,
             block_announcements,
@@ -920,12 +964,15 @@ impl RaftManager {
             region_creation_rx,
         ) = self.open_region_storage(region, event_writer, events_config, divergence_sender)?;
 
-        // Get accessor, commitment buffer, leader lease, and applied index watch
-        // before log_store is consumed by Adaptor.
+        // Get accessor, commitment buffer, leader lease, applied index watch,
+        // and the raft.db handle before log_store is consumed by Adaptor.
+        // raft.db ownership is surfaced here so sync_all_state_dbs (graceful
+        // shutdown) and StateCheckpointer (steady-state) can both reach it.
         let applied_state = log_store.accessor();
         let commitment_buffer = log_store.commitment_buffer();
         let leader_lease = log_store.leader_lease().clone();
         let applied_index_rx = log_store.applied_index_watch();
+        let raft_db = log_store.log_store_db();
 
         // ────────────────────────────────────────────────────────────
         // Create consensus engine + apply worker. The consensus engine
@@ -1052,6 +1099,11 @@ impl RaftManager {
                     duration_ms = stats.duration.as_millis() as u64,
                     "Crash-recovery replay complete",
                 );
+                // Capture stats for test-observability. Overwrites any
+                // previous entry so a region that's stopped + restarted
+                // during the same process lifetime reports its most recent
+                // recovery sweep.
+                self.recovery_stats.write().insert(region, stats);
             },
             Err(e) => {
                 return Err(RaftManagerError::Storage {
@@ -1161,6 +1213,7 @@ impl RaftManager {
                 region,
                 handle.clone(),
                 state.clone(),
+                Arc::clone(&raft_db),
                 block_archive.clone(),
                 applied_state.clone(),
                 applied_index_rx.clone(),
@@ -1198,6 +1251,7 @@ impl RaftManager {
 
             handle,
             state,
+            raft_db,
             block_archive,
             applied_state,
             block_announcements,
@@ -1230,6 +1284,7 @@ impl RaftManager {
         region: Region,
         handle: Arc<ConsensusHandle>,
         state: Arc<StateLayer<FileBackend>>,
+        raft_db: Arc<Database<FileBackend>>,
         block_archive: Arc<BlockArchive<FileBackend>>,
         applied_state: AppliedStateAccessor,
         applied_index_rx: tokio::sync::watch::Receiver<u64>,
@@ -1293,6 +1348,7 @@ impl RaftManager {
         let runtime_config = self.runtime_config.lock().clone().unwrap_or_default();
         let state_checkpointer = StateCheckpointer::from_config(
             state.database().clone(),
+            raft_db,
             runtime_config,
             applied_index_rx,
             parent_token.child_token(),
@@ -1461,20 +1517,30 @@ impl RaftManager {
         info!("Raft Manager shutdown complete");
     }
 
-    /// Forces a checkpoint-style `sync_state` on every region's state DB.
+    /// Forces a checkpoint-style `sync_state` on every region's state.db
+    /// AND raft.db.
     ///
     /// Called from the graceful-shutdown `pre_shutdown` closure **after** the
     /// WAL flush so that on clean shutdown the post-restart WAL replay is
     /// zero entries: the god-byte pointer captures every apply that happened
     /// between the last [`StateCheckpointer`] tick and the final drain.
     ///
-    /// Errors are logged per-region but do not abort the sweep — one region's
-    /// disk-full must not block the remaining regions from reaching
-    /// durability. The caller treats this as best-effort.
+    /// Each region owns two lazy-durable databases: state.db (entity tables,
+    /// via `StateLayer`) and raft.db (`KEY_APPLIED_STATE` blob + Raft log).
+    /// Both must be synced — skipping raft.db causes `applied_durable = 0`
+    /// to be read on restart and forces a full WAL replay (Task 3A
+    /// follow-up in the commit-durability audit).
+    ///
+    /// Errors are logged per-region and per-db but do not abort the sweep —
+    /// one region's disk-full (or one db's failure) must not block the
+    /// remaining work from reaching durability. The caller treats this as
+    /// best-effort.
     ///
     /// `total_timeout` is the **total** budget across all regions; each
-    /// region gets a proportional share with a 1s floor. A single timed-out
-    /// region does not consume the remaining regions' budgets.
+    /// region gets a proportional share with a 1s floor. Within a region,
+    /// state.db and raft.db are synced concurrently via `tokio::join!`, so
+    /// both share the per-region budget rather than splitting it. A single
+    /// timed-out region does not consume the remaining regions' budgets.
     pub async fn sync_all_state_dbs(&self, total_timeout: Duration) {
         let regions = self.list_regions();
         if regions.is_empty() {
@@ -1490,7 +1556,7 @@ impl RaftManager {
         info!(
             regions = regions.len(),
             per_region_timeout_ms = per_region_timeout.as_millis() as u64,
-            "sync_all_state_dbs: forcing final state-DB sync across all regions"
+            "sync_all_state_dbs: forcing final state.db + raft.db sync across all regions"
         );
 
         for region in regions {
@@ -1505,30 +1571,57 @@ impl RaftManager {
                 );
                 continue;
             };
-            let db = group.state().database().clone();
-            // `sync_state` consumes an `Arc<Self>`, so clone for the await
-            // and reuse the original to read `last_synced_snapshot_id` on
-            // success without re-holding the region lock.
-            match tokio::time::timeout(per_region_timeout, Arc::clone(&db).sync_state()).await {
-                Ok(Ok(())) => {
-                    info!(
-                        region = region.as_str(),
-                        last_synced_snapshot_id = db.last_synced_snapshot_id(),
-                        "sync_all_state_dbs: final state-DB sync complete"
-                    );
-                },
-                Ok(Err(e)) => {
-                    warn!(
-                        region = region.as_str(),
-                        error = %e,
-                        "sync_all_state_dbs: final state-DB sync failed; crash gap narrowed but not zero"
-                    );
+            let state_db = group.state().database().clone();
+            let raft_db = Arc::clone(group.raft_db());
+
+            // Sync both DBs concurrently inside the per-region timeout. Using
+            // `tokio::join!` rather than splitting the budget means a slow
+            // raft.db fsync doesn't starve state.db or vice versa. `sync_state`
+            // consumes an `Arc<Self>`, so clone for the await and reuse the
+            // originals to read `last_synced_snapshot_id` after the join.
+            let state_fut = Arc::clone(&state_db).sync_state();
+            let raft_fut = Arc::clone(&raft_db).sync_state();
+            match tokio::time::timeout(per_region_timeout, async {
+                tokio::join!(state_fut, raft_fut)
+            })
+            .await
+            {
+                Ok((state_result, raft_result)) => {
+                    match state_result {
+                        Ok(()) => info!(
+                            region = region.as_str(),
+                            db = "state",
+                            last_synced_snapshot_id = state_db.last_synced_snapshot_id(),
+                            "sync_all_state_dbs: final state-DB sync complete"
+                        ),
+                        Err(e) => warn!(
+                            region = region.as_str(),
+                            db = "state",
+                            error = %e,
+                            "sync_all_state_dbs: final state-DB sync failed; crash gap narrowed but not zero"
+                        ),
+                    }
+                    match raft_result {
+                        Ok(()) => info!(
+                            region = region.as_str(),
+                            db = "raft",
+                            last_synced_snapshot_id = raft_db.last_synced_snapshot_id(),
+                            "sync_all_state_dbs: final state-DB sync complete"
+                        ),
+                        Err(e) => warn!(
+                            region = region.as_str(),
+                            db = "raft",
+                            error = %e,
+                            "sync_all_state_dbs: final state-DB sync failed; crash gap narrowed but not zero"
+                        ),
+                    }
                 },
                 Err(_) => {
                     warn!(
                         region = region.as_str(),
                         timeout_ms = per_region_timeout.as_millis() as u64,
-                        "sync_all_state_dbs: final state-DB sync timed out; continuing with remaining regions"
+                        "sync_all_state_dbs: final state-DB sync (state.db + raft.db) timed out; \
+                         continuing with remaining regions"
                     );
                 },
             }
@@ -1634,6 +1727,7 @@ impl RaftManager {
             region,
             group.handle().clone(),
             group.state().clone(),
+            Arc::clone(group.raft_db()),
             group.block_archive().clone(),
             group.applied_state().clone(),
             group.applied_index_watch(),

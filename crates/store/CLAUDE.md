@@ -17,6 +17,8 @@ These files are load-bearing — their invariants ripple beyond the local file. 
 | `src/page/mod.rs` and submodules | Page header layout and dual-slot commit. A stray byte here is a file-format break.                                       |
 | `src/backend/encrypted.rs`       | Per-vault AES-256-GCM envelope. Changing the nonce scheme or AAD breaks backward-compatible reads.                       |
 | `src/transaction.rs`             | Transaction semantics — atomicity assumed by `StorageEngine` above.                                                      |
+| `src/db/transactions.rs`         | `WriteTransaction::commit` (strict-durable; dual-slot fsync) vs `commit_in_memory` (lazy; cache-only). Mis-routing is a silent durability or latency regression. |
+| `src/db/mod.rs`                  | `Database::sync_state` + `last_synced_snapshot_id` — the durability primitives the raft-layer `StateCheckpointer` + graceful-shutdown paths drive. Coalesces concurrent callers. |
 
 ## Owned Surface
 
@@ -43,3 +45,4 @@ These files are load-bearing — their invariants ripple beyond the local file. 
 5. **Table signatures take `&Table::KeyType` / `&Table::ValueType`.** For `Entities` both are `Vec<u8>` — pass `&Vec<u8>`, not `&[u8]`. The difference matters at the generic boundary.
 6. **Crypto-shredding leaves `_idx:` entries behind.** Erasure must delete the primary + every `_idx:` pointing at it. This invariant is enforced in the `state` crate; don't assume it's handled here.
 7. **Never `panic!` in production code to force a crash.** Use `CrashInjector` (`crates/test-utils`). Production panics bypass the orderly shutdown path.
+8. **`commit_in_memory` leaves pages in cache + advances the `committed_state` ArcSwap; it MUST NOT call `persist_state_to_disk`, `flush_pages`, or `try_free_pending_pages`.** The last one is load-bearing: freeing CoW-displaced pages before the on-disk god byte advances risks reuse-during-CoW. `Database::sync_state` is the only path that advances `last_synced_snapshot_id` and drains `pending_frees`. Callers choosing between `commit` and `commit_in_memory` MUST consult `docs/superpowers/specs/2026-04-19-commit-durability-audit.md` before flipping a call site.

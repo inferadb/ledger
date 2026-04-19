@@ -185,7 +185,7 @@ pub use leader_lease::LeaderLease;
 #[doc(hidden)]
 pub use learner_refresh::LearnerRefreshJob;
 #[doc(hidden)]
-pub use log_storage::RaftLogStore;
+pub use log_storage::{RaftLogStore, RecoveryStats};
 #[doc(hidden)]
 pub use organization_purge::OrganizationPurgeJob;
 #[doc(hidden)]

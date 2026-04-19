@@ -18,6 +18,8 @@ These files are load-bearing — their invariants ripple beyond the local file. 
 | `src/node_registry.rs`                           | `NodeConnectionRegistry` — the single per-node channel pool. Incorrect sharing = connection storm.                           |
 | `src/rate_limit.rs`                              | 3-tier token bucket. Atomic fields must stay `AtomicU64` for runtime reconfig via `RuntimeConfigHandle`.                     |
 | `src/leader_lease.rs` + `src/leader_transfer.rs` | Leader orchestration layer on top of consensus primitives.                                                                   |
+| `src/state_checkpointer.rs`                      | Per-region checkpointer. Drives `Database::sync_state` on BOTH state.db and raft.db; runtime-reconfigurable via `RuntimeConfigHandle`; skipping raft.db leaves `applied_durable = 0` and forces full WAL replay on next boot. |
+| `src/log_storage/raft_impl.rs` (`replay_crash_gap`) | Crash-gap recovery driver. MUST run before the region's apply worker is spawned — concurrent replay + live apply double-applies entries. |
 
 ## Owned Surface
 
@@ -27,7 +29,8 @@ These files are load-bearing — their invariants ripple beyond the local file. 
 - **Saga orchestration**: `SagaOrchestrator` (`saga_orchestrator.rs`).
 - **Coordination**: `RaftManager` (`raft_manager.rs`), `ConsensusHandle` (`consensus_handle.rs`), leader orchestration (`leader_lease.rs`, `leader_transfer.rs`).
 - **Rate limit + hot-key**: `RateLimiter` (`rate_limit.rs`), `HotKeyDetector` (`hot_key_detector.rs`).
-- **Graceful shutdown**: `GracefulShutdown` + `ShutdownCoordinator` (`graceful_shutdown.rs`).
+- **Graceful shutdown**: `GracefulShutdown` + `ShutdownCoordinator` (`graceful_shutdown.rs`); `RaftManager::sync_all_state_dbs` invoked from `pre_shutdown` after WAL flush to sync state.db + raft.db per region.
+- **Durability lifecycle**: `StateCheckpointer` (`state_checkpointer.rs`) + `RaftLogStore::replay_crash_gap` (`log_storage/raft_impl.rs`) — driven by `CheckpointConfig` in `types`; operator reference in `docs/operations/durability.md`.
 - **Background jobs** (crate root): `auto_recovery`, `backup`, `btree_compaction`, `block_compaction`, `post_erasure_compaction`, `integrity_scrubber`, `learner_refresh`, `organization_purge`, `events_gc`, `ttl_gc`, `orphan_cleanup`, `invite_maintenance`, `token_maintenance`, `user_retention`, `dek_rewrap`, `BackgroundJobWatchdog`.
 - **Observability**: `metrics.rs`, `otel.rs`, `dogstatsd.rs`, `logging/`, `trace_context.rs`.
 
@@ -49,3 +52,5 @@ These files are load-bearing — their invariants ripple beyond the local file. 
 8. **`HotKeyDetector` is observational only.** It exposes Prometheus metrics; it does not reject traffic. Adding rejection logic tied to hot-key output is a different RFC.
 9. **Background jobs emit lifecycle logs + metrics.** A job that silently runs is a debugging nightmare — every job needs `info!("<job> starting")` / `"<job> finished"` + a Prometheus counter.
 10. **Deadlines propagate via `deadline.rs`.** Fire-and-forget internal paths are explicit exceptions (documented inline); defaulting to no deadline causes request pileups under load.
+11. **`RaftLogStore::replay_crash_gap` runs BEFORE the apply worker is spawned.** A live apply worker during replay would double-apply entries (the WAL range is already in-flight through the replay path). Enforced by `start_region` call ordering in `raft_manager.rs` — reordering that site is a correctness bug.
+12. **`StateCheckpointer` syncs BOTH state.db and raft.db on every tick.** Raft.db holds `AppliedStateCore` / `applied_durable`; skipping its sync means post-clean-shutdown restarts read `applied_durable = 0` and replay the entire WAL. Same invariant holds for `sync_all_state_dbs` in `RaftManager`. Both sync targets are enumerated in the code; adding a third DB to the durability contract requires updating every checkpoint / shutdown path in lockstep.

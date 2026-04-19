@@ -397,6 +397,20 @@ impl<B: StorageBackend> RaftLogStore<B> {
         self.state_layer.as_ref()
     }
 
+    /// Returns the `raft.db` handle for this region.
+    ///
+    /// Owned here because `save_state_core` (Sprint 1B2 Task 2C FLIP) writes
+    /// `KEY_APPLIED_STATE` via `WriteTransaction::commit_in_memory` on this
+    /// database. `RaftManager::sync_all_state_dbs` (Task 2B) and
+    /// `StateCheckpointer` (Task 2A) both need a direct handle to call
+    /// `Database::sync_state` from outside `log_storage`, so that the
+    /// durable `applied_durable` read on restart matches the WAL's
+    /// `last_committed` after a clean shutdown.
+    #[must_use]
+    pub fn log_store_db(&self) -> Arc<Database<FileBackend>> {
+        Arc::clone(&self.db)
+    }
+
     /// Returns a reference to the block archive (if configured).
     pub fn block_archive(&self) -> Option<&Arc<BlockArchive<B>>> {
         self.block_archive.as_ref()

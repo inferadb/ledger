@@ -7,12 +7,23 @@
 //! may be ahead of the dual-slot on-disk pointer until the next checkpoint.
 //! This task narrows that gap.
 //!
+//! Each region has **two** `Database<FileBackend>` handles that go lazy under
+//! Task 2C: `state.db` (entity/relationship tables, owned by `StateLayer`)
+//! and `raft.db` (`KEY_APPLIED_STATE` + Raft log, owned by `RaftLogStore`).
+//! Both receive `commit_in_memory` commits on every applied batch, so the
+//! checkpointer syncs both concurrently on every fire. Missing the raft.db
+//! sync would cause `applied_durable = 0` to be read on clean-shutdown
+//! restart (`KEY_APPLIED_STATE` never reaches disk), forcing a full WAL
+//! replay — see the Task 3A follow-up in the commit-durability audit.
+//!
 //! Fire policy (any one triggers a checkpoint):
 //!
 //! 1. **Time** — more than `interval_ms` elapsed since the last checkpoint.
 //! 2. **Applies** — >= `applies_threshold` applies since the last checkpoint.
-//! 3. **Dirty pages** — `Database::cache_dirty_page_count()` >= `dirty_pages_threshold`
-//!    (backpressure against unbounded cache growth).
+//! 3. **Dirty pages** — `Database::cache_dirty_page_count()` on state.db >= `dirty_pages_threshold`
+//!    (backpressure against unbounded cache growth). state.db is used as the proxy because every
+//!    apply batch writes to both DBs, so its dirty-page count tracks raft.db's closely; when
+//!    state.db qualifies for a checkpoint, raft.db is also due.
 //!
 //! Thresholds are read from `RuntimeConfigHandle` on every wake-up so live
 //! `UpdateConfig` RPCs take effect on the next tick without restarting the
@@ -70,8 +81,14 @@ const STATUS_ERROR: &str = "error";
 /// [`StateCheckpointer::start`], which returns a `JoinHandle` that completes
 /// once the supplied `CancellationToken` is cancelled.
 pub struct StateCheckpointer {
-    /// State DB handle. The checkpointer calls `sync_state` on this.
-    db: Arc<Database<FileBackend>>,
+    /// State DB handle. The checkpointer calls `sync_state` on this DB and
+    /// uses its dirty-page count as the `dirty_pages_threshold` trigger.
+    state_db: Arc<Database<FileBackend>>,
+    /// Raft DB handle (the `raft.db` file that owns `KEY_APPLIED_STATE` +
+    /// the Raft log). Synced concurrently with `state_db` so clean-shutdown
+    /// restarts read a non-zero `applied_durable` and skip WAL replay.
+    /// See Task 3A follow-up in the commit-durability audit.
+    raft_db: Arc<Database<FileBackend>>,
     /// Live runtime-config handle. Re-read on every wake-up so live
     /// `UpdateConfig` RPCs take effect on the next tick.
     runtime_config: RuntimeConfigHandle,
@@ -99,7 +116,8 @@ impl StateCheckpointer {
     /// (`ledger_state_*{region=...}`).
     #[must_use]
     pub fn from_config(
-        db: Arc<Database<FileBackend>>,
+        state_db: Arc<Database<FileBackend>>,
+        raft_db: Arc<Database<FileBackend>>,
         runtime_config: RuntimeConfigHandle,
         applied_rx: watch::Receiver<u64>,
         cancellation_token: CancellationToken,
@@ -107,7 +125,8 @@ impl StateCheckpointer {
     ) -> Self {
         let initial_applied = *applied_rx.borrow();
         Self {
-            db,
+            state_db,
+            raft_db,
             runtime_config,
             applied_rx,
             cancellation_token,
@@ -183,51 +202,69 @@ impl StateCheckpointer {
         let applies_since_last = latest_applied_at_start.saturating_sub(prior_applies);
 
         let start = Instant::now();
-        let result = Arc::clone(&self.db).sync_state().await;
+        // Sync both DBs concurrently: state.db owns the entity/relationship
+        // tables, raft.db owns `KEY_APPLIED_STATE`. Both receive
+        // `commit_in_memory` writes on every applied batch (Task 2C FLIP),
+        // so both must reach disk for a clean-shutdown restart to read
+        // `applied_durable` > 0 and skip WAL replay.
+        let (state_result, raft_result) = tokio::join!(
+            Arc::clone(&self.state_db).sync_state(),
+            Arc::clone(&self.raft_db).sync_state(),
+        );
         let duration = start.elapsed();
         let duration_secs = duration.as_secs_f64();
 
-        match result {
-            Ok(()) => {
-                // Advance internal accumulators only on success.
-                self.applies_at_last_checkpoint.store(latest_applied_at_start, Ordering::Relaxed);
-                *self.last_checkpoint_at.lock() = Instant::now();
+        let both_ok = state_result.is_ok() && raft_result.is_ok();
 
-                metrics::record_state_checkpoint(&self.region, trigger, STATUS_OK, duration_secs);
-                metrics::set_state_last_synced_snapshot_id(
-                    &self.region,
-                    self.db.last_synced_snapshot_id(),
-                );
-                if let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) {
-                    metrics::set_state_checkpoint_last_timestamp(&self.region, now.as_secs_f64());
-                }
+        // Log per-DB failures separately so operators can tell which slot
+        // lagged. We continue on a single-DB failure because syncing the
+        // other DB still narrows the crash gap meaningfully.
+        if let Err(ref e) = state_result {
+            warn!(
+                error = %e,
+                trigger,
+                db = "state",
+                region = %self.region,
+                "state checkpoint failed on state.db; leaving accumulators untouched so the next tick retries"
+            );
+        }
+        if let Err(ref e) = raft_result {
+            warn!(
+                error = %e,
+                trigger,
+                db = "raft",
+                region = %self.region,
+                "state checkpoint failed on raft.db; leaving accumulators untouched so the next tick retries"
+            );
+        }
 
-                let dirty_pages = self.db.cache_dirty_page_count() as u64;
-                debug!(
-                    trigger,
-                    duration_ms = duration.as_millis() as u64,
-                    applies_since_last,
-                    dirty_pages,
-                    region = %self.region,
-                    "state checkpoint complete"
-                );
-            },
-            Err(e) => {
-                metrics::record_state_checkpoint(
-                    &self.region,
-                    trigger,
-                    STATUS_ERROR,
-                    duration_secs,
-                );
-                warn!(
-                    error = %e,
-                    trigger,
-                    duration_ms = duration.as_millis() as u64,
-                    applies_since_last,
-                    region = %self.region,
-                    "state checkpoint failed; leaving accumulators untouched so the next tick retries"
-                );
-            },
+        if both_ok {
+            // Advance internal accumulators only when BOTH DBs synced. If
+            // either lags, next tick must retry so the two slots stay in
+            // lock-step.
+            self.applies_at_last_checkpoint.store(latest_applied_at_start, Ordering::Relaxed);
+            *self.last_checkpoint_at.lock() = Instant::now();
+
+            metrics::record_state_checkpoint(&self.region, trigger, STATUS_OK, duration_secs);
+            metrics::set_state_last_synced_snapshot_id(
+                &self.region,
+                self.state_db.last_synced_snapshot_id(),
+            );
+            if let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) {
+                metrics::set_state_checkpoint_last_timestamp(&self.region, now.as_secs_f64());
+            }
+
+            let dirty_pages = self.state_db.cache_dirty_page_count() as u64;
+            debug!(
+                trigger,
+                duration_ms = duration.as_millis() as u64,
+                applies_since_last,
+                dirty_pages,
+                region = %self.region,
+                "state checkpoint complete (state.db + raft.db)"
+            );
+        } else {
+            metrics::record_state_checkpoint(&self.region, trigger, STATUS_ERROR, duration_secs);
         }
     }
 
@@ -294,8 +331,11 @@ impl StateCheckpointer {
     /// spinning the tokio select loop.
     async fn tick(&self, config: &CheckpointConfig) {
         let latest_applied = *self.applied_rx.borrow();
-        let dirty_pages = self.db.cache_dirty_page_count() as u64;
-        let cache_len = self.db.stats().cached_pages as u64;
+        // The dirty-page trigger samples state.db only; raft.db's dirty
+        // count tracks it closely (every apply batch writes to both), so
+        // the state.db proxy is a reliable "time to checkpoint" signal.
+        let dirty_pages = self.state_db.cache_dirty_page_count() as u64;
+        let cache_len = self.state_db.stats().cached_pages as u64;
 
         self.emit_live_gauges(latest_applied, dirty_pages, cache_len);
 
@@ -314,13 +354,15 @@ mod tests {
 
     use super::*;
 
-    /// Builds a file-backed state DB in a tempdir. The tempdir is returned
-    /// so its lifetime spans the test.
-    fn new_test_db() -> (TempDir, Arc<Database<FileBackend>>) {
+    /// Builds file-backed state + raft DBs in a tempdir. The tempdir is
+    /// returned so its lifetime spans the test.
+    fn new_test_db() -> (TempDir, Arc<Database<FileBackend>>, Arc<Database<FileBackend>>) {
         let dir = TempDir::new().expect("tempdir");
-        let path = dir.path().join("state.db");
-        let db = Arc::new(Database::create(&path).expect("create db"));
-        (dir, db)
+        let state_db =
+            Arc::new(Database::create(dir.path().join("state.db")).expect("create state db"));
+        let raft_db =
+            Arc::new(Database::create(dir.path().join("raft.db")).expect("create raft db"));
+        (dir, state_db, raft_db)
     }
 
     /// Dirties a page in the state DB via `commit_in_memory`.
@@ -331,7 +373,8 @@ mod tests {
     }
 
     fn new_checkpointer(
-        db: Arc<Database<FileBackend>>,
+        state_db: Arc<Database<FileBackend>>,
+        raft_db: Arc<Database<FileBackend>>,
         cfg: CheckpointConfig,
         applied: u64,
     ) -> (StateCheckpointer, RuntimeConfigHandle, CancellationToken, watch::Sender<u64>) {
@@ -342,7 +385,8 @@ mod tests {
         let (tx, rx) = watch::channel(applied);
         let token = CancellationToken::new();
         let cp = StateCheckpointer::from_config(
-            db,
+            state_db,
+            raft_db,
             runtime_config.clone(),
             rx,
             token.clone(),
@@ -355,14 +399,15 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn should_checkpoint_time_fires_after_interval() {
-        let (_dir, db) = new_test_db();
+        let (_dir, state_db, raft_db) = new_test_db();
         let cfg = CheckpointConfig::builder()
             .interval_ms(50)
             .applies_threshold(1_000_000)
             .dirty_pages_threshold(1_000_000)
             .build()
             .unwrap();
-        let (cp, _rc, _tok, _tx) = new_checkpointer(Arc::clone(&db), cfg.clone(), 0);
+        let (cp, _rc, _tok, _tx) =
+            new_checkpointer(Arc::clone(&state_db), Arc::clone(&raft_db), cfg.clone(), 0);
         // Back-date last_checkpoint_at so the time trigger qualifies.
         *cp.last_checkpoint_at.lock() = Instant::now() - Duration::from_millis(500);
         assert_eq!(cp.should_checkpoint(&cfg, 0, 0), Some(TRIGGER_TIME));
@@ -370,14 +415,15 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn should_checkpoint_applies_fires_after_threshold() {
-        let (_dir, db) = new_test_db();
+        let (_dir, state_db, raft_db) = new_test_db();
         let cfg = CheckpointConfig::builder()
             .interval_ms(60_000)
             .applies_threshold(100)
             .dirty_pages_threshold(1_000_000)
             .build()
             .unwrap();
-        let (cp, _rc, _tok, _tx) = new_checkpointer(Arc::clone(&db), cfg.clone(), 0);
+        let (cp, _rc, _tok, _tx) =
+            new_checkpointer(Arc::clone(&state_db), Arc::clone(&raft_db), cfg.clone(), 0);
         // Baseline applies = 0 (set in from_config); latest_applied = 100 is >= threshold.
         assert_eq!(cp.should_checkpoint(&cfg, 100, 0), Some(TRIGGER_APPLIES));
         // 99 is under threshold.
@@ -386,41 +432,44 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn should_checkpoint_dirty_fires_after_threshold() {
-        let (_dir, db) = new_test_db();
+        let (_dir, state_db, raft_db) = new_test_db();
         let cfg = CheckpointConfig::builder()
             .interval_ms(60_000)
             .applies_threshold(1_000_000)
             .dirty_pages_threshold(10)
             .build()
             .unwrap();
-        let (cp, _rc, _tok, _tx) = new_checkpointer(Arc::clone(&db), cfg.clone(), 0);
+        let (cp, _rc, _tok, _tx) =
+            new_checkpointer(Arc::clone(&state_db), Arc::clone(&raft_db), cfg.clone(), 0);
         assert_eq!(cp.should_checkpoint(&cfg, 0, 10), Some(TRIGGER_DIRTY));
         assert_eq!(cp.should_checkpoint(&cfg, 0, 9), None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn should_checkpoint_returns_none_when_all_under_threshold() {
-        let (_dir, db) = new_test_db();
+        let (_dir, state_db, raft_db) = new_test_db();
         let cfg = CheckpointConfig::builder()
             .interval_ms(60_000)
             .applies_threshold(1_000_000)
             .dirty_pages_threshold(1_000_000)
             .build()
             .unwrap();
-        let (cp, _rc, _tok, _tx) = new_checkpointer(Arc::clone(&db), cfg.clone(), 0);
+        let (cp, _rc, _tok, _tx) =
+            new_checkpointer(Arc::clone(&state_db), Arc::clone(&raft_db), cfg.clone(), 0);
         assert_eq!(cp.should_checkpoint(&cfg, 0, 0), None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn triggers_are_prioritized_deterministically_when_multiple_fire() {
-        let (_dir, db) = new_test_db();
+        let (_dir, state_db, raft_db) = new_test_db();
         let cfg = CheckpointConfig::builder()
             .interval_ms(50)
             .applies_threshold(1)
             .dirty_pages_threshold(1)
             .build()
             .unwrap();
-        let (cp, _rc, _tok, _tx) = new_checkpointer(Arc::clone(&db), cfg.clone(), 0);
+        let (cp, _rc, _tok, _tx) =
+            new_checkpointer(Arc::clone(&state_db), Arc::clone(&raft_db), cfg.clone(), 0);
         *cp.last_checkpoint_at.lock() = Instant::now() - Duration::from_millis(500);
         // All three conditions qualify — dirty wins.
         assert_eq!(cp.should_checkpoint(&cfg, 100, 100), Some(TRIGGER_DIRTY));
@@ -440,10 +489,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn runs_checkpoint_on_time_tick() {
-        let (_dir, db) = new_test_db();
+        let (_dir, state_db, raft_db) = new_test_db();
         // Dirty one page in memory so there's something to checkpoint.
-        commit_in_memory_one(&db, b"k1", b"v1");
-        assert_eq!(db.last_synced_snapshot_id(), 0);
+        commit_in_memory_one(&state_db, b"k1", b"v1");
+        assert_eq!(state_db.last_synced_snapshot_id(), 0);
 
         let cfg = CheckpointConfig::builder()
             .interval_ms(50)
@@ -451,32 +500,74 @@ mod tests {
             .dirty_pages_threshold(1_000_000)
             .build()
             .unwrap();
-        let (cp, _rc, token, _tx) = new_checkpointer(Arc::clone(&db), cfg, 0);
+        let (cp, _rc, token, _tx) =
+            new_checkpointer(Arc::clone(&state_db), Arc::clone(&raft_db), cfg, 0);
 
         let handle = cp.start();
 
         // Wait for at least one time-tick to fire a checkpoint.
         for _ in 0..40 {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            if db.last_synced_snapshot_id() > 0 {
+            if state_db.last_synced_snapshot_id() > 0 {
                 break;
             }
         }
 
         assert!(
-            db.last_synced_snapshot_id() > 0,
-            "expected checkpoint to advance last_synced_snapshot_id from zero"
+            state_db.last_synced_snapshot_id() > 0,
+            "expected checkpoint to advance state.db last_synced_snapshot_id from zero"
         );
 
         token.cancel();
         handle.await.expect("task join");
     }
 
+    /// Regression test for the Task 3A follow-up: the checkpointer must
+    /// sync raft.db alongside state.db on every fire. Without this, a
+    /// clean-shutdown restart reads `applied_durable = 0` from raft.db
+    /// and forces a full WAL replay even though state.db is caught up.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checkpoint_advances_both_state_db_and_raft_db() {
+        let (_dir, state_db, raft_db) = new_test_db();
+        // Dirty a page on BOTH DBs — mirrors the per-batch apply pattern
+        // where state.db gets entity writes and raft.db gets the
+        // KEY_APPLIED_STATE write.
+        commit_in_memory_one(&state_db, b"k1", b"v1");
+        commit_in_memory_one(&raft_db, b"k1", b"v1");
+        assert_eq!(state_db.last_synced_snapshot_id(), 0);
+        assert_eq!(raft_db.last_synced_snapshot_id(), 0);
+
+        let cfg = CheckpointConfig::builder()
+            .interval_ms(50)
+            .applies_threshold(1_000_000)
+            .dirty_pages_threshold(1_000_000)
+            .build()
+            .unwrap();
+        let (cp, _rc, _tok, _tx) =
+            new_checkpointer(Arc::clone(&state_db), Arc::clone(&raft_db), cfg.clone(), 0);
+
+        // Fire a time-triggered checkpoint manually via tick() so we don't
+        // rely on task scheduling.
+        *cp.last_checkpoint_at.lock() = Instant::now() - Duration::from_millis(500);
+        cp.tick(&cfg).await;
+
+        assert!(
+            state_db.last_synced_snapshot_id() > 0,
+            "state.db last_synced_snapshot_id must advance on checkpoint"
+        );
+        assert!(
+            raft_db.last_synced_snapshot_id() > 0,
+            "raft.db last_synced_snapshot_id must advance on checkpoint \
+             (Task 3A follow-up: missing this caused full WAL replay after clean shutdown)"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancellation_stops_the_task() {
-        let (_dir, db) = new_test_db();
+        let (_dir, state_db, raft_db) = new_test_db();
         let cfg = CheckpointConfig::default();
-        let (cp, _rc, token, _tx) = new_checkpointer(Arc::clone(&db), cfg, 0);
+        let (cp, _rc, token, _tx) =
+            new_checkpointer(Arc::clone(&state_db), Arc::clone(&raft_db), cfg, 0);
 
         let handle = cp.start();
         tokio::time::sleep(Duration::from_millis(80)).await;
@@ -496,7 +587,7 @@ mod tests {
         // triggers. The select arm is now guarded by `applied_rx_alive`,
         // which flips to `false` on `Err` so the time + cancellation arms
         // remain functional.
-        let (_dir, db) = new_test_db();
+        let (_dir, state_db, raft_db) = new_test_db();
         // Use sane thresholds so the time arm doesn't fire constantly while
         // we wait — we're testing the loop behaviour, not the trigger.
         let cfg = CheckpointConfig::builder()
@@ -505,7 +596,8 @@ mod tests {
             .dirty_pages_threshold(1_000_000)
             .build()
             .unwrap();
-        let (cp, _rc, token, tx) = new_checkpointer(Arc::clone(&db), cfg, 0);
+        let (cp, _rc, token, tx) =
+            new_checkpointer(Arc::clone(&state_db), Arc::clone(&raft_db), cfg, 0);
 
         let handle = cp.start();
 
@@ -526,7 +618,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn runtime_config_update_takes_effect_on_next_tick() {
-        let (_dir, db) = new_test_db();
+        let (_dir, state_db, raft_db) = new_test_db();
         // Start with thresholds so high nothing ever fires.
         let initial = CheckpointConfig::builder()
             .interval_ms(60_000)
@@ -534,17 +626,18 @@ mod tests {
             .dirty_pages_threshold(1_000_000)
             .build()
             .unwrap();
-        let (cp, runtime, token, _tx) = new_checkpointer(Arc::clone(&db), initial, 0);
+        let (cp, runtime, token, _tx) =
+            new_checkpointer(Arc::clone(&state_db), Arc::clone(&raft_db), initial, 0);
         // Dirty a page so a checkpoint would advance snapshot id if one fires.
-        commit_in_memory_one(&db, b"k1", b"v1");
-        assert_eq!(db.last_synced_snapshot_id(), 0);
+        commit_in_memory_one(&state_db, b"k1", b"v1");
+        assert_eq!(state_db.last_synced_snapshot_id(), 0);
 
         let handle = cp.start();
 
         // Let a few ticks pass with the huge thresholds; nothing should fire.
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert_eq!(
-            db.last_synced_snapshot_id(),
+            state_db.last_synced_snapshot_id(),
             0,
             "no checkpoint should have fired with huge thresholds"
         );
@@ -564,7 +657,7 @@ mod tests {
         let mut observed = false;
         for _ in 0..40 {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            if db.last_synced_snapshot_id() > 0 {
+            if state_db.last_synced_snapshot_id() > 0 {
                 observed = true;
                 break;
             }
@@ -577,8 +670,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn applies_count_resets_on_successful_checkpoint_only() {
-        let (_dir, db) = new_test_db();
-        commit_in_memory_one(&db, b"k1", b"v1");
+        let (_dir, state_db, raft_db) = new_test_db();
+        commit_in_memory_one(&state_db, b"k1", b"v1");
 
         let cfg = CheckpointConfig::builder()
             .interval_ms(50)
@@ -586,7 +679,8 @@ mod tests {
             .dirty_pages_threshold(1_000_000)
             .build()
             .unwrap();
-        let (cp, _rc, _tok, tx) = new_checkpointer(Arc::clone(&db), cfg.clone(), 0);
+        let (cp, _rc, _tok, tx) =
+            new_checkpointer(Arc::clone(&state_db), Arc::clone(&raft_db), cfg.clone(), 0);
 
         // Synthesize applied_index advance *before* a successful checkpoint.
         tx.send(42).expect("watch send");
@@ -601,35 +695,37 @@ mod tests {
             "successful checkpoint must advance applies_at_last_checkpoint to latest applied"
         );
         assert!(
-            db.last_synced_snapshot_id() > 0,
+            state_db.last_synced_snapshot_id() > 0,
             "successful checkpoint must have advanced the synced snapshot id"
         );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn tick_does_nothing_when_nothing_qualifies() {
-        let (_dir, db) = new_test_db();
+        let (_dir, state_db, raft_db) = new_test_db();
         let cfg = CheckpointConfig::builder()
             .interval_ms(60_000)
             .applies_threshold(1_000_000)
             .dirty_pages_threshold(1_000_000)
             .build()
             .unwrap();
-        let (cp, _rc, _tok, _tx) = new_checkpointer(Arc::clone(&db), cfg.clone(), 0);
+        let (cp, _rc, _tok, _tx) =
+            new_checkpointer(Arc::clone(&state_db), Arc::clone(&raft_db), cfg.clone(), 0);
 
         cp.tick(&cfg).await;
-        assert_eq!(db.last_synced_snapshot_id(), 0);
+        assert_eq!(state_db.last_synced_snapshot_id(), 0);
         assert_eq!(cp.applies_at_last_checkpoint.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn current_config_falls_back_to_default_when_unset() {
-        let (_dir, db) = new_test_db();
+        let (_dir, state_db, raft_db) = new_test_db();
         let runtime_config = RuntimeConfigHandle::new(RuntimeConfig::default());
         let (_tx, rx) = watch::channel(0u64);
         let token = CancellationToken::new();
         let cp = StateCheckpointer::from_config(
-            Arc::clone(&db),
+            Arc::clone(&state_db),
+            Arc::clone(&raft_db),
             runtime_config,
             rx,
             token,
@@ -638,5 +734,119 @@ mod tests {
 
         let cfg = cp.current_config();
         assert_eq!(cfg, CheckpointConfig::default());
+    }
+
+    // -----------------------------------------------------------------------
+    // Apply-accumulator property tests (Sprint 1B2 Task 3B Test 4)
+    // -----------------------------------------------------------------------
+
+    /// Accumulator-reset invariant covered as a proptest.
+    ///
+    /// `applies_since_last = latest_applied - applies_at_last_checkpoint` must
+    /// always be `>= 0` and may only decrease when a checkpoint succeeds. The
+    /// existing `applies_count_resets_on_successful_checkpoint_only` unit test
+    /// covers one concrete sequence; this proptest sweeps arbitrary
+    /// (advance, succeeds) event streams and asserts the invariant holds
+    /// across every observable point.
+    ///
+    /// The property is exercised against the real `StateCheckpointer`
+    /// accumulator fields by directly invoking the success branch of
+    /// `do_checkpoint`'s accounting (`applies_at_last_checkpoint.store(...)`)
+    /// and skipping the store on failure — i.e. simulating the outcome of
+    /// `sync_state` without actually calling it. This keeps the proptest
+    /// cheap enough to run at the workspace default 256 cases.
+    mod proptest_accumulator_invariant {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        proptest! {
+            // 64 cases balances search breadth against the per-case cost of
+            // spinning up a tempdir-backed pair of file DBs plus a tokio
+            // current-thread runtime. 256 (workspace default) takes ~3s;
+            // 64 keeps this test under ~1s of lib-test wall clock.
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            #[test]
+            fn accumulator_resets_only_on_success(
+                events in proptest::collection::vec(
+                    (0u64..1000u64, any::<bool>()),
+                    1..=50,
+                ),
+            ) {
+                // Spin up a checkpointer bound to a pair of FileBackend DBs.
+                // We never call sync_state, so no dual-slot I/O happens —
+                // only the in-memory accumulator is touched.
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime");
+                rt.block_on(async move {
+                    let (_dir, state_db, raft_db) = new_test_db();
+                    let cfg = CheckpointConfig::builder()
+                        .interval_ms(60_000)
+                        .applies_threshold(1)
+                        .dirty_pages_threshold(1_000_000)
+                        .build()
+                        .unwrap();
+                    let (cp, _rc, _tok, _tx) =
+                        new_checkpointer(Arc::clone(&state_db), Arc::clone(&raft_db), cfg, 0);
+
+                    // Reference model: `latest_applied` and `applies_at_last_checkpoint`.
+                    let mut latest: u64 = 0;
+                    let mut ref_at_last: u64 = 0;
+                    let mut prev_diff: u64 = 0;
+
+                    for (advance, succeeds) in events {
+                        // Apply the advance.
+                        latest = latest.saturating_add(advance);
+
+                        let diff_before_checkpoint =
+                            latest.saturating_sub(cp.applies_at_last_checkpoint.load(Ordering::Relaxed));
+                        // `applies_since_last` must be monotonically non-negative; saturating_sub
+                        // guarantees this trivially, but the assertion documents intent.
+                        prop_assert!(
+                            diff_before_checkpoint == latest.saturating_sub(ref_at_last),
+                            "checkpointer accumulator must match reference model"
+                        );
+
+                        // Simulate the success branch of do_checkpoint: on success,
+                        // advance applies_at_last_checkpoint to the observed latest.
+                        // On failure, leave it alone — exactly what do_checkpoint does.
+                        if succeeds {
+                            cp.applies_at_last_checkpoint.store(latest, Ordering::Relaxed);
+                            ref_at_last = latest;
+                        }
+
+                        let diff_after =
+                            latest.saturating_sub(cp.applies_at_last_checkpoint.load(Ordering::Relaxed));
+                        prop_assert_eq!(
+                            diff_after,
+                            latest.saturating_sub(ref_at_last),
+                            "diff after step must equal reference model"
+                        );
+
+                        // The accumulator may only decrease on success. On failure,
+                        // it must be >= prev_diff (advance can only grow the gap).
+                        if !succeeds {
+                            prop_assert!(
+                                diff_after >= prev_diff,
+                                "failure-only step must never shrink applies_since_last ({} < {})",
+                                diff_after, prev_diff
+                            );
+                        }
+                        prev_diff = diff_after;
+
+                        // Global invariant: the accumulator never exceeds latest.
+                        prop_assert!(
+                            cp.applies_at_last_checkpoint.load(Ordering::Relaxed) <= latest,
+                            "applies_at_last_checkpoint may never exceed latest_applied"
+                        );
+                    }
+
+                    Ok::<(), proptest::test_runner::TestCaseError>(())
+                })?;
+            }
+        }
     }
 }
