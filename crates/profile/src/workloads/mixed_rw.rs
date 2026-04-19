@@ -23,6 +23,7 @@ pub async fn run(harness: &Harness, duration: Duration) -> Summary {
         counter = counter.wrapping_add(1);
 
         let key = format!("profile:mixed:{key_idx}");
+        let op_start = Instant::now();
         let outcome = if is_write {
             let ops = vec![Operation::set_entity(key, vec![0xCDu8; VALUE_SIZE], None, None)];
             harness
@@ -37,7 +38,7 @@ pub async fn run(harness: &Harness, duration: Duration) -> Summary {
                 .await
                 .map(|_| ())
         };
-        summary.record(outcome);
+        summary.record_timed(outcome, op_start.elapsed());
     }
     summary.elapsed = start.elapsed();
     summary

@@ -4,7 +4,7 @@
 //! See `docs/operations/profiling.md` for usage.
 
 use clap::Parser;
-use snafu::{IntoError, Snafu};
+use snafu::{IntoError, ResultExt, Snafu};
 
 mod harness;
 mod workloads;
@@ -12,7 +12,8 @@ mod workloads;
 /// Top-level error for the profile binary.
 ///
 /// The enum is extended as subsystems are introduced; Task 2 seeded it empty,
-/// Task 6 adds the harness-bootstrap variant.
+/// Task 6 adds the harness-bootstrap variant, Suite B adds the metrics-JSON
+/// emission path.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum MainError {
@@ -23,6 +24,19 @@ pub enum MainError {
         /// clippy `result_large_err` unboxed. Precedent:
         /// `crates/state/src/system/service/mod.rs`.
         source: Box<harness::HarnessError>,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+    #[snafu(display("failed to write metrics JSON to {}: {source}", path.display()))]
+    WriteMetrics {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+    #[snafu(display("failed to serialize metrics report: {source}"))]
+    SerializeMetrics {
+        source: serde_json::Error,
         #[snafu(implicit)]
         location: snafu::Location,
     },
@@ -39,10 +53,16 @@ struct Cli {
 enum Preset {
     /// Tight write loop — one concurrent writer, fixed key-space.
     ThroughputWrites(PresetArgs),
-    /// 70/30 writes-to-checks mix against a pre-seeded vault.
+    /// 70/30 writes-to-reads mix against a pre-seeded vault.
     MixedRw(PresetArgs),
     /// 90% authorization checks, 10% writes against a pre-seeded vault.
     CheckHeavy(PresetArgs),
+    /// Pure read loop against 10k pre-seeded entities.
+    EntityReads(PresetArgs),
+    /// Pure create_relationship loop through a 10×10×10 tuple space.
+    RelationshipWrites(PresetArgs),
+    /// Pure check_relationship loop against 1k pre-seeded relationships.
+    RelationshipReads(PresetArgs),
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -53,6 +73,10 @@ struct PresetArgs {
     /// Measured-phase duration in seconds.
     #[arg(long, default_value_t = 60)]
     duration: u64,
+    /// Write a structured MetricsReport to this path on completion. Consumed
+    /// by scripts/profile-suite.sh to aggregate across workloads.
+    #[arg(long, value_name = "PATH")]
+    metrics_json: Option<std::path::PathBuf>,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -70,6 +94,9 @@ async fn main() -> Result<(), MainError> {
         Preset::ThroughputWrites(a) => (a, "throughput-writes"),
         Preset::MixedRw(a) => (a, "mixed-rw"),
         Preset::CheckHeavy(a) => (a, "check-heavy"),
+        Preset::EntityReads(a) => (a, "entity-reads"),
+        Preset::RelationshipWrites(a) => (a, "relationship-writes"),
+        Preset::RelationshipReads(a) => (a, "relationship-reads"),
     };
 
     let duration = std::time::Duration::from_secs(args.duration);
@@ -83,8 +110,23 @@ async fn main() -> Result<(), MainError> {
         Preset::ThroughputWrites(_) => workloads::throughput_writes::run(&harness, duration).await,
         Preset::MixedRw(_) => workloads::mixed_rw::run(&harness, duration).await,
         Preset::CheckHeavy(_) => workloads::check_heavy::run(&harness, duration).await,
+        Preset::EntityReads(_) => workloads::entity_reads::run(&harness, duration).await,
+        Preset::RelationshipWrites(_) => {
+            workloads::relationship_writes::run(&harness, duration).await
+        },
+        Preset::RelationshipReads(_) => {
+            workloads::relationship_reads::run(&harness, duration).await
+        },
     };
 
     summary.print(preset_name);
+
+    if let Some(path) = args.metrics_json.as_ref() {
+        let report = summary.to_report(preset_name, &args.endpoint, args.duration);
+        let json = serde_json::to_string_pretty(&report).context(SerializeMetricsSnafu)?;
+        std::fs::write(path, json).with_context(|_| WriteMetricsSnafu { path: path.clone() })?;
+        tracing::info!(path = %path.display(), "wrote metrics report");
+    }
+
     Ok(())
 }

@@ -108,6 +108,12 @@ doctor() {
     else
         echo "inferno-flamegraph: $(command -v inferno-flamegraph)"
     fi
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "warn: jq not on PATH — required for profile-suite report aggregation" >&2
+        echo "hint: brew install jq  (or: apt install jq)" >&2
+    else
+        echo "jq: $(command -v jq)"
+    fi
     echo ""
 
     echo "=== output ==="

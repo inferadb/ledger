@@ -1799,6 +1799,8 @@ dependencies = [
  "clap",
  "inferadb-ledger-sdk",
  "inferadb-ledger-types",
+ "serde",
+ "serde_json",
  "snafu",
  "tokio",
  "tracing",

@@ -385,3 +385,12 @@ profile-server WORKLOAD="throughput-writes" SECS="60":
 # Requires: cargo install inferno (for folded-stack → SVG post-processing).
 profile-server-spans WORKLOAD="throughput-writes" SECS="60":
     ./scripts/profile-server.sh spans {{WORKLOAD}} {{SECS}}
+
+# Run the full profiling suite: 6 workloads, per-workload metrics + flamegraphs,
+# aggregated summary.md. Produces profiles/session-<ts>/.
+# DURATION: per-workload measured duration (default 30)
+# MODE: sampling (default, faster) | spans (semantic lens, requires inferno)
+# Requires: jq (for summary aggregation) + the sampler (samply on macOS,
+# flamegraph on Linux). Run `just doctor-profiling` to verify.
+profile-suite DURATION="30" MODE="sampling":
+    ./scripts/profile-suite.sh {{DURATION}} {{MODE}}

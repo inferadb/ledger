@@ -1,10 +1,13 @@
-//! check-heavy: 90% relationship existence checks, 10% relationship writes.
+//! relationship-reads: pure check_relationship loop against a pre-seeded set.
 //!
-//! Seeds 1,000 relationships at startup (10 resources × 10 relations × 10
-//! subjects), then cycles through them with a fixed 9:1 check:write mix.
-//! The check path invokes `LedgerClient::check_relationship`, the
-//! storage-primitive existence check the Engine layer hammers when serving
-//! authorization decisions.
+//! Seed phase writes 1,000 relationships (10 resources × 10 relations × 10
+//! subjects). Measured phase cycles `client.check_relationship()` against
+//! those tuples — all calls should return `exists=true`. Exercises the
+//! SDK → gRPC → validation → slug-resolution → state-layer relationship-
+//! index lookup hot path in isolation.
+//!
+//! Consistency: `Eventual` (linearizable routes through ReadIndex, which
+//! profiles a different code path).
 
 use std::time::{Duration, Instant};
 
@@ -18,7 +21,7 @@ const SUBJECTS: u64 = 10;
 
 pub async fn run(harness: &Harness, duration: Duration) -> Summary {
     if let Err(e) = seed(harness).await {
-        tracing::warn!(error = %e, "seed failed; proceeding with whatever state exists");
+        tracing::warn!(error = %e, "seed failed; checks will miss and return exists=false");
     }
 
     let mut summary = Summary::default();
@@ -33,29 +36,20 @@ pub async fn run(harness: &Harness, duration: Duration) -> Summary {
         let subject = format!("subject:{}", (idx / (RESOURCES * RELATIONS)) % SUBJECTS);
 
         let op_start = Instant::now();
-        let outcome = if idx.is_multiple_of(10) {
-            let ops = vec![Operation::create_relationship(resource, relation, subject)];
-            harness
-                .client
-                .write(harness.user, harness.organization, Some(harness.vault), ops, None)
-                .await
-                .map(|_| ())
-        } else {
-            harness
-                .client
-                .check_relationship(
-                    harness.user,
-                    harness.organization,
-                    harness.vault,
-                    resource,
-                    relation,
-                    subject,
-                    ReadConsistency::Eventual,
-                    None,
-                )
-                .await
-                .map(|_| ())
-        };
+        let outcome = harness
+            .client
+            .check_relationship(
+                harness.user,
+                harness.organization,
+                harness.vault,
+                &resource,
+                &relation,
+                &subject,
+                ReadConsistency::Eventual,
+                None,
+            )
+            .await
+            .map(|_| ());
         summary.record_timed(outcome, op_start.elapsed());
     }
     summary.elapsed = start.elapsed();

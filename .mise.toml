@@ -23,3 +23,18 @@ node = "22"
 # Used by the markdown-format PostToolUse hook to normalize spacing and style in `.md`
 # files after edits. Installed via ubi from the upstream GitHub release.
 "ubi:huacnlee/autocorrect" = "2.16.3"
+
+# samply — sampling CPU profiler. Default sampler on macOS for `just profile-server`
+# and `just profile-suite`; also a fallback on Linux. cargo backend because samply's
+# release cadence matches its Cargo version.
+"cargo:samply" = "0.13"
+
+# inferno — flamegraph toolkit. We use the `inferno-flamegraph` binary to convert
+# tracing-flame folded-stack output into SVG in `just profile-server-spans` and the
+# spans mode of `just profile-suite`.
+"cargo:inferno" = "0.12"
+
+# jq — JSON processor. Used by `scripts/profile-suite-report.sh` to aggregate
+# per-workload metrics.json files into a session summary.md table. The upstream
+# release tags are `jq-<version>`, so the pin matches that shape.
+"ubi:jqlang/jq" = "jq-1.8.1"

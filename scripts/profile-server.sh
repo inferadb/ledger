@@ -12,6 +12,15 @@
 #   mode:          sampling | spans
 #   workload:      throughput-writes | mixed-rw | check-heavy
 #   duration_secs: measured-phase duration (default 60)
+#
+# Environment variables:
+#   PROFILER              samply (macOS default) | flamegraph (Linux default)
+#   FLAMEGRAPH_FREQ       sample rate in Hz (default 997)
+#   PROFILE_OUTPUT_DIR    output directory (default profiles/)
+#   WARMUP_SECS           warmup duration in seconds (default 5)
+#   PROFILE_METRICS_PATH  when set, passed as --metrics-json to the workload
+#                         binary; the measured-phase metrics report is written
+#                         to that path (consumed by scripts/profile-suite.sh)
 
 set -euo pipefail
 
@@ -247,10 +256,18 @@ echo "==> warmup (${WARMUP_SECS}s, preset=$WORKLOAD)"
     }
 
 echo "==> measured phase (${DURATION}s, preset=$WORKLOAD)"
-"$PROFILE_BIN" "$WORKLOAD" \
-    --endpoint "$ENDPOINT" \
-    --duration "$DURATION" \
-    2>&1 | tee "$DATA_DIR/measured.log" || true
+if [[ -n "${PROFILE_METRICS_PATH:-}" ]]; then
+    "$PROFILE_BIN" "$WORKLOAD" \
+        --endpoint "$ENDPOINT" \
+        --duration "$DURATION" \
+        --metrics-json "$PROFILE_METRICS_PATH" \
+        2>&1 | tee "$DATA_DIR/measured.log" || true
+else
+    "$PROFILE_BIN" "$WORKLOAD" \
+        --endpoint "$ENDPOINT" \
+        --duration "$DURATION" \
+        2>&1 | tee "$DATA_DIR/measured.log" || true
+fi
 
 # --- shutdown ---------------------------------------------------------------
 

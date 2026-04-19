@@ -131,11 +131,31 @@ just profile-server-spans throughput-writes 60
 Span mode has measurable overhead (~1–5% depending on span density). Use it
 for structural analysis, not absolute-throughput measurements.
 
-### Workloads (both server recipes)
+### Workloads (all server-profiling recipes + `profile-suite`)
 
-- `throughput-writes` — tight write loop, 10k-entry key-space, exercises the
-  update path.
-- `mixed-rw` — 70/30 writes-to-reads against a pre-seeded vault.
+Six workloads. The first four are **pure** — each isolates one hot path. The
+last two are **mixed** — they run realistic load shapes that expose
+regressions only visible under mixed pressure.
+
+Pure:
+
+- `throughput-writes` — tight entity-write loop. 10,000-entry key-space,
+  update-path dominant. Exercises SDK marshaling, gRPC, Raft propose + apply,
+  and B+ tree page update.
+- `entity-reads` — pure read loop against 10,000 pre-seeded entities.
+  Exercises SDK, gRPC, validation, slug resolution, and state-layer
+  entity-key lookup.
+- `relationship-writes` — pure `create_relationship` loop through a 10×10×10
+  tuple space. Exercises the relationship-mutation hot path (SDK → Raft →
+  apply → relationship-index insert).
+- `relationship-reads` — pure `check_relationship` loop against 1,000
+  pre-seeded relationships (10 resources × 10 relations × 10 subjects). All
+  calls should return `exists=true`. Exercises slug resolution, validation,
+  and state-layer relationship-index lookup.
+
+Mixed:
+
+- `mixed-rw` — 70/30 entity writes/reads against a pre-seeded vault.
 - `check-heavy` — 90% `CheckRelationship` RPC calls against a 1,000-tuple
   pre-seeded relationship set (10 resources × 10 relations × 10 subjects),
   10% relationship writes. Exercises the storage-primitive existence check
@@ -144,7 +164,72 @@ for structural analysis, not absolute-throughput measurements.
   state-layer lookup regressions.
 
 All workloads use fixed concurrency and fixed key-space size so the flame
-graph shape is stable across runs.
+graph shape is stable across runs. Pure presets are shorter (no mixing)
+and easier to compare across sessions; mixed presets are more realistic.
+
+## Running the suite
+
+`just profile-suite` runs all six workloads back-to-back, captures a
+flamegraph for each, and aggregates per-workload metrics into a single
+timestamped session directory. This is the canonical way to do a
+before/after comparison across a refactor.
+
+```bash
+just profile-suite              # 30s per workload, sampling mode (~6 min total)
+just profile-suite 60           # 60s per workload
+just profile-suite 30 spans     # span lens (tracing-flame) instead of sampling
+just profile-suite 30 sampling throughput-writes entity-reads   # subset
+```
+
+Output lives under `profiles/session-<UTC-ts>/`:
+
+```text
+profiles/session-20260418T194500Z/
+├── summary.md              # Aggregated throughput + latency percentiles per workload
+├── config.json             # Session parameters (duration, mode, platform, git SHA)
+├── throughput-writes/
+│   ├── server-throughput-writes-<ts>.svg  # flamegraph
+│   ├── metrics.json        # { throughput, errors, latency_ns: { p50, p95, p99, p999, max } }
+│   └── run.log
+├── entity-reads/
+├── relationship-writes/
+├── relationship-reads/
+├── mixed-rw/
+└── check-heavy/
+```
+
+**Diffing sessions.** Each `summary.md` is a stable, sortable table. To
+compare two sessions:
+
+```bash
+diff profiles/session-<before>/summary.md profiles/session-<after>/summary.md
+```
+
+**Prerequisites.** `just doctor-profiling` verifies everything. Beyond the
+sampler (`samply` / `cargo-flamegraph`) and `inferno-flamegraph` for spans
+mode, the suite report generator requires `jq`:
+
+```bash
+brew install jq     # macOS
+apt install jq      # Debian/Ubuntu
+```
+
+**Mode choice.** Default `sampling` is ~6 minutes for the full suite.
+`spans` mode takes roughly the same wall time but has ~1–5% measurement
+overhead from `tracing-flame` span events — so latency numbers in `sampling`
+mode are the ones to trust for absolute comparisons. Use `spans` mode when
+you want to drill into structural time distribution (which logical
+operations the server spent its time in) rather than stack-frame CPU.
+
+**Iterating on a hypothesis.** Typical loop:
+
+1. Run `just profile-suite` once to establish a baseline.
+2. Make your change.
+3. Run `just profile-suite` again.
+4. Diff the two `summary.md` files. Biggest deltas in throughput or p99
+   point at the workload whose path you affected.
+5. Open the flamegraph in that workload's subdir to see where the time
+   moved.
 
 ## Reading a flamegraph
 

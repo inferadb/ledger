@@ -24,12 +24,13 @@ pub async fn run(harness: &Harness, duration: Duration) -> Summary {
         counter = counter.wrapping_add(1);
 
         let ops = vec![Operation::set_entity(key, value, None, None)];
+        let op_start = Instant::now();
         let outcome = harness
             .client
             .write(harness.user, harness.organization, Some(harness.vault), ops, None)
             .await
             .map(|_| ());
-        summary.record(outcome);
+        summary.record_timed(outcome, op_start.elapsed());
     }
     summary.elapsed = start.elapsed();
     summary
