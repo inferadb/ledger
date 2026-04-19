@@ -199,8 +199,12 @@ else
     echo "==> starting server under $PROFILER"
     case "$PROFILER" in
         flamegraph)
-            cargo flamegraph \
-                --profile profiling \
+            # Use the standalone `flamegraph` wrapper (not `cargo flamegraph`).
+            # `cargo flamegraph` wants to build a cargo target; our workspace
+            # has multiple bin targets and cargo-flamegraph fails with an
+            # ambiguous-target error. The standalone wrapper takes an already-
+            # built binary path, which is what we want — we built it above.
+            flamegraph \
                 --freq "$FLAMEGRAPH_FREQ" \
                 -o "$RAW_OUTPUT" \
                 -- "$SERVER_BIN" \
