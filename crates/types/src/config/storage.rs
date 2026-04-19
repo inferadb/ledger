@@ -236,6 +236,141 @@ impl BTreeCompactionConfig {
 }
 
 // =========================================================================
+// CheckpointConfig
+// =========================================================================
+
+/// Default checkpoint interval in milliseconds.
+const fn default_checkpoint_interval_ms() -> u64 {
+    500
+}
+
+/// Default apply-count threshold before forcing a checkpoint.
+const fn default_checkpoint_applies_threshold() -> u64 {
+    5_000
+}
+
+/// Default dirty-page threshold before forcing a checkpoint.
+const fn default_checkpoint_dirty_pages_threshold() -> u64 {
+    10_000
+}
+
+/// Minimum checkpoint interval (50 ms floor keeps tight polling cheap).
+const MIN_CHECKPOINT_INTERVAL_MS: u64 = 50;
+
+/// Maximum checkpoint interval (60 s keeps recovery replay bounded).
+const MAX_CHECKPOINT_INTERVAL_MS: u64 = 60_000;
+
+/// State-DB checkpoint scheduling configuration.
+///
+/// Controls the background `StateCheckpointer` task that periodically drives
+/// `Database::sync_state`, amortizing the dual-slot `persist_state_to_disk`
+/// fsync cost across many in-memory commits. A checkpoint fires when any of
+/// the three thresholds is crossed:
+///
+/// 1. **Time** — more than `interval_ms` has elapsed since the last successful checkpoint.
+/// 2. **Apply count** — `applies_threshold` or more applies have landed in memory since the last
+///    successful checkpoint.
+/// 3. **Dirty pages** — the page cache is holding more than `dirty_pages_threshold` dirty pages
+///    (backpressure against unbounded cache growth under sustained write load).
+///
+/// Values are runtime-reconfigurable via `UpdateConfig`; the checkpointer
+/// re-reads from `RuntimeConfigHandle` on each wake-up so changes take
+/// effect on the next tick.
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_types::config::CheckpointConfig;
+/// let config = CheckpointConfig::builder()
+///     .interval_ms(250)
+///     .applies_threshold(2_500)
+///     .dirty_pages_threshold(5_000)
+///     .build()
+///     .expect("valid checkpoint config");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CheckpointConfig {
+    /// Time between checkpoint wake-ups in milliseconds.
+    ///
+    /// Must be in `[50, 60_000]`. Default: 500.
+    #[serde(default = "default_checkpoint_interval_ms")]
+    pub interval_ms: u64,
+    /// Number of applies accumulated in memory that will force a checkpoint.
+    ///
+    /// Must be >= 1. Default: 5_000.
+    #[serde(default = "default_checkpoint_applies_threshold")]
+    pub applies_threshold: u64,
+    /// Number of dirty pages in the page cache that will force a checkpoint.
+    ///
+    /// Must be >= 1. Default: 10_000 (~40MB at a 4KB page size).
+    #[serde(default = "default_checkpoint_dirty_pages_threshold")]
+    pub dirty_pages_threshold: u64,
+}
+
+impl Default for CheckpointConfig {
+    fn default() -> Self {
+        Self {
+            interval_ms: default_checkpoint_interval_ms(),
+            applies_threshold: default_checkpoint_applies_threshold(),
+            dirty_pages_threshold: default_checkpoint_dirty_pages_threshold(),
+        }
+    }
+}
+
+#[bon::bon]
+impl CheckpointConfig {
+    /// Creates a new checkpoint configuration with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if:
+    /// - `interval_ms` is outside `[50, 60_000]`
+    /// - `applies_threshold` is 0
+    /// - `dirty_pages_threshold` is 0
+    #[builder]
+    pub fn new(
+        #[builder(default = default_checkpoint_interval_ms())] interval_ms: u64,
+        #[builder(default = default_checkpoint_applies_threshold())] applies_threshold: u64,
+        #[builder(default = default_checkpoint_dirty_pages_threshold())] dirty_pages_threshold: u64,
+    ) -> Result<Self, ConfigError> {
+        let config = Self { interval_ms, applies_threshold, dirty_pages_threshold };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl CheckpointConfig {
+    /// Validates the configuration values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if any field is out of range.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.interval_ms < MIN_CHECKPOINT_INTERVAL_MS
+            || self.interval_ms > MAX_CHECKPOINT_INTERVAL_MS
+        {
+            return Err(ConfigError::Validation {
+                message: format!(
+                    "interval_ms must be in [{}, {}], got {}",
+                    MIN_CHECKPOINT_INTERVAL_MS, MAX_CHECKPOINT_INTERVAL_MS, self.interval_ms
+                ),
+            });
+        }
+        if self.applies_threshold == 0 {
+            return Err(ConfigError::Validation {
+                message: "applies_threshold must be >= 1".to_string(),
+            });
+        }
+        if self.dirty_pages_threshold == 0 {
+            return Err(ConfigError::Validation {
+                message: "dirty_pages_threshold must be >= 1".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+// =========================================================================
 // IntegrityConfig
 // =========================================================================
 
@@ -1023,6 +1158,108 @@ mod tiered_storage_tests {
         let mut config = BTreeCompactionConfig::default();
         config.interval_secs = 59;
         assert!(config.validate().is_err());
+    }
+
+    // CheckpointConfig tests
+
+    #[test]
+    fn checkpoint_config_default_valid() {
+        let config = CheckpointConfig::default();
+        assert!(config.validate().is_ok());
+        assert_eq!(config.interval_ms, 500);
+        assert_eq!(config.applies_threshold, 5_000);
+        assert_eq!(config.dirty_pages_threshold, 10_000);
+    }
+
+    #[test]
+    fn checkpoint_config_builder_defaults_valid() {
+        let config = CheckpointConfig::builder().build().unwrap();
+        assert_eq!(config.interval_ms, 500);
+        assert_eq!(config.applies_threshold, 5_000);
+        assert_eq!(config.dirty_pages_threshold, 10_000);
+    }
+
+    #[test]
+    fn checkpoint_config_interval_too_low_fails() {
+        let mut config = CheckpointConfig::default();
+        config.interval_ms = 49;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn checkpoint_config_interval_too_high_fails() {
+        let mut config = CheckpointConfig::default();
+        config.interval_ms = 60_001;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn checkpoint_config_interval_at_bounds_ok() {
+        let mut config = CheckpointConfig::default();
+        config.interval_ms = 50;
+        assert!(config.validate().is_ok());
+        config.interval_ms = 60_000;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn checkpoint_config_zero_applies_threshold_fails() {
+        let mut config = CheckpointConfig::default();
+        config.applies_threshold = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn checkpoint_config_zero_dirty_pages_threshold_fails() {
+        let mut config = CheckpointConfig::default();
+        config.dirty_pages_threshold = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn checkpoint_config_builder_custom_values() {
+        let config = CheckpointConfig::builder()
+            .interval_ms(250)
+            .applies_threshold(2_500)
+            .dirty_pages_threshold(5_000)
+            .build()
+            .unwrap();
+        assert_eq!(config.interval_ms, 250);
+        assert_eq!(config.applies_threshold, 2_500);
+        assert_eq!(config.dirty_pages_threshold, 5_000);
+    }
+
+    #[test]
+    fn checkpoint_config_serde_roundtrip() {
+        let config = CheckpointConfig::builder()
+            .interval_ms(1000)
+            .applies_threshold(1)
+            .dirty_pages_threshold(100)
+            .build()
+            .unwrap();
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: CheckpointConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, parsed);
+    }
+
+    #[test]
+    fn checkpoint_config_serde_defaults() {
+        let config: CheckpointConfig = serde_json::from_str("{}").unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.interval_ms, 500);
+        assert_eq!(config.applies_threshold, 5_000);
+        assert_eq!(config.dirty_pages_threshold, 10_000);
+    }
+
+    #[test]
+    fn checkpoint_config_json_schema() {
+        let schema = schemars::schema_for!(CheckpointConfig);
+        let json = serde_json::to_string(&schema).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let props = value.get("properties").and_then(|v| v.as_object()).unwrap();
+        assert!(props.contains_key("interval_ms"));
+        assert!(props.contains_key("applies_threshold"));
+        assert!(props.contains_key("dirty_pages_threshold"));
     }
 
     // IntegrityConfig tests

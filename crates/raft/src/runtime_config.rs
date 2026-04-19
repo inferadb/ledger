@@ -129,6 +129,13 @@ impl RuntimeConfigHandle {
             info!("Validation config updated — takes effect on next request");
         }
 
+        // State-DB checkpoint config changes take effect on the next
+        // checkpointer wake-up (the task re-reads from RuntimeConfigHandle
+        // on every tick).
+        if changed.contains(&"state_checkpoint".to_string()) {
+            info!("StateCheckpoint config updated — takes effect next tick");
+        }
+
         // Atomic swap — all subsequent load() calls see the new config.
         self.inner.store(Arc::new(new_config));
 

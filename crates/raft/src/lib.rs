@@ -134,6 +134,8 @@ pub mod saga_orchestrator;
 #[doc(hidden)]
 pub mod snapshot;
 #[doc(hidden)]
+pub mod state_checkpointer;
+#[doc(hidden)]
 pub mod state_root_verifier;
 #[doc(hidden)]
 pub mod token_maintenance;
@@ -211,6 +213,8 @@ pub use saga_orchestrator::{
     OnboardingPii, OrgPii, SagaOrchestrator, SagaOrchestratorHandle, SagaOutput, SagaPii,
     SagaSubmission,
 };
+#[doc(hidden)]
+pub use state_checkpointer::StateCheckpointer;
 #[doc(hidden)]
 pub use token_maintenance::TokenMaintenanceJob;
 #[doc(hidden)]

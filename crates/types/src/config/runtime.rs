@@ -8,7 +8,7 @@ use super::{
     jwt::JwtConfig,
     observability::{HotKeyConfig, MetricsCardinalityConfig},
     resilience::{RateLimitConfig, ValidationConfig},
-    storage::{BTreeCompactionConfig, IntegrityConfig},
+    storage::{BTreeCompactionConfig, CheckpointConfig, IntegrityConfig},
 };
 
 /// Runtime-reconfigurable configuration subset.
@@ -48,6 +48,9 @@ pub struct RuntimeConfig {
     /// Integrity scrubber parameters.
     #[serde(default)]
     pub integrity: Option<IntegrityConfig>,
+    /// State-DB checkpoint scheduling thresholds (time, applies, dirty pages).
+    #[serde(default)]
+    pub state_checkpoint: Option<CheckpointConfig>,
     /// Metric cardinality budgets. `None` disables cardinality tracking.
     #[serde(default)]
     pub metrics_cardinality: Option<MetricsCardinalityConfig>,
@@ -206,6 +209,9 @@ impl RuntimeConfig {
         if let Some(ref i) = self.integrity {
             i.validate()?;
         }
+        if let Some(ref cp) = self.state_checkpoint {
+            cp.validate()?;
+        }
         if let Some(ref mc) = self.metrics_cardinality {
             mc.validate()?;
         }
@@ -328,6 +334,41 @@ mod tests {
     fn runtime_config_validate_empty_is_ok() {
         let cfg = RuntimeConfig::default();
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn runtime_config_validate_propagates_state_checkpoint_error() {
+        let bad = CheckpointConfig { interval_ms: 10, ..CheckpointConfig::default() };
+        let cfg = RuntimeConfig { state_checkpoint: Some(bad), ..Default::default() };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn runtime_config_state_checkpoint_diff_detects_addition() {
+        let a = RuntimeConfig::default();
+        let b = RuntimeConfig {
+            state_checkpoint: Some(CheckpointConfig::default()),
+            ..Default::default()
+        };
+        let sections = a.diff(&b);
+        assert!(sections.contains(&"state_checkpoint".to_string()));
+    }
+
+    #[test]
+    fn runtime_config_state_checkpoint_detailed_diff_detects_field() {
+        let a = RuntimeConfig {
+            state_checkpoint: Some(CheckpointConfig::default()),
+            ..Default::default()
+        };
+        let b = RuntimeConfig {
+            state_checkpoint: Some(CheckpointConfig {
+                interval_ms: 1000,
+                ..CheckpointConfig::default()
+            }),
+            ..Default::default()
+        };
+        let changes = a.detailed_diff(&b);
+        assert!(changes.iter().any(|c| c.field == "state_checkpoint.interval_ms"));
     }
 
     // ── ConfigChange Display ────────────────────────────────────────

@@ -744,6 +744,123 @@ pub fn set_snapshot_disk_bytes(bytes: u64, region: &str) {
     });
 }
 
+// ─── State-DB Checkpointer ────────────────────────────────────
+
+/// State checkpoint events (counter). Labels: `region`, `trigger`, `status`.
+///
+/// `trigger` is one of `time` | `applies` | `dirty` | `snapshot` | `backup` |
+/// `shutdown` (Sprint 1B2 Task 2A only emits the first three + ok/error; the
+/// remaining triggers are reserved for Tasks 2B/2C).
+/// `status` is `ok` | `error`.
+pub const LEDGER_STATE_CHECKPOINTS_TOTAL: &str = "ledger_state_checkpoints_total";
+
+/// State checkpoint duration in seconds (histogram). Labels: `region`, `trigger`.
+pub const LEDGER_STATE_CHECKPOINT_DURATION_SECONDS: &str =
+    "ledger_state_checkpoint_duration_seconds";
+
+/// Unix timestamp of the most recent successful state checkpoint (gauge).
+/// Labels: `region`.
+pub const LEDGER_STATE_CHECKPOINT_LAST_TIMESTAMP_SECONDS: &str =
+    "ledger_state_checkpoint_last_timestamp_seconds";
+
+/// Applies accumulated in memory since the last successful checkpoint (gauge).
+/// Labels: `region`.
+pub const LEDGER_STATE_APPLIES_SINCE_CHECKPOINT: &str = "ledger_state_applies_since_checkpoint";
+
+/// Dirty page count observed at the most recent checkpointer wake-up (gauge).
+/// Labels: `region`.
+pub const LEDGER_STATE_DIRTY_PAGES: &str = "ledger_state_dirty_pages";
+
+/// Total in-memory pages resident in the state-DB page cache (gauge).
+/// Labels: `region`.
+pub const LEDGER_STATE_PAGE_CACHE_LEN: &str = "ledger_state_page_cache_len";
+
+/// Most recent snapshot id durably persisted to disk (gauge). Labels: `region`.
+pub const LEDGER_STATE_LAST_SYNCED_SNAPSHOT_ID: &str = "ledger_state_last_synced_snapshot_id";
+
+/// Records a state checkpoint attempt.
+///
+/// `trigger` is one of `"time"`, `"applies"`, `"dirty"` (emitted by the
+/// background checkpointer), plus `"snapshot"`, `"backup"`, `"shutdown"`
+/// (emitted by their owning code paths in Tasks 2B/2C).
+/// `status` is `"ok"` or `"error"`.
+#[inline]
+pub fn record_state_checkpoint(region: &str, trigger: &str, status: &str, duration_secs: f64) {
+    gated!(
+        LEDGER_STATE_CHECKPOINTS_TOTAL,
+        &[(fields::REGION, region), (fields::TRIGGER, trigger), (fields::STATUS, status)],
+        {
+            counter!(
+                LEDGER_STATE_CHECKPOINTS_TOTAL,
+                fields::REGION => region.to_string(),
+                fields::TRIGGER => trigger.to_string(),
+                fields::STATUS => status.to_string(),
+            )
+            .increment(1);
+        }
+    );
+    gated!(
+        LEDGER_STATE_CHECKPOINT_DURATION_SECONDS,
+        &[(fields::REGION, region), (fields::TRIGGER, trigger)],
+        {
+            histogram!(
+                LEDGER_STATE_CHECKPOINT_DURATION_SECONDS,
+                fields::REGION => region.to_string(),
+                fields::TRIGGER => trigger.to_string(),
+            )
+            .record(duration_secs);
+        }
+    );
+}
+
+/// Updates the applies-since-last-checkpoint gauge.
+#[inline]
+pub fn set_state_applies_since_checkpoint(region: &str, applies: u64) {
+    gated!(LEDGER_STATE_APPLIES_SINCE_CHECKPOINT, &[(fields::REGION, region)], {
+        gauge!(LEDGER_STATE_APPLIES_SINCE_CHECKPOINT, fields::REGION => region.to_string())
+            .set(applies as f64);
+    });
+}
+
+/// Updates the dirty-pages gauge sampled at checkpointer wake-ups.
+#[inline]
+pub fn set_state_dirty_pages(region: &str, dirty_pages: u64) {
+    gated!(LEDGER_STATE_DIRTY_PAGES, &[(fields::REGION, region)], {
+        gauge!(LEDGER_STATE_DIRTY_PAGES, fields::REGION => region.to_string())
+            .set(dirty_pages as f64);
+    });
+}
+
+/// Updates the total page-cache-size gauge.
+#[inline]
+pub fn set_state_page_cache_len(region: &str, cache_len: u64) {
+    gated!(LEDGER_STATE_PAGE_CACHE_LEN, &[(fields::REGION, region)], {
+        gauge!(LEDGER_STATE_PAGE_CACHE_LEN, fields::REGION => region.to_string())
+            .set(cache_len as f64);
+    });
+}
+
+/// Updates the last-synced-snapshot-id gauge.
+#[inline]
+pub fn set_state_last_synced_snapshot_id(region: &str, snapshot_id: u64) {
+    gated!(LEDGER_STATE_LAST_SYNCED_SNAPSHOT_ID, &[(fields::REGION, region)], {
+        gauge!(LEDGER_STATE_LAST_SYNCED_SNAPSHOT_ID, fields::REGION => region.to_string())
+            .set(snapshot_id as f64);
+    });
+}
+
+/// Updates the last-checkpoint-timestamp gauge (Unix seconds).
+#[inline]
+pub fn set_state_checkpoint_last_timestamp(region: &str, unix_secs: f64) {
+    gated!(LEDGER_STATE_CHECKPOINT_LAST_TIMESTAMP_SECONDS, &[(fields::REGION, region)], {
+        gauge!(
+            LEDGER_STATE_CHECKPOINT_LAST_TIMESTAMP_SECONDS,
+            fields::REGION => region.to_string(),
+        )
+        .set(unix_secs);
+    });
+}
+
 /// SLI-aligned histogram bucket boundaries (in seconds).
 ///
 /// These buckets are designed for latency SLI/SLO tracking:
@@ -1557,6 +1674,29 @@ mod tests {
     #[test]
     fn test_record_btree_compaction() {
         record_btree_compaction(10, 5);
+    }
+
+    // --- State-DB Checkpointer ---
+
+    #[test]
+    fn test_record_state_checkpoint_ok_paths() {
+        record_state_checkpoint("us-east-va", "time", "ok", 0.003);
+        record_state_checkpoint("us-east-va", "applies", "ok", 0.012);
+        record_state_checkpoint("us-east-va", "dirty", "ok", 0.025);
+    }
+
+    #[test]
+    fn test_record_state_checkpoint_error_path() {
+        record_state_checkpoint("global", "time", "error", 0.5);
+    }
+
+    #[test]
+    fn test_set_state_checkpoint_gauges() {
+        set_state_applies_since_checkpoint("global", 1234);
+        set_state_dirty_pages("global", 42);
+        set_state_page_cache_len("global", 999);
+        set_state_last_synced_snapshot_id("global", 5);
+        set_state_checkpoint_last_timestamp("global", 1_700_000_000.0);
     }
 
     #[test]

@@ -271,6 +271,11 @@ pub const EXHAUSTED: &str = "exhausted";
 /// Onboarding stage label (`"initiate"`, `"verify"`, `"register"`).
 pub const STAGE: &str = "stage";
 
+/// Trigger label identifying what caused an event to fire
+/// (e.g. `"time"`, `"applies"`, `"dirty"`, `"snapshot"`, `"backup"`,
+/// `"shutdown"` for the state-DB checkpointer).
+pub const TRIGGER: &str = "trigger";
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -360,6 +365,7 @@ mod tests {
             ("TIER", super::TIER),
             ("EXHAUSTED", super::EXHAUSTED),
             ("STAGE", super::STAGE),
+            ("TRIGGER", super::TRIGGER),
         ]
     }
 
