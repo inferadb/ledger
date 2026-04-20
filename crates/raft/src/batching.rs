@@ -18,6 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use inferadb_ledger_state::shard_routing::ShardIdx;
 use inferadb_ledger_types::config::BatchConfig;
 use parking_lot::Mutex;
 use tokio::{
@@ -280,6 +281,12 @@ where
     submit_fn: F,
     /// Region identifier for metric labels.
     region: String,
+    /// Shard identifier for metric labels, pre-stringified from the owning
+    /// `RegionGroup`'s
+    /// [`ShardIdx`](inferadb_ledger_state::shard_routing::ShardIdx). Phase A
+    /// always emits `"0"`; dashboards can start splitting per shard once
+    /// Task 5 stands up a BatchWriter per `(region, shard)`.
+    shard: String,
 }
 
 impl<F> BatchWriter<F>
@@ -292,12 +299,18 @@ where
         + 'static,
 {
     /// Creates a new batch writer.
-    pub fn new(config: BatchWriterConfig, submit_fn: F, region: impl Into<String>) -> Self {
+    pub fn new(
+        config: BatchWriterConfig,
+        submit_fn: F,
+        region: impl Into<String>,
+        shard_idx: ShardIdx,
+    ) -> Self {
         Self {
             state: Arc::new(Mutex::new(BatchState::new())),
             config,
             submit_fn,
             region: region.into(),
+            shard: shard_idx.0.to_string(),
         }
     }
 
@@ -344,7 +357,11 @@ where
                 let mut state = this.state.lock();
 
                 // Emit batch queue depth gauge for SLI monitoring.
-                metrics::set_batch_queue_depth(state.pending.len(), &this.region);
+                metrics::set_batch_queue_depth(
+                    state.pending.len(),
+                    &this.region,
+                    &this.shard,
+                );
 
                 if state.should_flush(&this.config) { Some(state.take_batch()) } else { None }
             };
@@ -386,7 +403,7 @@ where
         debug!(batch_size, "Flushing batch");
 
         // Record batch metrics.
-        metrics::record_batch_coalesce(batch_size);
+        metrics::record_batch_coalesce(batch_size, &self.region, &self.shard);
 
         // Destructure batch into requests and response senders (zero clones).
         let (requests, senders): (Vec<LedgerRequest>, Vec<_>) =
@@ -396,7 +413,7 @@ where
         let result = (self.submit_fn)(requests).await;
 
         let latency = start.elapsed().as_secs_f64();
-        metrics::record_batch_flush(latency);
+        metrics::record_batch_flush(latency, &self.region, &self.shard);
 
         // Distribute results to waiters.
         match result {
@@ -477,6 +494,7 @@ mod tests {
                 })
             },
             "global",
+            ShardIdx(0),
         );
 
         let handle = writer.handle();
@@ -534,6 +552,7 @@ mod tests {
                 })
             },
             "global",
+            ShardIdx(0),
         );
 
         let handle = writer.handle();
@@ -664,6 +683,7 @@ mod tests {
                 })
             },
             "global",
+            ShardIdx(0),
         );
 
         let handle = writer.handle();
@@ -852,7 +872,7 @@ mod tests {
                             >
                     };
 
-                    let writer = BatchWriter::new(config, submit_fn, "proptest");
+                    let writer = BatchWriter::new(config, submit_fn, "proptest", ShardIdx(0));
                     let handle = writer.handle();
                     let writer_task = tokio::spawn(writer.run());
 

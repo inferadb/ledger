@@ -339,16 +339,50 @@ pub fn record_grpc_request(service: &str, method: &str, status: &str, latency_se
 // =============================================================================
 
 /// Records a batch coalesce event.
+///
+/// `region` and `shard` locate the originating BatchWriter so dashboards
+/// can split coalesce volume across the `(region, shard)` matrix. Phase A
+/// always passes `shard = "0"`; Task 5 fans BatchWriters out across
+/// `0..shards_per_region` and the label starts carrying real information.
 #[inline]
-pub fn record_batch_coalesce(size: usize) {
-    counter!(BATCH_COALESCE_TOTAL).increment(1);
-    histogram!(BATCH_COALESCE_SIZE).record(size as f64);
+pub fn record_batch_coalesce(size: usize, region: &str, shard: &str) {
+    gated!(
+        BATCH_COALESCE_TOTAL,
+        &[(fields::REGION, region), (fields::SHARD, shard)],
+        {
+            counter!(
+                BATCH_COALESCE_TOTAL,
+                fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
+            )
+            .increment(1);
+            histogram!(
+                BATCH_COALESCE_SIZE,
+                fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
+            )
+            .record(size as f64);
+        }
+    );
 }
 
 /// Records batch flush latency.
+///
+/// See [`record_batch_coalesce`] for the role of `region` and `shard`.
 #[inline]
-pub fn record_batch_flush(latency_secs: f64) {
-    histogram!(BATCH_FLUSH_LATENCY).record(latency_secs);
+pub fn record_batch_flush(latency_secs: f64, region: &str, shard: &str) {
+    gated!(
+        BATCH_FLUSH_LATENCY,
+        &[(fields::REGION, region), (fields::SHARD, shard)],
+        {
+            histogram!(
+                BATCH_FLUSH_LATENCY,
+                fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
+            )
+            .record(latency_secs);
+        }
+    );
 }
 
 // =============================================================================
@@ -587,10 +621,19 @@ const LEADER_ELECTIONS_TOTAL: &str = "ledger_leader_elections_total";
 /// serving as a leading indicator of write saturation.
 /// The `region` label identifies which region's batch writer is being measured.
 #[inline]
-pub fn set_batch_queue_depth(depth: usize, region: &str) {
-    gated!(BATCH_QUEUE_DEPTH, &[(fields::REGION, region)], {
-        gauge!(BATCH_QUEUE_DEPTH, fields::REGION => region.to_string()).set(depth as f64);
-    });
+pub fn set_batch_queue_depth(depth: usize, region: &str, shard: &str) {
+    gated!(
+        BATCH_QUEUE_DEPTH,
+        &[(fields::REGION, region), (fields::SHARD, shard)],
+        {
+            gauge!(
+                BATCH_QUEUE_DEPTH,
+                fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
+            )
+            .set(depth as f64);
+        }
+    );
 }
 
 /// Sets the current rate limiter queue depth.
@@ -778,15 +821,31 @@ pub const LEDGER_STATE_RECOVERY_DURATION_SECONDS: &str = "ledger_state_recovery_
 /// background checkpointer), plus `"snapshot"`, `"backup"`, `"shutdown"`
 /// (emitted by their owning code paths in Tasks 2B/2C).
 /// `status` is `"ok"` or `"error"`.
+/// `shard` identifies the shard within `region`; Phase A always passes
+/// `"0"`. The label exists so dashboards track checkpoint cadence per
+/// `(region, shard)` once Task 5 fans checkpointers out across
+/// `0..shards_per_region`.
 #[inline]
-pub fn record_state_checkpoint(region: &str, trigger: &str, status: &str, duration_secs: f64) {
+pub fn record_state_checkpoint(
+    region: &str,
+    shard: &str,
+    trigger: &str,
+    status: &str,
+    duration_secs: f64,
+) {
     gated!(
         LEDGER_STATE_CHECKPOINTS_TOTAL,
-        &[(fields::REGION, region), (fields::TRIGGER, trigger), (fields::STATUS, status)],
+        &[
+            (fields::REGION, region),
+            (fields::SHARD, shard),
+            (fields::TRIGGER, trigger),
+            (fields::STATUS, status),
+        ],
         {
             counter!(
                 LEDGER_STATE_CHECKPOINTS_TOTAL,
                 fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
                 fields::TRIGGER => trigger.to_string(),
                 fields::STATUS => status.to_string(),
             )
@@ -795,11 +854,16 @@ pub fn record_state_checkpoint(region: &str, trigger: &str, status: &str, durati
     );
     gated!(
         LEDGER_STATE_CHECKPOINT_DURATION_SECONDS,
-        &[(fields::REGION, region), (fields::TRIGGER, trigger)],
+        &[
+            (fields::REGION, region),
+            (fields::SHARD, shard),
+            (fields::TRIGGER, trigger),
+        ],
         {
             histogram!(
                 LEDGER_STATE_CHECKPOINT_DURATION_SECONDS,
                 fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
                 fields::TRIGGER => trigger.to_string(),
             )
             .record(duration_secs);
@@ -808,51 +872,98 @@ pub fn record_state_checkpoint(region: &str, trigger: &str, status: &str, durati
 }
 
 /// Updates the applies-since-last-checkpoint gauge.
+///
+/// See [`record_state_checkpoint`] for the role of `shard`.
 #[inline]
-pub fn set_state_applies_since_checkpoint(region: &str, applies: u64) {
-    gated!(LEDGER_STATE_APPLIES_SINCE_CHECKPOINT, &[(fields::REGION, region)], {
-        gauge!(LEDGER_STATE_APPLIES_SINCE_CHECKPOINT, fields::REGION => region.to_string())
+pub fn set_state_applies_since_checkpoint(region: &str, shard: &str, applies: u64) {
+    gated!(
+        LEDGER_STATE_APPLIES_SINCE_CHECKPOINT,
+        &[(fields::REGION, region), (fields::SHARD, shard)],
+        {
+            gauge!(
+                LEDGER_STATE_APPLIES_SINCE_CHECKPOINT,
+                fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
+            )
             .set(applies as f64);
-    });
+        }
+    );
 }
 
 /// Updates the dirty-pages gauge sampled at checkpointer wake-ups.
+///
+/// See [`record_state_checkpoint`] for the role of `shard`.
 #[inline]
-pub fn set_state_dirty_pages(region: &str, dirty_pages: u64) {
-    gated!(LEDGER_STATE_DIRTY_PAGES, &[(fields::REGION, region)], {
-        gauge!(LEDGER_STATE_DIRTY_PAGES, fields::REGION => region.to_string())
+pub fn set_state_dirty_pages(region: &str, shard: &str, dirty_pages: u64) {
+    gated!(
+        LEDGER_STATE_DIRTY_PAGES,
+        &[(fields::REGION, region), (fields::SHARD, shard)],
+        {
+            gauge!(
+                LEDGER_STATE_DIRTY_PAGES,
+                fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
+            )
             .set(dirty_pages as f64);
-    });
+        }
+    );
 }
 
 /// Updates the total page-cache-size gauge.
+///
+/// See [`record_state_checkpoint`] for the role of `shard`.
 #[inline]
-pub fn set_state_page_cache_len(region: &str, cache_len: u64) {
-    gated!(LEDGER_STATE_PAGE_CACHE_LEN, &[(fields::REGION, region)], {
-        gauge!(LEDGER_STATE_PAGE_CACHE_LEN, fields::REGION => region.to_string())
+pub fn set_state_page_cache_len(region: &str, shard: &str, cache_len: u64) {
+    gated!(
+        LEDGER_STATE_PAGE_CACHE_LEN,
+        &[(fields::REGION, region), (fields::SHARD, shard)],
+        {
+            gauge!(
+                LEDGER_STATE_PAGE_CACHE_LEN,
+                fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
+            )
             .set(cache_len as f64);
-    });
+        }
+    );
 }
 
 /// Updates the last-synced-snapshot-id gauge.
+///
+/// See [`record_state_checkpoint`] for the role of `shard`.
 #[inline]
-pub fn set_state_last_synced_snapshot_id(region: &str, snapshot_id: u64) {
-    gated!(LEDGER_STATE_LAST_SYNCED_SNAPSHOT_ID, &[(fields::REGION, region)], {
-        gauge!(LEDGER_STATE_LAST_SYNCED_SNAPSHOT_ID, fields::REGION => region.to_string())
+pub fn set_state_last_synced_snapshot_id(region: &str, shard: &str, snapshot_id: u64) {
+    gated!(
+        LEDGER_STATE_LAST_SYNCED_SNAPSHOT_ID,
+        &[(fields::REGION, region), (fields::SHARD, shard)],
+        {
+            gauge!(
+                LEDGER_STATE_LAST_SYNCED_SNAPSHOT_ID,
+                fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
+            )
             .set(snapshot_id as f64);
-    });
+        }
+    );
 }
 
 /// Updates the last-checkpoint-timestamp gauge (Unix seconds).
+///
+/// See [`record_state_checkpoint`] for the role of `shard`.
 #[inline]
-pub fn set_state_checkpoint_last_timestamp(region: &str, unix_secs: f64) {
-    gated!(LEDGER_STATE_CHECKPOINT_LAST_TIMESTAMP_SECONDS, &[(fields::REGION, region)], {
-        gauge!(
-            LEDGER_STATE_CHECKPOINT_LAST_TIMESTAMP_SECONDS,
-            fields::REGION => region.to_string(),
-        )
-        .set(unix_secs);
-    });
+pub fn set_state_checkpoint_last_timestamp(region: &str, shard: &str, unix_secs: f64) {
+    gated!(
+        LEDGER_STATE_CHECKPOINT_LAST_TIMESTAMP_SECONDS,
+        &[(fields::REGION, region), (fields::SHARD, shard)],
+        {
+            gauge!(
+                LEDGER_STATE_CHECKPOINT_LAST_TIMESTAMP_SECONDS,
+                fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
+            )
+            .set(unix_secs);
+        }
+    );
 }
 
 /// Records the number of WAL entries replayed by `RaftLogStore::replay_crash_gap`.
@@ -1720,12 +1831,12 @@ mod tests {
 
     #[test]
     fn test_record_batch_coalesce() {
-        record_batch_coalesce(5);
+        record_batch_coalesce(5, "us-east-va", "0");
     }
 
     #[test]
     fn test_record_batch_flush() {
-        record_batch_flush(0.002);
+        record_batch_flush(0.002, "us-east-va", "0");
     }
 
     // --- Recovery ---
@@ -1795,23 +1906,23 @@ mod tests {
 
     #[test]
     fn test_record_state_checkpoint_ok_paths() {
-        record_state_checkpoint("us-east-va", "time", "ok", 0.003);
-        record_state_checkpoint("us-east-va", "applies", "ok", 0.012);
-        record_state_checkpoint("us-east-va", "dirty", "ok", 0.025);
+        record_state_checkpoint("us-east-va", "0", "time", "ok", 0.003);
+        record_state_checkpoint("us-east-va", "0", "applies", "ok", 0.012);
+        record_state_checkpoint("us-east-va", "0", "dirty", "ok", 0.025);
     }
 
     #[test]
     fn test_record_state_checkpoint_error_path() {
-        record_state_checkpoint("global", "time", "error", 0.5);
+        record_state_checkpoint("global", "0", "time", "error", 0.5);
     }
 
     #[test]
     fn test_set_state_checkpoint_gauges() {
-        set_state_applies_since_checkpoint("global", 1234);
-        set_state_dirty_pages("global", 42);
-        set_state_page_cache_len("global", 999);
-        set_state_last_synced_snapshot_id("global", 5);
-        set_state_checkpoint_last_timestamp("global", 1_700_000_000.0);
+        set_state_applies_since_checkpoint("global", "0", 1234);
+        set_state_dirty_pages("global", "0", 42);
+        set_state_page_cache_len("global", "0", 999);
+        set_state_last_synced_snapshot_id("global", "0", 5);
+        set_state_checkpoint_last_timestamp("global", "0", 1_700_000_000.0);
     }
 
     // --- Handler-phase event flusher ---
@@ -1882,7 +1993,7 @@ mod tests {
 
     #[test]
     fn test_set_batch_queue_depth() {
-        set_batch_queue_depth(10, "us-east-va");
+        set_batch_queue_depth(10, "us-east-va", "0");
     }
 
     #[test]

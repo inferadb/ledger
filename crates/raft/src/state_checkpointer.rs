@@ -49,6 +49,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use inferadb_ledger_state::shard_routing::ShardIdx;
 use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::config::CheckpointConfig;
 use parking_lot::Mutex;
@@ -120,6 +121,11 @@ pub struct StateCheckpointer {
     cancellation_token: CancellationToken,
     /// Region label used on emitted Prometheus metrics.
     region: String,
+    /// Shard-index label used on emitted Prometheus metrics, pre-stringified
+    /// from the owning `RegionGroup`'s [`ShardIdx`]. Phase A always emits
+    /// `"0"` — the label exists so dashboards can split per-shard once Task
+    /// 5 lights up `0..shards_per_region`.
+    shard: String,
     /// Applied index observed at the most recent successful checkpoint.
     /// Used to compute the apply-count trigger.
     applies_at_last_checkpoint: AtomicU64,
@@ -139,8 +145,12 @@ impl StateCheckpointer {
     /// omits events.db from its sync set and from the `max()` dirty-page
     /// trigger.
     ///
-    /// `region` is used as the label for emitted Prometheus metrics
-    /// (`ledger_state_*{region=...}`).
+    /// `region` and `shard` are used as the labels for emitted Prometheus
+    /// metrics (`ledger_state_*{region=..., shard=...}`). Phase A always
+    /// passes `ShardIdx(0)`; once Task 5 fans checkpointers out across
+    /// `0..shards_per_region`, `{region, shard}` pairs become unique per
+    /// checkpointer and dashboards can split their cadence per shard without
+    /// any further metric-schema changes.
     #[must_use]
     pub fn from_config(
         state_db: Arc<Database<FileBackend>>,
@@ -151,6 +161,7 @@ impl StateCheckpointer {
         applied_rx: watch::Receiver<u64>,
         cancellation_token: CancellationToken,
         region: impl Into<String>,
+        shard_idx: ShardIdx,
     ) -> Self {
         let initial_applied = *applied_rx.borrow();
         Self {
@@ -162,6 +173,7 @@ impl StateCheckpointer {
             applied_rx,
             cancellation_token,
             region: region.into(),
+            shard: shard_idx.0.to_string(),
             applies_at_last_checkpoint: AtomicU64::new(initial_applied),
             last_checkpoint_at: Mutex::new(Instant::now()),
         }
@@ -212,9 +224,9 @@ impl StateCheckpointer {
     fn emit_live_gauges(&self, latest_applied: u64, dirty_pages: u64, cache_len: u64) {
         let applies_since_last =
             latest_applied.saturating_sub(self.applies_at_last_checkpoint.load(Ordering::Relaxed));
-        metrics::set_state_applies_since_checkpoint(&self.region, applies_since_last);
-        metrics::set_state_dirty_pages(&self.region, dirty_pages);
-        metrics::set_state_page_cache_len(&self.region, cache_len);
+        metrics::set_state_applies_since_checkpoint(&self.region, &self.shard, applies_since_last);
+        metrics::set_state_dirty_pages(&self.region, &self.shard, dirty_pages);
+        metrics::set_state_page_cache_len(&self.region, &self.shard, cache_len);
     }
 
     /// Returns the peak `cache_dirty_page_count()` across every configured
@@ -340,13 +352,24 @@ impl StateCheckpointer {
             self.applies_at_last_checkpoint.store(latest_applied_at_start, Ordering::Relaxed);
             *self.last_checkpoint_at.lock() = Instant::now();
 
-            metrics::record_state_checkpoint(&self.region, trigger, STATUS_OK, duration_secs);
+            metrics::record_state_checkpoint(
+                &self.region,
+                &self.shard,
+                trigger,
+                STATUS_OK,
+                duration_secs,
+            );
             metrics::set_state_last_synced_snapshot_id(
                 &self.region,
+                &self.shard,
                 self.state_db.last_synced_snapshot_id(),
             );
             if let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) {
-                metrics::set_state_checkpoint_last_timestamp(&self.region, now.as_secs_f64());
+                metrics::set_state_checkpoint_last_timestamp(
+                    &self.region,
+                    &self.shard,
+                    now.as_secs_f64(),
+                );
             }
 
             let dirty_pages = self.max_dirty_pages();
@@ -360,7 +383,13 @@ impl StateCheckpointer {
                 "state checkpoint complete (state.db + raft.db + blocks.db + events.db if enabled)"
             );
         } else {
-            metrics::record_state_checkpoint(&self.region, trigger, STATUS_ERROR, duration_secs);
+            metrics::record_state_checkpoint(
+                &self.region,
+                &self.shard,
+                trigger,
+                STATUS_ERROR,
+                duration_secs,
+            );
         }
     }
 
@@ -523,6 +552,7 @@ mod tests {
             rx,
             token.clone(),
             "test-region",
+            ShardIdx(0),
         );
         (cp, runtime_config, token, tx)
     }
@@ -858,6 +888,7 @@ mod tests {
             rx,
             token,
             "test-region",
+            ShardIdx(0),
         );
 
         let cfg = cp.current_config();

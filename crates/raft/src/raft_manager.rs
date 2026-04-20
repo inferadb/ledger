@@ -64,6 +64,7 @@ use inferadb_ledger_consensus::WalBackend as _;
 use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_state::{
     BlockArchive, StateLayer,
+    shard_routing::ShardIdx,
     system::{MIN_NODES_PER_PROTECTED_REGION, SystemOrganizationService},
 };
 use inferadb_ledger_store::{Database, FileBackend};
@@ -315,6 +316,13 @@ impl Drop for RegionBackgroundJobs {
 pub struct RegionGroup {
     /// Region identifier.
     region: Region,
+    /// Shard index within the region. Each (region, shard) pair is its
+    /// own Raft group. Phase A has a single shard at
+    /// [`ShardIdx(0)`](inferadb_ledger_state::shard_routing::ShardIdx);
+    /// the field exists so metrics and diagnostics can label output by
+    /// shard without a separate lookup once Task 5 enables multi-shard
+    /// runtime routing.
+    shard_idx: ShardIdx,
     /// Consensus handle for background jobs and services.
     handle: Arc<ConsensusHandle>,
     /// Shared state layer for this region.
@@ -380,6 +388,17 @@ impl RegionGroup {
     /// Returns the region ID.
     pub fn region(&self) -> Region {
         self.region
+    }
+
+    /// Returns the shard index within the region.
+    ///
+    /// Phase A always returns
+    /// [`ShardIdx(0)`](inferadb_ledger_state::shard_routing::ShardIdx); the
+    /// accessor exists so metrics, tracing, and diagnostics can label output
+    /// with a stable `shard` dimension before Task 5 enables runtime routing
+    /// across `0..shards_per_region`.
+    pub fn shard_idx(&self) -> ShardIdx {
+        self.shard_idx
     }
 
     /// Returns the consensus handle.
@@ -553,8 +572,14 @@ pub struct RaftManager {
     config: RaftManagerConfig,
     /// Per-region database storage manager.
     storage_manager: RegionStorageManager,
-    /// Active region groups indexed by region ID.
-    regions: RwLock<HashMap<Region, Arc<RegionGroup>>>,
+    /// Active shard groups indexed by `(region, shard_idx)`.
+    ///
+    /// Each region hosts `self.config.shards_per_region` shards — one
+    /// `RegionGroup` per shard. Services that currently address a region
+    /// only (Task 5 will migrate them to explicit shard selection)
+    /// resolve via `self.get_region_group(region)`, which routes to
+    /// `ShardIdx(0)` as a compatibility shim until routing lands.
+    regions: RwLock<HashMap<(Region, ShardIdx), Arc<RegionGroup>>>,
     /// Shared peer address map (node ID → network address).
     ///
     /// Populated from `initial_members` during region startup and updated
@@ -708,7 +733,34 @@ impl RaftManager {
     /// Returns [`RaftManagerError::RegionNotFound`] if no region with the given ID
     /// is currently active.
     pub fn get_region_group(&self, region: Region) -> Result<Arc<RegionGroup>> {
-        self.regions.read().get(&region).cloned().ok_or(RaftManagerError::RegionNotFound { region })
+        // Task 4 shim: single-shard-per-region runtime (Task 4.2 will loop
+        // start_region over N shards; Task 5 will plumb ShardIdx through
+        // services). Until then, legacy callers continue to address shard 0.
+        self.regions
+            .read()
+            .get(&(region, ShardIdx(0)))
+            .cloned()
+            .ok_or(RaftManagerError::RegionNotFound { region })
+    }
+
+    /// Looks up the `RegionGroup` owning `(region, shard_idx)`.
+    ///
+    /// Phase A routing: services resolve `ShardIdx` via
+    /// [`inferadb_ledger_state::shard_routing::ShardRouter`] (see
+    /// [`RaftManager::shard_router`](Self::shard_router)) and call this to
+    /// reach the owning shard's Raft group. Task 5 migrates service call
+    /// sites from [`get_region_group`](Self::get_region_group) to this
+    /// method; until then the two are equivalent (single-shard runtime).
+    pub fn get_shard_group(
+        &self,
+        region: Region,
+        shard: ShardIdx,
+    ) -> Result<Arc<RegionGroup>> {
+        self.regions
+            .read()
+            .get(&(region, shard))
+            .cloned()
+            .ok_or(RaftManagerError::RegionNotFound { region })
     }
 
     /// Returns the system region (`_system`).
@@ -728,8 +780,17 @@ impl RaftManager {
             .map(|group| SystemStateReader { state_layer: group.state().clone() })
     }
 
-    /// Lists all active region IDs.
+    /// Lists all active region IDs. Deduplicates across shards.
     pub fn list_regions(&self) -> Vec<Region> {
+        let mut seen: std::collections::BTreeSet<Region> = std::collections::BTreeSet::new();
+        for (r, _s) in self.regions.read().keys() {
+            seen.insert(*r);
+        }
+        seen.into_iter().collect()
+    }
+
+    /// Lists all active (region, shard) pairs.
+    pub fn list_shards(&self) -> Vec<(Region, ShardIdx)> {
         self.regions.read().keys().copied().collect()
     }
 
@@ -745,9 +806,9 @@ impl RaftManager {
         let _ = self.dr_event_tx.send(());
     }
 
-    /// Checks if a region is active.
+    /// Checks if a region is active (has at least shard 0 running).
     pub fn has_region(&self, region: Region) -> bool {
-        self.regions.read().contains_key(&region)
+        self.regions.read().contains_key(&(region, ShardIdx(0)))
     }
 
     /// Registers an externally created region group.
@@ -789,7 +850,7 @@ impl RaftManager {
 
         let region_group = Arc::new(RegionGroup {
             region,
-
+            shard_idx: ShardIdx(0),
             handle,
             state: state.clone(),
             raft_db,
@@ -811,7 +872,7 @@ impl RaftManager {
 
         {
             let mut regions = self.regions.write();
-            regions.insert(region, region_group.clone());
+            regions.insert((region, ShardIdx(0)), region_group.clone());
         }
 
         Ok(region_group)
@@ -834,7 +895,7 @@ impl RaftManager {
         // Get local region group. Data regions are created through GLOBAL Raft
         // consensus (CreateDataRegion), so we don't lazily create here — the
         // region must already exist from a prior consensus proposal.
-        let group = self.regions.read().get(&region).cloned()?;
+        let group = self.regions.read().get(&(region, ShardIdx(0))).cloned()?;
         group.touch();
 
         // Auto-wake hibernated regions on first request
@@ -1265,7 +1326,8 @@ impl RaftManager {
                     >
             };
 
-            let writer = BatchWriter::new(batch_config, submit_fn, region.to_string());
+            let writer =
+                BatchWriter::new(batch_config, submit_fn, region.to_string(), ShardIdx(0));
             let bw_handle = writer.handle();
             tokio::spawn(writer.run());
             Some(bw_handle)
@@ -1322,7 +1384,7 @@ impl RaftManager {
         let blocks_db = Arc::clone(block_archive.db());
         let region_group = Arc::new(RegionGroup {
             region,
-
+            shard_idx: ShardIdx(0),
             handle,
             state,
             raft_db,
@@ -1342,10 +1404,11 @@ impl RaftManager {
             region_creation_rx: parking_lot::Mutex::new(region_creation_rx),
         });
 
-        // Register region
+        // Register region (Task 4 shim: single shard at ShardIdx(0); Task
+        // 4.2 will loop this for 0..shards_per_region).
         {
             let mut regions = self.regions.write();
-            regions.insert(region, region_group.clone());
+            regions.insert((region, ShardIdx(0)), region_group.clone());
         }
 
         info!(region = region.as_str(), "Region group started successfully");
@@ -1439,6 +1502,7 @@ impl RaftManager {
             applied_index_rx,
             parent_token.child_token(),
             region.as_str().to_string(),
+            ShardIdx(0),
         );
         let state_checkpointer_handle = state_checkpointer.start();
         info!(region = region.as_str(), "Started state checkpointer");
@@ -1570,7 +1634,9 @@ impl RaftManager {
     pub async fn stop_region(&self, region: Region) -> Result<()> {
         let region_group = {
             let mut regions = self.regions.write();
-            regions.remove(&region).ok_or(RaftManagerError::RegionNotFound { region })?
+            regions
+                .remove(&(region, ShardIdx(0)))
+                .ok_or(RaftManagerError::RegionNotFound { region })?
         };
 
         // Abort background jobs first
@@ -1655,7 +1721,7 @@ impl RaftManager {
             // Snapshot the region group under the read lock, drop the lock
             // before awaiting so the shutdown sweep never contends with
             // other readers for the regions map.
-            let group = self.regions.read().get(&region).cloned();
+            let group = self.regions.read().get(&(region, ShardIdx(0))).cloned();
             let Some(group) = group else {
                 debug!(
                     region = region.as_str(),
@@ -1798,7 +1864,7 @@ impl RaftManager {
             // Clone the region Arc so we can drop the lock before awaiting
             let region_group = {
                 let regions = self.regions.read();
-                regions.get(region).cloned()
+                regions.get(&(*region, ShardIdx(0))).cloned()
             };
 
             if let Some(region_group) = region_group
@@ -1897,10 +1963,10 @@ impl RaftManager {
     ///
     /// The system region (`GLOBAL`) is never hibernated.
     pub fn hibernate_idle_regions(&self, idle_timeout_secs: u64) {
-        let regions: Vec<(Region, Arc<RegionGroup>)> =
-            self.regions.read().iter().map(|(r, g)| (*r, g.clone())).collect();
+        let regions: Vec<((Region, ShardIdx), Arc<RegionGroup>)> =
+            self.regions.read().iter().map(|(k, g)| (*k, g.clone())).collect();
 
-        for (region, group) in regions {
+        for ((region, _shard), group) in regions {
             if region == Region::GLOBAL {
                 continue;
             }

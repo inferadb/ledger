@@ -46,6 +46,14 @@ pub const RAFT_TERM: &str = "raft_term";
 /// Data region identifier.
 pub const REGION: &str = "region";
 
+/// Shard index within a region (0-based).
+///
+/// Phase A always emits `"0"` — the workspace still runs a single Raft
+/// group per region. The label exists so Prometheus dashboards, log
+/// queries, and profiling captures can split per-shard once Task 5 lights
+/// up `0..shards_per_region`.
+pub const SHARD: &str = "shard";
+
 // ── Outcome ──────────────────────────────────────────────────────
 
 /// Request outcome (success, error, cached, rate_limited, precondition_failed).
