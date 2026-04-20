@@ -15,9 +15,10 @@ use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use inferadb_ledger_types::trace_context::TraceContext;
+
 use crate::{
     consensus_handle::ConsensusHandle, metrics::record_btree_compaction,
-    trace_context::TraceContext,
 };
 
 /// Default interval between B+ tree compaction cycles (1 hour).

@@ -35,7 +35,7 @@
 
 use std::time::Duration;
 
-use inferadb_ledger_raft::trace_context::{TraceContext, inject_into_metadata};
+use inferadb_ledger_types::trace_context::{TraceContext, inject_into_metadata};
 use opentelemetry::trace::TraceContextExt;
 use tonic::service::Interceptor;
 use tracing_opentelemetry::OpenTelemetrySpanExt;

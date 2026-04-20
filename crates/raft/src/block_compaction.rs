@@ -21,9 +21,11 @@ use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use inferadb_ledger_types::trace_context::TraceContext;
+
 use crate::{
     consensus_handle::ConsensusHandle, log_storage::AppliedStateAccessor,
-    trace_context::TraceContext, types::BlockRetentionMode,
+    types::BlockRetentionMode,
 };
 
 /// Default interval between compaction cycles.

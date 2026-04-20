@@ -141,18 +141,21 @@ hyper = "1"
 hyper-util = { version = "0.1", features = ["tokio"] }
 async-stream = "0.3"
 
-# Internal crates (version + path for crates.io publishing)
+# Internal crates
+# - `version + path` — crate is published to crates.io (consumed by external SDK users).
+# - `path` only     — internal-only crate, not published.
 inferadb-ledger-types = { version = "0.1.0", path = "crates/types" }
-inferadb-ledger-store = { version = "0.1.0", path = "crates/store" }
-inferadb-ledger-state = { version = "0.1.0", path = "crates/state" }
 inferadb-ledger-proto = { version = "0.1.0", path = "crates/proto" }
-inferadb-ledger-raft = { version = "0.1.0", path = "crates/raft" }
-inferadb-ledger-services = { version = "0.1.0", path = "crates/services" }
-inferadb-ledger-server = { path = "crates/server" }
 inferadb-ledger-sdk = { version = "0.1.0", path = "crates/sdk" }
+inferadb-ledger-store = { path = "crates/store" }
+inferadb-ledger-state = { path = "crates/state" }
+inferadb-ledger-raft = { path = "crates/raft" }
+inferadb-ledger-consensus = { path = "crates/consensus" }
+inferadb-ledger-services = { path = "crates/services" }
+inferadb-ledger-server = { path = "crates/server" }
 inferadb-ledger-test-utils = { path = "crates/test-utils" }
 inferadb-ledger-profile = { path = "crates/profile" }
-inferadb-ledger-fs-sync = { version = "0.1.0", path = "crates/fs-sync" }
+inferadb-ledger-fs-sync = { path = "crates/fs-sync" }
 
 # Hashing (for inferadb-ledger-store)
 xxhash-rust = { version = "0.8", features = ["xxh32", "xxh3"] }

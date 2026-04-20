@@ -48,6 +48,11 @@ zeroize.workspace = true
 # Utilities
 chrono.workspace = true
 humantime-serde.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+
+# gRPC metadata (for `trace_context` W3C Trace Context propagation)
+tonic.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

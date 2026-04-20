@@ -92,17 +92,18 @@ fn build_regional_proposal_metadata(traceparent: Option<&str>) -> tonic::metadat
     if let Some(tp) = traceparent
         && let Ok(value) = tp.parse()
     {
-        metadata.insert(crate::trace_context::TRACEPARENT_HEADER, value);
+        metadata.insert(inferadb_ledger_types::trace_context::TRACEPARENT_HEADER, value);
     }
     metadata
 }
+
+use inferadb_ledger_types::trace_context::TraceContext;
 
 use crate::{
     consensus_handle::ConsensusHandle,
     error::{SagaError, SerializationSnafu, StateReadSnafu},
     event_writer::{EventHandle, HandlerPhaseEmitter},
     raft_manager::RaftManager,
-    trace_context::TraceContext,
     types::{LedgerNodeId, LedgerRequest, RaftPayload, SystemRequest},
 };
 
@@ -3358,7 +3359,7 @@ mod tests {
         let tp = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
         let metadata = build_regional_proposal_metadata(Some(tp));
         let got =
-            metadata.get(crate::trace_context::TRACEPARENT_HEADER).and_then(|v| v.to_str().ok());
+            metadata.get(inferadb_ledger_types::trace_context::TRACEPARENT_HEADER).and_then(|v| v.to_str().ok());
         assert_eq!(got, Some(tp));
     }
 
@@ -3367,7 +3368,7 @@ mod tests {
     #[test]
     fn build_regional_proposal_metadata_is_empty_without_traceparent() {
         let metadata = build_regional_proposal_metadata(None);
-        assert!(metadata.get(crate::trace_context::TRACEPARENT_HEADER).is_none());
+        assert!(metadata.get(inferadb_ledger_types::trace_context::TRACEPARENT_HEADER).is_none());
     }
 
     /// A malformed traceparent value must not abort the RPC: the helper drops
@@ -3376,7 +3377,7 @@ mod tests {
     fn build_regional_proposal_metadata_drops_malformed_value() {
         // Embedded newline is not a valid header value — `.parse()` rejects it.
         let metadata = build_regional_proposal_metadata(Some("bad\nvalue"));
-        assert!(metadata.get(crate::trace_context::TRACEPARENT_HEADER).is_none());
+        assert!(metadata.get(inferadb_ledger_types::trace_context::TRACEPARENT_HEADER).is_none());
     }
 
     /// `SagaSubmission.traceparent` must be stamped onto the persisted saga
@@ -3429,7 +3430,7 @@ mod tests {
         // from the persisted saga's trace context.
         let metadata = build_regional_proposal_metadata(saga.traceparent());
         let injected = metadata
-            .get(crate::trace_context::TRACEPARENT_HEADER)
+            .get(inferadb_ledger_types::trace_context::TRACEPARENT_HEADER)
             .and_then(|v| v.to_str().ok())
             .expect("traceparent should be present");
         // The downstream span's parent trace_id matches the saga's origin.
@@ -3482,7 +3483,7 @@ mod tests {
         // RPC carries the originating trace header end-to-end.
         let metadata = build_regional_proposal_metadata(persisted.traceparent());
         let injected = metadata
-            .get(crate::trace_context::TRACEPARENT_HEADER)
+            .get(inferadb_ledger_types::trace_context::TRACEPARENT_HEADER)
             .and_then(|v| v.to_str().ok())
             .expect("traceparent should survive the full chain");
         assert_eq!(injected, tp);

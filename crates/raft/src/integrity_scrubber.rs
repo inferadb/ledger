@@ -22,9 +22,10 @@ use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use inferadb_ledger_types::trace_context::TraceContext;
+
 use crate::{
     metrics::{record_integrity_errors, record_integrity_pages_checked},
-    trace_context::TraceContext,
 };
 
 /// Default scrub interval (1 hour).

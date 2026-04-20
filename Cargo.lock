@@ -1905,7 +1905,6 @@ dependencies = [
  "hickory-resolver",
  "hyper-util",
  "inferadb-ledger-proto",
- "inferadb-ledger-raft",
  "inferadb-ledger-types",
  "metrics",
  "opentelemetry",
@@ -2109,6 +2108,9 @@ dependencies = [
  "snafu",
  "subtle",
  "tempfile",
+ "tonic",
+ "tracing",
+ "uuid",
  "zeroize",
 ]
 

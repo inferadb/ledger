@@ -37,6 +37,8 @@ pub mod onboarding;
 pub mod snowflake;
 /// JWT token types for user sessions and vault access.
 pub mod token;
+/// W3C Trace Context propagation via gRPC metadata headers.
+pub mod trace_context;
 /// Core domain types: identifiers, blocks, transactions, operations.
 pub mod types;
 /// Input validation for gRPC request fields.

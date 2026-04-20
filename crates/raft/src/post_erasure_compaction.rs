@@ -24,9 +24,11 @@ use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use inferadb_ledger_types::trace_context::TraceContext;
+
 use crate::{
     consensus_handle::ConsensusHandle, metrics::record_post_erasure_compaction_triggered,
-    raft_manager::RaftManager, trace_context::TraceContext,
+    raft_manager::RaftManager,
 };
 
 /// Background job that enforces maximum Raft log retention by triggering

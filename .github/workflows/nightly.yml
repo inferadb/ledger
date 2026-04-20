@@ -560,7 +560,7 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
-          for crate in inferadb-ledger-types inferadb-ledger-store inferadb-ledger-state inferadb-ledger-proto inferadb-ledger-raft inferadb-ledger-sdk; do
+          for crate in inferadb-ledger-types inferadb-ledger-proto inferadb-ledger-sdk; do
             echo "Publishing ${crate}..."
             cargo publish -p "${crate}" --token "$CARGO_REGISTRY_TOKEN" --allow-dirty
             echo "Waiting for crates.io to index..."

@@ -32,7 +32,6 @@
 
 pub mod cardinality;
 pub mod metrics;
-pub mod trace_context;
 
 // ---------------------------------------------------------------------------
 // Server-internal modules — implementation details hidden from `cargo doc`.

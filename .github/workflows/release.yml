@@ -482,7 +482,7 @@ jobs:
             return 1
           }
 
-          CRATES=(inferadb-ledger-types inferadb-ledger-store inferadb-ledger-state inferadb-ledger-proto inferadb-ledger-raft inferadb-ledger-sdk)
+          CRATES=(inferadb-ledger-types inferadb-ledger-proto inferadb-ledger-sdk)
           LAST_INDEX=$(( ${#CRATES[@]} - 1 ))
 
           for i in "${!CRATES[@]}"; do

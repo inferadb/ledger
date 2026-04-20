@@ -13,9 +13,10 @@ use inferadb_ledger_types::{UserStatus, config::UserRetentionConfig};
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
+use inferadb_ledger_types::trace_context::TraceContext;
+
 use crate::{
     consensus_handle::ConsensusHandle,
-    trace_context::TraceContext,
     types::{LedgerRequest, RaftPayload, SystemRequest},
 };
 

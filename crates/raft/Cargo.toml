@@ -18,7 +18,7 @@ inferadb-ledger-types.workspace = true
 inferadb-ledger-proto.workspace = true
 inferadb-ledger-state.workspace = true
 inferadb-ledger-store.workspace = true
-inferadb-ledger-consensus = { path = "../consensus" }
+inferadb-ledger-consensus.workspace = true
 
 # Parallelism (apply-path batched state_root + block_hash computation).
 rayon.workspace = true

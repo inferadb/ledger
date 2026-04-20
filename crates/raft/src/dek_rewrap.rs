@@ -24,10 +24,11 @@ use inferadb_ledger_types::config::RewrapConfig;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
+use inferadb_ledger_types::trace_context::TraceContext;
+
 use crate::{
     consensus_handle::ConsensusHandle,
     metrics::{record_rewrap_pages, record_rewrap_remaining},
-    trace_context::TraceContext,
 };
 
 /// Shared re-wrapping progress for status queries.

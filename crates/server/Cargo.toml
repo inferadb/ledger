@@ -25,7 +25,7 @@ inferadb-ledger-proto.workspace = true
 inferadb-ledger-state.workspace = true
 inferadb-ledger-raft.workspace = true
 inferadb-ledger-services.workspace = true
-inferadb-ledger-consensus = { path = "../consensus" }
+inferadb-ledger-consensus.workspace = true
 
 # Storage
 inferadb-ledger-store.workspace = true

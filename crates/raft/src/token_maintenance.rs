@@ -18,10 +18,11 @@ use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use inferadb_ledger_types::trace_context::TraceContext;
+
 use crate::{
     consensus_handle::ConsensusHandle,
     raft_manager::RaftManager,
-    trace_context::TraceContext,
     types::{LedgerRequest, RaftPayload, SystemRequest},
 };
 

@@ -23,6 +23,8 @@ use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use inferadb_ledger_types::trace_context::TraceContext;
+
 use crate::{
     consensus_handle::ConsensusHandle,
     error::{
@@ -30,7 +32,6 @@ use crate::{
         RecoveryError, StateRootComputationSnafu,
     },
     log_storage::{AppliedStateAccessor, MAX_RECOVERY_ATTEMPTS, VaultHealthStatus},
-    trace_context::TraceContext,
     types::{LedgerNodeId, LedgerRequest, LedgerResponse, RaftPayload},
 };
 
