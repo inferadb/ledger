@@ -125,6 +125,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// for crash-recovery of already-applied entries. In-memory state
     /// updates still execute so subsequent entries see correct state.
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(skip_state_writes = skip_state_writes)
+    )]
     pub(super) fn apply_request_with_events(
         &self,
         request: &LedgerRequest,

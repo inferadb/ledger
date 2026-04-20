@@ -133,6 +133,11 @@ impl<B: StorageBackend> EventWriter<B> {
     /// # Errors
     ///
     /// Returns [`EventWriterError`] if the transaction, write, or commit fails.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(entry_count = entries.len())
+    )]
     pub fn write_events(&self, entries: &[EventEntry]) -> Result<usize, EventWriterError> {
         if !self.config.enabled {
             return Ok(0);
@@ -1265,6 +1270,11 @@ impl<B: StorageBackend + 'static> EventFlusher<B> {
     /// strict-durable `commit()`. Does NOT flip to `commit_in_memory` —
     /// handler-phase events have no WAL replay backstop, so each flush
     /// batch is the durability boundary.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(entry_count = entries.len(), region = %self.region)
+    )]
     async fn commit_batch(&self, entries: &[EventEntry]) -> Result<(), EventWriterError> {
         let mut txn = self.events_db.write().context(TransactionSnafu)?;
         for entry in entries {

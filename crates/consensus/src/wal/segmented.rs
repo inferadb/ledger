@@ -173,6 +173,11 @@ impl SegmentedWalBackend {
 }
 
 impl WalBackend for SegmentedWalBackend {
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(frame_count = frames.len())
+    )]
     fn append(&mut self, frames: &[WalFrame]) -> Result<(), WalError> {
         for frame in frames {
             self.ensure_active()?;
@@ -204,6 +209,7 @@ impl WalBackend for SegmentedWalBackend {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     fn sync(&mut self) -> Result<(), WalError> {
         if let Some(ref seg) = self.active {
             seg.file

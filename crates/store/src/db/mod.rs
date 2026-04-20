@@ -1022,6 +1022,7 @@ impl<B: StorageBackend> Database<B> {
     /// `last_synced_snapshot_id` is NOT advanced, and `pending_frees` is
     /// NOT drained — a retry will re-attempt the full persist against the
     /// same (or newer) committed state.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn sync_state(self: std::sync::Arc<Self>) -> Result<()>
     where
         B: 'static,

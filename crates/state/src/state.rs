@@ -323,6 +323,15 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Returns [`StateError::Codec`] if entity serialization or deserialization fails.
     /// Returns [`StateError::Index`] if a relationship index update fails.
     /// Returns [`StateError::PreconditionFailed`] if a conditional write check fails.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            vault = vault.value(),
+            op_count = operations.len(),
+            block_height = block_height,
+        )
+    )]
     pub fn apply_operations_in_txn(
         &self,
         txn: &mut WriteTransaction<'_, B>,
@@ -806,10 +815,26 @@ impl<B: StorageBackend> StateLayer<B> {
     /// This scans only the dirty buckets and recomputes their roots,
     /// then returns SHA-256(bucket_roots[0..256]).
     ///
+    /// # Implementation
+    ///
+    /// Storage keys are encoded as `[vault_id:8BE][bucket_id:1][local_key]`,
+    /// so all entities in bucket `B` of vault `V` form a contiguous
+    /// prefix-scannable range `[bucket_prefix(V, B), bucket_prefix(V, B+1))`.
+    /// Rather than scanning the entire vault and filtering by bucket in
+    /// memory (O(vault_entries)), we issue one range scan per dirty bucket
+    /// (O(sum(dirty_bucket_entries))). With 256 buckets and typically a
+    /// handful dirty per apply, this skips ~99% of the scan + decode cost
+    /// on write-heavy workloads without changing the hash output.
+    ///
     /// # Errors
     ///
     /// Returns [`StateError::Store`] if the read transaction or iteration fails.
     /// Returns [`StateError::Codec`] if deserialization of any entity in a dirty bucket fails.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(vault = vault.value())
+    )]
     pub fn compute_state_root(&self, vault: VaultId) -> Result<Hash> {
         // First check if dirty and get the dirty buckets list (brief read lock)
         let dirty_buckets: Vec<u8> = {
@@ -830,34 +855,37 @@ impl<B: StorageBackend> StateLayer<B> {
             }
         };
 
-        // Single vault-scoped range scan distributing entities to dirty bucket builders
+        // Per-dirty-bucket prefix scan. Each dirty bucket's entities form a
+        // contiguous [bucket_prefix(V, B), bucket_prefix(V, B+1)) range, so
+        // we hit only the leaves that contain dirty data.
         let txn = self.db.read().context(StoreSnafu)?;
-        let mut builders: [Option<BucketRootBuilder>; 256] = std::array::from_fn(|_| None);
-        for &b in &dirty_buckets {
-            builders[b as usize] = Some(BucketRootBuilder::new(b));
-        }
+        let mut bucket_roots: Vec<(u8, Hash)> = Vec::with_capacity(dirty_buckets.len());
 
-        let vault_start = crate::keys::vault_prefix(vault).to_vec();
+        // `vault_end` is the exclusive upper bound for bucket 255 (wrapping to
+        // the next vault). Matches the prior implementation's convention of
+        // assuming `vault.value() + 1` does not overflow i64 for live vaults.
         let vault_end = crate::keys::vault_prefix(VaultId::new(vault.value() + 1)).to_vec();
-        let iter = txn
-            .range::<tables::Entities>(Some(&vault_start), Some(&vault_end))
-            .context(StoreSnafu)?;
 
-        for (key_bytes, value) in iter {
-            if key_bytes.len() < 9 {
-                continue;
-            }
-            let bucket = key_bytes[8];
-            if let Some(builder) = builders[bucket as usize].as_mut() {
+        for &bucket in &dirty_buckets {
+            let start = crate::keys::bucket_prefix(vault, bucket).to_vec();
+            let end_storage: Vec<u8>;
+            let end_ref: &Vec<u8> = if bucket < 255 {
+                end_storage = crate::keys::bucket_prefix(vault, bucket + 1).to_vec();
+                &end_storage
+            } else {
+                &vault_end
+            };
+
+            let iter =
+                txn.range::<tables::Entities>(Some(&start), Some(end_ref)).context(StoreSnafu)?;
+
+            let mut builder = BucketRootBuilder::new(bucket);
+            for (_key_bytes, value) in iter {
                 let entity: Entity = decode(&value).context(CodecSnafu)?;
                 builder.add_entity(&entity);
             }
+            bucket_roots.push((bucket, builder.finalize()));
         }
-
-        let bucket_roots: Vec<(u8, Hash)> = dirty_buckets
-            .into_iter()
-            .filter_map(|b| builders[b as usize].take().map(|builder| (b, builder.finalize())))
-            .collect();
 
         // Update commitment with computed bucket roots (brief write lock)
         Ok(self.with_commitment(vault, |commitment| {
@@ -2404,6 +2432,44 @@ mod tests {
         // Should be retrievable now
         let retrieved = state.get_bucket_roots(vault).unwrap();
         assert_eq!(retrieved, roots);
+    }
+
+    /// Per-bucket prefix-scan optimization: writing keys that hash into many
+    /// different buckets and then computing the state root must produce the
+    /// same root as a full-vault scan would. We verify two paths against each
+    /// other via `mark_all_dirty` (which forces every bucket's root to be
+    /// recomputed from storage, exercising the per-bucket prefix scan for
+    /// every non-empty bucket).
+    #[test]
+    fn test_compute_state_root_per_bucket_matches_recomputation() {
+        let state = create_test_state();
+        let vault = VaultId::new(1);
+
+        // Populate 64 entities whose keys land in many different buckets.
+        let ops: Vec<Operation> = (0..64u32)
+            .map(|i| Operation::SetEntity {
+                key: format!("entity:{i}"),
+                value: format!("value:{i}").into_bytes(),
+                condition: None,
+                expires_at: None,
+            })
+            .collect();
+        state.apply_operations(vault, &ops, 1).unwrap();
+
+        // First computation (only the dirty buckets touched by the writes
+        // above go through the per-bucket prefix scan).
+        let root_incremental = state.compute_state_root(vault).unwrap();
+
+        // Force every bucket to be marked dirty and recompute. This drives
+        // the per-bucket prefix scan across every non-empty bucket and the
+        // final root must match the incremental root byte-for-byte.
+        state.mark_all_dirty(vault);
+        let root_full = state.compute_state_root(vault).unwrap();
+
+        assert_eq!(
+            root_incremental, root_full,
+            "per-bucket prefix scan must produce identical state root to full recomputation"
+        );
     }
 
     #[test]

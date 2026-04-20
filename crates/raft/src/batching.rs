@@ -304,6 +304,15 @@ where
     }
 
     /// Flushes a batch of writes.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            batch_size = batch.len(),
+            is_eager = is_eager,
+            region = %self.region,
+        )
+    )]
     async fn flush_batch(&self, batch: Vec<PendingWrite>, is_eager: bool) {
         let batch_size = batch.len();
         if batch_size == 0 {

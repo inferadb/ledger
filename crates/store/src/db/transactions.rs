@@ -519,6 +519,11 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
     /// # Errors
     ///
     /// Returns [`super::Error::Io`] if flushing dirty pages or writing the header fails.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(dirty_pages = self.dirty_pages.len())
+    )]
     pub fn commit(mut self) -> Result<()> {
         // Collect dirty page IDs before pages are moved to the cache.
         let dirty_page_ids: Vec<PageId> = self.dirty_pages.keys().copied().collect();
@@ -611,6 +616,11 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
     /// Currently infallible; returns `Result<()>` for signature symmetry with
     /// [`WriteTransaction::commit`] and for forward compatibility if future
     /// bookkeeping steps become fallible.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(dirty_pages = self.dirty_pages.len())
+    )]
     pub fn commit_in_memory(mut self) -> Result<()> {
         // Collect dirty page IDs before pages are moved to the cache.
         let dirty_page_ids: Vec<PageId> = self.dirty_pages.keys().copied().collect();

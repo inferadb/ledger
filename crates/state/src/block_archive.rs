@@ -176,6 +176,15 @@ impl<B: StorageBackend> BlockArchive<B> {
     /// Returns [`BlockArchiveError::Codec`] if serialization of the block fails.
     /// Returns [`BlockArchiveError::Store`] if the write transaction or commit fails.
     /// Returns [`BlockArchiveError::Io`] if writing to a segment file fails.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            region_height = block.region_height,
+            vault_entries = block.vault_entries.len(),
+            has_segment_file = self.blocks_dir.is_some(),
+        )
+    )]
     pub fn append_block(&self, block: &RegionBlock) -> Result<()> {
         let mut txn = self.db.write().context(StoreSnafu)?;
 
@@ -214,6 +223,14 @@ impl<B: StorageBackend> BlockArchive<B> {
     }
 
     /// Append block to segment file.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            region_height = block.region_height,
+            encoded_bytes = encoded.len(),
+        )
+    )]
     fn append_to_segment(&self, block: &RegionBlock, encoded: &[u8]) -> Result<()> {
         let segment_id = block.region_height / SEGMENT_SIZE;
 

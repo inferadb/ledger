@@ -634,6 +634,21 @@ impl<B: StorageBackend> RaftLogStore<B> {
     ///
     /// Does NOT commit the transaction — the caller commits after
     /// writing both the core blob and external tables, ensuring atomicity.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            orgs = pending.organizations.len(),
+            orgs_deleted = pending.organizations_deleted.len(),
+            vaults = pending.vaults.len(),
+            vaults_deleted = pending.vaults_deleted.len(),
+            vault_heights = pending.vault_heights.len(),
+            vault_hashes = pending.vault_hashes.len(),
+            vault_health = pending.vault_health.len(),
+            sequences = pending.sequences.len(),
+            client_sequences = pending.client_sequences.len(),
+        )
+    )]
     pub(super) fn flush_external_writes(
         pending: &PendingExternalWrites,
         write_txn: &mut WriteTransaction<'_, FileBackend>,
@@ -797,6 +812,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// The version sentinel prefix `[0x00, 0x01]` is prepended to the
     /// serialized `AppliedStateCore` bytes to distinguish from old-format
     /// full `AppliedState` blobs during startup migration.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(region = self.region.as_str())
+    )]
     pub(super) fn save_state_core(
         &self,
         state: &AppliedState,

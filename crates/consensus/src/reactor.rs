@@ -901,6 +901,11 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
     /// Collects log entries in the range `(last_applied, up_to]` from the shard,
     /// updates `last_applied`, and marks the shard failed if the apply worker
     /// channel has closed.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(shard_count = pending.len())
+    )]
     async fn dispatch_committed_batches(&mut self, pending: &[(ShardId, u64)]) {
         for &(shard_id, up_to) in pending {
             let last = self.last_applied.get(&shard_id).copied().unwrap_or(0);
@@ -951,6 +956,15 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
     /// For synchronous backends (the default), both steps collapse into one:
     /// `submit_async_fsync()` calls `sync()` internally, `poll_fsync_completion()`
     /// returns `true` immediately, and the cycle is identical to the old behavior.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            pending_frames = self.pending_wal_frames.len(),
+            pending_commits = self.pending_commits.len(),
+            pending_responses = self.pending_responses.len(),
+        )
+    )]
     async fn flush(&mut self) {
         // If an async fsync is in flight, poll for completion first.
         if self.fsync_phase == FsyncPhase::Submitted {
@@ -979,7 +993,12 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             let frames = std::mem::take(&mut self.pending_wal_frames);
 
             // Append entry frames (may be empty if only commits this cycle).
-            if !frames.is_empty() && self.wal.append(&frames).is_err() {
+            let append_result = {
+                let _span =
+                    tracing::debug_span!("wal_append", frame_count = frames.len()).entered();
+                if !frames.is_empty() { self.wal.append(&frames) } else { Ok(()) }
+            };
+            if append_result.is_err() {
                 for (_, _, resp) in self.pending_responses.drain(..) {
                     let _ = resp.send(Err(ConsensusError::WalWriteError));
                 }
@@ -1015,7 +1034,11 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                 return;
             }
 
-            if self.wal.sync().is_err() {
+            let sync_result = {
+                let _span = tracing::debug_span!("wal_sync").entered();
+                self.wal.sync()
+            };
+            if sync_result.is_err() {
                 // WAL failure — reject all pending proposals and membership changes.
                 for (_, _, resp) in self.pending_responses.drain(..) {
                     let _ = resp.send(Err(ConsensusError::WalWriteError));

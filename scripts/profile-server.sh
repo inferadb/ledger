@@ -185,7 +185,12 @@ cleanup() {
             inferno-flamegraph < "$SPANS_FOLDED" > "$OUTPUT" || {
                 echo "warn: inferno-flamegraph failed; folded-stack file preserved at $SPANS_FOLDED" >&2
             }
+            # Preserve the folded-stacks file next to the SVG for offline
+            # aggregation (the DATA_DIR is rm -rf'd below).
+            FOLDED_OUTPUT="${OUTPUT%.svg}.folded"
+            cp "$SPANS_FOLDED" "$FOLDED_OUTPUT" 2>/dev/null || true
             echo "==> wrote $OUTPUT"
+            [[ -f "$FOLDED_OUTPUT" ]] && echo "==> wrote $FOLDED_OUTPUT"
         fi
     else
         if [[ -f "$RAW_OUTPUT" ]]; then
@@ -304,6 +309,26 @@ echo "==> running init subcommand"
 }
 # Brief settle before we start firing SDK traffic.
 sleep 2
+
+# Optional experiment knob: disable the StateCheckpointer via UpdateConfig so
+# apply-path fsyncs aren't contending with checkpoint fsyncs. One-off used for
+# investigating fsync-bandwidth contention; leave unset by default.
+if [[ "${DISABLE_CHECKPOINTER:-0}" == "1" ]]; then
+    if ! command -v grpcurl >/dev/null 2>&1; then
+        echo "error: DISABLE_CHECKPOINTER=1 requires grpcurl on PATH" >&2
+        exit 1
+    fi
+    echo "==> disabling StateCheckpointer via UpdateConfig RPC (experiment mode)"
+    grpcurl -plaintext -import-path proto -proto ledger/v1/ledger.proto \
+        -d '{"config_json":"{\"state_checkpoint\":{\"interval_ms\":60000,\"applies_threshold\":18446744073709551615,\"dirty_pages_threshold\":18446744073709551615}}"}' \
+        "127.0.0.1:${PORT}" ledger.v1.AdminService/UpdateConfig \
+        > "$DATA_DIR/update_config.log" 2>&1 || {
+            echo "error: UpdateConfig failed; last log lines:" >&2
+            tail -30 "$DATA_DIR/update_config.log" >&2 || true
+            exit 1
+        }
+    tail -10 "$DATA_DIR/update_config.log"
+fi
 
 # --- warmup + measured phases -----------------------------------------------
 

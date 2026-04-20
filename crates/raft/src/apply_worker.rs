@@ -50,11 +50,22 @@ impl ApplyWorker {
 
     /// Runs the apply loop until the channel is closed (engine shutdown).
     pub async fn run(mut self, mut rx: mpsc::Receiver<CommittedBatch>) {
+        use tracing::Instrument;
         while let Some(batch) = rx.recv().await {
             if batch.entries.is_empty() {
                 continue;
             }
-            match self.store.apply_committed_entries(&batch.entries, batch.leader_node).await {
+            let span = tracing::debug_span!(
+                "apply_worker_batch",
+                shard = batch.shard.0,
+                entry_count = batch.entries.len(),
+            );
+            match self
+                .store
+                .apply_committed_entries(&batch.entries, batch.leader_node)
+                .instrument(span)
+                .await
+            {
                 Ok(responses) => {
                     let mut map = self.response_map.lock();
                     for (entry, response) in batch.entries.iter().zip(responses.into_iter()) {
