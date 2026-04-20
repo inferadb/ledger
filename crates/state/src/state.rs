@@ -877,29 +877,37 @@ impl<B: StorageBackend> StateLayer<B> {
         // assuming `vault.value() + 1` does not overflow i64 for live vaults.
         let vault_end = crate::keys::vault_prefix(VaultId::new(vault.value() + 1)).to_vec();
 
-        let bucket_roots: Vec<(u8, Hash)> = dirty_buckets
-            .par_iter()
-            .map(|&bucket| -> Result<(u8, Hash)> {
-                let txn = self.db.read().context(StoreSnafu)?;
-                let start = crate::keys::bucket_prefix(vault, bucket).to_vec();
-                let end_owned: Vec<u8> = if bucket < 255 {
-                    crate::keys::bucket_prefix(vault, bucket + 1).to_vec()
-                } else {
-                    vault_end.clone()
-                };
+        // Use the bounded apply-path pool (see `apply_pool`) rather than
+        // rayon's default global pool. The global pool sizes itself to
+        // `num_cpus`, competing 1:1 with tokio's runtime workers and
+        // inflating p99 tail under apply bursts. `APPLY_POOL` caps parallelism
+        // at ~num_cpus/2 so network I/O and response delivery continue
+        // making progress while the apply worker is hashing.
+        let bucket_roots: Vec<(u8, Hash)> = crate::apply_pool::APPLY_POOL.install(|| {
+            dirty_buckets
+                .par_iter()
+                .map(|&bucket| -> Result<(u8, Hash)> {
+                    let txn = self.db.read().context(StoreSnafu)?;
+                    let start = crate::keys::bucket_prefix(vault, bucket).to_vec();
+                    let end_owned: Vec<u8> = if bucket < 255 {
+                        crate::keys::bucket_prefix(vault, bucket + 1).to_vec()
+                    } else {
+                        vault_end.clone()
+                    };
 
-                let iter = txn
-                    .range::<tables::Entities>(Some(&start), Some(&end_owned))
-                    .context(StoreSnafu)?;
+                    let iter = txn
+                        .range::<tables::Entities>(Some(&start), Some(&end_owned))
+                        .context(StoreSnafu)?;
 
-                let mut builder = BucketRootBuilder::new(bucket);
-                for (_key_bytes, value) in iter {
-                    let entity: Entity = decode(&value).context(CodecSnafu)?;
-                    builder.add_entity(&entity);
-                }
-                Ok((bucket, builder.finalize()))
-            })
-            .collect::<Result<Vec<(u8, Hash)>>>()?;
+                    let mut builder = BucketRootBuilder::new(bucket);
+                    for (_key_bytes, value) in iter {
+                        let entity: Entity = decode(&value).context(CodecSnafu)?;
+                        builder.add_entity(&entity);
+                    }
+                    Ok((bucket, builder.finalize()))
+                })
+                .collect::<Result<Vec<(u8, Hash)>>>()
+        })?;
 
         // Update commitment with computed bucket roots (brief write lock)
         Ok(self.with_commitment(vault, |commitment| {

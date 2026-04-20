@@ -14,6 +14,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod apply_pool;
 pub mod binary_keys;
 mod block_archive;
 mod bucket;

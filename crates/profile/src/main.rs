@@ -75,6 +75,11 @@ enum Preset {
     /// scaling past the single-vault WAL-fsync ceiling. Task `i` writes to
     /// `vaults[i % M]`.
     ConcurrentWritesMultivault(ConcurrentWritesMultivaultArgs),
+    /// N concurrent writers fanned across M organizations. Validates
+    /// shard-based parallelism — each org routes to its own Raft shard via
+    /// `ShardManager`, so writes land on distinct apply pipelines. Task `i`
+    /// writes to `orgs[i % M]`.
+    ConcurrentWritesMultiorg(ConcurrentWritesMultiorgArgs),
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -134,6 +139,27 @@ struct ConcurrentWritesMultivaultArgs {
     vaults: usize,
 }
 
+/// Args for the `concurrent-writes-multiorg` preset — base preset args
+/// plus `--concurrency N` and `--orgs M`. Task `i` is pinned to
+/// `orgs[i % M]`. Each org provisions as a fully-onboarded user with one
+/// vault; orgs route to distinct Raft shards via the cluster's
+/// `ShardManager`.
+#[derive(clap::Args, Debug, Clone)]
+struct ConcurrentWritesMultiorgArgs {
+    #[command(flatten)]
+    base: PresetArgs,
+
+    /// Number of concurrent writer tasks.
+    #[arg(long, default_value_t = 32)]
+    concurrency: usize,
+
+    /// Number of organizations to fan writes across. Provisioned at
+    /// bootstrap via N full onboarding flows. Setup cost scales linearly
+    /// with M but is paid once per run.
+    #[arg(long, default_value_t = 4)]
+    orgs: usize,
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), MainError> {
     tracing_subscriber::fmt()
@@ -155,6 +181,7 @@ async fn main() -> Result<(), MainError> {
         Preset::ConcurrentWrites(a) => (&a.base, "concurrent-writes"),
         Preset::ConcurrentReads(a) => (&a.base, "concurrent-reads"),
         Preset::ConcurrentWritesMultivault(a) => (&a.base, "concurrent-writes-multivault"),
+        Preset::ConcurrentWritesMultiorg(a) => (&a.base, "concurrent-writes-multiorg"),
     };
 
     let duration = std::time::Duration::from_secs(args.duration);
@@ -196,6 +223,27 @@ async fn main() -> Result<(), MainError> {
                 duration,
                 a.concurrency,
                 vaults,
+            )
+            .await
+        },
+        Preset::ConcurrentWritesMultiorg(a) => {
+            let mut targets = harness
+                .provision_orgs(a.orgs.saturating_sub(1).max(0))
+                .await
+                .map_err(|e| HarnessSnafu.into_error(Box::new(e)))?;
+            // Include the harness's own org as the first target so `--orgs 1`
+            // is a valid single-shard baseline.
+            targets.insert(0, (harness.user, harness.organization, harness.vault));
+            tracing::info!(
+                orgs = targets.len(),
+                concurrency = a.concurrency,
+                "concurrent-writes-multiorg: provisioned orgs"
+            );
+            workloads::concurrent_writes_multiorg::run(
+                &harness,
+                duration,
+                a.concurrency,
+                targets,
             )
             .await
         },
@@ -339,6 +387,50 @@ mod tests {
                 assert_eq!(a.vaults, 16);
             },
             other => panic!("expected ConcurrentWritesMultivault, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn concurrent_writes_multiorg_parses_with_both_knobs() {
+        let cli = Cli::try_parse_from([
+            "inferadb-ledger-profile",
+            "concurrent-writes-multiorg",
+            "--endpoint",
+            "http://127.0.0.1:50051",
+            "--duration",
+            "30",
+            "--concurrency",
+            "128",
+            "--orgs",
+            "8",
+        ])
+        .unwrap();
+        match cli.preset {
+            Preset::ConcurrentWritesMultiorg(a) => {
+                assert_eq!(a.base.endpoint, "http://127.0.0.1:50051");
+                assert_eq!(a.base.duration, 30);
+                assert_eq!(a.concurrency, 128);
+                assert_eq!(a.orgs, 8);
+            },
+            other => panic!("expected ConcurrentWritesMultiorg, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn concurrent_writes_multiorg_defaults() {
+        let cli = Cli::try_parse_from([
+            "inferadb-ledger-profile",
+            "concurrent-writes-multiorg",
+            "--endpoint",
+            "http://127.0.0.1:50051",
+        ])
+        .unwrap();
+        match cli.preset {
+            Preset::ConcurrentWritesMultiorg(a) => {
+                assert_eq!(a.concurrency, 32);
+                assert_eq!(a.orgs, 4);
+            },
+            other => panic!("expected ConcurrentWritesMultiorg, got {other:?}"),
         }
     }
 }

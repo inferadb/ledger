@@ -287,6 +287,77 @@ impl Harness {
         }
         Ok(vaults)
     }
+
+    /// Provisions `n` additional organizations (each with its own onboarded
+    /// user and one vault), returning `(user, org, vault)` triples.
+    ///
+    /// Orgs route to Raft shards via the cluster's `ShardManager`, so
+    /// fanning writes across multiple orgs exercises **multi-shard
+    /// parallelism** — the architectural axis the system is designed to
+    /// scale along. Used by `concurrent-writes-multiorg` to validate that
+    /// throughput scales roughly linearly with shard count.
+    ///
+    /// The harness's original `user`/`organization`/`vault` are
+    /// independent of the returned set — callers typically use them as
+    /// the first entry and append these as additional targets, or discard
+    /// them.
+    pub async fn provision_orgs(
+        &self,
+        n: usize,
+    ) -> Result<Vec<(UserSlug, OrganizationSlug, VaultSlug)>, HarnessError> {
+        let mut out = Vec::with_capacity(n);
+        let region = Region::US_EAST_VA;
+        for i in 0..n {
+            let suffix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let email = format!("profile-org-{i}-{suffix}@example.com");
+            let org_name = format!("profile-org-{i}-{suffix}");
+
+            let verification = self
+                .client
+                .initiate_email_verification(&email, region)
+                .await
+                .context(InitiateEmailSnafu)?;
+
+            let verify_result = self
+                .client
+                .verify_email_code(&email, verification.code, region)
+                .await
+                .context(VerifyEmailSnafu)?;
+
+            let onboarding_token = match verify_result {
+                EmailVerificationResult::NewUser { onboarding_token } => onboarding_token,
+                EmailVerificationResult::ExistingUser { .. }
+                | EmailVerificationResult::TotpRequired { .. } => {
+                    return NotNewUserSnafu.fail();
+                },
+            };
+
+            let registration = self
+                .client
+                .complete_registration(
+                    onboarding_token,
+                    &email,
+                    region,
+                    "Profile Workload",
+                    &org_name,
+                )
+                .await
+                .context(CompleteRegistrationSnafu)?;
+
+            let user = registration.user;
+            let organization =
+                registration.organization.ok_or_else(|| MissingOrganizationSnafu.build())?;
+
+            let vault_info =
+                self.client.create_vault(user, organization).await.context(CreateVaultSnafu)?;
+
+            out.push((user, organization, vault_info.vault));
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

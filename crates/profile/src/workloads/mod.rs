@@ -3,6 +3,7 @@
 pub mod check_heavy;
 pub mod concurrent_reads;
 pub mod concurrent_writes;
+pub mod concurrent_writes_multiorg;
 pub mod concurrent_writes_multivault;
 pub mod entity_reads;
 pub mod mixed_rw;

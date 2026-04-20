@@ -25,12 +25,17 @@
 #                         binary; the measured-phase metrics report is written
 #                         to that path (consumed by scripts/profile-suite.sh)
 #   CONCURRENCY           only honored when workload=concurrent-writes,
-#                         concurrent-reads, or concurrent-writes-multivault;
-#                         number of concurrent tasks (default 32). Other
-#                         workloads ignore this variable.
+#                         concurrent-reads, concurrent-writes-multivault, or
+#                         concurrent-writes-multiorg; number of concurrent
+#                         tasks (default 32). Other workloads ignore this.
 #   VAULTS                only honored when workload=concurrent-writes-
 #                         multivault; number of vaults to fan writes across
 #                         (default 16). Ignored by every other workload.
+#   ORGS                  only honored when workload=concurrent-writes-
+#                         multiorg; number of organizations to fan writes
+#                         across — orgs route to distinct Raft shards via
+#                         the cluster's ShardManager (default 4). Ignored by
+#                         every other workload.
 
 set -euo pipefail
 
@@ -77,15 +82,18 @@ esac
 case "$WORKLOAD" in
     throughput-writes|mixed-rw|check-heavy) ;;
     entity-reads|relationship-writes|relationship-reads) ;;
-    concurrent-writes|concurrent-reads|concurrent-writes-multivault) ;;
-    *) echo "error: unknown workload '$WORKLOAD' (expected throughput-writes|mixed-rw|check-heavy|entity-reads|relationship-writes|relationship-reads|concurrent-writes|concurrent-reads|concurrent-writes-multivault)" >&2; exit 1 ;;
+    concurrent-writes|concurrent-reads|concurrent-writes-multivault|concurrent-writes-multiorg) ;;
+    *) echo "error: unknown workload '$WORKLOAD' (expected throughput-writes|mixed-rw|check-heavy|entity-reads|relationship-writes|relationship-reads|concurrent-writes|concurrent-reads|concurrent-writes-multivault|concurrent-writes-multiorg)" >&2; exit 1 ;;
 esac
 
-# concurrent-writes, concurrent-reads, and concurrent-writes-multivault accept
-# an optional --concurrency flag; default 32. concurrent-writes-multivault also
-# accepts --vaults M (default 16). Other presets don't accept either.
+# concurrent-writes, concurrent-reads, concurrent-writes-multivault, and
+# concurrent-writes-multiorg accept an optional --concurrency flag (default
+# 32). The -multivault variant also accepts --vaults M (default 16); the
+# -multiorg variant also accepts --orgs M (default 4). Other presets don't
+# accept any of these.
 CONCURRENCY="${CONCURRENCY:-32}"
 VAULTS="${VAULTS:-16}"
+ORGS="${ORGS:-4}"
 EXTRA_ARGS=()
 case "$WORKLOAD" in
     concurrent-writes|concurrent-reads)
@@ -93,6 +101,9 @@ case "$WORKLOAD" in
         ;;
     concurrent-writes-multivault)
         EXTRA_ARGS=(--concurrency "$CONCURRENCY" --vaults "$VAULTS")
+        ;;
+    concurrent-writes-multiorg)
+        EXTRA_ARGS=(--concurrency "$CONCURRENCY" --orgs "$ORGS")
         ;;
 esac
 

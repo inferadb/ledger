@@ -565,24 +565,32 @@ impl RaftLogStore {
                 set.into_iter().collect()
             };
 
+            // Use the shared bounded apply pool (see
+            // `inferadb_ledger_state::apply_pool`) rather than rayon's global
+            // pool — the latter competes 1:1 with tokio workers and inflates
+            // p99 tail under apply bursts.
+            let pool = &*inferadb_ledger_state::apply_pool::APPLY_POOL;
+
             // Step 2: parallel compute_state_root across unique vaults.
             let patched_roots: std::collections::HashMap<
                 inferadb_ledger_types::VaultId,
                 inferadb_ledger_types::Hash,
-            > = unique_vaults
-                .par_iter()
-                .filter_map(|vault| match state_layer.compute_state_root(*vault) {
-                    Ok(root) => Some((*vault, root)),
-                    Err(e) => {
-                        tracing::error!(
-                            vault = %vault.value(),
-                            error = %e,
-                            "Deferred state_root computation failed; retaining placeholder hash"
-                        );
-                        None
-                    },
-                })
-                .collect();
+            > = pool.install(|| {
+                unique_vaults
+                    .par_iter()
+                    .filter_map(|vault| match state_layer.compute_state_root(*vault) {
+                        Ok(root) => Some((*vault, root)),
+                        Err(e) => {
+                            tracing::error!(
+                                vault = %vault.value(),
+                                error = %e,
+                                "Deferred state_root computation failed; retaining placeholder hash"
+                            );
+                            None
+                        },
+                    })
+                    .collect()
+            });
 
             // Step 3: serial patch of vault_entries' state_root fields.
             for entry in &mut vault_entries {
@@ -592,10 +600,12 @@ impl RaftLogStore {
             }
 
             // Step 4: parallel block_hash computation (pure CPU).
-            let block_hashes: Vec<inferadb_ledger_types::Hash> = vault_entries
-                .par_iter()
-                .map(|e| self.compute_vault_block_hash(e))
-                .collect();
+            let block_hashes: Vec<inferadb_ledger_types::Hash> = pool.install(|| {
+                vault_entries
+                    .par_iter()
+                    .map(|e| self.compute_vault_block_hash(e))
+                    .collect()
+            });
 
             // Step 5: serial patch of Write response block_hashes using the
             // pre-computed values. `vault_entries` mirrors the subset of
