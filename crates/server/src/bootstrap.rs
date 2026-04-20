@@ -250,6 +250,7 @@ pub async fn bootstrap_node(
         .heartbeat_interval_ms(hb_ms)
         .election_timeout_min_ms(el_min_ms)
         .election_timeout_max_ms(el_max_ms)
+        .wal_sync_mode(config.wal_sync_mode)
         .build();
     // Single shared per-node connection registry. All per-region consensus
     // transports created via `start_region` clone this Arc so that they

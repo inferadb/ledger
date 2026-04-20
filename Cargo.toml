@@ -12,6 +12,7 @@ members = [
     "crates/test-utils",
     "crates/consensus",
     "crates/profile",
+    "crates/fs-sync",
 ]
 
 [workspace.package]
@@ -114,6 +115,10 @@ humantime-serde = "1"
 # File locking
 fs2 = "0.4"
 
+# Low-level syscall FFI — used ONLY by `inferadb-ledger-fs-sync` to wrap
+# macOS `fcntl(F_BARRIERFSYNC)`. No other crate should depend on libc.
+libc = "0.2"
+
 # Testing
 tempfile = "3"
 rand = "0.10"
@@ -147,6 +152,7 @@ inferadb-ledger-server = { path = "crates/server" }
 inferadb-ledger-sdk = { version = "0.1.0", path = "crates/sdk" }
 inferadb-ledger-test-utils = { path = "crates/test-utils" }
 inferadb-ledger-profile = { path = "crates/profile" }
+inferadb-ledger-fs-sync = { version = "0.1.0", path = "crates/fs-sync" }
 
 # Hashing (for inferadb-ledger-store)
 xxhash-rust = { version = "0.8", features = ["xxh32", "xxh3"] }

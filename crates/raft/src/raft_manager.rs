@@ -175,6 +175,11 @@ pub struct RaftManagerConfig {
     /// Whether to inject trace context into Raft RPCs.
     #[builder(default = true)]
     pub trace_raft_rpcs: bool,
+    /// WAL sync mode — controls the fsync primitive used by the per-batch
+    /// WAL commit. Default is `Full` (preserves pre-existing durability).
+    /// See [`inferadb_ledger_fs_sync::FileSyncMode`].
+    #[builder(default)]
+    pub wal_sync_mode: inferadb_ledger_fs_sync::FileSyncMode,
 }
 
 impl RaftManagerConfig {
@@ -1083,10 +1088,14 @@ impl RaftManager {
         };
 
         let wal_dir = self.storage_manager.region_dir(region).join("wal");
-        let wal =
-            inferadb_ledger_consensus::wal::SegmentedWalBackend::open(&wal_dir).map_err(|e| {
-                RaftManagerError::Storage { region, message: format!("failed to open WAL: {e}") }
-            })?;
+        let wal = inferadb_ledger_consensus::wal::SegmentedWalBackend::open_with(
+            &wal_dir,
+            self.config.wal_sync_mode,
+        )
+        .map_err(|e| RaftManagerError::Storage {
+            region,
+            message: format!("failed to open WAL: {e}"),
+        })?;
 
         // Recover persisted term + votedFor from the WAL checkpoint (Raft
         // Figure 2). On first boot the WAL has no checkpoint, so we default

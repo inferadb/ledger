@@ -31,6 +31,7 @@ mod runtime;
 mod storage;
 
 pub use encryption::*;
+pub use inferadb_ledger_fs_sync::FileSyncMode;
 pub use jwt::*;
 pub use key_management::*;
 pub use node::*;

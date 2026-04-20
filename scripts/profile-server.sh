@@ -13,6 +13,7 @@
 #   workload:      throughput-writes | mixed-rw | check-heavy
 #                | entity-reads | relationship-writes | relationship-reads
 #                | concurrent-writes | concurrent-reads
+#                | concurrent-writes-multivault
 #   duration_secs: measured-phase duration (default 60)
 #
 # Environment variables:
@@ -23,10 +24,13 @@
 #   PROFILE_METRICS_PATH  when set, passed as --metrics-json to the workload
 #                         binary; the measured-phase metrics report is written
 #                         to that path (consumed by scripts/profile-suite.sh)
-#   CONCURRENCY           only honored when workload=concurrent-writes or
-#                         workload=concurrent-reads; number of concurrent
-#                         tasks (default 32). Other workloads ignore this
-#                         variable.
+#   CONCURRENCY           only honored when workload=concurrent-writes,
+#                         concurrent-reads, or concurrent-writes-multivault;
+#                         number of concurrent tasks (default 32). Other
+#                         workloads ignore this variable.
+#   VAULTS                only honored when workload=concurrent-writes-
+#                         multivault; number of vaults to fan writes across
+#                         (default 16). Ignored by every other workload.
 
 set -euo pipefail
 
@@ -73,18 +77,24 @@ esac
 case "$WORKLOAD" in
     throughput-writes|mixed-rw|check-heavy) ;;
     entity-reads|relationship-writes|relationship-reads) ;;
-    concurrent-writes|concurrent-reads) ;;
-    *) echo "error: unknown workload '$WORKLOAD' (expected throughput-writes|mixed-rw|check-heavy|entity-reads|relationship-writes|relationship-reads|concurrent-writes|concurrent-reads)" >&2; exit 1 ;;
+    concurrent-writes|concurrent-reads|concurrent-writes-multivault) ;;
+    *) echo "error: unknown workload '$WORKLOAD' (expected throughput-writes|mixed-rw|check-heavy|entity-reads|relationship-writes|relationship-reads|concurrent-writes|concurrent-reads|concurrent-writes-multivault)" >&2; exit 1 ;;
 esac
 
-# concurrent-writes and concurrent-reads accept an optional --concurrency flag;
-# default 32. Other presets don't accept it, so we only append when the workload
-# matches.
+# concurrent-writes, concurrent-reads, and concurrent-writes-multivault accept
+# an optional --concurrency flag; default 32. concurrent-writes-multivault also
+# accepts --vaults M (default 16). Other presets don't accept either.
 CONCURRENCY="${CONCURRENCY:-32}"
+VAULTS="${VAULTS:-16}"
 EXTRA_ARGS=()
-if [[ "$WORKLOAD" == "concurrent-writes" || "$WORKLOAD" == "concurrent-reads" ]]; then
-    EXTRA_ARGS=(--concurrency "$CONCURRENCY")
-fi
+case "$WORKLOAD" in
+    concurrent-writes|concurrent-reads)
+        EXTRA_ARGS=(--concurrency "$CONCURRENCY")
+        ;;
+    concurrent-writes-multivault)
+        EXTRA_ARGS=(--concurrency "$CONCURRENCY" --vaults "$VAULTS")
+        ;;
+esac
 
 if [[ "$MODE" == "spans" ]]; then
     command -v inferno-flamegraph >/dev/null 2>&1 || {

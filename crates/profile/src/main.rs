@@ -71,6 +71,10 @@ enum Preset {
     /// read throughput under concurrent gRPC streams on one HTTP/2 channel.
     /// Uses `ReadConsistency::Eventual` (lock-free page-cache path).
     ConcurrentReads(ConcurrentReadsArgs),
+    /// N concurrent writers fanned across M vaults. Exposes multi-shard
+    /// scaling past the single-vault WAL-fsync ceiling. Task `i` writes to
+    /// `vaults[i % M]`.
+    ConcurrentWritesMultivault(ConcurrentWritesMultivaultArgs),
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -113,6 +117,23 @@ struct ConcurrentReadsArgs {
     concurrency: usize,
 }
 
+/// Args for the `concurrent-writes-multivault` preset — base preset args
+/// plus `--concurrency N` and `--vaults M`. Task `i` is pinned to
+/// `vaults[i % M]`.
+#[derive(clap::Args, Debug, Clone)]
+struct ConcurrentWritesMultivaultArgs {
+    #[command(flatten)]
+    base: PresetArgs,
+
+    /// Number of concurrent writer tasks.
+    #[arg(long, default_value_t = 32)]
+    concurrency: usize,
+
+    /// Number of vaults to fan writes across. Provisioned at bootstrap.
+    #[arg(long, default_value_t = 16)]
+    vaults: usize,
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), MainError> {
     tracing_subscriber::fmt()
@@ -133,6 +154,7 @@ async fn main() -> Result<(), MainError> {
         Preset::RelationshipReads(a) => (a, "relationship-reads"),
         Preset::ConcurrentWrites(a) => (&a.base, "concurrent-writes"),
         Preset::ConcurrentReads(a) => (&a.base, "concurrent-reads"),
+        Preset::ConcurrentWritesMultivault(a) => (&a.base, "concurrent-writes-multivault"),
     };
 
     let duration = std::time::Duration::from_secs(args.duration);
@@ -158,6 +180,24 @@ async fn main() -> Result<(), MainError> {
         },
         Preset::ConcurrentReads(a) => {
             workloads::concurrent_reads::run(&harness, duration, a.concurrency).await
+        },
+        Preset::ConcurrentWritesMultivault(a) => {
+            let vaults = harness
+                .provision_vaults(a.vaults.max(1))
+                .await
+                .map_err(|e| HarnessSnafu.into_error(Box::new(e)))?;
+            tracing::info!(
+                vaults = vaults.len(),
+                concurrency = a.concurrency,
+                "concurrent-writes-multivault: provisioned vaults"
+            );
+            workloads::concurrent_writes_multivault::run(
+                &harness,
+                duration,
+                a.concurrency,
+                vaults,
+            )
+            .await
         },
     };
 
@@ -255,6 +295,50 @@ mod tests {
         match cli.preset {
             Preset::ConcurrentReads(a) => assert_eq!(a.concurrency, 32),
             other => panic!("expected ConcurrentReads, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn concurrent_writes_multivault_parses_with_both_knobs() {
+        let cli = Cli::try_parse_from([
+            "inferadb-ledger-profile",
+            "concurrent-writes-multivault",
+            "--endpoint",
+            "http://127.0.0.1:50051",
+            "--duration",
+            "30",
+            "--concurrency",
+            "64",
+            "--vaults",
+            "8",
+        ])
+        .unwrap();
+        match cli.preset {
+            Preset::ConcurrentWritesMultivault(a) => {
+                assert_eq!(a.base.endpoint, "http://127.0.0.1:50051");
+                assert_eq!(a.base.duration, 30);
+                assert_eq!(a.concurrency, 64);
+                assert_eq!(a.vaults, 8);
+            },
+            other => panic!("expected ConcurrentWritesMultivault, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn concurrent_writes_multivault_defaults() {
+        let cli = Cli::try_parse_from([
+            "inferadb-ledger-profile",
+            "concurrent-writes-multivault",
+            "--endpoint",
+            "http://127.0.0.1:50051",
+        ])
+        .unwrap();
+        match cli.preset {
+            Preset::ConcurrentWritesMultivault(a) => {
+                assert_eq!(a.concurrency, 32);
+                assert_eq!(a.vaults, 16);
+            },
+            other => panic!("expected ConcurrentWritesMultivault, got {other:?}"),
         }
     }
 }

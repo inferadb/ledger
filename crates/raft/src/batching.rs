@@ -48,8 +48,11 @@ pub struct BatchWriterConfig {
     /// Upper bound on a single batch. Once reached, `should_flush` returns
     /// true immediately regardless of `batch_timeout`. Caps memory growth
     /// under bursty concurrent load; also caps the size of a single Raft
-    /// proposal.
-    #[builder(default = 500)]
+    /// proposal. Default raised to 2000 alongside the static
+    /// [`BatchConfig`][inferadb_ledger_types::config::BatchConfig] default —
+    /// under `barrier` WAL sync the cap, not fsync latency, becomes the
+    /// binding constraint on amortization.
+    #[builder(default = 2000)]
     pub max_batch_size: usize,
     /// Maximum time to wait before flushing a partial batch.
     ///
@@ -669,7 +672,7 @@ mod tests {
     fn test_batch_config_builder_defaults() {
         let config = BatchWriterConfig::default();
 
-        assert_eq!(config.max_batch_size, 500);
+        assert_eq!(config.max_batch_size, 2000);
         assert_eq!(config.batch_timeout, Duration::from_millis(10));
         assert_eq!(config.tick_interval, Duration::from_millis(5));
     }

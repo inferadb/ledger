@@ -16,6 +16,9 @@ categories = ["cryptography", "data-structures"]
 # Builder pattern
 bon.workspace = true
 
+# File sync primitives (re-exports `FileSyncMode` for config surfaces).
+inferadb-ledger-fs-sync.workspace = true
+
 # Crypto
 sha2.workspace = true
 seahash.workspace = true

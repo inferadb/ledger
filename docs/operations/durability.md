@@ -125,6 +125,31 @@ Even in the strict-synchronous (`enabled = false`) mode, `record_handler_event` 
 
 With batching enabled (the default), the best-effort window widens to "one StateCheckpointer interval on crash" (default ~500ms, floor 50ms). This is a quantitative widening of the same best-effort category, not a new category of loss. The `Drop` overflow behavior on a full queue is the same shape as a commit-error drop: logged, metered, and swallowed.
 
+## WAL sync mode — `Full` vs `Barrier`
+
+The per-batch WAL fsync is the single I/O call that gates every write ACK. `--wal-sync-mode` (env: `INFERADB__LEDGER__WAL_SYNC_MODE`) selects the fsync primitive; the default is `full`, preserving pre-existing behavior.
+
+| Mode      | Apple (macOS/iOS)        | Linux       | Process crash | Kernel panic | Power loss                    | Typical APFS SSD latency |
+| --------- | ------------------------ | ----------- | ------------- | ------------ | ----------------------------- | ------------------------ |
+| `full`    | `fcntl(F_FULLFSYNC)`     | `fdatasync` | Safe          | Safe         | Safe (non-volatile flush)     | 15-25 ms                 |
+| `barrier` | `fcntl(F_BARRIERFSYNC)`  | `fdatasync` | Safe          | Safe         | May lose last ~seconds        | 2-5 ms                   |
+
+`barrier` asks the drive to apply a write barrier but does not force flush to non-volatile media. Drives with power-loss-protection capacitors (most enterprise SSDs) make this effectively safe for power loss as well; consumer drives may lose the last ~seconds of writes.
+
+**When to flip to `barrier`:**
+
+- Development / benchmarking on macOS, where `F_FULLFSYNC` dominates write latency.
+- Production on hardware with reliable power-loss protection (enterprise SSDs with capacitors, cloud providers that guarantee durability on acknowledged writes).
+- Workloads that can tolerate a narrow power-loss recovery window in exchange for 4-8× write throughput.
+
+**When to stay on `full`:**
+
+- Commodity hardware without power-loss protection.
+- Strict compliance postures requiring absolute crash durability on every ACKed write.
+- Any deployment where "last ~seconds" is an unacceptable post-crash loss window.
+
+On Linux, `barrier` degrades to `fdatasync` (the same as `full`'s effect); the mode is primarily useful on Apple platforms. The implementation is isolated in `crates/fs-sync/` — the single workspace crate permitted `unsafe`, since no audited safe-syscall crate exposes `F_BARRIERFSYNC`.
+
 ## Tuning the StateCheckpointer
 
 The checkpointer is the operator's primary durability knob. It fires when **any** of three thresholds is crossed:

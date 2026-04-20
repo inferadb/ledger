@@ -19,6 +19,7 @@ inferadb-ledger-proto.workspace = true
 inferadb-ledger-state.workspace = true
 inferadb-ledger-store.workspace = true
 inferadb-ledger-consensus = { path = "../consensus" }
+inferadb-ledger-fs-sync.workspace = true
 
 # gRPC
 tonic.workspace = true

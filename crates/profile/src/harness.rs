@@ -268,6 +268,25 @@ impl Harness {
 
         Ok(Self { client, user, organization, vault: vault_info.vault })
     }
+
+    /// Provisions `n` additional vaults under the harness's existing org +
+    /// user, returning their slugs. Used by multi-vault workloads that need
+    /// to fan writes across multiple Raft shards / WAL streams.
+    ///
+    /// The harness's own `vault` is unaffected — callers typically discard
+    /// it or use it as one of the N targets.
+    pub async fn provision_vaults(&self, n: usize) -> Result<Vec<VaultSlug>, HarnessError> {
+        let mut vaults = Vec::with_capacity(n);
+        for _ in 0..n {
+            let info = self
+                .client
+                .create_vault(self.user, self.organization)
+                .await
+                .context(CreateVaultSnafu)?;
+            vaults.push(info.vault);
+        }
+        Ok(vaults)
+    }
 }
 
 #[cfg(test)]

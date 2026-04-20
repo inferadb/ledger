@@ -379,9 +379,12 @@ impl Default for BatchConfig {
 
 fn default_max_batch_size() -> usize {
     // Under concurrent load, a larger cap lets more proposals amortize a
-    // single WAL fsync. See `BatchWriterConfig` documentation for the tuning
-    // tradeoff.
-    500
+    // single WAL fsync. With `wal_sync_mode = barrier` the fsync itself is
+    // ~2-5ms on APFS SSDs, so the batch cap — not fsync latency — becomes
+    // the binding constraint; 2000 keeps the cap well above realistic
+    // per-region burst rates while `batch_timeout` (10ms) still bounds
+    // per-op latency at low load.
+    2000
 }
 
 fn default_batch_timeout() -> Duration {
@@ -640,7 +643,7 @@ mod tests {
     fn batch_config_default_is_valid() {
         let config = BatchConfig::default();
         assert!(config.validate().is_ok());
-        assert_eq!(config.max_batch_size, 500);
+        assert_eq!(config.max_batch_size, 2000);
         assert_eq!(config.batch_timeout, Duration::from_millis(10));
     }
 

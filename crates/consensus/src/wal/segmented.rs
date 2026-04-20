@@ -14,6 +14,8 @@ use std::{
     sync::Arc,
 };
 
+use inferadb_ledger_fs_sync::FileSyncMode;
+
 use crate::wal_backend::{CHECKPOINT_SHARD_ID, CheckpointFrame, WalBackend, WalError, WalFrame};
 
 /// Size of the frame header: 8 bytes shard_id + 8 bytes index + 8 bytes term + 4 bytes entry_len.
@@ -53,13 +55,28 @@ pub struct SegmentedWalBackend {
     next_preallocated: bool,
     /// Total number of frames written across all segments.
     total_frames_written: u64,
+    /// Sync mode applied at every `sync()` call — the single fsync that
+    /// gates a commit batch. `Full` preserves pre-existing durability
+    /// semantics; `Barrier` trades a small power-loss window for ~4-8×
+    /// lower commit latency on Apple platforms.
+    sync_mode: FileSyncMode,
 }
 
 impl SegmentedWalBackend {
-    /// Creates a new segmented WAL backend rooted at the given directory.
+    /// Creates a new segmented WAL backend rooted at the given directory,
+    /// using `FileSyncMode::Full` — the default, pre-existing durability
+    /// semantics. For operator-tunable sync modes use [`Self::open_with`].
     ///
     /// On open, scans for existing segment files to resume from where we left off.
     pub fn open(dir: &Path) -> Result<Self, WalError> {
+        Self::open_with(dir, FileSyncMode::Full)
+    }
+
+    /// Creates a new segmented WAL backend rooted at the given directory
+    /// with an explicit sync mode.
+    ///
+    /// See [`FileSyncMode`] for the durability matrix.
+    pub fn open_with(dir: &Path, sync_mode: FileSyncMode) -> Result<Self, WalError> {
         fs::create_dir_all(dir)
             .map_err(|e| WalError::Io { kind: e.kind(), message: e.to_string() })?;
 
@@ -85,6 +102,7 @@ impl SegmentedWalBackend {
             next_segment_index: next_index,
             next_preallocated: false,
             total_frames_written: 0,
+            sync_mode,
         })
     }
 
@@ -212,8 +230,7 @@ impl WalBackend for SegmentedWalBackend {
     #[tracing::instrument(level = "debug", skip_all)]
     fn sync(&mut self) -> Result<(), WalError> {
         if let Some(ref seg) = self.active {
-            seg.file
-                .sync_data()
+            inferadb_ledger_fs_sync::sync(&seg.file, self.sync_mode)
                 .map_err(|e| WalError::Io { kind: e.kind(), message: e.to_string() })?;
         }
         Ok(())
@@ -650,6 +667,37 @@ mod tests {
         assert_eq!(frames.len(), 2);
         assert_eq!(&*frames[0].data, b"first");
         assert_eq!(&*frames[1].data, b"second");
+    }
+
+    #[test]
+    fn test_open_with_barrier_mode_persists_and_replays() {
+        // Smoke test for `open_with(FileSyncMode::Barrier)`. The barrier-mode
+        // fsync path is a different syscall on Apple, so we verify that
+        // appending + sync + reopening still yields the written frames.
+        // Durability semantics under crash are matrix-documented separately;
+        // this test verifies functional parity with `Full` mode.
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut wal =
+                SegmentedWalBackend::open_with(dir.path(), FileSyncMode::Barrier).unwrap();
+            wal.append(&[frame(1, b"barrier-write-1"), frame(1, b"barrier-write-2")]).unwrap();
+            wal.sync().unwrap();
+        }
+
+        let wal = SegmentedWalBackend::open_with(dir.path(), FileSyncMode::Barrier).unwrap();
+        let frames = wal.read_frames(0).unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(&*frames[0].data, b"barrier-write-1");
+        assert_eq!(&*frames[1].data, b"barrier-write-2");
+    }
+
+    #[test]
+    fn test_open_defaults_to_full_sync_mode() {
+        // `open()` preserves the historical contract. This guards against a
+        // future refactor silently switching the default to `Barrier`.
+        let dir = tempfile::tempdir().unwrap();
+        let wal = SegmentedWalBackend::open(dir.path()).unwrap();
+        assert_eq!(wal.sync_mode, FileSyncMode::Full);
     }
 
     // --- CRC corruption detection ---

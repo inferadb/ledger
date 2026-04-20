@@ -37,6 +37,15 @@ These are not categorically banned but require a justifying comment or test-only
 
 Test utilities (`crates/test-utils/`) and `fuzz/` are exempt entirely — they exist to exercise failure paths, and `unwrap` / `panic` are idiomatic there.
 
+## Unsafe allowlist: `crates/fs-sync/`
+
+`crates/fs-sync/` is the single workspace crate permitted to use `unsafe`. It wraps `fcntl(F_BARRIERFSYNC)` on Apple platforms (no audited safe-syscall crate exposes it). Rules when auditing this crate:
+
+- `unsafe { .. }` blocks are permitted **only** inside `src/lib.rs` and **only** immediately surrounding a single syscall (`libc::fcntl` or equivalent).
+- Every `unsafe` block must carry a `SAFETY:` comment on the preceding lines. Flag any `unsafe` block missing one as a BLOCK finding.
+- Any `unsafe fn`, `unsafe impl`, or `unsafe trait` in this crate is still a BLOCK finding — only narrowly-scoped `unsafe { .. }` expressions are allowed.
+- `unsafe` outside `crates/fs-sync/src/lib.rs` remains a BLOCK finding everywhere else, no exceptions.
+
 ## Method
 
 1. Use `search_for_pattern` / `Grep` over `crates/*/src/**.rs` for each banned token:

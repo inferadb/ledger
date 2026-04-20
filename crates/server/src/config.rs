@@ -208,6 +208,24 @@ pub struct Config {
     #[serde(default)]
     pub raft: Option<inferadb_ledger_types::config::RaftConfig>,
 
+    /// WAL sync mode — controls the fsync primitive used by the per-batch
+    /// WAL commit that gates write ACKs.
+    ///
+    /// - `full` (default) — full durability. Survives process crash,
+    ///   kernel panic, and power loss. On Apple platforms uses
+    ///   `fcntl(F_FULLFSYNC)`. Typical APFS SSD latency: 15-25ms.
+    /// - `barrier` — barrier fsync. Survives process crash and kernel
+    ///   panic; may lose the last few seconds of writes on sudden power
+    ///   loss (hardware-dependent). On Apple platforms uses
+    ///   `fcntl(F_BARRIERFSYNC)`. Typical APFS SSD latency: 2-5ms.
+    ///   On Linux degrades to `fdatasync` (same as `full`).
+    ///
+    /// See `docs/operations/durability.md` for the complete matrix.
+    #[arg(long = "wal-sync-mode", env = "INFERADB__LEDGER__WAL_SYNC_MODE", value_enum, default_value_t = Default::default())]
+    #[serde(default)]
+    #[builder(default)]
+    pub wal_sync_mode: inferadb_ledger_types::config::FileSyncMode,
+
     // === Write Batching ===
     /// Per-region write-batching configuration.
     ///
@@ -408,6 +426,7 @@ impl Default for Config {
             max_concurrent: default_max_concurrent(),
             timeout_secs: default_timeout_secs(),
             raft: None,
+            wal_sync_mode: inferadb_ledger_types::config::FileSyncMode::default(),
             batching: inferadb_ledger_types::config::BatchConfig::default(),
             logging: LoggingConfig::default(),
             backup: None,
@@ -645,6 +664,10 @@ mod tests {
         assert_eq!(config.timeout_secs, 30);
         assert!(config.join.is_none());
         assert!(config.data_dir.is_none());
+        assert_eq!(
+            config.wal_sync_mode,
+            inferadb_ledger_types::config::FileSyncMode::Full,
+        );
     }
 
     #[test]

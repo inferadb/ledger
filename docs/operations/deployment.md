@@ -254,6 +254,7 @@ Configuration can be set via CLI arguments or environment variables. CLI argumen
 | `--log-format`             | —                                          | `auto`        | Log format: `text`, `json`, or `auto`                                   |
 | `--concurrent`             | `INFERADB__LEDGER__MAX_CONCURRENT`         | `10000`       | Max concurrent requests                                                 |
 | `--timeout`                | `INFERADB__LEDGER__TIMEOUT`                | `30`          | Request timeout in seconds                                              |
+| `--wal-sync-mode`          | `INFERADB__LEDGER__WAL_SYNC_MODE`          | `full`        | WAL fsync mode: `full` (full durability) or `barrier` (fast, power-loss window) |
 
 At least one of `--listen` or `--socket` must be specified.
 
