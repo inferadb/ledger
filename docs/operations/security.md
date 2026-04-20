@@ -60,7 +60,9 @@ Endpoint = peer2.example.com:51820
 Ledger then binds to the WireGuard interface:
 
 ```bash
-INFERADB__LEDGER__LISTEN=10.0.0.1:50051 inferadb-ledger --cluster 3
+INFERADB__LEDGER__LISTEN=10.0.0.1:50051 \
+INFERADB__LEDGER__JOIN=10.0.0.2:50051,10.0.0.3:50051 \
+inferadb-ledger
 ```
 
 ### Alternative: VPC/Private Network

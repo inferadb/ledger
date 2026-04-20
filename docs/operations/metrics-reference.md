@@ -35,7 +35,7 @@ curl http://localhost:9090/metrics
 Enable with `--metrics` or `INFERADB__LEDGER__METRICS`:
 
 ```bash
-INFERADB__LEDGER__METRICS=0.0.0.0:9090 inferadb-ledger --single
+INFERADB__LEDGER__METRICS=0.0.0.0:9090 inferadb-ledger --listen 0.0.0.0:50051 --data /tmp/ledger
 ```
 
 ## Naming Conventions
@@ -57,7 +57,6 @@ All 13 gRPC services emit unified request metrics via `RequestContext::drop()`. 
 | ------------------------------------- | --------- | ----------------------------- | ----------------------------- |
 | `ledger_grpc_requests_total`          | Counter   | `service`, `method`, `status` | gRPC requests by endpoint     |
 | `ledger_grpc_request_latency_seconds` | Histogram | `service`, `method`           | gRPC request latency          |
-| `ledger_grpc_sli_latency_seconds`     | Histogram | `service`, `method`, `status` | Per-RPC latency (SLI buckets) |
 | `ledger_active_connections`           | Gauge     | -                             | Active gRPC connections       |
 
 **Labels:**

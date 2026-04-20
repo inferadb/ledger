@@ -79,10 +79,10 @@ spec:
       containers:
         - name: ledger
           env:
-            - name: INFERADB__LEDGER__CLUSTER
-              value: "3"
-            - name: INFERADB__LEDGER__PEERS
-              value: "ledger-headless.ledger-us-east.svc.cluster.local"
+            - name: INFERADB__LEDGER__LISTEN
+              value: "0.0.0.0:50051"
+            - name: INFERADB__LEDGER__JOIN
+              value: "ledger-headless.ledger-us-east.svc.cluster.local:50051"
 ```
 
 ### 2. Configure Organization Routing

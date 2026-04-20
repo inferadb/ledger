@@ -98,8 +98,10 @@ docker run -d --name ledger-restore-test \
   -p 50052:50051 \
   -e INFERADB__LEDGER__LISTEN=0.0.0.0:50051 \
   -e INFERADB__LEDGER__DATA=/data \
-  -e INFERADB__LEDGER__CLUSTER=1 \
   inferadb/ledger:latest
+
+# Once the container is running, bootstrap it as a single-node test cluster
+docker exec ledger-restore-test inferadb-ledger init --host localhost:50051
 ```
 
 ### 3. Verify Restore

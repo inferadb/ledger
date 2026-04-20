@@ -48,8 +48,7 @@ data:
   INFERADB__LEDGER__LISTEN: "0.0.0.0:50051"
   INFERADB__LEDGER__METRICS: "0.0.0.0:9090"
   INFERADB__LEDGER__DATA: "/data"
-  INFERADB__LEDGER__CLUSTER: "3"
-  INFERADB__LEDGER__PEERS: "ledger-headless.inferadb.svc.cluster.local"
+  INFERADB__LEDGER__JOIN: "ledger-headless.inferadb.svc.cluster.local:50051"
 ```
 
 **Headless Service:**

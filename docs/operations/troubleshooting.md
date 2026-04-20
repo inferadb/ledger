@@ -159,7 +159,7 @@ grpcurl -plaintext localhost:50051 ledger.v1.AdminService/GetNodeInfo
 
 **Solutions**:
 
-1. Verify `--peers` DNS resolves correctly
+1. Verify `--join` DNS resolves correctly
 2. Check network connectivity to seed nodes
 3. Ensure consistent cluster configuration
 
@@ -207,7 +207,7 @@ Enable verbose logging:
 
 ```bash
 # Full debug logging
-RUST_LOG=debug inferadb-ledger --single
+RUST_LOG=debug inferadb-ledger --listen 0.0.0.0:50051 --data /tmp/ledger
 
 # Module-specific logging
 RUST_LOG=inferadb_ledger_raft=debug,inferadb_ledger_state=info inferadb-ledger

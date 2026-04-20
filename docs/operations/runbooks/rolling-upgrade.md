@@ -21,7 +21,7 @@ Running nodes on different binary versions in the same Raft group is **not suppo
 
 **What happens if attempted**:
 
-1. Leader and follower negotiate a snapshot transfer via openraft's `install_snapshot` RPC.
+1. Leader and follower negotiate a snapshot transfer via the consensus engine's `install_snapshot` path (custom in-house implementation in `crates/raft/src/log_storage/raft_impl.rs`, streaming zstd-compressed snapshots via `crates/raft/src/snapshot.rs`).
 2. The sender serializes snapshot chunks using the new file-based streaming format (zstd-compressed, SHA-256 verified).
 3. The receiver expects the old in-memory blob format and fails to decode the chunks.
 4. The follower cannot catch up — it will retry indefinitely, never joining the cluster.
@@ -154,11 +154,14 @@ systemctl daemon-reload
 
 ### Step 4: Start First Node
 
-Start one node as a single-node cluster to perform the restore:
+Start one node and bootstrap it as a single-node cluster to perform the restore:
 
 ```bash
-# Start in single-node mode
-inferadb-ledger --single --data /var/lib/ledger
+# Start the node
+inferadb-ledger --listen 0.0.0.0:50051 --data /var/lib/ledger &
+
+# Bootstrap it as a single-node cluster
+inferadb-ledger init --host localhost:50051
 ```
 
 ### Step 5: Restore from Backup
@@ -203,14 +206,14 @@ systemctl stop ledger
 # Start all nodes in cluster mode
 # Node 1 (has restored data):
 INFERADB__LEDGER__DATA=/var/lib/ledger \
-INFERADB__LEDGER__CLUSTER=3 \
-INFERADB__LEDGER__PEERS=node1,node2,node3 \
+INFERADB__LEDGER__LISTEN=0.0.0.0:50051 \
+INFERADB__LEDGER__JOIN=node1:50051,node2:50051,node3:50051 \
 inferadb-ledger
 
 # Nodes 2 and 3 (empty, will sync from node 1):
 INFERADB__LEDGER__DATA=/var/lib/ledger \
-INFERADB__LEDGER__JOIN=true \
-INFERADB__LEDGER__PEERS=node1:50051 \
+INFERADB__LEDGER__LISTEN=0.0.0.0:50051 \
+INFERADB__LEDGER__JOIN=node1:50051 \
 inferadb-ledger
 ```
 

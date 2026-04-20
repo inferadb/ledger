@@ -43,7 +43,7 @@ An organization is an organizational boundary (typically one per customer/org). 
 1. Start the new node with `--join`:
 
    ```bash
-   inferadb-ledger --join --data /data --peers existing-cluster.internal
+   inferadb-ledger --listen 0.0.0.0:50051 --data /data --join existing-cluster.internal:50051
    ```
 
 2. From an existing cluster member, add the node:
@@ -115,10 +115,11 @@ Common causes:
 
 ### Can I run a single-node cluster?
 
-Yes, for development and testing:
+Yes, for development and testing. Start the node, then run `init` to bootstrap it as a single-node cluster:
 
 ```bash
-inferadb-ledger --single --data /tmp/ledger
+inferadb-ledger --listen 0.0.0.0:50051 --data /tmp/ledger &
+inferadb-ledger init --host localhost:50051
 ```
 
 Not recommended for production. Single-node provides no fault tolerance.
@@ -195,7 +196,7 @@ Cross-region operations are not supported; design your organization placement ac
 ### How do I enable debug logging?
 
 ```bash
-RUST_LOG=debug inferadb-ledger --single
+RUST_LOG=debug inferadb-ledger --listen 0.0.0.0:50051 --data /tmp/ledger
 
 # Module-specific
 RUST_LOG=inferadb_ledger_raft=debug,inferadb_ledger_state=info inferadb-ledger

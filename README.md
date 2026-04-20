@@ -76,22 +76,22 @@ For Kubernetes, Docker Compose, or systemd deployments, see the [deployment guid
 **Start a node:**
 
 ```bash
-inferadb-ledger --listen 0.0.0.0:9090 --data /var/lib/ledger
+inferadb-ledger --listen 0.0.0.0:50051 --data /var/lib/ledger
 ```
 
 **Bootstrap the cluster (once, from any machine):**
 
 ```bash
-inferadb-ledger init --host node1:9090
+inferadb-ledger init --host node1:50051
 ```
 
 **Add more nodes:**
 
 ```bash
 inferadb-ledger \
-  --listen 0.0.0.0:9090 \
+  --listen 0.0.0.0:50051 \
   --data /var/lib/ledger \
-  --join node1:9090
+  --join node1:50051
 ```
 
 Nodes discover each other via `--join` seed addresses. The cluster manages membership automatically — new nodes are added as learners and promoted to voters once caught up. On restart, only `--data` is required; peer addresses are read from persisted Raft membership state.
@@ -100,9 +100,9 @@ Nodes discover each other via `--join` seed addresses. The cluster manages membe
 
 ```bash
 inferadb-ledger \
-  --listen 0.0.0.0:9090 \
+  --listen 0.0.0.0:50051 \
   --data /var/lib/ledger \
-  --join node1:9090 \
+  --join node1:50051 \
   --region ie-east-dublin
 ```
 

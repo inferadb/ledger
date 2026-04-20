@@ -12,11 +12,11 @@ Ledger uses a CockroachDB-style `start`+`init` bootstrap pattern. Nodes start th
 mkdir -p /var/lib/ledger
 
 ./target/release/inferadb-ledger \
-  --listen 127.0.0.1:9090 \
+  --listen 127.0.0.1:50051 \
   --data /var/lib/ledger
 
 # Initialize (once, from any machine that can reach the node)
-./target/release/inferadb-ledger init --host 127.0.0.1:9090
+./target/release/inferadb-ledger init --host 127.0.0.1:50051
 ```
 
 ### Multi-Node Cluster (3 nodes)
@@ -27,7 +27,7 @@ Start each node with `--join` pointing to one or more seed addresses. Each node 
 
 ```bash
 ./target/release/inferadb-ledger \
-  --listen 192.168.1.101:9090 \
+  --listen 192.168.1.101:50051 \
   --data /var/lib/ledger
 ```
 
@@ -35,24 +35,24 @@ Start each node with `--join` pointing to one or more seed addresses. Each node 
 
 ```bash
 ./target/release/inferadb-ledger \
-  --listen 192.168.1.102:9090 \
+  --listen 192.168.1.102:50051 \
   --data /var/lib/ledger \
-  --join 192.168.1.101:9090
+  --join 192.168.1.101:50051
 ```
 
 **Node 3** (`192.168.1.103`):
 
 ```bash
 ./target/release/inferadb-ledger \
-  --listen 192.168.1.103:9090 \
+  --listen 192.168.1.103:50051 \
   --data /var/lib/ledger \
-  --join 192.168.1.101:9090,192.168.1.102:9090
+  --join 192.168.1.101:50051,192.168.1.102:50051
 ```
 
 **Initialize the cluster (once):**
 
 ```bash
-./target/release/inferadb-ledger init --host 192.168.1.101:9090
+./target/release/inferadb-ledger init --host 192.168.1.101:50051
 ```
 
 All nodes discover each other via `--join` seed addresses, exchange node info, and form the cluster automatically after initialization.
@@ -109,9 +109,9 @@ Start the new node with `--join` pointing to any existing cluster member:
 
 ```bash
 ./target/release/inferadb-ledger \
-  --listen 192.168.1.104:9090 \
+  --listen 192.168.1.104:50051 \
   --data /var/lib/ledger \
-  --join 192.168.1.101:9090
+  --join 192.168.1.101:50051
 ```
 
 The node will:
@@ -204,9 +204,9 @@ mkdir -p /var/lib/ledger/snapshots
 cp /backup/000010000.snap /var/lib/ledger/snapshots/
 
 ./target/release/inferadb-ledger \
-  --listen 0.0.0.0:9090 \
+  --listen 0.0.0.0:50051 \
   --data /var/lib/ledger \
-  --join existing-node:9090
+  --join existing-node:50051
 ```
 
 The node will:
@@ -225,13 +225,13 @@ If all nodes are lost, restore from the most recent backup:
 cp -r /backup/ledger-node1 /var/lib/ledger
 
 # Start the first node
-./target/release/inferadb-ledger --listen 0.0.0.0:9090 --data /var/lib/ledger
+./target/release/inferadb-ledger --listen 0.0.0.0:50051 --data /var/lib/ledger
 
 # Initialize the restored cluster
-./target/release/inferadb-ledger init --host node1:9090
+./target/release/inferadb-ledger init --host node1:50051
 
 # Start remaining nodes with --join
-./target/release/inferadb-ledger --listen 0.0.0.0:9090 --data /var/lib/ledger --join node1:9090
+./target/release/inferadb-ledger --listen 0.0.0.0:50051 --data /var/lib/ledger --join node1:50051
 ```
 
 ## Configuration Reference
@@ -306,8 +306,10 @@ Use the provided Helm chart or raw manifests.
 
 ```bash
 helm install ledger ./deploy/helm/inferadb-ledger \
-  --organization inferadb \
-  --create-organization
+  --namespace inferadb \
+  --create-namespace \
+  --set replicaCount=3 \
+  --set persistence.size=50Gi
 ```
 
 **Kustomize:**

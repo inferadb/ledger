@@ -618,12 +618,12 @@
       },
       "targets": [
         {
-          "expr": "rate(ledger_idempotency_cache_hits_total[5m])",
+          "expr": "rate(ledger_idempotency_operations_total{result=\"hit\"}[5m])",
           "legendFormat": "Hits",
           "refId": "A"
         },
         {
-          "expr": "rate(ledger_idempotency_cache_misses_total[5m])",
+          "expr": "rate(ledger_idempotency_operations_total{result=\"miss\"}[5m])",
           "legendFormat": "Misses",
           "refId": "B"
         }

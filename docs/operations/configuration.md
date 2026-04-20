@@ -121,7 +121,7 @@ Batching is configured via `NodeConfig.batching` (set at startup) plus `RuntimeC
 
 | Parameter        | Default | Description                                                            |
 | ---------------- | ------- | ---------------------------------------------------------------------- |
-| `max_batch_size` | 500     | Upper bound on writes coalesced into one Raft proposal / one WAL fsync |
+| `max_batch_size` | 2000    | Upper bound on writes coalesced into one Raft proposal / one WAL fsync |
 | `batch_timeout`  | 10ms    | Max wait before flushing a partial batch (caps single-client latency)  |
 
 Internal polling cadence (`tick_interval`, not operator-facing) is derived as `batch_timeout / 2`, clamped to `[1ms, 10ms]`.

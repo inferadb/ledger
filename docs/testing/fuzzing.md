@@ -22,21 +22,22 @@ cargo +nightly fuzz run fuzz_proto_convert --fuzz-dir fuzz
 cargo +nightly fuzz run fuzz_postcard_codec --fuzz-dir fuzz -- -max_total_time=300
 
 # Run all targets as a smoke test (60 seconds each)
-for target in fuzz_proto_convert fuzz_postcard_codec fuzz_btree_keys fuzz_pagination_token fuzz_wal_frames fuzz_rkyv_entries; do
+for target in fuzz_proto_convert fuzz_postcard_codec fuzz_btree_keys fuzz_pagination_token fuzz_email_hmac fuzz_encrypted_page fuzz_region_serde; do
     cargo +nightly fuzz run "$target" --fuzz-dir fuzz -- -max_total_time=60
 done
 ```
 
 ## Fuzz Targets
 
-| Target                  | Attack Surface                                     |
-| ----------------------- | -------------------------------------------------- |
-| `fuzz_proto_convert`    | Protobuf deserialization (gRPC requests)           |
-| `fuzz_postcard_codec`   | Postcard codec for domain types                    |
-| `fuzz_btree_keys`       | B+ tree key encoding/decoding, varint              |
-| `fuzz_pagination_token` | HMAC-signed pagination token parsing               |
-| `fuzz_wal_frames`       | WAL frame parsing, CRC validation, crash recovery  |
-| `fuzz_rkyv_entries`     | rkyv archived entry deserialization and validation |
+| Target                  | Attack Surface                                                              |
+| ----------------------- | --------------------------------------------------------------------------- |
+| `fuzz_proto_convert`    | Protobuf deserialization (gRPC requests)                                    |
+| `fuzz_postcard_codec`   | Postcard codec for domain types                                             |
+| `fuzz_btree_keys`       | B+ tree key encoding/decoding, varint                                       |
+| `fuzz_pagination_token` | HMAC-signed pagination token parsing                                        |
+| `fuzz_email_hmac`       | HMAC-SHA256 email blinding input handling                                   |
+| `fuzz_encrypted_page`   | Page-level envelope-encryption decode + authentication tag validation       |
+| `fuzz_region_serde`     | `Region` enum (de)serialization across stable wire + runtime representations |
 
 ## Investigating Crashes
 

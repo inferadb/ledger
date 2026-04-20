@@ -58,8 +58,7 @@ EOF
 inferadb-ledger \
   --listen 0.0.0.0:50051 \
   --data /var/lib/ledger-new \
-  --peers /var/lib/ledger-new/peers.json \
-  --join
+  --join existing-node-1:50051,existing-node-2:50051,existing-node-3:50051
 ```
 
 The node will:
@@ -128,7 +127,7 @@ kubectl get pods -l app=ledger -w
 kubectl exec ledger-0 -- grpcurl -plaintext localhost:50051 ledger.v1.AdminService/GetClusterInfo
 ```
 
-**Note**: The Helm chart automatically configures `INFERADB__LEDGER__CLUSTER` based on `replicaCount`. When scaling, update the Helm release:
+**Note**: The Helm chart wires each pod's `INFERADB__LEDGER__JOIN` at the headless service FQDN; new pods auto-join. When scaling, update the Helm release:
 
 ```bash
 helm upgrade ledger ./deploy/helm/inferadb-ledger --set replicaCount=5
@@ -271,7 +270,7 @@ If cluster split into multiple partitions:
 
 1. **Stop all nodes**
 2. **Identify which partition has latest data** (highest commit index)
-3. **Restart surviving partition** with `--single` to force new cluster
+3. **Restart surviving partition** and run `inferadb-ledger init` to re-bootstrap as a new cluster
 4. **Add new nodes** to replace lost ones
 
 See [Disaster Recovery](disaster-recovery.md) for detailed procedures.

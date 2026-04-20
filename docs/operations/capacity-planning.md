@@ -89,7 +89,7 @@ Each `WriteTransaction` accumulates COW (copy-on-write) pages in memory before c
 | Snapshot installation   | Proportional to state size (all pages rewritten) |
 | B-tree compaction merge | ~128 KB per merge                                |
 
-Monitor `inferadb_ledger_resource_write_txn_dirty_pages` for actual COW page counts.
+Monitor `ledger_disk_bytes_used` per region (labelled by `region`) to track actual persisted bytes.
 
 ### Per-Region Sizing
 

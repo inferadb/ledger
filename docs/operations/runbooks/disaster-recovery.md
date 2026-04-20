@@ -30,8 +30,7 @@ grpcurl -plaintext healthy-node:50051 \
 # Start replacement node
 INFERADB__LEDGER__DATA=/data \
 INFERADB__LEDGER__LISTEN=0.0.0.0:50051 \
-INFERADB__LEDGER__JOIN=true \
-INFERADB__LEDGER__PEERS=healthy-node:50051 \
+INFERADB__LEDGER__JOIN=healthy-node:50051 \
 inferadb-ledger
 ```
 
@@ -57,13 +56,16 @@ systemctl stop ledger
 
 > **⚠️ WARNING: Split-Brain Risk**
 >
-> Using `--single` creates a NEW cluster from this node's data, abandoning the old cluster identity. If other nodes from the old cluster come back online, you will have TWO separate clusters with potentially diverged data.
+> Starting a node and running `init` against it creates a NEW cluster from that node's data, abandoning the old cluster identity. If other nodes from the old cluster come back online, you will have TWO separate clusters with potentially diverged data.
 >
-> **Only use `--single` when you are CERTAIN the old cluster is permanently destroyed** or all other nodes' data will be wiped before rejoining.
+> **Only do this when you are CERTAIN the old cluster is permanently destroyed** or all other nodes' data will be wiped before rejoining.
 
 ```bash
-# Start single node as new cluster
-inferadb-ledger --single --data /data
+# Start the surviving node
+inferadb-ledger --listen 0.0.0.0:50051 --data /data &
+
+# Re-bootstrap it as a new single-node cluster
+inferadb-ledger init --host localhost:50051
 ```
 
 3. **Verify data**:
@@ -85,9 +87,10 @@ done
 # Stop single-node mode
 systemctl stop ledger
 
-# Restart as cluster with new nodes
-INFERADB__LEDGER__CLUSTER=3 \
-INFERADB__LEDGER__PEERS=node1,node2,node3 \
+# Restart as cluster with new nodes (each node runs with --join pointing
+# at the seed addresses of the other members)
+INFERADB__LEDGER__LISTEN=0.0.0.0:50051 \
+INFERADB__LEDGER__JOIN=node1:50051,node2:50051,node3:50051 \
 inferadb-ledger
 ```
 
@@ -112,10 +115,11 @@ tar -xzf $RESTORE_DIR/snapshot.tar.gz -C $RESTORE_DIR
 
 > **⚠️ WARNING: New Cluster Identity**
 >
-> Using `--single` creates a NEW cluster. This is appropriate here because you're restoring from backup after total loss. Do NOT use this if any nodes from the original cluster might still have data.
+> Starting a node against restored data and running `init` creates a NEW cluster. This is appropriate here because you're restoring from backup after total loss. Do NOT do this if any nodes from the original cluster might still have data.
 
 ```bash
-inferadb-ledger --single --data $RESTORE_DIR
+inferadb-ledger --listen 0.0.0.0:50051 --data $RESTORE_DIR &
+inferadb-ledger init --host localhost:50051
 ```
 
 3. **Verify restored state**:
@@ -148,14 +152,14 @@ rm -rf /data/*
 # Start cluster (node1 has restored data)
 # Node 1:
 INFERADB__LEDGER__DATA=$RESTORE_DIR \
-INFERADB__LEDGER__CLUSTER=3 \
-INFERADB__LEDGER__PEERS=node1,node2,node3 \
+INFERADB__LEDGER__LISTEN=0.0.0.0:50051 \
+INFERADB__LEDGER__JOIN=node1:50051,node2:50051,node3:50051 \
 inferadb-ledger
 
 # Nodes 2 and 3:
 INFERADB__LEDGER__DATA=/data \
-INFERADB__LEDGER__JOIN=true \
-INFERADB__LEDGER__PEERS=node1:50051 \
+INFERADB__LEDGER__LISTEN=0.0.0.0:50051 \
+INFERADB__LEDGER__JOIN=node1:50051 \
 inferadb-ledger
 ```
 
@@ -239,8 +243,12 @@ cd /dr-region
 aws s3 sync s3://ledger-primary-backups/latest/ ./data/
 
 INFERADB__LEDGER__DATA=./data \
-INFERADB__LEDGER__CLUSTER=3 \
-inferadb-ledger
+INFERADB__LEDGER__LISTEN=0.0.0.0:50051 \
+INFERADB__LEDGER__JOIN=dr-node1:50051,dr-node2:50051,dr-node3:50051 \
+inferadb-ledger &
+
+# After all three DR nodes are up, re-bootstrap as a new cluster:
+inferadb-ledger init --host dr-node1:50051
 ```
 
 3. **Update DNS/routing**:

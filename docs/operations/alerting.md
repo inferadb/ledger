@@ -38,14 +38,14 @@ ledger_page_cache_size
 | Metric                                     | Warning   | Critical  | Action                                          |
 | ------------------------------------------ | --------- | --------- | ----------------------------------------------- |
 | `ledger_btree_depth`                       | > 5       | > 7       | Increase page size, review key distribution     |
-| `rate(ledger_btree_page_splits_total[5m])` | > 100/min | > 500/min | Indicates heavy write load; review batch sizing |
+| `rate(ledger_btree_operations_total{kind="split"}[5m])` | > 100/min | > 500/min | Indicates heavy write load; review batch sizing |
 
 ```promql
 # Warning: excessive B-tree depth
 ledger_btree_depth > 5
 
 # Warning: high split rate
-rate(ledger_btree_page_splits_total[5m]) > 100/60
+rate(ledger_btree_operations_total{kind="split"}[5m]) > 100/60
 ```
 
 ## Compaction Lag
