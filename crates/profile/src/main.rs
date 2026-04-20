@@ -63,6 +63,10 @@ enum Preset {
     RelationshipWrites(PresetArgs),
     /// Pure check_relationship loop against 1k pre-seeded relationships.
     RelationshipReads(PresetArgs),
+    /// N concurrent writers. Tests whether Raft's BatchWriter amortizes WAL
+    /// fsync under concurrent load. Each task owns its own key-prefix (no
+    /// write-write contention).
+    ConcurrentWrites(ConcurrentWritesArgs),
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -77,6 +81,19 @@ struct PresetArgs {
     /// by scripts/profile-suite.sh to aggregate across workloads.
     #[arg(long, value_name = "PATH")]
     metrics_json: Option<std::path::PathBuf>,
+}
+
+/// Args for the `concurrent-writes` preset — the base preset args plus a
+/// `--concurrency` knob for the number of writer tasks to spawn.
+#[derive(clap::Args, Debug, Clone)]
+struct ConcurrentWritesArgs {
+    #[command(flatten)]
+    base: PresetArgs,
+
+    /// Number of concurrent writer tasks. Each task runs its own serial write
+    /// loop against its own key-prefix.
+    #[arg(long, default_value_t = 32)]
+    concurrency: usize,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -97,6 +114,7 @@ async fn main() -> Result<(), MainError> {
         Preset::EntityReads(a) => (a, "entity-reads"),
         Preset::RelationshipWrites(a) => (a, "relationship-writes"),
         Preset::RelationshipReads(a) => (a, "relationship-reads"),
+        Preset::ConcurrentWrites(a) => (&a.base, "concurrent-writes"),
     };
 
     let duration = std::time::Duration::from_secs(args.duration);
@@ -117,6 +135,9 @@ async fn main() -> Result<(), MainError> {
         Preset::RelationshipReads(_) => {
             workloads::relationship_reads::run(&harness, duration).await
         },
+        Preset::ConcurrentWrites(a) => {
+            workloads::concurrent_writes::run(&harness, duration, a.concurrency).await
+        },
     };
 
     summary.print(preset_name);
@@ -129,4 +150,51 @@ async fn main() -> Result<(), MainError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn concurrent_writes_parses_with_explicit_concurrency() {
+        let cli = Cli::try_parse_from([
+            "inferadb-ledger-profile",
+            "concurrent-writes",
+            "--endpoint",
+            "http://127.0.0.1:50051",
+            "--duration",
+            "30",
+            "--concurrency",
+            "16",
+        ])
+        .unwrap();
+        match cli.preset {
+            Preset::ConcurrentWrites(a) => {
+                assert_eq!(a.base.endpoint, "http://127.0.0.1:50051");
+                assert_eq!(a.base.duration, 30);
+                assert_eq!(a.concurrency, 16);
+                assert!(a.base.metrics_json.is_none());
+            },
+            other => panic!("expected ConcurrentWrites, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn concurrent_writes_defaults_concurrency_to_32() {
+        let cli = Cli::try_parse_from([
+            "inferadb-ledger-profile",
+            "concurrent-writes",
+            "--endpoint",
+            "http://127.0.0.1:50051",
+        ])
+        .unwrap();
+        match cli.preset {
+            Preset::ConcurrentWrites(a) => assert_eq!(a.concurrency, 32),
+            other => panic!("expected ConcurrentWrites, got {other:?}"),
+        }
+    }
 }

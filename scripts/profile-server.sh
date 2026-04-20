@@ -11,6 +11,8 @@
 # Usage: scripts/profile-server.sh <mode> <workload> [duration_secs]
 #   mode:          sampling | spans
 #   workload:      throughput-writes | mixed-rw | check-heavy
+#                | entity-reads | relationship-writes | relationship-reads
+#                | concurrent-writes
 #   duration_secs: measured-phase duration (default 60)
 #
 # Environment variables:
@@ -21,6 +23,9 @@
 #   PROFILE_METRICS_PATH  when set, passed as --metrics-json to the workload
 #                         binary; the measured-phase metrics report is written
 #                         to that path (consumed by scripts/profile-suite.sh)
+#   CONCURRENCY           only honored when workload=concurrent-writes; number
+#                         of concurrent writer tasks (default 32). Other
+#                         workloads ignore this variable.
 
 set -euo pipefail
 
@@ -66,8 +71,18 @@ esac
 
 case "$WORKLOAD" in
     throughput-writes|mixed-rw|check-heavy) ;;
-    *) echo "error: unknown workload '$WORKLOAD' (expected throughput-writes|mixed-rw|check-heavy)" >&2; exit 1 ;;
+    entity-reads|relationship-writes|relationship-reads) ;;
+    concurrent-writes) ;;
+    *) echo "error: unknown workload '$WORKLOAD' (expected throughput-writes|mixed-rw|check-heavy|entity-reads|relationship-writes|relationship-reads|concurrent-writes)" >&2; exit 1 ;;
 esac
+
+# concurrent-writes accepts an optional --concurrency flag; default 32. Other
+# presets don't accept it, so we only append when the workload matches.
+CONCURRENCY="${CONCURRENCY:-32}"
+EXTRA_ARGS=()
+if [[ "$WORKLOAD" == "concurrent-writes" ]]; then
+    EXTRA_ARGS=(--concurrency "$CONCURRENCY")
+fi
 
 if [[ "$MODE" == "spans" ]]; then
     command -v inferno-flamegraph >/dev/null 2>&1 || {
@@ -296,6 +311,7 @@ echo "==> warmup (${WARMUP_SECS}s, preset=$WORKLOAD)"
 "$PROFILE_BIN" "$WORKLOAD" \
     --endpoint "$ENDPOINT" \
     --duration "$WARMUP_SECS" \
+    ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
     > "$DATA_DIR/warmup.log" 2>&1 || {
         echo "error: warmup failed; last log lines:" >&2
         tail -30 "$DATA_DIR/warmup.log" >&2 || true
@@ -308,11 +324,13 @@ if [[ -n "${PROFILE_METRICS_PATH:-}" ]]; then
         --endpoint "$ENDPOINT" \
         --duration "$DURATION" \
         --metrics-json "$PROFILE_METRICS_PATH" \
+        ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
         2>&1 | tee "$DATA_DIR/measured.log" || true
 else
     "$PROFILE_BIN" "$WORKLOAD" \
         --endpoint "$ENDPOINT" \
         --duration "$DURATION" \
+        ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
         2>&1 | tee "$DATA_DIR/measured.log" || true
 fi
 

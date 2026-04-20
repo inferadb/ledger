@@ -84,6 +84,17 @@ impl Summary {
         }
     }
 
+    /// Merge another summary's operation counts, error counts, and per-op
+    /// latencies into this one. Used by the `concurrent-writes` workload to
+    /// combine per-task results into one run-wide summary. Intentionally does
+    /// not touch `elapsed` — the concurrent driver sets wall-clock elapsed
+    /// from its outer `start.elapsed()`, not the sum of per-task durations.
+    pub fn merge(&mut self, other: Summary) {
+        self.operations += other.operations;
+        self.errors += other.errors;
+        self.latencies.extend(other.latencies);
+    }
+
     /// Compute percentiles from the recorded successful-op latencies. Returns
     /// zeros if no latencies have been recorded.
     pub fn percentiles(&self) -> Percentiles {
