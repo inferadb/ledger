@@ -15,7 +15,7 @@ Complete reference for Ledger configuration via environment variables and CLI ar
 | `INFERADB__LEDGER__ADVERTISE`        | `--advertise`  | _(auto)_      | Address advertised to peers                  |
 | `INFERADB__LEDGER__MAX_CONCURRENT`   | `--concurrent` | `10000`       | Max concurrent requests                      |
 | `INFERADB__LEDGER__TIMEOUT`          | `--timeout`    | `30`          | Request timeout (seconds)                    |
-| `INFERADB__LEDGER__WAL_SYNC_MODE`    | `--wal-sync-mode` | `full`     | WAL fsync mode (`full` \| `barrier`)        |
+| `INFERADB__LEDGER__WAL_SYNC_MODE`    | `--wal-sync-mode` | `barrier`  | WAL fsync mode (`barrier` \| `full`)        |
 | —                                    | `--log-format` | `auto`        | Log format (`text`/`json`/`auto`)            |
 | `INFERADB__LEDGER__LOGGING__ENABLED` | —              | `true`        | Enable request logging                       |
 

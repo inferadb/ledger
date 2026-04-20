@@ -125,30 +125,31 @@ Even in the strict-synchronous (`enabled = false`) mode, `record_handler_event` 
 
 With batching enabled (the default), the best-effort window widens to "one StateCheckpointer interval on crash" (default ~500ms, floor 50ms). This is a quantitative widening of the same best-effort category, not a new category of loss. The `Drop` overflow behavior on a full queue is the same shape as a commit-error drop: logged, metered, and swallowed.
 
-## WAL sync mode — `Full` vs `Barrier`
+## WAL sync mode — `Barrier` (default) vs `Full`
 
-The per-batch WAL fsync is the single I/O call that gates every write ACK. `--wal-sync-mode` (env: `INFERADB__LEDGER__WAL_SYNC_MODE`) selects the fsync primitive; the default is `full`, preserving pre-existing behavior.
+The per-batch WAL fsync is the single I/O call that gates every write ACK. `--wal-sync-mode` (env: `INFERADB__LEDGER__WAL_SYNC_MODE`) selects the fsync primitive; the default is `barrier`.
 
 | Mode      | Apple (macOS/iOS)        | Linux       | Process crash | Kernel panic | Power loss                    | Typical APFS SSD latency |
 | --------- | ------------------------ | ----------- | ------------- | ------------ | ----------------------------- | ------------------------ |
+| `barrier` (default) | `fcntl(F_BARRIERFSYNC)`  | `fdatasync` | Safe          | Safe         | May lose last ~seconds        | 2-5 ms                   |
 | `full`    | `fcntl(F_FULLFSYNC)`     | `fdatasync` | Safe          | Safe         | Safe (non-volatile flush)     | 15-25 ms                 |
-| `barrier` | `fcntl(F_BARRIERFSYNC)`  | `fdatasync` | Safe          | Safe         | May lose last ~seconds        | 2-5 ms                   |
 
 `barrier` asks the drive to apply a write barrier but does not force flush to non-volatile media. Drives with power-loss-protection capacitors (most enterprise SSDs) make this effectively safe for power loss as well; consumer drives may lose the last ~seconds of writes.
 
-**When to flip to `barrier`:**
+**Why `barrier` is the default:**
 
-- Development / benchmarking on macOS, where `F_FULLFSYNC` dominates write latency.
-- Production on hardware with reliable power-loss protection (enterprise SSDs with capacitors, cloud providers that guarantee durability on acknowledged writes).
-- Workloads that can tolerate a narrow power-loss recovery window in exchange for 4-8× write throughput.
+- On Apple, `F_BARRIERFSYNC` is 4-8× lower latency than `F_FULLFSYNC` while still surviving every failure mode short of sudden power loss.
+- On Linux, `barrier` and `full` are the same syscall (`fdatasync`) — the default change has no effect on Linux deployments.
+- Modern enterprise SSDs have power-loss protection capacitors, making the `barrier` window effectively zero on that hardware.
+- The power-loss window under `barrier` (the last ~seconds of writes on consumer hardware) is narrower than the crash-recovery window already exposed by lazy state-DB commits — the overall durability contract is unchanged in shape, the constants just shift by a few seconds.
 
-**When to stay on `full`:**
+**When to opt in to `full`:**
 
-- Commodity hardware without power-loss protection.
-- Strict compliance postures requiring absolute crash durability on every ACKed write.
-- Any deployment where "last ~seconds" is an unacceptable post-crash loss window.
+- Commodity hardware without power-loss protection, where the drive silently drops acknowledged writes on power loss.
+- Strict compliance postures requiring absolute non-volatile flush on every ACKed write, not merely "survives process + kernel crash."
+- Any deployment where a ~few-second power-loss window is unacceptable.
 
-On Linux, `barrier` degrades to `fdatasync` (the same as `full`'s effect); the mode is primarily useful on Apple platforms. The implementation is isolated in `crates/fs-sync/` — the single workspace crate permitted `unsafe`, since no audited safe-syscall crate exposes `F_BARRIERFSYNC`.
+On Linux, `full` and `barrier` produce identical syscalls; the opt-in matters primarily on Apple. The implementation is isolated in `crates/fs-sync/` — the single workspace crate permitted `unsafe`, since no audited safe-syscall crate exposes `F_BARRIERFSYNC`.
 
 ## Tuning the StateCheckpointer
 
@@ -215,10 +216,17 @@ Nine Prometheus metrics track checkpoint and recovery behavior. Full signatures 
 
 ### Suggested Grafana panels
 
+The durability-focused panels suggested below ship pre-built in `docs/operations/grafana/ledger-dashboard.json` under the **"Durability — StateCheckpointer + Event Flusher"** row (panels 53-61).
+
 - Checkpoint rate per region: `rate(ledger_state_checkpoints_total{status="ok"}[5m])` grouped by `trigger`.
 - Checkpoint fsync p50/p99: `histogram_quantile(0.50|0.99, ledger_state_checkpoint_duration_seconds_bucket)`.
 - In-memory backlog: `ledger_state_applies_since_checkpoint` + `ledger_state_dirty_pages` on twin y-axes.
+- Checkpoint age per region: `time() - ledger_state_checkpoint_last_timestamp_seconds` — flat or monotonically-growing indicates a stalled checkpointer.
 - Durable snapshot pointer: `ledger_state_last_synced_snapshot_id` per region — monotonically increasing; a flat line is a stalled checkpointer.
+- Event flush rate by trigger: `rate(ledger_event_flush_triggers_total[5m])` grouped by `trigger` — under sustained load `size` should dominate `time`.
+- Event flush duration p50/p99: `histogram_quantile(0.50|0.99, ledger_event_flush_duration_seconds_bucket)`.
+- Event flush queue depth: `ledger_event_flush_queue_depth` — sustained high values mean producers are outrunning the flusher.
+- Event overflow + failure rates: `rate(ledger_event_overflow_total[5m])` grouped by `cause`, and `rate(ledger_event_flush_failures_total[5m])` — non-zero sustained rates are alertable.
 - Recovery replay window: `rate(ledger_state_recovery_replay_count_total[1h])` — spikes indicate unclean restarts.
 - Recovery sweep latency: `histogram_quantile(0.99, ledger_state_recovery_duration_seconds_bucket)`.
 

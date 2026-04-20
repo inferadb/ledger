@@ -662,6 +662,232 @@
       ],
       "title": "Cache Size",
       "type": "timeseries"
+    },
+    {
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 50 },
+      "id": 53,
+      "title": "Durability — StateCheckpointer + Event Flusher",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "description": "Rate of state-DB checkpoint events, broken out by trigger. `time` fires on interval; `applies` and `dirty` fire when thresholds are crossed; `snapshot`, `backup`, and `shutdown` are forced checkpoints. A healthy steady state is dominated by `applies` or `dirty` under write load and by `time` at idle.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "spanNulls": false },
+          "unit": "ops"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 51 },
+      "id": 54,
+      "options": {
+        "legend": { "calcs": ["mean"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(ledger_state_checkpoints_total[5m])) by (trigger, status)",
+          "legendFormat": "{{trigger}} / {{status}}",
+          "refId": "A"
+        }
+      ],
+      "title": "State Checkpoint Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "description": "p50 and p99 of a single state-DB checkpoint (dual-slot fsync on state.db + raft.db + blocks.db + events.db per region). p99 spikes indicate IO contention or large accumulated dirty-page sets.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "spanNulls": false },
+          "unit": "s"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 51 },
+      "id": 55,
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(ledger_state_checkpoint_duration_seconds_bucket[5m])) by (le, region))",
+          "legendFormat": "p50 {{region}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(ledger_state_checkpoint_duration_seconds_bucket[5m])) by (le, region))",
+          "legendFormat": "p99 {{region}}",
+          "refId": "B"
+        }
+      ],
+      "title": "State Checkpoint Duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "description": "Applies accumulated in memory since the last successful checkpoint, per region. Rises toward `applies_threshold` (default 5000) and snaps back on checkpoint. A growing floor means checkpoints are lagging behind the apply rate.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "spanNulls": false },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 59 },
+      "id": 56,
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "ledger_state_applies_since_checkpoint",
+          "legendFormat": "applies / {{region}}",
+          "refId": "A"
+        },
+        {
+          "expr": "ledger_state_dirty_pages",
+          "legendFormat": "dirty pages / {{region}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Checkpoint Lag (applies + dirty pages)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "description": "Time since the most recent successful state checkpoint per region. Alertable: a value above `interval_ms` × 3 indicates the checkpointer is stalled or failing.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "spanNulls": false },
+          "unit": "s"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 59 },
+      "id": 57,
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "time() - ledger_state_checkpoint_last_timestamp_seconds",
+          "legendFormat": "age / {{region}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Checkpoint Age (time since last success)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "description": "Rate of handler-phase event-flush triggers, by trigger type. `time` fires on the flusher interval; `size` fires when the queue hits the size threshold; `shutdown` fires from Phase 5b of GracefulShutdown. Under sustained load `size` should dominate `time`.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "spanNulls": false },
+          "unit": "ops"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 67 },
+      "id": 58,
+      "options": {
+        "legend": { "calcs": ["mean"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(ledger_event_flush_triggers_total[5m])) by (trigger, region)",
+          "legendFormat": "{{trigger}} / {{region}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Event Flush Rate (by trigger)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "description": "p50 and p99 of a single handler-phase event flush (drain + commit_in_memory into events.db page cache). Durability of flushed entries is realised on the next StateCheckpointer tick.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "spanNulls": false },
+          "unit": "s"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 67 },
+      "id": 59,
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(ledger_event_flush_duration_seconds_bucket[5m])) by (le, region))",
+          "legendFormat": "p50 {{region}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(ledger_event_flush_duration_seconds_bucket[5m])) by (le, region))",
+          "legendFormat": "p99 {{region}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Event Flush Duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "description": "Queue depth sampled at flush entry — per-region snapshot of how full the bounded FlushQueue is when the flusher starts draining. A sustained high value indicates producers outrunning the flusher; tune `flush_interval_ms` or `queue_capacity`.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "spanNulls": false },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 75 },
+      "id": 60,
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "ledger_event_flush_queue_depth",
+          "legendFormat": "depth / {{region}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Event Flush Queue Depth",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "description": "Event overflows (dropped handler-phase events) by cause, plus flush failures. `queue_full` means producers outran the flusher; `shutdown_timeout` means Phase 5b drain didn't complete; `channel_closed` is a programming bug. Any non-zero sustained rate is alertable — events are best-effort but drops should be rare.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "spanNulls": false },
+          "unit": "ops"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 75 },
+      "id": 61,
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(ledger_event_overflow_total[5m])) by (cause, region)",
+          "legendFormat": "overflow / {{cause}} / {{region}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(ledger_event_flush_failures_total[5m])) by (region)",
+          "legendFormat": "flush failures / {{region}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Event Overflows + Flush Failures",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",
