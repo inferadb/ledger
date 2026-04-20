@@ -210,7 +210,7 @@ See [configuration.md](../reference/configuration.md) for the `UpdateConfig` / `
 
 ## Monitoring
 
-Nine Prometheus metrics track checkpoint and recovery behavior. Full signatures in [metrics-reference.md](../reference/metrics.md).
+Nine Prometheus metrics track checkpoint and recovery behavior. Full signatures in the [Metrics reference](../reference/metrics.md).
 
 | Metric                                           | Type      | Labels                        | Purpose                                                                                |
 | ------------------------------------------------ | --------- | ----------------------------- | -------------------------------------------------------------------------------------- |

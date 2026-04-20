@@ -85,6 +85,6 @@ Forward-only, idempotent on crash-resume. Full detail in [PII.md § User Erasure
 
 ### Related
 
-- [PII.md](../../PII.md) — canonical compliance reference.
-- [errors.md](../reference/errors.md) — error codes the SDK surfaces for this flow.
-- [data-residency-architecture.md](../architecture/data-residency.md) — the GLOBAL / REGIONAL split that the erasure must respect.
+- [PII](../../PII.md) — canonical compliance reference.
+- [Errors](../reference/errors.md) — error codes the SDK surfaces for this flow.
+- [Data residency](../architecture/data-residency.md) — the GLOBAL / REGIONAL split that the erasure must respect.

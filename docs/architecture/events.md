@@ -1,6 +1,6 @@
-# Events Operations Guide
+# Event System
 
-Operations reference for InferaDB Ledger's audit event system.
+Architectural explanation of InferaDB Ledger's audit event pipeline — what it emits, how it flushes, how retention works. For operational tasks (enabling events, querying them, tuning retention), see [how-to/logging.md](../how-to/logging.md) and the [events-service-specific dashboard](../dashboards/grafana-events.json).
 
 ## Architecture Overview
 

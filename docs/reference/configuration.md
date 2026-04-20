@@ -26,10 +26,10 @@ At least one of `--listen` or `--socket` must be specified. CLI arguments take p
 
 ```bash
 # Accept all interfaces (required for containers/remote access)
-INFERADB__LEDGER__LISTEN=0.0.0.0:9090
+INFERADB__LEDGER__LISTEN=0.0.0.0:50051
 
 # Specific interface (WireGuard)
-INFERADB__LEDGER__LISTEN=10.0.0.1:9090
+INFERADB__LEDGER__LISTEN=10.0.0.1:50051
 ```
 
 ### Unix Domain Socket
@@ -58,29 +58,29 @@ Ledger uses a `start`+`init` pattern. Nodes start their gRPC servers and wait fo
 
 ```bash
 # Start the node
-inferadb-ledger --listen 127.0.0.1:9090 --data /data
+inferadb-ledger --listen 127.0.0.1:50051 --data /data
 
 # Initialize the cluster (once)
-inferadb-ledger init --host 127.0.0.1:9090
+inferadb-ledger init --host 127.0.0.1:50051
 ```
 
 ### Multi-Node
 
 ```bash
 # Start the first node
-inferadb-ledger --listen 0.0.0.0:9090 --data /data
+inferadb-ledger --listen 0.0.0.0:50051 --data /data
 
 # Start additional nodes with seed addresses
-inferadb-ledger --listen 0.0.0.0:9090 --data /data --join node1:9090
+inferadb-ledger --listen 0.0.0.0:50051 --data /data --join node1:50051
 
 # Initialize the cluster (once, from any machine)
-inferadb-ledger init --host node1:9090
+inferadb-ledger init --host node1:50051
 ```
 
 ### Adding Nodes to an Existing Cluster
 
 ```bash
-inferadb-ledger --listen 0.0.0.0:9090 --data /data --join node1:9090,node2:9090
+inferadb-ledger --listen 0.0.0.0:50051 --data /data --join node1:50051,node2:50051
 ```
 
 The `--join` flag accepts a comma-separated list of seed addresses. The new node connects to the seeds, discovers the cluster, and joins as a learner.
@@ -139,7 +139,7 @@ The current defaults are tuned for throughput: `concurrent-writes @ 32` measures
 ```bash
 grpcurl -plaintext -d '{
   "config_json": "{\"batching\":{\"max_batch_size\":1000,\"batch_timeout\":\"20ms\"}}"
-}' localhost:9090 ledger.v1.AdminService/UpdateConfig
+}' localhost:50051 ledger.v1.AdminService/UpdateConfig
 ```
 
 ### Monitoring
@@ -149,7 +149,7 @@ grpcurl -plaintext -d '{
 - `ledger_batch_flush_latency_seconds` — histogram, per-flush wall-clock time (Raft submit round-trip).
 - `ledger_batch_queue_depth` — gauge per region, pending writes at tick entry. A sustained high depth indicates the WAL is the bottleneck.
 
-The older `ledger_batch_eager_commits_total` and `ledger_batch_timeout_commits_total` metrics no longer exist; there is no separate counter by trigger (the "eager" path was removed). Dashboards referencing the removed metrics will show "No data" — see the metrics-reference note for the cleanup list.
+The older `ledger_batch_eager_commits_total` and `ledger_batch_timeout_commits_total` metrics no longer exist; there is no separate counter by trigger (the "eager" path was removed). Dashboards referencing the removed metrics will show "No data" — see the [metrics reference](metrics.md) for the current set.
 
 ## Request Limits
 
@@ -182,7 +182,7 @@ These defaults were raised ~100× from earlier values (`client_burst=100`, `clie
 ```bash
 grpcurl -plaintext -d '{
   "config_json": "{\"rate_limit\":{\"client_burst\":500,\"client_rate\":250.0,\"organization_burst\":5000,\"organization_rate\":2500.0,\"backpressure_threshold\":1000}}"
-}' localhost:9090 ledger.v1.AdminService/UpdateConfig
+}' localhost:50051 ledger.v1.AdminService/UpdateConfig
 ```
 
 Validation enforces `> 0` on every field and caps (`client_*` ≤ 1,000,000; `organization_*` ≤ 10,000,000). Hot-reloadable — the `RateLimiter`'s backing atomics re-read on every admission check.
@@ -280,18 +280,18 @@ services:
   ledger:
     image: inferadb/ledger:latest
     environment:
-      INFERADB__LEDGER__LISTEN: "0.0.0.0:9090"
-      INFERADB__LEDGER__METRICS: "0.0.0.0:9091"
+      INFERADB__LEDGER__LISTEN: "0.0.0.0:50051"
+      INFERADB__LEDGER__METRICS: "0.0.0.0:9090"
       INFERADB__LEDGER__DATA: "/data"
-      INFERADB__LEDGER__JOIN: "ledger-1:9090,ledger-2:9090"
+      INFERADB__LEDGER__JOIN: "ledger-1:50051,ledger-2:50051"
     volumes:
       - ledger-data:/data
     ports:
+      - "50051:50051"
       - "9090:9090"
-      - "9091:9091"
 ```
 
-After all containers start, run `inferadb-ledger init --host ledger-1:9090` once.
+After all containers start, run `inferadb-ledger init --host ledger-1:50051` once.
 
 ### Kubernetes ConfigMap
 
@@ -301,8 +301,8 @@ kind: ConfigMap
 metadata:
   name: ledger-config
 data:
-  INFERADB__LEDGER__LISTEN: "0.0.0.0:9090"
-  INFERADB__LEDGER__METRICS: "0.0.0.0:9091"
+  INFERADB__LEDGER__LISTEN: "0.0.0.0:50051"
+  INFERADB__LEDGER__METRICS: "0.0.0.0:9090"
   INFERADB__LEDGER__DATA: "/data"
   INFERADB__LEDGER__JOIN: "ledger-headless.default.svc.cluster.local"
 ```
@@ -311,13 +311,13 @@ data:
 
 ```bash
 inferadb-ledger \
-  --listen 0.0.0.0:9090 \
+  --listen 0.0.0.0:50051 \
   --socket /var/run/ledger.sock \
-  --metrics 0.0.0.0:9091 \
+  --metrics 0.0.0.0:9090 \
   --data /var/lib/ledger \
-  --join node1:9090,node2:9090 \
+  --join node1:50051,node2:50051 \
   --region us-east-va \
-  --advertise node3:9090 \
+  --advertise node3:50051 \
   --concurrent 100 \
   --timeout 30 \
   --enable-grpc-reflection
@@ -363,10 +363,10 @@ Do not set any threshold to 0 — validation rejects it. If you want to effectiv
 ```bash
 grpcurl -plaintext -d '{
   "config_json": "{\"state_checkpoint\":{\"interval_ms\":250,\"applies_threshold\":2000,\"dirty_pages_threshold\":5000}}"
-}' localhost:9090 ledger.v1.AdminService/UpdateConfig
+}' localhost:50051 ledger.v1.AdminService/UpdateConfig
 ```
 
-Monitor the effect via `ledger_state_checkpoints_total{trigger}`, `ledger_state_checkpoint_duration_seconds`, `ledger_state_dirty_pages`, and `ledger_state_applies_since_checkpoint` — see [metrics-reference.md](metrics.md#state-durability) for the full metric set.
+Monitor the effect via `ledger_state_checkpoints_total{trigger}`, `ledger_state_checkpoint_duration_seconds`, `ledger_state_dirty_pages`, and `ledger_state_applies_since_checkpoint` — see [metrics.md § State Durability](metrics.md#state-durability) for the full metric set.
 
 ## Handler-Phase Event Batching
 
@@ -394,7 +394,7 @@ Triggers are OR'd — the flusher fires on whichever hits first. The shutdown tr
 ```bash
 grpcurl -plaintext -d '{
   "config_json": "{\"event_writer_batch\":{\"flush_interval_ms\":50,\"flush_size_threshold\":500}}"
-}' localhost:9090 ledger.v1.AdminService/UpdateConfig
+}' localhost:50051 ledger.v1.AdminService/UpdateConfig
 ```
 
 ### Disabling batching (strict synchronous durability)
@@ -402,14 +402,14 @@ grpcurl -plaintext -d '{
 ```bash
 grpcurl -plaintext -d '{
   "config_json": "{\"event_writer_batch\":{\"enabled\":false}}"
-}' localhost:9090 ledger.v1.AdminService/UpdateConfig
+}' localhost:50051 ledger.v1.AdminService/UpdateConfig
 ```
 
 With `enabled = false`, every `record_handler_event` call fsyncs before returning. Expect throughput on the event-emission hot path to fall to a ~50 ops/s ceiling on `concurrent-writes @ 32` (the fsync serializes on `events.db`'s write-txn mutex). Use this only when the audit trail's per-emission durability matters more than the ~42% active-CPU cost on the event path.
 
 ### Monitoring
 
-Six metrics track flusher behavior. See [metrics-reference.md § Handler Event Flush](metrics.md#handler-event-flush) for full label sets and suggested alerts.
+Six metrics track flusher behavior. See [metrics.md § Handler Event Flush](metrics.md#handler-event-flush) for full label sets and suggested alerts.
 
 - `ledger_event_flush_triggers_total{trigger}` — flushes by trigger (`time`, `size`, `shutdown`).
 - `ledger_event_flush_duration_seconds` — per-flush fsync latency.
@@ -434,13 +434,13 @@ Controls how expired client sequence entries are purged from the replicated stat
 ```bash
 grpcurl -plaintext -d '{
   "config_json": "{\"compaction\":{\"target_fill_ratio\":0.85}}"
-}' localhost:9090 ledger.v1.AdminService/UpdateConfig
+}' localhost:50051 ledger.v1.AdminService/UpdateConfig
 ```
 
 Use `GetConfig` to inspect current runtime configuration:
 
 ```bash
-grpcurl -plaintext localhost:9090 ledger.v1.AdminService/GetConfig
+grpcurl -plaintext localhost:50051 ledger.v1.AdminService/GetConfig
 ```
 
 ## JWT Configuration
@@ -495,5 +495,5 @@ These fields are updatable at runtime via the `UpdateConfig` RPC without restart
 ```bash
 grpcurl -plaintext -d '{
   "config_json": "{\"events\":{\"default_ttl_days\":30,\"ingest_rate_limit_per_source\":5000}}"
-}' localhost:9090 ledger.v1.AdminService/UpdateConfig
+}' localhost:50051 ledger.v1.AdminService/UpdateConfig
 ```

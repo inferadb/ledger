@@ -277,8 +277,8 @@ For Partition D (and for `README.md` where it claims quickstart status), verify 
 10. **Evaluate** — `README.md` answers _what / when-to-use / when-not-to-use_ within the first ~30 lines. At least one comparable system named where relevant.
 11. **Install** — install paths declare prerequisites, supported versions, image digests or checksums where applicable, and a post-install verification command.
 12. **Configure** — every flag in `configuration.md` declares: default value, safe range or enumeration, restart-required? (runtime-reconfigurable via `UpdateConfig` vs not), security implication.
-13. **Bootstrap** — `production-deployment-tutorial.md` (or equivalent) reaches first successful RPC response in a named, fixed number of copy-pasteable commands with expected output after each.
-14. **Observe** — every metric in `metrics-reference.md` that is _alertable_ links to its alert rule in `alerting.md`; every metric that is _actionable_ links to its runbook. Missing linkage → FIX.
+13. **Bootstrap** — `docs/getting-started/production-deployment.md` (or equivalent) reaches first successful RPC response in a named, fixed number of copy-pasteable commands with expected output after each.
+14. **Observe** — every metric in `docs/reference/metrics.md` that is _alertable_ links to its alert rule in `docs/reference/alerting.md`; every metric that is _actionable_ links to its runbook. Missing linkage → FIX.
 15. **Operate** — each day-2 task (upgrade / backup / scale / rotate / failover) has a how-to page with pre-state and post-state verification commands.
 16. **Troubleshoot** — every `ErrorCode` variant in `crates/types/src/error_code.rs` appears in operator-visible troubleshooting with a remediation. An error class in code without a doc entry is FIX.
 17. **Recover** — every runbook under `docs/runbooks/**` conforms to the runbook shape (invariant 18).
@@ -301,7 +301,7 @@ For Partition D (and for `README.md` where it claims quickstart status), verify 
 25. **Directional cross-links present** — replace generic "related docs link to each other":
     - Every alert in `docs/reference/alerting.md` links to its runbook if one exists.
     - Every runbook links back to its triggering alert and referenced metrics.
-    - Every alertable metric in `metrics-reference.md` links to its alert rule.
+    - Every alertable metric in `docs/reference/metrics.md` links to its alert rule.
     Missing directed link → FIX.
 26. **Progressive disclosure** — a top-level file over ~500 lines without sub-page decomposition → FIX.
 27. **Error-focused guidance** — features that produce specific error codes or retryable / non-retryable classifications document those failure modes next to the feature, not only in a distant troubleshooting file.
@@ -317,7 +317,7 @@ For Partition D (and for `README.md` where it claims quickstart status), verify 
 34. **Ambiguous audience** — a doc addressing two audiences in the same page that would benefit from splitting. NOTE.
 35. **Missing "why"** — a design decision documented only as "we do X" without rationale. NOTE with a pointer to where rationale should live.
 36. **Justfile as docs** — a recipe whose name or comment disagrees with its body, or a recipe referenced by an in-scope doc but lacking a comment block inside the Justfile. NOTE.
-37. **Kubernetes version floor consistency** — K8s version floors stated across operator docs (e.g. "1.24+" in `production-deployment-tutorial.md`) must be internally consistent. If `deploy/helm/inferadb-ledger/Chart.yaml` declares a `kubeVersion`, doc claims must match it. Absence of `kubeVersion` in the Helm chart is itself a NOTE — the chart could declare its K8s floor so doc claims become verifiable (upgradable to BLOCK) going forward.
+37. **Kubernetes version floor consistency** — K8s version floors stated across operator docs (e.g. "1.24+" in `docs/getting-started/production-deployment.md`) must be internally consistent. If `deploy/helm/inferadb-ledger/Chart.yaml` declares a `kubeVersion`, doc claims must match it. Absence of `kubeVersion` in the Helm chart is itself a NOTE — the chart could declare its K8s floor so doc claims become verifiable (upgradable to BLOCK) going forward.
 
 ## Output format
 

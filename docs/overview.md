@@ -1,5 +1,7 @@
 # Architecture Overview
 
+Audience: **evaluators and operators** assessing whether Ledger fits their use case. This page explains what Ledger is, the terminology, and how its pieces fit together. For deployment steps, see the [getting-started tutorial](getting-started/production-deployment.md); for deep internals, see [DESIGN.md](../DESIGN.md).
+
 Ledger is InferaDB's storage layer—a blockchain database for cryptographically verifiable auditing. It exposes a gRPC API and uses Raft consensus for replication.
 
 ## Design Goals

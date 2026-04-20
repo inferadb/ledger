@@ -1,6 +1,6 @@
 # Region Management
 
-[Documentation](../README.md) > Operations > Region Management
+[Documentation](../README.md) > Architecture > Region Management
 
 Regions are geographic data residency zones. Each region maps 1:1 to a Raft consensus group with isolated storage. This guide covers region concepts, organization assignment, write forwarding, and monitoring.
 

@@ -39,6 +39,6 @@ A playbook may escalate into an incident runbook if the maintenance procedure fa
 
 ## Related
 
-- [../runbooks/](../runbooks/README.md) — incident-response runbooks.
-- [../troubleshooting.md](../how-to/troubleshooting.md) — symptom → runbook routing.
-- [../README.md](../README.md) — operator documentation index.
+- [Runbooks](../runbooks/README.md) — incident-response runbooks.
+- [Troubleshooting](../how-to/troubleshooting.md) — symptom → runbook routing.
+- [Documentation home](../README.md) — operator documentation index.

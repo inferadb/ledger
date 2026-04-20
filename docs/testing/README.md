@@ -1,5 +1,7 @@
 # Testing
 
+Audience: **contributors and internal maintainers** verifying Ledger's correctness claims, plus internals-readers evaluating the testing posture of the project.
+
 InferaDB Ledger uses multiple testing strategies layered on top of standard unit tests. This directory documents the advanced ones.
 
 | Doc                            | When to read                                                           |

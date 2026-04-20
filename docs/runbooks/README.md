@@ -43,8 +43,8 @@ Scheduled playbooks use a lighter 6-section shape — see [../playbooks/README.m
 
 ## Related
 
-- [../troubleshooting.md](../how-to/troubleshooting.md) — higher-level symptom index; fast triage before opening a runbook.
-- [../alerting.md](../reference/alerting.md) — recommended Prometheus thresholds that fire the alerts above.
-- [../metrics-reference.md](../reference/metrics.md) — authoritative metric catalog.
-- [../errors.md](../reference/errors.md) — `ErrorCode` reference, mapped to remediation.
-- [../playbooks/](../playbooks/README.md) — scheduled maintenance procedures.
+- [Troubleshooting](../how-to/troubleshooting.md) — higher-level symptom index; fast triage before opening a runbook.
+- [Alerting](../reference/alerting.md) — recommended Prometheus thresholds that fire the alerts above.
+- [Metrics](../reference/metrics.md) — authoritative metric catalog.
+- [Errors](../reference/errors.md) — `ErrorCode` reference, mapped to remediation.
+- [Playbooks](../playbooks/README.md) — scheduled maintenance procedures.

@@ -146,6 +146,6 @@ changes.
 
 ## Related
 
-- [Node Connection Registry spec](../../superpowers/specs/2026-04-15-node-connection-registry.md) (Phase 2 backpressure)
+- [Node Connection Registry runbook](node-connection-registry.md) — companion runbook for the channel pool that consumes this send queue
 - [Metrics Reference: Consensus Transport](../reference/metrics.md#consensus-transport)
-- [Leader Cache Diagnosis Runbook](leader-cache-diagnosis.md) — SDK-side companion for leader routing
+- [Leader Cache Diagnosis runbook](leader-cache-diagnosis.md) — SDK-side companion for leader routing
