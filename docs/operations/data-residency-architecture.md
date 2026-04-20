@@ -2,6 +2,8 @@
 
 How Ledger enforces data residency requirements across regions.
 
+> **Related**: For multi-region deployment patterns, see [Multi-Region Deployment](multi-region.md). For the operational mechanics of regions (Region enum, storage layout, organization assignment, write forwarding), see [Region Management](region-management.md).
+
 ## Overview
 
 Ledger separates data into two categories with different storage guarantees:

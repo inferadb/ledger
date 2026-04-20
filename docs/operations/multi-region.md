@@ -2,6 +2,8 @@
 
 Guidance for deploying Ledger across multiple geographic regions.
 
+> **Related**: For the mechanics of how regions work (Region enum, storage layout, organization-to-region assignment, write forwarding), see [Region Management](region-management.md). For data-residency compliance guarantees (GLOBAL vs REGIONAL split, pseudonymization, crypto-shredding), see [Data Residency Architecture](data-residency-architecture.md).
+
 ## Architecture Options
 
 ### Option 1: Regional Clusters (Recommended)

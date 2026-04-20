@@ -4,6 +4,8 @@
 
 Regions are geographic data residency zones. Each region maps 1:1 to a Raft consensus group with isolated storage. This guide covers region concepts, organization assignment, write forwarding, and monitoring.
 
+> **Related**: For multi-region deployment patterns (regional vs stretched clusters, DR strategies), see [Multi-Region Deployment](multi-region.md). For data-residency compliance guarantees (why GLOBAL/REGIONAL split exists, pseudonymization, crypto-shredding), see [Data Residency Architecture](data-residency-architecture.md).
+
 ## Overview
 
 ```text

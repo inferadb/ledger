@@ -226,7 +226,7 @@ Nine Prometheus metrics track checkpoint and recovery behavior. Full signatures 
 
 ### Suggested Grafana panels
 
-The durability-focused panels suggested below ship pre-built in `docs/operations/grafana/ledger-dashboard.json` under the **"Durability — StateCheckpointer + Event Flusher"** row (panels 53-61).
+The durability-focused panels suggested below ship pre-built in `docs/dashboards/grafana-all-in-one.json` under the **"Durability — StateCheckpointer + Event Flusher"** row (panels 53-61).
 
 - Checkpoint rate per region: `rate(ledger_state_checkpoints_total{status="ok"}[5m])` grouped by `trigger`.
 - Checkpoint fsync p50/p99: `histogram_quantile(0.50|0.99, ledger_state_checkpoint_duration_seconds_bucket)`.

@@ -9,40 +9,43 @@ Operational documentation for running InferaDB Ledger in production.
 | [Production Deployment Tutorial](production-deployment-tutorial.md) | Step-by-step Kubernetes deployment      |
 | [Deployment Guide](deployment.md)                                   | Cluster setup, bootstrap modes, backup  |
 | [Configuration](configuration.md)                                   | Environment variables and CLI reference |
+| [API Versioning](api-versioning.md)                                 | Client–server compatibility and headers |
 
 ## Day-to-Day Operations
 
-| Document                                  | Description                                   |
-| ----------------------------------------- | --------------------------------------------- |
-| [Logging](logging.md)                     | Request-level JSON logging and queries        |
-| [Dashboard Templates](dashboards/)        | Pre-built Grafana, Kibana, Datadog dashboards |
-| [Alerting](alerting.md)                   | Prometheus alerting rules and SLOs            |
-| [Metrics Reference](metrics-reference.md) | All Prometheus metrics                        |
-| [Troubleshooting](troubleshooting.md)     | Common issues and solutions                   |
-| [Capacity Planning](capacity-planning.md) | Sizing and scaling guidelines                 |
+| Document                                  | Description                                              |
+| ----------------------------------------- | -------------------------------------------------------- |
+| [Logging](logging.md)                     | Request-level JSON logging and queries                   |
+| [Dashboard Templates](../dashboards/)     | Pre-built Grafana, Kibana, Datadog dashboards            |
+| [Alerting](alerting.md)                   | Prometheus alerting thresholds and PromQL rules          |
+| [SLOs](slo.md)                            | Service-level objectives and SLI definitions             |
+| [Metrics Reference](metrics-reference.md) | All Prometheus metrics (includes per-organization view)  |
+| [Errors](errors.md)                       | `ErrorCode` reference (gRPC mapping, retryability)       |
+| [Troubleshooting](troubleshooting.md)     | Symptom index routing to runbooks and common fixes       |
+| [Capacity Planning](capacity-planning.md) | Sizing and scaling guidelines                            |
+| [Observability Cost](observability-cost.md) | Cost-tuning for Datadog and comparable paid vendors    |
+| [Profiling](profiling.md)                 | Flamegraph capture and performance investigation         |
 
-## Architecture & Security
+## Architecture & Compliance
 
-| Document                                  | Description                              |
-| ----------------------------------------- | ---------------------------------------- |
-| [Security](security.md)                   | Trust model, network security, hardening |
-| [Multi-Region](multi-region.md)           | Geographic distribution patterns         |
-| [Region Management](region-management.md) | Organization-to-region routing           |
+| Document                                                  | Description                                         |
+| --------------------------------------------------------- | --------------------------------------------------- |
+| [Security](security.md)                                   | Trust model, network security, hardening            |
+| [Durability](durability.md)                               | WAL, checkpoints, recovery contract                 |
+| [Events](events.md)                                       | Audit event pipeline and queryability               |
+| [Background Jobs](background-jobs.md)                     | Scheduled jobs that run inside the node             |
+| [Multi-Region](multi-region.md)                           | Geographic distribution patterns                    |
+| [Region Management](region-management.md)                 | Organization-to-region routing                      |
+| [Data Residency Architecture](data-residency-architecture.md) | PII isolation, GLOBAL/REGIONAL split, crypto-shredding |
 
-## Maintenance & Recovery
+## Incident Response & Scheduled Work
 
-| Document                        | Description                              |
-| ------------------------------- | ---------------------------------------- |
-| [Vault Repair](vault-repair.md) | Diagnosing and repairing diverged vaults |
-| [Runbooks](runbooks/)           | Operational procedures                   |
+| Document                                | Description                                        |
+| --------------------------------------- | -------------------------------------------------- |
+| [Runbooks](runbooks/)                   | On-call incident runbooks + scheduled playbooks    |
+| [Troubleshooting](troubleshooting.md)   | First-stop symptom index                           |
 
-### Runbooks
-
-| Runbook                                                | Description              |
-| ------------------------------------------------------ | ------------------------ |
-| [Upgrade Runbook](runbooks/rolling-upgrade.md)         | Version upgrades         |
-| [Backup Verification](runbooks/backup-verification.md) | Testing backup integrity |
-| [Disaster Recovery](runbooks/disaster-recovery.md)     | Recovery procedures      |
+See [`runbooks/README.md`](runbooks/README.md) for the full symptom → runbook table.
 
 ## Quick Reference
 

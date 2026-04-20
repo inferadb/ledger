@@ -657,7 +657,7 @@ Both are emitted from the same code paths. Keep existing metrics for alerting; u
 
 ### Schema Versioning
 
-Request logs include a `schema_version` field. See [Dashboard Templates](dashboards/) for version compatibility.
+Request logs include a `schema_version` field. See [Dashboard Templates](../dashboards/) for version compatibility.
 
 **Compatibility guarantees:**
 
@@ -723,6 +723,6 @@ cargo bench -p inferadb-ledger-raft --bench logging_bench
 ## Related Documentation
 
 - [Configuration Reference](configuration.md#logging) - All environment variables
-- [Dashboard Templates](dashboards/) - Pre-built Grafana, Kibana, Datadog dashboards
+- [Dashboard Templates](../dashboards/) - Pre-built Grafana, Kibana, Datadog dashboards
 - [Metrics Reference](metrics-reference.md) - Prometheus metrics (complementary)
 - [Alerting Guide](alerting.md) - Using metrics for alerts

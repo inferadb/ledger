@@ -1,6 +1,8 @@
-# Datadog Cost Optimization
+# Observability Cost
 
-Guidance for operators running InferaDB Ledger on Datadog to control custom metric costs.
+Guidance for operators running InferaDB Ledger against paid observability vendors (Datadog, New Relic, Honeycomb, etc.) to control ingestion and custom-metric costs.
+
+This guide uses **Datadog** as the worked example because its pricing model and knobs are widely documented. The same principles — cardinality budgeting, metric filtering at source, sampling hot log streams, using vendor-native "metrics-without-limits" or equivalent features — apply to comparable platforms; check your vendor's documentation for the specific knob names.
 
 ## Custom Metric Pricing Model
 

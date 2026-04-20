@@ -154,14 +154,82 @@ Background jobs that reclaim soft-deleted organizations and evict plaintext from
 
 - `op`: `read` or `write`
 
+## Per-Organization Resource Metrics
+
+Per-tenant accounting for capacity planning and billing. Cardinality is bounded by the number of organizations, which is operator-controlled (typical deployments: 10s–100s of organizations).
+
+| Metric                                 | Type      | Labels                         | Description                        |
+| -------------------------------------- | --------- | ------------------------------ | ---------------------------------- |
+| `ledger_organization_storage_bytes`    | Gauge     | `organization_id`              | Cumulative estimated storage bytes |
+| `ledger_organization_operations_total` | Counter   | `organization_id`, `operation` | Operations by type                 |
+| `ledger_organization_latency_seconds`  | Histogram | `organization_id`, `operation` | Request latency by type            |
+
+**Labels:**
+
+- `organization_id`: Internal organization identifier
+- `operation`: `write`, `read`, or `admin`
+
+### Storage Accounting
+
+Storage bytes are tracked in Raft-replicated state, updated on every committed write:
+
+- **SetEntity**: adds `len(key) + len(value)` bytes
+- **DeleteEntity**: subtracts `len(key)` bytes (conservative; old value size unknown)
+- **CreateRelationship**: adds `len(resource) + len(relation) + len(subject)` bytes
+- **DeleteRelationship**: subtracts the same
+- **ExpireEntity**: subtracts `len(key)` bytes
+
+The counter floors at zero via saturating subtraction. Because only committed writes update the counter, all replicas converge to the same value after snapshot restore. Resource limits are derived from the organization's `OrganizationTier` (`Free`, `Launch`, `Scale`) by the downstream Engine and Control layers — Ledger tracks cumulative storage bytes but does not enforce limits itself.
+
+### Useful queries
+
+```promql
+# Storage bytes by organization (top 10)
+topk(10, ledger_organization_storage_bytes)
+
+# Write rate per organization (5m window)
+sum by (organization_id) (rate(ledger_organization_operations_total{operation="write"}[5m]))
+
+# Read/write ratio per organization
+sum by (organization_id) (rate(ledger_organization_operations_total{operation="read"}[5m]))
+/
+sum by (organization_id) (rate(ledger_organization_operations_total{operation="write"}[5m]))
+
+# p99 write latency per organization
+histogram_quantile(0.99,
+  sum by (organization_id, le) (
+    rate(ledger_organization_latency_seconds_bucket{operation="write"}[5m])
+  )
+)
+
+# Operations per organization over 24h
+increase(ledger_organization_operations_total[24h])
+```
+
+### Example alert
+
+```yaml
+groups:
+  - name: organization-capacity
+    rules:
+      - alert: OrganizationHighWriteRate
+        expr: sum by (organization_id) (rate(ledger_organization_operations_total{operation="write"}[5m])) > 1000
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: "Organization {{ $labels.organization_id }} sustained >1k writes/s"
+```
+
 ## Snapshots
 
-| Metric                                    | Type      | Labels | Description            |
-| ----------------------------------------- | --------- | ------ | ---------------------- |
-| `ledger_snapshots_created_total`          | Counter   | -      | Snapshots created      |
-| `ledger_snapshot_size_bytes`              | Histogram | -      | Snapshot size          |
-| `ledger_snapshot_create_latency_seconds`  | Histogram | -      | Snapshot creation time |
-| `ledger_snapshot_restore_latency_seconds` | Histogram | -      | Snapshot restore time  |
+| Metric                                     | Type      | Labels | Description                                 |
+| ------------------------------------------ | --------- | ------ | ------------------------------------------- |
+| `ledger_snapshots_created_total`           | Counter   | -      | Snapshots created                           |
+| `ledger_snapshot_size_bytes`               | Histogram | -      | Snapshot size                               |
+| `ledger_snapshot_restore_duration_seconds` | Histogram | -      | Snapshot restore time                       |
+| `ledger_snapshot_disk_bytes`               | Gauge     | -      | On-disk size of the most recent snapshot    |
+| `ledger_state_last_synced_snapshot_id`     | Gauge     | -      | Highest snapshot ID synced to durable state |
 
 ## Idempotency Cache
 
@@ -190,7 +258,7 @@ rate(ledger_operations_total{result="hit"}[5m]) /
 
 ### Removed metrics
 
-`ledger_batch_eager_commits_total` and `ledger_batch_timeout_commits_total` were removed with the `eager_commit` policy. Timer-only flushing is now the only policy; `ledger_batch_coalesce_total` fires once per flush regardless of trigger. Bundled Grafana dashboards (`docs/dashboards/resource-saturation.json`, `docs/operations/grafana/ledger-dashboard.json`) were updated accordingly.
+`ledger_batch_eager_commits_total` and `ledger_batch_timeout_commits_total` were removed with the `eager_commit` policy. Timer-only flushing is now the only policy; `ledger_batch_coalesce_total` fires once per flush regardless of trigger. Bundled Grafana dashboards (`docs/dashboards/resource-saturation.json`, `docs/dashboards/grafana-all-in-one.json`) were updated accordingly.
 
 ### Tuning indicators
 
@@ -551,11 +619,17 @@ spec:
       - inferadb
 ```
 
-## Grafana Dashboard
+## Pre-built Dashboards
 
-See the [dashboards directory](../dashboards/) for pre-built Grafana dashboards:
+See the [dashboards directory](../dashboards/) for importable Grafana / Kibana / Datadog templates:
 
-- `api-performance.json` — API latency, throughput, and error rates
-- `raft-health.json` — Raft consensus health and replication metrics
-- `resource-saturation.json` — Resource utilization and saturation indicators
-- `storage-engine.json` — B+ tree and storage engine metrics
+- `grafana-all-in-one.json` — Comprehensive Grafana dashboard covering cluster health, latency, batching, durability, and storage
+- `api-performance.json` — Focused Grafana dashboard: API latency, throughput, error rates
+- `resource-saturation.json` — Focused Grafana dashboard: resource utilization and saturation indicators
+- `storage-engine.json` — Focused Grafana dashboard: B+ tree and storage-engine metrics
+- `grafana-events.json` — Events-service dashboard (Prometheus data source)
+- `grafana-loki.json` — Loki logging dashboard
+- `kibana.ndjson` — Kibana saved objects for log-based observability
+- `datadog.json` — Datadog dashboard template
+
+See [`docs/dashboards/README.md`](../dashboards/README.md) for import instructions and compatibility notes.

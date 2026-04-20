@@ -32,17 +32,17 @@ Per-crate architecture lives in each crate's own `CLAUDE.md` (e.g. `crates/conse
 - [Logging](operations/logging.md) — canonical log lines, structured fields
 - [Events](operations/events.md) — audit event system, event catalog, retention
 - [Alerting](operations/alerting.md) — Prometheus alerting rules and thresholds
-- [Dashboard templates](operations/dashboards/) — Grafana, Kibana, Datadog
+- [Dashboard templates](dashboards/) — Grafana, Kibana, Datadog
 - [SLI/SLO reference](operations/slo.md) — service level indicators and objectives
-- [Organization metrics](operations/organization-metrics.md) — per-tenant resource tracking
+- [Per-organization metrics](operations/metrics-reference.md#per-organization-resource-metrics) — per-tenant resource tracking (subsection of the metrics reference)
 - [Background jobs](operations/background-jobs.md) — job observability and health
 - [Capacity planning](operations/capacity-planning.md) — sizing and resource estimation
-- [Datadog cost optimization](operations/datadog-cost-optimization.md) — controlling custom metric costs on Datadog
+- [Observability cost](operations/observability-cost.md) — controlling metric and log ingestion costs across paid observability vendors
 
 ## Maintaining
 
 - [Troubleshooting](operations/troubleshooting.md) — common issues and solutions
-- [Vault repair](operations/vault-repair.md) — recovering diverged vaults
+- [Vault repair](operations/runbooks/vault-repair.md) — recovering diverged vaults
 - [API versioning](operations/api-versioning.md) — version negotiation and compatibility
 
 ## Runbooks
