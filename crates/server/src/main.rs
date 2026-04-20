@@ -206,6 +206,17 @@ async fn main() -> Result<(), ServerError> {
     // (Sprint 1B2 Task 2B). This narrows the post-restart WAL replay to zero
     // entries on clean shutdown.
     let manager_for_shutdown = node.manager.clone();
+    // Clone the batching `EventHandle` so the `pre_shutdown` closure can
+    // drain the handler-phase event flusher at Phase 5b (Sprint 1B4 Task
+    // 2B) — between the WAL flush (5a) and the state-DB sync (5c). The
+    // flusher keeps running through coordinator shutdown so in-flight RPCs
+    // in Phases 1-4 can still enqueue events; `flush_for_shutdown` is the
+    // only signal that stops it.
+    let event_handle_for_shutdown = node.event_handle.clone();
+    // The flusher `JoinHandle` is moved (not cloned) into the shutdown
+    // closure so the runtime doesn't tear down while the tokio task is
+    // technically still scheduled after `flush_for_shutdown` returns.
+    let event_flusher_join_handle = node.event_flusher_handle;
     let graceful_shutdown = graceful_shutdown.with_handle(node.handle.clone());
     let shutdown_handle = tokio::spawn(async move {
         shutdown::shutdown_signal().await;
@@ -235,9 +246,10 @@ async fn main() -> Result<(), ServerError> {
 
         graceful_shutdown
             .execute(|| async move {
-                // Explicitly flush the WAL before the consensus engine handle
-                // is dropped. This ensures all committed proposals are durable
-                // even if a crash occurs between gRPC server stop and handle drop.
+                // Phase 5a (Sprint 1B2): explicitly flush the WAL before the
+                // consensus engine handle is dropped. This ensures all
+                // committed proposals are durable even if a crash occurs
+                // between gRPC server stop and handle drop.
                 let flush_timeout = std::time::Duration::from_secs(5);
                 if let Err(e) = consensus_handle.flush_for_shutdown(flush_timeout).await {
                     tracing::warn!(error = %e, "WAL flush during shutdown failed");
@@ -245,16 +257,54 @@ async fn main() -> Result<(), ServerError> {
                     tracing::info!("WAL flushed successfully during shutdown");
                 }
 
-                // Force a final `sync_state` on every region's state DB AFTER
-                // the WAL flush so the dual-slot god byte captures every apply
-                // that happened between the last `StateCheckpointer` tick and
-                // now. On clean shutdown this drives post-restart WAL replay
-                // to zero entries (Sprint 1B2 Task 2B). Proceed even if the
-                // WAL flush above failed — the god byte may still succeed on
-                // a prefix that the WAL flush missed, narrowing the crash
-                // gap. `sync_all_state_dbs` logs per-region success/failure
-                // internally and never aborts the sweep on a single region's
-                // error.
+                // Phase 5b (Sprint 1B4): drain the handler-phase event
+                // flusher before the final state-DB sync. The flusher keeps
+                // accepting events through Phases 1-4 (in-flight RPCs still
+                // emit), so this is the single point where the queue is
+                // fully drained + the flusher exits cleanly. Strict-durable
+                // per-window commits here — any events still queued after
+                // the timeout are logged as lost + counted in
+                // `ledger_event_overflow_total{cause=shutdown_timeout}`.
+                let drain_timeout = std::time::Duration::from_secs(5);
+                let drain_result =
+                    event_handle_for_shutdown.flush_for_shutdown(drain_timeout).await;
+                tracing::info!(
+                    drained = drain_result.drained,
+                    lost = drain_result.lost,
+                    duration_ms = drain_result.duration.as_millis() as u64,
+                    "Event flusher drain complete"
+                );
+
+                // Defensive: await the flusher task handle so its tokio task
+                // fully terminates before the runtime shuts down.
+                // `flush_for_shutdown` already waits for the drain ack, so
+                // this should resolve almost immediately. A missed exit here
+                // would otherwise race the watchdog's `std::process::exit(0)`
+                // and leak the task mid-fsync.
+                let join_timeout = std::time::Duration::from_secs(1);
+                match tokio::time::timeout(join_timeout, event_flusher_join_handle).await {
+                    Ok(Ok(())) => tracing::debug!("Event flusher task exited cleanly"),
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "Event flusher task panicked on exit")
+                    },
+                    Err(_) => tracing::warn!(
+                        "Event flusher task did not exit within 1s of flush_for_shutdown"
+                    ),
+                }
+
+                // Phase 5c (Sprint 1B2 Task 2B + 1B3 Task 3A fix): force a
+                // final `sync_state` on every region's state DB AFTER the
+                // WAL flush so the dual-slot god byte captures every apply
+                // that happened between the last `StateCheckpointer` tick
+                // and now. On clean shutdown this drives post-restart WAL
+                // replay to zero entries. Proceed even if the WAL flush
+                // above failed — the god byte may still succeed on a prefix
+                // that the WAL flush missed, narrowing the crash gap.
+                // `sync_all_state_dbs` logs per-region success/failure
+                // internally and never aborts the sweep on a single
+                // region's error. For `events.db`, Phase 5b already drained
+                // pending writes, so this sweep is effectively a no-op for
+                // that DB — harmless but redundant.
                 manager_for_shutdown.sync_all_state_dbs(std::time::Duration::from_secs(5)).await;
             })
             .await;

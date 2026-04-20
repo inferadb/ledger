@@ -8,7 +8,7 @@ use super::{
     jwt::JwtConfig,
     observability::{HotKeyConfig, MetricsCardinalityConfig},
     resilience::{RateLimitConfig, ValidationConfig},
-    storage::{BTreeCompactionConfig, CheckpointConfig, IntegrityConfig},
+    storage::{BTreeCompactionConfig, CheckpointConfig, EventWriterBatchConfig, IntegrityConfig},
 };
 
 /// Runtime-reconfigurable configuration subset.
@@ -51,6 +51,13 @@ pub struct RuntimeConfig {
     /// State-DB checkpoint scheduling thresholds (time, applies, dirty pages).
     #[serde(default)]
     pub state_checkpoint: Option<CheckpointConfig>,
+    /// Handler-phase event batching parameters (Sprint 1B4).
+    ///
+    /// Controls the background `EventFlusher` that amortizes `events.db`
+    /// fsyncs for handler-phase emissions. `queue_capacity` is
+    /// restart-only; all other fields take effect on the next flush cycle.
+    #[serde(default)]
+    pub event_writer_batch: Option<EventWriterBatchConfig>,
     /// Metric cardinality budgets. `None` disables cardinality tracking.
     #[serde(default)]
     pub metrics_cardinality: Option<MetricsCardinalityConfig>,
@@ -212,6 +219,9 @@ impl RuntimeConfig {
         if let Some(ref cp) = self.state_checkpoint {
             cp.validate()?;
         }
+        if let Some(ref eb) = self.event_writer_batch {
+            eb.validate()?;
+        }
         if let Some(ref mc) = self.metrics_cardinality {
             mc.validate()?;
         }
@@ -352,6 +362,44 @@ mod tests {
         };
         let sections = a.diff(&b);
         assert!(sections.contains(&"state_checkpoint".to_string()));
+    }
+
+    // ── event_writer_batch passthrough ─────────────────────────────
+
+    #[test]
+    fn runtime_config_validate_propagates_event_writer_batch_error() {
+        let bad =
+            EventWriterBatchConfig { flush_interval_ms: 0, ..EventWriterBatchConfig::default() };
+        let cfg = RuntimeConfig { event_writer_batch: Some(bad), ..Default::default() };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn runtime_config_event_writer_batch_diff_detects_addition() {
+        let a = RuntimeConfig::default();
+        let b = RuntimeConfig {
+            event_writer_batch: Some(EventWriterBatchConfig::default()),
+            ..Default::default()
+        };
+        let sections = a.diff(&b);
+        assert!(sections.contains(&"event_writer_batch".to_string()));
+    }
+
+    #[test]
+    fn runtime_config_event_writer_batch_detailed_diff_detects_field() {
+        let a = RuntimeConfig {
+            event_writer_batch: Some(EventWriterBatchConfig::default()),
+            ..Default::default()
+        };
+        let b = RuntimeConfig {
+            event_writer_batch: Some(EventWriterBatchConfig {
+                flush_interval_ms: 250,
+                ..EventWriterBatchConfig::default()
+            }),
+            ..Default::default()
+        };
+        let changes = a.detailed_diff(&b);
+        assert!(changes.iter().any(|c| c.field == "event_writer_batch.flush_interval_ms"));
     }
 
     #[test]

@@ -905,6 +905,105 @@ pub fn record_state_recovery_duration(region: &str, duration: std::time::Duratio
     });
 }
 
+// ─── Handler-Phase Event Flusher (Sprint 1B4) ──────────────────────
+
+/// Total handler-phase event flushes by trigger reason (counter).
+/// Labels: `region`, `trigger = time | size | shutdown`.
+pub const LEDGER_EVENT_FLUSH_TRIGGERS_TOTAL: &str = "ledger_event_flush_triggers_total";
+
+/// Duration of a single handler-phase event flush (histogram, seconds).
+/// Labels: `region`. Uses `SLI_HISTOGRAM_BUCKETS`.
+pub const LEDGER_EVENT_FLUSH_DURATION_SECONDS: &str = "ledger_event_flush_duration_seconds";
+
+/// Queue depth sampled at flush entry (gauge). Labels: `region`.
+pub const LEDGER_EVENT_FLUSH_QUEUE_DEPTH: &str = "ledger_event_flush_queue_depth";
+
+/// Entries drained per flush (histogram). Labels: `region`.
+pub const LEDGER_EVENT_FLUSH_ENTRIES_PER_FLUSH: &str = "ledger_event_flush_entries_per_flush";
+
+/// Handler-phase event flush failures (counter). Labels: `region`.
+pub const LEDGER_EVENT_FLUSH_FAILURES_TOTAL: &str = "ledger_event_flush_failures_total";
+
+/// Handler-phase event overflows by cause (counter).
+/// Labels: `region`, `cause = queue_full | shutdown_timeout | channel_closed`.
+pub const LEDGER_EVENT_OVERFLOW_TOTAL: &str = "ledger_event_overflow_total";
+
+/// Records a successful handler-phase flush attempt.
+///
+/// `trigger` is one of `"time"`, `"size"`, `"shutdown"` — emitted by the
+/// background flusher in `event_writer.rs`.
+#[inline]
+pub fn record_event_flush(region: &str, trigger: &str, duration_secs: f64, entries: u64) {
+    gated!(
+        LEDGER_EVENT_FLUSH_TRIGGERS_TOTAL,
+        &[(fields::REGION, region), (fields::TRIGGER, trigger)],
+        {
+            counter!(
+                LEDGER_EVENT_FLUSH_TRIGGERS_TOTAL,
+                fields::REGION => region.to_string(),
+                fields::TRIGGER => trigger.to_string(),
+            )
+            .increment(1);
+        }
+    );
+    gated!(LEDGER_EVENT_FLUSH_DURATION_SECONDS, &[(fields::REGION, region)], {
+        histogram!(
+            LEDGER_EVENT_FLUSH_DURATION_SECONDS,
+            fields::REGION => region.to_string(),
+        )
+        .record(duration_secs);
+    });
+    gated!(LEDGER_EVENT_FLUSH_ENTRIES_PER_FLUSH, &[(fields::REGION, region)], {
+        histogram!(
+            LEDGER_EVENT_FLUSH_ENTRIES_PER_FLUSH,
+            fields::REGION => region.to_string(),
+        )
+        .record(entries as f64);
+    });
+}
+
+/// Records a flush failure (events.db commit / write error).
+#[inline]
+pub fn record_event_flush_failure(region: &str) {
+    gated!(LEDGER_EVENT_FLUSH_FAILURES_TOTAL, &[(fields::REGION, region)], {
+        counter!(
+            LEDGER_EVENT_FLUSH_FAILURES_TOTAL,
+            fields::REGION => region.to_string(),
+        )
+        .increment(1);
+    });
+}
+
+/// Updates the pre-drain queue-depth gauge sampled at flush entry.
+#[inline]
+pub fn set_event_flush_queue_depth(region: &str, depth: u64) {
+    gated!(LEDGER_EVENT_FLUSH_QUEUE_DEPTH, &[(fields::REGION, region)], {
+        gauge!(LEDGER_EVENT_FLUSH_QUEUE_DEPTH, fields::REGION => region.to_string())
+            .set(depth as f64);
+    });
+}
+
+/// Records a handler-phase event overflow.
+///
+/// `cause` is one of `"queue_full"` (producer tried to enqueue on a full
+/// channel under `overflow_behavior = Drop`), `"shutdown_timeout"`
+/// (flush-for-shutdown exited with queued entries remaining), or
+/// `"channel_closed"` (bug signal — producer saw a closed channel).
+#[inline]
+pub fn record_event_overflow(region: &str, cause: &str, count: u64) {
+    if count == 0 {
+        return;
+    }
+    gated!(LEDGER_EVENT_OVERFLOW_TOTAL, &[(fields::REGION, region), (fields::CAUSE, cause)], {
+        counter!(
+            LEDGER_EVENT_OVERFLOW_TOTAL,
+            fields::REGION => region.to_string(),
+            fields::CAUSE => cause.to_string(),
+        )
+        .increment(count);
+    });
+}
+
 /// SLI-aligned histogram bucket boundaries (in seconds).
 ///
 /// These buckets are designed for latency SLI/SLO tracking:
@@ -1741,6 +1840,38 @@ mod tests {
         set_state_page_cache_len("global", 999);
         set_state_last_synced_snapshot_id("global", 5);
         set_state_checkpoint_last_timestamp("global", 1_700_000_000.0);
+    }
+
+    // --- Handler-phase event flusher (Sprint 1B4) ---
+
+    #[test]
+    fn test_record_event_flush_triggers() {
+        record_event_flush("global", "time", 0.002, 5);
+        record_event_flush("global", "size", 0.012, 500);
+        record_event_flush("global", "shutdown", 0.050, 1_000);
+    }
+
+    #[test]
+    fn test_record_event_flush_failure() {
+        record_event_flush_failure("global");
+    }
+
+    #[test]
+    fn test_set_event_flush_queue_depth() {
+        set_event_flush_queue_depth("global", 0);
+        set_event_flush_queue_depth("global", 1_234);
+    }
+
+    #[test]
+    fn test_record_event_overflow_all_causes() {
+        record_event_overflow("global", "queue_full", 1);
+        record_event_overflow("global", "shutdown_timeout", 42);
+        record_event_overflow("global", "channel_closed", 1);
+    }
+
+    #[test]
+    fn test_record_event_overflow_zero_count_is_noop() {
+        record_event_overflow("global", "queue_full", 0);
     }
 
     #[test]

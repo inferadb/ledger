@@ -166,6 +166,19 @@ pub struct BootstrappedNode {
     /// Shutdown coordinator that owns the cancellation token tree and tracks
     /// all background task handles for coordinated drain during shutdown.
     pub coordinator: Arc<crate::shutdown::ShutdownCoordinator>,
+    /// Handler-phase event handle (batching variant) used by gRPC services to
+    /// record denials / admin events. Hoisted out of bootstrap so the graceful
+    /// shutdown `pre_shutdown` closure can call
+    /// [`EventHandle::flush_for_shutdown`] at Phase 5b — between the WAL
+    /// flush (5a) and the per-region state-DB sync (5c). This is the single
+    /// point where the flusher queue drains + the background task exits
+    /// cleanly (Sprint 1B4 Task 2B).
+    pub event_handle: EventHandle<FileBackend>,
+    /// Join handle for the background event flusher task spawned by
+    /// [`EventHandle::with_batching`]. `flush_for_shutdown` signals the task
+    /// to exit; the shutdown closure awaits this handle defensively so the
+    /// tokio runtime doesn't tear down while the flusher is still scheduled.
+    pub event_flusher_handle: tokio::task::JoinHandle<()>,
 }
 
 /// Bootstraps the node using the two-phase start+init pattern.
@@ -492,9 +505,30 @@ pub async fn bootstrap_node(
         .transpose()?;
 
     // Create handler-phase event handle for gRPC service denial recording.
+    //
+    // Sprint 1B4: wire the background `EventFlusher` alongside the handle.
+    // The flusher batches handler-phase `events.db` fsyncs so the
+    // RPC-critical `record_handler_event` path becomes a lock-free enqueue
+    // instead of a per-event fsync. `queue_capacity` comes from the runtime
+    // config (restart-only); time / size triggers are live-reconfigurable
+    // via `UpdateConfig`. The flusher `JoinHandle` is hoisted into
+    // `BootstrappedNode` (Sprint 1B4 Task 2B) so the graceful shutdown
+    // `pre_shutdown` closure can await the final drain at Phase 5b.
     let event_config = Arc::new(config.events.clone());
-    let event_handle = EventHandle::new(Arc::clone(&events_db), event_config, node_id);
+    let batch_config = runtime_config.load().event_writer_batch.clone().unwrap_or_default();
+    let (event_handle, event_flusher_handle) = EventHandle::with_batching(
+        Arc::clone(&events_db),
+        event_config,
+        node_id,
+        batch_config,
+        runtime_config.clone(),
+        config.region.as_str(),
+    );
     let event_handle_for_saga = Some(event_handle.clone());
+    // Retained clone returned via `BootstrappedNode.event_handle` so the
+    // shutdown-task closure in `main.rs` can call `flush_for_shutdown` at
+    // Phase 5b. All clones share the same underlying `FlushQueue`.
+    let event_handle_for_node = event_handle.clone();
 
     // Create TokenServiceConfig when a key_manager is provided (enables TokenService).
     let token_service_config =
@@ -669,6 +703,8 @@ pub async fn bootstrap_node(
             post_erasure_compaction_handle: jobs.post_erasure_compaction_handle,
             snapshot_demotion_handle: jobs.snapshot_demotion_handle,
             coordinator,
+            event_handle: event_handle_for_node,
+            event_flusher_handle,
         })
     } else {
         // === Fresh node path ===
@@ -812,6 +848,8 @@ pub async fn bootstrap_node(
             post_erasure_compaction_handle: jobs.post_erasure_compaction_handle,
             snapshot_demotion_handle: jobs.snapshot_demotion_handle,
             coordinator,
+            event_handle: event_handle_for_node,
+            event_flusher_handle,
         })
     }
 }

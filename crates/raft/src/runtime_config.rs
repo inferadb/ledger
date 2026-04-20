@@ -136,6 +136,18 @@ impl RuntimeConfigHandle {
             info!("StateCheckpoint config updated — takes effect next tick");
         }
 
+        // Handler-phase event-batching config changes take effect on the
+        // next flush cycle (the flusher re-reads from RuntimeConfigHandle
+        // on every tick). Sprint 1B4 note: `queue_capacity` is restart-only
+        // — the flusher warns on live updates of that field (tokio::mpsc
+        // channels cannot be resized without dropping sender + receiver).
+        if changed.contains(&"event_writer_batch".to_string()) {
+            info!(
+                "EventWriter batch config updated — takes effect on next flush cycle \
+                 (queue_capacity is restart-only)"
+            );
+        }
+
         // Atomic swap — all subsequent load() calls see the new config.
         self.inner.store(Arc::new(new_config));
 

@@ -276,6 +276,11 @@ pub const STAGE: &str = "stage";
 /// `"shutdown"` for the state-DB checkpointer).
 pub const TRIGGER: &str = "trigger";
 
+/// Cause label identifying why an overflow / failure occurred
+/// (e.g. `"queue_full"`, `"shutdown_timeout"`, `"channel_closed"` for the
+/// handler-phase event flusher).
+pub const CAUSE: &str = "cause";
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -366,6 +371,7 @@ mod tests {
             ("EXHAUSTED", super::EXHAUSTED),
             ("STAGE", super::STAGE),
             ("TRIGGER", super::TRIGGER),
+            ("CAUSE", super::CAUSE),
         ]
     }
 

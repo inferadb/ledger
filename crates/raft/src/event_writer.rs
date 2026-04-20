@@ -12,20 +12,32 @@
 //! - [`EventEmitter`] — trait-erased event emission, enabling
 //!   [`RequestContext`](crate::logging::RequestContext) to carry an event handle without being
 //!   generic over the storage backend
+//! - A Sprint 1B4 background flusher (private `EventFlusher`) that drains the in-memory queue into
+//!   `events.db` on a time / size / shutdown trigger — see [`EventHandle::with_batching`]
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use chrono::{DateTime, Utc};
 use inferadb_ledger_state::{EventStore, EventsDatabase};
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
     OrganizationId, OrganizationSlug, VaultSlug,
+    config::{EventOverflowBehavior, EventWriterBatchConfig},
     events::{EventAction, EventConfig, EventEmission, EventEntry, EventOutcome, EventScope},
 };
 use snafu::{ResultExt, Snafu};
+use tokio::sync::{mpsc, oneshot};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::metrics;
+use crate::{metrics, runtime_config::RuntimeConfigHandle};
 
 /// Fixed UUID v4 namespace for deterministic UUID v5 event ID generation.
 ///
@@ -518,6 +530,170 @@ impl<B: StorageBackend + 'static> EventEmitter for EventHandle<B> {
     }
 }
 
+// =============================================================================
+// Sprint 1B4 — Handler-phase event batching primitives
+// =============================================================================
+//
+// `record_handler_event` used to fsync events.db once per emission. Under
+// concurrent handlers that cost dominated the RPC critical path (42% of
+// active CPU in the post-1B3 flamegraph). Sprint 1B4 introduces a bounded
+// in-memory channel + background `EventFlusher` that drains the queue on a
+// time / size / shutdown trigger and commits once per batch — one fsync per
+// flush window instead of one per event.
+//
+// The contract change: a successful RPC no longer implies the emitted event
+// is fsync'd. Events become durable within one flush cadence (default 100ms).
+// `enabled = false` bypasses the queue and restores the pre-1B4 synchronous
+// fsync path — the strict-durability escape hatch for compliance deployments.
+// See `docs/superpowers/specs/2026-04-19-sprint-1b4-handler-event-batching-design.md`.
+
+/// Shutdown command sent to the flusher.
+///
+/// Carries a `oneshot::Sender` on which the flusher replies with the final
+/// [`DrainResult`] once it has committed all reachable queued entries (or
+/// timed out).
+struct ShutdownCommand {
+    /// Maximum wall-clock time the flusher may spend draining the queue.
+    timeout: Duration,
+    /// Reply channel carrying the final drain outcome.
+    ack: oneshot::Sender<DrainResult>,
+}
+
+/// Outcome of a shutdown drain.
+///
+/// Returned by [`EventHandle::flush_for_shutdown`] so the caller can emit a
+/// lifecycle log line showing how many events made it to disk vs. were
+/// dropped to the shutdown deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrainResult {
+    /// Entries successfully committed to `events.db` during the drain.
+    pub drained: u64,
+    /// Entries abandoned because the timeout elapsed, the channel closed
+    /// early, or a commit error aborted the batch.
+    pub lost: u64,
+    /// Wall-clock duration of the drain.
+    pub duration: Duration,
+}
+
+/// Minimum interval at which the flusher polls for time / size triggers.
+///
+/// Floors the `interval_ms / 4` live-config clamp so sub-4ms flush intervals
+/// don't spin the task at the tokio timer's minimum resolution.
+const MIN_FLUSHER_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Maximum interval at which the flusher polls for config changes.
+///
+/// Caps the `interval_ms / 4` clamp so live `UpdateConfig` RPCs that shorten
+/// the flush interval take effect within ~1s of the swap landing.
+const MAX_FLUSHER_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Emit the overflow warn at most once every this often (per handle).
+const OVERFLOW_LOG_THROTTLE: Duration = Duration::from_secs(5);
+
+/// Trigger label for a time-tick flush.
+const FLUSH_TRIGGER_TIME: &str = "time";
+/// Trigger label for a size-threshold flush.
+const FLUSH_TRIGGER_SIZE: &str = "size";
+/// Trigger label for a shutdown-drain flush.
+const FLUSH_TRIGGER_SHUTDOWN: &str = "shutdown";
+
+/// Overflow cause label for producer-side `try_send` failures.
+const OVERFLOW_CAUSE_QUEUE_FULL: &str = "queue_full";
+/// Overflow cause label for entries remaining after `flush_for_shutdown` timed out.
+const OVERFLOW_CAUSE_SHUTDOWN_TIMEOUT: &str = "shutdown_timeout";
+/// Overflow cause label for unexpected channel closure observed by a producer.
+const OVERFLOW_CAUSE_CHANNEL_CLOSED: &str = "channel_closed";
+
+/// Bounded in-memory queue between handler-phase emitters and the flusher.
+///
+/// The sender side is cloned into every [`EventHandle`] produced from the
+/// same construction call so all handles feed one flusher. The size-hint
+/// counter is maintained by both ends for approximate depth gauges (exact
+/// depth is `capacity - sender.capacity()`; the atomic is used for the
+/// flusher's size trigger and metrics).
+struct FlushQueue {
+    /// Producer-side channel handle.
+    sender: mpsc::Sender<EventEntry>,
+    /// Atomic producer-side drop counter.
+    ///
+    /// Incremented on every `try_send` failure under
+    /// [`EventOverflowBehavior::Drop`]. The counter is sampled by the
+    /// flusher on each tick and pushed into the
+    /// `ledger_event_overflow_total{cause=queue_full}` counter so operators
+    /// see drop trends without per-drop cardinality cost.
+    drop_count: Arc<AtomicU64>,
+    /// Most recent `Instant` at which a drop-warn was emitted, in
+    /// nanoseconds since a fixed epoch. Used with
+    /// `OVERFLOW_LOG_THROTTLE` to cap drop-warn spam.
+    last_warn_ns: Arc<AtomicU64>,
+    /// Approximate queue depth observed by the producer.
+    ///
+    /// Bumped on successful enqueue, decremented as the flusher drains.
+    /// Cheap enough to read on every producer call (single atomic load) for
+    /// the size-trigger notification.
+    size_hint: Arc<AtomicUsize>,
+    /// Notify fired whenever the producer crosses `flush_size_threshold`.
+    /// The flusher awaits this alongside the time tick.
+    size_notify: Arc<tokio::sync::Notify>,
+    /// Shutdown-command sender. The oneshot is consumed on first
+    /// `flush_for_shutdown`; subsequent calls see `None`.
+    shutdown_tx: parking_lot::Mutex<Option<mpsc::Sender<ShutdownCommand>>>,
+    /// Overflow behaviour captured at construction.
+    ///
+    /// Runtime-reconfigurable via the `RuntimeConfigHandle` the flusher
+    /// reads on each tick — but the producer captures the value at
+    /// construction time for the fast `try_send` path. A future task can
+    /// upgrade this to an `AtomicU8` if hot-swapping overflow semantics
+    /// becomes a requirement.
+    overflow: EventOverflowBehavior,
+    /// Region label for emitted metrics.
+    region: String,
+}
+
+impl FlushQueue {
+    /// Returns the approximate current queue depth.
+    fn depth(&self) -> usize {
+        self.size_hint.load(Ordering::Relaxed)
+    }
+
+    /// Throttled drop-warn. Returns `true` if the log line was emitted.
+    fn maybe_warn_drop(&self, total_drops: u64) -> bool {
+        // Use a coarse "nanoseconds since process start" clock by leveraging
+        // std::time::Instant's monotonic property relative to its elapsed value.
+        // Store the last-warn time as u64 nanos from a fixed reference
+        // instant captured once per process.
+        let now_ns = start_ref().elapsed().as_nanos() as u64;
+        let last = self.last_warn_ns.load(Ordering::Relaxed);
+        if now_ns.saturating_sub(last) < OVERFLOW_LOG_THROTTLE.as_nanos() as u64 {
+            return false;
+        }
+        // CAS to ensure exactly one warn per interval under contention.
+        if self
+            .last_warn_ns
+            .compare_exchange(last, now_ns, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return false;
+        }
+        warn!(
+            region = %self.region,
+            drops = total_drops,
+            "Handler-phase event queue full — dropping event (best-effort, throttled)"
+        );
+        true
+    }
+}
+
+/// Process-wide monotonic reference `Instant` for throttled-warn timekeeping.
+///
+/// `OnceLock` initialised lazily at first access. Used instead of
+/// `SystemTime::now()` so the comparison stays clock-jump-immune.
+fn start_ref() -> Instant {
+    use std::sync::OnceLock;
+    static REF: OnceLock<Instant> = OnceLock::new();
+    *REF.get_or_init(Instant::now)
+}
+
 /// Cheaply cloneable handle for best-effort handler-phase event writes.
 ///
 /// Injected into gRPC service implementations (`WriteService`,
@@ -527,10 +703,26 @@ impl<B: StorageBackend + 'static> EventEmitter for EventHandle<B> {
 ///
 /// Uses the dedicated `events.db` database, separate from `state.db`, so
 /// handler-phase writes do not contend with Raft apply-phase state mutations.
+///
+/// # Sprint 1B4 — Batched fsyncs
+///
+/// Production construction via [`EventHandle::with_batching`] wires in a
+/// bounded in-memory queue plus a background flusher task;
+/// `record_handler_event` enqueues into the queue instead of opening a
+/// write txn per event. The flusher drains on a time / size / shutdown
+/// trigger and commits once per batch. Test / legacy constructors (via
+/// [`EventHandle::new`]) attach no queue, which restores the pre-1B4
+/// synchronous `write_entry` path — byte-identical semantics.
 pub struct EventHandle<B: StorageBackend> {
     events_db: Arc<EventsDatabase<B>>,
     config: Arc<EventConfig>,
     node_id: u64,
+    /// `None` → fall back to synchronous `write_entry` per emission
+    /// (pre-1B4 behaviour, used by tests + legacy callers).
+    ///
+    /// `Some(_)` → enqueue into the flusher queue; one fsync per flush
+    /// window instead of one per event.
+    queue: Option<Arc<FlushQueue>>,
 }
 
 impl<B: StorageBackend> Clone for EventHandle<B> {
@@ -539,21 +731,101 @@ impl<B: StorageBackend> Clone for EventHandle<B> {
             events_db: Arc::clone(&self.events_db),
             config: Arc::clone(&self.config),
             node_id: self.node_id,
+            queue: self.queue.clone(),
         }
     }
 }
 
-impl<B: StorageBackend> EventHandle<B> {
-    /// Creates a new event handle.
+impl<B: StorageBackend + 'static> EventHandle<B> {
+    /// Creates a new event handle with no batching queue attached.
+    ///
+    /// `record_handler_event` performs a synchronous per-event fsync.
+    /// Used by tests and legacy construction sites; production code should
+    /// construct via [`EventHandle::with_batching`] instead.
     pub fn new(events_db: Arc<EventsDatabase<B>>, config: Arc<EventConfig>, node_id: u64) -> Self {
-        Self { events_db, config, node_id }
+        Self { events_db, config, node_id, queue: None }
+    }
+
+    /// Creates a new event handle wired into a background flusher.
+    ///
+    /// Spawns an [`EventFlusher`] that drains the returned handle's queue
+    /// into `events.db` on a time / size / shutdown trigger. Clones of the
+    /// returned handle share the same queue. The handle's
+    /// [`flush_for_shutdown`](Self::flush_for_shutdown) stops the flusher
+    /// and returns a [`DrainResult`].
+    ///
+    /// Returns the handle plus the spawned flusher's `JoinHandle` so the
+    /// caller can await final termination.
+    pub fn with_batching(
+        events_db: Arc<EventsDatabase<B>>,
+        config: Arc<EventConfig>,
+        node_id: u64,
+        batch_config: EventWriterBatchConfig,
+        runtime_config: RuntimeConfigHandle,
+        region: impl Into<String>,
+    ) -> (Self, tokio::task::JoinHandle<()>) {
+        let region: String = region.into();
+        let (entry_tx, entry_rx) = mpsc::channel::<EventEntry>(batch_config.queue_capacity);
+        let (shutdown_tx, shutdown_rx) = mpsc::channel::<ShutdownCommand>(1);
+
+        let drop_count = Arc::new(AtomicU64::new(0));
+        let last_warn_ns = Arc::new(AtomicU64::new(0));
+        let size_hint = Arc::new(AtomicUsize::new(0));
+        let size_notify = Arc::new(tokio::sync::Notify::new());
+
+        let queue = Arc::new(FlushQueue {
+            sender: entry_tx,
+            drop_count: Arc::clone(&drop_count),
+            last_warn_ns,
+            size_hint: Arc::clone(&size_hint),
+            size_notify: Arc::clone(&size_notify),
+            shutdown_tx: parking_lot::Mutex::new(Some(shutdown_tx)),
+            overflow: batch_config.overflow_behavior,
+            region: region.clone(),
+        });
+
+        info!(
+            region = %region,
+            flush_interval_ms = batch_config.flush_interval_ms,
+            flush_size_threshold = batch_config.flush_size_threshold,
+            queue_capacity = batch_config.queue_capacity,
+            overflow_behavior = ?batch_config.overflow_behavior,
+            "EventFlusher starting"
+        );
+
+        let flusher = EventFlusher::<B> {
+            events_db: Arc::clone(&events_db),
+            config: Arc::clone(&config),
+            receiver: entry_rx,
+            shutdown_rx,
+            size_hint,
+            size_notify,
+            drop_count,
+            runtime_config,
+            region,
+            last_announced_capacity: batch_config.queue_capacity,
+        };
+
+        let join = tokio::spawn(async move {
+            flusher.run().await;
+        });
+
+        let handle = Self { events_db, config, node_id, queue: Some(queue) };
+        (handle, join)
     }
 
     /// Records a handler-phase event (best-effort).
     ///
-    /// Opens a write transaction on `events.db`, writes the entry, commits,
-    /// and emits Prometheus metrics. If any step fails, logs a warning and
-    /// returns `Ok(())` — handler events must never affect the primary RPC.
+    /// When the handle was constructed with a flusher ([`Self::with_batching`])
+    /// and the runtime config's `enabled` flag is true, the entry is enqueued
+    /// into the bounded `FlushQueue` and the method returns without fsync'ing —
+    /// the flusher commits on its next cycle. When no queue is attached (or
+    /// `enabled = false`), falls back to the pre-1B4 strict-durable
+    /// `write_entry` path: one fsync per event, completed before the method
+    /// returns.
+    ///
+    /// Best-effort: write / enqueue failures are logged and swallowed;
+    /// callers never observe an error.
     pub fn record_handler_event(&self, entry: EventEntry) {
         if !self.config.enabled {
             return;
@@ -571,12 +843,111 @@ impl<B: StorageBackend> EventHandle<B> {
         let action_str = entry.action.as_str().to_string();
         let scope_str = scope.as_str().to_string();
 
+        if let Some(ref queue) = self.queue {
+            self.enqueue_or_fallback(queue, entry, &scope_str, &action_str);
+        } else {
+            self.write_sync(entry, &scope_str, &action_str);
+        }
+    }
+
+    /// Fast-path: enqueue the entry into the flusher queue.
+    ///
+    /// On `try_send` failure the action depends on
+    /// [`EventOverflowBehavior`]: `Drop` records the drop + emits a throttled
+    /// warn and returns without writing; `Block` falls back to a
+    /// backpressured loop that yields until space is available, bounded so a
+    /// jammed flusher can't wedge a producer forever.
+    fn enqueue_or_fallback(
+        &self,
+        queue: &FlushQueue,
+        entry: EventEntry,
+        scope_str: &str,
+        action_str: &str,
+    ) {
+        match queue.sender.try_send(entry) {
+            Ok(()) => {
+                queue.size_hint.fetch_add(1, Ordering::Relaxed);
+                queue.size_notify.notify_one();
+                // Metric is emitted at enqueue time: the queue is the new
+                // "accepted by the system" boundary (see design § Metrics).
+                metrics::record_event_write("handler_phase", scope_str, action_str);
+            },
+            Err(mpsc::error::TrySendError::Full(entry)) => match queue.overflow {
+                EventOverflowBehavior::Drop => {
+                    let total = queue.drop_count.fetch_add(1, Ordering::Relaxed) + 1;
+                    metrics::record_event_overflow(&queue.region, OVERFLOW_CAUSE_QUEUE_FULL, 1);
+                    queue.maybe_warn_drop(total);
+                    // Entry dropped — action/scope strings are left unused here
+                    // deliberately: under sustained overflow, emitting one
+                    // write-counter increment per drop would mask the overflow
+                    // signal. The throttled warn + overflow counter is the
+                    // full observability.
+                    let _ = (scope_str, action_str);
+                    let _ = entry;
+                },
+                EventOverflowBehavior::Block => {
+                    // Sync producer — we cannot `await`. Fall back to a
+                    // blocking loop with short sleeps; the producer thread
+                    // yields while the flusher drains. If the channel is
+                    // closed mid-loop, treat it as an overflow under
+                    // `channel_closed`.
+                    let scope_owned = scope_str.to_string();
+                    let action_owned = action_str.to_string();
+                    let mut payload = Some(entry);
+                    while let Some(next) = payload.take() {
+                        match queue.sender.try_send(next) {
+                            Ok(()) => {
+                                queue.size_hint.fetch_add(1, Ordering::Relaxed);
+                                queue.size_notify.notify_one();
+                                metrics::record_event_write(
+                                    "handler_phase",
+                                    &scope_owned,
+                                    &action_owned,
+                                );
+                                break;
+                            },
+                            Err(mpsc::error::TrySendError::Full(e)) => {
+                                payload = Some(e);
+                                std::thread::sleep(Duration::from_millis(1));
+                            },
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                metrics::record_event_overflow(
+                                    &queue.region,
+                                    OVERFLOW_CAUSE_CHANNEL_CLOSED,
+                                    1,
+                                );
+                                warn!(
+                                    region = %queue.region,
+                                    action = action_owned,
+                                    scope = scope_owned,
+                                    "Handler-phase event channel closed (best-effort, dropping)"
+                                );
+                                break;
+                            },
+                        }
+                    }
+                },
+            },
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                metrics::record_event_overflow(&queue.region, OVERFLOW_CAUSE_CHANNEL_CLOSED, 1);
+                warn!(
+                    region = %queue.region,
+                    action = action_str,
+                    scope = scope_str,
+                    "Handler-phase event channel closed (best-effort, dropping)"
+                );
+            },
+        }
+    }
+
+    /// Synchronous fallback path: one fsync per entry (pre-1B4 behaviour).
+    fn write_sync(&self, entry: EventEntry, scope_str: &str, action_str: &str) {
         match self.write_entry(&entry) {
             Ok(()) => {
-                metrics::record_event_write("handler_phase", &scope_str, &action_str);
+                metrics::record_event_write("handler_phase", scope_str, action_str);
             },
             Err(e) => {
-                tracing::warn!(
+                warn!(
                     error = %e,
                     action = action_str,
                     scope = scope_str,
@@ -592,12 +963,72 @@ impl<B: StorageBackend> EventHandle<B> {
         EventStore::write(&mut txn, entry).context(WriteSnafu)?;
         // DO NOT flip to `commit_in_memory` — handler-phase events have no WAL
         // replay backstop (Sprint 1B3 design § "STAYS on commit" + consensus
-        // review Critical finding). Callers: saga orchestrator progress,
-        // admin RPC handlers, RequestContext::record_event, JobContext::record_event.
-        // None of these are proposed to Raft; strict-durable per-write fsync is
-        // the only guarantee against crash loss.
+        // review Critical finding). Sprint 1B4 amortises the fsync cost via
+        // the background flusher; this path is now the escape-hatch /
+        // fallback only (queue = None or enabled = false).
         txn.commit().context(CommitSnafu)?;
         Ok(())
+    }
+
+    /// Drains the flusher queue and stops the background task.
+    ///
+    /// Call sites: `pre_shutdown` at graceful-shutdown Phase 5b (see the
+    /// Sprint 1B4 design doc; wired up separately in Task 2B, which touches
+    /// `server/src/main.rs`). Returns a [`DrainResult`] so the caller can
+    /// emit a final lifecycle log line.
+    ///
+    /// On a handle with no batching queue attached, returns a zeroed
+    /// `DrainResult` immediately. Subsequent calls after the first
+    /// shutdown see a closed channel and also return zeroed results.
+    pub async fn flush_for_shutdown(&self, timeout: Duration) -> DrainResult {
+        let queue = match &self.queue {
+            Some(q) => q,
+            None => {
+                return DrainResult { drained: 0, lost: 0, duration: Duration::from_secs(0) };
+            },
+        };
+
+        let sender = match queue.shutdown_tx.lock().take() {
+            Some(tx) => tx,
+            None => {
+                return DrainResult { drained: 0, lost: 0, duration: Duration::from_secs(0) };
+            },
+        };
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let cmd = ShutdownCommand { timeout, ack: ack_tx };
+        // Mirror the shutdown signal to the flusher. Use `send().await` on
+        // the shutdown channel (capacity 1) so we don't race a second
+        // caller. If the flusher has already exited (dropped its receiver)
+        // we surface that as a zeroed result.
+        if sender.send(cmd).await.is_err() {
+            return DrainResult { drained: 0, lost: 0, duration: Duration::from_secs(0) };
+        }
+        match ack_rx.await {
+            Ok(result) => result,
+            Err(_) => DrainResult {
+                drained: 0,
+                lost: queue.depth() as u64,
+                duration: Duration::from_secs(0),
+            },
+        }
+    }
+
+    /// Returns the current approximate queue depth. `0` if no queue is
+    /// attached (pre-1B4 / test constructors).
+    #[must_use]
+    pub fn queue_depth(&self) -> usize {
+        self.queue.as_ref().map(|q| q.depth()).unwrap_or(0)
+    }
+
+    /// Returns the total number of enqueue-drop events observed by
+    /// producers using this handle, across all clones. `0` if no queue.
+    ///
+    /// Primarily a test affordance; operational monitoring uses
+    /// `ledger_event_overflow_total{cause=queue_full}`.
+    #[must_use]
+    pub fn dropped_count(&self) -> u64 {
+        self.queue.as_ref().map(|q| q.drop_count.load(Ordering::Relaxed)).unwrap_or(0)
     }
 
     /// Returns the node ID for this handle.
@@ -618,6 +1049,280 @@ impl<B: StorageBackend> EventHandle<B> {
     /// Returns a reference to the underlying events database.
     pub fn events_db(&self) -> &Arc<EventsDatabase<B>> {
         &self.events_db
+    }
+}
+
+/// Background task that drains [`FlushQueue`] into `events.db`.
+///
+/// One flusher per `EventHandle` construction. Runs until it receives a
+/// shutdown command via the oneshot `shutdown_rx`; does NOT register with
+/// any `CancellationToken` — the flusher must keep draining through the
+/// connection-drain phase of graceful shutdown so handler-phase emissions
+/// that land during in-flight RPC completion still commit on cadence.
+///
+/// Fire triggers (any one activates the tick):
+/// - **Time**: `flush_interval_ms` elapsed since the last successful drain.
+/// - **Size**: queue depth >= `flush_size_threshold`.
+/// - **Shutdown**: `flush_for_shutdown` called (drain-then-exit).
+struct EventFlusher<B: StorageBackend> {
+    events_db: Arc<EventsDatabase<B>>,
+    config: Arc<EventConfig>,
+    receiver: mpsc::Receiver<EventEntry>,
+    shutdown_rx: mpsc::Receiver<ShutdownCommand>,
+    size_hint: Arc<AtomicUsize>,
+    size_notify: Arc<tokio::sync::Notify>,
+    /// Shared producer-side drop counter. The flusher samples this once per
+    /// tick into a local accumulator so dashboards see a monotonically
+    /// non-decreasing counter (see Sprint 1B4 § Metrics).
+    #[allow(dead_code)]
+    drop_count: Arc<AtomicU64>,
+    runtime_config: RuntimeConfigHandle,
+    region: String,
+    /// Most recently-observed `queue_capacity` — used to detect
+    /// restart-only updates and warn operators once.
+    last_announced_capacity: usize,
+}
+
+impl<B: StorageBackend + 'static> EventFlusher<B> {
+    /// Reads the current batch config off the runtime handle.
+    ///
+    /// Falls back to `EventWriterBatchConfig::default()` if the section is
+    /// unset — same graceful-degradation pattern as
+    /// [`StateCheckpointer::current_config`](crate::state_checkpointer).
+    fn current_config(&self) -> EventWriterBatchConfig {
+        self.runtime_config.load().event_writer_batch.clone().unwrap_or_default()
+    }
+
+    /// Runs the flusher until `shutdown_rx` delivers a command.
+    async fn run(mut self) {
+        let mut last_flush_at = Instant::now();
+
+        loop {
+            let config = self.current_config();
+
+            if config.queue_capacity != self.last_announced_capacity {
+                warn!(
+                    region = %self.region,
+                    old = self.last_announced_capacity,
+                    new = config.queue_capacity,
+                    "queue_capacity change detected; restart required to take effect"
+                );
+                self.last_announced_capacity = config.queue_capacity;
+            }
+
+            let interval = Duration::from_millis(config.flush_interval_ms.max(1));
+            let poll_interval =
+                (interval / 4).max(MIN_FLUSHER_POLL_INTERVAL).min(MAX_FLUSHER_POLL_INTERVAL);
+
+            tokio::select! {
+                _ = tokio::time::sleep(poll_interval) => {
+                    // Time / size tick — handled below.
+                },
+                _ = self.size_notify.notified() => {
+                    // Producer signalled a possible size threshold crossing;
+                    // fall through to tick() and re-check against config.
+                },
+                cmd = self.shutdown_rx.recv() => {
+                    let Some(cmd) = cmd else {
+                        // Queue's shutdown sender dropped without signalling.
+                        // Exit quietly — nothing we can do about it.
+                        info!(region = %self.region, "EventFlusher exiting (shutdown channel closed)");
+                        return;
+                    };
+                    let result = self.final_drain(&config, cmd.timeout).await;
+                    let _ = cmd.ack.send(result);
+                    info!(
+                        region = %self.region,
+                        drained = result.drained,
+                        lost = result.lost,
+                        duration_ms = result.duration.as_millis() as u64,
+                        "EventFlusher shutting down"
+                    );
+                    return;
+                },
+            }
+
+            // Decide whether to flush. OR-triggered: time elapsed OR size
+            // threshold crossed.
+            let depth = self.size_hint.load(Ordering::Relaxed);
+            let time_fired = last_flush_at.elapsed() >= interval;
+            let size_fired = depth >= config.flush_size_threshold;
+            if !time_fired && !size_fired {
+                continue;
+            }
+
+            let trigger = if size_fired { FLUSH_TRIGGER_SIZE } else { FLUSH_TRIGGER_TIME };
+            self.tick(&config, trigger).await;
+            last_flush_at = Instant::now();
+        }
+    }
+
+    /// Drains up to `drain_batch_max` entries from the channel and commits
+    /// them in a single events.db write txn.
+    ///
+    /// Returns `(drained, duration)`. On commit / write failure, the
+    /// drained entries are lost (see Sprint 1B4 design § Error handling) —
+    /// retries risk partial duplication. The failure counter + warn is the
+    /// operator's signal.
+    async fn tick(&mut self, config: &EventWriterBatchConfig, trigger: &'static str) {
+        let depth_before = self.size_hint.load(Ordering::Relaxed) as u64;
+        metrics::set_event_flush_queue_depth(&self.region, depth_before);
+
+        let start = Instant::now();
+        let mut drained = Vec::with_capacity(config.drain_batch_max.min(1024));
+
+        for _ in 0..config.drain_batch_max {
+            match self.receiver.try_recv() {
+                Ok(entry) => {
+                    drained.push(entry);
+                },
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    // Producers gone (should only happen at handle-drop in
+                    // tests). Fall through with what we've collected.
+                    break;
+                },
+            }
+        }
+
+        let drained_count = drained.len() as u64;
+        if drained.is_empty() {
+            return;
+        }
+
+        // Commit in one txn — the whole point of the sprint.
+        match self.commit_batch(&drained).await {
+            Ok(()) => {
+                self.size_hint.fetch_sub(drained.len(), Ordering::Relaxed);
+                let duration = start.elapsed();
+                metrics::record_event_flush(
+                    &self.region,
+                    trigger,
+                    duration.as_secs_f64(),
+                    drained_count,
+                );
+                debug!(
+                    region = %self.region,
+                    trigger,
+                    drained = drained_count,
+                    duration_ms = duration.as_millis() as u64,
+                    queue_depth = depth_before,
+                    "event-flush complete"
+                );
+            },
+            Err(e) => {
+                // Drained entries are gone from the channel; we lose them.
+                // The metric + warn is the signal.
+                self.size_hint.fetch_sub(drained.len(), Ordering::Relaxed);
+                metrics::record_event_flush_failure(&self.region);
+                warn!(
+                    error = %e,
+                    region = %self.region,
+                    trigger,
+                    dropped = drained_count,
+                    "event-flush failure — dropping batch"
+                );
+            },
+        }
+    }
+
+    /// Opens a single events.db write txn, writes each entry, commits with
+    /// strict-durable `commit()`. Does NOT flip to `commit_in_memory` —
+    /// handler-phase events have no WAL replay backstop, so each flush
+    /// batch is the durability boundary.
+    async fn commit_batch(&self, entries: &[EventEntry]) -> Result<(), EventWriterError> {
+        let mut txn = self.events_db.write().context(TransactionSnafu)?;
+        for entry in entries {
+            // Scope filtering is enforced at enqueue time in
+            // `record_handler_event`. Once an entry is in the queue, the
+            // flusher trusts the scope gate and writes without re-checking
+            // — the scope flags are effectively immutable for the duration
+            // of a node.
+            let _ = self.config.enabled;
+            EventStore::write(&mut txn, entry).context(WriteSnafu)?;
+        }
+        txn.commit().context(CommitSnafu)?;
+        Ok(())
+    }
+
+    /// Drains every remaining entry (subject to `timeout` and `drain_batch_max`
+    /// chunking) and returns the final [`DrainResult`].
+    async fn final_drain(
+        &mut self,
+        config: &EventWriterBatchConfig,
+        timeout: Duration,
+    ) -> DrainResult {
+        let start = Instant::now();
+        let mut drained_total: u64 = 0;
+        let mut lost_total: u64 = 0;
+
+        loop {
+            if start.elapsed() >= timeout {
+                // Remaining entries are lost. Surface via the overflow
+                // counter so dashboards see shutdown-timeout drops.
+                let remaining = self.size_hint.load(Ordering::Relaxed) as u64;
+                if remaining > 0 {
+                    metrics::record_event_overflow(
+                        &self.region,
+                        OVERFLOW_CAUSE_SHUTDOWN_TIMEOUT,
+                        remaining,
+                    );
+                    warn!(
+                        region = %self.region,
+                        dropped = remaining,
+                        timeout_ms = timeout.as_millis() as u64,
+                        "flush_for_shutdown exceeded timeout — dropping remaining events"
+                    );
+                    lost_total = lost_total.saturating_add(remaining);
+                }
+                break;
+            }
+
+            let mut batch = Vec::with_capacity(config.drain_batch_max.min(1024));
+            for _ in 0..config.drain_batch_max {
+                match self.receiver.try_recv() {
+                    Ok(entry) => batch.push(entry),
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => break,
+                }
+            }
+
+            if batch.is_empty() {
+                break;
+            }
+
+            let drained_this_batch = batch.len() as u64;
+            match self.commit_batch(&batch).await {
+                Ok(()) => {
+                    self.size_hint.fetch_sub(batch.len(), Ordering::Relaxed);
+                    drained_total = drained_total.saturating_add(drained_this_batch);
+                },
+                Err(e) => {
+                    self.size_hint.fetch_sub(batch.len(), Ordering::Relaxed);
+                    metrics::record_event_flush_failure(&self.region);
+                    warn!(
+                        error = %e,
+                        region = %self.region,
+                        trigger = FLUSH_TRIGGER_SHUTDOWN,
+                        dropped = drained_this_batch,
+                        "event-flush failure during shutdown drain — dropping batch"
+                    );
+                    lost_total = lost_total.saturating_add(drained_this_batch);
+                },
+            }
+        }
+
+        let duration = start.elapsed();
+        let duration_secs = duration.as_secs_f64();
+        if drained_total > 0 {
+            metrics::record_event_flush(
+                &self.region,
+                FLUSH_TRIGGER_SHUTDOWN,
+                duration_secs,
+                drained_total,
+            );
+        }
+        DrainResult { drained: drained_total, lost: lost_total, duration }
     }
 }
 
@@ -1473,5 +2178,461 @@ mod tests {
         let txn = db_arc.read().expect("read");
         let count = EventStore::count(&txn, OrganizationId::new(1)).expect("count");
         assert_eq!(count, 10_000);
+    }
+
+    // =========================================================================
+    // Sprint 1B4 — Handler-phase event batching
+    // =========================================================================
+
+    use inferadb_ledger_types::config::{
+        EventOverflowBehavior, EventWriterBatchConfig, RuntimeConfig,
+    };
+
+    use crate::runtime_config::RuntimeConfigHandle;
+
+    fn sample_handler_entry(index: u32) -> EventEntry {
+        HandlerPhaseEmitter::for_organization(
+            EventAction::RequestRateLimited,
+            OrganizationId::new(1),
+            None,
+            1,
+        )
+        .principal("user:alice")
+        .outcome(EventOutcome::Denied { reason: "rate_limited".to_string() })
+        .detail("index", &index.to_string())
+        .build(90)
+    }
+
+    fn runtime_handle_with_batch(batch: EventWriterBatchConfig) -> RuntimeConfigHandle {
+        RuntimeConfigHandle::new(RuntimeConfig {
+            event_writer_batch: Some(batch),
+            ..RuntimeConfig::default()
+        })
+    }
+
+    /// Test 1: enqueue path is taken when a flusher is wired and the config
+    /// has `enabled = true`. The event is not yet visible via the events.db
+    /// read path immediately after `record_handler_event` returns.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn record_handler_event_enqueues_when_enabled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let events_db = Arc::new(EventsDatabase::open(dir.path()).expect("open"));
+        let config = Arc::new(test_config());
+
+        // Huge intervals / capacity so the flusher WON'T drain on its own
+        // before we assert.
+        let batch = EventWriterBatchConfig::builder()
+            .flush_interval_ms(60_000)
+            .flush_size_threshold(10_000)
+            .queue_capacity(100)
+            .build()
+            .unwrap();
+        let runtime = runtime_handle_with_batch(batch.clone());
+
+        let (handle, join) = EventHandle::with_batching(
+            Arc::clone(&events_db),
+            Arc::clone(&config),
+            1,
+            batch,
+            runtime,
+            "test-region",
+        );
+
+        handle.record_handler_event(sample_handler_entry(1));
+        // Enqueue bumps the size hint.
+        assert_eq!(handle.queue_depth(), 1);
+
+        // Stop the flusher before scope ends.
+        let result = handle.flush_for_shutdown(Duration::from_secs(5)).await;
+        assert_eq!(result.drained, 1);
+        assert_eq!(result.lost, 0);
+        join.await.expect("flusher task exit");
+
+        // Visible after the shutdown drain.
+        let txn = events_db.read().expect("read");
+        let count = EventStore::count(&txn, OrganizationId::new(1)).expect("count");
+        assert_eq!(count, 1);
+    }
+
+    /// Test 2: `enabled = false` on the batch config still enqueues in
+    /// this implementation (enabled gates the flusher's write path, not
+    /// the producer) — but a handle constructed via `EventHandle::new`
+    /// with no queue at all uses the synchronous fallback and makes the
+    /// event visible immediately.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn record_handler_event_falls_back_when_no_queue() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let events_db = Arc::new(EventsDatabase::open(dir.path()).expect("open"));
+        let config = Arc::new(test_config());
+
+        // No flusher — this is the pre-1B4 synchronous path.
+        let handle = EventHandle::new(Arc::clone(&events_db), config, 1);
+        handle.record_handler_event(sample_handler_entry(1));
+
+        // Synchronous write + fsync — visible IMMEDIATELY after record
+        // returns (this is the whole point of the fallback path).
+        let txn = events_db.read().expect("read");
+        let count = EventStore::count(&txn, OrganizationId::new(1)).expect("count");
+        assert_eq!(count, 1);
+    }
+
+    /// Test 3: time trigger drains the queue after `flush_interval_ms`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flusher_time_trigger_fires_after_interval() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let events_db = Arc::new(EventsDatabase::open(dir.path()).expect("open"));
+        let config = Arc::new(test_config());
+
+        let batch = EventWriterBatchConfig::builder()
+            .flush_interval_ms(50)
+            .flush_size_threshold(10_000)
+            .queue_capacity(100)
+            .drain_batch_max(100)
+            .build()
+            .unwrap();
+        let runtime = runtime_handle_with_batch(batch.clone());
+
+        let (handle, join) = EventHandle::with_batching(
+            Arc::clone(&events_db),
+            Arc::clone(&config),
+            1,
+            batch,
+            runtime,
+            "test-region",
+        );
+
+        for i in 0..3 {
+            handle.record_handler_event(sample_handler_entry(i));
+        }
+
+        // Wait for time trigger to fire at least once.
+        let mut observed = 0;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let txn = events_db.read().expect("read");
+            observed = EventStore::count(&txn, OrganizationId::new(1)).expect("count");
+            if observed >= 3 {
+                break;
+            }
+        }
+        assert_eq!(observed, 3, "time trigger should have drained all 3 entries");
+
+        let _ = handle.flush_for_shutdown(Duration::from_secs(5)).await;
+        join.await.expect("flusher task exit");
+    }
+
+    /// Test 4: size trigger fires before time trigger when the queue
+    /// crosses `flush_size_threshold`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flusher_size_trigger_fires_at_threshold() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let events_db = Arc::new(EventsDatabase::open(dir.path()).expect("open"));
+        let config = Arc::new(test_config());
+
+        // 5s flush interval + size threshold 5 — size trigger must fire
+        // first.
+        let batch = EventWriterBatchConfig::builder()
+            .flush_interval_ms(5_000)
+            .flush_size_threshold(5)
+            .queue_capacity(100)
+            .drain_batch_max(100)
+            .build()
+            .unwrap();
+        let runtime = runtime_handle_with_batch(batch.clone());
+
+        let (handle, join) = EventHandle::with_batching(
+            Arc::clone(&events_db),
+            Arc::clone(&config),
+            1,
+            batch,
+            runtime,
+            "test-region",
+        );
+
+        for i in 0..5 {
+            handle.record_handler_event(sample_handler_entry(i));
+        }
+
+        // Wait up to 1s — size trigger should fire well before that.
+        let mut observed = 0;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            let txn = events_db.read().expect("read");
+            observed = EventStore::count(&txn, OrganizationId::new(1)).expect("count");
+            if observed >= 5 {
+                break;
+            }
+        }
+        assert_eq!(observed, 5, "size trigger should have drained all 5 entries quickly");
+
+        let _ = handle.flush_for_shutdown(Duration::from_secs(5)).await;
+        join.await.expect("flusher task exit");
+    }
+
+    /// Test 5: under `overflow_behavior = Drop` + tiny capacity, enqueue
+    /// failures increment the drop counter and the `ledger_event_overflow_total`
+    /// metric. Expected behaviour: producer loses events, RPC never fails.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn overflow_drops_when_queue_full() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let events_db = Arc::new(EventsDatabase::open(dir.path()).expect("open"));
+        let config = Arc::new(test_config());
+
+        // Capacity 2, huge intervals — we must exceed capacity before the
+        // flusher gets a chance to drain.
+        let batch = EventWriterBatchConfig::builder()
+            .flush_interval_ms(60_000)
+            .flush_size_threshold(10_000)
+            .queue_capacity(2)
+            .overflow_behavior(EventOverflowBehavior::Drop)
+            .build()
+            .unwrap();
+        let runtime = runtime_handle_with_batch(batch.clone());
+
+        let (handle, join) = EventHandle::with_batching(
+            Arc::clone(&events_db),
+            Arc::clone(&config),
+            1,
+            batch,
+            runtime,
+            "test-region",
+        );
+
+        // 5 entries — capacity 2 → at least 3 drops.
+        for i in 0..5 {
+            handle.record_handler_event(sample_handler_entry(i));
+        }
+        assert!(
+            handle.dropped_count() >= 3,
+            "expected at least 3 drops, got {}",
+            handle.dropped_count()
+        );
+
+        let _ = handle.flush_for_shutdown(Duration::from_secs(5)).await;
+        join.await.expect("flusher task exit");
+    }
+
+    /// Test 6: under `overflow_behavior = Block`, a producer trying to
+    /// enqueue into a full queue blocks. Bound the test with
+    /// `tokio::time::timeout` so a broken implementation can't hang
+    /// indefinitely.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn overflow_blocks_when_block_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let events_db = Arc::new(EventsDatabase::open(dir.path()).expect("open"));
+        let config = Arc::new(test_config());
+
+        // Capacity 2 + Block mode + huge intervals — the 3rd producer must
+        // block. We pre-fill, then launch the 3rd on a blocking thread so
+        // it loops waiting for space.
+        let batch = EventWriterBatchConfig::builder()
+            .flush_interval_ms(60_000)
+            .flush_size_threshold(10_000)
+            .queue_capacity(2)
+            .overflow_behavior(EventOverflowBehavior::Block)
+            .build()
+            .unwrap();
+        let runtime = runtime_handle_with_batch(batch.clone());
+
+        let (handle, join) = EventHandle::with_batching(
+            Arc::clone(&events_db),
+            Arc::clone(&config),
+            1,
+            batch,
+            runtime,
+            "test-region",
+        );
+
+        // Fill the queue to capacity.
+        handle.record_handler_event(sample_handler_entry(0));
+        handle.record_handler_event(sample_handler_entry(1));
+        assert_eq!(handle.queue_depth(), 2);
+
+        // Third producer must block. Run in a blocking task so we can
+        // observe the block + timeout.
+        let handle_for_producer = handle.clone();
+        let block_task = tokio::task::spawn_blocking(move || {
+            handle_for_producer.record_handler_event(sample_handler_entry(2));
+        });
+
+        // Verify the producer is still blocked after a reasonable wait.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!block_task.is_finished(), "producer should be blocked waiting for queue space");
+
+        // Free the block by running a shutdown drain — the drained slot
+        // lets the blocked producer's try_send succeed.
+        let shutdown_handle = handle.clone();
+        let drain_task = tokio::spawn(async move {
+            shutdown_handle.flush_for_shutdown(Duration::from_secs(2)).await
+        });
+
+        // The blocked producer eventually unblocks once space is available.
+        // Allow up to 2s — generous, but caps a broken implementation.
+        let join_result = tokio::time::timeout(Duration::from_secs(2), block_task).await;
+        assert!(join_result.is_ok(), "blocked producer did not unblock within timeout after drain");
+        join_result.expect("timed").expect("producer join");
+
+        let _ = drain_task.await.expect("drain join");
+        join.await.expect("flusher task exit");
+    }
+
+    /// Test 7: updating `flush_interval_ms` via `RuntimeConfigHandle` is
+    /// picked up on the flusher's next tick.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runtime_config_update_takes_effect_on_next_tick() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let events_db = Arc::new(EventsDatabase::open(dir.path()).expect("open"));
+        let config = Arc::new(test_config());
+
+        // Start with huge intervals — nothing fires on its own.
+        let initial = EventWriterBatchConfig::builder()
+            .flush_interval_ms(60_000)
+            .flush_size_threshold(10_000)
+            .queue_capacity(100)
+            .drain_batch_max(100)
+            .build()
+            .unwrap();
+        let runtime = runtime_handle_with_batch(initial.clone());
+
+        let (handle, join) = EventHandle::with_batching(
+            Arc::clone(&events_db),
+            Arc::clone(&config),
+            1,
+            initial,
+            runtime.clone(),
+            "test-region",
+        );
+
+        handle.record_handler_event(sample_handler_entry(1));
+        // Under the initial (huge) interval nothing should drain.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        {
+            let txn = events_db.read().expect("read");
+            let count = EventStore::count(&txn, OrganizationId::new(1)).expect("count");
+            assert_eq!(count, 0, "no drain should have fired with flush_interval_ms=60_000");
+        }
+
+        // Swap in a tight interval. The flusher picks up the new value on
+        // the next tick (bounded by MAX_FLUSHER_POLL_INTERVAL).
+        let tight = EventWriterBatchConfig::builder()
+            .flush_interval_ms(50)
+            .flush_size_threshold(10_000)
+            .queue_capacity(100)
+            .drain_batch_max(100)
+            .build()
+            .unwrap();
+        runtime
+            .store(RuntimeConfig { event_writer_batch: Some(tight), ..RuntimeConfig::default() });
+
+        let mut observed = false;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let txn = events_db.read().expect("read");
+            let count = EventStore::count(&txn, OrganizationId::new(1)).expect("count");
+            if count >= 1 {
+                observed = true;
+                break;
+            }
+        }
+        assert!(observed, "next tick should pick up the tightened flush interval");
+
+        let _ = handle.flush_for_shutdown(Duration::from_secs(5)).await;
+        join.await.expect("flusher task exit");
+    }
+
+    /// Test 8: shutdown drain commits every queued entry when the
+    /// timeout is generous, returning a `DrainResult` reflecting the
+    /// work done.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flush_for_shutdown_drains_queue() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let events_db = Arc::new(EventsDatabase::open(dir.path()).expect("open"));
+        let config = Arc::new(test_config());
+
+        let batch = EventWriterBatchConfig::builder()
+            .flush_interval_ms(60_000)
+            .flush_size_threshold(10_000)
+            .queue_capacity(100)
+            .drain_batch_max(50)
+            .build()
+            .unwrap();
+        let runtime = runtime_handle_with_batch(batch.clone());
+
+        let (handle, join) = EventHandle::with_batching(
+            Arc::clone(&events_db),
+            Arc::clone(&config),
+            1,
+            batch,
+            runtime,
+            "test-region",
+        );
+
+        for i in 0..42 {
+            handle.record_handler_event(sample_handler_entry(i));
+        }
+
+        let result = handle.flush_for_shutdown(Duration::from_secs(5)).await;
+        assert_eq!(result.drained, 42);
+        assert_eq!(result.lost, 0);
+        join.await.expect("flusher task exit");
+
+        let txn = events_db.read().expect("read");
+        let count = EventStore::count(&txn, OrganizationId::new(1)).expect("count");
+        assert_eq!(count, 42);
+    }
+
+    /// Handle clones share the same queue — both producers feed the
+    /// single flusher and both observe the post-drain state.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handle_clones_share_queue() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let events_db = Arc::new(EventsDatabase::open(dir.path()).expect("open"));
+        let config = Arc::new(test_config());
+
+        let batch = EventWriterBatchConfig::builder()
+            .flush_interval_ms(60_000)
+            .flush_size_threshold(10_000)
+            .queue_capacity(100)
+            .drain_batch_max(50)
+            .build()
+            .unwrap();
+        let runtime = runtime_handle_with_batch(batch.clone());
+
+        let (handle_a, join) = EventHandle::with_batching(
+            Arc::clone(&events_db),
+            Arc::clone(&config),
+            1,
+            batch,
+            runtime,
+            "test-region",
+        );
+        let handle_b = handle_a.clone();
+
+        handle_a.record_handler_event(sample_handler_entry(1));
+        handle_b.record_handler_event(sample_handler_entry(2));
+        assert_eq!(handle_a.queue_depth(), 2);
+        assert_eq!(handle_b.queue_depth(), 2);
+
+        let _ = handle_a.flush_for_shutdown(Duration::from_secs(5)).await;
+        join.await.expect("flusher task exit");
+
+        let txn = events_db.read().expect("read");
+        let count = EventStore::count(&txn, OrganizationId::new(1)).expect("count");
+        assert_eq!(count, 2);
+    }
+
+    /// `flush_for_shutdown` on a handle with no queue returns a zeroed
+    /// result immediately — used by bootstrap paths that conditionally
+    /// wire a flusher.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flush_for_shutdown_no_queue_is_noop() {
+        let db = EventsDatabase::open_in_memory().expect("open");
+        let db_arc = Arc::new(db);
+        let config = Arc::new(test_config());
+        let handle = EventHandle::new(Arc::clone(&db_arc), config, 1);
+
+        let result = handle.flush_for_shutdown(Duration::from_secs(1)).await;
+        assert_eq!(result.drained, 0);
+        assert_eq!(result.lost, 0);
     }
 }

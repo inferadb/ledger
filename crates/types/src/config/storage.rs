@@ -991,6 +991,208 @@ impl OrganizationPurgeConfig {
     }
 }
 
+// =========================================================================
+// EventWriterBatchConfig
+// =========================================================================
+
+/// Default master switch for the handler-phase event flusher.
+const fn default_event_batch_enabled() -> bool {
+    true
+}
+
+/// Default flush interval in milliseconds.
+const fn default_event_flush_interval_ms() -> u64 {
+    100
+}
+
+/// Default size-trigger threshold (entries).
+const fn default_event_flush_size_threshold() -> usize {
+    1_000
+}
+
+/// Default bounded-channel capacity (entries).
+const fn default_event_queue_capacity() -> usize {
+    10_000
+}
+
+/// Default maximum entries drained per flush txn.
+const fn default_event_drain_batch_max() -> usize {
+    500
+}
+
+/// Minimum flush-interval clamp (ms).
+const MIN_EVENT_FLUSH_INTERVAL_MS: u64 = 1;
+
+/// Maximum flush-interval clamp (ms).
+const MAX_EVENT_FLUSH_INTERVAL_MS: u64 = 60_000;
+
+/// Overflow behaviour when the handler-phase event queue is full.
+///
+/// Default is [`EventOverflowBehavior::Drop`] — matches the pre-existing
+/// best-effort contract on `record_handler_event` (write failures are
+/// logged and swallowed). [`EventOverflowBehavior::Block`] is an opt-in
+/// for compliance deployments that prefer "slow but lossless" over
+/// "fast but lossy".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EventOverflowBehavior {
+    /// Drop events when the queue is full; count drops via
+    /// `ledger_event_overflow_total{cause=queue_full}`.
+    #[default]
+    Drop,
+    /// Block the producer until space is available.
+    Block,
+}
+
+fn default_event_overflow_behavior() -> EventOverflowBehavior {
+    EventOverflowBehavior::Drop
+}
+
+/// Handler-phase event-batching configuration.
+///
+/// Controls the in-memory queue + background flusher introduced in
+/// Sprint 1B4 that amortizes `events.db` fsyncs for the handler-phase
+/// emission path. Handlers enqueue `EventEntry` values; a flusher drains
+/// the queue on a time / size / shutdown trigger and commits once per
+/// batch, so one fsync covers every event emitted during the flush
+/// window.
+///
+/// See `docs/superpowers/specs/2026-04-19-sprint-1b4-handler-event-batching-design.md`
+/// for the full design.
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_types::config::EventWriterBatchConfig;
+/// let config = EventWriterBatchConfig::builder()
+///     .flush_interval_ms(100)
+///     .flush_size_threshold(1_000)
+///     .build()
+///     .expect("valid event batch config");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EventWriterBatchConfig {
+    /// Master switch. When `false`, `record_handler_event` bypasses the
+    /// queue entirely and falls back to the pre-1B4 synchronous
+    /// per-event fsync path — the strict-durability escape hatch for
+    /// compliance deployments.
+    ///
+    /// Default: `true`.
+    #[serde(default = "default_event_batch_enabled")]
+    pub enabled: bool,
+    /// Time trigger: upper bound on the durability window, in milliseconds.
+    ///
+    /// Must be in `[1, 60_000]`. Default: 100.
+    #[serde(default = "default_event_flush_interval_ms")]
+    pub flush_interval_ms: u64,
+    /// Size trigger: drain when the queue holds this many entries.
+    ///
+    /// Must be >= 1. Default: 1_000.
+    #[serde(default = "default_event_flush_size_threshold")]
+    pub flush_size_threshold: usize,
+    /// Bounded `tokio::sync::mpsc` channel capacity.
+    ///
+    /// **Restart-only.** Live `UpdateConfig` values are accepted by
+    /// `RuntimeConfigHandle::update()` but ignored by the running flusher
+    /// with a `warn!` — resizing a `tokio::mpsc` channel requires dropping
+    /// and recreating the sender/receiver pair. Must be >= 1. Default: 10_000.
+    #[serde(default = "default_event_queue_capacity")]
+    pub queue_capacity: usize,
+    /// Producer-side behaviour when the queue is full.
+    ///
+    /// Default: [`EventOverflowBehavior::Drop`] — matches the
+    /// best-effort contract on `record_handler_event`.
+    #[serde(default = "default_event_overflow_behavior")]
+    pub overflow_behavior: EventOverflowBehavior,
+    /// Maximum entries drained per flush cycle.
+    ///
+    /// Bounds the `events.db` write-txn hold time so the apply-phase
+    /// pipeline doesn't starve under a burst. Must be >= 1. Default: 500.
+    #[serde(default = "default_event_drain_batch_max")]
+    pub drain_batch_max: usize,
+}
+
+impl Default for EventWriterBatchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_event_batch_enabled(),
+            flush_interval_ms: default_event_flush_interval_ms(),
+            flush_size_threshold: default_event_flush_size_threshold(),
+            queue_capacity: default_event_queue_capacity(),
+            overflow_behavior: default_event_overflow_behavior(),
+            drain_batch_max: default_event_drain_batch_max(),
+        }
+    }
+}
+
+#[bon::bon]
+impl EventWriterBatchConfig {
+    /// Creates a new event-batching configuration with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if any field is out of range.
+    #[builder]
+    pub fn new(
+        #[builder(default = default_event_batch_enabled())] enabled: bool,
+        #[builder(default = default_event_flush_interval_ms())] flush_interval_ms: u64,
+        #[builder(default = default_event_flush_size_threshold())] flush_size_threshold: usize,
+        #[builder(default = default_event_queue_capacity())] queue_capacity: usize,
+        #[builder(default = default_event_overflow_behavior())]
+        overflow_behavior: EventOverflowBehavior,
+        #[builder(default = default_event_drain_batch_max())] drain_batch_max: usize,
+    ) -> Result<Self, ConfigError> {
+        let config = Self {
+            enabled,
+            flush_interval_ms,
+            flush_size_threshold,
+            queue_capacity,
+            overflow_behavior,
+            drain_batch_max,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl EventWriterBatchConfig {
+    /// Validates the configuration values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if any field is out of range.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.flush_interval_ms < MIN_EVENT_FLUSH_INTERVAL_MS
+            || self.flush_interval_ms > MAX_EVENT_FLUSH_INTERVAL_MS
+        {
+            return Err(ConfigError::Validation {
+                message: format!(
+                    "flush_interval_ms must be in [{}, {}], got {}",
+                    MIN_EVENT_FLUSH_INTERVAL_MS,
+                    MAX_EVENT_FLUSH_INTERVAL_MS,
+                    self.flush_interval_ms
+                ),
+            });
+        }
+        if self.flush_size_threshold == 0 {
+            return Err(ConfigError::Validation {
+                message: "flush_size_threshold must be >= 1".to_string(),
+            });
+        }
+        if self.queue_capacity == 0 {
+            return Err(ConfigError::Validation {
+                message: "queue_capacity must be >= 1".to_string(),
+            });
+        }
+        if self.drain_batch_max == 0 {
+            return Err(ConfigError::Validation {
+                message: "drain_batch_max must be >= 1".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::field_reassign_with_default)]
 mod tiered_storage_tests {
@@ -1353,5 +1555,136 @@ mod tiered_storage_tests {
         let result =
             BackupConfig::builder().destination("/backups").max_backup_retention_days(0).build();
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // EventWriterBatchConfig tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn event_batch_config_default_valid() {
+        let config = EventWriterBatchConfig::default();
+        assert!(config.validate().is_ok());
+        assert!(config.enabled);
+        assert_eq!(config.flush_interval_ms, 100);
+        assert_eq!(config.flush_size_threshold, 1_000);
+        assert_eq!(config.queue_capacity, 10_000);
+        assert_eq!(config.drain_batch_max, 500);
+        assert_eq!(config.overflow_behavior, EventOverflowBehavior::Drop);
+    }
+
+    #[test]
+    fn event_batch_config_builder_defaults_valid() {
+        let config = EventWriterBatchConfig::builder().build().unwrap();
+        assert_eq!(config, EventWriterBatchConfig::default());
+    }
+
+    #[test]
+    fn event_batch_config_builder_custom_values() {
+        let config = EventWriterBatchConfig::builder()
+            .enabled(true)
+            .flush_interval_ms(250)
+            .flush_size_threshold(2_000)
+            .queue_capacity(50_000)
+            .overflow_behavior(EventOverflowBehavior::Block)
+            .drain_batch_max(1_000)
+            .build()
+            .unwrap();
+        assert_eq!(config.flush_interval_ms, 250);
+        assert_eq!(config.flush_size_threshold, 2_000);
+        assert_eq!(config.queue_capacity, 50_000);
+        assert_eq!(config.drain_batch_max, 1_000);
+        assert_eq!(config.overflow_behavior, EventOverflowBehavior::Block);
+    }
+
+    #[test]
+    fn event_batch_config_zero_flush_interval_fails() {
+        let mut config = EventWriterBatchConfig::default();
+        config.flush_interval_ms = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn event_batch_config_too_large_flush_interval_fails() {
+        let mut config = EventWriterBatchConfig::default();
+        config.flush_interval_ms = 60_001;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn event_batch_config_flush_interval_at_bounds_ok() {
+        let mut config = EventWriterBatchConfig::default();
+        config.flush_interval_ms = 1;
+        assert!(config.validate().is_ok());
+        config.flush_interval_ms = 60_000;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn event_batch_config_zero_size_threshold_fails() {
+        let mut config = EventWriterBatchConfig::default();
+        config.flush_size_threshold = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn event_batch_config_zero_queue_capacity_fails() {
+        let mut config = EventWriterBatchConfig::default();
+        config.queue_capacity = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn event_batch_config_zero_drain_batch_max_fails() {
+        let mut config = EventWriterBatchConfig::default();
+        config.drain_batch_max = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn event_batch_config_serde_roundtrip() {
+        let config = EventWriterBatchConfig::builder()
+            .enabled(false)
+            .flush_interval_ms(200)
+            .overflow_behavior(EventOverflowBehavior::Block)
+            .build()
+            .unwrap();
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: EventWriterBatchConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, parsed);
+    }
+
+    #[test]
+    fn event_batch_config_serde_defaults() {
+        let config: EventWriterBatchConfig = serde_json::from_str("{}").unwrap();
+        config.validate().unwrap();
+        assert_eq!(config, EventWriterBatchConfig::default());
+    }
+
+    #[test]
+    fn event_batch_config_json_schema_has_fields() {
+        let schema = schemars::schema_for!(EventWriterBatchConfig);
+        let json = serde_json::to_string(&schema).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let props = value.get("properties").and_then(|v| v.as_object()).unwrap();
+        assert!(props.contains_key("enabled"));
+        assert!(props.contains_key("flush_interval_ms"));
+        assert!(props.contains_key("flush_size_threshold"));
+        assert!(props.contains_key("queue_capacity"));
+        assert!(props.contains_key("overflow_behavior"));
+        assert!(props.contains_key("drain_batch_max"));
+    }
+
+    #[test]
+    fn event_overflow_behavior_default_is_drop() {
+        assert_eq!(EventOverflowBehavior::default(), EventOverflowBehavior::Drop);
+    }
+
+    #[test]
+    fn event_overflow_behavior_serde_snake_case() {
+        let drop_json = serde_json::to_string(&EventOverflowBehavior::Drop).unwrap();
+        assert_eq!(drop_json, r#""drop""#);
+        let block_json = serde_json::to_string(&EventOverflowBehavior::Block).unwrap();
+        assert_eq!(block_json, r#""block""#);
     }
 }
