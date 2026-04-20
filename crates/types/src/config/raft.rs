@@ -71,6 +71,14 @@ pub struct RaftConfig {
     #[serde(with = "humantime_serde")]
     #[schemars(with = "String")]
     pub proposal_timeout: Duration,
+    /// When `true`, the reactor resolves client proposal responses after
+    /// WAL append but *before* the blocking fsync — trading a kernel-
+    /// panic / power-loss window for removing fsync from the client's
+    /// critical path. See `docs/operations/durability.md` for the full
+    /// durability matrix. Default `false` preserves classical
+    /// "response-after-fsync" semantics.
+    #[serde(default)]
+    pub pipelined_commit: bool,
 }
 
 #[bon::bon]
@@ -93,6 +101,7 @@ impl RaftConfig {
         #[builder(default = default_max_entries_per_rpc())] max_entries_per_rpc: u64,
         #[builder(default = default_snapshot_threshold())] snapshot_threshold: u64,
         #[builder(default = default_proposal_timeout())] proposal_timeout: Duration,
+        #[builder(default)] pipelined_commit: bool,
     ) -> Result<Self, ConfigError> {
         let config = Self {
             heartbeat_interval,
@@ -101,6 +110,7 @@ impl RaftConfig {
             max_entries_per_rpc,
             snapshot_threshold,
             proposal_timeout,
+            pipelined_commit,
         };
         config.validate()?;
         Ok(config)
@@ -161,6 +171,7 @@ impl Default for RaftConfig {
             max_entries_per_rpc: default_max_entries_per_rpc(),
             snapshot_threshold: default_snapshot_threshold(),
             proposal_timeout: default_proposal_timeout(),
+            pipelined_commit: false,
         }
     }
 }
@@ -333,6 +344,15 @@ pub struct BatchConfig {
     #[serde(with = "humantime_serde")]
     #[schemars(with = "String")]
     pub batch_timeout: Duration,
+    /// Maximum number of batches allowed in-flight concurrently at the
+    /// BatchWriter level. Values > 1 pipeline batches through Raft (propose
+    /// + commit + apply + response) so that a new batch can form while
+    /// earlier batches are still applying. Raft preserves log ordering
+    /// regardless of in-flight count. Default: 8.
+    ///
+    /// Must be > 0.
+    #[serde(default = "default_max_in_flight_batches")]
+    pub max_in_flight_batches: usize,
 }
 
 #[bon::bon]
@@ -346,8 +366,9 @@ impl BatchConfig {
     pub fn new(
         #[builder(default = default_max_batch_size())] max_batch_size: usize,
         #[builder(default = default_batch_timeout())] batch_timeout: Duration,
+        #[builder(default = default_max_in_flight_batches())] max_in_flight_batches: usize,
     ) -> Result<Self, ConfigError> {
-        let config = Self { max_batch_size, batch_timeout };
+        let config = Self { max_batch_size, batch_timeout, max_in_flight_batches };
         config.validate()?;
         Ok(config)
     }
@@ -367,13 +388,22 @@ impl BatchConfig {
                 message: "max_batch_size must be > 0".to_string(),
             });
         }
+        if self.max_in_flight_batches == 0 {
+            return Err(ConfigError::Validation {
+                message: "max_in_flight_batches must be > 0".to_string(),
+            });
+        }
         Ok(())
     }
 }
 
 impl Default for BatchConfig {
     fn default() -> Self {
-        Self { max_batch_size: default_max_batch_size(), batch_timeout: default_batch_timeout() }
+        Self {
+            max_batch_size: default_max_batch_size(),
+            batch_timeout: default_batch_timeout(),
+            max_in_flight_batches: default_max_in_flight_batches(),
+        }
     }
 }
 
@@ -391,6 +421,15 @@ fn default_batch_timeout() -> Duration {
     // Give proposals more time to accumulate; caps added latency under
     // single-client load.
     Duration::from_millis(10)
+}
+
+fn default_max_in_flight_batches() -> usize {
+    // Pipeline up to 8 batches concurrently through Raft (propose + commit +
+    // apply + response). At 8, the BatchWriter never blocks on downstream
+    // stages unless apply itself saturates. A value of 1 restores the
+    // pre-pipeline serial behaviour — useful for the `concurrent-writes`
+    // apples-to-apples comparison or when diagnosing a suspected ordering bug.
+    8
 }
 
 /// Configuration for client sequence TTL eviction.

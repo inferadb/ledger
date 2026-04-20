@@ -502,6 +502,10 @@ impl RaftLogStore {
                         log_id_bytes.as_deref(),
                         skip_state_writes,
                         payload.caller,
+                        // Defer state_root computation to post-loop
+                        // amortization below — cuts per-entity state-root
+                        // work to one call per unique vault per batch.
+                        true,
                     )
                 },
                 EntryKind::Membership(consensus_membership) => {
@@ -520,6 +524,76 @@ impl RaftLogStore {
 
             if let Some(entry) = vault_entry {
                 vault_entries.push(entry);
+            }
+        }
+
+        // Amortized state-root computation (Opt B): because
+        // `apply_request_with_events` was called with `defer_state_root = true`,
+        // every accumulated `VaultEntry.state_root` is currently `EMPTY_HASH`
+        // and every Write response carries a stale placeholder `block_hash`.
+        // Compute the final state root *once* per unique vault touched by this
+        // batch and patch every matching entry + Write response. This turns
+        // O(entries × vault-work) into O(unique-vaults × vault-work).
+        //
+        // Semantic model: within a batched commit, all vault heights for a
+        // given vault share the post-batch state_root — they observe the same
+        // atomic state. Prior per-entity state_roots described states that
+        // existed for microseconds before the next op in the same batch
+        // overwrote them; the batch-end root is the only one that ever
+        // externally materialises on disk.
+        if let Some(state_layer) = &self.state_layer
+            && !vault_entries.is_empty()
+        {
+            let mut patched_roots: std::collections::HashMap<
+                inferadb_ledger_types::VaultId,
+                inferadb_ledger_types::Hash,
+            > = std::collections::HashMap::new();
+            for entry in &vault_entries {
+                if patched_roots.contains_key(&entry.vault) {
+                    continue;
+                }
+                match state_layer.compute_state_root(entry.vault) {
+                    Ok(root) => {
+                        patched_roots.insert(entry.vault, root);
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            vault = %entry.vault.value(),
+                            error = %e,
+                            "Deferred state_root computation failed; retaining placeholder hash"
+                        );
+                    },
+                }
+            }
+
+            // Patch vault_entries with the computed per-vault state_root.
+            for entry in &mut vault_entries {
+                if let Some(root) = patched_roots.get(&entry.vault) {
+                    entry.state_root = *root;
+                }
+            }
+
+            // Patch Write response block_hashes. `vault_entries` mirrors the
+            // subset of `responses` that produced a VaultEntry; we walk both
+            // vectors and re-compute block_hash for matching Write responses.
+            // Non-Write responses are left untouched.
+            let mut ve_iter = vault_entries.iter();
+            for response in responses.iter_mut() {
+                if let crate::types::LedgerResponse::Write { block_hash, .. } = response {
+                    if let Some(entry) = ve_iter.next() {
+                        *block_hash = self.compute_vault_block_hash(entry);
+                    }
+                } else if let crate::types::LedgerResponse::BatchWrite { responses: inner } =
+                    response
+                {
+                    for inner_resp in inner.iter_mut() {
+                        if let crate::types::LedgerResponse::Write { block_hash, .. } = inner_resp
+                            && let Some(entry) = ve_iter.next()
+                        {
+                            *block_hash = self.compute_vault_block_hash(entry);
+                        }
+                    }
+                }
             }
         }
 

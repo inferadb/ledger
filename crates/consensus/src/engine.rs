@@ -71,6 +71,20 @@ pub struct ConsensusEngine {
     validator: Option<Arc<ValidatorFn>>,
 }
 
+/// Runtime options for [`ConsensusEngine::start_with_options`].
+///
+/// Defaults match [`ConsensusEngine::start`] — classical durability
+/// semantics with fsync on the client response critical path.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConsensusEngineOptions {
+    /// When `true`, the reactor resolves client responses before the
+    /// blocking WAL fsync, trading a narrow kernel-panic / power-loss
+    /// window for fsync-free response latency. See
+    /// [`Reactor::with_pipelined_commit`](crate::reactor::Reactor) and
+    /// `docs/operations/durability.md`.
+    pub pipelined_commit: bool,
+}
+
 impl ConsensusEngine {
     /// Starts the engine by spawning the reactor as a background task.
     ///
@@ -95,6 +109,32 @@ impl ConsensusEngine {
         W: WalBackend + Send + 'static,
         T: NetworkTransport,
     {
+        Self::start_with_options(
+            shards,
+            wal,
+            clock,
+            transport,
+            flush_interval,
+            ConsensusEngineOptions::default(),
+        )
+    }
+
+    /// Starts the engine with explicit runtime options (`pipelined_commit`,
+    /// future knobs). See [`ConsensusEngineOptions`].
+    pub fn start_with_options<C, R, W, T>(
+        shards: Vec<Shard<C, R>>,
+        wal: W,
+        clock: C,
+        transport: T,
+        flush_interval: Duration,
+        options: ConsensusEngineOptions,
+    ) -> (Self, mpsc::Receiver<CommittedBatch>, HashMap<ShardId, watch::Receiver<ShardState>>)
+    where
+        C: Clock + Clone + Send + 'static,
+        R: RngSource + Send + 'static,
+        W: WalBackend + Send + 'static,
+        T: NetworkTransport,
+    {
         // Priority split: control traffic gets a small dedicated channel so
         // membership / snapshot / shutdown events can't be starved by a
         // proposal flood. Proposals get the larger bulk channel with
@@ -104,7 +144,8 @@ impl ConsensusEngine {
         let (commit_tx, commit_rx) = mpsc::channel(10_000);
 
         let mut reactor =
-            Reactor::new(control_rx, proposal_rx, wal, clock, transport, commit_tx, flush_interval);
+            Reactor::new(control_rx, proposal_rx, wal, clock, transport, commit_tx, flush_interval)
+                .with_pipelined_commit(options.pipelined_commit);
         let mut state_receivers = HashMap::new();
 
         for shard in shards {

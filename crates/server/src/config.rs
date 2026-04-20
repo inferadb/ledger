@@ -208,6 +208,18 @@ pub struct Config {
     #[serde(default)]
     pub raft: Option<inferadb_ledger_types::config::RaftConfig>,
 
+    /// Pipelined WAL commit. When true, the reactor resolves client
+    /// proposal responses after WAL append but **before** the blocking
+    /// fsync — removing fsync from the client's critical path at the
+    /// cost of a narrow kernel-panic / power-loss loss window for the
+    /// most recent acked writes. Opt-in; default `false`.
+    ///
+    /// See `docs/operations/durability.md` § *Pipelined WAL Commit*.
+    #[arg(long = "pipelined-commit", env = "INFERADB__LEDGER__PIPELINED_COMMIT", default_value_t = false)]
+    #[serde(default)]
+    #[builder(default)]
+    pub pipelined_commit: bool,
+
     /// WAL sync mode — controls the fsync primitive used by the per-batch
     /// WAL commit that gates write ACKs.
     ///
@@ -429,6 +441,7 @@ impl Default for Config {
             max_concurrent: default_max_concurrent(),
             timeout_secs: default_timeout_secs(),
             raft: None,
+            pipelined_commit: false,
             wal_sync_mode: inferadb_ledger_types::config::FileSyncMode::default(),
             batching: inferadb_ledger_types::config::BatchConfig::default(),
             logging: LoggingConfig::default(),

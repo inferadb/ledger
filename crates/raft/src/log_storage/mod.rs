@@ -3932,6 +3932,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
 
         // Verify response is a successful write
@@ -4000,6 +4001,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
         store_b.apply_request_with_events(
             &write_request,
@@ -4012,6 +4014,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
 
         // Both must produce the same number of events
@@ -4067,6 +4070,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
 
         // Should have: 1 WriteCommitted + 2 EntityExpired = 3 events
@@ -4120,6 +4124,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
 
         // Write events through the EventWriter (simulating what apply_to_state_machine does)
@@ -4221,6 +4226,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
 
         assert_eq!(
@@ -4301,6 +4307,7 @@ mod tests {
                 None,
                 false,
                 0,
+                false,
             );
             assert_eq!(response, LedgerResponse::Empty);
         }
@@ -4348,6 +4355,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
 
         let org_event = events
@@ -4395,6 +4403,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
 
         let del_event = events
@@ -4443,6 +4452,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
 
         let user_event = events
@@ -4485,6 +4495,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
 
         let suspend_event = events
@@ -4517,6 +4528,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
 
         let resume_event = resume_events
@@ -4563,6 +4575,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
 
         // Emit an org-scoped event (WriteCommitted)
@@ -4578,6 +4591,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
 
         // Persist all events
@@ -4642,6 +4656,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
         assert!(
             matches!(resp, LedgerResponse::VaultCreated { .. }),
@@ -4682,6 +4697,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
         assert!(
             matches!(resp, LedgerResponse::VaultDeleted { success: true }),
@@ -4748,6 +4764,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
         assert!(matches!(resp, LedgerResponse::BatchWrite { .. }), "expected BatchWrite response");
 
@@ -4800,6 +4817,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
 
         let health_event = events
@@ -4874,6 +4892,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
 
         // Write to org B
@@ -4905,6 +4924,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
 
         // Verify org isolation: filter events by org_id
@@ -4959,6 +4979,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
 
         // Events are accumulated but the writer will filter org events on write.
@@ -5006,6 +5027,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
 
         let write_event = events
@@ -5050,6 +5072,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
 
         let second_write = events
@@ -6469,6 +6492,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
         assert!(
             matches!(response, LedgerResponse::OnboardingUserActivated),
@@ -6783,6 +6807,7 @@ mod tests {
             None,
             false,
             0,
+            false,
         );
         response
     }
@@ -12957,6 +12982,7 @@ mod tests {
                         None,
                         false,
                         0,
+                        false,
                     );
                     prop_assert_eq!(
                         response,
@@ -12995,6 +13021,7 @@ mod tests {
                         None,
                         false,
                         0,
+                        false,
                     );
                     prop_assert_eq!(
                         response,

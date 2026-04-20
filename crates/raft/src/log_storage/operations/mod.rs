@@ -86,6 +86,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             None,
             false,
             0,
+            false,
         )
     }
 
@@ -142,6 +143,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
         log_id_bytes: Option<&[u8]>,
         skip_state_writes: bool,
         caller: u64,
+        // When true, skip the per-entity `compute_state_root` call and leave
+        // `state_root` in the returned `VaultEntry` as `EMPTY_HASH`. The
+        // caller must patch the final state_root (and recompute block_hash
+        // in the response) after all entries in the batch apply. Setting
+        // this to true amortizes state-root work from O(entries) to
+        // O(unique-vaults-in-batch).
+        defer_state_root: bool,
     ) -> (LedgerResponse, Option<VaultEntry>) {
         // Block height for event emission (from region chain state)
         let block_height = self.region_chain.read().height + 1;
@@ -368,18 +376,29 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         }
                     }
 
-                    // Compute state root
-                    match state_layer.compute_state_root(*vault) {
-                        Ok(root) => root,
-                        Err(e) => {
-                            return (
-                                LedgerResponse::Error {
-                                    code: ErrorCode::Internal,
-                                    message: format!("Failed to compute state root: {}", e),
-                                },
-                                None,
-                            );
-                        },
+                    // Compute state root, unless deferred. Deferred mode
+                    // leaves the placeholder and expects the batch caller to
+                    // patch it post-loop via a single per-vault call —
+                    // amortizing state-root work from O(entries) to
+                    // O(unique-vaults-in-batch).
+                    if defer_state_root {
+                        inferadb_ledger_types::EMPTY_HASH
+                    } else {
+                        match state_layer.compute_state_root(*vault) {
+                            Ok(root) => root,
+                            Err(e) => {
+                                return (
+                                    LedgerResponse::Error {
+                                        code: ErrorCode::Internal,
+                                        message: format!(
+                                            "Failed to compute state root: {}",
+                                            e
+                                        ),
+                                    },
+                                    None,
+                                );
+                            },
+                        }
                     }
                 } else {
                     // No state layer configured, use placeholder
@@ -6543,6 +6562,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     log_id_bytes,
                     skip_state_writes,
                     caller,
+                    defer_state_root,
                 )
             },
 
@@ -6644,6 +6664,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     log_id_bytes,
                     skip_state_writes,
                     caller,
+                    defer_state_root,
                 )
             },
 
@@ -6666,6 +6687,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         log_id_bytes,
                         skip_state_writes,
                         caller,
+                        defer_state_root,
                     );
                     responses.push(response);
                     if vault_entry.is_some() {

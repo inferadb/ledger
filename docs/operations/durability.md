@@ -125,6 +125,46 @@ Even in the strict-synchronous (`enabled = false`) mode, `record_handler_event` 
 
 With batching enabled (the default), the best-effort window widens to "one StateCheckpointer interval on crash" (default ~500ms, floor 50ms). This is a quantitative widening of the same best-effort category, not a new category of loss. The `Drop` overflow behavior on a full queue is the same shape as a commit-error drop: logged, metered, and swallowed.
 
+## Pipelined WAL commit (`--pipelined-commit`)
+
+Opt-in lever (`--pipelined-commit` / `INFERADB__LEDGER__PIPELINED_COMMIT=true`) that removes `fsync()` from the client response critical path. When enabled, the reactor resolves client proposal responses **after WAL append** but **before** the blocking fsync — entries are already in the kernel page cache (ordered, visible to subsequent reads, process-crash safe) but not yet flushed to non-volatile storage.
+
+### Durability matrix
+
+| Failure | `pipelined_commit=false` (default) | `pipelined_commit=true` |
+|---|---|---|
+| Process crash (SIGKILL / panic) | Safe | Safe (kernel writeback flushes cache) |
+| Kernel panic | Safe (fsync completed) | May lose last ~tick of acked writes |
+| Power loss | Depends on `wal_sync_mode` | May lose last ~tick of acked writes |
+| WAL fsync error | All pending responses rejected | Already-acked responses stand; error logged + `consensus_pipelined_sync_failures_total` metric |
+
+The loss window is bounded by the reactor's flush interval (default 2ms) plus the batched fsync latency. Under `wal_sync_mode=barrier` on APFS that's ~5-7ms total. Enterprise SSDs with power-loss protection capacitors narrow this to effectively zero.
+
+### When to flip it on
+
+- Hardware has power-loss protection (enterprise SSDs with capacitors, cloud providers that guarantee durability on acknowledged writes).
+- Workload can tolerate a ~5-10ms power-loss window for 2-3× lower write latency and higher throughput.
+- Combined with `wal_sync_mode=barrier` this is the maximum-throughput configuration.
+
+### When to stay off
+
+- Strict compliance postures that require absolute durability on every acked write.
+- Commodity hardware where power-loss semantics are unclear.
+- Any deployment where a kernel panic losing the last few ms of writes is unacceptable.
+
+### Interaction with `wal_sync_mode`
+
+Orthogonal. `wal_sync_mode` controls **which fsync primitive** runs; `pipelined_commit` controls **whether the client waits for it**. Compose them:
+
+- `wal_sync_mode=full`, `pipelined_commit=false` → classical, maximal durability (15-25ms p50 on APFS)
+- `wal_sync_mode=barrier`, `pipelined_commit=false` → default; fast fsync, still on critical path (~3-5ms p50)
+- `wal_sync_mode=barrier`, `pipelined_commit=true` → fastest; fsync off critical path (~0.5-2ms p50), narrow power-loss window
+
+### Metrics
+
+- `consensus_pipelined_sync_failures_total` — counter. Non-zero means an fsync failed after the client had already received success. Alertable: any sustained non-zero rate is a durability regression.
+- Response latency histograms (`ledger_grpc_request_duration_seconds`) should drop measurably when enabled — the difference gives you a direct read on how much fsync was contributing to p50/p99.
+
 ## WAL sync mode — `Barrier` (default) vs `Full`
 
 The per-batch WAL fsync is the single I/O call that gates every write ACK. `--wal-sync-mode` (env: `INFERADB__LEDGER__WAL_SYNC_MODE`) selects the fsync primitive; the default is `barrier`.

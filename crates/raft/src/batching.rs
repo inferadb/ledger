@@ -20,7 +20,10 @@ use std::{
 
 use inferadb_ledger_types::config::BatchConfig;
 use parking_lot::Mutex;
-use tokio::{sync::oneshot, time::interval};
+use tokio::{
+    sync::{Semaphore, oneshot},
+    time::interval,
+};
 use tracing::{debug, info, instrument, warn};
 
 use crate::{
@@ -71,6 +74,17 @@ pub struct BatchWriterConfig {
     /// compromise; lower it if single-client latency SLOs are tight.
     #[builder(default = Duration::from_millis(5))]
     pub tick_interval: Duration,
+    /// Maximum number of batches in-flight concurrently.
+    ///
+    /// `run()` spawns each drained batch as an independent tokio task and
+    /// bounds the spawn count with a semaphore of this size. Values > 1
+    /// pipeline batches through Raft (propose + commit + apply + response)
+    /// — the BatchWriter keeps forming new batches while earlier ones are
+    /// still applying. Raft preserves log ordering regardless of in-flight
+    /// count (the engine serializes `propose` calls by log index). Default:
+    /// 8. Set to 1 to restore the pre-pipeline serial behaviour.
+    #[builder(default = 8)]
+    pub max_in_flight_batches: usize,
 }
 
 impl Default for BatchWriterConfig {
@@ -110,6 +124,7 @@ impl From<&BatchConfig> for BatchWriterConfig {
             .max_batch_size(config.max_batch_size)
             .batch_timeout(config.batch_timeout)
             .tick_interval(derived_tick)
+            .max_in_flight_batches(config.max_in_flight_batches)
             .build()
     }
 }
@@ -296,14 +311,29 @@ where
     /// This should be spawned as a background task. Runs an infinite loop
     /// that processes batches on each tick until the task is cancelled or
     /// the process exits.
+    ///
+    /// # Pipelining
+    ///
+    /// Each drained batch is handed off to a spawned task (gated by a
+    /// semaphore sized `max_in_flight_batches`) rather than awaited inline.
+    /// This lets the run loop keep forming and proposing new batches while
+    /// earlier batches are still committing + applying. Raft serializes
+    /// `propose` calls internally by log index, so ordering is preserved
+    /// regardless of spawn order. Setting `max_in_flight_batches = 1`
+    /// restores the pre-pipeline serial behaviour — used by
+    /// [`test_utils::config::test_batch_config`] for deterministic tests
+    /// that assume strict before/after apply ordering.
     #[instrument(skip(self))]
     pub async fn run(self) {
         let mut ticker = interval(self.config.tick_interval);
+        let semaphore = Arc::new(Semaphore::new(self.config.max_in_flight_batches.max(1)));
+        let this = Arc::new(self);
 
         info!(
-            max_batch_size = self.config.max_batch_size,
-            batch_timeout_ms = self.config.batch_timeout.as_millis(),
-            tick_interval_us = self.config.tick_interval.as_micros(),
+            max_batch_size = this.config.max_batch_size,
+            batch_timeout_ms = this.config.batch_timeout.as_millis(),
+            tick_interval_us = this.config.tick_interval.as_micros(),
+            max_in_flight_batches = this.config.max_in_flight_batches,
             "Starting batch writer"
         );
 
@@ -311,16 +341,28 @@ where
             ticker.tick().await;
 
             let batch = {
-                let mut state = self.state.lock();
+                let mut state = this.state.lock();
 
                 // Emit batch queue depth gauge for SLI monitoring.
-                metrics::set_batch_queue_depth(state.pending.len(), &self.region);
+                metrics::set_batch_queue_depth(state.pending.len(), &this.region);
 
-                if state.should_flush(&self.config) { Some(state.take_batch()) } else { None }
+                if state.should_flush(&this.config) { Some(state.take_batch()) } else { None }
             };
 
             if let Some(batch) = batch {
-                self.flush_batch(batch).await;
+                // Bounded pipelining: block the tick until a permit frees up so
+                // the queue cannot accumulate indefinitely if Raft apply falls
+                // behind. Permits are owned by the spawned task and released
+                // once the batch's responses are distributed.
+                let permit = match semaphore.clone().acquire_owned().await {
+                    Ok(p) => p,
+                    Err(_closed) => break,
+                };
+                let this = this.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    this.flush_batch(batch).await;
+                });
             }
         }
     }
@@ -415,6 +457,7 @@ mod tests {
             max_batch_size: 10,
             batch_timeout: Duration::from_millis(100),
             tick_interval: Duration::from_millis(10),
+        max_in_flight_batches: 1,
         };
 
         let call_count = Arc::new(AtomicUsize::new(0));
@@ -471,6 +514,7 @@ mod tests {
             max_batch_size: 3,
             batch_timeout: Duration::from_secs(10), // Long timeout
             tick_interval: Duration::from_millis(1),
+        max_in_flight_batches: 1,
         };
 
         let call_count = Arc::new(AtomicUsize::new(0));
@@ -518,6 +562,7 @@ mod tests {
             max_batch_size: 2,
             batch_timeout: Duration::from_millis(10),
             tick_interval: Duration::from_millis(1),
+        max_in_flight_batches: 1,
         };
 
         let mut state = BatchState::new();
@@ -559,6 +604,7 @@ mod tests {
             max_batch_size: 10,
             batch_timeout: Duration::from_secs(10), // Long timeout
             tick_interval: Duration::from_millis(1),
+        max_in_flight_batches: 1,
         };
 
         let mut state = BatchState::new();
@@ -598,6 +644,7 @@ mod tests {
             max_batch_size: 100,                      // High limit
             batch_timeout: Duration::from_millis(20), // Short timeout
             tick_interval: Duration::from_millis(5),
+        max_in_flight_batches: 1,
         };
 
         let call_count = Arc::new(AtomicUsize::new(0));
@@ -767,6 +814,7 @@ mod tests {
                         max_batch_size: 64,
                         batch_timeout: Duration::from_millis(20),
                         tick_interval: Duration::from_millis(2),
+                    max_in_flight_batches: 1,
                     };
 
                     // Capturing `submit_fn` — records each request's

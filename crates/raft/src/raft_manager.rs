@@ -180,6 +180,10 @@ pub struct RaftManagerConfig {
     /// `fdatasync` on Linux). See [`inferadb_ledger_fs_sync::FileSyncMode`].
     #[builder(default)]
     pub wal_sync_mode: inferadb_ledger_fs_sync::FileSyncMode,
+    /// Pipelined WAL commit: resolve client responses before fsync
+    /// completes. Default `false`. See `docs/operations/durability.md`.
+    #[builder(default)]
+    pub pipelined_commit: bool,
 }
 
 impl RaftManagerConfig {
@@ -1203,13 +1207,17 @@ impl RaftManager {
                 }
             }
         }
-        let (engine, commit_rx, state_watchers) = inferadb_ledger_consensus::ConsensusEngine::start(
-            vec![consensus_shard],
-            wal,
-            inferadb_ledger_consensus::SystemClock,
-            consensus_transport,
-            std::time::Duration::from_millis(2),
-        );
+        let (engine, commit_rx, state_watchers) =
+            inferadb_ledger_consensus::ConsensusEngine::start_with_options(
+                vec![consensus_shard],
+                wal,
+                inferadb_ledger_consensus::SystemClock,
+                consensus_transport,
+                std::time::Duration::from_millis(2),
+                inferadb_ledger_consensus::ConsensusEngineOptions {
+                    pipelined_commit: self.config.pipelined_commit,
+                },
+            );
 
         let state_rx = state_watchers.get(&shard_id).cloned().unwrap_or_else(|| {
             let (_, rx) = tokio::sync::watch::channel(

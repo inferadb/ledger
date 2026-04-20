@@ -12,7 +12,12 @@ use inferadb_ledger_types::config::BatchConfig;
 /// Uses small values for fast test execution:
 /// - `max_batch_size`: 10 (small batches for quick iteration)
 /// - `batch_timeout`: 10ms (fast timeout for tests)
+/// - `max_in_flight_batches`: 1 (serial flushing for deterministic tests)
 #[must_use]
 pub fn test_batch_config() -> BatchConfig {
-    BatchConfig { max_batch_size: 10, batch_timeout: Duration::from_millis(10) }
+    BatchConfig {
+        max_batch_size: 10,
+        batch_timeout: Duration::from_millis(10),
+        max_in_flight_batches: 1,
+    }
 }
