@@ -254,8 +254,6 @@ Configuration can be set via CLI arguments or environment variables. CLI argumen
 | `--log-format`             | —                                          | `auto`        | Log format: `text`, `json`, or `auto`                                   |
 | `--concurrent`             | `INFERADB__LEDGER__MAX_CONCURRENT`         | `10000`       | Max concurrent requests                                                 |
 | `--timeout`                | `INFERADB__LEDGER__TIMEOUT`                | `30`          | Request timeout in seconds                                              |
-| `--wal-sync-mode`          | `INFERADB__LEDGER__WAL_SYNC_MODE`          | `barrier`     | WAL fsync mode: `barrier` (default; fast, narrow power-loss window) or `full` (opt-in; non-volatile flush on every ACK) |
-| `--pipelined-commit`       | `INFERADB__LEDGER__PIPELINED_COMMIT`       | `false`       | When true, client responses resolve before fsync (removes fsync from critical path; see durability.md) |
 
 At least one of `--listen` or `--socket` must be specified.
 

@@ -1,6 +1,6 @@
 [package]
 name = "inferadb-ledger-fs-sync"
-description = "File sync primitives with configurable durability modes for InferaDB Ledger. This is the only crate in the workspace that is permitted to use unsafe code."
+description = "Barrier-fsync primitive for InferaDB Ledger. This is the only crate in the workspace that is permitted to use unsafe code."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,19 +12,9 @@ categories = ["filesystem"]
 
 [dependencies]
 libc.workspace = true
-serde.workspace = true
-schemars.workspace = true
-clap = { workspace = true, optional = true }
-
-[features]
-default = []
-# Enables `clap::ValueEnum` for `FileSyncMode` so it can be used directly in
-# CLI argument definitions (`#[arg(value_enum, ...)]`).
-clap = ["dep:clap"]
 
 [dev-dependencies]
 tempfile.workspace = true
-serde_json.workspace = true
 
 # This crate overrides the workspace-wide `unsafe_code = "deny"` because it
 # wraps `fcntl(F_BARRIERFSYNC)` on Apple platforms, which no audited safe-

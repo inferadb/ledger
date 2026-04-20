@@ -26,7 +26,6 @@ inferadb-ledger-state.workspace = true
 inferadb-ledger-raft.workspace = true
 inferadb-ledger-services.workspace = true
 inferadb-ledger-consensus = { path = "../consensus" }
-inferadb-ledger-fs-sync = { workspace = true, features = ["clap"] }
 
 # Storage
 inferadb-ledger-store.workspace = true

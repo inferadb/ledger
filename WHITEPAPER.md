@@ -73,7 +73,7 @@ This separation enables sub-microsecond authorization checks during normal opera
 
 Ledger follows the relationship-based access control model pioneered by Google's Zanzibar system [4]. Authorization state consists of tuples:
 
-```
+```text
 (resource, relation, subject)
 ```
 
@@ -109,7 +109,7 @@ Ledger uses Raft consensus to ensure linearizable writes [5]—a strong consiste
 
 Ledger consists of five primary layers:
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                      gRPC Services                          │
 │  Read | Write | Organization | Vault | Admin | User         │
@@ -243,7 +243,7 @@ Each bucket maintains:
 
 The state root is computed as:
 
-```
+```text
 state_root = SHA-256(bucket_hash[0] || bucket_hash[1] || ... || bucket_hash[255])
 ```
 
@@ -363,7 +363,7 @@ The DEK itself is wrapped with the Region Master Key (RMK) using AES-KWP [14]. A
 
 Per-page crypto metadata is stored in a 72-byte sidecar entry alongside each page:
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────────────┐
 │                     Crypto Metadata (72 bytes)                       │
 ├──────────────┬───────────────┬──────────────┬────────────────────────┤
@@ -374,7 +374,7 @@ Per-page crypto metadata is stored in a 72-byte sidecar entry alongside each pag
 
 The encryption flow:
 
-```
+```text
 ┌─────────────────┐                           ┌─────────────────┐
 │   Page Write     │                           │   Page Read      │
 ├─────────────────┤                           ├─────────────────┤
@@ -434,7 +434,7 @@ All benchmarks run on Apple M3 (8-core), 24GB RAM, APFS SSD. Storage layer measu
 | Read throughput              | **952K ops/sec** | > 100K ops/sec | **9.5x** |
 | Write throughput (batch 100) | **11K ops/sec**  | > 5K ops/sec   | **2.2x** |
 
-**Methodology**: Custom stress-test harness with 1000+ samples per measurement, capturing latency histograms via atomic counters. Storage layer measurements isolated from network overhead. See `crates/server/tests/stress_test.rs` for configuration and `scripts/stress-throughput.sh` to reproduce.
+**Methodology**: Custom stress-test harness with 1000+ samples per measurement, capturing latency histograms via atomic counters. Storage layer measurements isolated from network overhead. See `crates/server/tests/stress_test.rs` for configuration and run `just test-stress-throughput` to reproduce.
 
 **Encryption overhead**: When encryption at rest is enabled, writes incur one AES-256-GCM encryption and one AES-KWP key wrap per page. Reads hit the DEK cache on most requests, reducing overhead to a single AES-256-GCM decryption. With a 714x margin on read latency, encryption adds negligible impact to end-to-end authorization checks.
 
@@ -442,7 +442,7 @@ All benchmarks run on Apple M3 (8-core), 24GB RAM, APFS SSD. Storage layer measu
 
 Read latency is remarkably consistent due to B+ tree O(log n) lookup:
 
-```
+```text
 Read Latency Distribution (50K entities, 482K samples)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   p50:      0.92 µs

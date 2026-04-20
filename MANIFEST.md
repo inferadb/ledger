@@ -9,7 +9,7 @@ gRPC Services (14 proto-defined, 13 implemented): Read, Write, Organization, Vau
  ↓
  services — gRPC service implementations, JWT engine, server assembly
  ↓
- raft — openraft integration, apply-phase parallelism, saga orchestrator, background jobs, rate limiting, multi-region
+ raft — operationalization layer over the consensus engine: apply-phase parallelism, saga orchestrator, background jobs, rate limiting, multi-region
  ↓
  consensus — purpose-built multi-shard Raft engine, event-driven Reactor, segmented WAL, pipelined replication
  ↓
@@ -870,8 +870,8 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 ## Crate: `inferadb-ledger-raft`
 
-- **Purpose**: Operationalization layer on top of the consensus engine. Provides openraft integration (`RaftLogStore` implementing `RaftStorage`), apply-phase parallelism, saga orchestration, background jobs, rate limiting, hot-key detection, batching, graceful shutdown, leader transfer, and 30+ production features. The actual Raft engine (Reactor, Shard, WAL) lives in `inferadb-ledger-consensus`; this crate is the glue between that engine and the rest of the app. gRPC services live in `inferadb-ledger-services`.
-- **Dependencies**: `types`, `store`, `state`, `proto`, `consensus`, `openraft`, `tonic`
+- **Purpose**: Operationalization layer on top of the consensus engine. Provides `RaftLogStore` (a combined log + state-machine store built directly against the in-house `inferadb-ledger-consensus` engine), apply-phase parallelism, saga orchestration, background jobs, rate limiting, hot-key detection, batching, graceful shutdown, leader transfer, and 30+ production features. The actual Raft engine (Reactor, Shard, WAL) lives in `inferadb-ledger-consensus`; this crate is the glue between that engine and the rest of the app. gRPC services live in `inferadb-ledger-services`.
+- **Dependencies**: `types`, `store`, `state`, `proto`, `consensus`, `tonic`
 - **Quality Rating**: ★★★★☆
 
 **Two-layer consensus architecture**: `inferadb-ledger-consensus` owns Raft correctness (election, replication, WAL, snapshotting) as a pure event-driven engine. `inferadb-ledger-raft` (this crate) owns operationalization: apply-phase workers, job scheduling, sagas, rate limiting, leader transfer orchestration, backup/restore, runtime reconfiguration. The split keeps the engine simulation-testable while letting operational concerns evolve independently.
@@ -882,14 +882,14 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 - **Purpose**: Public API surface (2 stable modules: `metrics`, `trace_context`; remaining modules including `snapshot` are `#[doc(hidden)]`)
 - **Key Types/Functions**:
-- Re-exports: `LedgerTypeConfig`, `LedgerNodeId`, `RaftLogStore`, `RateLimiter`, `HotKeyDetector`, `GracefulShutdown`, `HealthState`, `BackgroundJobWatchdog`, `EventsGarbageCollector`, `SagaOrchestrator`, `SagaOrchestratorHandle`, `SagaSubmission`, `SagaOutput`, `OnboardingPii`, `OrgPii`, `OrphanCleanupJob`, `IntegrityScrubberJob`, `TokenMaintenanceJob`, `InviteMaintenanceJob`, `OrganizationPurgeJob`, `PostErasureCompactionJob`, `UserRetentionReaper`, `AutoRecoveryJob`, `BackupJob`, `BackupManager`, `BlockCompactor`, `LearnerRefreshJob`, `ResourceMetricsCollector`, `RuntimeConfigHandle`, `TtlGarbageCollector`, `RaftManager`, `RaftManagerConfig`, `RegionConfig`, `RegionGroup`, `GrpcRaftNetworkFactory`, `RegionStorage`, `RegionStorageManager`. (`LedgerServer` moved to `inferadb-ledger-services`)
+- Re-exports: `LedgerNodeId`, `RaftLogStore`, `RateLimiter`, `HotKeyDetector`, `GracefulShutdown`, `HealthState`, `BackgroundJobWatchdog`, `EventsGarbageCollector`, `SagaOrchestrator`, `SagaOrchestratorHandle`, `SagaSubmission`, `SagaOutput`, `OnboardingPii`, `OrgPii`, `OrphanCleanupJob`, `IntegrityScrubberJob`, `TokenMaintenanceJob`, `InviteMaintenanceJob`, `OrganizationPurgeJob`, `PostErasureCompactionJob`, `UserRetentionReaper`, `AutoRecoveryJob`, `BackupJob`, `BackupManager`, `BlockCompactor`, `LearnerRefreshJob`, `ResourceMetricsCollector`, `RuntimeConfigHandle`, `TtlGarbageCollector`, `RaftManager`, `RaftManagerConfig`, `RegionConfig`, `RegionGroup`, `GrpcRaftNetworkFactory`, `RegionStorage`, `RegionStorageManager`. (`LedgerServer` moved to `inferadb-ledger-services`)
 - Note: `LedgerRequest` is NOT re-exported (access via `types::LedgerRequest`). `RaftPayload` is NOT re-exported either (access via `log_storage` internals). `RaftPayload` wraps `LedgerRequest` with `proposed_at` for deterministic timestamps.
 - 30+ `#[doc(hidden)] pub mod` declarations for server-internal infrastructure (includes `event_writer`, `events_gc`, `snapshot`, `leader_transfer`)
 - **Insights**: Public API is intentionally narrow — 2 stable modules with the remainder marked `#[doc(hidden)]` for server-internal infrastructure. `leader_transfer` supports graceful leadership handoff.
 
 #### `log_storage/`
 
-- **Purpose**: openraft LogStore and StateMachine implementation, log storage, externalized state persistence, streaming snapshot building
+- **Purpose**: Custom combined Raft log + state-machine storage (the `RaftLogStore` glue layer between the in-house consensus engine and the state layer), externalized state persistence, streaming snapshot building
 - **Structure**:
 - `log_storage/mod.rs` — Metadata constants, `ShardChainState`, re-exports, test suite (test fixtures use `wrap_payload` helper to construct `EntryPayload::Normal(RaftPayload { ... })`, includes deterministic timestamp tests, eviction tests, pending writes tests, state persistence tests)
 - `log_storage/types.rs` — `AppliedState`, `AppliedStateCore` (5-field persistence struct for new snapshot format), `PendingExternalWrites` (20-field accumulator for externalized table writes including insert/delete pairs for organizations, vaults, vault_heights/hashes/health, sequences, client_sequences, and all 5 slug indexes), `ClientSequenceEntry` (sequence + last_seen + idempotency_key + request_hash), `OrganizationMeta` (fields: `organization: OrganizationId`, `slug: OrganizationSlug`, `region: Region`, `status`, `tier`, `pending_region: Option<Region>`, `storage_bytes: u64`), `VaultMeta` (fields: `organization: OrganizationId`, `vault: VaultId`, `slug: VaultSlug`, `name: Option<String>`, `deleted: bool`, `last_write_timestamp: u64`, `retention_policy: BlockRetentionPolicy`), `SequenceCounters` (includes `signing_key`, `refresh_token`, and `invite` fields with `next_signing_key()`/`next_refresh_token()`/`next_invite()` methods), `VaultHealthStatus`. `AppliedState` maintains bidirectional slug ↔ internal ID maps for both organizations and vaults. Deleted: `CombinedSnapshot` (replaced by file-based streaming snapshots).
@@ -898,7 +898,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `log_storage/operations/` — Directory module (was a single file, now split into submodules): `mod.rs` (dispatch logic: `apply_request()` and `apply_request_with_events()`), `token_helpers.rs` (token apply handlers), `app_helpers.rs` (app apply handlers), `org_helpers.rs` (organization apply handlers), `team_helpers.rs` (team apply handlers), `helpers.rs` (shared apply helpers). Handles all `LedgerRequest` variants including 10 token variants and 6 onboarding `SystemRequest` variants. Onboarding handlers: `CreateEmailVerification` (rate limiting via count+window, overwrites existing record), `VerifyEmailCode` (constant-time `hash_eq()`, branches on `existing_user_hmac_hit`), `CreateOnboardingUser` (step 0: idempotency guard via `EmailHashEntry::Provisioning`, CAS HMAC reservation, ID allocation), `WriteOnboardingUserProfile` (step 1: write all PII regionally, create session, delete onboarding account), `ActivateOnboardingUser` (step 2: activate user directory, update HMAC index to Active, persist org meta to B+ tree, sync org registry status), `CleanupExpiredOnboarding` (GC scan of `_tmp:` prefixes with `MAX_ONBOARDING_SCAN` limit). Also `UpdateUserProfile` handler for PII-split user updates. Token apply handlers: `CreateSigningKey` (idempotent for saga retry), `RotateSigningKey` (grace period or immediate revocation), `RevokeSigningKey`, `TransitionSigningKeyRevoked` (background job), `CreateRefreshToken`, `UseRefreshToken` (atomic check-and-consume with poisoned-family detection, version binding, scope re-validation), `RevokeTokenFamily`, `RevokeAllUserSessions` (atomic: revoke + version increment), `RevokeAllAppSessions` (atomic: revoke + app version increment), `DeleteExpiredRefreshTokens` (+ poisoned family GC). Cascade hooks: `SetAppEnabled` revokes subject tokens on disable, `RemoveAppVault` revokes app-vault tokens, `PurgeOrganization`/`DeleteOrganization` cascade signing key deletion and refresh token revocation. All time-dependent logic uses `proposed_at` from `RaftPayload`.
 - `log_storage/raft_impl.rs` — `RaftLogReader`, `LedgerSnapshotBuilder` (reads from DB, not in-memory `Arc<RwLock<AppliedState>>`), `RaftStorage` trait impls. `apply_to_state_machine` creates `PendingExternalWrites`, passes through apply loop, saves via `save_state_core()`. Client sequence TTL eviction triggers on `log_id.index % eviction_interval`. `write_snapshot_to_file()` uses `SnapshotWriter` for zstd-compressed, SHA-256 checksummed file-based snapshots. `install_snapshot()` uses `SyncSnapshotReader` with `block_in_place()` for sync zstd decoding — streams directly into WriteTransactions with zero staging. `collect_snapshot_events()` uses org_ids + timestamp cutoff via `scan_apply_phase_ranged()`.
 - **Key Types/Functions**:
-- `RaftLogStore`: Implements openraft's `RaftStorage` trait (combined log + state machine)
+- `RaftLogStore`: Combined Raft log + state-machine store built against the in-house consensus engine (not openraft). Holds log entries, vote state, committed log ID, applied state, and integrates with `StateLayer` and `BlockArchive`.
 - `AppliedState`: State machine with vault heights, organizations, sequences
 - `apply_request()`: Dispatches to operation handlers for entities, relationships, vaults, organizations
 - `AppliedStateAccessor`: Shared read accessor (passed to services without direct Raft storage access)
@@ -913,10 +913,10 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `HashingWriter<W>`: Wrapper that computes SHA-256 digest while writing (streaming checksum, no buffering)
 - `SnapshotWriter<W: AsyncWrite + Unpin>`: Async streaming writer — magic header → version → zstd-compressed table data → SHA-256 checksum trailer. Methods: `new()`, `write_table_entries()`, `finish() -> [u8; 32]`
 - `SnapshotReader`: Async streaming reader — validates magic/version, decompresses zstd, yields `(table_id, key, value)` triples. Methods: `new()`, `read_entries() -> Vec<(u8, Vec<u8>, Vec<u8>)>`, `verify_checksum()`
-- `SyncSnapshotReader`: Synchronous variant for `install_snapshot()` (openraft requires sync context via `block_in_place()`). Streams directly into WriteTransactions with zero staging.
+- `SyncSnapshotReader`: Synchronous variant used by the `install_snapshot()` path, which calls `block_in_place()` so zstd decoding can stream directly into `WriteTransaction`s with zero staging.
 - `SNAPSHOT_TABLE_IDS`: Constant array of valid table IDs for snapshot inclusion
 - `validate_table_id()`: Guards against unknown table IDs during restore
-- **Insights**: Replaces the old `CombinedSnapshot` (in-memory postcard blob) with streaming file-based snapshots. Enables O(1) memory snapshots regardless of state size. The async/sync split (`SnapshotWriter`/`SyncSnapshotReader`) is necessary because openraft's `install_snapshot` callback runs in a sync context. SHA-256 checksum covers the entire compressed payload for tamper detection.
+- **Insights**: Replaces the old `CombinedSnapshot` (in-memory postcard blob) with streaming file-based snapshots. Enables O(1) memory snapshots regardless of state size. The async/sync split (`SnapshotWriter`/`SyncSnapshotReader`) exists because the install path runs synchronous zstd decoding under `block_in_place()` to stream directly into `WriteTransaction`s with zero staging. SHA-256 checksum covers the entire compressed payload for tamper detection.
 
 #### `leader_transfer.rs` — NEW
 
@@ -928,7 +928,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `transfer_leadership(raft, target, transfer_lock, config) -> Result<u64, LeaderTransferError>`: Core coordination function
 - Algorithm: verify leader → select best target (most caught-up follower via `metrics.replication`) → wait for replication catch-up → send `TriggerElection` RPC to target → poll until leader changes or timeout
 - Unit tests: config defaults, custom config, guard reset, concurrent lock prevention, error display
-- **Insights**: Composes transfer from openraft primitives (no built-in `transfer_leader()` API). Accepts _any_ new leader (not just requested target) — pragmatic for "stop being leader before shutdown." Concurrency guard shared between AdminService RPC and GracefulShutdown.
+- **Insights**: Composed directly against the consensus engine's leadership primitives (`leadership.rs`, `lease.rs`) and the `ConsensusHandle::transfer_leader` RPC. Accepts _any_ new leader (not just the requested target) — pragmatic for "stop being leader before shutdown." Concurrency guard shared between AdminService RPC and GracefulShutdown.
 
 #### `server.rs` (in `inferadb-ledger-services`)
 
@@ -949,7 +949,6 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - **Purpose**: Raft type configuration, payload wrapper, and request/response types
 - **Key Types/Functions**:
 - `RaftPayload`: Wrapper around `LedgerRequest` with leader-assigned `proposed_at: DateTime<Utc>` timestamp. Ensures all replicas apply with identical timestamps (deterministic apply-phase).
-- `LedgerTypeConfig`: openraft type config with `D = RaftPayload` (was `D = LedgerRequest`)
 - `LedgerNodeId`: Newtype for node ID (Snowflake ID)
 - `LedgerRequest`: 45 variants — 31 structural + 10 token + 4 invitation:
   - Structural: `Write`, `CreateVault`, `DeleteOrganization`, `DeleteVault`, `UpdateVault`, `SuspendOrganization`, `ResumeOrganization`, `RemoveOrganizationMember`, `UpdateOrganizationMemberRole`, `AddOrganizationMember`, `PurgeOrganization`, `StartMigration`, `CompleteMigration`, `UpdateVaultHealth`, `System(SystemRequest)`, `BatchWrite`, `CreateOrganizationTeam`, `DeleteOrganizationTeam`, `CreateApp`, `DeleteApp`, `SetAppEnabled`, `SetAppCredentialEnabled`, `RotateAppClientSecret`, `CreateAppClientAssertion`, `DeleteAppClientAssertion`, `SetAppClientAssertionEnabled`, `AddAppVault`, `UpdateAppVault`, `RemoveAppVault`, `EncryptedUserSystem(EncryptedUserSystemRequest)`, `EncryptedOrgSystem(EncryptedOrgSystemRequest)`. Note: `CreateOrganization` is a `SystemRequest` variant, not a top-level `LedgerRequest`.
@@ -1141,7 +1140,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 
 #### Consensus Interaction
 
-These files sit between this crate's openraft integration and the multi-shard consensus engine. They handle the "how do we actually commit and apply entries efficiently" question.
+These files sit between this crate's `RaftLogStore` layer and the in-house multi-shard consensus engine. They handle the "how do we actually commit and apply entries efficiently" question.
 
 - `consensus_handle.rs`: `ConsensusHandle` — the typed handle higher layers use to propose, read-index, and query membership. Wraps the `ConsensusEngine` from the consensus crate behind a Raft-crate-owned API so the rest of the app doesn't depend on consensus-crate types directly.
 - `consensus_transport.rs`: Network transport shim bridging the consensus crate's `NetworkTransport` trait to the app's gRPC-based `RaftService`. Routes `Message`s to the correct peer and surfaces delivery errors back to the reactor.
@@ -1385,9 +1384,68 @@ These files sit between this crate's openraft integration and the multi-shard co
 ### Insights
 
 - **Determinism is the load-bearing architectural choice.** The reactor is a pure function of `(state, event) → (new_state, Action[])`. All non-determinism (time, randomness, I/O) flows through injected traits. This is what makes `simulation/` worth the complexity: failing runs are reproducible.
-- **Two-layer consensus architecture.** `inferadb-ledger-consensus` is the multi-shard engine; `inferadb-ledger-raft` wraps it with openraft compatibility, background jobs, saga orchestration, and the glue that talks to the rest of the app. The raft crate owes this layering: consensus cares only about Raft correctness and durability; raft cares about operationalization.
+- **Two-layer consensus architecture.** `inferadb-ledger-consensus` is the in-house multi-shard Raft engine; `inferadb-ledger-raft` wraps it with the `RaftLogStore` integration, background jobs, saga orchestration, and the glue that talks to the rest of the app. The raft crate owes this layering: consensus cares only about Raft correctness and durability; raft cares about operationalization.
 - **WAL backend pluggability is real.** Segmented is the production backend; in-memory supports tests; encrypted is a composable wrapper; io_uring is a Linux-only performance backend. Each satisfies `WalBackend + FsyncPhase`; the reactor doesn't know which it's calling.
 - **Snapshot + WAL share the same crypto path.** `snapshot_crypto` and `wal/encrypted` both sit on `crypto.rs` (AES-GCM). Key management lives in the store crate; this crate just wraps.
+
+---
+
+## Crate: `inferadb-ledger-services`
+
+- **Purpose**: gRPC service implementations, `SlugResolver` (slug ↔ ID boundary), `JwtEngine`, `ApiVersionLayer`, and `LedgerServer` assembly. This is where the wire protocol meets the apply pipeline: RPC handlers validate input, resolve slugs to internal IDs, submit proposals via `ProposalService`, and return gRPC responses carrying `ErrorDetails` built by a single canonical helper. Local invariants are codified in `crates/services/CLAUDE.md`.
+- **Dependencies**: `types`, `store`, `state`, `proto`, `raft`, `consensus`, `tonic`
+
+### Core Files
+
+#### `lib.rs` + `server.rs`
+
+- **Purpose**: Public API surface and `LedgerServer` assembly
+- **Key Types/Functions**:
+- `LedgerServer`: bon-based builder wiring all 14 services, consensus, rate limiter, audit logger, health checks, metrics, tracing, graceful shutdown
+- Threads `HealthState` to `WriteService` and `AdminService` for drain-phase proposal rejection
+- Optional `email_blinding_key`, `saga_orchestrator_handle`, `events_db`, `event_handle` for onboarding and event-recording paths
+- **Insights**: Central wiring point. When `events_db` is present, `EventsServiceServer` is registered with `api_version_interceptor`. `email_blinding_key` and `saga_orchestrator_handle` are threaded into `ServiceContext` and `UserService` for onboarding handler access.
+
+#### `services/` — per-RPC service modules
+
+- **Purpose**: One module per gRPC service plus the shared service-layer helpers
+- **Services (14 total)**: `read`, `write`, `organization`, `vault`, `schema` (proto-only, no impl — placeholder for future schema registry), `admin`, `user`, `invitation`, `app`, `token` (as `TokenServiceImpl` — `TokenService` is the proto trait), `events`, `health`, `discovery` (impls `SystemDiscoveryService` proto trait), `raft`
+- **Region routing**: `region_resolver.rs` backs the `ResolveRegionLeader` RPC on `SystemDiscoveryService`; `ConsensusStream` bidi RPC pushes leadership updates to the SDK
+- **Shared helpers** (all in `services/`): `error_classify.rs`, `error_details.rs`, `helpers.rs`, `metadata.rs`, `service_infra.rs`, `slug_resolver.rs`
+- **Load-bearing invariants**:
+  - Every RPC resolves slugs at the top of the handler via `SlugResolver` — internal `i64` IDs never cross the wire
+  - All gRPC errors return via `status_with_correlation()` in `metadata.rs` — the canonical path for `ErrorDetails` attachment; bypassing it strips `ErrorDetails` from every missed response
+  - Version-exempt list is exactly `Health`, `SystemDiscovery`, `Raft` — operator probes, peer-to-peer Raft transport, and pre-negotiation clients
+  - Every mutation emits `AuditEvent` via `AuditLogger`; read-only admin ops (get/list) are not audited by design
+  - Leader-based errors map to `UNAVAILABLE`, snapshot-in-progress to `FAILED_PRECONDITION` — classification via `classify_raft_error`
+  - `RegionalProposal` (defined in the `Raft` service) is the only server-to-server forwarding RPC, reserved for saga orchestration
+
+#### `api_version.rs`
+
+- **Purpose**: API version negotiation — request interceptor plus response-header tower `Layer`
+- **Key Types/Functions**:
+- `CURRENT_API_VERSION: u32 = 1`, `MIN_SUPPORTED_API_VERSION: u32 = 1`
+- `API_VERSION_HEADER: &str = "x-ledger-api-version"` — sent by the SDK on every non-exempt request
+- `validate_api_version(request) -> Result<(), Status>` — rejects clients below the server minimum or above the current version
+- `api_version_interceptor()` — per-service request validation (attached via `*ServiceServer::with_interceptor`)
+- `ApiVersionLayer` — tower `Layer` installed on the server builder to inject response headers globally
+- **Insights**: Missing header defaults to version 1 for backwards compatibility during rollout. Failing outside the `[MIN, CURRENT]` window returns `FAILED_PRECONDITION` with an actionable message ("upgrade your SDK" / "downgrade your SDK or upgrade the server").
+
+#### `jwt.rs`
+
+- **Purpose**: Ed25519 JWT signing and verification
+- **Key Types/Functions**:
+- `JwtEngine` — signs tokens with Ed25519, verifies via `JwtConfig`
+- Envelope encryption: AES-256-GCM for DEKs, AES-KWP for key wrapping
+- `ArcSwap` lock-free key cache; rotation orchestrated via `SagaOrchestrator`
+- **Insights**: Changes require security review per `crates/services/CLAUDE.md`. Signing keys are zeroed in memory on drop; public verification keys are exposed via `GetPublicKeys` on `TokenService`.
+
+#### `services/slug_resolver.rs`
+
+- **Purpose**: Slug ↔ ID boundary between external gRPC surfaces (Snowflake slugs) and internal storage (sequential `i64` IDs)
+- **Key Types/Functions**:
+- `SlugResolver` — translates `{Entity}Slug(u64)` → `{Entity}Id(i64)` and validates that the slug resolves in the correct organization scope
+- **Insights**: Bugs here leak internal IDs over the wire or skip ownership validation. Audited by `proto-reviewer`.
 
 ---
 
@@ -1788,6 +1846,52 @@ These files sit between this crate's openraft integration and the multi-shard co
 
 ---
 
+## Crate: `inferadb-ledger-fs-sync`
+
+- **Purpose**: Platform-abstracted file-sync primitive. Wraps `fcntl(F_BARRIERFSYNC)` on Apple platforms and `File::sync_data` (`fdatasync` under the hood on Linux) elsewhere. This is the **only** crate in the workspace where `unsafe` is permitted — the allowlist is encoded in `crates/fs-sync/CLAUDE.md` and enforced by the `unsafe-panic-auditor` agent.
+- **Dependencies**: Platform syscalls only (no workspace dependencies)
+
+### Files
+
+#### `lib.rs`
+
+- **Purpose**: Barrier-fsync primitive — data reaches the device write cache in order and survives process and kernel crashes, but may lose the last few seconds of writes under sudden power loss on hardware without power-loss-protection capacitors
+- **Key Types/Functions**:
+- `pub fn sync(file: &File) -> io::Result<()>` — public entry point; chooses platform implementation via `#[cfg(target_vendor = "apple")]` vs other
+- `sync_barrier_apple(file)` — Apple-only path; the sole `unsafe` block in the workspace, invoking `libc::fcntl(fd, F_BARRIERFSYNC)` with a `SAFETY:` comment mapping to the single syscall
+- Linux / Unix / Windows fall through to `File::sync_data` (VFS-layer barrier semantics on ext4/xfs/btrfs with default mount options)
+- **Insights**: Barrier fsync is substantially cheaper than full `fsync` on Apple platforms while retaining crash-safety properties; the WAL batches proposals and issues a single barrier fsync per batch. Per-platform durability matrix lives in `docs/operations/durability.md`; the unsafe-exception rationale lives in `crates/fs-sync/CLAUDE.md`.
+
+---
+
+## Crate: `inferadb-ledger-profile`
+
+- **Purpose**: Profiling workload driver — a standalone binary that drives reproducible load against a running ledger node for flamegraph capture, latency histogram collection, and metrics-JSON export. SDK-consumer only: it talks to the server through `inferadb-ledger-sdk` and does not link server internals.
+- **Dependencies**: `sdk`, `types`, plus `clap`, `snafu`, `serde_json`
+
+### Files
+
+#### `main.rs`
+
+- **Purpose**: CLI entry point — parses arguments via `clap`, dispatches to the selected workload preset, writes metrics to JSON on completion
+- **Key Types/Functions**:
+- `MainError` — snafu enum with `Harness { source: Box<HarnessError> }` (boxed to satisfy clippy `result_large_err`; precedent documented inline), `WriteMetrics`, `SerializeMetrics`
+- **Insights**: Invoked by Justfile recipes `profile-server`, `profile-server-spans`, and `profile-suite`. User-facing documentation lives in `docs/operations/profiling.md`.
+
+#### `harness.rs`
+
+- **Purpose**: Bootstrap and shared infrastructure — establishes an SDK client, prepares an organization/vault, runs a measured phase with timing and sampling, and emits aggregated metrics
+- **Key Types/Functions**:
+- `HarnessError` — snafu error wrapping `SdkError` and setup/teardown failures
+
+#### `workloads/`
+
+- **Purpose**: Individual workload presets, each a subcommand of the CLI. Directory module (`mod.rs` plus one file per preset).
+- **Presets (9 total)**: `throughput_writes` (tight write loop, single organization/vault, one concurrent writer — deliberately mirrors the shape of `just test-stress-throughput` for comparability), `concurrent_writes`, `concurrent_writes_multivault`, `entity_reads`, `relationship_reads`, `relationship_writes`, `concurrent_reads`, `mixed_rw`, `check_heavy`
+- **Insights**: Designed to be flamegraph-friendly — the workload driver runs as a child process so `samply`, `cargo-flamegraph`, and `instruments` attach cleanly to the server.
+
+---
+
 ## Cross-Cutting Observations
 
 ### 1. Error Handling Excellence
@@ -1911,7 +2015,7 @@ Translation happens at the gRPC service boundary via `SlugResolver`, backed by `
 Two previously identified large-file concerns have been resolved:
 
 - **`types/src/config.rs`** → Split into `config/` directory module with 9 submodules (mod.rs, node.rs, storage.rs, raft.rs, resilience.rs, observability.rs, runtime.rs, encryption.rs, key_management.rs). All public APIs preserved via `pub use` re-exports. Encryption and key management configs added for envelope encryption at rest.
-- **`raft/src/log_storage.rs`** → Split into `log_storage/` directory module with 5 submodules + 1 subdirectory (mod.rs, types.rs, accessor.rs, store.rs, raft_impl.rs, operations/ with mod.rs + 5 helper files). Growth from externalized state persistence, streaming snapshots, client sequence eviction, and PendingExternalWrites accumulator. The `operations/` subdirectory further splits apply logic into `token_helpers.rs`, `app_helpers.rs`, `org_helpers.rs`, `team_helpers.rs`, and `helpers.rs`. Fields use `pub(super)` for cross-submodule access. All openraft trait implementations preserved.
+- **`raft/src/log_storage.rs`** → Split into `log_storage/` directory module with 5 submodules + 1 subdirectory (mod.rs, types.rs, accessor.rs, store.rs, raft_impl.rs, operations/ with mod.rs + 5 helper files). Growth from externalized state persistence, streaming snapshots, client sequence eviction, and PendingExternalWrites accumulator. The `operations/` subdirectory further splits apply logic into `token_helpers.rs`, `app_helpers.rs`, `org_helpers.rs`, `team_helpers.rs`, and `helpers.rs`. Fields use `pub(super)` for cross-submodule access. `RaftLogStore` is the only integration layer against the in-house consensus engine — the crate has no external Raft framework dependency.
 
 ---
 
@@ -1919,10 +2023,10 @@ Two previously identified large-file concerns have been resolved:
 
 InferaDB Ledger is a **production-grade blockchain database** with exceptional engineering quality:
 
-- **10 crates** of Rust (excluding generated code), 90%+ test coverage target
+- **12 crates** of Rust (excluding generated code): `types`, `store`, `state`, `proto`, `consensus`, `raft`, `services`, `sdk`, `server`, `test-utils`, `fs-sync`, `profile`. 90%+ test coverage target.
 - **Zero `unsafe` code**, comprehensive error handling (snafu on server crates, thiserror on SDK), structured error taxonomy
 - **Custom B+ tree engine** with ACID transactions, crash recovery, compaction
-- **Two-layer consensus**: purpose-built multi-shard Raft engine in `inferadb-ledger-consensus` (event-driven `Reactor`, segmented WAL, pluggable backends) + operationalization in `inferadb-ledger-raft` (openraft integration, apply-phase parallelism, saga orchestrator, background jobs). Simulation-testable via the engine's abstract `Clock`/`RngSource`/`NetworkTransport`/`WalBackend` traits.
+- **Two-layer consensus**: purpose-built multi-shard Raft engine in `inferadb-ledger-consensus` (event-driven `Reactor`, segmented WAL, pluggable backends) + operationalization in `inferadb-ledger-raft` (`RaftLogStore` integration, apply-phase parallelism, saga orchestrator, background jobs). Simulation-testable via the engine's abstract `Clock`/`RngSource`/`NetworkTransport`/`WalBackend` traits. No external Raft framework dependency — the engine is wholly in-house.
 - **Enterprise features**: JWT token authentication (EdDSA, refresh token theft detection, signing key auto-bootstrap, cascade revocation), multi-credential authentication (passkeys, TOTP, recovery codes with Ledger-authoritative verification), organization invitations (privacy-preserving lifecycle with four-check rate limiting, multi-email HMAC matching, CAS state machine, partial failure recovery), graceful shutdown with leader transfer (Draining phase, best-effort handoff before election timeout), circuit breaker, rate limiting, hot key detection, quota enforcement, backup/restore, tiered storage with multipart upload, API versioning, deadline propagation, dependency health checks, runtime reconfiguration, organization-scoped event logging, externalized state persistence, streaming snapshots, automatic write forwarding, and many more
 - **Excellent observability**: OpenTelemetry tracing, Prometheus metrics, canonical log lines, structured request logging, SDK-side metrics, queryable event audit trails via gRPC EventsService
 - **Comprehensive testing**: Unit tests, property-based tests (proptest), crash recovery tests, chaos tests, integration tests

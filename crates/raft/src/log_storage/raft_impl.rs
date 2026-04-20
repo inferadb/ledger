@@ -527,70 +527,95 @@ impl RaftLogStore {
             }
         }
 
-        // Amortized state-root computation (Opt B): because
-        // `apply_request_with_events` was called with `defer_state_root = true`,
-        // every accumulated `VaultEntry.state_root` is currently `EMPTY_HASH`
-        // and every Write response carries a stale placeholder `block_hash`.
-        // Compute the final state root *once* per unique vault touched by this
-        // batch and patch every matching entry + Write response. This turns
-        // O(entries × vault-work) into O(unique-vaults × vault-work).
+        // Amortized + parallel state-root computation (Opt B + Opt
+        // Parallel-apply): because `apply_request_with_events` was called
+        // with `defer_state_root = true`, every accumulated
+        // `VaultEntry.state_root` is currently `EMPTY_HASH` and every Write
+        // response carries a stale placeholder `block_hash`.
+        //
+        // 1. Collect unique vault IDs (sorted for deterministic log output).
+        // 2. Compute `state_root` per vault in parallel via rayon —
+        //    `StorageEngine` supports concurrent read txns, so there is no
+        //    contention between vaults. With N unique vaults and M rayon
+        //    workers, this shrinks the phase from ~N × per-vault-work to
+        //    ~N/M.
+        // 3. Patch vault_entries' state_root field (serial, cheap).
+        // 4. Compute per-entry `block_hash` in parallel — pure CPU, each
+        //    entry independent.
+        // 5. Patch Write response block_hashes (serial walk to preserve the
+        //    original response ordering into BatchWrite.responses).
         //
         // Semantic model: within a batched commit, all vault heights for a
-        // given vault share the post-batch state_root — they observe the same
-        // atomic state. Prior per-entity state_roots described states that
-        // existed for microseconds before the next op in the same batch
-        // overwrote them; the batch-end root is the only one that ever
-        // externally materialises on disk.
+        // given vault share the post-batch state_root — they observe the
+        // same atomic state. Prior per-entity state_roots described states
+        // that existed for microseconds before the next op in the same
+        // batch overwrote them; the batch-end root is the only one that
+        // ever externally materialises on disk.
         if let Some(state_layer) = &self.state_layer
             && !vault_entries.is_empty()
         {
-            let mut patched_roots: std::collections::HashMap<
+            use rayon::prelude::*;
+
+            // Step 1: unique vault IDs (BTreeSet → sorted + deduped).
+            let unique_vaults: Vec<inferadb_ledger_types::VaultId> = {
+                let mut set: std::collections::BTreeSet<_> = std::collections::BTreeSet::new();
+                for e in &vault_entries {
+                    set.insert(e.vault);
+                }
+                set.into_iter().collect()
+            };
+
+            // Step 2: parallel compute_state_root across unique vaults.
+            let patched_roots: std::collections::HashMap<
                 inferadb_ledger_types::VaultId,
                 inferadb_ledger_types::Hash,
-            > = std::collections::HashMap::new();
-            for entry in &vault_entries {
-                if patched_roots.contains_key(&entry.vault) {
-                    continue;
-                }
-                match state_layer.compute_state_root(entry.vault) {
-                    Ok(root) => {
-                        patched_roots.insert(entry.vault, root);
-                    },
+            > = unique_vaults
+                .par_iter()
+                .filter_map(|vault| match state_layer.compute_state_root(*vault) {
+                    Ok(root) => Some((*vault, root)),
                     Err(e) => {
                         tracing::error!(
-                            vault = %entry.vault.value(),
+                            vault = %vault.value(),
                             error = %e,
                             "Deferred state_root computation failed; retaining placeholder hash"
                         );
+                        None
                     },
-                }
-            }
+                })
+                .collect();
 
-            // Patch vault_entries with the computed per-vault state_root.
+            // Step 3: serial patch of vault_entries' state_root fields.
             for entry in &mut vault_entries {
                 if let Some(root) = patched_roots.get(&entry.vault) {
                     entry.state_root = *root;
                 }
             }
 
-            // Patch Write response block_hashes. `vault_entries` mirrors the
-            // subset of `responses` that produced a VaultEntry; we walk both
-            // vectors and re-compute block_hash for matching Write responses.
-            // Non-Write responses are left untouched.
-            let mut ve_iter = vault_entries.iter();
+            // Step 4: parallel block_hash computation (pure CPU).
+            let block_hashes: Vec<inferadb_ledger_types::Hash> = vault_entries
+                .par_iter()
+                .map(|e| self.compute_vault_block_hash(e))
+                .collect();
+
+            // Step 5: serial patch of Write response block_hashes using the
+            // pre-computed values. `vault_entries` mirrors the subset of
+            // `responses` that produced a VaultEntry, in the same order; the
+            // block_hashes vec is 1:1 with vault_entries. Walk both vectors
+            // together.
+            let mut bh_iter = block_hashes.iter();
             for response in responses.iter_mut() {
                 if let crate::types::LedgerResponse::Write { block_hash, .. } = response {
-                    if let Some(entry) = ve_iter.next() {
-                        *block_hash = self.compute_vault_block_hash(entry);
+                    if let Some(bh) = bh_iter.next() {
+                        *block_hash = *bh;
                     }
                 } else if let crate::types::LedgerResponse::BatchWrite { responses: inner } =
                     response
                 {
                     for inner_resp in inner.iter_mut() {
                         if let crate::types::LedgerResponse::Write { block_hash, .. } = inner_resp
-                            && let Some(entry) = ve_iter.next()
+                            && let Some(bh) = bh_iter.next()
                         {
-                            *block_hash = self.compute_vault_block_hash(entry);
+                            *block_hash = *bh;
                         }
                     }
                 }

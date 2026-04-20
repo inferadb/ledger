@@ -1797,11 +1797,7 @@ dependencies = [
 name = "inferadb-ledger-fs-sync"
 version = "0.1.0"
 dependencies = [
- "clap",
  "libc",
- "schemars",
- "serde",
- "serde_json",
  "tempfile",
 ]
 
@@ -1858,7 +1854,6 @@ dependencies = [
  "hyper-util",
  "im",
  "inferadb-ledger-consensus",
- "inferadb-ledger-fs-sync",
  "inferadb-ledger-proto",
  "inferadb-ledger-state",
  "inferadb-ledger-store",
@@ -1877,6 +1872,7 @@ dependencies = [
  "prost",
  "prost-types",
  "rand 0.10.0",
+ "rayon",
  "seahash",
  "serde",
  "serde_json",
@@ -1944,7 +1940,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "inferadb-ledger-consensus",
- "inferadb-ledger-fs-sync",
  "inferadb-ledger-proto",
  "inferadb-ledger-raft",
  "inferadb-ledger-sdk",
@@ -2040,6 +2035,7 @@ dependencies = [
  "postcard",
  "proptest",
  "rand 0.10.0",
+ "rayon",
  "seahash",
  "serde",
  "serde_json",
@@ -2099,7 +2095,6 @@ dependencies = [
  "criterion",
  "hmac 0.13.0",
  "humantime-serde",
- "inferadb-ledger-fs-sync",
  "parking_lot",
  "postcard",
  "proptest",

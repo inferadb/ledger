@@ -43,7 +43,7 @@ pub use clock::{Clock, SystemClock};
 pub use closed_ts::ClosedTimestampTracker;
 pub use committed::{CommittedBatch, CommittedEntry};
 pub use config::ShardConfig;
-pub use engine::{ConsensusEngine, ConsensusEngineOptions};
+pub use engine::ConsensusEngine;
 pub use error::ConsensusError;
 pub use leadership::ShardState;
 pub use lease::LeaderLease;

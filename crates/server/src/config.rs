@@ -208,38 +208,6 @@ pub struct Config {
     #[serde(default)]
     pub raft: Option<inferadb_ledger_types::config::RaftConfig>,
 
-    /// Pipelined WAL commit. When true, the reactor resolves client
-    /// proposal responses after WAL append but **before** the blocking
-    /// fsync — removing fsync from the client's critical path at the
-    /// cost of a narrow kernel-panic / power-loss loss window for the
-    /// most recent acked writes. Opt-in; default `false`.
-    ///
-    /// See `docs/operations/durability.md` § *Pipelined WAL Commit*.
-    #[arg(long = "pipelined-commit", env = "INFERADB__LEDGER__PIPELINED_COMMIT", default_value_t = false)]
-    #[serde(default)]
-    #[builder(default)]
-    pub pipelined_commit: bool,
-
-    /// WAL sync mode — controls the fsync primitive used by the per-batch
-    /// WAL commit that gates write ACKs.
-    ///
-    /// - `barrier` (default) — barrier fsync. Survives process crash and
-    ///   kernel panic; may lose the last few seconds of writes on sudden
-    ///   power loss (hardware-dependent). On Apple platforms uses
-    ///   `fcntl(F_BARRIERFSYNC)`. Typical APFS SSD latency: 2-5ms. On
-    ///   Linux this is `fdatasync`, which is already barrier-class.
-    /// - `full` — full durability. Survives process crash, kernel panic,
-    ///   **and** power loss. Opt-in; use when the deployment cannot
-    ///   tolerate the power-loss window `barrier` permits (commodity
-    ///   hardware without power-loss protection, strict compliance).
-    ///   On Apple: `fcntl(F_FULLFSYNC)` (~15-25ms on APFS SSDs).
-    ///   On Linux: `fdatasync` (same as `barrier`).
-    ///
-    /// See `docs/operations/durability.md` for the complete matrix.
-    #[arg(long = "wal-sync-mode", env = "INFERADB__LEDGER__WAL_SYNC_MODE", value_enum, default_value_t = Default::default())]
-    #[serde(default)]
-    #[builder(default)]
-    pub wal_sync_mode: inferadb_ledger_types::config::FileSyncMode,
 
     // === Write Batching ===
     /// Per-region write-batching configuration.
@@ -441,8 +409,6 @@ impl Default for Config {
             max_concurrent: default_max_concurrent(),
             timeout_secs: default_timeout_secs(),
             raft: None,
-            pipelined_commit: false,
-            wal_sync_mode: inferadb_ledger_types::config::FileSyncMode::default(),
             batching: inferadb_ledger_types::config::BatchConfig::default(),
             logging: LoggingConfig::default(),
             backup: None,
@@ -680,10 +646,6 @@ mod tests {
         assert_eq!(config.timeout_secs, 30);
         assert!(config.join.is_none());
         assert!(config.data_dir.is_none());
-        assert_eq!(
-            config.wal_sync_mode,
-            inferadb_ledger_types::config::FileSyncMode::Barrier,
-        );
     }
 
     #[test]

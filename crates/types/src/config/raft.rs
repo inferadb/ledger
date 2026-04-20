@@ -71,14 +71,6 @@ pub struct RaftConfig {
     #[serde(with = "humantime_serde")]
     #[schemars(with = "String")]
     pub proposal_timeout: Duration,
-    /// When `true`, the reactor resolves client proposal responses after
-    /// WAL append but *before* the blocking fsync — trading a kernel-
-    /// panic / power-loss window for removing fsync from the client's
-    /// critical path. See `docs/operations/durability.md` for the full
-    /// durability matrix. Default `false` preserves classical
-    /// "response-after-fsync" semantics.
-    #[serde(default)]
-    pub pipelined_commit: bool,
 }
 
 #[bon::bon]
@@ -101,7 +93,6 @@ impl RaftConfig {
         #[builder(default = default_max_entries_per_rpc())] max_entries_per_rpc: u64,
         #[builder(default = default_snapshot_threshold())] snapshot_threshold: u64,
         #[builder(default = default_proposal_timeout())] proposal_timeout: Duration,
-        #[builder(default)] pipelined_commit: bool,
     ) -> Result<Self, ConfigError> {
         let config = Self {
             heartbeat_interval,
@@ -110,7 +101,6 @@ impl RaftConfig {
             max_entries_per_rpc,
             snapshot_threshold,
             proposal_timeout,
-            pipelined_commit,
         };
         config.validate()?;
         Ok(config)
@@ -171,7 +161,6 @@ impl Default for RaftConfig {
             max_entries_per_rpc: default_max_entries_per_rpc(),
             snapshot_threshold: default_snapshot_threshold(),
             proposal_timeout: default_proposal_timeout(),
-            pipelined_commit: false,
         }
     }
 }

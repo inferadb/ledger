@@ -125,71 +125,41 @@ Even in the strict-synchronous (`enabled = false`) mode, `record_handler_event` 
 
 With batching enabled (the default), the best-effort window widens to "one StateCheckpointer interval on crash" (default ~500ms, floor 50ms). This is a quantitative widening of the same best-effort category, not a new category of loss. The `Drop` overflow behavior on a full queue is the same shape as a commit-error drop: logged, metered, and swallowed.
 
-## Pipelined WAL commit (`--pipelined-commit`)
+## WAL commit model
 
-Opt-in lever (`--pipelined-commit` / `INFERADB__LEDGER__PIPELINED_COMMIT=true`) that removes `fsync()` from the client response critical path. When enabled, the reactor resolves client proposal responses **after WAL append** but **before** the blocking fsync — entries are already in the kernel page cache (ordered, visible to subsequent reads, process-crash safe) but not yet flushed to non-volatile storage.
+InferaDB Ledger uses a single, opinionated write-path commit model — no opt-in tunables:
+
+1. **Barrier fsync** always. Every WAL commit uses `fcntl(F_BARRIERFSYNC)` on Apple platforms and `fdatasync` on Linux. `F_FULLFSYNC` (non-volatile media flush) is never used — the 4-8× latency cost on APFS isn't justified given the enterprise-SSD power-loss-protection assumption.
+2. **Pipelined commit** always. The reactor resolves client proposal responses *after* WAL append but *before* the fsync completes. The fsync still runs on the same tick (in kernel/drive write-cache terms) — it's just no longer on the client's critical path.
+
+Together these mean a typical concurrent-writes p50 of ~0.5-2ms on APFS SSD, down from ~15-25ms under the strictest possible contract.
 
 ### Durability matrix
 
-| Failure | `pipelined_commit=false` (default) | `pipelined_commit=true` |
-|---|---|---|
-| Process crash (SIGKILL / panic) | Safe | Safe (kernel writeback flushes cache) |
-| Kernel panic | Safe (fsync completed) | May lose last ~tick of acked writes |
-| Power loss | Depends on `wal_sync_mode` | May lose last ~tick of acked writes |
-| WAL fsync error | All pending responses rejected | Already-acked responses stand; error logged + `consensus_pipelined_sync_failures_total` metric |
+| Failure | Outcome |
+|---|---|
+| Process crash (SIGKILL / panic) | Safe — kernel writeback flushes the page cache |
+| Kernel panic | May lose last ~tick of acked writes (tick ≈ 2ms flush interval) |
+| Power loss | Same as kernel panic; size of loss window depends on drive (PLP-equipped drives narrow this to near-zero) |
+| WAL fsync error after ACK | Logged + `consensus_pipelined_sync_failures_total` counter. Already-acked responses stand — the kernel buffer is still reachable by process-restart recovery |
 
-The loss window is bounded by the reactor's flush interval (default 2ms) plus the batched fsync latency. Under `wal_sync_mode=barrier` on APFS that's ~5-7ms total. Enterprise SSDs with power-loss protection capacitors narrow this to effectively zero.
+The loss window is bounded by the reactor's flush interval (~2ms) plus the batched barrier-fsync latency (~2-5ms on APFS). On enterprise SSDs with power-loss-protection capacitors the "may lose" window collapses to effectively zero because the drive guarantees durability of writes it has acknowledged regardless of subsequent power events.
 
-### When to flip it on
+### Hardware assumption
 
-- Hardware has power-loss protection (enterprise SSDs with capacitors, cloud providers that guarantee durability on acknowledged writes).
-- Workload can tolerate a ~5-10ms power-loss window for 2-3× lower write latency and higher throughput.
-- Combined with `wal_sync_mode=barrier` this is the maximum-throughput configuration.
+The durability contract assumes drives honor barrier semantics correctly — acknowledged writes reach the drive's write cache in order, and the drive does not reorder them across an unexpected power event. This is true for:
 
-### When to stay off
+- Enterprise SSDs with power-loss protection capacitors (standard for any production ledger deployment).
+- Cloud block storage (AWS EBS, GCP Persistent Disk, Azure Managed Disks) — all guarantee ordered durability of acknowledged writes.
 
-- Strict compliance postures that require absolute durability on every acked write.
-- Commodity hardware where power-loss semantics are unclear.
-- Any deployment where a kernel panic losing the last few ms of writes is unacceptable.
-
-### Interaction with `wal_sync_mode`
-
-Orthogonal. `wal_sync_mode` controls **which fsync primitive** runs; `pipelined_commit` controls **whether the client waits for it**. Compose them:
-
-- `wal_sync_mode=full`, `pipelined_commit=false` → classical, maximal durability (15-25ms p50 on APFS)
-- `wal_sync_mode=barrier`, `pipelined_commit=false` → default; fast fsync, still on critical path (~3-5ms p50)
-- `wal_sync_mode=barrier`, `pipelined_commit=true` → fastest; fsync off critical path (~0.5-2ms p50), narrow power-loss window
+Commodity consumer SSDs without capacitors may lose the last few seconds of buffered-but-unflushed writes on unexpected power loss. InferaDB's target deployment profile treats this as out-of-scope.
 
 ### Metrics
 
 - `consensus_pipelined_sync_failures_total` — counter. Non-zero means an fsync failed after the client had already received success. Alertable: any sustained non-zero rate is a durability regression.
-- Response latency histograms (`ledger_grpc_request_duration_seconds`) should drop measurably when enabled — the difference gives you a direct read on how much fsync was contributing to p50/p99.
+- Response latency histograms (`ledger_grpc_request_duration_seconds`) reflect the critical path *without* fsync; fsync latency is measured separately via the reactor's `wal_sync` span.
 
-## WAL sync mode — `Barrier` (default) vs `Full`
-
-The per-batch WAL fsync is the single I/O call that gates every write ACK. `--wal-sync-mode` (env: `INFERADB__LEDGER__WAL_SYNC_MODE`) selects the fsync primitive; the default is `barrier`.
-
-| Mode      | Apple (macOS/iOS)        | Linux       | Process crash | Kernel panic | Power loss                    | Typical APFS SSD latency |
-| --------- | ------------------------ | ----------- | ------------- | ------------ | ----------------------------- | ------------------------ |
-| `barrier` (default) | `fcntl(F_BARRIERFSYNC)`  | `fdatasync` | Safe          | Safe         | May lose last ~seconds        | 2-5 ms                   |
-| `full`    | `fcntl(F_FULLFSYNC)`     | `fdatasync` | Safe          | Safe         | Safe (non-volatile flush)     | 15-25 ms                 |
-
-`barrier` asks the drive to apply a write barrier but does not force flush to non-volatile media. Drives with power-loss-protection capacitors (most enterprise SSDs) make this effectively safe for power loss as well; consumer drives may lose the last ~seconds of writes.
-
-**Why `barrier` is the default:**
-
-- On Apple, `F_BARRIERFSYNC` is 4-8× lower latency than `F_FULLFSYNC` while still surviving every failure mode short of sudden power loss.
-- On Linux, `barrier` and `full` are the same syscall (`fdatasync`) — the default change has no effect on Linux deployments.
-- Modern enterprise SSDs have power-loss protection capacitors, making the `barrier` window effectively zero on that hardware.
-- The power-loss window under `barrier` (the last ~seconds of writes on consumer hardware) is narrower than the crash-recovery window already exposed by lazy state-DB commits — the overall durability contract is unchanged in shape, the constants just shift by a few seconds.
-
-**When to opt in to `full`:**
-
-- Commodity hardware without power-loss protection, where the drive silently drops acknowledged writes on power loss.
-- Strict compliance postures requiring absolute non-volatile flush on every ACKed write, not merely "survives process + kernel crash."
-- Any deployment where a ~few-second power-loss window is unacceptable.
-
-On Linux, `full` and `barrier` produce identical syscalls; the opt-in matters primarily on Apple. The implementation is isolated in `crates/fs-sync/` — the single workspace crate permitted `unsafe`, since no audited safe-syscall crate exposes `F_BARRIERFSYNC`.
+The barrier-fsync syscall is isolated in `crates/fs-sync/` — the single workspace crate permitted `unsafe`, since no audited safe-syscall crate exposes `F_BARRIERFSYNC`.
 
 ## Tuning the StateCheckpointer
 

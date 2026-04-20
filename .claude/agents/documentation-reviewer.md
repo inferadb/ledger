@@ -124,6 +124,9 @@ Additionally pre-gather these canonical lists so subagents do not each re-scan:
 - Prometheus metric names from `crates/raft/src/metrics.rs` (and SDK counterparts in `crates/sdk/src/metrics.rs`).
 - Error codes from `crates/types/src/error_code.rs` (the `ErrorCode` enum variants).
 - Config defaults — scan `crates/types/src/config/**` for `Default` impls and `#[builder(default = …)]`; scan `crates/server/src/config.rs` and `crates/server/src/main.rs` for clap `default_value`.
+- Rust toolchain version — `rust-version` from root `Cargo.toml` (authoritative) and the `+1.92` pin in `Justfile`.
+- Helm chart K8s constraint — `kubeVersion` from `deploy/helm/inferadb-ledger/Chart.yaml` if declared; record "absent" explicitly when the field is missing so subagents can flag it.
+- API version — the constant exported by `crates/services/src/api_version.rs`.
 
 Do not run any Bash command outside the allowlist. If you need additional shell data, record the gap in your report instead of expanding scope.
 
@@ -177,6 +180,9 @@ Secondary audience: {{…}}
 - Prometheus metric names (server + SDK): {{paste}}
 - ErrorCode variants: {{paste}}
 - Known config defaults (flag → default → source file:line): {{paste}}
+- Rust toolchain version (Cargo.toml rust-version + Justfile pin): {{paste}}
+- Helm chart kubeVersion (or "absent" if Chart.yaml does not declare it): {{paste}}
+- API version constant (from crates/services/src/api_version.rs): {{paste}}
 - Recent churn (14d and 90d file lists): {{paste}}
 
 ## Invariants to check
@@ -201,7 +207,7 @@ All invariants are defined in the parent agent prompt. Summary:
 ## Worked examples — use these as the quality bar
 
 Good BLOCK finding:
-  docs/operations/configuration.md:142 [BLOCK] 6b defaults-match-code
+  docs/operations/configuration.md:142 [BLOCK] 6 defaults-match-code
     quote: "`INFERADB__LEDGER__RAFT_HEARTBEAT_MS` defaults to 100."
     reality: crates/types/src/config/raft.rs defines heartbeat_ms default = 250.
 
@@ -260,53 +266,60 @@ Merge subagent reports. Deduplicate findings that reproduce across docs — the 
 7. **Terminology consistency** — the rename trail is respected. "Namespace" where code says "organization" is BLOCK (Kubernetes-namespace references in `deploy/` and K8s-operator docs are legitimate; distinguish context). "Single-Raft" is BLOCK — the system is multi-Raft in production. "openraft" in current architecture descriptions is BLOCK — consensus is custom in-house. Only historical / migration contexts may mention legacy terms, and must frame them as historical.
 8. **Tooling matches reality** — `cargo nextest` references are BLOCK (project uses plain `cargo test`). `cargo` without a `+1.92` / `+nightly` pin in setup or contributor docs is BLOCK.
 
+9. **Declared-version consistency** — version claims in docs match the code source of truth:
+    - Rust toolchain version: `rust-version` in root `Cargo.toml` (currently `1.92`) and the `+1.92` pin in `Justfile`. Docs stating a different Rust version are BLOCK.
+    - API version: the constant exported by `crates/services/src/api_version.rs`. Docs stating a different API version are BLOCK.
+
+    Kubernetes version floors are covered separately at NOTE level (invariant 37) because the Helm chart does not currently declare a `kubeVersion`.
+
 ### Operator-journey coverage — FIX
 
 For Partition D (and for `README.md` where it claims quickstart status), verify coverage across all eight stages. A missing stage is FIX unless explicitly declared out of scope for the doc.
 
-9. **Evaluate** — `README.md` answers _what / when-to-use / when-not-to-use_ within the first ~30 lines. At least one comparable system named where relevant.
-10. **Install** — install paths declare prerequisites, supported versions, image digests or checksums where applicable, and a post-install verification command.
-11. **Configure** — every flag in `configuration.md` declares: default value, safe range or enumeration, restart-required? (runtime-reconfigurable via `UpdateConfig` vs not), security implication.
-12. **Bootstrap** — `production-deployment-tutorial.md` (or equivalent) reaches first successful RPC response in a named, fixed number of copy-pasteable commands with expected output after each.
-13. **Observe** — every metric in `metrics-reference.md` that is _alertable_ links to its alert rule in `alerting.md`; every metric that is _actionable_ links to its runbook. Missing linkage → FIX.
-14. **Operate** — each day-2 task (upgrade / backup / scale / rotate / failover) has a how-to page with pre-state and post-state verification commands.
-15. **Troubleshoot** — every `ErrorCode` variant in `crates/types/src/error_code.rs` appears in operator-visible troubleshooting with a remediation. An error class in code without a doc entry is FIX.
-16. **Recover** — every runbook under `docs/operations/runbooks/**` conforms to the runbook shape (invariant 17).
+10. **Evaluate** — `README.md` answers _what / when-to-use / when-not-to-use_ within the first ~30 lines. At least one comparable system named where relevant.
+11. **Install** — install paths declare prerequisites, supported versions, image digests or checksums where applicable, and a post-install verification command.
+12. **Configure** — every flag in `configuration.md` declares: default value, safe range or enumeration, restart-required? (runtime-reconfigurable via `UpdateConfig` vs not), security implication.
+13. **Bootstrap** — `production-deployment-tutorial.md` (or equivalent) reaches first successful RPC response in a named, fixed number of copy-pasteable commands with expected output after each.
+14. **Observe** — every metric in `metrics-reference.md` that is _alertable_ links to its alert rule in `alerting.md`; every metric that is _actionable_ links to its runbook. Missing linkage → FIX.
+15. **Operate** — each day-2 task (upgrade / backup / scale / rotate / failover) has a how-to page with pre-state and post-state verification commands.
+16. **Troubleshoot** — every `ErrorCode` variant in `crates/types/src/error_code.rs` appears in operator-visible troubleshooting with a remediation. An error class in code without a doc entry is FIX.
+17. **Recover** — every runbook under `docs/operations/runbooks/**` conforms to the runbook shape (invariant 18).
 
 ### Runbook shape — FIX
 
-17. **Runbook sections present** — every file under `docs/operations/runbooks/**` contains the following headings (case-insensitive match): **Symptom**, **Alert / Trigger**, **Blast radius**, **Preconditions**, **Steps**, **Verification**, **Rollback**, **Escalation**. Each missing section is FIX. Optional ninth section **Post-incident actions** is NOTE when absent.
+18. **Runbook sections present** — every file under `docs/operations/runbooks/**` contains the following headings (case-insensitive match): **Symptom**, **Alert / Trigger**, **Blast radius**, **Preconditions**, **Steps**, **Verification**, **Rollback**, **Escalation**. Each missing section is FIX. Optional ninth section **Post-incident actions** is NOTE when absent.
 
 ### Internals-audience — FIX (Partition B only)
 
-18. **Guarantee-to-code traceability** — normative claims in `DESIGN.md` / `WHITEPAPER.md` (words like "always", "never", "on response", "durable", "verifiable", "atomic", "linearizable") link to or reference a test, proptest, simulation, or specific code location. Unanchored normative claims → FIX.
-19. **Performance claims grounded** — quantitative claims (latency, throughput, complexity bounds like O(k)) name the benchmark or measurement that established them. Ungrounded numbers → FIX.
+19. **Guarantee-to-code traceability** — normative claims in `DESIGN.md` / `WHITEPAPER.md` (words like "always", "never", "on response", "durable", "verifiable", "atomic", "linearizable") link to or reference a test, proptest, simulation, or specific code location. Unanchored normative claims → FIX.
+20. **Performance claims grounded** — quantitative claims (latency, throughput, complexity bounds like O(k)) name the benchmark or measurement that established them. Ungrounded numbers → FIX.
 
 ### DevX — FIX (principle-based, concretely checkable)
 
-20. **Audience stated** — every top-level doc (`README.md`, `CONTRIBUTING.md`, `DESIGN.md`, `WHITEPAPER.md`, `MANIFEST.md`, each `docs/*/README.md`) identifies its intended reader using the audience model (operator / SDK consumer / core contributor / internals-reader) in the first section.
-21. **Problem framing** — top-level docs open with _what this solves / when to use / when not to_ within the first ~30 lines.
-22. **Hello World reachable** — `README.md` and `docs/operations/deployment.md` contain a self-contained, copy-pasteable path from zero to first successful outcome. Placeholders like `<your-token>` without adjacent instructions on where to get them → FIX.
-23. **Single source of truth** — the same concept explained in ≥2 places is FIX unless the second place is a short pointer to the first. Duplicated prose rots asymmetrically. Cross-partition duplication surfaces during aggregation.
-24. **Directional cross-links present** — replace generic "related docs link to each other":
+21. **Audience stated** — every top-level doc (`README.md`, `CONTRIBUTING.md`, `DESIGN.md`, `WHITEPAPER.md`, `MANIFEST.md`, each `docs/*/README.md`) identifies its intended reader using the audience model (operator / SDK consumer / core contributor / internals-reader) in the first section.
+22. **Problem framing** — top-level docs open with _what this solves / when to use / when not to_ within the first ~30 lines.
+23. **Hello World reachable** — `README.md` and `docs/operations/deployment.md` contain a self-contained, copy-pasteable path from zero to first successful outcome. Placeholders like `<your-token>` without adjacent instructions on where to get them → FIX.
+24. **Single source of truth** — the same concept explained in ≥2 places is FIX unless the second place is a short pointer to the first. Duplicated prose rots asymmetrically. Cross-partition duplication surfaces during aggregation.
+25. **Directional cross-links present** — replace generic "related docs link to each other":
     - Every alert in `docs/operations/alerting.md` links to its runbook if one exists.
     - Every runbook links back to its triggering alert and referenced metrics.
     - Every alertable metric in `metrics-reference.md` links to its alert rule.
     Missing directed link → FIX.
-25. **Progressive disclosure** — a top-level file over ~500 lines without sub-page decomposition → FIX.
-26. **Error-focused guidance** — features that produce specific error codes or retryable / non-retryable classifications document those failure modes next to the feature, not only in a distant troubleshooting file.
-27. **Diátaxis type-shape respected** — reference docs that editorialise, tutorials that branch, runbooks that explain architecture instead of executing steps, explanation docs mixed with operator commands → FIX. Each file's expected type is set in the briefing.
-28. **Code fences tagged** — every fenced block has a language tag. No `ignore` fences in docs. `no_run` for Rust examples, `text` for non-Rust content.
-29. **Filenames kebab-case** — every `docs/**/*.md` file name is lowercase-kebab-case. Exceptions: `README.md`, `CHANGELOG.md`, and the allowlist in the writing-check hook.
-30. **Example completeness** — operator examples include namespace / context / expected output; developer examples include `use` imports and name their crate.
+26. **Progressive disclosure** — a top-level file over ~500 lines without sub-page decomposition → FIX.
+27. **Error-focused guidance** — features that produce specific error codes or retryable / non-retryable classifications document those failure modes next to the feature, not only in a distant troubleshooting file.
+28. **Diátaxis type-shape respected** — reference docs that editorialise, tutorials that branch, runbooks that explain architecture instead of executing steps, explanation docs mixed with operator commands → FIX. Each file's expected type is set in the briefing.
+29. **Code fences tagged** — every fenced block has a language tag. No `ignore` fences in docs. `no_run` for Rust examples, `text` for non-Rust content.
+30. **Filenames kebab-case** — every `docs/**/*.md` file name is lowercase-kebab-case. Exceptions: `README.md`, `CHANGELOG.md`, and the allowlist in the writing-check hook.
+31. **Example completeness** — operator examples include namespace / context / expected output; developer examples include `use` imports and name their crate.
 
 ### Judgement — NOTE (human review warranted)
 
-31. **Staleness signal** — a doc unchanged in >90 days whose referenced symbols / RPCs / metrics show meaningful churn is a candidate for review. NOTE the doc + the relevant commits. (Symbol-level signal, not crate-level — crate churn alone is too noisy.)
-32. **Weasel words** — "very", "really", "simply", "basically", "just" in operator-critical content. NOTE; prose quality is less important than accuracy.
-33. **Ambiguous audience** — a doc addressing two audiences in the same page that would benefit from splitting. NOTE.
-34. **Missing "why"** — a design decision documented only as "we do X" without rationale. NOTE with a pointer to where rationale should live.
-35. **Justfile as docs** — a recipe whose name or comment disagrees with its body, or a recipe referenced by an in-scope doc but lacking a comment block inside the Justfile. NOTE.
+32. **Staleness signal** — a doc unchanged in >90 days whose referenced symbols / RPCs / metrics show meaningful churn is a candidate for review. NOTE the doc + the relevant commits. (Symbol-level signal, not crate-level — crate churn alone is too noisy.)
+33. **Weasel words** — "very", "really", "simply", "basically", "just" in operator-critical content. NOTE; prose quality is less important than accuracy.
+34. **Ambiguous audience** — a doc addressing two audiences in the same page that would benefit from splitting. NOTE.
+35. **Missing "why"** — a design decision documented only as "we do X" without rationale. NOTE with a pointer to where rationale should live.
+36. **Justfile as docs** — a recipe whose name or comment disagrees with its body, or a recipe referenced by an in-scope doc but lacking a comment block inside the Justfile. NOTE.
+37. **Kubernetes version floor consistency** — K8s version floors stated across operator docs (e.g. "1.24+" in `production-deployment-tutorial.md`) must be internally consistent. If `deploy/helm/inferadb-ledger/Chart.yaml` declares a `kubeVersion`, doc claims must match it. Absence of `kubeVersion` in the Helm chart is itself a NOTE — the chart could declare its K8s floor so doc claims become verifiable (upgradable to BLOCK) going forward.
 
 ## Output format
 

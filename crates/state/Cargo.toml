@@ -29,6 +29,7 @@ zstd.workspace = true
 # Concurrency
 dashmap.workspace = true
 parking_lot.workspace = true
+rayon.workspace = true
 
 # Caching
 moka.workspace = true

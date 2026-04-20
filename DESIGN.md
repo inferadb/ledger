@@ -72,7 +72,7 @@ No existing solution satisfies both requirements.
 
 Ledger resolves the performance-verifiability tension through **separation of concerns**:
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────────────┐
 │                         Client Request                               │
 └───────────────────────────────┬──────────────────────────────────────┘
@@ -113,7 +113,7 @@ Ledger resolves the performance-verifiability tension through **separation of co
 
 Traditional approaches hash the entire state tree on every write. We use 256 buckets keyed by the first byte of each key's hash:
 
-```
+```text
 state_root = SHA-256(bucket_hash[0] || bucket_hash[1] || ... || bucket_hash[255])
 ```
 
@@ -132,7 +132,7 @@ For a vault with 10M keys and 100 updates per block:
 
 ### Multi-Tenant Isolation
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────┐
 │                      Region Group (Raft)                             │
 │           Nodes A, B, C sharing consensus for us-east-va            │
@@ -170,7 +170,7 @@ Each vault maintains its own blockchain. A corruption in Vault A cannot affect V
 | **Region**                  | Geographic zone mapped 1:1 to a Raft consensus group. Organizations declare a region at creation for data residency. See [Scaling Architecture: Regions](#scaling-architecture-regions).                                                                                                                        |
 | **`_system` organization**  | Global control plane replicated to all nodes: org registry, sequences, node discovery. See [Discovery & Coordination](#system-organization-_system--global-control-plane).                                                                                                                                      |
 | **Consensus engine**        | Purpose-built multi-shard Raft implementation in `crates/consensus/` — event-driven `Reactor`, per-vault segmented WAL, `LeaderLease`, `ClosedTimestampTracker`, `StateMachine` trait. Determinism-first: the Reactor returns `Action`s rather than performing I/O, which makes the engine simulation-testable. |
-| **Raft operationalization** | Wrapping layer in `crates/raft/` — openraft-compatible `RaftLogStore`, `ApplyPool` / `ApplyWorker` for parallel state-machine apply across shards, `SagaOrchestrator`, background jobs (compaction, retention, events GC), rate limiting, hot-key detection, `LeaderTransfer`, `RaftManager` for region groups. |
+| **Raft operationalization** | Wrapping layer in `crates/raft/` — custom `RaftLogStore` (combined log + state machine, implemented against the in-house consensus engine), `ApplyPool` / `ApplyWorker` for parallel state-machine apply across shards, `SagaOrchestrator`, background jobs (compaction, retention, events GC), rate limiting, hot-key detection, `LeaderTransfer`, `RaftManager` for region groups. |
 
 ### Block Structure
 
@@ -233,7 +233,7 @@ enum SetCondition {
 
 ### Write Path
 
-```
+```text
 Client Request (with idempotency_key)
     │
     ▼
@@ -287,7 +287,7 @@ Client Request (with idempotency_key)
 
 ### Read Path
 
-```
+```text
 Client Request
     │
     ▼
@@ -375,7 +375,7 @@ impl StateLayer {
 
 Storage keys encode vault isolation and bucket assignment:
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │  vault_id   │  bucket_id  │         local_key                   │
 │  (8 bytes)  │  (1 byte)   │         (N bytes)                   │
@@ -424,7 +424,7 @@ All operations are **idempotent** with **Raft total ordering**:
 
 **Concurrent operation resolution**: Raft provides deterministic total ordering. Operations serialize by Raft log index.
 
-```
+```text
 Client A: CREATE(user:alice, viewer, doc:1)  →  Raft index 100
 Client B: DELETE(user:alice, viewer, doc:1)  →  Raft index 101
 
@@ -494,7 +494,7 @@ When failures occur, Ledger degrades gracefully rather than failing completely:
 
 Each Raft consensus group maps 1:1 to a geographic **region**. Organizations declare a region for data residency. The `Region` enum is exhaustive — adding a region is a code change, not a runtime operation.
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                               Cluster                                     │
 ├──────────────────────────────────────────────────────────────────────────┤
@@ -527,7 +527,7 @@ Each Raft consensus group maps 1:1 to a geographic **region**. Organizations dec
 
 The `_system` organization (OrganizationId = 0) is the **global control plane**, replicated to all nodes via the `GLOBAL` Raft group. It stores non-PII metadata only:
 
-```
+```text
 _system organization (GLOBAL Raft group — all nodes)
 ├── Organization registry (organization → region mapping)
 ├── Node discovery (node_id, addresses, region tag)
@@ -538,7 +538,7 @@ _system organization (GLOBAL Raft group — all nodes)
 
 User PII lives in **regional user stores**, not `_system`:
 
-```
+```text
 Regional user store (per-region Raft group — membership per region type)
 ├── User profiles (user:{user_id})
 ├── Email mappings (user_email:{blinded_email_hash})
@@ -549,7 +549,7 @@ Regional user store (per-region Raft group — membership per region type)
 
 ### Client Discovery Flow
 
-```
+```text
 [1] Client connects to any node
 [2] Sends request with organization_slug
 [3] Node looks up organization → region mapping in local _system replica
@@ -561,7 +561,7 @@ Regional user store (per-region Raft group — membership per region type)
 
 ### Node Join
 
-```
+```text
 [1] New node contacts seed node
 [2] Seed node adds new node as Raft learner
 [3] Learner replicates log (may take time for large state)
@@ -571,7 +571,7 @@ Regional user store (per-region Raft group — membership per region type)
 
 ### Node Leave (Graceful)
 
-```
+```text
 [1] Operator initiates removal (SIGTERM or API call)
 [2] Enter Draining phase — reject new write proposals (UNAVAILABLE)
 [3] If leader: transfer leadership to most caught-up follower (see Leader Transfer)
@@ -586,7 +586,7 @@ Graceful leader transfer eliminates election timeout delays during planned shutd
 
 **Protocol** (5 steps, implemented in `leader_transfer.rs`):
 
-```
+```text
 [1] Verify this node is the current leader
 [2] Select target: explicit node or auto-pick most caught-up follower
 [3] Wait for replication — target's match_index reaches leader's last_log_id
@@ -598,7 +598,7 @@ Graceful leader transfer eliminates election timeout delays during planned shutd
 
 **Phase transitions during shutdown**:
 
-```
+```text
 Ready ──→ Draining ──→ ShuttingDown
            │              │
            │ reject writes │ drain connections
@@ -633,7 +633,7 @@ During `Draining`, all mutating RPCs (write, batch_write, create/delete org/vaul
 
 ### Crash Recovery
 
-```
+```text
 [1] Node restarts, loads last snapshot
 [2] Replays Raft log from snapshot index
 [3] Verifies state_root matches expected
@@ -649,7 +649,7 @@ During `Draining`, all mutating RPCs (write, batch_write, create/delete org/vaul
 
 Each region's Raft group gets isolated database files. This eliminates write lock contention between concurrent Raft group applies, enables per-region encryption, and simplifies migration, snapshots, and disk accounting.
 
-```
+```text
 {data_dir}/
 ├── node_id                          # Node identity file
 ├── global/                          # GLOBAL Raft group (_system control plane)
@@ -694,7 +694,7 @@ The Control service uses Ledger for organization and user management:
 
 ### Entity Key Patterns
 
-```
+```text
 # Organization entities
 org:{org_id}                    → Organization metadata
 org:{org_id}:member:{user_id}   → Membership with role
@@ -744,7 +744,7 @@ All tokens use **EdDSA (Ed25519)** signatures. Algorithm enforcement is defense-
 
 Signing key private material is envelope-encrypted using the same RMK infrastructure as page encryption, adapted for a fixed 32-byte Ed25519 private key:
 
-```
+```text
 SigningKeyEnvelope (100 bytes fixed layout):
 ┌──────────────┬───────────┬──────────────┬──────────────┐
 │ wrapped_dek  │   nonce   │  ciphertext  │  auth_tag    │
@@ -765,7 +765,7 @@ On key load, the JwtEngine unwraps the DEK via RMK, decrypts the private key, bu
 
 The `JwtEngine` uses `ArcSwap<HashMap<String, CachedKey>>` for lock-free reads on every validation:
 
-```
+```text
 JwtEngine
 ├── config: JwtConfig
 └── cache: ArcSwap<HashMap<kid → CachedSigningKey>>
@@ -787,7 +787,7 @@ JwtEngine
 
 Refresh tokens implement **rotate-on-use** with family-based theft detection:
 
-```
+```text
 Family A (created at login):
   RT-1 ──use──▶ RT-2 ──use──▶ RT-3 (current)
                   │
@@ -1158,7 +1158,7 @@ Rollback: if transfer fails, revert status to `Active` in source region. No data
 
 All on-disk data is encrypted using **per-page envelope encryption**. Each region manages its own **Region Master Key (RMK)**. Key material never leaves its region and is never stored in Raft.
 
-```
+```text
 ┌──────────────────────────────────────────────────────────┐
 │                    Key Hierarchy                          │
 ├──────────────────────────────────────────────────────────┤
@@ -1378,7 +1378,7 @@ This appendix provides normative, language-independent specifications for all cr
 
 #### Block Hash
 
-```
+```text
 block_hash = SHA-256(
     height              || # u64, big-endian (8 bytes)
     organization_id     || # i64, big-endian (8 bytes)
@@ -1396,7 +1396,7 @@ block_hash = SHA-256(
 
 #### Transaction Hash
 
-```
+```text
 tx_hash = SHA-256(
     tx_id               || # 16 bytes (UUID)
     client_id_len       || # u32, little-endian
@@ -1413,7 +1413,7 @@ tx_hash = SHA-256(
 
 #### Operation Encoding
 
-```
+```text
 op_type (1 byte):
   0x01 = CreateRelationship
   0x02 = DeleteRelationship
@@ -1441,7 +1441,7 @@ ExpireEntity:
 
 #### Condition Types
 
-```
+```text
 0x00 = None
 0x01 = MustNotExist
 0x02 = MustExist
@@ -1460,7 +1460,7 @@ Standard binary Merkle tree:
 
 #### State Tree Leaf Hash
 
-```
+```text
 leaf_contribution = (
     key_len (u32 LE)    ||
     key                 ||

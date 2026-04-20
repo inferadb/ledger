@@ -175,15 +175,6 @@ pub struct RaftManagerConfig {
     /// Whether to inject trace context into Raft RPCs.
     #[builder(default = true)]
     pub trace_raft_rpcs: bool,
-    /// WAL sync mode — controls the fsync primitive used by the per-batch
-    /// WAL commit. Default is `Barrier` (fast path on macOS, equivalent to
-    /// `fdatasync` on Linux). See [`inferadb_ledger_fs_sync::FileSyncMode`].
-    #[builder(default)]
-    pub wal_sync_mode: inferadb_ledger_fs_sync::FileSyncMode,
-    /// Pipelined WAL commit: resolve client responses before fsync
-    /// completes. Default `false`. See `docs/operations/durability.md`.
-    #[builder(default)]
-    pub pipelined_commit: bool,
 }
 
 impl RaftManagerConfig {
@@ -1092,14 +1083,10 @@ impl RaftManager {
         };
 
         let wal_dir = self.storage_manager.region_dir(region).join("wal");
-        let wal = inferadb_ledger_consensus::wal::SegmentedWalBackend::open_with(
-            &wal_dir,
-            self.config.wal_sync_mode,
-        )
-        .map_err(|e| RaftManagerError::Storage {
-            region,
-            message: format!("failed to open WAL: {e}"),
-        })?;
+        let wal =
+            inferadb_ledger_consensus::wal::SegmentedWalBackend::open(&wal_dir).map_err(|e| {
+                RaftManagerError::Storage { region, message: format!("failed to open WAL: {e}") }
+            })?;
 
         // Recover persisted term + votedFor from the WAL checkpoint (Raft
         // Figure 2). On first boot the WAL has no checkpoint, so we default
@@ -1207,17 +1194,13 @@ impl RaftManager {
                 }
             }
         }
-        let (engine, commit_rx, state_watchers) =
-            inferadb_ledger_consensus::ConsensusEngine::start_with_options(
-                vec![consensus_shard],
-                wal,
-                inferadb_ledger_consensus::SystemClock,
-                consensus_transport,
-                std::time::Duration::from_millis(2),
-                inferadb_ledger_consensus::ConsensusEngineOptions {
-                    pipelined_commit: self.config.pipelined_commit,
-                },
-            );
+        let (engine, commit_rx, state_watchers) = inferadb_ledger_consensus::ConsensusEngine::start(
+            vec![consensus_shard],
+            wal,
+            inferadb_ledger_consensus::SystemClock,
+            consensus_transport,
+            std::time::Duration::from_millis(2),
+        );
 
         let state_rx = state_watchers.get(&shard_id).cloned().unwrap_or_else(|| {
             let (_, rx) = tokio::sync::watch::channel(

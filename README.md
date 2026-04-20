@@ -65,7 +65,7 @@ Run Ledger directly when you need cryptographic authorization history but want t
 
 ```bash
 # Build from source (requires Rust 1.92+)
-cargo install --locked --path crates/server
+cargo +1.92 install --locked --path crates/server
 
 # Or grab a prebuilt binary from Releases
 # https://github.com/inferadb/ledger/releases
@@ -112,7 +112,7 @@ See the [deployment guide](docs/operations/deployment.md) for multi-node setup, 
 
 | CLI           | Purpose                                                                                               | Default         |
 | ------------- | ----------------------------------------------------------------------------------------------------- | --------------- |
-| `--data`      | Persistent [storage](docs/internals/storage.md#directory-layout) (WAL, state, snapshots)              | _(ephemeral)_   |
+| `--data`      | Persistent [storage](docs/operations/durability.md) (WAL, state, snapshots)                           | _(ephemeral)_   |
 | `--listen`    | TCP address for gRPC API                                                                              | _(none)_        |
 | `--socket`    | Unix domain socket path for gRPC API                                                                  | _(none)_        |
 | `--join`      | Seed addresses for [cluster discovery](docs/operations/deployment.md#adding-a-node) (comma-separated) | _(none)_        |

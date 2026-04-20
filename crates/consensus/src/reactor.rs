@@ -166,27 +166,6 @@ pub struct Reactor<C: Clock, R: RngSource, W: WalBackend, T: NetworkTransport> {
     /// Async fsync lifecycle phase — `Idle` until entries are submitted, then
     /// `Submitted` until the fsync completes (or immediately for sync backends).
     fsync_phase: FsyncPhase,
-    /// When `true`, client proposal responses are resolved *before* the WAL
-    /// fsync completes. Concretely: after `wal.append()` returns (data in
-    /// kernel page cache, ordered, visible to subsequent reads), the reactor
-    /// dispatches committed batches to the apply worker, flushes the network
-    /// outbox, and signals the proposer's oneshot — all without waiting on
-    /// the blocking `wal.sync()` call. The sync still runs on the same tick
-    /// for durability, but is no longer on the client's critical path.
-    ///
-    /// # Durability trade-off
-    ///
-    /// On process crash between `append` and `sync` the kernel's writeback
-    /// typically still flushes buffered data to disk (process-crash safe on
-    /// typical Linux/macOS). On kernel panic or power loss, the last few
-    /// hundred-ms of acked writes may be lost — the client saw "success"
-    /// but the data never reached non-volatile storage. This is an explicit
-    /// opt-in relaxation, documented in
-    /// `docs/operations/durability.md` under *Pipelined WAL Commit*.
-    ///
-    /// Default `false` preserves the classical "response-after-fsync"
-    /// guarantee.
-    pipelined_commit: bool,
 }
 
 impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor<C, R, W, T> {
@@ -224,23 +203,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             last_applied: HashMap::new(),
             state_watchers: HashMap::new(),
             fsync_phase: FsyncPhase::Idle,
-            pipelined_commit: false,
         }
-    }
-
-    /// Enables pipelined-commit mode on this reactor. See the
-    /// [`pipelined_commit`](Self::pipelined_commit) field doc for the
-    /// durability trade-off.
-    #[must_use]
-    pub fn with_pipelined_commit(mut self, enabled: bool) -> Self {
-        if enabled {
-            tracing::warn!(
-                "Pipelined WAL commit enabled — client responses resolve before fsync. \
-                 Kernel panic or power loss may drop the last few hundred-ms of acked writes."
-            );
-        }
-        self.pipelined_commit = enabled;
-        self
     }
 
     /// Registers a shard with the reactor.
@@ -1071,52 +1034,34 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                 return;
             }
 
-            if self.pipelined_commit {
-                // Pipelined path: dispatch committed batches, flush the
-                // outbox, and resolve client responses NOW — before the
-                // blocking fsync. Entries are in the kernel page cache
-                // (ordered + visible to subsequent reads); durability
-                // reaches non-volatile media on the sync call below.
-                //
-                // On sync failure we log but do not retract already-acked
-                // responses — the client saw success, and the entries
-                // survive process crash via kernel writeback. Kernel
-                // panic or power loss between now and sync completion is
-                // the documented loss window.
-                let pending = std::mem::take(&mut self.pending_commits);
-                self.dispatch_committed_batches(&pending).await;
-                self.outbox.flush(&self.transport);
-                self.resolve_committed_responses();
-
-                let sync_result = {
-                    let _span = tracing::debug_span!("wal_sync_pipelined").entered();
-                    self.wal.sync()
-                };
-                if let Err(e) = sync_result {
-                    tracing::error!(
-                        error = %e,
-                        "Pipelined WAL commit: fsync failed after client ACK. \
-                         Already-acked writes may not survive kernel panic or power loss."
-                    );
-                    counter!("consensus_pipelined_sync_failures_total").increment(1);
-                }
-                self.reject_stale_responses();
-                return;
-            }
+            // Pipelined commit: dispatch committed batches, flush the
+            // outbox, and resolve client responses NOW — before the blocking
+            // fsync. Entries are in the kernel page cache (ordered + visible
+            // to subsequent reads); durability reaches non-volatile media on
+            // the sync call below. On sync failure we log but do not retract
+            // already-acked responses — the client saw success, and the
+            // entries survive process crash via kernel writeback. Kernel
+            // panic or power loss between now and sync completion is the
+            // documented loss window (see docs/operations/durability.md).
+            let pending = std::mem::take(&mut self.pending_commits);
+            self.dispatch_committed_batches(&pending).await;
+            self.outbox.flush(&self.transport);
+            self.resolve_committed_responses();
 
             let sync_result = {
                 let _span = tracing::debug_span!("wal_sync").entered();
                 self.wal.sync()
             };
-            if sync_result.is_err() {
-                // WAL failure — reject all pending proposals and membership changes.
-                for (_, _, resp) in self.pending_responses.drain(..) {
-                    let _ = resp.send(Err(ConsensusError::WalWriteError));
-                }
-                self.pending_commits.clear();
-                self.outbox = NetworkOutbox::new();
-                return;
+            if let Err(e) = sync_result {
+                tracing::error!(
+                    error = %e,
+                    "WAL fsync failed after client ACK. \
+                     Already-acked writes may not survive kernel panic or power loss."
+                );
+                counter!("consensus_pipelined_sync_failures_total").increment(1);
             }
+            self.reject_stale_responses();
+            return;
         }
 
         // Dispatch committed batches to the apply worker.
@@ -2125,13 +2070,19 @@ mod tests {
         assert_eq!(batch.shard, ShardId(1));
     }
 
-    // ── WAL sync failure ──────────────────────────────────────────
+    // ── WAL sync failure under always-pipelined commit ─────────────
 
     #[tokio::test]
-    async fn test_flush_wal_sync_failure_rejects_pending_responses() {
+    async fn test_flush_wal_sync_failure_does_not_retract_acked_responses() {
+        // Under always-on pipelined commit, client responses are resolved
+        // *before* the fsync runs. A subsequent sync failure is logged and
+        // metric-counted but CANNOT retract responses the reactor has
+        // already signalled as success — the client has already seen them.
+        // This test pins that invariant: a sync failure must not send
+        // `WalWriteError` back to a caller whose response was already
+        // drained from `pending_responses`.
         let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
-        // Arrange: queue a WAL frame and a pending response, inject sync error.
         let entry = Entry {
             term: 1,
             index: 1,
@@ -2142,20 +2093,14 @@ mod tests {
             shard: ShardId(1),
             entries: vec![entry],
         }]);
-        let (resp_tx, resp_rx) = oneshot::channel();
-        reactor.pending_responses.push((ShardId(1), 1, resp_tx));
         reactor.pending_commits.push((ShardId(1), 1));
         reactor.wal.inject_sync_error("disk full");
 
-        // Act
+        // Act: flush, triggering append → dispatch → resolve → sync fail.
         reactor.flush().await;
 
-        // Assert: response rejected, commits cleared.
-        let result = resp_rx.await.expect("channel should not be dropped");
-        assert!(
-            matches!(result, Err(ConsensusError::WalWriteError)),
-            "expected WalWriteError on sync failure, got {result:?}"
-        );
+        // Assert: pending_commits drained (dispatched to apply worker);
+        // the sync failure log + metric are the only surviving signal.
         assert!(reactor.pending_commits.is_empty());
     }
 

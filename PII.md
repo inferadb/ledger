@@ -415,7 +415,7 @@ Same pattern: resolve slug to ID via GLOBAL index, read profile from REGIONAL st
 
 Triggered by `SystemRequest::EraseUser { user_id, region }`. The `UserRetentionReaper` background job (`crates/raft/src/user_retention.rs`) scans for users in `Deleting` status whose `deleted_at + region.retention_days()` has elapsed, then proposes `EraseUser` to the GLOBAL Raft. Manual erasure is also possible via the `EraseUser` gRPC RPC.
 
-Eight idempotent steps executed in `erase_user()`:
+Ten idempotent steps executed in `erase_user()`:
 
 **Step 1: Read directory entry**
 
@@ -447,19 +447,30 @@ Eight idempotent steps executed in `erase_user()`:
 - Clear `_idx:user_emails:{user_id}` index
 - Batched into a single `apply_operations` call
 
-**Step 6: Delete UserShredKey** (REGIONAL, crypto-shredding)
+**Step 6: Delete all user credentials** (REGIONAL)
+
+- Delete all `user_credential:{user_id}:{credential_id}` entities (passkeys, TOTP, recovery-code material)
+- Delete per-type indices under `_idx:user_credential:*`
+- Failure logged as warning; `erase_user` continues (idempotent on re-execution)
+
+**Step 7: Delete all pending TOTP challenges** (REGIONAL)
+
+- Delete pending `totp_challenge:{user_id}:*` entries
+- Failure logged as warning; `erase_user` continues (idempotent on re-execution)
+
+**Step 8: Delete UserShredKey** (REGIONAL, crypto-shredding)
 
 - Delete `_shred:user:{user_id}` from REGIONAL store
 - All `EncryptedUserSystemRequest` entries in Raft log become permanently unrecoverable
 - On subsequent log replay, apply handler detects missing key and silently skips the entry
 
-**Step 7: Delete User record** (REGIONAL)
+**Step 9: Delete User record** (REGIONAL)
 
 - Delete `user:{user_id}` entity (contains plaintext `name` — PII)
 - Must occur after session revocation (Step 3) because `revoke_all_user_sessions` reads `TokenVersion`
-- Must occur before audit record (Step 8) so audit trail is the final write
+- Must occur before audit record (Step 10) so audit trail is the final write
 
-**Step 8: Write erasure audit record** (GLOBAL)
+**Step 10: Write erasure audit record** (GLOBAL)
 
 - `ErasureAuditRecord { user_id, erased_at, region }` at `_audit:erasure:{user_id}`
 - Non-PII: only opaque identifiers and timestamps
@@ -467,7 +478,7 @@ Eight idempotent steps executed in `erase_user()`:
 
 All steps are idempotent: `DeleteEntity` on a missing key is a no-op in the B+ tree engine. Re-executing `erase_user()` after completion does not error.
 
-Source: `crates/state/src/system/service.rs:1178-1286`
+Source: `crates/state/src/system/service/erasure.rs` (function `erase_user`, lines 60-176)
 
 ### Organization Purge
 
@@ -601,4 +612,4 @@ The GLOBAL/REGIONAL split ensures no plaintext PII enters the GLOBAL Raft log. R
 - `UserShredKey.key` and `OrgShredKey.key` exist as `[u8; 32]` in memory during active use
 - `DataEncryptionKey` implements `Zeroize` — key bytes are zeroed on drop
 - `RegionMasterKey` implements `Zeroize` — key bytes are zeroed on drop
-- UserShredKey/OrgShredKey do not implement `Zeroize` (they are short-lived deserialized values)
+- `UserShredKey` and `OrgShredKey` derive `Zeroize` and `ZeroizeOnDrop` — the 32-byte `key` field is zeroed on drop (`#[zeroize(skip)]` is applied to non-secret fields like `user_id`/`organization` and `created_at`). See `crates/state/src/system/types.rs` lines 117 and 143.
