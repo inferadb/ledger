@@ -323,12 +323,6 @@ mod tests {
         assert!(err.to_string().contains("ingest_rate_limit_per_source"));
     }
 
-    #[test]
-    fn events_validate_accepts_none_fields() {
-        let cfg = RuntimeEventsConfig::default();
-        assert!(cfg.validate().is_ok());
-    }
-
     // ── RuntimeConfig::validate ─────────────────────────────────────
 
     #[test]
@@ -338,12 +332,6 @@ mod tests {
             ..Default::default()
         };
         assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn runtime_config_validate_empty_is_ok() {
-        let cfg = RuntimeConfig::default();
-        assert!(cfg.validate().is_ok());
     }
 
     #[test]

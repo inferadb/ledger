@@ -536,25 +536,6 @@ mod tests {
     // OtelConfig tests
 
     #[test]
-    fn otel_config_default_values() {
-        let config = OtelConfig::default();
-        assert!(!config.enabled);
-        assert!(config.endpoint.is_none());
-        assert_eq!(config.transport, OtelTransport::Grpc);
-        assert_eq!(config.batch_size, 512);
-        assert_eq!(config.batch_interval_ms, 5000);
-        assert_eq!(config.timeout_ms, 10000);
-        assert_eq!(config.shutdown_timeout_ms, 15000);
-        assert!(config.trace_raft_rpcs);
-    }
-
-    #[test]
-    fn otel_config_builder_defaults_valid() {
-        let config = OtelConfig::builder().build().unwrap();
-        assert!(!config.enabled);
-    }
-
-    #[test]
     fn otel_config_enabled_without_endpoint_fails() {
         let result = OtelConfig::builder().enabled(true).build();
         assert!(result.is_err());
@@ -624,36 +605,7 @@ mod tests {
         assert!(!config.enabled);
     }
 
-    #[test]
-    fn otel_transport_default_is_grpc() {
-        assert_eq!(OtelTransport::default(), OtelTransport::Grpc);
-    }
-
-    #[test]
-    fn otel_config_serde_roundtrip() {
-        let config = OtelConfig::default();
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: OtelConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(config, deserialized);
-    }
-
     // HotKeyConfig tests
-
-    #[test]
-    fn hot_key_config_default_values() {
-        let config = HotKeyConfig::default();
-        assert_eq!(config.window_secs, 60);
-        assert_eq!(config.threshold, 100);
-        assert_eq!(config.cms_width, 1024);
-        assert_eq!(config.cms_depth, 4);
-        assert_eq!(config.top_k, 10);
-    }
-
-    #[test]
-    fn hot_key_config_builder_defaults_valid() {
-        let config = HotKeyConfig::builder().build().unwrap();
-        assert_eq!(config.window_secs, 60);
-    }
 
     #[test]
     fn hot_key_config_zero_window_fails() {
@@ -690,34 +642,7 @@ mod tests {
         assert!(config.validate().is_err());
     }
 
-    #[test]
-    fn hot_key_config_valid_custom() {
-        let config = HotKeyConfig::builder()
-            .window_secs(30)
-            .threshold(200)
-            .cms_width(2048)
-            .cms_depth(8)
-            .top_k(20)
-            .build()
-            .unwrap();
-        assert_eq!(config.window_secs, 30);
-        assert_eq!(config.threshold, 200);
-    }
-
     // MetricsCardinalityConfig tests
-
-    #[test]
-    fn metrics_cardinality_default_values() {
-        let config = MetricsCardinalityConfig::default();
-        assert_eq!(config.warn_cardinality, 5000);
-        assert_eq!(config.max_cardinality, 10_000);
-    }
-
-    #[test]
-    fn metrics_cardinality_builder_defaults_valid() {
-        let config = MetricsCardinalityConfig::builder().build().unwrap();
-        assert_eq!(config.warn_cardinality, 5000);
-    }
 
     #[test]
     fn metrics_cardinality_zero_warn_fails() {

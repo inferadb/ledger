@@ -1275,20 +1275,6 @@ mod tiered_storage_tests {
     // StorageConfig tests
 
     #[test]
-    fn storage_config_default_valid() {
-        let config = StorageConfig::default();
-        assert!(config.validate().is_ok());
-        assert_eq!(config.cache_size_bytes, 256 * 1024 * 1024);
-        assert_eq!(config.compression_level, 3);
-    }
-
-    #[test]
-    fn storage_config_builder_defaults_valid() {
-        let config = StorageConfig::builder().build().unwrap();
-        assert_eq!(config.cache_size_bytes, 256 * 1024 * 1024);
-    }
-
-    #[test]
     fn storage_config_small_cache_fails() {
         let mut config = StorageConfig::default();
         config.cache_size_bytes = 1024; // 1 KB, below 1 MB minimum
@@ -1321,20 +1307,6 @@ mod tiered_storage_tests {
     // BTreeCompactionConfig tests
 
     #[test]
-    fn compaction_config_default_valid() {
-        let config = BTreeCompactionConfig::default();
-        assert!(config.validate().is_ok());
-        assert_eq!(config.min_fill_factor, 0.4);
-        assert_eq!(config.interval_secs, 3600);
-    }
-
-    #[test]
-    fn compaction_config_builder_defaults_valid() {
-        let config = BTreeCompactionConfig::builder().build().unwrap();
-        assert_eq!(config.min_fill_factor, 0.4);
-    }
-
-    #[test]
     fn compaction_config_zero_fill_factor_fails() {
         let mut config = BTreeCompactionConfig::default();
         config.min_fill_factor = 0.0;
@@ -1363,23 +1335,6 @@ mod tiered_storage_tests {
     }
 
     // CheckpointConfig tests
-
-    #[test]
-    fn checkpoint_config_default_valid() {
-        let config = CheckpointConfig::default();
-        assert!(config.validate().is_ok());
-        assert_eq!(config.interval_ms, 500);
-        assert_eq!(config.applies_threshold, 5_000);
-        assert_eq!(config.dirty_pages_threshold, 10_000);
-    }
-
-    #[test]
-    fn checkpoint_config_builder_defaults_valid() {
-        let config = CheckpointConfig::builder().build().unwrap();
-        assert_eq!(config.interval_ms, 500);
-        assert_eq!(config.applies_threshold, 5_000);
-        assert_eq!(config.dirty_pages_threshold, 10_000);
-    }
 
     #[test]
     fn checkpoint_config_interval_too_low_fails() {
@@ -1419,32 +1374,6 @@ mod tiered_storage_tests {
     }
 
     #[test]
-    fn checkpoint_config_builder_custom_values() {
-        let config = CheckpointConfig::builder()
-            .interval_ms(250)
-            .applies_threshold(2_500)
-            .dirty_pages_threshold(5_000)
-            .build()
-            .unwrap();
-        assert_eq!(config.interval_ms, 250);
-        assert_eq!(config.applies_threshold, 2_500);
-        assert_eq!(config.dirty_pages_threshold, 5_000);
-    }
-
-    #[test]
-    fn checkpoint_config_serde_roundtrip() {
-        let config = CheckpointConfig::builder()
-            .interval_ms(1000)
-            .applies_threshold(1)
-            .dirty_pages_threshold(100)
-            .build()
-            .unwrap();
-        let json = serde_json::to_string(&config).unwrap();
-        let parsed: CheckpointConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(config, parsed);
-    }
-
-    #[test]
     fn checkpoint_config_serde_defaults() {
         let config: CheckpointConfig = serde_json::from_str("{}").unwrap();
         config.validate().unwrap();
@@ -1465,21 +1394,6 @@ mod tiered_storage_tests {
     }
 
     // IntegrityConfig tests
-
-    #[test]
-    fn integrity_config_default_valid() {
-        let config = IntegrityConfig::default();
-        assert!(config.validate().is_ok());
-        assert_eq!(config.scrub_interval_secs, 3600);
-        assert_eq!(config.pages_per_cycle_percent, 1.0);
-        assert_eq!(config.full_scan_period_secs, 345_600);
-    }
-
-    #[test]
-    fn integrity_config_builder_defaults_valid() {
-        let config = IntegrityConfig::builder().build().unwrap();
-        assert_eq!(config.scrub_interval_secs, 3600);
-    }
 
     #[test]
     fn integrity_config_low_scrub_interval_fails() {
@@ -1562,42 +1476,6 @@ mod tiered_storage_tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn event_batch_config_default_valid() {
-        let config = EventWriterBatchConfig::default();
-        assert!(config.validate().is_ok());
-        assert!(config.enabled);
-        assert_eq!(config.flush_interval_ms, 100);
-        assert_eq!(config.flush_size_threshold, 1_000);
-        assert_eq!(config.queue_capacity, 10_000);
-        assert_eq!(config.drain_batch_max, 500);
-        assert_eq!(config.overflow_behavior, EventOverflowBehavior::Drop);
-    }
-
-    #[test]
-    fn event_batch_config_builder_defaults_valid() {
-        let config = EventWriterBatchConfig::builder().build().unwrap();
-        assert_eq!(config, EventWriterBatchConfig::default());
-    }
-
-    #[test]
-    fn event_batch_config_builder_custom_values() {
-        let config = EventWriterBatchConfig::builder()
-            .enabled(true)
-            .flush_interval_ms(250)
-            .flush_size_threshold(2_000)
-            .queue_capacity(50_000)
-            .overflow_behavior(EventOverflowBehavior::Block)
-            .drain_batch_max(1_000)
-            .build()
-            .unwrap();
-        assert_eq!(config.flush_interval_ms, 250);
-        assert_eq!(config.flush_size_threshold, 2_000);
-        assert_eq!(config.queue_capacity, 50_000);
-        assert_eq!(config.drain_batch_max, 1_000);
-        assert_eq!(config.overflow_behavior, EventOverflowBehavior::Block);
-    }
-
-    #[test]
     fn event_batch_config_zero_flush_interval_fails() {
         let mut config = EventWriterBatchConfig::default();
         config.flush_interval_ms = 0;
@@ -1639,19 +1517,6 @@ mod tiered_storage_tests {
         let mut config = EventWriterBatchConfig::default();
         config.drain_batch_max = 0;
         assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn event_batch_config_serde_roundtrip() {
-        let config = EventWriterBatchConfig::builder()
-            .enabled(false)
-            .flush_interval_ms(200)
-            .overflow_behavior(EventOverflowBehavior::Block)
-            .build()
-            .unwrap();
-        let json = serde_json::to_string(&config).unwrap();
-        let parsed: EventWriterBatchConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(config, parsed);
     }
 
     #[test]

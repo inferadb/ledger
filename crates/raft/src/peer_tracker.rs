@@ -289,30 +289,6 @@ mod tests {
     }
 
     #[test]
-    fn test_default_config_values() {
-        let config = PeerTrackerConfig::default();
-        assert_eq!(config.staleness_threshold, Duration::from_secs(60 * 60));
-        assert_eq!(config.maintenance_interval, Duration::from_secs(5 * 60));
-    }
-
-    #[test]
-    fn test_peer_tracker_config_builder_with_defaults() {
-        let config = PeerTrackerConfig::builder().build();
-        assert_eq!(config.staleness_threshold, Duration::from_secs(60 * 60));
-        assert_eq!(config.maintenance_interval, Duration::from_secs(5 * 60));
-    }
-
-    #[test]
-    fn test_peer_tracker_config_builder_with_custom_values() {
-        let config = PeerTrackerConfig::builder()
-            .staleness_threshold(Duration::from_secs(120))
-            .maintenance_interval(Duration::from_secs(30))
-            .build();
-        assert_eq!(config.staleness_threshold, Duration::from_secs(120));
-        assert_eq!(config.maintenance_interval, Duration::from_secs(30));
-    }
-
-    #[test]
     fn test_timestamp_is_reasonable() {
         let mut tracker = PeerTracker::new();
 

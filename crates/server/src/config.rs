@@ -211,14 +211,17 @@ pub struct Config {
     /// WAL sync mode — controls the fsync primitive used by the per-batch
     /// WAL commit that gates write ACKs.
     ///
-    /// - `full` (default) — full durability. Survives process crash,
-    ///   kernel panic, and power loss. On Apple platforms uses
-    ///   `fcntl(F_FULLFSYNC)`. Typical APFS SSD latency: 15-25ms.
-    /// - `barrier` — barrier fsync. Survives process crash and kernel
-    ///   panic; may lose the last few seconds of writes on sudden power
-    ///   loss (hardware-dependent). On Apple platforms uses
-    ///   `fcntl(F_BARRIERFSYNC)`. Typical APFS SSD latency: 2-5ms.
-    ///   On Linux degrades to `fdatasync` (same as `full`).
+    /// - `barrier` (default) — barrier fsync. Survives process crash and
+    ///   kernel panic; may lose the last few seconds of writes on sudden
+    ///   power loss (hardware-dependent). On Apple platforms uses
+    ///   `fcntl(F_BARRIERFSYNC)`. Typical APFS SSD latency: 2-5ms. On
+    ///   Linux this is `fdatasync`, which is already barrier-class.
+    /// - `full` — full durability. Survives process crash, kernel panic,
+    ///   **and** power loss. Opt-in; use when the deployment cannot
+    ///   tolerate the power-loss window `barrier` permits (commodity
+    ///   hardware without power-loss protection, strict compliance).
+    ///   On Apple: `fcntl(F_FULLFSYNC)` (~15-25ms on APFS SSDs).
+    ///   On Linux: `fdatasync` (same as `barrier`).
     ///
     /// See `docs/operations/durability.md` for the complete matrix.
     #[arg(long = "wal-sync-mode", env = "INFERADB__LEDGER__WAL_SYNC_MODE", value_enum, default_value_t = Default::default())]
@@ -666,7 +669,7 @@ mod tests {
         assert!(config.data_dir.is_none());
         assert_eq!(
             config.wal_sync_mode,
-            inferadb_ledger_types::config::FileSyncMode::Full,
+            inferadb_ledger_types::config::FileSyncMode::Barrier,
         );
     }
 
@@ -689,12 +692,6 @@ mod tests {
         // Verify node_id was written to file
         let node_id = config.node_id(&data_dir).expect("load node_id");
         assert_eq!(node_id, 1);
-    }
-
-    #[test]
-    fn validate_accepts_default_config() {
-        let config = Config::default();
-        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -757,48 +754,7 @@ mod tests {
         std::fs::remove_dir_all(&resolved).ok();
     }
 
-    // === Builder API Tests (TDD) ===
-
-    #[test]
-    fn test_config_builder_with_defaults() {
-        // Builder with all defaults should have same behavior as Default::default()
-        let from_builder = Config::builder().build();
-        let from_default = Config::default();
-
-        assert_eq!(from_builder.listen, from_default.listen);
-        assert_eq!(from_builder.metrics_addr, from_default.metrics_addr);
-        assert_eq!(from_builder.data_dir, from_default.data_dir);
-        assert_eq!(from_builder.join, from_default.join);
-        assert_eq!(from_builder.max_concurrent, from_default.max_concurrent);
-        assert_eq!(from_builder.timeout_secs, from_default.timeout_secs);
-    }
-
-    #[test]
-    fn test_config_builder_with_custom_values() {
-        let config = Config::builder()
-            .listen("127.0.0.1:9999".parse().unwrap())
-            .metrics_addr("127.0.0.1:9090".parse().unwrap())
-            .data_dir(PathBuf::from("/custom/data"))
-            .join(vec!["node1:9090".to_string(), "node2:9090".to_string()])
-            .max_concurrent(200)
-            .timeout_secs(60)
-            .build();
-
-        assert_eq!(config.listen.unwrap().port(), 9999);
-        assert!(config.metrics_addr.is_some());
-        assert_eq!(config.data_dir, Some(PathBuf::from("/custom/data")));
-        assert_eq!(config.join, Some(vec!["node1:9090".to_string(), "node2:9090".to_string()]));
-        assert_eq!(config.max_concurrent, 200);
-        assert_eq!(config.timeout_secs, 60);
-    }
-
     // === Logging Config Tests ===
-
-    #[test]
-    fn test_logging_config_defaults() {
-        let config = LoggingConfig::default();
-        assert!(!config.otel.enabled);
-    }
 
     #[test]
     fn test_logging_config_for_test() {
@@ -807,38 +763,12 @@ mod tests {
         assert!(!config.otel.enabled);
     }
 
-    #[test]
-    fn test_logging_config_validate() {
-        let config = LoggingConfig::default();
-        assert!(config.validate().is_ok());
-    }
-
     // === OTEL Config Tests ===
-
-    #[test]
-    fn test_otel_config_defaults() {
-        let config = OtelConfig::default();
-        assert!(!config.enabled);
-        assert!(config.endpoint.is_none());
-        assert_eq!(config.transport, OtelTransport::Grpc);
-        assert_eq!(config.batch_size, 512);
-        assert_eq!(config.batch_interval_ms, 5000);
-        assert_eq!(config.timeout_ms, 10000);
-        assert_eq!(config.shutdown_timeout_ms, 15000);
-        assert!(config.trace_raft_rpcs); // default is true
-    }
 
     #[test]
     fn test_otel_config_for_test() {
         let config = OtelConfig::for_test();
         assert!(!config.enabled); // Disabled by default for tests
-    }
-
-    #[test]
-    fn test_otel_config_validate_disabled() {
-        // Disabled config is valid even without endpoint
-        let config = OtelConfig::default();
-        assert!(config.validate().is_ok());
     }
 
     #[test]

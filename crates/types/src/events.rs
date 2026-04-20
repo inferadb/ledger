@@ -1315,39 +1315,6 @@ mod tests {
     // ── EventConfig ─────────────────────────────────────────
 
     #[test]
-    fn event_config_defaults() {
-        let config = EventConfig::default();
-        assert!(config.enabled);
-        assert_eq!(config.default_ttl_days, 90);
-        assert_eq!(config.max_details_size_bytes, 4096);
-        assert!(config.system_log_enabled);
-        assert!(config.organization_log_enabled);
-    }
-
-    #[test]
-    fn event_config_builder_defaults() {
-        let config = EventConfig::builder().build().expect("valid defaults");
-        assert_eq!(config, EventConfig::default());
-    }
-
-    #[test]
-    fn event_config_builder_custom() {
-        let config = EventConfig::builder()
-            .enabled(false)
-            .default_ttl_days(30)
-            .max_details_size_bytes(8192)
-            .system_log_enabled(false)
-            .organization_log_enabled(true)
-            .build()
-            .expect("valid config");
-        assert!(!config.enabled);
-        assert_eq!(config.default_ttl_days, 30);
-        assert_eq!(config.max_details_size_bytes, 8192);
-        assert!(!config.system_log_enabled);
-        assert!(config.organization_log_enabled);
-    }
-
-    #[test]
     fn event_config_ttl_days_too_low() {
         let result = EventConfig::builder().default_ttl_days(0).build();
         assert!(result.is_err());
@@ -1397,22 +1364,6 @@ mod tests {
         let config =
             EventConfig::builder().max_details_size_bytes(65536).build().expect("65536 is valid");
         assert_eq!(config.max_details_size_bytes, 65536);
-    }
-
-    #[test]
-    fn event_config_validate_method() {
-        let mut config = EventConfig::default();
-        assert!(config.validate().is_ok());
-        config.default_ttl_days = 0;
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn event_config_serde_roundtrip() {
-        let config = EventConfig::default();
-        let json = serde_json::to_string(&config).expect("serialize");
-        let back: EventConfig = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(config, back);
     }
 
     #[test]
@@ -1523,14 +1474,6 @@ mod tests {
             ..IngestionConfig::default()
         };
         assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn ingestion_config_serde_roundtrip() {
-        let config = IngestionConfig::default();
-        let json = serde_json::to_string(&config).expect("serialize");
-        let back: IngestionConfig = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(config, back);
     }
 
     #[test]

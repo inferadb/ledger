@@ -176,8 +176,8 @@ pub struct RaftManagerConfig {
     #[builder(default = true)]
     pub trace_raft_rpcs: bool,
     /// WAL sync mode — controls the fsync primitive used by the per-batch
-    /// WAL commit. Default is `Full` (preserves pre-existing durability).
-    /// See [`inferadb_ledger_fs_sync::FileSyncMode`].
+    /// WAL commit. Default is `Barrier` (fast path on macOS, equivalent to
+    /// `fdatasync` on Linux). See [`inferadb_ledger_fs_sync::FileSyncMode`].
     #[builder(default)]
     pub wal_sync_mode: inferadb_ledger_fs_sync::FileSyncMode,
 }

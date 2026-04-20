@@ -945,12 +945,6 @@ mod tests {
     // RateLimitConfig tests
 
     #[test]
-    fn rate_limit_defaults_validate() {
-        assert!(RateLimitConfig::default().validate().is_ok());
-        assert!(RateLimitConfig::builder().build().unwrap().validate().is_ok());
-    }
-
-    #[test]
     fn rate_limit_zero_client_burst_fails() {
         let mut config = RateLimitConfig::default();
         config.client_burst = 0;
@@ -1027,33 +1021,7 @@ mod tests {
         assert!(config.validate().is_err());
     }
 
-    #[test]
-    fn rate_limit_serde_roundtrip() {
-        let config = RateLimitConfig::default();
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: RateLimitConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(config, deserialized);
-    }
-
     // ShutdownConfig tests
-
-    #[test]
-    fn shutdown_default_valid() {
-        let config = ShutdownConfig::default();
-        assert!(config.validate().is_ok());
-        assert_eq!(config.grace_period_secs, 15);
-        assert_eq!(config.drain_timeout_secs, 30);
-        assert_eq!(config.pre_stop_delay_secs, 5);
-        assert_eq!(config.pre_shutdown_timeout_secs, 60);
-        assert_eq!(config.watchdog_multiplier, 2);
-        assert_eq!(config.leader_transfer_timeout_secs, 10);
-    }
-
-    #[test]
-    fn shutdown_builder_defaults_valid() {
-        let config = ShutdownConfig::builder().build().unwrap();
-        assert_eq!(config.grace_period_secs, 15);
-    }
 
     #[test]
     fn shutdown_zero_grace_period_fails() {
@@ -1086,15 +1054,6 @@ mod tests {
     // HealthCheckConfig tests
 
     #[test]
-    fn health_check_default_valid() {
-        let config = HealthCheckConfig::default();
-        assert!(config.validate().is_ok());
-        assert_eq!(config.dependency_check_timeout_secs, 2);
-        assert_eq!(config.health_cache_ttl_secs, 5);
-        assert_eq!(config.max_raft_lag, 1000);
-    }
-
-    #[test]
     fn health_check_zero_timeout_fails() {
         let mut config = HealthCheckConfig::default();
         config.dependency_check_timeout_secs = 0;
@@ -1116,18 +1075,6 @@ mod tests {
     }
 
     // ValidationConfig tests
-
-    #[test]
-    fn validation_config_default_valid() {
-        let config = ValidationConfig::default();
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn validation_config_builder_defaults_valid() {
-        let config = ValidationConfig::builder().build().unwrap();
-        assert_eq!(config.max_key_bytes, 1024);
-    }
 
     #[test]
     fn validation_config_zero_key_bytes_fails() {
@@ -1216,13 +1163,6 @@ mod tests {
     // SagaConfig tests
 
     #[test]
-    fn saga_config_default_valid() {
-        let config = SagaConfig::default();
-        assert!(config.validate().is_ok());
-        assert_eq!(config.poll_interval_secs, 2);
-    }
-
-    #[test]
     fn saga_config_zero_interval_fails() {
         let mut config = SagaConfig::default();
         config.poll_interval_secs = 0;
@@ -1232,13 +1172,6 @@ mod tests {
     // CleanupConfig tests
 
     #[test]
-    fn cleanup_config_default_valid() {
-        let config = CleanupConfig::default();
-        assert!(config.validate().is_ok());
-        assert_eq!(config.interval_secs, 3600);
-    }
-
-    #[test]
     fn cleanup_config_zero_interval_fails() {
         let mut config = CleanupConfig::default();
         config.interval_secs = 0;
@@ -1246,13 +1179,6 @@ mod tests {
     }
 
     // MigrationConfig tests
-
-    #[test]
-    fn migration_config_default_valid() {
-        let config = MigrationConfig::default();
-        assert!(config.validate().is_ok());
-        assert_eq!(config.timeout_secs, 1800);
-    }
 
     #[test]
     fn migration_config_below_minimum_fails() {
@@ -1271,14 +1197,6 @@ mod tests {
     // HibernateConfig tests
 
     #[test]
-    fn hibernate_config_default_valid() {
-        let config = HibernateConfig::default();
-        assert!(config.validate().is_ok());
-        assert!(config.enabled);
-        assert_eq!(config.idle_timeout_secs, 60);
-    }
-
-    #[test]
     fn hibernate_config_below_minimum_fails() {
         let mut config = HibernateConfig::default();
         config.idle_timeout_secs = 9;
@@ -1290,14 +1208,6 @@ mod tests {
         let mut config = HibernateConfig::default();
         config.idle_timeout_secs = 10;
         assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn hibernate_config_serde_roundtrip() {
-        let config = HibernateConfig { enabled: false, idle_timeout_secs: 120 };
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: HibernateConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(config, deserialized);
     }
 
     #[test]

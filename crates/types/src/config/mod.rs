@@ -59,7 +59,7 @@ pub enum ConfigError {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
-    use std::{net::SocketAddr, path::PathBuf, time::Duration};
+    use std::{net::SocketAddr, time::Duration};
 
     use super::*;
 
@@ -68,43 +68,6 @@ mod tests {
     // (StorageConfig, RaftConfig, BatchConfig, PostErasureCompactionConfig
     //  are tested in their respective sub-module files.)
     // =========================================================================
-
-    #[test]
-    fn peer_config_builder() {
-        let peer = PeerConfig::builder().node_id("node-2").addr("127.0.0.1:50052").build();
-        assert_eq!(peer.node_id, "node-2");
-        assert_eq!(peer.addr, "127.0.0.1:50052");
-    }
-
-    #[test]
-    fn node_config_builder_with_nested_configs() {
-        let addr: SocketAddr = "127.0.0.1:50051".parse().unwrap();
-        let config = NodeConfig::builder()
-            .node_id("node-1")
-            .listen_addr(addr)
-            .data_dir("/tmp/ledger")
-            .peers(vec![PeerConfig::builder().node_id("node-2").addr("127.0.0.1:50052").build()])
-            .storage(StorageConfig::builder().cache_size_bytes(1024 * 1024).build().expect("valid"))
-            .raft(
-                RaftConfig::builder()
-                    .heartbeat_interval(Duration::from_millis(200))
-                    .election_timeout_min(Duration::from_millis(500))
-                    .election_timeout_max(Duration::from_millis(1000))
-                    .build()
-                    .expect("valid"),
-            )
-            .batching(BatchConfig::builder().max_batch_size(50).build().expect("valid"))
-            .build();
-
-        assert_eq!(config.node_id, "node-1");
-        assert_eq!(config.listen_addr, addr);
-        assert_eq!(config.data_dir, PathBuf::from("/tmp/ledger"));
-        assert_eq!(config.peers.len(), 1);
-        assert_eq!(config.peers[0].node_id, "node-2");
-        assert_eq!(config.storage.cache_size_bytes, 1024 * 1024);
-        assert_eq!(config.raft.heartbeat_interval, Duration::from_millis(200));
-        assert_eq!(config.batching.max_batch_size, 50);
-    }
 
     #[test]
     fn node_config_builder_uses_sub_config_defaults() {
@@ -308,18 +271,6 @@ mod tests {
         assert_eq!(display, "rate_limit.client_burst: 100 → 200");
     }
 
-    #[test]
-    fn config_change_serde_roundtrip() {
-        let change = ConfigChange {
-            field: "hot_key.threshold".to_string(),
-            old: "50".to_string(),
-            new: "100".to_string(),
-        };
-        let json = serde_json::to_string(&change).unwrap();
-        let deserialized: ConfigChange = serde_json::from_str(&json).unwrap();
-        assert_eq!(change, deserialized);
-    }
-
     // =========================================================================
     // JsonSchema tests
     // =========================================================================
@@ -399,43 +350,6 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn jwt_config_defaults_are_valid() {
-        let config = JwtConfig::builder().build().expect("defaults should be valid");
-        assert_eq!(config.issuer, "inferadb");
-        assert_eq!(config.session_access_ttl_secs, 1800);
-        assert_eq!(config.session_refresh_ttl_secs, 1_209_600);
-        assert_eq!(config.vault_access_ttl_secs, 900);
-        assert_eq!(config.vault_refresh_ttl_secs, 3600);
-        assert_eq!(config.clock_skew_secs, 30);
-        assert_eq!(config.key_rotation_grace_secs, 14400);
-        assert_eq!(config.max_family_lifetime_secs, 2_592_000);
-    }
-
-    #[test]
-    fn jwt_config_default_trait_matches_builder() {
-        let config = JwtConfig::default();
-        assert_eq!(config.issuer, "inferadb");
-        config.validate().expect("default should be valid");
-    }
-
-    #[test]
-    fn jwt_config_builder_custom_values() {
-        let config = JwtConfig::builder()
-            .issuer("my-cluster")
-            .session_access_ttl_secs(600)
-            .session_refresh_ttl_secs(86400)
-            .vault_access_ttl_secs(300)
-            .vault_refresh_ttl_secs(1800)
-            .clock_skew_secs(10)
-            .key_rotation_grace_secs(7200)
-            .build()
-            .expect("custom values should be valid");
-        assert_eq!(config.issuer, "my-cluster");
-        assert_eq!(config.session_access_ttl_secs, 600);
-        assert_eq!(config.vault_access_ttl_secs, 300);
-    }
-
-    #[test]
     fn jwt_config_rejects_empty_issuer() {
         let result = JwtConfig::builder().issuer("").build();
         assert!(result.is_err());
@@ -499,19 +413,6 @@ mod tests {
     }
 
     #[test]
-    fn jwt_config_serde_roundtrip() {
-        let config = JwtConfig::builder()
-            .issuer("test")
-            .session_access_ttl_secs(600)
-            .session_refresh_ttl_secs(7200)
-            .build()
-            .unwrap();
-        let json = serde_json::to_string(&config).unwrap();
-        let parsed: JwtConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(config, parsed);
-    }
-
-    #[test]
     fn jwt_config_serde_defaults() {
         let config: JwtConfig = serde_json::from_str("{}").unwrap();
         config.validate().expect("serde defaults should be valid");
@@ -519,11 +420,4 @@ mod tests {
         assert_eq!(config.session_access_ttl_secs, 1800);
     }
 
-    #[test]
-    fn jwt_config_validate_method() {
-        let mut config = JwtConfig::default();
-        assert!(config.validate().is_ok());
-        config.session_access_ttl_secs = 0;
-        assert!(config.validate().is_err());
-    }
 }

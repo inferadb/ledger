@@ -330,7 +330,7 @@ mod tests {
 
     #[test]
     fn test_disabled_without_key_source_passes_validation() {
-        let config = EncryptionConfig::default();
+        let config = EncryptionConfig { enabled: false, key_source: None, ..Default::default() };
         assert!(config.validate().is_ok());
     }
 

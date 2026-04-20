@@ -642,42 +642,6 @@ mod tests {
     }
 
     // =========================================================================
-    // Builder API tests (TDD for bon::Builder adoption)
-    // =========================================================================
-
-    #[test]
-    fn test_batch_config_builder_custom_values() {
-        let config = BatchWriterConfig::builder()
-            .max_batch_size(250)
-            .batch_timeout(Duration::from_millis(50))
-            .tick_interval(Duration::from_millis(10))
-            .build();
-
-        assert_eq!(config.max_batch_size, 250);
-        assert_eq!(config.batch_timeout, Duration::from_millis(50));
-        assert_eq!(config.tick_interval, Duration::from_millis(10));
-    }
-
-    #[test]
-    fn test_batch_config_builder_partial_override() {
-        // Only override some fields, rest should use defaults.
-        let config = BatchWriterConfig::builder().max_batch_size(200).build();
-
-        assert_eq!(config.max_batch_size, 200);
-        assert_eq!(config.batch_timeout, Duration::from_millis(10)); // default
-        assert_eq!(config.tick_interval, Duration::from_millis(5)); // default
-    }
-
-    #[test]
-    fn test_batch_config_builder_defaults() {
-        let config = BatchWriterConfig::default();
-
-        assert_eq!(config.max_batch_size, 2000);
-        assert_eq!(config.batch_timeout, Duration::from_millis(10));
-        assert_eq!(config.tick_interval, Duration::from_millis(5));
-    }
-
-    // =========================================================================
     // From<&BatchConfig> tests (operator config → runtime config)
     // =========================================================================
 

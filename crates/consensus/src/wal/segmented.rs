@@ -64,12 +64,12 @@ pub struct SegmentedWalBackend {
 
 impl SegmentedWalBackend {
     /// Creates a new segmented WAL backend rooted at the given directory,
-    /// using `FileSyncMode::Full` — the default, pre-existing durability
-    /// semantics. For operator-tunable sync modes use [`Self::open_with`].
+    /// using `FileSyncMode::default()` (`Barrier`). For operator-controlled
+    /// sync modes use [`Self::open_with`].
     ///
     /// On open, scans for existing segment files to resume from where we left off.
     pub fn open(dir: &Path) -> Result<Self, WalError> {
-        Self::open_with(dir, FileSyncMode::Full)
+        Self::open_with(dir, FileSyncMode::default())
     }
 
     /// Creates a new segmented WAL backend rooted at the given directory
@@ -692,12 +692,13 @@ mod tests {
     }
 
     #[test]
-    fn test_open_defaults_to_full_sync_mode() {
-        // `open()` preserves the historical contract. This guards against a
-        // future refactor silently switching the default to `Barrier`.
+    fn test_open_uses_file_sync_mode_default() {
+        // `open()` delegates to `open_with(FileSyncMode::default())`. Guards
+        // against a future refactor silently hardcoding one mode or the
+        // other, bypassing the workspace default.
         let dir = tempfile::tempdir().unwrap();
         let wal = SegmentedWalBackend::open(dir.path()).unwrap();
-        assert_eq!(wal.sync_mode, FileSyncMode::Full);
+        assert_eq!(wal.sync_mode, FileSyncMode::default());
     }
 
     // --- CRC corruption detection ---

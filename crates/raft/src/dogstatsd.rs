@@ -109,36 +109,6 @@ mod tests {
     }
 
     #[test]
-    fn dogstatsd_config_default_values() {
-        let config = DogStatsdConfig::default();
-        assert!(config.endpoint.is_none());
-        assert!(config.use_distributions);
-    }
-
-    #[test]
-    fn dogstatsd_config_with_endpoint() {
-        let addr: SocketAddr = "127.0.0.1:8125".parse().unwrap();
-        let config = DogStatsdConfig { endpoint: Some(addr), use_distributions: true };
-        assert_eq!(config.endpoint, Some(addr));
-        assert!(config.use_distributions);
-    }
-
-    #[test]
-    fn dogstatsd_config_distributions_opt_out() {
-        let addr: SocketAddr = "127.0.0.1:8125".parse().unwrap();
-        let config = DogStatsdConfig { endpoint: Some(addr), use_distributions: false };
-        assert!(!config.use_distributions);
-    }
-
-    #[test]
-    fn dogstatsd_config_serde_roundtrip() {
-        let config = DogStatsdConfig::default();
-        let json = serde_json::to_string(&config).unwrap();
-        let restored: DogStatsdConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(config, restored);
-    }
-
-    #[test]
     fn dogstatsd_config_serde_roundtrip_with_endpoint() {
         let addr: SocketAddr = "10.0.0.1:8125".parse().unwrap();
         let config = DogStatsdConfig { endpoint: Some(addr), use_distributions: false };

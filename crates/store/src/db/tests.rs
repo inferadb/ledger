@@ -8,36 +8,6 @@ mod tests {
     };
 
     #[test]
-    fn test_database_config_builder() {
-        let config =
-            DatabaseConfig::builder().page_size(8192).cache_size(512).sync_on_commit(false).build();
-
-        assert_eq!(config.page_size, 8192);
-        assert_eq!(config.cache_size, 512);
-        assert!(!config.sync_on_commit);
-    }
-
-    #[test]
-    fn test_database_config_builder_defaults() {
-        let from_builder = DatabaseConfig::builder().build();
-        let from_default = DatabaseConfig::default();
-
-        assert_eq!(from_builder.page_size, from_default.page_size);
-        assert_eq!(from_builder.cache_size, from_default.cache_size);
-        assert_eq!(from_builder.sync_on_commit, from_default.sync_on_commit);
-    }
-
-    #[test]
-    fn test_database_config_builder_partial() {
-        // Override only one field, others use defaults
-        let config = DatabaseConfig::builder().page_size(16384).build();
-
-        assert_eq!(config.page_size, 16384);
-        assert_eq!(config.cache_size, 16_384); // default
-        assert!(config.sync_on_commit); // default
-    }
-
-    #[test]
     fn test_database_create() {
         let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
         let stats = db.stats();

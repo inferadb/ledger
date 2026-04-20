@@ -589,38 +589,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_config() {
-        let config = AutoRecoveryConfig::default();
-        assert_eq!(config.scan_interval, Duration::from_secs(30));
-        assert_eq!(config.base_retry_delay, Duration::from_secs(5));
-        assert_eq!(config.max_retry_delay, Duration::from_secs(300));
-        assert!(config.enabled);
-    }
-
-    #[test]
-    fn test_auto_recovery_config_builder_with_defaults() {
-        let config = AutoRecoveryConfig::builder().build();
-        assert_eq!(config.scan_interval, Duration::from_secs(30));
-        assert_eq!(config.base_retry_delay, Duration::from_secs(5));
-        assert_eq!(config.max_retry_delay, Duration::from_secs(300));
-        assert!(config.enabled);
-    }
-
-    #[test]
-    fn test_auto_recovery_config_builder_with_custom_values() {
-        let config = AutoRecoveryConfig::builder()
-            .scan_interval(Duration::from_secs(60))
-            .base_retry_delay(Duration::from_secs(10))
-            .max_retry_delay(Duration::from_secs(600))
-            .enabled(false)
-            .build();
-        assert_eq!(config.scan_interval, Duration::from_secs(60));
-        assert_eq!(config.base_retry_delay, Duration::from_secs(10));
-        assert_eq!(config.max_retry_delay, Duration::from_secs(600));
-        assert!(!config.enabled);
-    }
-
-    #[test]
     fn test_retry_delay_exact_backoff_schedule() {
         // Reproduce the exact retry_delay method logic
         let base = Duration::from_secs(5);

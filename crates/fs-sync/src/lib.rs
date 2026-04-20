@@ -21,38 +21,49 @@ use serde::{Deserialize, Serialize};
 ///
 /// | Mode      | Process crash | Kernel panic | Power loss                    |
 /// |-----------|---------------|--------------|-------------------------------|
-/// | `Full`    | Safe          | Safe         | Safe (non-volatile media)     |
 /// | `Barrier` | Safe          | Safe         | May lose last ~seconds        |
+/// | `Full`    | Safe          | Safe         | Safe (non-volatile media)     |
+///
+/// `Barrier` is the default because on Apple platforms it is 4-8× lower
+/// latency than `Full` while still surviving every failure mode short of
+/// sudden power loss. Linux deployments see identical behavior in both
+/// modes — `fdatasync` already implements barrier semantics at the VFS
+/// layer — so the default change is macOS-centric.
 ///
 /// # Platform behavior
 ///
 /// - **Apple** (`target_vendor = "apple"`):
+///   - `Barrier` (default) → `fcntl(F_BARRIERFSYNC)` (this crate's `unsafe` block).
 ///   - `Full` → `fcntl(F_FULLFSYNC)` via [`File::sync_data`].
-///   - `Barrier` → `fcntl(F_BARRIERFSYNC)` (this crate's `unsafe` block).
 /// - **Linux / other Unix**:
-///   - `Full` → `fdatasync` via [`File::sync_data`].
-///   - `Barrier` → `fdatasync` (degrades to `Full`-equivalent; Linux's
-///     `fdatasync` already has the semantics `F_BARRIERFSYNC` approximates).
+///   - `Barrier` (default) → `fdatasync` via [`File::sync_data`].
+///   - `Full` → `fdatasync` (same call; Linux's `fdatasync` already has the
+///     semantics `F_BARRIERFSYNC` approximates on macOS).
 /// - **Windows / other**:
 ///   - Both modes → [`File::sync_data`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "snake_case")]
 pub enum FileSyncMode {
-    /// Full durability: data is flushed to non-volatile storage before the
-    /// call returns. Survives process crash, kernel panic, and power loss.
-    /// This is the default and preserves pre-existing behavior.
-    #[default]
-    Full,
     /// Barrier fsync: data is written in order and reaches the device write
     /// cache before returning, but is not forced to non-volatile storage.
     /// Survives process crash and kernel panic; may lose the last few
     /// seconds of writes under sudden power loss (hardware-dependent).
+    /// **This is the default.**
     ///
-    /// On non-Apple platforms this degrades to `Full`-equivalent
-    /// semantics — `fdatasync` on Linux is already what `F_BARRIERFSYNC`
-    /// approximates on macOS.
+    /// On non-Apple platforms this is equivalent to `Full` — `fdatasync`
+    /// on Linux is already what `F_BARRIERFSYNC` approximates on macOS.
+    #[default]
     Barrier,
+    /// Full durability: data is flushed to non-volatile storage before the
+    /// call returns. Survives process crash, kernel panic, **and** power
+    /// loss. Opt-in; set when the deployment cannot tolerate the power-loss
+    /// window `Barrier` permits (commodity hardware without power-loss
+    /// protection, strict compliance requirements).
+    ///
+    /// On Apple: `fcntl(F_FULLFSYNC)` (~15-25ms on APFS SSDs).
+    /// On Linux: `fdatasync` (same call as `Barrier` on Linux).
+    Full,
 }
 
 /// Syncs `file` to persistent storage using the selected `mode`.
@@ -112,8 +123,13 @@ mod tests {
     }
 
     #[test]
-    fn default_is_full() {
-        assert_eq!(FileSyncMode::default(), FileSyncMode::Full);
+    fn default_is_barrier() {
+        // Barrier is the default because on Apple it is 4-8× lower latency
+        // than Full while surviving every failure mode short of sudden
+        // power loss. Flipping this back to `Full` is a deliberate
+        // durability-class change — fail the test so it is caught in
+        // review, not on a live deployment.
+        assert_eq!(FileSyncMode::default(), FileSyncMode::Barrier);
     }
 
     #[test]
