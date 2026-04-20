@@ -264,10 +264,13 @@ update:
 udeps:
     cargo +{{nightly}} udeps --workspace
 
-# Bump the workspace version and all internal-crate dependency pins in one go.
+# Bump the workspace version and every published internal crate's dependency pin.
 # Rewrites [workspace.package].version (member crates inherit via
-# `version.workspace = true`) and every inferadb-ledger-*.version entry under
-# [workspace.dependencies]. Validates semver; prints a diff; does NOT commit.
+# `version.workspace = true`) and the `version = "..."` pin for each published
+# internal crate (currently types, proto, sdk) under [workspace.dependencies].
+# Path-only internal crates (store, state, raft, consensus, services, server,
+# test-utils, profile, fs-sync) have no version pin and are correctly skipped.
+# Validates semver; prints a diff; does NOT commit.
 # Run `cargo +{{rust}} build --workspace` after to refresh Cargo.lock.
 # Usage: just bump-version 0.2.0
 bump-version VERSION:
