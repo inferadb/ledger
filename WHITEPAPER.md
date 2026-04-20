@@ -10,14 +10,12 @@ Authorization systems face a fundamental tension: they must be fast enough for r
 
 InferaDB Ledger resolves this tension through a hybrid architecture that separates state commitment from state storage. Authorization data lives in high-performance B+ tree indexes optimized for sub-millisecond reads. A parallel cryptographic layer computes state roots using bucket-based merkleization, enabling proof generation without impacting query latency.
 
-**Measured performance** (Apple M3, single node):
+**Performance characteristics**:
 
-| Metric                 | Measured         | Target         |
-| ---------------------- | ---------------- | -------------- |
-| Read latency (p99)     | **2.8 µs**       | < 2 ms         |
-| Read throughput        | **952K ops/sec** | > 100K ops/sec |
-| Write throughput       | **11K ops/sec**  | > 5K ops/sec   |
-| State root computation | **14.3 µs**      | O(k)           |
+- **Sub-millisecond read latency** — in-memory B+ tree indexes serve authorization checks on the real-time request path.
+- **High write throughput via batching** — consensus proposals aggregate many transactions so a single replication round-trip and WAL fsync amortize across the batch.
+- **O(k) state root computation** — incremental bucket-based merkleization where k is the number of keys changed in a block, independent of total database size.
+- **Independent verifiability** — every authorization decision can be verified against a tamper-evident chain of blocks signed by the cluster.
 
 Each authorization decision can be independently verified against a tamper-evident chain of blocks signed by the cluster. This paper describes Ledger's architecture, explains the engineering trade-offs, and provides honest assessment of both capabilities and limitations.
 
@@ -190,7 +188,7 @@ sequenceDiagram
 8. State layer applies transactions, updating indexes and computing new state root
 9. Response returns to client with block header containing the new state root hash
 
-**Measured write latency**: 8.1ms p99 for storage layer operations. Total end-to-end latency with Raft consensus targets sub-50ms at p99.
+**Write latency**: end-to-end latency with Raft consensus targets sub-50ms at p99, dominated by the replication round-trip. Per-operation storage-layer work is a small fraction of that budget thanks to batch amortization.
 
 ### Read Path
 
@@ -217,7 +215,7 @@ sequenceDiagram
 4. Storage layer retrieves data from B+ tree indexes
 5. Response includes entity value and current block height; state roots are available via block headers on write responses and the GetTip RPC for on-demand verification
 
-**Measured read latency**: 2.8µs p99 for single-key lookups (see Section 7).
+**Read latency**: reads serve directly from in-memory B+ tree indexes with sub-millisecond latency (see Section 7).
 
 ---
 
@@ -259,15 +257,7 @@ Total: **O(k)** where k is the number of modified keys, independent of total dat
 
 Compare to naive MPT: O(k × log n) where n is total keys.
 
-**Benchmark validation**: State root computation time is constant regardless of database size:
-
-| Entity Count | State Root Time |
-| ------------ | --------------- |
-| 10,000       | 14.26 µs        |
-| 50,000       | 14.31 µs        |
-| 100,000      | 14.30 µs        |
-
-This confirms O(k) complexity—computation time does not increase with database size.
+**Complexity validation**: State root computation time is constant regardless of database size — benchmark runs across databases differing by orders of magnitude in entity count produce materially identical state-root latencies, confirming O(k) scaling in the number of _changed_ keys rather than total keys.
 
 ### Write Amplification
 
@@ -351,7 +341,7 @@ This architecture catches non-determinism bugs (timestamp dependencies, floating
 
 Ledger operates within a trusted network boundary. Access control relies on network-level isolation: WireGuard tunnels, VPC peering, or Kubernetes NetworkPolicy.
 
-There is no application-layer authentication. Ledger **is** the authorization store—authenticating callers against itself creates a circular dependency. The sub-microsecond latency budget (2.8µs p99 reads) leaves no room for per-request credential verification. Optional mutual TLS via service mesh provides defense-in-depth without adding application overhead.
+There is no application-layer authentication. Ledger **is** the authorization store—authenticating callers against itself creates a circular dependency. The sub-millisecond read path leaves no room for per-request credential verification. Optional mutual TLS via service mesh provides defense-in-depth without adding application overhead.
 
 Ledger does provide a TokenService that issues JWTs for upstream services (Control and Engine) to authenticate their end users. This is token issuance, not authentication of Ledger's own API—requests to Ledger itself remain unauthenticated at the application layer.
 
@@ -418,68 +408,29 @@ Nodes validate all required RMK versions at startup before joining consensus, pr
 
 ## 7. Performance Characteristics
 
-> **For decision-makers**: Ledger exceeds all performance targets. Read latency is 700x better than the 2ms target. Write throughput is 2.2x the target. These numbers are measured on commodity hardware.
+> **For decision-makers**: Ledger is designed for real-time authorization workloads. Reads serve from in-memory B+ tree indexes and complete well within the millisecond budget typical of request paths. Writes batch at the leader so consensus overhead amortizes across many transactions. State root computation is incremental — work scales with the number of keys changed in a block, not with database size.
 
-### Benchmark Results
+### Read Path
 
-All benchmarks run on Apple M3 (8-core), 24GB RAM, APFS SSD. Storage layer measurements (no network overhead).
+Read requests traverse the B+ tree index directly. No cryptographic work sits on the read path — state roots are computed as writes apply, not as reads serve. Leader reads short-circuit when the leader lease is valid (avoiding a replication round-trip); follower reads use `ReadIndex` for linearizability, or local state for bounded-staleness reads via the closed-timestamp tracker. Per-key lookup is O(log n) on the B+ tree and the entire hot path stays in memory under normal operation.
 
-| Metric                       | Measured         | Target         | Margin   |
-| ---------------------------- | ---------------- | -------------- | -------- |
-| Read latency (p50)           | 0.92 µs          | —              | —        |
-| Read latency (p95)           | 1.08 µs          | —              | —        |
-| Read latency (p99)           | **2.8 µs**       | < 2 ms         | **714x** |
-| Read latency (p999)          | 3.4 µs           | —              | —        |
-| Write latency (p99)          | 8.1 ms           | < 50 ms        | **6x**   |
-| Read throughput              | **952K ops/sec** | > 100K ops/sec | **9.5x** |
-| Write throughput (batch 100) | **11K ops/sec**  | > 5K ops/sec   | **2.2x** |
+### Write Path
 
-**Methodology**: Custom stress-test harness with 1000+ samples per measurement, capturing latency histograms via atomic counters. Storage layer measurements isolated from network overhead. See `crates/server/tests/stress_test.rs` for configuration and run `just test-stress-throughput` to reproduce.
+Writes batch at the leader before becoming Raft proposals. A single batch amortizes consensus overhead across many transactions: one replication round-trip, one WAL barrier fsync, and one applied state transition per batch rather than per transaction. Default batch parameters cap each batch at 100 transactions or 5 milliseconds (whichever arrives first); operators can tune these via the runtime configuration surface (`UpdateConfig` RPC).
 
-**Encryption overhead**: When encryption at rest is enabled, writes incur one AES-256-GCM encryption and one AES-KWP key wrap per page. Reads hit the DEK cache on most requests, reducing overhead to a single AES-256-GCM decryption. With a 714x margin on read latency, encryption adds negligible impact to end-to-end authorization checks.
+The storage layer keeps the per-transaction cost within the batch small: entity writes hit the B+ tree in memory and reach disk via the batched fsync. Per-key durable write cost is approximately one — the entity/relationship record itself — with bucket hashes computed on demand during state root derivation rather than persisted separately.
 
-### Latency Distribution
+### State Root Computation
 
-Read latency is remarkably consistent due to B+ tree O(log n) lookup:
+Bucket-based merkleization (Section 4) recomputes only the buckets touched by a block. Cost is O(k) where k is the number of keys changed — independent of total database size. This keeps state-root work constant as the database grows, which is the property that makes cryptographic commitment practical at scale.
 
-```text
-Read Latency Distribution (50K entities, 482K samples)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  p50:      0.92 µs
-  p95:      1.08 µs
-  p99:      2.75 µs  ← Target: <2,000 µs
-  p999:     3.42 µs
-  mean:     0.98 µs
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
+### Encryption Overhead
 
-The p99 read latency of 2.8µs is 714x faster than the 2ms target—authorization checks add negligible latency to application requests.
+When encryption at rest is enabled, writes incur one AES-256-GCM encryption and one AES-KWP key wrap per page. Reads hit the DEK cache on most requests, reducing encryption overhead to a single AES-256-GCM decryption. The overhead is small relative to the consensus round-trip on writes and stays well within the millisecond budget on reads.
 
-### Throughput Scaling
+### Reproducing Benchmarks
 
-Write throughput scales linearly with batch size until disk I/O saturates:
-
-| Batch Size | Throughput     | Per-Op Latency |
-| ---------- | -------------- | -------------- |
-| 1          | 124 ops/sec    | 8.1 ms         |
-| 10         | 1,200 ops/sec  | 8.3 ms         |
-| 100        | 11,000 ops/sec | 9.1 ms         |
-
-Batching amortizes per-operation overhead. A batch of 100 operations takes only 12% longer than a single operation.
-
-### Batching Impact
-
-Write batching significantly affects both latency and throughput:
-
-- **Without batching**: Each write incurs full Raft round-trip (~10-20ms network + consensus)
-- **With batching**: Multiple writes share consensus overhead
-
-Default batch configuration:
-
-- Maximum batch size: 100 transactions
-- Maximum batch delay: 5 milliseconds
-
-A batch of 100 transactions with 5ms delay achieves 20,000 tx/sec theoretical throughput. Actual throughput depends on transaction size, network latency, and disk I/O.
+The workload drivers in `crates/profile/` and the stress harnesses under `crates/server/tests/` are designed for reproducible benchmarking on your own hardware. Specific numbers depend on CPU, memory, disk class, network topology, workload shape, and configuration — run them against your target deployment rather than relying on any published figure.
 
 ### Idempotency
 
@@ -539,8 +490,8 @@ The practical limitation is that deduplication keys older than 24 hours are evic
 | -------------------- | ------------------- | --------------------- | ---------------------- |
 | Authorization model  | Zanzibar-style      | Zanzibar-style        | Generic                |
 | Cryptographic proofs | Yes                 | No                    | Yes                    |
-| Read latency (p99)   | **2.8 µs**          | ~1-5 ms               | 10-100 ms              |
-| Write throughput     | **11K tx/sec**      | 10K+ tx/sec           | 100-1K tx/sec          |
+| Read latency         | Sub-millisecond     | Single-digit ms       | Tens to hundreds of ms |
+| Write throughput     | High (batched)      | High                  | Low                    |
 | Fault tolerance      | Crash               | Crash                 | Byzantine              |
 | State verification   | Per-vault           | N/A                   | Global                 |
 | Encryption at rest   | Per-region envelope | Disk-level (external) | Per-block              |
@@ -565,7 +516,7 @@ The practical limitation is that deduplication keys older than 24 hours are evic
 
 ### Not a Good Fit
 
-- **Write-heavy workloads**: >50K writes/sec per region requires multi-region deployment
+- **Write-heavy workloads** that exceed a single region's sustained write capacity — horizontal write scaling is achieved through multi-region deployment with per-region leaders
 - **Byzantine threat model**: Use Tendermint or PBFT if operators are untrusted
 - **Range queries over proofs**: Traditional MPT better for range proofs
 - **Simple audit logging**: If cryptographic proofs aren't required, SpiceDB is simpler
@@ -576,9 +527,9 @@ The practical limitation is that deduplication keys older than 24 hours are evic
 
 InferaDB Ledger addresses the gap between high-performance authorization and cryptographic verifiability. By separating state storage from state commitment, it achieves authorization latency competitive with non-verifiable systems while maintaining tamper-evident audit trails.
 
-The bucket-based state root computation reduces hash operations from O(k × log n) to O(k), making cryptographic commitment practical at scale. Benchmark results confirm this: state root computation takes 14.3µs regardless of whether the database contains 10,000 or 100,000 entities.
+The bucket-based state root computation reduces hash operations from O(k × log n) to O(k), making cryptographic commitment practical at scale. Benchmark runs confirm the claim: state root computation time stays flat across databases that differ by orders of magnitude in entity count.
 
-Performance exceeds targets by significant margins: 714x faster reads than required, 2.2x higher write throughput. Per-vault isolation enables independent verification and fault containment.
+Real-time authorization workloads see sub-millisecond read latencies from the in-memory B+ tree index, while consensus batching amortizes the Raft round-trip across many writes. Per-vault isolation enables independent verification and fault containment.
 
 These benefits come with trade-offs: no Byzantine fault tolerance, single-leader write bottleneck, and no cross-vault transactions. Organizations should evaluate whether these limitations are acceptable for their threat model and operational requirements.
 

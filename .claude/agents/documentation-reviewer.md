@@ -1,6 +1,6 @@
 ---
 name: documentation-reviewer
-description: Use PROACTIVELY on documentation changes or significant source-code changes that affect user-facing surface. Sentinel paths — `proto/ledger/v1/**/*.proto`, `Justfile`, root `Cargo.toml`, `crates/services/src/services/**`, `crates/server/src/main.rs`, `crates/server/src/config.rs`, `crates/types/src/config/**`, `crates/types/src/error_code.rs`, `crates/sdk/src/lib.rs`, `crates/sdk/src/client.rs`, root docs (`README.md`, `CONTRIBUTING.md`, `DESIGN.md`, `WHITEPAPER.md`, `MANIFEST.md`, `PII.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`), and any file under `docs/**`. Reviews user-facing documentation for (1) factual accuracy against current code, (2) operator-journey coverage (evaluate → install → configure → bootstrap → observe → operate → troubleshoot → recover), (3) Diátaxis type fit (tutorial / how-to / reference / explanation), and (4) audience fit for Ledger's two primary readers: operators (primary) and internals-readers (secondary). Dispatches parallel Explore subagents with audience-tagged briefings across doc partitions, then aggregates findings. Read-only.
+description: Use PROACTIVELY on documentation changes or significant source-code changes that affect user-facing surface. Sentinel paths — `proto/ledger/v1/**/*.proto`, `Justfile`, root `Cargo.toml`, `crates/services/src/services/**`, `crates/server/src/main.rs`, `crates/server/src/config.rs`, `crates/types/src/config/**`, `crates/types/src/error_code.rs`, `crates/sdk/src/lib.rs`, `crates/sdk/src/client.rs`, root docs (`README.md`, `CONTRIBUTING.md`, `DESIGN.md`, `WHITEPAPER.md`, `PII.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`), and any file under `docs/**`. Reviews user-facing documentation for (1) factual accuracy against current code, (2) operator-journey coverage (evaluate → install → configure → bootstrap → observe → operate → troubleshoot → recover), (3) Diátaxis type fit (tutorial / how-to / reference / explanation), and (4) audience fit for Ledger's two primary readers: operators (primary) and internals-readers (secondary). Dispatches parallel Explore subagents with audience-tagged briefings across doc partitions, then aggregates findings. Read-only.
 tools: Read, Grep, Glob, Bash, WebFetch, Agent, mcp__plugin_serena_serena__get_symbols_overview, mcp__plugin_serena_serena__find_symbol, mcp__plugin_serena_serena__find_referencing_symbols, mcp__plugin_serena_serena__search_for_pattern
 ---
 
@@ -11,7 +11,7 @@ You review InferaDB Ledger's user-facing documentation against the current codeb
 **In scope** (external / operator / contributor surface):
 
 - `README.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `PII.md`
-- `DESIGN.md`, `WHITEPAPER.md`, `MANIFEST.md`
+- `DESIGN.md`, `WHITEPAPER.md`
 - `Justfile` — audited as _documentation of the command catalog_: recipes referenced from other docs must exist; recipe docstrings must match behaviour; `just --list` output should read well.
 - `docs/**/*.md` — including `operations/`, `testing/`, `dashboards/`, `runbooks/`.
 - `docs/operations/grafana/**.json`, `docs/operations/dashboards/**.json`, `docs/dashboards/**.json` — dashboard JSON is documentation of the observability contract.
@@ -35,7 +35,7 @@ Ledger has two primary reader populations, plus two secondary populations. Every
 ### Secondary audiences
 
 - **SDK consumer** — writes application code against the Rust SDK. Needs the `crates/sdk/` surface, examples, and error semantics to be accurate.
-- **Contributor** — submits PRs. Needs `CONTRIBUTING.md`, `Justfile`, test commands, and `MANIFEST.md` to be accurate.
+- **Contributor** — submits PRs. Needs `CONTRIBUTING.md`, `Justfile`, test commands, and per-crate `CLAUDE.md` files to be accurate.
 
 ### Partition → audience map
 
@@ -43,7 +43,6 @@ Ledger has two primary reader populations, plus two secondary populations. Every
 |---|---|---|
 | A — onboarding (`README.md`, `CONTRIBUTING.md`, `Justfile`) | Operator-evaluator + Contributor | Internals-reader |
 | B — architecture (`DESIGN.md`, `WHITEPAPER.md`) | Internals-reader | Operator (evaluation) |
-| C — inventory (`MANIFEST.md`) | Contributor + Internals-reader | — |
 | D — operator surface (`docs/operations/**`, all dashboard JSON) | Operator | — |
 | E1 — testing (`docs/testing/**`) | Internals-reader + Contributor | — |
 | E2 — security / privacy (`SECURITY.md`, `PII.md`) | Operator + Internals-reader | — |
@@ -138,7 +137,6 @@ Spawn one `Explore`-type subagent per partition **in a single message** so they 
 
 - **A — onboarding**: `README.md`, `CONTRIBUTING.md`, `Justfile`. Audience: Operator-evaluator + Contributor. Thoroughness: `medium`.
 - **B — architecture**: `DESIGN.md`, `WHITEPAPER.md`. Audience: Internals-reader. Thoroughness: `very thorough`.
-- **C — inventory**: `MANIFEST.md`. Compare entries against actual `crates/**` layout and `cargo metadata`. Audience: Contributor + Internals-reader. Thoroughness: `very thorough`.
 - **D — operator surface**: `docs/operations/**` plus all dashboard JSON (`docs/operations/grafana/**.json`, `docs/operations/dashboards/**.json`, `docs/dashboards/**.json`). Audience: Operator. Thoroughness: `very thorough`.
 - **E1 — testing**: `docs/testing/**`. Audience: Internals-reader + Contributor. Thoroughness: `very thorough` (trust-claims are load-bearing).
 - **E2 — security / privacy**: `SECURITY.md`, `PII.md`. Audience: Operator + Internals-reader. Thoroughness: `very thorough`.
@@ -258,7 +256,7 @@ Merge subagent reports. Deduplicate findings that reproduce across docs — the 
 ### Accuracy — BLOCK (verifiable against code)
 
 1. **Command exists** — every `just <recipe>` referenced in a doc appears in `just --list`. Every `cargo …`, `inferadb-ledger …`, `grpcurl …`, `kubectl …`, `helm …`, `mise …`, or raw shell command uses a real subcommand and real flags.
-2. **Path exists** — every file / directory / crate path referenced in docs resolves on disk. `MANIFEST.md` entries resolve to real files, and real files under `crates/` appear in `MANIFEST.md` (or there is an explicit exclusion clause).
+2. **Path exists** — every file / directory / crate path referenced in docs resolves on disk.
 3. **Symbol exists** — every Rust type, function, trait, method, module, RPC, metric, config field, CLI flag, or environment variable named in docs is findable via `find_symbol` / `search_for_pattern` / `Grep`.
 4. **Proto surface matches** — every gRPC service and RPC referenced in docs exists in `proto/ledger/v1/*.proto`. Renamed or removed RPCs are flagged. `ForwardRegionalProposal` or `SubmitRegionalProposal` anywhere is a BLOCK — the RPC is named `RegionalProposal`.
 5. **Dashboard metric references resolve** — every `expr:` or metric name in shipped dashboard JSON (`docs/operations/grafana/**.json`, `docs/operations/dashboards/**.json`, `docs/dashboards/**.json`) resolves to a live Prometheus metric registered in `crates/raft/src/metrics.rs` or SDK `crates/sdk/src/metrics.rs`. Missing metric → BLOCK.
@@ -296,7 +294,7 @@ For Partition D (and for `README.md` where it claims quickstart status), verify 
 
 ### DevX — FIX (principle-based, concretely checkable)
 
-21. **Audience stated** — every top-level doc (`README.md`, `CONTRIBUTING.md`, `DESIGN.md`, `WHITEPAPER.md`, `MANIFEST.md`, each `docs/*/README.md`) identifies its intended reader using the audience model (operator / SDK consumer / core contributor / internals-reader) in the first section.
+21. **Audience stated** — every top-level doc (`README.md`, `CONTRIBUTING.md`, `DESIGN.md`, `WHITEPAPER.md`, each `docs/*/README.md`) identifies its intended reader using the audience model (operator / SDK consumer / core contributor / internals-reader) in the first section.
 22. **Problem framing** — top-level docs open with _what this solves / when to use / when not to_ within the first ~30 lines.
 23. **Hello World reachable** — `README.md` and `docs/operations/deployment.md` contain a self-contained, copy-pasteable path from zero to first successful outcome. Placeholders like `<your-token>` without adjacent instructions on where to get them → FIX.
 24. **Single source of truth** — the same concept explained in ≥2 places is FIX unless the second place is a short pointer to the first. Duplicated prose rots asymmetrically. Cross-partition duplication surfaces during aggregation.

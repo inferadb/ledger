@@ -186,7 +186,7 @@ When a new rule is added here, also update the relevant **agent definition** (if
 - `proto-reviewer` — proto + conversion + service wiring, `SlugResolver`, `ErrorDetails`
 - `test-isolation-auditor` — server integration test hygiene
 - `consensus-reviewer` — custom Raft / WAL / shard / saga invariants
-- `documentation-reviewer` — user-facing docs (`README.md`, `CONTRIBUTING.md`, `DESIGN.md`, `WHITEPAPER.md`, `MANIFEST.md`, `Justfile`, `docs/**`) plus user-facing source surface (`crates/types/src/config/**`, `crates/types/src/error_code.rs`, `crates/sdk/src/{lib,client}.rs`, `crates/services/src/services/**`, `crates/server/src/{main,config}.rs`, `proto/ledger/v1/**`) for factual accuracy against code + developer-experience principles (audience, problem framing, Hello World, single source of truth, progressive disclosure). Dispatches parallel subagents.
+- `documentation-reviewer` — user-facing docs (`README.md`, `CONTRIBUTING.md`, `DESIGN.md`, `WHITEPAPER.md`, `Justfile`, `docs/**`) plus user-facing source surface (`crates/types/src/config/**`, `crates/types/src/error_code.rs`, `crates/sdk/src/{lib,client}.rs`, `crates/services/src/services/**`, `crates/server/src/{main,config}.rs`, `proto/ledger/v1/**`) for factual accuracy against code + developer-experience principles (audience, problem framing, Hello World, single source of truth, progressive disclosure). Dispatches parallel subagents.
 
 **Skills** (invoke via `/skill-name` or auto-triggered):
 

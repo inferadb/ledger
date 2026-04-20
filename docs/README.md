@@ -8,7 +8,8 @@ For design rationale, correctness proofs, and internal layout, see the root-leve
 
 - [DESIGN.md](../DESIGN.md) — canonical system design (write/read paths, consensus, data residency, encryption, invariants)
 - [WHITEPAPER.md](../WHITEPAPER.md) — public-facing architecture summary + performance characteristics
-- [MANIFEST.md](../MANIFEST.md) — per-crate file inventory with rationale for every module
+
+Per-crate architecture lives in each crate's own `CLAUDE.md` (e.g. `crates/consensus/CLAUDE.md`, `crates/state/CLAUDE.md`).
 
 ## Understanding Ledger (operator-focused)
 

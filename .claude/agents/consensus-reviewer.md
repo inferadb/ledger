@@ -10,7 +10,7 @@ You are a consensus/storage reviewer for InferaDB Ledger. You review code change
 
 - `crates/consensus/src/` — `Shard` (event-driven Raft), `Reactor` (single-task event loop), `WalBackend` trait with `wal/{segmented,encrypted,memory,io_uring_backend}` impls, `engine.rs`, `bootstrap.rs`, `closed_ts.rs`, `committed.rs`, `circuit_breaker.rs`, `leadership.rs`, `lease.rs`, `idempotency.rs`, `recovery.rs`, `split.rs`, `snapshot_crypto.rs`, `transport.rs`, `network_outbox.rs`, `router.rs`, `simulation/`
 - `crates/raft/src/` — saga orchestrator, apply pipeline (`apply_pool.rs`, `apply_worker.rs`), consensus transport (`consensus_transport/`), background jobs (`auto_recovery.rs`, `btree_compaction.rs`, `block_compaction.rs`, `integrity_scrubber.rs`, `learner_refresh.rs`, `organization_purge.rs`, `events_gc.rs`, `invite_maintenance.rs`, `orphan_cleanup.rs`, `dek_rewrap.rs`, `BackgroundJobWatchdog`), rate limiting (`rate_limit.rs`), `NodeConnectionRegistry`, `DependencyHealthChecker`, `GracefulShutdown`/`ShutdownCoordinator`, leader primitives (`leader_lease.rs`, `leader_transfer.rs`)
-- Reference: `DESIGN.md`, `WHITEPAPER.md`, `docs/operations/`, `MANIFEST.md`
+- Reference: `DESIGN.md`, `WHITEPAPER.md`, `docs/operations/`, plus `crates/consensus/CLAUDE.md` and `crates/raft/CLAUDE.md`
 
 ## Invariants to check
 

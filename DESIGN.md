@@ -283,6 +283,8 @@ Client Request (with idempotency_key)
 
 **Target latency**: <50ms at p99 under normal load.
 
+**Durability**: The response at step [14] is returned only after successful quorum commit (step [11]). `Reactor` batches WAL fsyncs across proposals — one barrier fsync per batch via `crates/fs-sync/src/lib.rs`, not per proposal — so write latency scales with batch cadence rather than per-operation disk work. See [Durability & Finality](#durability--finality) below for the complete contract and [docs/operations/durability.md](docs/operations/durability.md) for the operator-facing recovery matrix.
+
 **Consensus layering**: Steps 10–11 run inside `inferadb-ledger-consensus` (event-driven `Reactor` returns `Action`s: WAL fsync, peer sends, commit). Steps 12–13 run in `inferadb-ledger-raft`'s `ApplyPool` — one `ApplyWorker` per shard parallelizes state-machine application across shards while keeping each shard's apply deterministic.
 
 ### Read Path
@@ -623,11 +625,11 @@ During `Draining`, all mutating RPCs (write, batch_write, create/delete org/vaul
 
 ### Finality Model
 
-| Event                | Durability Guarantee                           |
-| -------------------- | ---------------------------------------------- |
-| Write acknowledged   | Persisted on majority (2f+1) nodes             |
-| Block committed      | Cannot be reverted without majority corruption |
-| State root published | Independently verifiable by any client         |
+| Event                | Durability Guarantee                           | Enforced in                                                                                                                                                                                                                            |
+| -------------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Write acknowledged   | Persisted on majority (2f+1) nodes             | `Shard::handle_append_response` emits `Commit` only once quorum is reached (`crates/consensus/src/shard.rs`); `Reactor` issues a barrier fsync per batch (`crates/consensus/src/reactor.rs` via `crates/fs-sync/src/lib.rs`). Verified by `crates/consensus/src/simulation/multi_raft.rs`. |
+| Block committed      | Cannot be reverted without majority corruption | No `Action` variant removes a committed entry; safety is exercised by the deterministic simulation harness in `crates/consensus/src/simulation/`.                                                                                      |
+| State root published | Independently verifiable by any client         | `BlockHeader.state_root` returned on write responses and via the `GetTip` / `VerifiedRead` / `GetBlock` RPCs; verification primitives in `crates/types/src/hash.rs` and `crates/types/src/merkle.rs`.                                  |
 
 **No rollbacks**: Once committed, blocks are permanent. Corrections require compensating transactions.
 
@@ -1012,9 +1014,9 @@ We sacrifice instant per-key proofs for 10x lower write amplification and O(1) q
 | ---------------------- | --------------------------------- | --------------------------- |
 | Development velocity   | High (generated clients, tooling) | Low (manual implementation) |
 | Operational complexity | Low (standard load balancers)     | High (custom tooling)       |
-| Per-request overhead   | ~0.5ms                            | ~0.1-0.2ms                  |
+| Per-request overhead   | Higher (framing + HTTP/2)         | Lower                       |
 
-~0.3ms overhead per request is negligible compared to consensus latency (~2-5ms). Development velocity wins.
+The overhead is negligible compared to the consensus round-trip on the write path, and gRPC's development velocity — generated clients, tooling, standard middleware — materially outweighs a custom protocol's marginal latency edge.
 
 ### Raft vs. Byzantine Consensus
 
@@ -1312,14 +1314,14 @@ Key destruction is a single Raft-committed operation. Once the per-subject key i
 
 ### Performance Targets
 
-| Metric              | Target          | Measured         | Measurement Condition       |
-| ------------------- | --------------- | ---------------- | --------------------------- |
-| Read latency (p99)  | < 2 ms          | **2.8 µs**       | Single key lookup           |
-| Write latency (p99) | < 50 ms         | **8.1 ms**       | Batch committed             |
-| Write throughput    | 5,000 tx/sec    | **11K tx/sec**   | 3-node cluster              |
-| Read throughput     | 100,000 req/sec | **952K req/sec** | Eventually consistent reads |
+| Metric              | Design Target    | Measurement Condition       |
+| ------------------- | ---------------- | --------------------------- |
+| Read latency (p99)  | < 2 ms           | Single key lookup           |
+| Write latency (p99) | < 50 ms          | Batch committed             |
+| Write throughput    | 5,000 tx/sec     | 3-node cluster              |
+| Read throughput     | 100,000 req/sec  | Eventually consistent reads |
 
-Benchmarks run on Apple M3 (8-core), 24GB RAM, APFS SSD. See [WHITEPAPER.md](WHITEPAPER.md#7-performance-characteristics) for full methodology and latency distributions.
+These are design targets — the envelope Ledger is engineered to operate within, not benchmark figures. Actual numbers depend on hardware, workload shape, and configuration; see [WHITEPAPER.md § 7](WHITEPAPER.md#7-performance-characteristics) for the qualitative performance model and how to reproduce benchmarks on your own hardware.
 
 ### Correctness Invariants
 
@@ -1335,36 +1337,38 @@ See [System Invariants](#system-invariants) — safety invariants 1–4 define t
 
 ## System Invariants
 
+Every invariant below is named with its enforcement site (the code that establishes the property) and verification site (tests, proptests, or the deterministic simulation harness that exercises it). The primary verification mechanism for consensus-level invariants (1–7, 13) is the deterministic simulation harness under `crates/consensus/src/simulation/` (`harness.rs`, `multi_raft.rs`, `network.rs`); state-level invariants (8–10, 14–16) are enforced in `crates/types/`, `crates/state/`, `crates/store/`, and `crates/raft/`.
+
 ### Safety Invariants
 
-1. **Commitment permanence**: Committed blocks cannot be removed or modified
-2. **State determinism**: Replaying identical transactions produces identical state_root
-3. **Chain continuity**: Every block (except genesis) links to its predecessor via previous_hash
-4. **Quorum requirement**: Commits require 2f+1 node acknowledgment
+1. **Commitment permanence**: Committed blocks cannot be removed or modified. _Enforced by `Shard` in `crates/consensus/src/shard.rs` (no `Action` variant removes a committed entry); verified by the deterministic simulation harness in `crates/consensus/src/simulation/`._
+2. **State determinism**: Replaying identical transactions produces identical `state_root`. _Enforced by `RaftPayload.proposed_at` in `crates/raft/src/log_storage/types.rs` (leader-assigned timestamp so all replicas apply with identical inputs) and the deterministic `ApplyWorker` in `crates/raft/src/apply_worker.rs`; verified by state-root parity checks in `just test-stress-correctness`._
+3. **Chain continuity**: Every block (except genesis) links to its predecessor via `previous_hash`. _Enforced by `BlockHeader.previous_hash` validation at commit (appendix specifies byte layout); `BlockArchive::append_block` is idempotent-by-height, making this property stable under crash recovery (see `crates/state/CLAUDE.md` rule 10)._
+4. **Quorum requirement**: Commits require 2f+1 node acknowledgment. _Enforced by `Shard` commit logic in `crates/consensus/src/shard.rs` (emits `Commit` only once quorum is reached); verified by `crates/consensus/src/simulation/multi_raft.rs`._
 
 ### Liveness Invariants
 
-5. **Progress under minority failure**: Fewer than f+1 failures → writes continue
-6. **Eventual convergence**: After partition heals, all replicas converge to same state
-7. **Leader availability**: New leader elected within election timeout after leader failure
+5. **Progress under minority failure**: Fewer than f+1 failures → writes continue. _Verified by partition-and-fail tests in `crates/consensus/src/simulation/`._
+6. **Eventual convergence**: After partition heals, all replicas converge to the same state. _Verified by partition-heal tests in `crates/consensus/src/simulation/`._
+7. **Leader availability**: A new leader is elected within the election timeout after leader failure. _Enforced by `crates/consensus/src/leadership.rs` (election timer + vote handling); verified by election tests in the simulation harness._
 
 ### Integrity Invariants
 
-8. **Merkle soundness**: Invalid values cannot produce valid proofs
-9. **Hash chain integrity**: Modifying any block invalidates all subsequent blocks
-10. **Transaction atomicity**: All operations in a transaction apply together or not at all
+8. **Merkle soundness**: Invalid values cannot produce valid proofs. _Enforced by `Merkle::verify()` in `crates/types/src/merkle.rs`; verified by proptests constrained to power-of-2 leaf counts (see `crates/types/CLAUDE.md`)._
+9. **Hash chain integrity**: Modifying any block invalidates all subsequent blocks. _Enforced by SHA-256 chain construction via `previous_hash`; byte layout fixed in the [Cryptographic Hash Specifications](#a-cryptographic-hash-specifications) appendix and verified by hash-chain property tests._
+10. **Transaction atomicity**: All operations in a transaction apply together or not at all. _Enforced by `WriteTransaction` atomicity in `crates/store/` (dual-slot commit protocol) and `StateLayer::apply_operations` / `apply_operations_lazy` in `crates/state/src/state.rs`; verified by crash-recovery tests (`just test-store-recovery`) that exercise every `CrashPoint` in `crates/test-utils/src/crash_injector.rs`._
 
 ### Operational Invariants
 
-11. **Snapshot consistency**: Loading snapshot + applying subsequent blocks produces current state_root
-12. **Historical accessibility**: Any committed block is readable with verifiable proofs
-13. **Replication durability**: After Raft commit, data exists on quorum
+11. **Snapshot consistency**: Loading a snapshot and applying subsequent blocks produces the current `state_root`. _Enforced by `SnapshotWriter` / `SyncSnapshotReader` in `crates/raft/src/snapshot.rs` and `RaftLogStore::install_snapshot` in `crates/raft/src/log_storage/raft_impl.rs`; verified by snapshot-determinism tests in `just test-stress-correctness`._
+12. **Historical accessibility**: Any committed block is readable with verifiable proofs. _Exposed via the `HistoricalRead`, `GetBlock`, and `GetBlockRange` RPCs in `proto/ledger/v1/ledger.proto`, served from `BlockArchive` in `crates/state/src/`._
+13. **Replication durability**: After Raft commit, data exists on quorum. _Enforced by batched barrier fsync in `crates/consensus/src/reactor.rs` (one fsync per batch via `crates/fs-sync/src/lib.rs`); contract detailed in [`docs/operations/durability.md`](docs/operations/durability.md); verified by crash-and-recover tests in `crates/consensus/src/simulation/`._
 
 ### Idempotency Invariants
 
-14. **Sequence monotonicity**: Server-assigned per-client-vault sequences are strictly increasing
-15. **Idempotency deduplication**: Same `(client_id, idempotency_key)` returns cached result, never re-executes
-16. **Sequence persistence**: Server-assigned sequences survive leader failover (stored in `AppliedState`)
+14. **Sequence monotonicity**: Server-assigned per-client-vault sequences are strictly increasing. _Enforced by `SequenceCounters` in `crates/raft/src/log_storage/types.rs`; consulted via `AppliedStateAccessor::client_idempotency_check` in `crates/raft/src/log_storage/accessor.rs`._
+15. **Idempotency deduplication**: Same `(client_id, idempotency_key)` returns the cached result, never re-executes. _Enforced in `crates/raft/src/idempotency.rs` (moka-tinylfu cache) plus `AppliedStateAccessor::client_idempotency_check` for cross-failover deduplication via replicated `ClientSequenceEntry`; verified by idempotency unit tests in `crates/raft/src/log_storage/accessor.rs`._
+16. **Sequence persistence**: Server-assigned sequences survive leader failover (stored in `AppliedState`). _Enforced by `ClientSequenceEntry` persistence in `AppliedState` (`crates/raft/src/log_storage/types.rs`), flushed to `raft.db` on each `StateCheckpointer` tick (`crates/raft/src/state_checkpointer.rs`); verified by state-persistence tests in `crates/raft/src/log_storage/store.rs`._
 
 ---
 
