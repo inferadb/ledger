@@ -18,6 +18,7 @@ use inferadb_ledger_types::{
     Entity, Hash, Operation, Relationship, SetCondition, VaultId, WriteStatus, decode, encode,
 };
 use parking_lot::{MappedRwLockReadGuard, RwLock, RwLockReadGuard};
+use rayon::prelude::*;
 use snafu::{ResultExt, Snafu};
 
 use crate::{
@@ -857,34 +858,48 @@ impl<B: StorageBackend> StateLayer<B> {
         // Per-dirty-bucket prefix scan. Each dirty bucket's entities form a
         // contiguous [bucket_prefix(V, B), bucket_prefix(V, B+1)) range, so
         // we hit only the leaves that contain dirty data.
-        let txn = self.db.read().context(StoreSnafu)?;
-        let mut bucket_roots: Vec<(u8, Hash)> = Vec::with_capacity(dirty_buckets.len());
+        //
+        // Buckets are independent — their hashes don't depend on each other —
+        // so we fan the scan-and-hash work across rayon's thread pool. Each
+        // rayon task opens its own MVCC read transaction: the snapshot
+        // semantics guarantee each thread sees a consistent view of the DB,
+        // and opening a read txn is cheap (snapshot registration + table-
+        // roots clone). `ReadTransaction` is `!Sync` because it caches
+        // fetched pages in a `RefCell`; one txn per thread sidesteps that.
+        //
+        // For batches that dirty many buckets (typical in multi-op
+        // workloads) this turns the hottest span in the apply path from
+        // O(dirty_buckets × entities-per-bucket) serial work into
+        // near-O(work / cores).
 
         // `vault_end` is the exclusive upper bound for bucket 255 (wrapping to
         // the next vault). Matches the prior implementation's convention of
         // assuming `vault.value() + 1` does not overflow i64 for live vaults.
         let vault_end = crate::keys::vault_prefix(VaultId::new(vault.value() + 1)).to_vec();
 
-        for &bucket in &dirty_buckets {
-            let start = crate::keys::bucket_prefix(vault, bucket).to_vec();
-            let end_storage: Vec<u8>;
-            let end_ref: &Vec<u8> = if bucket < 255 {
-                end_storage = crate::keys::bucket_prefix(vault, bucket + 1).to_vec();
-                &end_storage
-            } else {
-                &vault_end
-            };
+        let bucket_roots: Vec<(u8, Hash)> = dirty_buckets
+            .par_iter()
+            .map(|&bucket| -> Result<(u8, Hash)> {
+                let txn = self.db.read().context(StoreSnafu)?;
+                let start = crate::keys::bucket_prefix(vault, bucket).to_vec();
+                let end_owned: Vec<u8> = if bucket < 255 {
+                    crate::keys::bucket_prefix(vault, bucket + 1).to_vec()
+                } else {
+                    vault_end.clone()
+                };
 
-            let iter =
-                txn.range::<tables::Entities>(Some(&start), Some(end_ref)).context(StoreSnafu)?;
+                let iter = txn
+                    .range::<tables::Entities>(Some(&start), Some(&end_owned))
+                    .context(StoreSnafu)?;
 
-            let mut builder = BucketRootBuilder::new(bucket);
-            for (_key_bytes, value) in iter {
-                let entity: Entity = decode(&value).context(CodecSnafu)?;
-                builder.add_entity(&entity);
-            }
-            bucket_roots.push((bucket, builder.finalize()));
-        }
+                let mut builder = BucketRootBuilder::new(bucket);
+                for (_key_bytes, value) in iter {
+                    let entity: Entity = decode(&value).context(CodecSnafu)?;
+                    builder.add_entity(&entity);
+                }
+                Ok((bucket, builder.finalize()))
+            })
+            .collect::<Result<Vec<(u8, Hash)>>>()?;
 
         // Update commitment with computed bucket roots (brief write lock)
         Ok(self.with_commitment(vault, |commitment| {
