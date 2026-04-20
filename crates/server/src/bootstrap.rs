@@ -554,18 +554,18 @@ pub async fn bootstrap_node(
         });
 
     // Create rate limiter and hot key detector.
-    let rate_limiter = if let Some(ref rl) = config.rate_limit {
-        Arc::new(RateLimiter::new(
-            rl.client_burst,
-            rl.client_rate,
-            rl.organization_burst,
-            rl.organization_rate,
-            rl.backpressure_threshold,
-            config.region.as_str(),
-        ))
-    } else {
-        Arc::new(RateLimiter::new(100, 50.0, 1000, 500.0, 100, config.region.as_str()))
-    };
+    let rl = config
+        .rate_limit
+        .clone()
+        .unwrap_or_else(inferadb_ledger_types::config::RateLimitConfig::default);
+    let rate_limiter = Arc::new(RateLimiter::new(
+        rl.client_burst,
+        rl.client_rate,
+        rl.organization_burst,
+        rl.organization_rate,
+        rl.backpressure_threshold,
+        config.region.as_str(),
+    ));
     let hot_key_config = inferadb_ledger_types::config::HotKeyConfig::default();
     let hot_key_detector = Arc::new(HotKeyDetector::new(&hot_key_config));
 

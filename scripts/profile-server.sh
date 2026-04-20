@@ -12,7 +12,7 @@
 #   mode:          sampling | spans
 #   workload:      throughput-writes | mixed-rw | check-heavy
 #                | entity-reads | relationship-writes | relationship-reads
-#                | concurrent-writes
+#                | concurrent-writes | concurrent-reads
 #   duration_secs: measured-phase duration (default 60)
 #
 # Environment variables:
@@ -23,9 +23,10 @@
 #   PROFILE_METRICS_PATH  when set, passed as --metrics-json to the workload
 #                         binary; the measured-phase metrics report is written
 #                         to that path (consumed by scripts/profile-suite.sh)
-#   CONCURRENCY           only honored when workload=concurrent-writes; number
-#                         of concurrent writer tasks (default 32). Other
-#                         workloads ignore this variable.
+#   CONCURRENCY           only honored when workload=concurrent-writes or
+#                         workload=concurrent-reads; number of concurrent
+#                         tasks (default 32). Other workloads ignore this
+#                         variable.
 
 set -euo pipefail
 
@@ -72,15 +73,16 @@ esac
 case "$WORKLOAD" in
     throughput-writes|mixed-rw|check-heavy) ;;
     entity-reads|relationship-writes|relationship-reads) ;;
-    concurrent-writes) ;;
-    *) echo "error: unknown workload '$WORKLOAD' (expected throughput-writes|mixed-rw|check-heavy|entity-reads|relationship-writes|relationship-reads|concurrent-writes)" >&2; exit 1 ;;
+    concurrent-writes|concurrent-reads) ;;
+    *) echo "error: unknown workload '$WORKLOAD' (expected throughput-writes|mixed-rw|check-heavy|entity-reads|relationship-writes|relationship-reads|concurrent-writes|concurrent-reads)" >&2; exit 1 ;;
 esac
 
-# concurrent-writes accepts an optional --concurrency flag; default 32. Other
-# presets don't accept it, so we only append when the workload matches.
+# concurrent-writes and concurrent-reads accept an optional --concurrency flag;
+# default 32. Other presets don't accept it, so we only append when the workload
+# matches.
 CONCURRENCY="${CONCURRENCY:-32}"
 EXTRA_ARGS=()
-if [[ "$WORKLOAD" == "concurrent-writes" ]]; then
+if [[ "$WORKLOAD" == "concurrent-writes" || "$WORKLOAD" == "concurrent-reads" ]]; then
     EXTRA_ARGS=(--concurrency "$CONCURRENCY")
 fi
 

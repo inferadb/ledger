@@ -13,7 +13,7 @@ Complete reference for Ledger configuration via environment variables and CLI ar
 | `INFERADB__LEDGER__JOIN`             | `--join`       | _(none)_      | Comma-separated seed addresses for discovery |
 | `INFERADB__LEDGER__REGION`           | `--region`     | `global`      | Geographic data residency region             |
 | `INFERADB__LEDGER__ADVERTISE`        | `--advertise`  | _(auto)_      | Address advertised to peers                  |
-| `INFERADB__LEDGER__MAX_CONCURRENT`   | `--concurrent` | `100`         | Max concurrent requests                      |
+| `INFERADB__LEDGER__MAX_CONCURRENT`   | `--concurrent` | `10000`       | Max concurrent requests                      |
 | `INFERADB__LEDGER__TIMEOUT`          | `--timeout`    | `30`          | Request timeout (seconds)                    |
 | —                                    | `--log-format` | `auto`        | Log format (`text`/`json`/`auto`)            |
 | `INFERADB__LEDGER__LOGGING__ENABLED` | —              | `true`        | Enable request logging                       |

@@ -67,6 +67,10 @@ enum Preset {
     /// fsync under concurrent load. Each task owns its own key-prefix (no
     /// write-write contention).
     ConcurrentWrites(ConcurrentWritesArgs),
+    /// N concurrent readers against a pre-seeded 1k-entry corpus. Measures
+    /// read throughput under concurrent gRPC streams on one HTTP/2 channel.
+    /// Uses `ReadConsistency::Eventual` (lock-free page-cache path).
+    ConcurrentReads(ConcurrentReadsArgs),
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -96,6 +100,19 @@ struct ConcurrentWritesArgs {
     concurrency: usize,
 }
 
+/// Args for the `concurrent-reads` preset — the base preset args plus a
+/// `--concurrency` knob for the number of reader tasks to spawn.
+#[derive(clap::Args, Debug, Clone)]
+struct ConcurrentReadsArgs {
+    #[command(flatten)]
+    base: PresetArgs,
+
+    /// Number of concurrent reader tasks. All tasks share the seeded
+    /// key-space — reads don't contend, so no per-task partitioning.
+    #[arg(long, default_value_t = 32)]
+    concurrency: usize,
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), MainError> {
     tracing_subscriber::fmt()
@@ -115,6 +132,7 @@ async fn main() -> Result<(), MainError> {
         Preset::RelationshipWrites(a) => (a, "relationship-writes"),
         Preset::RelationshipReads(a) => (a, "relationship-reads"),
         Preset::ConcurrentWrites(a) => (&a.base, "concurrent-writes"),
+        Preset::ConcurrentReads(a) => (&a.base, "concurrent-reads"),
     };
 
     let duration = std::time::Duration::from_secs(args.duration);
@@ -137,6 +155,9 @@ async fn main() -> Result<(), MainError> {
         },
         Preset::ConcurrentWrites(a) => {
             workloads::concurrent_writes::run(&harness, duration, a.concurrency).await
+        },
+        Preset::ConcurrentReads(a) => {
+            workloads::concurrent_reads::run(&harness, duration, a.concurrency).await
         },
     };
 
@@ -195,6 +216,45 @@ mod tests {
         match cli.preset {
             Preset::ConcurrentWrites(a) => assert_eq!(a.concurrency, 32),
             other => panic!("expected ConcurrentWrites, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn concurrent_reads_parses_with_explicit_concurrency() {
+        let cli = Cli::try_parse_from([
+            "inferadb-ledger-profile",
+            "concurrent-reads",
+            "--endpoint",
+            "http://127.0.0.1:50051",
+            "--duration",
+            "30",
+            "--concurrency",
+            "16",
+        ])
+        .unwrap();
+        match cli.preset {
+            Preset::ConcurrentReads(a) => {
+                assert_eq!(a.base.endpoint, "http://127.0.0.1:50051");
+                assert_eq!(a.base.duration, 30);
+                assert_eq!(a.concurrency, 16);
+                assert!(a.base.metrics_json.is_none());
+            },
+            other => panic!("expected ConcurrentReads, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn concurrent_reads_defaults_concurrency_to_32() {
+        let cli = Cli::try_parse_from([
+            "inferadb-ledger-profile",
+            "concurrent-reads",
+            "--endpoint",
+            "http://127.0.0.1:50051",
+        ])
+        .unwrap();
+        match cli.preset {
+            Preset::ConcurrentReads(a) => assert_eq!(a.concurrency, 32),
+            other => panic!("expected ConcurrentReads, got {other:?}"),
         }
     }
 }

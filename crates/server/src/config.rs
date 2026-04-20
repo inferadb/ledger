@@ -187,7 +187,7 @@ pub struct Config {
 
     // === Request Limits ===
     /// Maximum concurrent requests.
-    #[arg(long = "concurrent", env = "INFERADB__LEDGER__MAX_CONCURRENT", default_value_t = 100)]
+    #[arg(long = "concurrent", env = "INFERADB__LEDGER__MAX_CONCURRENT", default_value_t = 10_000)]
     #[serde(default = "default_max_concurrent")]
     #[builder(default = default_max_concurrent())]
     pub max_concurrent: usize,
@@ -386,7 +386,7 @@ fn default_token_maintenance_interval_secs() -> u64 {
     300 // 5 minutes
 }
 fn default_max_concurrent() -> usize {
-    100
+    10_000
 }
 fn default_timeout_secs() -> u64 {
     30
@@ -641,7 +641,7 @@ mod tests {
     #[test]
     fn default_config_has_expected_field_values() {
         let config = Config::default();
-        assert_eq!(config.max_concurrent, 100);
+        assert_eq!(config.max_concurrent, 10_000);
         assert_eq!(config.timeout_secs, 30);
         assert!(config.join.is_none());
         assert!(config.data_dir.is_none());

@@ -26,7 +26,6 @@
 //! ```
 
 use std::{
-    collections::HashSet,
     hash::{Hash, Hasher},
     sync::{
         OnceLock,
@@ -34,8 +33,7 @@ use std::{
     },
 };
 
-use dashmap::DashMap;
-use parking_lot::Mutex;
+use dashmap::{DashMap, DashSet};
 
 // ---------------------------------------------------------------------------
 // Per-metric cardinality overrides for known high-cardinality metric families.
@@ -58,7 +56,13 @@ pub enum CardinalityMode {
 /// Per-metric cardinality tracking entry.
 struct MetricEntry {
     /// Distinct label-set fingerprints seen.
-    fingerprints: Mutex<HashSet<u64>>,
+    ///
+    /// [`DashSet`] gives lock-free reads on the already-seen fast path and
+    /// shard-local locks only on first-insert. This replaces a prior
+    /// `Mutex<HashSet<u64>>` that became the workspace's dominant CPU
+    /// contender at 256-client concurrency (~43% of active CPU in
+    /// `__psynch_mutexwait`).
+    fingerprints: DashSet<u64>,
     /// Count of emissions dropped or overflowed.
     overflow_count: AtomicU64,
 }
@@ -85,20 +89,33 @@ impl CardinalityTracker {
     ///
     /// `label_fingerprint` is a pre-computed hash of the label key-value pairs
     /// (see [`fingerprint_labels`]).
+    ///
+    /// # Concurrency
+    ///
+    /// Backed by a [`DashSet`] rather than `Mutex<HashSet>` so the hot
+    /// already-seen path is lock-free. The cap check (`len() >= max`) and the
+    /// subsequent `insert()` are NOT held under a single lock, so two
+    /// concurrent admits can both observe `len() == max - 1`, both pass the
+    /// cap check, and both insert — admitting at most `N` extra fingerprints
+    /// beyond `max` where `N` is the number of threads concurrently admitting
+    /// novel fingerprints at the cap boundary. This is an acceptable overshoot
+    /// for a cardinality gauge (label-explosion detector) — it is not a
+    /// correctness bug.
     pub fn admit(&self, metric_name: &'static str, label_fingerprint: u64) -> bool {
         let entry = self.entries.entry(metric_name).or_insert_with(|| MetricEntry {
-            fingerprints: Mutex::new(HashSet::new()),
+            fingerprints: DashSet::new(),
             overflow_count: AtomicU64::new(0),
         });
 
-        let mut fps = entry.fingerprints.lock();
-
-        // Already-seen fingerprints are always admitted.
-        if fps.contains(&label_fingerprint) {
+        // Fast path: already-seen fingerprint. DashSet::contains is lock-free
+        // on the read side (per-shard RwLock taken as reader).
+        if entry.fingerprints.contains(&label_fingerprint) {
             return true;
         }
 
-        let current = fps.len() as u32;
+        // Slow path: possibly-novel label combination. Check cap, then insert.
+        // See doc comment on race semantics — `len()` here is best-effort.
+        let current = entry.fingerprints.len() as u32;
         let max = self.resolved_max(metric_name);
 
         if current >= max {
@@ -107,7 +124,7 @@ impl CardinalityTracker {
 
             match self.mode {
                 CardinalityMode::Observe => {
-                    fps.insert(label_fingerprint);
+                    entry.fingerprints.insert(label_fingerprint);
                     true
                 },
                 CardinalityMode::Enforce => false,
@@ -123,7 +140,7 @@ impl CardinalityTracker {
                     "metric cardinality approaching limit"
                 );
             }
-            fps.insert(label_fingerprint);
+            entry.fingerprints.insert(label_fingerprint);
             true
         }
     }
@@ -135,7 +152,7 @@ impl CardinalityTracker {
 
     /// Returns the number of distinct fingerprints tracked for a metric.
     pub fn distinct_count(&self, metric_name: &str) -> usize {
-        self.entries.get(metric_name).map(|e| e.fingerprints.lock().len()).unwrap_or(0)
+        self.entries.get(metric_name).map(|e| e.fingerprints.len()).unwrap_or(0)
     }
 
     /// Returns the top `n` metrics by distinct label-combination count, sorted
@@ -144,7 +161,7 @@ impl CardinalityTracker {
         let mut entries: Vec<_> = self
             .entries
             .iter()
-            .map(|entry| (*entry.key(), entry.value().fingerprints.lock().len()))
+            .map(|entry| (*entry.key(), entry.value().fingerprints.len()))
             .collect();
         entries.sort_by(|a, b| b.1.cmp(&a.1));
         entries.truncate(n);
