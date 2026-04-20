@@ -570,10 +570,9 @@ mod tests {
 
         // With only timer-based flushing, a single pending write does NOT
         // flush until `batch_timeout` elapses — even though the queue has
-        // "drained" (no new arrivals). This is the fix for Sprint 1B5: under
-        // concurrent load, clients wait on responses before submitting, so
-        // the drained-queue predicate fires on every tick and forces
-        // one-proposal-per-fsync behavior.
+        // "drained" (no new arrivals). Under concurrent load, clients wait
+        // on responses before submitting, so the drained-queue predicate
+        // fires on every tick and forces one-proposal-per-fsync behavior.
         assert!(!state.should_flush(&config));
 
         // Add another write — still under max_batch_size, still under
@@ -734,11 +733,11 @@ mod tests {
     }
 
     // =========================================================================
-    // Proptest: BatchWriter preserves FIFO submission order (Sprint 1B5 Phase 3)
+    // Proptest: BatchWriter preserves FIFO submission order
     // =========================================================================
     //
-    // Sprint 1B5 Fix #1 reworked `BatchState::should_flush` (dropped
-    // `eager_commit`, retuned defaults). The existing `test_batch_state` and
+    // `BatchState::should_flush` dropped `eager_commit` and retuned defaults.
+    // The existing `test_batch_state` and
     // `test_timer_only_flush_does_not_fire_on_drain` cover size/timer triggers;
     // this proptest pins the orthogonal invariant the apply pipeline depends
     // on: when N proposals are submitted serially via

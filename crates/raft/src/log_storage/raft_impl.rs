@@ -57,20 +57,20 @@ pub struct LedgerSnapshotBuilder {
 impl LedgerSnapshotBuilder {
     /// Builds a snapshot file and returns the file handle plus metadata.
     ///
-    /// Sprint 1B2 Task 2C: forces `Database::sync_state` before reading the
-    /// state DB so the snapshot captures a durable dual-slot-consistent state.
-    /// Under Task 2C's lazy-commit regime, `committed_state` can be ahead of
-    /// the last synced disk state; shipping a snapshot at an unsynced
-    /// `applied` index to followers risks follower WAL truncation of entries
-    /// the local node still needs on crash recovery.
+    /// Forces `Database::sync_state` before reading the state DB so the
+    /// snapshot captures a durable dual-slot-consistent state. Under the
+    /// lazy-commit regime, `committed_state` can be ahead of the last synced
+    /// disk state; shipping a snapshot at an unsynced `applied` index to
+    /// followers risks follower WAL truncation of entries the local node
+    /// still needs on crash recovery.
     ///
     /// This narrows the race window rather than eliminating it: a concurrent
     /// apply on the `ApplyWorker` can land a `commit_in_memory` between this
     /// `sync_state` call and the subsequent `db.read()`, leaving the captured
     /// `last_applied` one or more entries ahead of the synced dual-slot. The
     /// `StateCheckpointer` re-syncs on its 500ms cadence, so the residual
-    /// window collapses quickly under steady state; Task 3A's crash-recovery
-    /// tests will confirm whether a tighter post-read re-sync loop is needed.
+    /// window collapses quickly under steady state; crash-recovery tests
+    /// confirm whether a tighter post-read re-sync loop is needed.
     pub async fn build_snapshot(&mut self) -> Result<(tokio::fs::File, SnapshotMeta), StoreError> {
         Arc::clone(&self.db).sync_state().await.map_err(|e| to_storage_error(&e))?;
 
@@ -742,9 +742,9 @@ impl RaftLogStore {
     /// normal apply pipeline, then forces a [`Database::sync_state`] so the
     /// recovered state is durable before the node begins serving traffic.
     ///
-    /// Sprint 1B2 Task 2D: closes the crash-recovery gap widened by the
-    /// `commit_in_memory` apply path (Task 2C). `apply_committed_entries` now
-    /// commits in-memory and leaves durability to the periodic
+    /// Closes the crash-recovery gap widened by the `commit_in_memory`
+    /// apply path. `apply_committed_entries` commits in-memory and leaves
+    /// durability to the periodic
     /// `StateCheckpointer`; on crash, up to ~500ms of committed applies can
     /// sit between the synced dual-slot and the WAL tail. This method
     /// re-drives those entries through the same apply pipeline a live shard
@@ -763,9 +763,9 @@ impl RaftLogStore {
     ///
     /// Replay is safe against partially-checkpointed batches: every field
     /// reconstructed by `apply_committed_entries` is either CAS-idempotent or
-    /// monotonic-per-log-index, and `BlockArchive::append_block` became
-    /// idempotent-by-height in Task 1C. See the design doc's
-    /// "Replay idempotency audit" table for the field-by-field proof.
+    /// monotonic-per-log-index, and `BlockArchive::append_block` is
+    /// idempotent-by-height. See the design doc's "Replay idempotency audit"
+    /// table for the field-by-field proof.
     ///
     /// # Errors
     ///
@@ -801,8 +801,8 @@ impl RaftLogStore {
         let last_committed = recovery.committed_index;
 
         // Fast-path: nothing to replay. Either fresh boot (no checkpoint),
-        // clean shutdown (Task 2B's `sync_all_state_dbs` drove the gap to
-        // zero), or a restart into an already-caught-up state DB.
+        // clean shutdown (`sync_all_state_dbs` drove the gap to zero),
+        // or a restart into an already-caught-up state DB.
         if recovery.replay_count == 0 {
             tracing::info!(
                 region = self.region.as_str(),
@@ -854,9 +854,9 @@ impl RaftLogStore {
         // region — raft.db (via `save_state_core` → `KEY_APPLIED_STATE`),
         // state.db (via `apply_request_with_events` →
         // entity/relationship tables), blocks.db (via
-        // `BlockArchive::append_block`, Sprint 1B3 Task 2A), and
-        // events.db (via `EventWriter::write_events`, Sprint 1B3 Task
-        // 2B). Force a `sync_state` on every configured DB concurrently
+        // `BlockArchive::append_block`), and events.db (via
+        // `EventWriter::write_events`). Force a `sync_state` on every
+        // configured DB concurrently
         // so the recovered state is durably captured before the node
         // begins serving traffic — otherwise a second crash during the
         // server-startup window could regress state past the recovered
@@ -989,7 +989,7 @@ impl RaftLogStore {
     /// Streams decompressed data directly into B-trees and restores the
     /// in-memory state from the committed tables.
     ///
-    /// Sprint 1B2 Task 2C: no `Database::sync_state` hook here. Installing a
+    /// No `Database::sync_state` hook here. Installing a
     /// snapshot is a receive path (we're absorbing state shipped by the
     /// leader), not a ship path. The write transaction at the end of the
     /// streaming sync phase (`write_txn.commit()` at the end of the
@@ -1180,10 +1180,10 @@ impl RaftLogStore {
     pub async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<(tokio::fs::File, SnapshotMeta)>, StoreError> {
-        // Sprint 1B2 Task 2C: force `Database::sync_state` before reading
-        // the state DB so the snapshot captures a durable
-        // dual-slot-consistent state. Under Task 2C's lazy-commit regime
-        // `committed_state` can be ahead of the last synced disk state;
+        // Force `Database::sync_state` before reading the state DB so the
+        // snapshot captures a durable dual-slot-consistent state. Under
+        // the lazy-commit regime, `committed_state` can be ahead of the
+        // last synced disk state;
         // shipping a snapshot at an unsynced `applied` index to followers
         // risks follower WAL truncation of entries the local node still
         // needs on crash recovery.
@@ -1193,8 +1193,8 @@ impl RaftLogStore {
         // and the subsequent `db.read()`, leaving the captured
         // `last_applied` ahead of the synced dual-slot. The
         // `StateCheckpointer`'s 500ms cadence closes the residual gap;
-        // Task 3A's crash-recovery tests will confirm whether a tighter
-        // post-read re-sync loop is needed.
+        // Crash-recovery tests confirm whether a tighter post-read
+        // re-sync loop is needed.
         Arc::clone(&self.db).sync_state().await.map_err(|e| to_storage_error(&e))?;
 
         // Check whether any state has been applied

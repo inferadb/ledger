@@ -131,9 +131,9 @@ pub enum EventEmissionPath {
     ApplyPhase,
     /// Emitted outside the apply pipeline: either ingested externally
     /// through [`LedgerClient::ingest_events`](crate::LedgerClient::ingest_events)
-    /// (Raft-replicated) or recorded locally during RPC handling. As of
-    /// Sprint 1B4, locally-recorded handler-phase events are batched through
-    /// an in-memory flush queue and fsynced within a ~100 ms default window,
+    /// (Raft-replicated) or recorded locally during RPC handling.
+    /// Locally-recorded handler-phase events are batched through an
+    /// in-memory flush queue and fsynced within a ~100 ms default window,
     /// so a query issued immediately after the emitting RPC may not yet
     /// observe them.
     HandlerPhase,
@@ -355,8 +355,8 @@ impl EventFilter {
     /// Handler-phase events cover both externally-ingested events (via
     /// [`LedgerClient::ingest_events`](crate::LedgerClient::ingest_events),
     /// which are Raft-replicated) and events recorded locally inside RPC
-    /// handlers. As of Sprint 1B4, locally-recorded handler-phase events
-    /// carry a ~100 ms default durability window: the server batches them
+    /// handlers. Locally-recorded handler-phase events carry a ~100 ms
+    /// default durability window: the server batches them
     /// through an in-memory flush queue and fsyncs them on a background
     /// tick, so a query issued immediately after the emitting RPC may not
     /// yet observe them. See

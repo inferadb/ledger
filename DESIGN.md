@@ -441,7 +441,7 @@ Batching amortizes Raft consensus overhead:
 | N tuples to same resource       | 3N     | 1            | ~50K tuples/sec  |
 | Bulk import (1000 tuples/block) | 3000   | 1            | ~100K tuples/sec |
 
-Default batch configuration (Sprint 1B5):
+Default batch configuration:
 
 - Maximum batch size: 500 transactions
 - Maximum batch delay: 10ms (`batch_timeout`)

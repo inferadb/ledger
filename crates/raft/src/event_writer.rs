@@ -12,8 +12,8 @@
 //! - [`EventEmitter`] — trait-erased event emission, enabling
 //!   [`RequestContext`](crate::logging::RequestContext) to carry an event handle without being
 //!   generic over the storage backend
-//! - A Sprint 1B4 background flusher (private `EventFlusher`) that drains the in-memory queue into
-//!   `events.db` on a time / size / shutdown trigger — see [`EventHandle::with_batching`]
+//! - A background flusher (private `EventFlusher`) that drains the in-memory queue into `events.db`
+//!   on a time / size / shutdown trigger — see [`EventHandle::with_batching`]
 
 use std::{
     collections::BTreeMap,
@@ -156,8 +156,8 @@ impl<B: StorageBackend> EventWriter<B> {
             EventStore::write(&mut txn, entry).context(WriteSnafu)?;
         }
 
-        // Sprint 1B3 Task 2B: events.db apply-path batched write flipped to
-        // `commit_in_memory`. Every EventEntry's event_id is deterministic
+        // The events.db apply-path batched write uses `commit_in_memory`.
+        // Every EventEntry's event_id is deterministic
         // (UUID v5 over {block_height, op_index, action} — see ApplyPhaseEmitter
         // at event_writer.rs:~292-332), so replay produces byte-identical rows.
         // EventStore::write is idempotent via B-tree upsert semantics; duplicate
@@ -536,19 +536,19 @@ impl<B: StorageBackend + 'static> EventEmitter for EventHandle<B> {
 }
 
 // =============================================================================
-// Sprint 1B4 — Handler-phase event batching primitives
+// Handler-phase event batching primitives
 // =============================================================================
 //
 // `record_handler_event` used to fsync events.db once per emission. Under
 // concurrent handlers that cost dominated the RPC critical path (42% of
-// active CPU in the post-1B3 flamegraph). Sprint 1B4 introduces a bounded
-// in-memory channel + background `EventFlusher` that drains the queue on a
-// time / size / shutdown trigger and commits once per batch — one fsync per
-// flush window instead of one per event.
+// active CPU in the earlier flamegraph). A bounded in-memory channel +
+// background `EventFlusher` now drains the queue on a time / size / shutdown
+// trigger and commits once per batch — one fsync per flush window instead of
+// one per event.
 //
 // The contract change: a successful RPC no longer implies the emitted event
 // is fsync'd. Events become durable within one flush cadence (default 100ms).
-// `enabled = false` bypasses the queue and restores the pre-1B4 synchronous
+// `enabled = false` bypasses the queue and restores the synchronous per-event
 // fsync path — the strict-durability escape hatch for compliance deployments.
 // See `docs/superpowers/specs/2026-04-19-sprint-1b4-handler-event-batching-design.md`.
 
@@ -709,28 +709,28 @@ fn start_ref() -> Instant {
 /// Uses the dedicated `events.db` database, separate from `state.db`, so
 /// handler-phase writes do not contend with Raft apply-phase state mutations.
 ///
-/// # Sprint 1B4 — Batched fsyncs
+/// # Batched fsyncs
 ///
 /// Production construction via [`EventHandle::with_batching`] wires in a
 /// bounded in-memory queue plus a background flusher task;
 /// `record_handler_event` enqueues into the queue instead of opening a
 /// write txn per event. The flusher drains on a time / size / shutdown
 /// trigger and commits once per batch. Test / legacy constructors (via
-/// [`EventHandle::new`]) attach no queue, which restores the pre-1B4
-/// synchronous `write_entry` path — byte-identical semantics.
+/// [`EventHandle::new`]) attach no queue, which restores the synchronous
+/// `write_entry` path — byte-identical semantics.
 pub struct EventHandle<B: StorageBackend> {
     events_db: Arc<EventsDatabase<B>>,
     config: Arc<EventConfig>,
     node_id: u64,
     /// `None` → fall back to synchronous `write_entry` per emission
-    /// (pre-1B4 behaviour, used by tests + legacy callers).
+    /// (used by tests and strict-durability callers).
     ///
     /// `Some(_)` → enqueue into the flusher queue; one fsync per flush
     /// window instead of one per event.
     queue: Option<Arc<FlushQueue>>,
     /// Handle to the live runtime configuration.
     ///
-    /// `None` → pre-1B4 construction via [`EventHandle::new`]; there is no
+    /// `None` → construction via [`EventHandle::new`]; there is no
     /// flusher to consult and `record_handler_event` unconditionally uses
     /// the synchronous fallback.
     ///
@@ -849,10 +849,10 @@ impl<B: StorageBackend + 'static> EventHandle<B> {
     /// - When `event_writer_batch.enabled = false` is set via the `UpdateConfig` RPC, the queue is
     ///   **bypassed** and the entry is written synchronously through [`Self::write_entry`] with one
     ///   fsync per emission. This is the strict-durability escape hatch for compliance deployments
-    ///   (see the Sprint 1B4 design doc § "enabled = false as escape hatch"). Entries already in
-    ///   the queue when the flag flips continue to drain on the next flush cycle — no data loss.
-    /// - When no flusher is attached ([`Self::new`], pre-1B4 construction), the same synchronous
-    ///   path is taken unconditionally.
+    ///   (see the design doc § "enabled = false as escape hatch"). Entries already in the queue
+    ///   when the flag flips continue to drain on the next flush cycle — no data loss.
+    /// - When no flusher is attached ([`Self::new`]), the same synchronous path is taken
+    ///   unconditionally.
     ///
     /// Best-effort: write / enqueue failures are logged and swallowed;
     /// callers never observe an error.
@@ -875,10 +875,10 @@ impl<B: StorageBackend + 'static> EventHandle<B> {
 
         // Strict-durability escape hatch: operators can toggle
         // `event_writer_batch.enabled = false` at runtime via `UpdateConfig`
-        // RPC to bypass the queue and restore pre-1B4 per-emission fsync
-        // semantics. Default is `true` (Sprint 1B4 batching is the shipped
-        // default); an unset `event_writer_batch` section is also treated as
-        // batched, matching `EventWriterBatchConfig::default().enabled`.
+        // RPC to bypass the queue and restore per-emission fsync semantics.
+        // Default is `true` (batching is the shipped default); an unset
+        // `event_writer_batch` section is also treated as batched,
+        // matching `EventWriterBatchConfig::default().enabled`.
         let batch_enabled = self
             .runtime_config
             .as_ref()
@@ -980,7 +980,7 @@ impl<B: StorageBackend + 'static> EventHandle<B> {
         }
     }
 
-    /// Synchronous fallback path: one fsync per entry (pre-1B4 behaviour).
+    /// Synchronous fallback path: one fsync per entry.
     fn write_sync(&self, entry: EventEntry, scope_str: &str, action_str: &str) {
         match self.write_entry(&entry) {
             Ok(()) => {
@@ -1002,10 +1002,10 @@ impl<B: StorageBackend + 'static> EventHandle<B> {
         let mut txn = self.events_db.write().context(TransactionSnafu)?;
         EventStore::write(&mut txn, entry).context(WriteSnafu)?;
         // DO NOT flip to `commit_in_memory` — handler-phase events have no WAL
-        // replay backstop (Sprint 1B3 design § "STAYS on commit" + consensus
-        // review Critical finding). Sprint 1B4 amortises the fsync cost via
-        // the background flusher; this path is now the escape-hatch /
-        // fallback only (queue = None or enabled = false).
+        // replay backstop (per design § "STAYS on commit" + consensus review
+        // Critical finding). The background flusher amortises the fsync cost;
+        // this path is the escape-hatch / fallback only (queue = None or
+        // enabled = false).
         txn.commit().context(CommitSnafu)?;
         Ok(())
     }
@@ -1013,8 +1013,8 @@ impl<B: StorageBackend + 'static> EventHandle<B> {
     /// Drains the flusher queue and stops the background task.
     ///
     /// Call sites: `pre_shutdown` at graceful-shutdown Phase 5b (see the
-    /// Sprint 1B4 design doc; wired up separately in Task 2B, which touches
-    /// `server/src/main.rs`). Returns a [`DrainResult`] so the caller can
+    /// design doc; wired up in `server/src/main.rs`). Returns a
+    /// [`DrainResult`] so the caller can
     /// emit a final lifecycle log line.
     ///
     /// On a handle with no batching queue attached, returns a zeroed
@@ -1055,7 +1055,7 @@ impl<B: StorageBackend + 'static> EventHandle<B> {
     }
 
     /// Returns the current approximate queue depth. `0` if no queue is
-    /// attached (pre-1B4 / test constructors).
+    /// attached (test / strict-durability constructors).
     #[must_use]
     pub fn queue_depth(&self) -> usize {
         self.queue.as_ref().map(|q| q.depth()).unwrap_or(0)
@@ -1105,18 +1105,18 @@ impl<B: StorageBackend + 'static> EventHandle<B> {
 /// - **Size**: queue depth >= `flush_size_threshold`.
 /// - **Shutdown**: `flush_for_shutdown` called (drain-then-exit).
 ///
-/// **Sprint 1B5 Fix #2 durability class.** Each tick commits the batch with
+/// **Durability class.** Each tick commits the batch with
 /// `commit_in_memory` — the per-flush dual-slot fsync was removed to unblock
 /// throughput under concurrent-write workloads. Durability for handler-phase
-/// events is now realised by
+/// events is realised by
 /// [`StateCheckpointer`](crate::state_checkpointer::StateCheckpointer),
 /// which syncs `events.db` alongside the other state DBs on every
 /// `checkpoint_interval_ms` tick (default 500ms). Clean-shutdown zero-loss
 /// is preserved via Phase 5b (`flush_for_shutdown` drains the queue) →
 /// Phase 5c (`sync_all_state_dbs` syncs `events.db`) in the server's
 /// `pre_shutdown` closure. See
-/// `docs/superpowers/specs/2026-04-19-commit-durability-audit.md` §
-/// "Sprint 1B5 Fix #2" for the full audit entry.
+/// `docs/superpowers/specs/2026-04-19-commit-durability-audit.md`
+/// for the full audit entry.
 struct EventFlusher<B: StorageBackend> {
     events_db: Arc<EventsDatabase<B>>,
     config: Arc<EventConfig>,
@@ -1126,7 +1126,7 @@ struct EventFlusher<B: StorageBackend> {
     size_notify: Arc<tokio::sync::Notify>,
     /// Shared producer-side drop counter. The flusher samples this once per
     /// tick into a local accumulator so dashboards see a monotonically
-    /// non-decreasing counter (see Sprint 1B4 § Metrics).
+    /// non-decreasing counter (see § Metrics in the design doc).
     #[allow(dead_code)]
     drop_count: Arc<AtomicU64>,
     runtime_config: RuntimeConfigHandle,
@@ -1214,7 +1214,7 @@ impl<B: StorageBackend + 'static> EventFlusher<B> {
     /// them in a single events.db write txn.
     ///
     /// Returns `(drained, duration)`. On commit / write failure, the
-    /// drained entries are lost (see Sprint 1B4 design § Error handling) —
+    /// drained entries are lost (see design § Error handling) —
     /// retries risk partial duplication. The failure counter + warn is the
     /// operator's signal.
     async fn tick(&mut self, config: &EventWriterBatchConfig, trigger: &'static str) {
@@ -1282,10 +1282,10 @@ impl<B: StorageBackend + 'static> EventFlusher<B> {
     /// Opens a single events.db write txn, writes each entry, commits
     /// in-memory only.
     ///
-    /// Sprint 1B5 Fix #2: flipped from strict-durable `commit()` to
-    /// `commit_in_memory()`. The per-flush dual-slot fsync was the dominant
-    /// cost under `concurrent-writes @ 32` (~12% of wall-clock). Durability
-    /// is now realised by `StateCheckpointer`, which syncs `events.db` on
+    /// Commits via `commit_in_memory()` rather than strict-durable `commit()`.
+    /// The per-flush dual-slot fsync was the dominant cost under
+    /// `concurrent-writes @ 32` (~12% of wall-clock). Durability is realised
+    /// by `StateCheckpointer`, which syncs `events.db` on
     /// every tick (default `checkpoint_interval_ms = 500ms` — see
     /// `crates/raft/src/state_checkpointer.rs` and
     /// `crates/types/src/config/storage.rs` `default_checkpoint_interval_ms`).
@@ -1297,7 +1297,7 @@ impl<B: StorageBackend + 'static> EventFlusher<B> {
     /// (`RaftManager::sync_all_state_dbs` syncs `events.db`); see
     /// `crates/server/src/main.rs` `pre_shutdown` closure.
     ///
-    /// Operators who require the pre-1B5 window set
+    /// Operators who require the narrower window set
     /// `EventWriterBatchConfig::enabled = false` (see `write_entry` escape
     /// hatch — unchanged, still strict-durable per invocation).
     #[tracing::instrument(
@@ -1316,7 +1316,7 @@ impl<B: StorageBackend + 'static> EventFlusher<B> {
             let _ = self.config.enabled;
             EventStore::write(&mut txn, entry).context(WriteSnafu)?;
         }
-        // Sprint 1B5 Fix #2: `commit_in_memory` skips the dual-slot persist.
+        // `commit_in_memory` skips the dual-slot persist.
         // `StateCheckpointer::do_checkpoint` invokes `sync_state` on
         // events.db alongside state.db / raft.db / blocks.db on every tick;
         // graceful shutdown's Phase 5c sweep (`sync_all_state_dbs`) closes
@@ -1859,10 +1859,10 @@ mod tests {
         assert_eq!(writer2.write_events(&[entry2]).expect("write2"), 1);
     }
 
-    // ── Sprint 1B3 Task 2B: commit-in-memory semantics ─────────
+    // ── commit-in-memory semantics ─────────
 
-    /// Sprint 1B3 Task 2B: the FLIP. `write_events` commits in-memory only;
-    /// `sync_state` advances `last_synced_snapshot_id`. Mirrors the Sprint 1B2
+    /// `write_events` commits in-memory only; `sync_state` advances
+    /// `last_synced_snapshot_id`. Mirrors the
     /// `save_state_core_commits_in_memory_only_then_sync_advances_snapshot`
     /// test pattern.
     #[tokio::test]
@@ -1904,7 +1904,7 @@ mod tests {
         assert_eq!(
             synced_after_commit, synced_before,
             "write_events must not advance last_synced_snapshot_id \
-             (Sprint 1B3 Task 2B: commit_in_memory skips the dual-slot persist)"
+             (commit_in_memory skips the dual-slot persist)"
         );
 
         // Forcing a sync advances the synced id.
@@ -1931,10 +1931,10 @@ mod tests {
         );
     }
 
-    /// Sprint 1B3 Task 2B guard: `write_entry` (handler-phase) STAYS
-    /// strict-durable. Mirrors Sprint 1B2's `save_vote_is_durable_before_returning`
-    /// test. Handler-phase events have no WAL replay backstop; losing them on
-    /// crash is the audit finding the DO-NOT-FLIP comment cites.
+    /// Guard: `write_entry` (handler-phase) STAYS strict-durable. Mirrors
+    /// the `save_vote_is_durable_before_returning` test. Handler-phase events
+    /// have no WAL replay backstop; losing them on crash is the audit finding
+    /// the DO-NOT-FLIP comment cites.
     #[tokio::test]
     async fn write_entry_stays_durable_per_write() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2261,7 +2261,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Sprint 1B4 — Handler-phase event batching
+    // Handler-phase event batching
     // =========================================================================
 
     use inferadb_ledger_types::config::{
@@ -2346,7 +2346,7 @@ mod tests {
         let events_db = Arc::new(EventsDatabase::open(dir.path()).expect("open"));
         let config = Arc::new(test_config());
 
-        // No flusher — this is the pre-1B4 synchronous path.
+        // No flusher — this exercises the synchronous fallback path.
         let handle = EventHandle::new(Arc::clone(&events_db), config, 1);
         handle.record_handler_event(sample_handler_entry(1));
 
@@ -2357,16 +2357,15 @@ mod tests {
         assert_eq!(count, 1);
     }
 
-    /// Sprint 1B5 Fix #2 guard: `EventFlusher::commit_batch` commits
-    /// in-memory only. Mirrors Sprint 1B3's
+    /// Guard: `EventFlusher::commit_batch` commits in-memory only. Mirrors
     /// `write_events_commits_in_memory_only_until_sync` — enqueue events,
     /// trigger a flush via `flush_for_shutdown`, assert the entries are
     /// visible via in-process reads but `last_synced_snapshot_id` has NOT
     /// advanced. Forcing `sync_state` then advances it.
     ///
-    /// Under the pre-1B5 contract, `commit_batch` would call `commit()` and
-    /// `last_synced_snapshot_id` would advance as part of the flush. This
-    /// test fires exactly when that contract is restored by accident.
+    /// Under a strict-durable contract, `commit_batch` would call `commit()`
+    /// and `last_synced_snapshot_id` would advance as part of the flush.
+    /// This test fires exactly when that contract is restored by accident.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn commit_batch_commits_in_memory_only_until_sync() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2402,8 +2401,8 @@ mod tests {
         }
         assert_eq!(handle.queue_depth(), 3);
 
-        // Drain via the shutdown path. Post-1B5 `commit_batch` uses
-        // `commit_in_memory`, so the dual-slot persist is skipped.
+        // Drain via the shutdown path. `commit_batch` uses `commit_in_memory`,
+        // so the dual-slot persist is skipped.
         let drain = handle.flush_for_shutdown(Duration::from_secs(5)).await;
         assert_eq!(drain.drained, 3, "shutdown drain must commit every queued entry");
         assert_eq!(drain.lost, 0);
@@ -2421,13 +2420,13 @@ mod tests {
         drop(txn);
 
         // `last_synced_snapshot_id` MUST NOT have advanced — this is the
-        // Sprint 1B5 Fix #2 contract. `commit_in_memory` skips the
-        // dual-slot persist; durability is the StateCheckpointer's job.
+        // commit-in-memory contract. `commit_in_memory` skips the dual-slot
+        // persist; durability is the StateCheckpointer's job.
         let synced_after_commit = events_db.db().last_synced_snapshot_id();
         assert_eq!(
             synced_after_commit, synced_before,
             "commit_batch must not advance last_synced_snapshot_id \
-             (Sprint 1B5 Fix #2: commit_in_memory skips the dual-slot persist)"
+             (commit_in_memory skips the dual-slot persist)"
         );
 
         // Forcing a sync (what the StateCheckpointer does on every tick)
@@ -2818,7 +2817,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Sprint 1B4 Task 3B — Proptests for queue ordering + flush correctness
+    // Proptests for queue ordering + flush correctness
     // =========================================================================
     //
     // Two invariants drive these proptests:
@@ -3020,7 +3019,7 @@ mod tests {
             /// Property 2: `enabled = false` escape hatch produces
             /// byte-identical `events.db` state vs the batched path.
             ///
-            /// The Sprint 1B4 design
+            /// The design doc
             /// (`docs/superpowers/specs/2026-04-19-sprint-1b4-handler-event-batching-design.md`
             /// § "enabled = false is the strict-durability escape
             /// hatch") specifies that operators can disable batching at
@@ -3038,7 +3037,7 @@ mod tests {
             ///   with `event_writer_batch.enabled = false` in the
             ///   runtime config. `record_handler_event` consults the
             ///   flag and falls through to `write_sync` (one fsync per
-            ///   event, matches pre-1B4 semantics).
+            ///   event; strict-synchronous semantics).
             /// - Handle B: constructed via [`EventHandle::with_batching`]
             ///   with `enabled = true`; every emission enqueues into
             ///   the flusher, and `flush_for_shutdown` drains the

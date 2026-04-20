@@ -561,7 +561,7 @@ impl LedgerServer {
                 .maybe_event_config(event_config)
                 .maybe_node_id(node_id)
                 .maybe_ingestion_rate_limiter(ingestion_rate_limiter)
-                // Sprint 1B3 Task 2C: route IngestEvents through REGIONAL Raft.
+                // Route IngestEvents through REGIONAL Raft.
                 .proposer(events_proposer.clone())
                 .manager(self.manager.clone())
                 .proposal_timeout(self.proposal_timeout)

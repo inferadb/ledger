@@ -2048,8 +2048,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             };
             use inferadb_ledger_types::EMPTY_HASH;
 
-            // Sprint 1B2 Task 2C: `create_backup` takes a pre-built
-            // `Snapshot`; per its contract, the caller must sync the state DB
+            // `create_backup` takes a pre-built `Snapshot`; per its contract,
+            // the caller must sync the state DB
             // first so the `StateLayer` reads below observe durable state.
             let db = self.state.database();
             Arc::clone(db).sync_state().await.map_err(|e| {

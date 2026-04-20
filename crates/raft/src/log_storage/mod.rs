@@ -4144,7 +4144,7 @@ mod tests {
         assert_eq!(write_committed[0].organization_id, org_id);
     }
 
-    // ── Sprint 1B3 Task 2C: IngestExternalEvents apply handler tests ──
+    // ── IngestExternalEvents apply handler tests ──
 
     /// Build a HandlerPhase `EventEntry` shaped like the ones the RPC handler
     /// constructs (UUID v4 event_id, fixed timestamp, no block_height).
@@ -12469,7 +12469,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Sprint 1B2 Task 2C: snapshot-build sync hook test
+    // snapshot-build sync hook test
     // ========================================================================
 
     /// `LedgerSnapshotBuilder::build_snapshot` (via `get_current_snapshot`)
@@ -12511,13 +12511,13 @@ mod tests {
         let synced_after = store.db.last_synced_snapshot_id();
         assert!(
             synced_after > synced_before,
-            "build_snapshot must advance last_synced_snapshot_id (Task 2C \
-             sync hook): before={synced_before} after={synced_after}"
+            "build_snapshot must advance last_synced_snapshot_id \
+             (sync hook): before={synced_before} after={synced_after}"
         );
     }
 
     // ========================================================================
-    // Sprint 1B2 Task 2D — replay_crash_gap
+    // replay_crash_gap
     // ========================================================================
     //
     // These tests drive `RaftLogStore::replay_crash_gap` directly against an
@@ -12672,14 +12672,12 @@ mod tests {
         );
     }
 
-    /// Sprint 1B3 Task 2D: post-replay sync must advance
-    /// `last_synced_snapshot_id` on EVERY configured domain DB
-    /// (state.db, blocks.db, events.db) in addition to raft.db. Before
-    /// 1B3 only state.db + raft.db were synced, so any dirty pages in
-    /// blocks.db or events.db (produced by the replayed commit-in-memory
-    /// applies in Task 2A/2B) would accumulate in memory until the next
-    /// checkpointer tick — a second crash during startup would lose
-    /// them.
+    /// Post-replay sync must advance `last_synced_snapshot_id` on EVERY
+    /// configured domain DB (state.db, blocks.db, events.db) in addition
+    /// to raft.db. If only state.db + raft.db were synced, any dirty
+    /// pages in blocks.db or events.db (produced by the replayed
+    /// commit-in-memory applies) would accumulate in memory until the next
+    /// checkpointer tick — a second crash during startup would lose them.
     #[tokio::test]
     async fn replay_crash_gap_post_replay_syncs_all_four_dbs() {
         let dir = tempdir().expect("create temp dir");
@@ -12787,13 +12785,11 @@ mod tests {
         );
         assert!(
             blocks_db.last_synced_snapshot_id() > blocks_synced_before,
-            "blocks.db last_synced_snapshot_id must advance on post-replay sync \
-             (Sprint 1B3 Task 2D)"
+            "blocks.db last_synced_snapshot_id must advance on post-replay sync"
         );
         assert!(
             events_db.db().last_synced_snapshot_id() > events_synced_before,
-            "events.db last_synced_snapshot_id must advance on post-replay sync \
-             (Sprint 1B3 Task 2D)"
+            "events.db last_synced_snapshot_id must advance on post-replay sync"
         );
     }
 
@@ -12829,7 +12825,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Sprint 1B3 Task 3B: property-based idempotency for IngestExternalEvents
+    // Property-based idempotency for IngestExternalEvents
     // =========================================================================
 
     /// Arbitrary sequences of `IngestExternalEvents` proposals are replay-safe:

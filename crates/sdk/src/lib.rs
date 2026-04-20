@@ -24,7 +24,7 @@
 //! `docs/operations/durability.md` for the full contract.
 //!
 //! External event ingestion (see [`LedgerClient::ingest_events`]) carries the
-//! same WAL-durability guarantee as of Sprint 1B3: a successful response means
+//! same WAL-durability guarantee: a successful response means
 //! the events committed through Raft and applied to the events.db in-memory,
 //! not that they have been fsynced to the events-state DB. Ingested event IDs
 //! are stable byte-identical across crash recovery — see the method docstring
@@ -40,7 +40,7 @@
 //! so a crash before the next checkpoint loses the flushed-but-uncheckpointed
 //! entries. Strict-durability deployments can disable the queue via the
 //! `UpdateConfig` admin RPC (`event_writer_batch.enabled = false`), restoring
-//! pre-1B4 per-emission fsync semantics. Apply-phase and ingested events are
+//! strict per-emission fsync semantics. Apply-phase and ingested events are
 //! unaffected. See `docs/operations/durability.md` for the full contract and
 //! the [`EventFilter::handler_phase_only`] docstring for the consumer-visible
 //! caveat.

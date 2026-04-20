@@ -704,7 +704,7 @@ pub enum LedgerRequest {
         address: String,
     },
 
-    /// Sprint 1B3 Task 2C: external audit-event ingestion routed through Raft.
+    /// External audit-event ingestion routed through Raft.
     ///
     /// Constructed by `EventsServiceImpl::ingest_events` AFTER validation +
     /// allow-list filtering. Only accepted events reach this variant; rejections
@@ -4050,8 +4050,8 @@ mod tests {
             // AddRegionLearner is intercepted by regional_proposal
             // before reaching the Raft log. It carries no PII.
             LedgerRequest::AddRegionLearner { .. } => RaftScope::Global,
-            // Sprint 1B3 Task 2C: IngestExternalEvents carries user-controlled
-            // strings (principal, event_type, details) and MUST ride the
+            // IngestExternalEvents carries user-controlled strings
+            // (principal, event_type, details) and MUST ride the
             // REGIONAL Raft group owning the organization. Classified
             // Regional so the PII-classification test fails loudly if the
             // routing ever regresses.

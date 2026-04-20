@@ -342,9 +342,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         // Mark dirty before commit: dirty marks are conservative
                         // (trigger re-hash from storage). Safe on commit failure.
                         state_layer.mark_dirty_keys(*vault, &all_dirty_keys);
-                        // Sprint 1B2 Task 2C: hot-path apply commit uses
-                        // `commit_in_memory` so no dual-slot persist (2 fsyncs)
-                        // runs per entry. Durability is realized by
+                        // The hot-path apply commit uses `commit_in_memory`
+                        // so no dual-slot persist (2 fsyncs) runs per entry.
+                        // Durability is realized by
                         // `Database::sync_state` driven by `StateCheckpointer`
                         // (periodic) and forced before snapshots / backups /
                         // shutdown. On crash, every write in the gap is
@@ -6713,7 +6713,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             },
 
             LedgerRequest::IngestExternalEvents { source, events: ingest_events } => {
-                // Sprint 1B3 Task 2C: external audit-event ingestion apply handler.
+                // External audit-event ingestion apply handler.
                 //
                 // Residency backstop: external EventEntry payloads carry
                 // user-controlled strings (principal, event_type, details).
@@ -6724,7 +6724,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 // reaches the GLOBAL apply path during development.
                 debug_assert!(
                     self.region != Region::GLOBAL,
-                    "IngestExternalEvents applied on GLOBAL shard — residency bug (Sprint 1B3)"
+                    "IngestExternalEvents applied on GLOBAL shard — residency bug"
                 );
 
                 // External events are idempotent under replay: the entire
@@ -6803,10 +6803,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                 }
 
-                // Sprint 1B3 Task 2C: events.db external-ingest apply commit
-                // uses `commit_in_memory` — same durability class as the
-                // apply-phase write_events path (Task 2B). Durability is
-                // realized by StateCheckpointer / snapshot / backup /
+                // The events.db external-ingest apply commit uses
+                // `commit_in_memory` — same durability class as the
+                // apply-phase `write_events` path. Durability is realized
+                // by StateCheckpointer / snapshot / backup /
                 // graceful-shutdown sync of events.db. On crash, every
                 // IngestExternalEvents proposal in the gap is WAL-replayable
                 // via apply_committed_entries.
@@ -6829,7 +6829,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 }
 
                 // Per-event metrics. Label values match the RPC-handler site
-                // this replaces (Sprint 1B3 design § Observability):
+                // this replaces (see design § Observability):
                 // phase="handler_phase" because events were constructed as
                 // HandlerPhase emission at the RPC boundary.
                 for entry in ingest_events.iter() {

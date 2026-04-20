@@ -254,7 +254,7 @@ impl BackupManager {
     /// Returns the backup metadata. Old backups are pruned according to the
     /// retention count.
     ///
-    /// Sprint 1B2 Task 2C: no `Database::sync_state` hook here. This function
+    /// No `Database::sync_state` hook here. This function
     /// accepts a pre-built `Snapshot` value and writes it plus a sidecar to
     /// the backup directory. The sync-before-read guarantee is the caller's
     /// responsibility: any caller that builds the `Snapshot` from live state
@@ -468,8 +468,8 @@ impl BackupManager {
         region_height: u64,
         tag: &str,
     ) -> Result<BackupMetadata> {
-        // Sprint 1B2 Task 2C: force `sync_state` so the backend's last-synced
-        // state matches `committed_state`. Incremental backups read directly
+        // Force `sync_state` so the backend's last-synced state matches
+        // `committed_state`. Incremental backups read directly
         // from the backend (`dirty_page_ids` + `export_pages`); under lazy
         // commits those dirty pages may still be in the in-process cache,
         // not yet persisted. Syncing first guarantees the emitted pages are
@@ -860,7 +860,7 @@ impl BackupManager {
         chain_commitment_hash: Hash,
         tag: &str,
     ) -> Result<BackupMetadata> {
-        // Sprint 1B2 Task 2C: force `sync_state` before reading the backend.
+        // Force `sync_state` before reading the backend.
         // A full page backup exports every live page; under lazy commits
         // some of those pages may be dirty in the in-process cache and
         // therefore not yet written via `flush_pages`. Syncing first
@@ -2064,11 +2064,11 @@ mod tests {
     }
 
     // ========================================================================
-    // Sprint 1B2 Task 2C: backup-path sync hooks fire before reading the backend
+    // Backup-path sync hooks fire before reading the backend
     // ========================================================================
 
     /// Helper: commit a write in-memory only (no dual-slot persist), simulating
-    /// an apply-path commit under Task 2C.
+    /// an apply-path commit.
     fn commit_in_memory_one<B: inferadb_ledger_store::StorageBackend>(
         db: &Arc<Database<B>>,
         key: &[u8],
@@ -2106,7 +2106,7 @@ mod tests {
         assert!(
             synced_after > synced_before,
             "create_full_page_backup must advance last_synced_snapshot_id \
-             (Task 2C sync hook): before={synced_before} after={synced_after}"
+             (sync hook): before={synced_before} after={synced_after}"
         );
     }
 
@@ -2141,7 +2141,7 @@ mod tests {
         assert!(
             synced_after > synced_before,
             "create_incremental_backup must advance last_synced_snapshot_id \
-             (Task 2C sync hook): before={synced_before} after={synced_after}"
+             (sync hook): before={synced_before} after={synced_after}"
         );
     }
 }

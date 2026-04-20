@@ -189,9 +189,9 @@ rate(ledger_operations_total{result="hit"}[5m]) /
 | `ledger_batch_flush_latency_seconds` | Histogram | -        | Batch flush wall-clock (Raft submit round-trip)     |
 | `ledger_batch_queue_depth`           | Gauge     | `region` | Pending writes at tick entry (write-saturation SLI) |
 
-### Removed in Sprint 1B5
+### Removed metrics
 
-`ledger_batch_eager_commits_total` and `ledger_batch_timeout_commits_total` were removed with the `eager_commit` policy. Timer-only flushing is now the only policy; `ledger_batch_coalesce_total` fires once per flush regardless of trigger. Bundled Grafana dashboards (`docs/dashboards/resource-saturation.json`, `docs/operations/grafana/ledger-dashboard.json`) were updated in the same sprint.
+`ledger_batch_eager_commits_total` and `ledger_batch_timeout_commits_total` were removed with the `eager_commit` policy. Timer-only flushing is now the only policy; `ledger_batch_coalesce_total` fires once per flush regardless of trigger. Bundled Grafana dashboards (`docs/dashboards/resource-saturation.json`, `docs/operations/grafana/ledger-dashboard.json`) were updated accordingly.
 
 ### Tuning indicators
 
@@ -223,7 +223,7 @@ ledger_determinism_bug_total > 0
 
 ## State Durability
 
-Lazy-commit + periodic-checkpoint durability (Sprint 1B2, extended to all four regional DBs in Sprint 1B3). Operator tuning + interpretation reference: [durability.md](durability.md).
+Lazy-commit + periodic-checkpoint durability, covering all four regional DBs. Operator tuning + interpretation reference: [durability.md](durability.md).
 
 | Metric                                           | Type      | Labels                        | Description                                                                                                                                                                                                                           |
 | ------------------------------------------------ | --------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -252,7 +252,7 @@ ledger_state_dirty_pages
 
 ## Handler Event Flush
 
-Metrics for the handler-phase event queue + background flusher introduced in Sprint 1B4. Operator tuning + durability contract: [durability.md § Handler-phase event flush window](durability.md#handler-phase-event-flush-window). Configuration knobs: [configuration.md § Handler-Phase Event Batching](configuration.md#handler-phase-event-batching).
+Metrics for the handler-phase event queue + background flusher. Operator tuning + durability contract: [durability.md § Handler-phase event flush window](durability.md#handler-phase-event-flush-window). Configuration knobs: [configuration.md § Handler-Phase Event Batching](configuration.md#handler-phase-event-batching).
 
 | Metric                                 | Type      | Labels              | Description                                                                                                                                                                                                                               |
 | -------------------------------------- | --------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

@@ -51,7 +51,7 @@ pub struct RuntimeConfig {
     /// State-DB checkpoint scheduling thresholds (time, applies, dirty pages).
     #[serde(default)]
     pub state_checkpoint: Option<CheckpointConfig>,
-    /// Handler-phase event batching parameters (Sprint 1B4).
+    /// Handler-phase event batching parameters.
     ///
     /// Controls the background `EventFlusher` that amortizes `events.db`
     /// fsyncs for handler-phase emissions. `queue_capacity` is

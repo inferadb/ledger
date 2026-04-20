@@ -13,7 +13,7 @@
 //! Mitigates noisy neighbor problems in multi-tenant regions by applying rate
 //! limits per organization at the region leader.
 //!
-//! # Concurrency design (Sprint 1B4 Task 2C)
+//! # Concurrency design
 //!
 //! The hot path through [`RateLimiter::check`] is lock-free:
 //!

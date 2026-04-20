@@ -202,13 +202,12 @@ async fn main() -> Result<(), ServerError> {
     let consensus_handle = node.handle.clone();
     let coordinator = node.coordinator.clone();
     // Clone the RaftManager so the `pre_shutdown` closure can force a final
-    // `sync_state` on every region's state DB AFTER the WAL flush
-    // (Sprint 1B2 Task 2B). This narrows the post-restart WAL replay to zero
-    // entries on clean shutdown.
+    // `sync_state` on every region's state DB AFTER the WAL flush. This
+    // narrows the post-restart WAL replay to zero entries on clean shutdown.
     let manager_for_shutdown = node.manager.clone();
     // Clone the batching `EventHandle` so the `pre_shutdown` closure can
-    // drain the handler-phase event flusher at Phase 5b (Sprint 1B4 Task
-    // 2B) — between the WAL flush (5a) and the state-DB sync (5c). The
+    // drain the handler-phase event flusher at Phase 5b — between the WAL
+    // flush (5a) and the state-DB sync (5c). The
     // flusher keeps running through coordinator shutdown so in-flight RPCs
     // in Phases 1-4 can still enqueue events; `flush_for_shutdown` is the
     // only signal that stops it.
@@ -246,7 +245,7 @@ async fn main() -> Result<(), ServerError> {
 
         graceful_shutdown
             .execute(|| async move {
-                // Phase 5a (Sprint 1B2): explicitly flush the WAL before the
+                // Phase 5a: explicitly flush the WAL before the
                 // consensus engine handle is dropped. This ensures all
                 // committed proposals are durable even if a crash occurs
                 // between gRPC server stop and handle drop.
@@ -257,7 +256,7 @@ async fn main() -> Result<(), ServerError> {
                     tracing::info!("WAL flushed successfully during shutdown");
                 }
 
-                // Phase 5b (Sprint 1B4): drain the handler-phase event
+                // Phase 5b: drain the handler-phase event
                 // flusher before the final state-DB sync. The flusher keeps
                 // accepting events through Phases 1-4 (in-flight RPCs still
                 // emit), so this is the single point where the queue is
@@ -292,8 +291,8 @@ async fn main() -> Result<(), ServerError> {
                     ),
                 }
 
-                // Phase 5c (Sprint 1B2 Task 2B + 1B3 Task 3A fix): force a
-                // final `sync_state` on every region's state DB AFTER the
+                // Phase 5c: force a final `sync_state` on every region's
+                // state DB AFTER the
                 // WAL flush so the dual-slot god byte captures every apply
                 // that happened between the last `StateCheckpointer` tick
                 // and now. On clean shutdown this drives post-restart WAL

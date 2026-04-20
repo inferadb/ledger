@@ -255,7 +255,7 @@ pub struct RegionBackgroundJobs {
     integrity_scrubber_handle: Option<JoinHandle<()>>,
     /// DEK re-wrapping job handle.
     dek_rewrap_handle: Option<JoinHandle<()>>,
-    /// State-DB checkpointer handle (Sprint 1B2 Task 2B). Drives
+    /// State-DB checkpointer handle. Drives
     /// [`Database::sync_state`](inferadb_ledger_store::Database::sync_state)
     /// on a time / apply-count / dirty-page trigger policy so state-DB
     /// durability is amortized across many in-memory commits.
@@ -318,18 +318,18 @@ pub struct RegionGroup {
     /// Shared between the [`StateCheckpointer`] (which syncs it on every
     /// checkpoint tick) and [`RaftManager::sync_all_state_dbs`] (which syncs
     /// it at graceful shutdown). Both flush paths are required because
-    /// `save_state_core` (Task 2C FLIP) writes `KEY_APPLIED_STATE` to
-    /// raft.db via `commit_in_memory` — leaving raft.db unsynced causes
-    /// clean-shutdown restarts to read `applied_durable = 0` and replay
-    /// the entire WAL. See the Task 3A follow-up in
+    /// `save_state_core` writes `KEY_APPLIED_STATE` to raft.db via
+    /// `commit_in_memory` — leaving raft.db unsynced causes clean-shutdown
+    /// restarts to read `applied_durable = 0` and replay the entire WAL.
+    /// See the follow-up in
     /// `docs/superpowers/specs/2026-04-19-commit-durability-audit.md`.
     raft_db: Arc<Database<FileBackend>>,
     /// `blocks.db` handle for this region.
     ///
     /// Surfaced alongside `raft_db` so the [`StateCheckpointer`] and
     /// [`RaftManager::sync_all_state_dbs`] can drive `sync_state` on
-    /// blocks.db in lock-step with state.db + raft.db. Sprint 1B3 flips
-    /// `BlockArchive::append_block` to `commit_in_memory`; without this
+    /// blocks.db in lock-step with state.db + raft.db.
+    /// `BlockArchive::append_block` uses `commit_in_memory`; without this
     /// handle the dirty pages from apply-phase block writes would never
     /// reach disk outside of ad-hoc flushes. The underlying database is
     /// shared with `block_archive` — the `BlockArchive` owns the domain
@@ -1124,7 +1124,7 @@ impl RaftManager {
             },
         };
 
-        // Sprint 1B2 Task 2D: close the crash-recovery gap widened by Task 2C.
+        // Close the crash-recovery gap widened by `commit_in_memory`.
         // `commit_in_memory` leaves the state DB lagging the WAL by up to one
         // checkpoint interval on an unclean shutdown; replay WAL entries in
         // `(applied_durable, last_committed]` through the normal apply
@@ -1336,7 +1336,7 @@ impl RaftManager {
     ///
     /// `raft_db`, `blocks_db`, and `events_db` are plumbed into the
     /// [`StateCheckpointer`] so it can `sync_state` on every durability
-    /// DB in lock-step (Sprint 1B3 Task 2D). `events_db` is `Option`
+    /// DB in lock-step. `events_db` is `Option`
     /// because some regions (test fixtures, historical GLOBAL-only
     /// configurations) are constructed without an events writer.
     #[allow(clippy::too_many_arguments)]
@@ -1397,12 +1397,11 @@ impl RaftManager {
         let btree_compactor_handle = btree_compactor.start();
         info!(region = region.as_str(), "Started B+ tree compactor");
 
-        // State-DB Checkpointer (Sprint 1B2 Task 2B extended by 1B3 Task 2D).
+        // State-DB Checkpointer.
         //
         // Drives `Database::sync_state` against in-memory commits produced by
-        // `WriteTransaction::commit_in_memory`. Sprint 1B2 Task 2C flipped
-        // the apply path to `commit_in_memory` on state.db + raft.db;
-        // Sprint 1B3 Tasks 2A/2B extend the flip to blocks.db + events.db.
+        // `WriteTransaction::commit_in_memory`. The apply path uses
+        // `commit_in_memory` on state.db + raft.db + blocks.db + events.db.
         // This checkpointer is the sync driver for all 4 DBs (or 3 when a
         // region has no events writer).
         //
@@ -1594,7 +1593,7 @@ impl RaftManager {
     /// Each region owns two lazy-durable databases: state.db (entity tables,
     /// via `StateLayer`) and raft.db (`KEY_APPLIED_STATE` blob + Raft log).
     /// Both must be synced — skipping raft.db causes `applied_durable = 0`
-    /// to be read on restart and forces a full WAL replay (Task 3A
+    /// to be read on restart and forces a full WAL replay (see the
     /// follow-up in the commit-durability audit).
     ///
     /// Errors are logged per-region and per-db but do not abort the sweep —
@@ -2404,13 +2403,13 @@ mod tests {
         // sync_state short-circuits to a no-op when there's nothing dirty,
         // but it still completes Ok(()) which is what this test asserts.
         //
-        // Sprint 1B3 Task 2D: the sweep now covers 4 DBs per region
-        // (state, raft, blocks, events when configured). This assertion
-        // confirms none of them regress their `last_synced_snapshot_id`.
+        // The sweep covers 4 DBs per region (state, raft, blocks, events
+        // when configured). This assertion confirms none of them regress
+        // their `last_synced_snapshot_id`.
         //
         // A deeper test that commits-in-memory and asserts the snapshot id
-        // actually advances belongs in Task 3A (crash-recovery integration),
-        // where the full apply pipeline is in scope.
+        // actually advances belongs in crash-recovery integration, where
+        // the full apply pipeline is in scope.
         let temp = TestDir::new();
         let config = create_test_config(&temp);
         let manager = test_manager(config);

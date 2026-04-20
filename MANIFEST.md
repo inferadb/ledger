@@ -837,7 +837,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - Invitation conversions: `From<InviteSlug>` / `From<proto::InviteSlug>` (owned + ref, both directions), `From<InvitationStatus>` / `TryFrom<proto::InvitationStatus>` (Unspecified→Pending default), `invitation_status_from_i32()` validator
 - Covers all domain types: Block, Transaction, Operation, Entity, Relationship, VaultSlug, InviteSlug, InvitationStatus, EventEntry, TokenPair, ValidatedToken, UserCredential, etc.
 - Unit tests + Proptests validating round-trip conversions (including events, tokens, and credentials)
-- **Insights**: Deduplication effort (Phase 2 Task 15) removed duplicate helper functions. Events proto conversion flattens Rust's data-carrying enums. Token conversions for `SigningKeyScope` domain enum (carries `OrganizationId`) and `PublicKeyInfo ↔ SigningKey` deferred to services layer where both proto and state crate types are available. `user_credential_to_proto()` is a function (not `From` trait) because domain `UserCredential.user` is `UserId(i64)` but proto uses `UserSlug(u64)` — `From` trait doesn't support extra parameters. `strip_totp_secret()` is a defense-in-depth helper for gRPC handlers (caller obligation, not conversion-layer guarantee). Proto `TotpAlgorithm` uses `SHA1 = 0` (not `UNSPECIFIED = 0`) because SHA-1 is the RFC 6238 default.
+- **Insights**: Proto-conversion helpers are deduplicated via `From`/`TryFrom` impls to avoid per-service copies. Events proto conversion flattens Rust's data-carrying enums. Token conversions for `SigningKeyScope` domain enum (carries `OrganizationId`) and `PublicKeyInfo ↔ SigningKey` are deferred to the services layer where both proto and state crate types are available. `user_credential_to_proto()` is a function (not `From` trait) because domain `UserCredential.user` is `UserId(i64)` but proto uses `UserSlug(u64)` — `From` trait doesn't support extra parameters. `strip_totp_secret()` is a defense-in-depth helper for gRPC handlers (caller obligation, not conversion-layer guarantee). Proto `TotpAlgorithm` uses `SHA1 = 0` (not `UNSPECIFIED = 0`) because SHA-1 is the RFC 6238 default.
 
 #### `generated/ledger.v1.rs`
 
@@ -885,7 +885,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - Re-exports: `LedgerTypeConfig`, `LedgerNodeId`, `RaftLogStore`, `RateLimiter`, `HotKeyDetector`, `GracefulShutdown`, `HealthState`, `BackgroundJobWatchdog`, `EventsGarbageCollector`, `SagaOrchestrator`, `SagaOrchestratorHandle`, `SagaSubmission`, `SagaOutput`, `OnboardingPii`, `OrgPii`, `OrphanCleanupJob`, `IntegrityScrubberJob`, `TokenMaintenanceJob`, `InviteMaintenanceJob`, `OrganizationPurgeJob`, `PostErasureCompactionJob`, `UserRetentionReaper`, `AutoRecoveryJob`, `BackupJob`, `BackupManager`, `BlockCompactor`, `LearnerRefreshJob`, `ResourceMetricsCollector`, `RuntimeConfigHandle`, `TtlGarbageCollector`, `RaftManager`, `RaftManagerConfig`, `RegionConfig`, `RegionGroup`, `GrpcRaftNetworkFactory`, `RegionStorage`, `RegionStorageManager`. (`LedgerServer` moved to `inferadb-ledger-services`)
 - Note: `LedgerRequest` is NOT re-exported (access via `types::LedgerRequest`). `RaftPayload` is NOT re-exported either (access via `log_storage` internals). `RaftPayload` wraps `LedgerRequest` with `proposed_at` for deterministic timestamps.
 - 30+ `#[doc(hidden)] pub mod` declarations for server-internal infrastructure (includes `event_writer`, `events_gc`, `snapshot`, `leader_transfer`)
-- **Insights**: Phase 2 Task 2 cleaned up public API. 2 stable modules + many doc-hidden modules. `leader_transfer` module added for graceful leadership handoff. Excellent encapsulation.
+- **Insights**: Public API is intentionally narrow — 2 stable modules with the remainder marked `#[doc(hidden)]` for server-internal infrastructure. `leader_transfer` supports graceful leadership handoff.
 
 #### `log_storage/`
 
@@ -1052,7 +1052,7 @@ The codebase demonstrates production-grade engineering: zero `unsafe` code, comp
 - `load_app()`, `read_vault_connection()`: App/vault lookup helpers
 - `error_code_to_status()`, `storage_err()`, `create_replay_context()`: Error conversion helpers
 - Note: `validate_email()`, `validate_user_name()`, `validate_organization_name()` are in the types crate's `validation` module, NOT in helpers.rs. Service handlers call them via `validation::validate_email()`.
-- **Insights**: Phase 2 Task 1 extracted shared code from write/admin services. `check_not_draining()` added for leader transfer sprint — centralizes the drain guard pattern. `ServiceContext` (in `service_infra.rs`) gained `propose_regional(region, request)` method + `regional_state(region)` + `email_blinding_key: Option<Arc<EmailBlindingKey>>` for cross-region Raft proposals and onboarding.
+- **Insights**: `helpers.rs` centralizes code shared across write/admin services. `check_not_draining()` centralizes the drain-guard pattern for leader transfer. `ServiceContext` (in `service_infra.rs`) exposes `propose_regional(region, request)` + `regional_state(region)` + `email_blinding_key: Option<Arc<EmailBlindingKey>>` for cross-region Raft proposals and onboarding.
 
 #### `services/metadata.rs`
 
@@ -1475,7 +1475,7 @@ These files sit between this crate's openraft integration and the multi-shard co
 - `SdkError::is_cas_conflict() -> bool`: Convenience method detecting CAS conflict (gRPC FAILED_PRECONDITION with "condition" in message) — simplifies compare-and-set retry loops
 - `ServerErrorDetails`: Decoded from proto ErrorDetails (error_code, retryable, retry_after, context, action)
 - `is_retryable()`, `error_type()`: Classification helpers
-- `attempt_history: Vec<(u32, String)>`: Retry tracking on `RetryExhausted` variant (PRD Task 2)
+- `attempt_history: Vec<(u32, String)>`: Retry tracking on `RetryExhausted` variant
 - **Insights**: Rich error context for debugging. ServerErrorDetails decode via prost. RateLimited variant with retry_after guidance. `is_cas_conflict()` pairs with `SetCondition::from_expected()` for ergonomic CAS patterns.
 
 #### `retry.rs`
@@ -1491,7 +1491,7 @@ These files sit between this crate's openraft integration and the multi-shard co
 
 #### `circuit_breaker.rs`
 
-- **Purpose**: Per-endpoint circuit breaker state machine (PRD Task 5)
+- **Purpose**: Per-endpoint circuit breaker state machine
 - **Key Types/Functions**:
 - `CircuitBreaker::new(config) -> Self`
 - `check() -> Result<()>`: Check state, transition Open→HalfOpen if timeout elapsed
@@ -1511,7 +1511,7 @@ These files sit between this crate's openraft integration and the multi-shard co
 
 #### `metrics.rs`
 
-- **Purpose**: SdkMetrics trait with noop and metrics-crate implementations (PRD Task 6)
+- **Purpose**: SdkMetrics trait with noop and metrics-crate implementations
 - **Key Types/Functions**:
 - `SdkMetrics` trait: record_request, record_retry, record_circuit_state, record_connection
 - `NoopSdkMetrics`: Zero-overhead default (no-op methods)
@@ -1553,7 +1553,7 @@ These files sit between this crate's openraft integration and the multi-shard co
 - **Purpose**: W3C Trace Context propagation, API version header injection
 - **Key Types/Functions**:
 - `TraceContextInterceptor`: Injects traceparent, tracestate, x-ledger-api-version, x-sdk-version headers
-- `with_timeout(duration)`: Injects grpc-timeout header (PRD Task 7)
+- `with_timeout(duration)`: Injects grpc-timeout header
 - Always injects x-sdk-version (not gated by trace config)
 - **Insights**: Tonic interceptor for header injection. W3C Trace Context standard. SDK version enables server-side telemetry.
 

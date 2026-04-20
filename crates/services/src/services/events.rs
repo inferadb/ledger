@@ -59,7 +59,7 @@ const COUNT_SCAN_LIMIT: usize = 100_000;
 #[derive(bon::Builder)]
 pub struct EventsService<B: StorageBackend> {
     /// Events database (local to this node).
-    #[allow(dead_code)] // reserved for read paths + test fixtures post Sprint 1B3 Task 2C
+    #[allow(dead_code)] // reserved for read paths + test fixtures
     events_db: EventsDatabase<B>,
 
     /// Applied state for slug resolution.
@@ -79,7 +79,7 @@ pub struct EventsService<B: StorageBackend> {
 
     /// Proposal service for routing `IngestExternalEvents` through Raft.
     ///
-    /// Sprint 1B3 Task 2C: when set, `ingest_events` proposes the accepted
+    /// When set, `ingest_events` proposes the accepted
     /// batch as [`LedgerRequest::IngestExternalEvents`] against the REGIONAL
     /// Raft group owning the organization, instead of writing directly to
     /// `events.db`. When `None`, ingestion is disabled (the RPC returns
@@ -688,8 +688,8 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
             accepted_entries.push(entry);
         }
 
-        // 8. Route the accepted batch through the REGIONAL Raft group (Sprint 1B3 Task 2C).
-        //    Rejections + accepted count are known locally — the apply response is just an ack.
+        // 8. Route the accepted batch through the REGIONAL Raft group. Rejections + accepted count
+        //    are known locally — the apply response is just an ack.
         let accepted_count = accepted_entries.len() as u32;
         let rejected_count = rejections.len() as u32;
         let caller = req.caller.as_ref().map_or(0, |c| c.slug);
@@ -767,8 +767,7 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
         }
 
         // 9. Record ingestion metrics (RPC-handler site, unchanged). Per-event
-        //    `ledger_event_writes_total` now fires on the apply side (Sprint 1B3 design §
-        //    Observability).
+        //    `ledger_event_writes_total` now fires on the apply side (see design § Observability).
         metrics::record_events_ingest(source, "accepted", accepted_count);
         if rejected_count > 0 {
             metrics::record_events_ingest(source, "rejected", rejected_count);
@@ -827,7 +826,7 @@ mod tests {
     use super::*;
 
     /// Test double that stands in for the apply-handler side of the
-    /// Sprint 1B3 Task 2C `IngestExternalEvents` flow.
+    /// `IngestExternalEvents` flow.
     ///
     /// - Captures every `propose_to_region` call for assertion.
     /// - Simulates the apply handler's write-through-and-ack by writing the proposed `EventEntry`
@@ -2009,7 +2008,7 @@ mod tests {
         assert_eq!(resp.get_ref().entries.len(), 1);
     }
 
-    // ── Sprint 1B3 Task 2C: IngestExternalEvents Raft-routing tests ──
+    // ── IngestExternalEvents Raft-routing tests ──
 
     /// A valid batch must produce exactly one `LedgerRequest::IngestExternalEvents`
     /// proposal via `propose_to_region`. The captured proposal's event list

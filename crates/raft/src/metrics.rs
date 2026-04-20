@@ -732,8 +732,7 @@ pub fn set_snapshot_disk_bytes(bytes: u64, region: &str) {
 /// State checkpoint events (counter). Labels: `region`, `trigger`, `status`.
 ///
 /// `trigger` is one of `time` | `applies` | `dirty` | `snapshot` | `backup` |
-/// `shutdown` (Sprint 1B2 Task 2A only emits the first three + ok/error; the
-/// remaining triggers are reserved for Tasks 2B/2C).
+/// `shutdown`.
 /// `status` is `ok` | `error`.
 pub const LEDGER_STATE_CHECKPOINTS_TOTAL: &str = "ledger_state_checkpoints_total";
 
@@ -762,8 +761,8 @@ pub const LEDGER_STATE_PAGE_CACHE_LEN: &str = "ledger_state_page_cache_len";
 pub const LEDGER_STATE_LAST_SYNCED_SNAPSHOT_ID: &str = "ledger_state_last_synced_snapshot_id";
 
 /// Number of WAL entries replayed during the post-open crash-recovery sweep
-/// (counter, Sprint 1B2 Task 2D). Fired exactly once per region on startup,
-/// with value 0 on clean shutdown. Labels: `region`.
+/// (counter). Fired exactly once per region on startup, with value 0 on
+/// clean shutdown. Labels: `region`.
 pub const LEDGER_STATE_RECOVERY_REPLAY_COUNT_TOTAL: &str =
     "ledger_state_recovery_replay_count_total";
 
@@ -888,7 +887,7 @@ pub fn record_state_recovery_duration(region: &str, duration: std::time::Duratio
     });
 }
 
-// ─── Handler-Phase Event Flusher (Sprint 1B4) ──────────────────────
+// ─── Handler-Phase Event Flusher ──────────────────────
 
 /// Total handler-phase event flushes by trigger reason (counter).
 /// Labels: `region`, `trigger = time | size | shutdown`.
@@ -1815,7 +1814,7 @@ mod tests {
         set_state_checkpoint_last_timestamp("global", 1_700_000_000.0);
     }
 
-    // --- Handler-phase event flusher (Sprint 1B4) ---
+    // --- Handler-phase event flusher ---
 
     #[test]
     fn test_record_event_flush_triggers() {

@@ -9,8 +9,8 @@ use super::ConfigError;
 // Rate Limiting Configuration
 // =============================================================================
 
-// Default values bias heavily toward throughput. Sprint 1B5 profiling showed a
-// single node sustains 1,350+ ops/s under concurrent load; the prior 100/50
+// Default values bias heavily toward throughput. Profiling showed a single
+// node sustains 1,350+ ops/s under concurrent load; the prior 100/50
 // per-client defaults capped this at ~52 ops/s via `tokens_exhausted`
 // rejections. These defaults aim to be effectively inert for any
 // reasonable single-tenant or trusted-caller workload, with the rate limiter

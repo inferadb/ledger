@@ -1,8 +1,8 @@
-//! Crash-recovery integration tests (Sprint 1B2 Task 3A).
+//! Crash-recovery integration tests.
 //!
-//! Proves the Phase 2 lazy-durability contract is crash-safe. After
-//! Task 2A-2D, the apply path uses `commit_in_memory` and leaves the
-//! state DB lagging the WAL by up to one checkpoint interval. These
+//! Proves the Phase 2 lazy-durability contract is crash-safe. The apply
+//! path uses `commit_in_memory` and leaves the state DB lagging the WAL
+//! by up to one checkpoint interval. These
 //! tests boot a real node on an owned `data_dir`, proposes entries
 //! through the normal Raft path, either crash (abort the server task
 //! without running `sync_all_state_dbs`) or shut down cleanly, then
@@ -90,12 +90,11 @@ struct CrashableNode {
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     /// UDS socket path as a string — used by gRPC client helpers in
     /// `common::connect_channel` when tests need to exercise the
-    /// wire-level RPC surface (Sprint 1B3 Task 3A ingest + write
-    /// scenarios). `None` if no socket was provisioned (e.g. future
-    /// TCP-only test variant).
+    /// wire-level RPC surface (ingest + write scenarios). `None` if no
+    /// socket was provisioned (e.g. future TCP-only test variant).
     addr: String,
-    /// Handler-phase event handle cloned from `BootstrappedNode` — Sprint
-    /// 1B4 Task 3A. Retained so tests can:
+    /// Handler-phase event handle cloned from `BootstrappedNode`.
+    /// Retained so tests can:
     ///   * Directly emit handler-phase events via [`EventHandle::record_handler_event`], bypassing
     ///     the RPC stack.
     ///   * Inspect `queue_depth()` between emission and flush.
@@ -125,15 +124,15 @@ impl CrashableNode {
     }
 
     /// Extended `start` that also accepts a post-bootstrap override for
-    /// the Sprint 1B4 `EventWriterBatchConfig`. When `Some`, the
+    /// the `EventWriterBatchConfig`. When `Some`, the
     /// runtime-config handle is swapped after the event flusher has been
     /// spawned — so the already-created `mpsc` channel keeps its
     /// bootstrap-time `queue_capacity` (not runtime-reconfigurable by
     /// design) while the flusher's next tick picks up the new
     /// `flush_interval_ms` / `flush_size_threshold`.
     ///
-    /// This is the test hook Sprint 1B4 Task 3A uses to force the
-    /// flusher into a "never fires on its own" configuration so we can
+    /// This test hook forces the flusher into a "never fires on its own"
+    /// configuration so we can
     /// observe the queued-but-not-yet-fsync'd window deterministically.
     async fn start_with(
         data_dir: PathBuf,
@@ -246,8 +245,8 @@ impl CrashableNode {
             "node failed to become GLOBAL leader within timeout"
         );
 
-        // Start the US_EAST_VA data region. Sprint 1B3 Task 3A tests need a
-        // REGIONAL Raft group so that `LedgerRequest::Write` can produce blocks
+        // Start the US_EAST_VA data region. These tests need a REGIONAL
+        // Raft group so that `LedgerRequest::Write` can produce blocks
         // in `blocks.db` and `LedgerRequest::IngestExternalEvents` has a target
         // for its REGIONAL-only proposal. Skipped on restart: bootstrap_node's
         // `discover_existing_regions` path auto-re-opens regions whose on-disk
@@ -263,7 +262,7 @@ impl CrashableNode {
             // `BatchWriterConfig` the GLOBAL region receives. Without it,
             // `RegionGroup::batch_handle()` returns `None` for the data region
             // and proposals bypass the BatchWriter — diverging from production
-            // and making Sprint 1B5 Fix #1b untestable at the integration layer.
+            // and making BatchWriter wiring untestable at the integration layer.
             let data_region_cfg = RegionConfig::builder()
                 .region(Region::US_EAST_VA)
                 .initial_members(vec![(handle.node_id(), config.advertise_addr())])
@@ -341,8 +340,8 @@ impl CrashableNode {
     /// Invokes the production pre-shutdown sequence:
     ///   1. Cancel background jobs so nothing proposes new entries.
     ///   2. Flush the WAL so every committed proposal is durable (Phase 5a).
-    ///   3. Drain the handler-phase event flusher + wait for its task to exit (Phase 5b — Sprint
-    ///      1B4 Task 2B). Any events enqueued during in-flight RPC completion land here.
+    ///   3. Drain the handler-phase event flusher + wait for its task to exit (Phase 5b). Any
+    ///      events enqueued during in-flight RPC completion land here.
     ///   4. Sync every region's state DB so `applied_durable == last_committed` for the next boot
     ///      (Phase 5c).
     ///   5. Drop the watch sender so the gRPC server loop exits.
@@ -350,8 +349,8 @@ impl CrashableNode {
     ///
     /// Order mirrors `crates/server/src/main.rs` — reordering any of
     /// these steps can leak entries past the final sync and break the
-    /// zero-replay contract, or (post-1B4) lose handler-phase events
-    /// that were enqueued but not yet committed to events.db.
+    /// zero-replay contract, or lose handler-phase events that were
+    /// enqueued but not yet committed to events.db.
     async fn graceful_shutdown(mut self) {
         self.coordinator.shutdown().await;
         let _ = self.handle.flush_for_shutdown(Duration::from_secs(5)).await;
@@ -376,7 +375,7 @@ impl CrashableNode {
 
     /// Simulates an unclean crash: aborts the server task without
     /// signalling shutdown. No WAL flush, no `sync_all_state_dbs`, and
-    /// (post-1B4) no `event_handle.flush_for_shutdown`. The WAL is
+    /// no `event_handle.flush_for_shutdown`. The WAL is
     /// still durable — per root rule 10, every committed proposal is
     /// WAL-fsynced before `propose_and_wait` returns — so only the
     /// state DB and the in-memory event flusher queue can lag.
@@ -401,9 +400,9 @@ impl CrashableNode {
     }
 
     /// Returns the last captured recovery stats for the US_EAST_VA data
-    /// region, if any. Sprint 1B3 Task 3A needs this because the
-    /// `BlockArchive` + `events_db` flips land on the REGIONAL region;
-    /// the GLOBAL replay path never exercises them.
+    /// region, if any. These tests need this because the `BlockArchive`
+    /// and `events_db` flips land on the REGIONAL region; the GLOBAL
+    /// replay path never exercises them.
     fn data_region_recovery_stats(&self) -> Option<RecoveryStats> {
         self.manager.last_recovery_stats(Region::US_EAST_VA)
     }
@@ -455,8 +454,8 @@ fn count_surviving_email_hashes(node: &CrashableNode, keys: &[String]) -> usize 
 /// size threshold goes straight to `usize::MAX`. `queue_capacity`
 /// stays at the default (10k) — this value is bootstrap-locked and
 /// runtime overrides would only emit a warn! on the next flusher
-/// tick. Used by Sprint 1B4 Task 3A tests to hold events in the
-/// queue across an arbitrary wall-clock window before crashing.
+/// tick. Used to hold events in the queue across an arbitrary
+/// wall-clock window before crashing.
 fn disable_event_flusher() -> EventWriterBatchConfig {
     EventWriterBatchConfig::builder()
         .enabled(true)
@@ -485,7 +484,7 @@ fn build_test_handler_event(node_id: u64, tag: &str) -> EventEntry {
         None,
         node_id,
     )
-    .principal("test:sprint-1b4-3a")
+    .principal("test:handler-crash-recovery")
     .outcome(EventOutcome::Denied { reason: "test-only".to_string() })
     .detail("test_tag", tag)
     .build(90)
@@ -494,10 +493,10 @@ fn build_test_handler_event(node_id: u64, tag: &str) -> EventEntry {
 /// Scans the GLOBAL `events.db` for all events matching `organization_id`,
 /// returning the full list. Handler-phase events emitted via
 /// `EventHandle::record_handler_event` land in the GLOBAL events.db
-/// regardless of the organization's home region (see Sprint 1B4 design
-/// doc § "Per-EventHandle isolation" invariant 5). Crash-recovery tests
-/// scan here rather than in the REGIONAL events.db used by the Sprint
-/// 1B3 ingest tests.
+/// regardless of the organization's home region (see design doc §
+/// "Per-EventHandle isolation" invariant 5). Crash-recovery tests
+/// scan here rather than in the REGIONAL events.db used by the ingest
+/// tests.
 fn scan_global_events(
     node: &CrashableNode,
     organization: OrganizationId,
@@ -529,15 +528,15 @@ fn count_tagged_handler_events(node: &CrashableNode, tag: &str) -> usize {
 
 /// After a graceful shutdown, the next restart should replay zero entries.
 ///
-/// Durability contract (Sprint 1B2 Task 2B): `pre_shutdown` flushes
-/// the WAL and calls `sync_all_state_dbs`, so `applied_durable ==
-/// last_committed` on restart and `replay_crash_gap` is a no-op.
+/// Durability contract: `pre_shutdown` flushes the WAL and calls
+/// `sync_all_state_dbs`, so `applied_durable == last_committed` on
+/// restart and `replay_crash_gap` is a no-op.
 ///
-/// Task 3A follow-up: `sync_all_state_dbs` now syncs both state.db and
-/// raft.db per region (previously it only synced state.db, leaving
+/// `sync_all_state_dbs` syncs both state.db and raft.db per region
+/// (previously it only synced state.db, leaving
 /// `KEY_APPLIED_STATE` on raft.db at 0 after every clean shutdown and
-/// forcing a full WAL replay on the next boot). See the Task 3A
-/// follow-up section in
+/// forcing a full WAL replay on the next boot). See the follow-up
+/// section in
 /// `docs/superpowers/specs/2026-04-19-commit-durability-audit.md`.
 #[tokio::test]
 async fn test_clean_shutdown_zero_replay() {
@@ -687,7 +686,7 @@ async fn test_crash_mid_checkpoint_old_slot_valid() {
 /// "mid-apply" at the wall-clock level catches at least one batch
 /// before its state-DB sync lands. `replay_crash_gap` replays the
 /// gap through `apply_committed_entries`, which is idempotent per
-/// log index (Task 1C's `append_block` idempotency-by-height +
+/// log index (`append_block` idempotency-by-height +
 /// `state_layer_sentinel` check in `apply_committed_entries`).
 #[tokio::test]
 async fn test_crash_mid_batch_apply() {
@@ -808,14 +807,14 @@ async fn test_snapshot_forces_sync() {
 /// real org+vault outside the saga requires replicating ~80 lines
 /// of bootstrap code that lives in `setup_user` + `create_test_vault`
 /// + regional saga step execution. The block-archive idempotency
-/// invariant is already covered by the Task 1C unit tests:
+/// invariant is already covered by the unit tests:
 /// `append_block_idempotent_by_height` and
 /// `append_block_rejects_divergent_block_at_same_height` in
 /// `crates/state/src/block_archive.rs`. Those tests exercise the
 /// same invariant the design doc calls out (identical bytes on
 /// replay, rejected on divergent bytes).
 ///
-/// Followup (Task 3B): the property-test candidate here is "replay
+/// Followup: the property-test candidate here is "replay
 /// any committed prefix, then replay an overlapping prefix, and
 /// assert the block archive state is a function of the WAL tail
 /// only." That's a deterministic simulation-level assertion and
@@ -836,8 +835,8 @@ async fn test_block_archive_idempotent_on_replay() {
 /// `last_committed` after `pre_shutdown` completes. This is the
 /// second-order invariant that makes zero-replay possible.
 ///
-/// Task 3A follow-up: relies on `sync_all_state_dbs` syncing both
-/// state.db and raft.db per region — see
+/// Relies on `sync_all_state_dbs` syncing both state.db and raft.db
+/// per region — see
 /// `test_clean_shutdown_zero_replay` above for the fix description.
 #[tokio::test]
 async fn test_shutdown_forces_sync() {
@@ -889,18 +888,18 @@ async fn test_shutdown_forces_sync() {
 }
 
 // ============================================================================
-// Sprint 1B3 Task 3A: blocks.db + events.db + external-ingest crash-recovery
+// blocks.db + events.db + external-ingest crash-recovery
 // ============================================================================
 //
-// Sprint 1B3 flipped `BlockArchive::append_block` (Task 2A) and the apply-path
-// `EventWriter::write_events` (Task 2B) to `commit_in_memory`, and routed the
-// external `IngestEvents` RPC through Raft via `LedgerRequest::IngestExternalEvents`
-// (Task 2C). Durability for all three is now realized via the `StateCheckpointer`
-// tick — periodic, or at snapshot/backup/shutdown. The three tests below prove
-// that with the checkpointer disabled, a WAL-committed proposal still survives
-// an unclean crash because `replay_crash_gap` re-runs `apply_committed_entries`
-// and the per-DB commit path is idempotent (idempotency-by-height for blocks,
-// upsert semantics for events).
+// `BlockArchive::append_block` and the apply-path `EventWriter::write_events`
+// use `commit_in_memory`, and the external `IngestEvents` RPC is routed
+// through Raft via `LedgerRequest::IngestExternalEvents`. Durability for all
+// three is realized via the `StateCheckpointer` tick — periodic, or at
+// snapshot/backup/shutdown. The three tests below prove that with the
+// checkpointer disabled, a WAL-committed proposal still survives an unclean
+// crash because `replay_crash_gap` re-runs `apply_committed_entries` and the
+// per-DB commit path is idempotent (idempotency-by-height for blocks, upsert
+// semantics for events).
 //
 // Scope extension to `CrashableNode`: each node now also starts the
 // `US_EAST_VA` data region during `start()` so `LedgerRequest::Write` and
@@ -908,7 +907,7 @@ async fn test_shutdown_forces_sync() {
 // region dir via `bootstrap_node`'s `discover_existing_regions` path.
 
 // ----------------------------------------------------------------------------
-// Shared setup helpers for Sprint 1B3 Task 3A tests
+// Shared setup helpers for the tests above
 // ----------------------------------------------------------------------------
 
 /// Bootstraps a user → organization → vault tuple on a fresh `CrashableNode` by
@@ -920,8 +919,8 @@ async fn test_shutdown_forces_sync() {
 /// per test. The direct-proposal shape below completes in < 500ms and produces
 /// an Active org + a fully-registered vault. It intentionally omits steps that
 /// are needed only for higher-level RPCs (profile, ownership, team) — the
-/// Sprint 1B3 tests exercise `IngestEvents` + `Write` only, and both require
-/// only (a) an Active org in the GLOBAL routing table, (b) a registered vault
+/// These tests exercise `IngestEvents` + `Write` only, and both require only
+/// (a) an Active org in the GLOBAL routing table, (b) a registered vault
 /// slug, (c) the US_EAST_VA region running.
 async fn bootstrap_org_and_vault(
     node: &CrashableNode,
@@ -1135,10 +1134,10 @@ fn read_region_block(
 }
 
 // ----------------------------------------------------------------------------
-// Test 8 (Sprint 1B3): external ingest is crash-recoverable
+// Test 8: external ingest is crash-recoverable
 // ----------------------------------------------------------------------------
 
-/// `IngestEvents` now routes through Raft (Sprint 1B3 Task 2C): the RPC
+/// `IngestEvents` routes through Raft: the RPC
 /// handler builds a `Vec<EventEntry>` with pre-generated UUID v4 event IDs
 /// and proposes `LedgerRequest::IngestExternalEvents` to the organization's
 /// REGIONAL Raft group. The apply handler writes each event to `events.db`
@@ -1164,7 +1163,7 @@ async fn test_crash_preserves_externally_ingested_events() {
 
     // Ingest 20 external events. Each entry generates a random UUID v4 at the
     // RPC handler, which is frozen into the WAL payload before Raft accepts
-    // the proposal — see Sprint 1B3 design doc § "Event-ID determinism".
+    // the proposal — see design doc § "Event-ID determinism".
     let batch = build_ingest_batch(20, "pre-crash");
     let resp = call_ingest_events(&node.addr, org_slug, admin_user, batch)
         .await
@@ -1222,14 +1221,13 @@ async fn test_crash_preserves_externally_ingested_events() {
 }
 
 // ----------------------------------------------------------------------------
-// Test 9 (Sprint 1B3): blocks.db is idempotent on replay
+// Test 9: blocks.db is idempotent on replay
 // ----------------------------------------------------------------------------
 
-/// Promoted from the Sprint 1B2 Task 3A deferral — Sprint 1B3 flipped
-/// `BlockArchive::append_block` to `commit_in_memory` (Task 2A), so the apply
-/// path's block-production side-effect now actually lags the WAL until the
-/// checkpoint tick. Task 1C's idempotency-by-height property guards replay:
-/// re-appending a block at an existing height is a no-op.
+/// `BlockArchive::append_block` uses `commit_in_memory`, so the apply
+/// path's block-production side-effect lags the WAL until the checkpoint
+/// tick. The idempotency-by-height property guards replay: re-appending
+/// a block at an existing height is a no-op.
 ///
 /// The test produces 30 region blocks via sequential entity writes, crashes
 /// before any checkpoint fires, and asserts that replay re-populates
@@ -1311,8 +1309,8 @@ async fn test_blocks_db_idempotent_on_replay() {
 
     // Every region_height reported by the VaultBlockIndex must decode to a
     // valid region block. This catches a class of bugs where replay leaves a
-    // dangling index row pointing at a non-existent block (Task 1C's
-    // idempotency-by-height is the guard).
+    // dangling index row pointing at a non-existent block
+    // (idempotency-by-height is the guard).
     let post_region_heights: std::collections::BTreeSet<u64> =
         post_vault_heights.values().copied().collect();
     let region_group =
@@ -1373,12 +1371,12 @@ fn collect_region_heights(
 }
 
 // ----------------------------------------------------------------------------
-// Test 10 (Sprint 1B3): events.db is idempotent on replay
+// Test 10: events.db is idempotent on replay
 // ----------------------------------------------------------------------------
 
-/// Sprint 1B3 flipped the apply-path `EventWriter::write_events` to
-/// `commit_in_memory` (Task 2B) and routed external ingest through Raft
-/// (Task 2C). This test mixes both emission paths under a wide crash gap:
+/// The apply-path `EventWriter::write_events` uses `commit_in_memory`, and
+/// external ingest is routed through Raft. This test mixes both emission
+/// paths under a wide crash gap:
 ///   * 20 external `IngestEvents` RPC calls (batch size 3 each — 60 events), each event tagged with
 ///     a pre-generated UUID v4 frozen into the WAL payload
 ///   * 10 entity writes (each produces apply-phase audit events)
@@ -1509,24 +1507,23 @@ async fn test_events_db_idempotent_on_replay() {
 }
 
 // ============================================================================
-// Sprint 1B4 Task 3A: handler-phase event flusher crash + shutdown
+// Handler-phase event flusher crash + shutdown
 // ============================================================================
 //
-// Sprint 1B4 flipped `EventHandle::record_handler_event` from a synchronous
-// `commit()` per event to an enqueue into a bounded `tokio::sync::mpsc`
-// channel drained by a background `EventFlusher` task (one per `EventHandle`,
-// i.e. one per node today). The durability contract changes from "fsync
-// before handler returns success" to "enqueued before handler returns
-// success; fsync within one flush cadence window (default 100ms)". Graceful
-// shutdown preserves zero-loss by draining the queue via the new
-// `EventHandle::flush_for_shutdown` at `pre_shutdown` Phase 5b — between the
-// WAL flush (5a) and the per-region state-DB sync (5c). See the design doc
-// at `docs/superpowers/specs/2026-04-19-sprint-1b4-handler-event-batching-design.md`
+// `EventHandle::record_handler_event` enqueues into a bounded
+// `tokio::sync::mpsc` channel drained by a background `EventFlusher` task
+// (one per `EventHandle`, i.e. one per node today). The durability contract
+// is "enqueued before handler returns success; fsync within one flush
+// cadence window (default 100ms)". Graceful shutdown preserves zero-loss by
+// draining the queue via `EventHandle::flush_for_shutdown` at `pre_shutdown`
+// Phase 5b — between the WAL flush (5a) and the per-region state-DB sync
+// (5c). See the design doc at
+// `docs/superpowers/specs/2026-04-19-sprint-1b4-handler-event-batching-design.md`
 // § "Testing strategy" for the intended scenarios.
 //
 // The three tests below cover the visible-contract corners of that change:
 //   * Test 11 — crash before flush: events enqueued within the flush window are lost on SIGKILL
-//     (the `new` durability window the sprint introduces).
+//     (the durability window the batching change introduces).
 //   * Test 12 — graceful shutdown: Phase 5b drains the queue; zero events lost on a clean exit.
 //   * Test 13 — time-triggered flush: with the flusher left on its default cadence, events emitted
 //     pre-crash ARE preserved if we wait longer than the flush interval before crashing. This
@@ -1537,11 +1534,11 @@ async fn test_events_db_idempotent_on_replay() {
 // Test 11: handler-phase events enqueued within the flush window are lost on crash
 // ----------------------------------------------------------------------------
 
-/// Documents Sprint 1B4's new durability contract: a SIGKILL between a
-/// successful RPC response and the next flusher tick loses any handler-phase
-/// events emitted during that window. The pre-1B4 contract ("fsync before
-/// the handler returns success") would have preserved every event — that
-/// invariant no longer holds, and this test makes the change visible.
+/// Documents the durability contract: a SIGKILL between a successful RPC
+/// response and the next flusher tick loses any handler-phase events emitted
+/// during that window. A strict per-event "fsync before the handler returns
+/// success" contract would have preserved every event — that invariant no
+/// longer holds, and this test makes the change visible.
 ///
 /// Setup: push an `EventWriterBatchConfig` that effectively disables the
 /// flusher's time + size triggers (60s interval, `usize::MAX` size
@@ -1550,7 +1547,7 @@ async fn test_events_db_idempotent_on_replay() {
 /// settles into a 1s poll + 60s-or-bust cadence. Emit events directly via
 /// `EventHandle::record_handler_event` so we bypass the RPC handler stack
 /// entirely (the integration-test intent is to prove the durability
-/// contract at the flusher level; the RPC path is a Sprint 1B5 concern).
+/// contract at the flusher level; the RPC path is a separate concern).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_handler_events_lost_within_flush_window_on_crash() {
     const TAG: &str = "pre-crash-lost";
@@ -1618,7 +1615,7 @@ async fn test_handler_events_lost_within_flush_window_on_crash() {
     let surviving = count_tagged_handler_events(&restarted, TAG);
     assert_eq!(
         surviving, 0,
-        "Sprint 1B4 contract: handler-phase events enqueued within the flush window MUST be lost \
+        "Contract: handler-phase events enqueued within the flush window MUST be lost \
          on crash before the flusher drains. Expected 0 surviving, got {surviving}."
     );
 
@@ -1665,10 +1662,10 @@ async fn test_handler_events_preserved_across_graceful_shutdown() {
             .record_handler_event(build_test_handler_event(node.handle.node_id(), TAG));
     }
 
-    // Graceful shutdown now drains the event flusher at Phase 5b before
-    // syncing state DBs at Phase 5c. Sprint 1B5 Fix #2: the flusher's
-    // `commit_batch` uses `commit_in_memory`, so queued events only become
-    // durable via Phase 5c's `sync_all_state_dbs` sweep on events.db.
+    // Graceful shutdown drains the event flusher at Phase 5b before syncing
+    // state DBs at Phase 5c. The flusher's `commit_batch` uses
+    // `commit_in_memory`, so queued events only become durable via Phase 5c's
+    // `sync_all_state_dbs` sweep on events.db.
     node.graceful_shutdown().await;
 
     // Restart and assert every emitted event round-tripped. `start` on
@@ -1678,7 +1675,7 @@ async fn test_handler_events_preserved_across_graceful_shutdown() {
     let surviving = count_tagged_handler_events(&restarted, TAG);
     assert_eq!(
         surviving, EVENTS_EMITTED,
-        "Sprint 1B4 + 1B5 contract: graceful shutdown Phase 5b (drain) + Phase 5c \
+        "Contract: graceful shutdown Phase 5b (drain) + Phase 5c \
          (sync_all_state_dbs) MUST make every queued event durable before exit. \
          Expected {EVENTS_EMITTED} surviving, got {surviving}."
     );
@@ -1694,12 +1691,11 @@ async fn test_handler_events_preserved_across_graceful_shutdown() {
 /// have been flushed AND checkpointed MUST be durable even on an unclean
 /// crash. Test 11 proves events are lost within the flush window; this test
 /// proves they are safe OUTSIDE the checkpoint window. Together they pin
-/// the Sprint 1B5 durability contract to "at most `checkpoint_interval_ms`
+/// the durability contract to "at most `checkpoint_interval_ms`
 /// of handler-phase events lost on crash".
 ///
-/// Sprint 1B5 Fix #2 widens the loss window from "flush_interval_ms"
-/// (default 100ms, 1B4) to "checkpoint_interval_ms" (default 500ms, 1B5).
-/// `EventFlusher::commit_batch` now uses `commit_in_memory` — only the
+/// The loss window is "checkpoint_interval_ms" (default 500ms).
+/// `EventFlusher::commit_batch` uses `commit_in_memory` — only the
 /// `StateCheckpointer`'s per-tick `sync_state` on events.db makes queued
 /// events durable on an unclean crash.
 ///
@@ -1738,8 +1734,8 @@ async fn test_handler_events_durable_after_checkpoint_interval() {
     }
 
     // Phase 1: wait for the flusher to drain the queue (default 100ms
-    // interval). Under 1B5, this only commits in-memory — the events are
-    // visible via in-process reads but NOT durable across crashes yet.
+    // interval). This only commits in-memory — the events are visible via
+    // in-process reads but NOT durable across crashes yet.
     let drain_deadline = std::time::Instant::now() + Duration::from_secs(5);
     while node.event_handle.queue_depth() > 0 && std::time::Instant::now() < drain_deadline {
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -1751,9 +1747,9 @@ async fn test_handler_events_durable_after_checkpoint_interval() {
     );
 
     // Phase 2: wait for the StateCheckpointer to advance events.db's
-    // `last_synced_snapshot_id` — this is the post-1B5 durability
-    // boundary. Default checkpoint_interval_ms is 500ms; 5s is a ~10×
-    // safety margin against CI scheduling jitter.
+    // `last_synced_snapshot_id` — this is the durability boundary. Default
+    // checkpoint_interval_ms is 500ms; 5s is a ~10× safety margin against
+    // CI scheduling jitter.
     let sync_deadline = std::time::Instant::now() + Duration::from_secs(5);
     while events_db_handle.last_synced_snapshot_id() <= synced_before
         && std::time::Instant::now() < sync_deadline
@@ -1783,7 +1779,7 @@ async fn test_handler_events_durable_after_checkpoint_interval() {
     let surviving = count_tagged_handler_events(&restarted, TAG);
     assert_eq!(
         surviving, EVENTS_EMITTED,
-        "Sprint 1B5 Fix #2 contract: handler-phase events synced by the StateCheckpointer \
+        "Contract: handler-phase events synced by the StateCheckpointer \
          MUST survive a crash. Expected {EVENTS_EMITTED} surviving, got {surviving}."
     );
 
@@ -1791,17 +1787,14 @@ async fn test_handler_events_durable_after_checkpoint_interval() {
 }
 
 // ----------------------------------------------------------------------------
-// Test 14 (Sprint 1B5 Fix #2): handler-phase events lost on crash within
-// the checkpoint window
+// Test 14: handler-phase events lost on crash within the checkpoint window
 // ----------------------------------------------------------------------------
 
-/// Sprint 1B5 Fix #2 widens the durability window. This test is the
-/// post-1B5 companion to Test 11: even after the flusher commits a batch
+/// Companion to Test 11: even after the flusher commits a batch
 /// (`commit_in_memory`), an unclean crash BEFORE the StateCheckpointer's
-/// next tick loses every event in that batch. The previous contract
-/// ("events are durable within `flush_interval_ms` of emission") is
-/// replaced by "events are durable within `checkpoint_interval_ms` of the
-/// last checkpoint tick".
+/// next tick loses every event in that batch. The durability contract is
+/// "events are durable within `checkpoint_interval_ms` of the last
+/// checkpoint tick".
 ///
 /// Setup:
 ///   * Default batch config (flusher ticks on 100ms cadence).
@@ -1843,7 +1836,7 @@ async fn test_handler_events_lost_within_checkpoint_window_on_crash() {
             .record_handler_event(build_test_handler_event(node.handle.node_id(), TAG));
     }
 
-    // Wait for the flusher to drain (default 100ms). Post-1B5 this is a
+    // Wait for the flusher to drain (default 100ms). The flusher uses
     // `commit_in_memory` — the pages are dirty but the dual-slot god byte
     // hasn't been updated.
     let drain_deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -1858,8 +1851,8 @@ async fn test_handler_events_lost_within_checkpoint_window_on_crash() {
 
     // Events are visible in-process (commit_in_memory) — confirms the
     // flusher ran — but `last_synced_snapshot_id` has NOT advanced because
-    // the StateCheckpointer is disabled. This is the precise Sprint 1B5
-    // Fix #2 durability window under test.
+    // the StateCheckpointer is disabled. This is the durability window
+    // under test.
     let in_memory_count = count_tagged_handler_events(&node, TAG);
     assert_eq!(
         in_memory_count, EVENTS_EMITTED,
@@ -1890,7 +1883,7 @@ async fn test_handler_events_lost_within_checkpoint_window_on_crash() {
     let surviving = count_tagged_handler_events(&restarted, TAG);
     assert_eq!(
         surviving, 0,
-        "Sprint 1B5 Fix #2 contract: handler-phase events flushed via commit_in_memory \
+        "Contract: handler-phase events flushed via commit_in_memory \
          but NOT yet synced by the StateCheckpointer MUST be lost on an unclean crash. \
          Expected 0 surviving, got {surviving}."
     );
@@ -1899,13 +1892,13 @@ async fn test_handler_events_lost_within_checkpoint_window_on_crash() {
 }
 
 // ============================================================================
-// Sprint 1B5 Fix #1b: BatchWriter is wired into production bootstrap
+// BatchWriter is wired into production bootstrap
 // ============================================================================
 
-/// Sprint 1B5 Fix #1b plumbed `BatchConfig` → `BatchWriterConfig` through
-/// `bootstrap.rs` so every region starts with a live `BatchWriter` spawned on
-/// the runtime. Pre-1B5 `batch_writer_config` defaulted to `None` inside
-/// `RegionConfig`, which silently bypassed the batch writer in production:
+/// `BatchConfig` → `BatchWriterConfig` is plumbed through `bootstrap.rs` so
+/// every region starts with a live `BatchWriter` spawned on the runtime.
+/// Previously `batch_writer_config` defaulted to `None` inside `RegionConfig`,
+/// which silently bypassed the batch writer in production:
 /// every proposal landed on Raft alone, one fsync per commit. This test
 /// locks that wiring down — if `batch_handle()` returns `None` on a
 /// freshly-bootstrapped region the regression is back.
@@ -1927,7 +1920,7 @@ async fn test_batch_writer_active_in_production() {
     let global = node.manager.get_region_group(Region::GLOBAL).expect("GLOBAL region running");
     assert!(
         global.batch_handle().is_some(),
-        "Sprint 1B5 Fix #1b: GLOBAL region must have a BatchWriterHandle wired \
+        "GLOBAL region must have a BatchWriterHandle wired \
          after bootstrap (batch_handle() returned None — BatchWriter is \
          bypassed in production again)"
     );
@@ -1936,7 +1929,7 @@ async fn test_batch_writer_active_in_production() {
         node.manager.get_region_group(Region::US_EAST_VA).expect("US_EAST_VA region running");
     assert!(
         data.batch_handle().is_some(),
-        "Sprint 1B5 Fix #1b: US_EAST_VA region must have a BatchWriterHandle \
+        "US_EAST_VA region must have a BatchWriterHandle \
          wired after start_data_region (batch_handle() returned None — data-region \
          code path bypasses the batch writer)"
     );
@@ -1945,24 +1938,24 @@ async fn test_batch_writer_active_in_production() {
 }
 
 // ============================================================================
-// Sprint 1B5 Fix #1: WAL batching sustains reasonable throughput under load
+// WAL batching sustains reasonable throughput under load
 // ============================================================================
 
-/// Smoke test for Sprint 1B5 Fix #1 — the WAL batching retune (`max_batch_size=500`,
+/// Smoke test for the WAL batching retune (`max_batch_size=500`,
 /// `batch_timeout=10ms`, `tick_interval=5ms`, `eager_commit` removed).
 ///
 /// Not a benchmark; a regression guard. The profile-suite drives the real
-/// throughput measurements (1,350 ops/s at concurrency=32 on 1B5); this test
-/// picks a floor well below that (100 ops/s) so normal variance stays green
-/// while a regression back to the pre-1B5 fsync-per-op state (~52 ops/s) or
-/// to the pre-Fix-#1b "no BatchWriter wired" state trips the floor.
+/// throughput measurements (1,350 ops/s at concurrency=32); this test picks
+/// a floor well below that (100 ops/s) so normal variance stays green while
+/// a regression back to the fsync-per-op state (~52 ops/s) or to the
+/// "no BatchWriter wired" state trips the floor.
 ///
 /// Shape: 8 concurrent writers × 20 proposals each = 160 total, budget
 /// ~10 seconds. Asserts observed throughput ≥ 20 ops/s. The `CrashableNode`
 /// default config raises the rate-limit ceilings to 10k req/s — so rate
-/// limiting is not the bottleneck under this load (Sprint 1B5 defaults-raise).
+/// limiting is not the bottleneck under this load.
 ///
-/// The floor is intentionally loose (20 ops/s, ~67× below the measured 1B5
+/// The floor is intentionally loose (20 ops/s, ~67× below the measured
 /// single-test ceiling of 1,350 ops/s). Under `cargo test` parallel execution
 /// the consolidated integration binary runs ~15 other crash-recovery tests
 /// concurrently, each spinning up a full server; resource contention brings
@@ -1970,9 +1963,8 @@ async fn test_batch_writer_active_in_production() {
 /// 20 ops/s keeps CI green while still catching the two target regressions:
 ///   * `eager_commit` reintroduced → fsync-per-op bottleneck compounds under contention, observed
 ///     ops/s falls well below 20.
-///   * BatchWriter unwired (pre-Fix-#1b) → separately caught by
-///     `test_batch_writer_active_in_production`; rate-limit-bound at ~52 ops/s quiescent, far lower
-///     under contention.
+///   * BatchWriter unwired → separately caught by `test_batch_writer_active_in_production`;
+///     rate-limit-bound at ~52 ops/s quiescent, far lower under contention.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_batch_writer_throughput_under_concurrent_load() {
     const CONCURRENCY: usize = 8;
@@ -1990,7 +1982,7 @@ async fn test_batch_writer_throughput_under_concurrent_load() {
     // Fan out CONCURRENCY × PROPOSALS_PER_TASK proposals through
     // `propose_and_wait`. Each handle clone shares the same region group
     // and therefore the same BatchWriter — this is the production write
-    // path after Fix #1b.
+    // path.
     let mut tasks = Vec::with_capacity(CONCURRENCY);
     for worker in 0..CONCURRENCY {
         let handle = node.handle.clone();
@@ -2032,13 +2024,13 @@ async fn test_batch_writer_throughput_under_concurrent_load() {
         "expected all {total} proposals to succeed; got {successes} (losses mask throughput regressions)"
     );
 
-    // Second — throughput floor. 100 ops/s is ~2× the pre-1B5 cap (52
-    // ops/s) and an order of magnitude below the measured 1B5 ceiling
+    // Second — throughput floor. 100 ops/s is ~2× the prior cap (52
+    // ops/s) and an order of magnitude below the measured ceiling
     // (1,350 ops/s at c=32), so normal CI variance stays green while a
     // regression to fsync-per-op or unwired BatchWriter surfaces loudly.
     assert!(
         ops_per_sec >= MIN_OPS_PER_SEC,
-        "Sprint 1B5 Fix #1 throughput floor: expected ≥ {MIN_OPS_PER_SEC:.0} ops/s, \
+        "throughput floor: expected ≥ {MIN_OPS_PER_SEC:.0} ops/s, \
          got {ops_per_sec:.1} ops/s ({successes} proposals in {:.3}s). \
          Likely regressions: BatchWriter unwired (see test_batch_writer_active_in_production), \
          eager_commit reintroduced, or tick_interval too fine-grained.",
@@ -2049,7 +2041,7 @@ async fn test_batch_writer_throughput_under_concurrent_load() {
 }
 
 // ============================================================================
-// Sprint 1B5 Fix #1 (follow-up): throughput floor through the gRPC Write path
+// Throughput floor through the gRPC Write path
 // ============================================================================
 
 /// Sibling to `test_batch_writer_throughput_under_concurrent_load` that drives
@@ -2060,8 +2052,7 @@ async fn test_batch_writer_throughput_under_concurrent_load() {
 /// `BatchWriter::submit` layer only sees traffic that comes through
 /// `WriteService::write` (`crates/services/src/services/write.rs` — the
 /// `batch_handle.submit(ledger_request)` branch). Without this test,
-/// LedgerRequest-level coalescing — Sprint 1B5 Fix #1b's main win — has no
-/// integration-layer regression guard.
+/// LedgerRequest-level coalescing has no integration-layer regression guard.
 ///
 /// Shape: 8 concurrent workers × 10 writes each = 80 total, submitted through
 /// `WriteServiceClient::write` against the node's UDS socket. Org + vault
@@ -2070,9 +2061,9 @@ async fn test_batch_writer_throughput_under_concurrent_load() {
 ///
 ///   1. All 80 writes returned `WriteResponse::Success` — a high loss rate would mask a throughput
 ///      regression (we'd be measuring timeouts, not fsync cadence).
-///   2. `ops_per_sec >= 20.0` — same floor as the direct-consensus variant. Well above the pre-1B5
-///      cap (~52 ops/s quiescent) and far below the measured 1B5 ceiling, so CI variance stays
-///      green while regressions trip loudly. The gRPC path adds codec + UDS hop cost relative to
+///   2. `ops_per_sec >= 20.0` — same floor as the direct-consensus variant. Well above the prior
+///      cap (~52 ops/s quiescent) and far below the measured ceiling, so CI variance stays green
+///      while regressions trip loudly. The gRPC path adds codec + UDS hop cost relative to
 ///      `propose_and_wait`, so we don't ratchet the floor higher.
 ///   3. `region.batch_handle().is_some()` on `US_EAST_VA` after the test completes. Combined with
 ///      the successful gRPC writes, this is the operational proof that `BatchWriter::submit` was
@@ -2190,7 +2181,7 @@ async fn test_batch_writer_throughput_via_grpc_under_concurrent_load() {
     // The gRPC path adds codec + UDS hop cost so we don't ratchet higher.
     assert!(
         ops_per_sec >= MIN_OPS_PER_SEC,
-        "Sprint 1B5 Fix #1 gRPC throughput floor: expected ≥ {MIN_OPS_PER_SEC:.0} ops/s, \
+        "gRPC throughput floor: expected ≥ {MIN_OPS_PER_SEC:.0} ops/s, \
          got {ops_per_sec:.1} ops/s ({successes} writes in {:.3}s). \
          Likely regressions: BatchWriter unwired (see test_batch_writer_active_in_production), \
          eager_commit reintroduced, or the BatchWriter::submit path in \
@@ -2210,7 +2201,7 @@ async fn test_batch_writer_throughput_via_grpc_under_concurrent_load() {
         data.batch_handle().is_some(),
         "BatchWriter was not wired on US_EAST_VA when the gRPC writes ran — the \
          throughput measurement above exercised the direct-proposal fallback, not \
-         the BatchWriter::submit path Sprint 1B5 Fix #1b was meant to guard."
+         the BatchWriter::submit path."
     );
 
     node.crash();

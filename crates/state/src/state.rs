@@ -591,8 +591,7 @@ impl<B: StorageBackend> StateLayer<B> {
     /// [`StateLayer::apply_operations`] so their writes are durable-on-return.
     ///
     /// See `docs/superpowers/specs/2026-04-19-commit-durability-audit.md`
-    /// (Sprint 1B3 Task 2E) for the classification rules governing the
-    /// split.
+    /// for the classification rules governing the split.
     ///
     /// # Errors
     ///
@@ -2753,7 +2752,7 @@ mod tests {
         assert!(!state.relationship_exists(vault, "doc:1", "viewer", "user:alice").unwrap());
     }
 
-    // ─── Sprint 1B3 Task 2E: apply_operations_lazy vs apply_operations ───────
+    // ─── apply_operations_lazy vs apply_operations ───────
 
     /// `apply_operations_lazy` produces the same in-process observable
     /// state as `apply_operations`. Test both paths against the same ops

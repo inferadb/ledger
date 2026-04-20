@@ -599,15 +599,15 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
     /// - On-disk backend state (pages + dual-slot state pointer) has NOT been touched. The on-disk
     ///   state pointer still references the previous synced snapshot.
     ///
-    /// Durability is deferred to the next `Database::sync_state` call
-    /// (added in Sprint 1B2 Task 1B). `sync_state` runs periodically via
-    /// `StateCheckpointer`, and is forced synchronously before snapshot
-    /// creation, before backup creation, and during graceful shutdown.
+    /// Durability is deferred to the next `Database::sync_state` call.
+    /// `sync_state` runs periodically via `StateCheckpointer`, and is forced
+    /// synchronously before snapshot creation, before backup creation, and
+    /// during graceful shutdown.
     ///
     /// Intended only for callers whose writes are reconstructible from
     /// the WAL on crash recovery — see the "API surface and
-    /// commit-durability classification" table in the Sprint 1B2 design
-    /// doc (`docs/superpowers/specs/2026-04-19-sprint-1b2-apply-batching-design.md`).
+    /// commit-durability classification" table in
+    /// `docs/superpowers/specs/2026-04-19-sprint-1b2-apply-batching-design.md`.
     /// Callers that need strict on-disk durability on return (e.g.
     /// `save_vote`) MUST use [`WriteTransaction::commit`] instead.
     ///
@@ -674,7 +674,7 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
         // page IDs to the allocator now would let a subsequent durable `commit`
         // reuse them and overwrite pages that recovery would walk from the old
         // root. The drain runs in `Database::sync_state` AFTER
-        // `persist_state_to_disk` advances the god byte. See the Sprint 1B2
+        // `persist_state_to_disk` advances the god byte. See the apply-batching
         // design doc's "Invariants that MUST be preserved" section.
 
         self.db.tracker.end_write_transaction(self.snapshot_id);

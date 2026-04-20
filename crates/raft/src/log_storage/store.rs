@@ -399,10 +399,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
     /// Returns the `raft.db` handle for this region.
     ///
-    /// Owned here because `save_state_core` (Sprint 1B2 Task 2C FLIP) writes
-    /// `KEY_APPLIED_STATE` via `WriteTransaction::commit_in_memory` on this
-    /// database. `RaftManager::sync_all_state_dbs` (Task 2B) and
-    /// `StateCheckpointer` (Task 2A) both need a direct handle to call
+    /// Owned here because `save_state_core` writes `KEY_APPLIED_STATE` via
+    /// `WriteTransaction::commit_in_memory` on this database.
+    /// `RaftManager::sync_all_state_dbs` and `StateCheckpointer` both need
+    /// a direct handle to call
     /// `Database::sync_state` from outside `log_storage`, so that the
     /// durable `applied_durable` read on restart matches the WAL's
     /// `last_committed` after a clean shutdown.
@@ -586,10 +586,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
         write_txn
             .insert::<tables::RaftState>(&super::KEY_VOTE.to_string(), &vote_data)
             .map_err(|e| to_storage_error(&e))?;
-        // DO NOT flip to `commit_in_memory` — Raft election safety (Sprint 1B2
-        // Task 2C audit). A node that voted for A in term T, crashed, and
-        // recovered with the vote lost could vote for B in term T, producing
-        // split-brain.
+        // DO NOT flip to `commit_in_memory` — Raft election safety. A node
+        // that voted for A in term T, crashed, and recovered with the vote
+        // lost could vote for B in term T, producing split-brain.
         write_txn.commit().map_err(|e| to_storage_error(&e))?;
         *self.vote_cache.write() = Some(*vote);
         Ok(())
@@ -840,8 +839,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
         // Flush all external table writes in the same transaction
         Self::flush_external_writes(pending, &mut write_txn)?;
 
-        // Sprint 1B2 Task 2C: per-batch Raft metadata commit uses
-        // `commit_in_memory`. Every field in this transaction (last_applied,
+        // The per-batch Raft metadata commit uses `commit_in_memory`.
+        // Every field in this transaction (last_applied,
         // membership, sequences, slug tables, region_height,
         // previous_region_hash, organization/vault/team/app/user metadata)
         // is WAL-replayable via the normal apply pipeline. Flipping this
@@ -2175,7 +2174,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Sprint 1B2 Task 2C: commit-durability classification tests
+    // commit-durability classification tests
     // ========================================================================
 
     /// The FLIP: `save_state_core` uses `commit_in_memory` now. After the call
@@ -2206,12 +2205,12 @@ mod tests {
         assert_states_equal(&state, &loaded);
 
         // But `last_synced_snapshot_id` has NOT advanced — no fsync fired
-        // in `save_state_core` under Task 2C.
+        // in `save_state_core` under commit_in_memory.
         let synced_after_commit = store.db.last_synced_snapshot_id();
         assert_eq!(
             synced_after_commit, synced_before,
             "save_state_core must not advance last_synced_snapshot_id \
-             (Task 2C: commit_in_memory skips the dual-slot persist)"
+             (commit_in_memory skips the dual-slot persist)"
         );
 
         // Forcing a sync advances the synced id.

@@ -20,7 +20,7 @@ These files are load-bearing — their invariants ripple beyond the local file. 
 
 ## Owned Surface
 
-- **`StorageEngine<B>`, `StateLayer<B>`** — generic over `StorageBackend`. `StateLayer` exposes two apply entrypoints: `apply_operations` (strict-durable; for admin / recovery callers that must return with on-disk durability — `AdminService::recover_vault`, `check_integrity`, `ReadService` historical replay, `AutoRecoveryJob`) and `apply_operations_lazy` (lazy via `commit_in_memory`; for every IN-APPLY-PIPELINE admin arm reachable from `apply_request_with_events`). Sprint 1B3 Task 2E split. See `docs/superpowers/specs/2026-04-19-commit-durability-audit.md` for the call-site classification.
+- **`StorageEngine<B>`, `StateLayer<B>`** — generic over `StorageBackend`. `StateLayer` exposes two apply entrypoints: `apply_operations` (strict-durable; for admin / recovery callers that must return with on-disk durability — `AdminService::recover_vault`, `check_integrity`, `ReadService` historical replay, `AutoRecoveryJob`) and `apply_operations_lazy` (lazy via `commit_in_memory`; for every IN-APPLY-PIPELINE admin arm reachable from `apply_request_with_events`).
 - **`SystemKeys::*`** key builders, `KEY_REGISTRY`, `KeyTier` (`Global` / `Regional`), `KeyFamily` (`Entity`, `Directory`, `Index`, `Meta`, `Sequence`, `Shred`, `Temporary`, `Audit`).
 - **Stores**: `EntityStore`, `RelationshipStore`, `RelationshipIndex`, `BlockArchive`.
 - **`ShardManager`** — org-to-shard routing; not persisted, rebuilt from GLOBAL state on start.

@@ -138,9 +138,9 @@ impl RuntimeConfigHandle {
 
         // Handler-phase event-batching config changes take effect on the
         // next flush cycle (the flusher re-reads from RuntimeConfigHandle
-        // on every tick). Sprint 1B4 note: `queue_capacity` is restart-only
-        // — the flusher warns on live updates of that field (tokio::mpsc
-        // channels cannot be resized without dropping sender + receiver).
+        // on every tick). `queue_capacity` is restart-only — the flusher
+        // warns on live updates of that field (tokio::mpsc channels cannot
+        // be resized without dropping sender + receiver).
         if changed.contains(&"event_writer_batch".to_string()) {
             info!(
                 "EventWriter batch config updated — takes effect on next flush cycle \

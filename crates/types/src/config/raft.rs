@@ -378,15 +378,15 @@ impl Default for BatchConfig {
 }
 
 fn default_max_batch_size() -> usize {
-    // Sprint 1B5 Fix #1: under concurrent load, a larger cap lets more
-    // proposals amortize a single WAL fsync. See `BatchWriterConfig`
-    // documentation for the tuning tradeoff.
+    // Under concurrent load, a larger cap lets more proposals amortize a
+    // single WAL fsync. See `BatchWriterConfig` documentation for the tuning
+    // tradeoff.
     500
 }
 
 fn default_batch_timeout() -> Duration {
-    // Sprint 1B5 Fix #1: give proposals more time to accumulate; caps
-    // added latency under single-client load.
+    // Give proposals more time to accumulate; caps added latency under
+    // single-client load.
     Duration::from_millis(10)
 }
 

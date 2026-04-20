@@ -1436,12 +1436,12 @@ mod tests {
     }
 
     // =========================================================================
-    // Property-based idempotency (Sprint 1B3 Task 3B)
+    // Property-based idempotency
     // =========================================================================
 
     /// Replay-idempotency invariant covered as a proptest.
     ///
-    /// Post-Sprint 1B3, `EventStore::write` lands on the apply path for
+    /// `EventStore::write` lands on the apply path for
     /// `LedgerRequest::IngestExternalEvents` — and on crash recovery the
     /// apply pipeline can re-drive the same proposal against events.db.
     /// [`apply_ingest_external_events_replay_idempotency`] covers the

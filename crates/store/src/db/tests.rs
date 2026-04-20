@@ -1816,7 +1816,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // commit_in_memory (Sprint 1B2 Task 1A)
+    // commit_in_memory
     // -----------------------------------------------------------------------
 
     /// `commit_in_memory` makes writes observable to future read transactions
@@ -1860,12 +1860,11 @@ mod tests {
 
     /// `commit_in_memory` does NOT advance the dual-slot state pointer on disk.
     ///
-    /// Task 1A cannot fully verify this (no `last_synced_snapshot_id` accessor
-    /// yet — Task 1B adds it). For Task 1A we use the strongest observable
-    /// available: after a `commit_in_memory`-only session, reopening the same
-    /// file MUST NOT surface the write. That's exactly the durability gap
-    /// the lazy-persist design introduces, and is the behavior `sync_state`
-    /// will close in Task 1B.
+    /// This test uses the strongest observable available without a
+    /// `last_synced_snapshot_id` accessor: after a `commit_in_memory`-only
+    /// session, reopening the same file MUST NOT surface the write. That's
+    /// exactly the durability gap the lazy-persist design introduces, and is
+    /// the behavior `sync_state` closes.
     #[test]
     fn commit_in_memory_does_not_persist_state_pointer() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1999,7 +1998,7 @@ mod tests {
     }
 
     /// Regression test for the deferred-drain invariant of
-    /// `commit_in_memory` (Sprint 1B2 Task 1A follow-up).
+    /// `commit_in_memory`.
     ///
     /// `commit_in_memory` MUST record CoW-freed pages in `pending_frees` but
     /// MUST NOT call `try_free_pending_pages`, because the on-disk god byte
@@ -2065,7 +2064,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // sync_state (Sprint 1B2 Task 1B)
+    // sync_state
     // -----------------------------------------------------------------------
 
     /// `sync_state` advances `last_synced_snapshot_id` to the raw snapshot id
@@ -2216,7 +2215,7 @@ mod tests {
 
     /// End-to-end durability: a `commit_in_memory` followed by `sync_state`
     /// SURVIVES a reopen. This is the exact gap `sync_state` is designed
-    /// to close, and is the contrast case for the Task 1A regression
+    /// to close, and is the contrast case for the regression
     /// `commit_in_memory_does_not_persist_state_pointer`.
     #[tokio::test(flavor = "multi_thread")]
     async fn sync_state_durability_across_reopen() {
@@ -2255,8 +2254,8 @@ mod tests {
         let db = std::sync::Arc::new(Database::<InMemoryBackend>::open_in_memory().unwrap());
 
         // Seed so the leaf page we later empty belongs to a prior snapshot
-        // and therefore enters pages_to_free via CoW, as in the Task 1A
-        // regression scenario.
+        // and therefore enters pages_to_free via CoW, as in the
+        // commit_in_memory regression scenario.
         {
             let mut txn = db.write().unwrap();
             txn.insert::<tables::RaftLog>(&1u64, &vec![0xAA]).unwrap();
@@ -2297,8 +2296,7 @@ mod tests {
     /// - No deadlock on the `sync_state_mutex`.
     ///
     /// The coalesce logic is the load-bearing piece; proving it under
-    /// adversarial scheduling belongs to the simulation harness that
-    /// Task 3B adds.
+    /// adversarial scheduling belongs to the simulation harness.
     #[tokio::test(flavor = "multi_thread")]
     async fn sync_state_concurrent_callers_coalesce() {
         let db = std::sync::Arc::new(Database::<InMemoryBackend>::open_in_memory().unwrap());
@@ -2365,10 +2363,10 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // sync_state coalesce + fault-injection (Sprint 1B2 Task 3B)
+    // sync_state coalesce + fault-injection
     // -----------------------------------------------------------------------
 
-    /// Concurrent-caller coalesce property (Task 3B Test 2).
+    /// Concurrent-caller coalesce property.
     ///
     /// Spawns N concurrent `sync_state` callers racing against M
     /// `commit_in_memory` writers. After the race, `last_synced_snapshot_id`
@@ -2479,15 +2477,15 @@ mod tests {
         }
     }
 
-    /// Disk-full fault injection during `sync_state` (Task 3B Test 3).
+    /// Disk-full fault injection during `sync_state`.
     ///
     /// Wraps `InMemoryBackend` with a toggleable `FaultyBackend` that returns
     /// `Error::Io` on writes when armed. Assertions:
     ///
     ///  1. Pre-fault: `commit_in_memory` advances committed state; the synced pointer still trails.
     ///  2. Armed sync: `sync_state` fails with `Err(Io)`; the synced pointer is NOT advanced, and
-    ///     dirty pages remain in the cache (per the Task 1B contract: `try_free_pending_pages` is
-    ///     gated on a successful pointer advance).
+    ///     dirty pages remain in the cache (per the sync_state contract: `try_free_pending_pages`
+    ///     is gated on a successful pointer advance).
     ///  3. Disarmed retry: `sync_state` succeeds; the synced pointer catches up to committed, and
     ///     the dirty pages that survived the failed call are now durable (durability surviving a
     ///     reopen is not observable here because the fault backend is in-memory, but the

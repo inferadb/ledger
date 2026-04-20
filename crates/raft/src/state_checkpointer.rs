@@ -2,14 +2,13 @@
 //!
 //! Drives [`Database::sync_state`] on a time / apply-count / dirty-page
 //! trigger policy so that state-DB durability is amortized across many
-//! in-memory commits. The apply path uses `WriteTransaction::commit_in_memory`
-//! (landed in Sprint 1B2 Task 1A), so writes visible to in-process readers
-//! may be ahead of the dual-slot on-disk pointer until the next checkpoint.
-//! This task narrows that gap.
+//! in-memory commits. The apply path uses `WriteTransaction::commit_in_memory`,
+//! so writes visible to in-process readers may be ahead of the dual-slot
+//! on-disk pointer until the next checkpoint. This task narrows that gap.
 //!
 //! Each region has up to **four** `Database<FileBackend>` handles that go
-//! lazy under Sprint 1B2 / 1B3: `state.db` (entity/relationship tables, owned
-//! by `StateLayer`), `raft.db` (`KEY_APPLIED_STATE` + Raft log, owned by
+//! lazy: `state.db` (entity/relationship tables, owned by `StateLayer`),
+//! `raft.db` (`KEY_APPLIED_STATE` + Raft log, owned by
 //! `RaftLogStore`), `blocks.db` (historical block archive, owned by
 //! `BlockArchive`), and `events.db` (audit events, owned by
 //! `EventsDatabase` — optional: some regions are configured without events).
@@ -17,8 +16,8 @@
 //! batch, so the checkpointer syncs them concurrently on every fire.
 //! Missing the raft.db sync would cause `applied_durable = 0` to be read on
 //! clean-shutdown restart (`KEY_APPLIED_STATE` never reaches disk), forcing
-//! a full WAL replay — see the Task 3A follow-up in the commit-durability
-//! audit. Missing blocks.db or events.db would leave their dirty pages
+//! a full WAL replay — see the follow-up in the commit-durability audit.
+//! Missing blocks.db or events.db would leave their dirty pages
 //! accumulating unbounded in memory between ticks.
 //!
 //! Fire policy (any one triggers a checkpoint):
@@ -26,11 +25,11 @@
 //! 1. **Time** — more than `interval_ms` elapsed since the last checkpoint.
 //! 2. **Applies** — >= `applies_threshold` applies since the last checkpoint.
 //! 3. **Dirty pages** — `max(cache_dirty_page_count)` across all 4 DBs (state, raft, blocks, events
-//!    — whichever are configured) >= `dirty_pages_threshold`. Sprint 1B3 reviewer-mandated change:
-//!    under ingest-heavy / write-light workloads, only events.db (or only blocks.db under
-//!    write-heavy / read-light workloads) may be dirty; using state.db alone as the proxy would
-//!    fail to fire until the time trigger elapsed, letting the non-state DBs accumulate pages. One
-//!    atomic read per DB per wake-up is trivially cheap.
+//!    — whichever are configured) >= `dirty_pages_threshold`. Under ingest-heavy / write-light
+//!    workloads, only events.db (or only blocks.db under write-heavy / read-light workloads) may be
+//!    dirty; using state.db alone as the proxy would fail to fire until the time trigger elapsed,
+//!    letting the non-state DBs accumulate pages. One atomic read per DB per wake-up is trivially
+//!    cheap.
 //!
 //! Thresholds are read from `RuntimeConfigHandle` on every wake-up so live
 //! `UpdateConfig` RPCs take effect on the next tick without restarting the
@@ -95,21 +94,20 @@ pub struct StateCheckpointer {
     /// Raft DB handle (the `raft.db` file that owns `KEY_APPLIED_STATE` +
     /// the Raft log). Synced concurrently with `state_db` so clean-shutdown
     /// restarts read a non-zero `applied_durable` and skip WAL replay.
-    /// See Task 3A follow-up in the commit-durability audit.
+    /// See the follow-up in the commit-durability audit.
     raft_db: Arc<Database<FileBackend>>,
     /// Blocks DB handle (the `blocks.db` file that owns the region's block
-    /// archive). Sprint 1B3 flips `BlockArchive::append_block` to
-    /// `commit_in_memory`; this handle is synced concurrently alongside
-    /// state.db + raft.db + events.db so dirty apply-phase block pages
-    /// reach disk on the checkpoint cadence.
+    /// archive). `BlockArchive::append_block` uses `commit_in_memory`; this
+    /// handle is synced concurrently alongside state.db + raft.db + events.db
+    /// so dirty apply-phase block pages reach disk on the checkpoint cadence.
     blocks_db: Arc<Database<FileBackend>>,
     /// Events DB handle (the `events.db` file that owns apply-phase audit
     /// events). `None` for regions configured without an events writer
     /// (test fixtures, historical GLOBAL-only configurations) — the
-    /// checkpointer silently skips events.db in that case. Sprint 1B3
-    /// flips `EventWriter::write_events` to `commit_in_memory`; when
-    /// present, this handle must be synced to prevent apply-phase event
-    /// pages from accumulating unbounded between ticks.
+    /// checkpointer silently skips events.db in that case.
+    /// `EventWriter::write_events` uses `commit_in_memory`; when present,
+    /// this handle must be synced to prevent apply-phase event pages from
+    /// accumulating unbounded between ticks.
     events_db: Option<Arc<Database<FileBackend>>>,
     /// Live runtime-config handle. Re-read on every wake-up so live
     /// `UpdateConfig` RPCs take effect on the next tick.
@@ -220,10 +218,9 @@ impl StateCheckpointer {
     }
 
     /// Returns the peak `cache_dirty_page_count()` across every configured
-    /// DB (state, raft, blocks, and events when Some). Sprint 1B3 reviewer
-    /// change: the trigger must fire on whichever DB is under pressure,
-    /// not solely state.db, because ingest-heavy workloads can dirty
-    /// events.db while state.db stays clean.
+    /// DB (state, raft, blocks, and events when Some). The trigger must
+    /// fire on whichever DB is under pressure, not solely state.db, because
+    /// ingest-heavy workloads can dirty events.db while state.db stays clean.
     fn max_dirty_pages(&self) -> u64 {
         let state = self.state_db.cache_dirty_page_count() as u64;
         let raft = self.raft_db.cache_dirty_page_count() as u64;
@@ -246,7 +243,7 @@ impl StateCheckpointer {
     /// tick — the remaining DBs still get their sync so each flush
     /// narrows the crash gap. Accumulators advance only when **every**
     /// configured DB's sync succeeded, keeping the lock-step policy the
-    /// 2-DB version established in Sprint 1B2.
+    /// 2-DB version established.
     async fn do_checkpoint(&self, trigger: &'static str, latest_applied_at_start: u64) {
         // Compute how many entries this checkpoint is flushing before we
         // reset the accumulator. Used in both the success debug! and the
@@ -260,10 +257,10 @@ impl StateCheckpointer {
         // Sync every configured DB concurrently: state.db owns the
         // entity/relationship tables, raft.db owns `KEY_APPLIED_STATE`,
         // blocks.db owns the historical block archive, events.db (when
-        // configured) owns apply-phase audit events. Sprint 1B3 flips
-        // blocks.db + events.db apply-path commits to `commit_in_memory`;
-        // all of them must reach disk for a clean-shutdown restart to
-        // find a consistent on-disk world and skip WAL replay.
+        // configured) owns apply-phase audit events. The blocks.db +
+        // events.db apply-path commits use `commit_in_memory`; all of them
+        // must reach disk for a clean-shutdown restart to find a consistent
+        // on-disk world and skip WAL replay.
         //
         // The match on `events_db` lets us emit a 3-arm join when events
         // is absent — this preserves the "configured DBs only" invariant
@@ -430,12 +427,11 @@ impl StateCheckpointer {
     /// spinning the tokio select loop.
     async fn tick(&self, config: &CheckpointConfig) {
         let latest_applied = *self.applied_rx.borrow();
-        // Sprint 1B3: the dirty-page trigger reads `max()` across every
-        // configured DB (state, raft, blocks, events when present). Using
-        // state.db alone as a proxy fails under ingest-heavy workloads
-        // where only events.db is dirty; the reviewer mandated `max()` so
-        // operator-tuned thresholds apply to whichever DB is under
-        // pressure.
+        // The dirty-page trigger reads `max()` across every configured DB
+        // (state, raft, blocks, events when present). Using state.db alone
+        // as a proxy fails under ingest-heavy workloads where only
+        // events.db is dirty; `max()` ensures operator-tuned thresholds
+        // apply to whichever DB is under pressure.
         let dirty_pages = self.max_dirty_pages();
         // Cache-length gauge continues to report state.db — it's the
         // operator-facing "how large is the working set" metric; per-DB
@@ -653,8 +649,8 @@ mod tests {
         handle.await.expect("task join");
     }
 
-    /// Regression test for the Task 3A follow-up: the checkpointer must
-    /// sync raft.db alongside state.db on every fire. Without this, a
+    /// Regression test: the checkpointer must sync raft.db alongside
+    /// state.db on every fire. Without this, a
     /// clean-shutdown restart reads `applied_durable = 0` from raft.db
     /// and forces a full WAL replay even though state.db is caught up.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -690,7 +686,7 @@ mod tests {
         assert!(
             raft_handle.last_synced_snapshot_id() > 0,
             "raft.db last_synced_snapshot_id must advance on checkpoint \
-             (Task 3A follow-up: missing this caused full WAL replay after clean shutdown)"
+             (missing this caused full WAL replay after clean shutdown)"
         );
     }
 
@@ -868,7 +864,7 @@ mod tests {
         assert_eq!(cfg, CheckpointConfig::default());
     }
 
-    // ── Sprint 1B3 Task 2D — 4-DB coverage ─────────────────────────────
+    // ── 4-DB coverage ─────────────────────────────
 
     /// All 4 configured DBs (state + raft + blocks + events) must have
     /// their `last_synced_snapshot_id` advance when the checkpointer
@@ -879,8 +875,8 @@ mod tests {
         let dbs = new_test_db_with_events();
         let events_handle =
             Arc::clone(dbs.events.as_ref().expect("events db configured by helper"));
-        // Dirty a page on every DB — mirrors the post-1B3 apply pattern
-        // where state.db, raft.db, blocks.db, and events.db all receive
+        // Dirty a page on every DB — mirrors the apply pattern where
+        // state.db, raft.db, blocks.db, and events.db all receive
         // `commit_in_memory` writes on an applied batch.
         commit_in_memory_one(&dbs.state, b"k1", b"v1");
         commit_in_memory_one(&dbs.raft, b"k1", b"v1");
@@ -947,8 +943,8 @@ mod tests {
     }
 
     /// `max()` trigger: dirtying ONLY blocks.db past the threshold must
-    /// fire the dirty-page trigger. Pre-1B3 the trigger sampled state.db
-    /// alone and would have missed this case.
+    /// fire the dirty-page trigger. The `max()` across all four DBs
+    /// catches cases a state.db-only sample would miss.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn checkpoint_max_trigger_fires_on_blocks_db_pressure() {
         let dbs = new_test_db_with_events();
@@ -975,8 +971,7 @@ mod tests {
 
     /// `max()` trigger: dirtying ONLY events.db past the threshold must
     /// fire the dirty-page trigger. Critical under ingest-heavy
-    /// workloads where `IngestExternalEvents` touches only events.db
-    /// until Task 2A/2B flips land.
+    /// workloads where `IngestExternalEvents` touches only events.db.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn checkpoint_max_trigger_fires_on_events_db_pressure() {
         let dbs = new_test_db_with_events();
@@ -1023,7 +1018,7 @@ mod tests {
     }
 
     /// `max()` trigger: state.db pressure alone also fires — parity
-    /// check with the pre-1B3 behaviour.
+    /// check that the single-DB case still triggers the checkpoint.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn checkpoint_max_trigger_fires_on_state_db_pressure() {
         let dbs = new_test_db_with_events();
@@ -1042,7 +1037,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Apply-accumulator property tests (Sprint 1B2 Task 3B Test 4)
+    // Apply-accumulator property tests
     // -----------------------------------------------------------------------
 
     /// Accumulator-reset invariant covered as a proptest.

@@ -854,8 +854,8 @@ impl<B: StorageBackend> Database<B> {
     /// modified since the last BACKUP checkpoint for incremental-backup
     /// bookkeeping. That count resets on backup completion, not on sync.
     ///
-    /// Used by `StateCheckpointer` (added in Sprint 1B2 Task 2A) to trigger
-    /// a checkpoint when accumulated dirty pages exceed a threshold — back-
+    /// Used by `StateCheckpointer` to trigger a checkpoint when accumulated
+    /// dirty pages exceed a threshold — back-
     /// pressure against unbounded cache growth under sustained
     /// [`WriteTransaction::commit_in_memory`] load.
     pub fn cache_dirty_page_count(&self) -> usize {
@@ -870,8 +870,8 @@ impl<B: StorageBackend> Database<B> {
     /// advancing the on-disk dual-slot state pointer. On crash before the
     /// next `sync_state`, the database rolls back to this snapshot id;
     /// durability of in-flight in-memory commits is the WAL's responsibility
-    /// (per the Sprint 1B2 durability contract — see
-    /// `docs/superpowers/specs/2026-04-19-sprint-1b2-apply-batching-design.md`).
+    /// (see `docs/superpowers/specs/2026-04-19-sprint-1b2-apply-batching-design.md`
+    /// for the durability contract).
     pub fn last_synced_snapshot_id(&self) -> u64 {
         self.last_synced_snapshot_id.load(Ordering::Acquire)
     }

@@ -1050,9 +1050,9 @@ fn default_event_overflow_behavior() -> EventOverflowBehavior {
 
 /// Handler-phase event-batching configuration.
 ///
-/// Controls the in-memory queue + background flusher introduced in
-/// Sprint 1B4 that amortizes `events.db` fsyncs for the handler-phase
-/// emission path. Handlers enqueue `EventEntry` values; a flusher drains
+/// Controls the in-memory queue + background flusher that amortizes
+/// `events.db` fsyncs for the handler-phase emission path. Handlers
+/// enqueue `EventEntry` values; a flusher drains
 /// the queue on a time / size / shutdown trigger and commits once per
 /// batch, so one fsync covers every event emitted during the flush
 /// window.
@@ -1073,8 +1073,8 @@ fn default_event_overflow_behavior() -> EventOverflowBehavior {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EventWriterBatchConfig {
     /// Master switch. When `false`, `record_handler_event` bypasses the
-    /// queue entirely and falls back to the pre-1B4 synchronous
-    /// per-event fsync path — the strict-durability escape hatch for
+    /// queue entirely and falls back to the synchronous per-event
+    /// fsync path — the strict-durability escape hatch for
     /// compliance deployments.
     ///
     /// Default: `true`.

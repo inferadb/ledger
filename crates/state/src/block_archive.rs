@@ -207,11 +207,11 @@ impl<B: StorageBackend> BlockArchive<B> {
                 .context(StoreSnafu)?;
         }
 
-        // Sprint 1B3 Task 2A: blocks.db apply-path commit flipped to
-        // `commit_in_memory`. The block is WAL-replayable via the originating
-        // Raft entry (apply_committed_entries re-calls append_block on replay).
-        // Idempotency-by-height (Task 1C) makes replay safe. Durability realized
-        // by the next StateCheckpointer tick, snapshot/backup sync, or graceful
+        // The blocks.db apply-path commit uses `commit_in_memory`. The block
+        // is WAL-replayable via the originating Raft entry
+        // (apply_committed_entries re-calls append_block on replay).
+        // Idempotency-by-height makes replay safe. Durability is realized by
+        // the next StateCheckpointer tick, snapshot/backup sync, or graceful
         // shutdown's sync_all_state_dbs sweep.
         txn.commit_in_memory().context(StoreSnafu)?;
 
@@ -987,7 +987,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Durability (Sprint 1B3 Task 2A) — commit_in_memory + sync_state
+    // Durability — commit_in_memory + sync_state
     // =========================================================================
 
     /// The FLIP: `append_block` uses `commit_in_memory` now. After the call
@@ -996,9 +996,9 @@ mod tests {
     /// (no dual-slot persist fired). A subsequent `sync_state` advances the
     /// synced id, and the block survives a close-reopen cycle afterwards.
     ///
-    /// Mirrors Sprint 1B2 Task 2C's
+    /// Mirrors the
     /// `save_state_core_commits_in_memory_only_then_sync_advances_snapshot`
-    /// shape, adapted to the blocks.db durability lifecycle landed in Task 2D.
+    /// shape, adapted to the blocks.db durability lifecycle.
     #[tokio::test]
     async fn append_block_commits_in_memory_only_until_sync() {
         use crate::engine::StorageEngine;
@@ -1022,12 +1022,12 @@ mod tests {
         assert_eq!(loaded.region_height, 42);
 
         // But `last_synced_snapshot_id` has NOT advanced — no dual-slot
-        // persist fired under the Task 2A flip.
+        // persist fired under the commit_in_memory flip.
         let synced_after_commit = db.last_synced_snapshot_id();
         assert_eq!(
             synced_after_commit, synced_before,
             "append_block must not advance last_synced_snapshot_id \
-             (Sprint 1B3 Task 2A: commit_in_memory skips the dual-slot persist)"
+             (commit_in_memory skips the dual-slot persist)"
         );
 
         // Forcing a sync advances the synced id.
@@ -1053,12 +1053,12 @@ mod tests {
     }
 
     // =========================================================================
-    // Property-based idempotency (Sprint 1B2 Task 3B)
+    // Property-based idempotency
     // =========================================================================
 
     /// Replay-idempotency invariant covered as a proptest.
     ///
-    /// WAL replay on recovery (Task 2D) can re-execute `append_block` calls
+    /// WAL replay on recovery can re-execute `append_block` calls
     /// whose effects were already durably persisted. The single-case unit test
     /// `append_block_idempotent_by_height` covers the scalar property for one
     /// block; this proptest sweeps arbitrary-length block chains and arbitrary

@@ -56,7 +56,7 @@ You review gRPC boundary changes in InferaDB Ledger for consistency with the est
 - Leadership errors → `UNAVAILABLE`
 - Snapshot-in-progress → `FAILED_PRECONDITION`
 - Use `classify_raft_error` helper — flag manual `Status::internal()` for known Raft conditions.
-- Circuit-open errors on the SDK side are non-retryable (see PRD Task 5).
+- Circuit-open errors on the SDK side are non-retryable.
 
 **Request deadline propagation**
 

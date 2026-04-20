@@ -7,7 +7,7 @@ description: Checklist for adding a proto↔domain conversion in InferaDB Ledger
 
 Proto conversions are a narrow, high-churn surface. They cross the gRPC boundary in both directions: domain → proto for responses, proto → domain (validated) for requests. Picking the wrong submodule scatters related code; picking `From` where `TryFrom` is needed hides validation failures as panics; skipping a round-trip proptest lets asymmetric impls ship undetected. This is the conversion-only checklist.
 
-For full new-RPC flow (proto + service impl + SDK + audit + quotas), use the `new-rpc` skill and treat this skill as the "step 2" zoom-in.
+For full new-RPC flow (proto + service impl + SDK + audit + quotas), use the `new-rpc` skill; this skill is the conversion-layer zoom-in.
 
 ## Layout
 
@@ -24,7 +24,7 @@ For full new-RPC flow (proto + service impl + SDK + audit + quotas), use the `ne
 | `credentials.rs` | Auth credentials: passkey, TOTP, recovery codes, email verify                                          |
 | `tests.rs`       | Unit + property tests for all of the above                                                             |
 
-If a new conversion fits no existing submodule, add a new file — but err toward placing it in `domain.rs` or the closest match. Proliferating one-conversion modules defeats the dedup work from Phase 2 Task 15.
+If a new conversion fits no existing submodule, add a new file — but err toward placing it in `domain.rs` or the closest match. Proliferating one-conversion modules defeats the centralization that keeps `From`/`TryFrom` impls deduplicated.
 
 ## Checklist
 
@@ -85,7 +85,7 @@ Asymmetric conversions (lossy, one-way) do not need a round-trip proptest but MU
 
 ### 6. Deduplication check
 
-Phase 2 Task 15 dedup'd `convert_operation` / `convert_set_condition` helpers that had grown duplicates. Before adding a conversion, grep the convert/ tree for an existing impl for the same types — even partial overlaps (different field subsets) should be consolidated.
+`convert_operation` and `convert_set_condition` live in the `convert/` tree as single sources of truth; duplicates have been collapsed in the past. Before adding a conversion, grep the `convert/` tree for an existing impl for the same types — even partial overlaps (different field subsets) should be consolidated.
 
 ### 7. Tests
 

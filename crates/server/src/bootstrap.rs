@@ -172,7 +172,7 @@ pub struct BootstrappedNode {
     /// [`EventHandle::flush_for_shutdown`] at Phase 5b — between the WAL
     /// flush (5a) and the per-region state-DB sync (5c). This is the single
     /// point where the flusher queue drains + the background task exits
-    /// cleanly (Sprint 1B4 Task 2B).
+    /// cleanly.
     pub event_handle: EventHandle<FileBackend>,
     /// Join handle for the background event flusher task spawned by
     /// [`EventHandle::with_batching`]. `flush_for_shutdown` signals the task
@@ -263,8 +263,8 @@ pub async fn bootstrap_node(
 
     // Create the runtime-config handle early and plumb it into the manager
     // BEFORE the first region starts. Per-region `StateCheckpointer` tasks
-    // (Sprint 1B2 Task 2B) read `CheckpointConfig` off this handle on every
-    // tick so live `UpdateConfig` RPCs adjust thresholds without a restart.
+    // read `CheckpointConfig` off this handle on every tick so live
+    // `UpdateConfig` RPCs adjust thresholds without a restart.
     // The handle is cloned later into `LedgerServer` so the admin UpdateConfig
     // RPC writes into the same ArcSwap.
     let runtime_config = RuntimeConfigHandle::default();
@@ -521,14 +521,14 @@ pub async fn bootstrap_node(
 
     // Create handler-phase event handle for gRPC service denial recording.
     //
-    // Sprint 1B4: wire the background `EventFlusher` alongside the handle.
-    // The flusher batches handler-phase `events.db` fsyncs so the
-    // RPC-critical `record_handler_event` path becomes a lock-free enqueue
-    // instead of a per-event fsync. `queue_capacity` comes from the runtime
-    // config (restart-only); time / size triggers are live-reconfigurable
-    // via `UpdateConfig`. The flusher `JoinHandle` is hoisted into
-    // `BootstrappedNode` (Sprint 1B4 Task 2B) so the graceful shutdown
-    // `pre_shutdown` closure can await the final drain at Phase 5b.
+    // Wires the background `EventFlusher` alongside the handle. The flusher
+    // batches handler-phase `events.db` fsyncs so the RPC-critical
+    // `record_handler_event` path becomes a lock-free enqueue instead of a
+    // per-event fsync. `queue_capacity` comes from the runtime config
+    // (restart-only); time / size triggers are live-reconfigurable via
+    // `UpdateConfig`. The flusher `JoinHandle` is hoisted into
+    // `BootstrappedNode` so the graceful shutdown `pre_shutdown` closure can
+    // await the final drain at Phase 5b.
     let event_config = Arc::new(config.events.clone());
     let batch_config = runtime_config.load().event_writer_batch.clone().unwrap_or_default();
     let (event_handle, event_flusher_handle) = EventHandle::with_batching(

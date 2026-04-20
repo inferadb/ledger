@@ -30,8 +30,8 @@ impl LedgerClient {
     ///
     /// Handler-phase audit events (events emitted as a side-effect of RPCs
     /// such as admin mutations or authorization checks) are batched through
-    /// an in-memory flush queue on the server. As of Sprint 1B5 the flusher
-    /// commits into the events.db page cache (not per-flush fsync); the
+    /// an in-memory flush queue on the server. The flusher commits into
+    /// the events.db page cache (not per-flush fsync); the
     /// events become visible to `list_events` / `count_events` / `get_event`
     /// on the same node within a ~100 ms default flush interval, and reach
     /// disk on the `StateCheckpointer` cadence (~500 ms default). A query
