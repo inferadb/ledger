@@ -1,9 +1,13 @@
-//! Per-region database file layout management.
+//! Per-shard database file layout management.
 //!
-//! Each region's Raft group gets isolated database files under a dedicated directory.
-//! This eliminates write lock contention between concurrent Raft group applies,
-//! enables per-region encryption (one `EncryptedBackend` per file with that region's RMK),
-//! and simplifies migration, snapshots, crypto-shredding, and disk accounting.
+//! Each shard (Raft group) gets isolated database files under a dedicated
+//! directory. A region hosts N shards via
+//! `NodeConfig.shards_per_region`; orgs within the region route to shards
+//! via [`inferadb_ledger_state::shard_routing::ShardRouter`]. This
+//! eliminates write-lock contention between concurrent Raft-group applies,
+//! enables per-region encryption (one `EncryptedBackend` per file with
+//! that region's RMK), and keeps migration / snapshot / crypto-shredding
+//! scoped to a single shard directory.
 //!
 //! ## On-disk layout
 //!
@@ -11,19 +15,26 @@
 //! {data_dir}/
 //! ├── node_id                          # node identity (unchanged)
 //! ├── global/                          # GLOBAL Raft group (_system control plane)
-//! │   ├── state.db                     # org registry, sequences, sagas, node info (no PII)
-//! │   ├── blocks.db                    # global blockchain
-//! │   ├── raft.db                      # Raft log for GLOBAL group
-//! │   └── events.db                    # audit events for GLOBAL group
+//! │   └── shard-0/                     # GLOBAL is always single-shard (Phase A)
+//! │       ├── state.db                 # org registry, sequences, sagas, node info (no PII)
+//! │       ├── blocks.db                # global blockchain
+//! │       ├── raft.db                  # Raft log for GLOBAL group
+//! │       ├── events.db                # audit events for GLOBAL group
+//! │       └── wal/                     # consensus WAL segments
 //! ├── regions/                         # per-region data (orgs + user PII)
 //! │   ├── us_east_va/
-//! │   │   ├── state.db
-//! │   │   ├── blocks.db
-//! │   │   ├── raft.db
-//! │   │   └── events.db
+//! │   │   ├── shard-0/
+//! │   │   │   ├── state.db
+//! │   │   │   ├── blocks.db
+//! │   │   │   ├── raft.db
+//! │   │   │   ├── events.db
+//! │   │   │   └── wal/
+//! │   │   ├── shard-1/
+//! │   │   │   └── ...
+//! │   │   └── shard-N/
 //! │   └── .../
-//! ├── snapshots/                       # per-region snapshot directories
-//! │   ├── global/
+//! ├── snapshots/                       # per-shard snapshot directories
+//! │   ├── global/shard-0/
 //! │   └── .../
 //! └── keys/                            # per-region RMK storage (managed by RegionKeyManager)
 //! ```
@@ -34,7 +45,7 @@ use std::{
     sync::Arc,
 };
 
-use inferadb_ledger_state::EventsDatabase;
+use inferadb_ledger_state::{EventsDatabase, shard_routing::ShardIdx};
 use inferadb_ledger_store::{Database, DatabaseConfig, FileBackend};
 use inferadb_ledger_types::Region;
 use parking_lot::RwLock;
@@ -138,22 +149,27 @@ impl RegionStorage {
 // RegionStorageManager
 // ============================================================================
 
-/// Manages per-region database file layout and lifecycle.
+/// Manages per-shard database file layout and lifecycle.
 ///
-/// Opens and closes per-region database directories, enforcing the directory
-/// tree convention (`global/` for the GLOBAL Raft group, `regions/{name}/`
-/// for data regions). Detects legacy flat layouts and produces clear errors.
+/// Opens and closes per-shard database directories under the per-region
+/// tree (`global/shard-{N}/`, `regions/{name}/shard-{N}/`). Detects legacy
+/// flat layouts and produces clear errors.
+///
+/// Each region hosts `shards_per_region` shards (Phase A: fixed at region
+/// creation). Orgs within the region route to shards via
+/// [`inferadb_ledger_state::shard_routing::ShardRouter`]; the storage
+/// manager is agnostic to routing — it just opens what it's asked to open.
 pub struct RegionStorageManager {
     /// Base data directory.
     data_dir: PathBuf,
-    /// Open region storage indexed by region.
-    regions: RwLock<HashMap<Region, Arc<RegionStorage>>>,
+    /// Open per-shard storage indexed by `(region, shard_idx)`.
+    shards: RwLock<HashMap<(Region, ShardIdx), Arc<RegionStorage>>>,
 }
 
 impl RegionStorageManager {
     /// Creates a new storage manager for the given data directory.
     pub fn new(data_dir: PathBuf) -> Self {
-        Self { data_dir, regions: RwLock::new(HashMap::new()) }
+        Self { data_dir, shards: RwLock::new(HashMap::new()) }
     }
 
     /// Returns the base data directory.
@@ -161,10 +177,14 @@ impl RegionStorageManager {
         &self.data_dir
     }
 
-    /// Returns the data directory for a specific region.
+    /// Returns the base directory for a region (parent of its shard subdirs).
     ///
     /// - `GLOBAL` → `{data_dir}/global/`
     /// - Others → `{data_dir}/regions/{region_name}/`
+    ///
+    /// Per-shard files live under [`shard_dir`](Self::shard_dir). This
+    /// method is retained for operations that span all shards in a region
+    /// (e.g. directory discovery, region-level cleanup).
     pub fn region_dir(&self, region: Region) -> PathBuf {
         if region == Region::GLOBAL {
             self.data_dir.join("global")
@@ -173,21 +193,30 @@ impl RegionStorageManager {
         }
     }
 
-    /// Returns the snapshot directory for a specific region.
+    /// Returns the data directory for a specific (region, shard) pair.
     ///
-    /// - `GLOBAL` → `{data_dir}/snapshots/global/`
-    /// - Others → `{data_dir}/snapshots/{region_name}/`
-    pub fn snapshot_dir(&self, region: Region) -> PathBuf {
-        if region == Region::GLOBAL {
+    /// Layout: `{region_dir}/shard-{shard_idx}/`. Contains `state.db`,
+    /// `blocks.db`, `raft.db`, `events.db`, and `wal/` for that shard.
+    pub fn shard_dir(&self, region: Region, shard: ShardIdx) -> PathBuf {
+        self.region_dir(region).join(format!("shard-{}", shard.value()))
+    }
+
+    /// Returns the snapshot directory for a specific (region, shard) pair.
+    ///
+    /// - `GLOBAL` → `{data_dir}/snapshots/global/shard-{N}/`
+    /// - Others → `{data_dir}/snapshots/{region_name}/shard-{N}/`
+    pub fn snapshot_dir(&self, region: Region, shard: ShardIdx) -> PathBuf {
+        let base = if region == Region::GLOBAL {
             self.data_dir.join("snapshots").join("global")
         } else {
             self.data_dir.join("snapshots").join(region.as_str())
-        }
+        };
+        base.join(format!("shard-{}", shard.value()))
     }
 
-    /// Returns the Raft log database path for a specific region.
-    pub fn raft_db_path(&self, region: Region) -> PathBuf {
-        self.region_dir(region).join("raft.db")
+    /// Returns the Raft log database path for a specific (region, shard).
+    pub fn raft_db_path(&self, region: Region, shard: ShardIdx) -> PathBuf {
+        self.shard_dir(region, shard).join("raft.db")
     }
 
     /// Checks for legacy flat layout and returns an error if detected.
@@ -208,45 +237,49 @@ impl RegionStorageManager {
         Ok(())
     }
 
-    /// Opens storage for a region.
+    /// Opens storage for a specific shard of a region.
     ///
-    /// Creates the region directory if it does not exist, then opens (or creates)
-    /// state, blocks, and events databases within it.
+    /// Creates the shard directory if it does not exist, then opens (or
+    /// creates) state, blocks, and events databases within it.
     ///
     /// # Errors
     ///
-    /// Returns [`RegionStorageError::AlreadyOpen`] if the region is already open.
-    /// Returns [`RegionStorageError::Storage`] if directory creation or database
-    /// opening fails.
-    pub fn open_region(&self, region: Region) -> Result<Arc<RegionStorage>, RegionStorageError> {
-        // Hold write lock for the entire operation to prevent TOCTOU race where
-        // two concurrent callers both pass the existence check and open databases,
-        // with the second silently overwriting the first.
-        let mut regions = self.regions.write();
-        if regions.contains_key(&region) {
+    /// Returns [`RegionStorageError::AlreadyOpen`] if that shard is
+    /// already open. Returns [`RegionStorageError::Storage`] if directory
+    /// creation or database opening fails.
+    pub fn open_shard(
+        &self,
+        region: Region,
+        shard: ShardIdx,
+    ) -> Result<Arc<RegionStorage>, RegionStorageError> {
+        // Hold write lock for the entire operation to prevent TOCTOU race
+        // where two concurrent callers both pass the existence check and
+        // open databases, with the second silently overwriting the first.
+        let mut shards = self.shards.write();
+        if shards.contains_key(&(region, shard)) {
             return Err(RegionStorageError::AlreadyOpen { region });
         }
 
-        let region_dir = self.region_dir(region);
+        let shard_dir = self.shard_dir(region, shard);
 
         // Create directory tree
-        std::fs::create_dir_all(&region_dir).map_err(|e| RegionStorageError::Storage {
+        std::fs::create_dir_all(&shard_dir).map_err(|e| RegionStorageError::Storage {
             region,
-            message: format!("failed to create region directory {}: {e}", region_dir.display()),
+            message: format!("failed to create shard directory {}: {e}", shard_dir.display()),
         })?;
 
         // Open or create state database
-        let state_db_path = region_dir.join("state.db");
+        let state_db_path = shard_dir.join("state.db");
         let state_db = open_or_create_db(&state_db_path, region)?;
         let state_db = Arc::new(state_db);
 
         // Open or create blocks database
-        let blocks_db_path = region_dir.join("blocks.db");
+        let blocks_db_path = shard_dir.join("blocks.db");
         let blocks_db = open_or_create_db(&blocks_db_path, region)?;
         let blocks_db = Arc::new(blocks_db);
 
         // Open or create events database
-        let events_db = EventsDatabase::<FileBackend>::open(&region_dir).map_err(|e| {
+        let events_db = EventsDatabase::<FileBackend>::open(&shard_dir).map_err(|e| {
             RegionStorageError::Storage {
                 region,
                 message: format!("failed to open events db: {e}"),
@@ -256,43 +289,92 @@ impl RegionStorageManager {
 
         let storage = Arc::new(RegionStorage { region, state_db, blocks_db, events_db });
 
-        regions.insert(region, storage.clone());
+        shards.insert((region, shard), storage.clone());
 
-        tracing::info!(region = region.as_str(), dir = %region_dir.display(), "Opened region storage");
+        tracing::info!(
+            region = region.as_str(),
+            shard = shard.value(),
+            dir = %shard_dir.display(),
+            "Opened shard storage"
+        );
 
         Ok(storage)
     }
 
-    /// Closes storage for a region.
+    /// Closes storage for a specific shard.
     ///
-    /// Removes the region from tracking. Actual database file closure happens
-    /// when all `Arc` references are dropped.
+    /// Removes the shard from tracking. Actual database file closure
+    /// happens when all `Arc` references are dropped.
     ///
     /// # Errors
     ///
-    /// Returns [`RegionStorageError::NotOpen`] if the region is not currently open.
-    pub fn close_region(&self, region: Region) -> Result<(), RegionStorageError> {
-        let removed = self.regions.write().remove(&region);
+    /// Returns [`RegionStorageError::NotOpen`] if that shard is not open.
+    pub fn close_shard(
+        &self,
+        region: Region,
+        shard: ShardIdx,
+    ) -> Result<(), RegionStorageError> {
+        let removed = self.shards.write().remove(&(region, shard));
         if removed.is_none() {
             return Err(RegionStorageError::NotOpen { region });
         }
-        tracing::info!(region = region.as_str(), "Closed region storage");
+        tracing::info!(
+            region = region.as_str(),
+            shard = shard.value(),
+            "Closed shard storage"
+        );
         Ok(())
     }
 
-    /// Returns the storage for a region, if open.
-    pub fn get(&self, region: Region) -> Option<Arc<RegionStorage>> {
-        self.regions.read().get(&region).cloned()
+    /// Returns the storage for a shard, if open.
+    pub fn get_shard(&self, region: Region, shard: ShardIdx) -> Option<Arc<RegionStorage>> {
+        self.shards.read().get(&(region, shard)).cloned()
     }
 
-    /// Lists all currently open regions.
-    pub fn regions(&self) -> Vec<Region> {
-        self.regions.read().keys().copied().collect()
+    /// Lists all currently open (region, shard) pairs.
+    pub fn open_shards(&self) -> Vec<(Region, ShardIdx)> {
+        self.shards.read().keys().copied().collect()
     }
 
-    /// Returns the number of open regions.
+    /// Returns the number of open shards (across all regions).
     pub fn open_count(&self) -> usize {
-        self.regions.read().len()
+        self.shards.read().len()
+    }
+
+    // ── Legacy single-shard convenience aliases ──
+    //
+    // Task 3 keeps these so the raft_manager + tests don't all have to
+    // change at once. Task 4 (RegionGroup per-shard refactor) will call
+    // the shard-aware methods directly and these can be removed.
+
+    /// Legacy shim: opens shard-0 of `region`. Kept until Task 4 migrates
+    /// callers to iterate over `shards_per_region`.
+    #[doc(hidden)]
+    pub fn open_region(&self, region: Region) -> Result<Arc<RegionStorage>, RegionStorageError> {
+        self.open_shard(region, ShardIdx(0))
+    }
+
+    /// Legacy shim: closes shard-0 of `region`.
+    #[doc(hidden)]
+    pub fn close_region(&self, region: Region) -> Result<(), RegionStorageError> {
+        self.close_shard(region, ShardIdx(0))
+    }
+
+    /// Legacy shim: returns shard-0 storage of `region`.
+    #[doc(hidden)]
+    pub fn get(&self, region: Region) -> Option<Arc<RegionStorage>> {
+        self.get_shard(region, ShardIdx(0))
+    }
+
+    /// Legacy shim: lists regions that have shard-0 open. Task 4 replaces
+    /// this with full (region, shard) enumeration.
+    #[doc(hidden)]
+    pub fn regions(&self) -> Vec<Region> {
+        self.shards
+            .read()
+            .keys()
+            .filter_map(|(r, s)| (s.value() == 0).then_some(*r))
+            .collect()
     }
 
     /// Discovers regions with existing data on disk.
@@ -393,11 +475,11 @@ mod tests {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        let dir = mgr.snapshot_dir(Region::GLOBAL);
-        assert!(dir.ends_with("snapshots/global"));
+        let dir = mgr.snapshot_dir(Region::GLOBAL, ShardIdx(0));
+        assert!(dir.ends_with("snapshots/global/shard-0"));
 
-        let dir = mgr.snapshot_dir(Region::DE_CENTRAL_FRANKFURT);
-        assert!(dir.ends_with("snapshots/de-central-frankfurt"));
+        let dir = mgr.snapshot_dir(Region::DE_CENTRAL_FRANKFURT, ShardIdx(3));
+        assert!(dir.ends_with("snapshots/de-central-frankfurt/shard-3"));
     }
 
     #[test]
@@ -405,11 +487,23 @@ mod tests {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        let path = mgr.raft_db_path(Region::GLOBAL);
-        assert!(path.ends_with("global/raft.db"));
+        let path = mgr.raft_db_path(Region::GLOBAL, ShardIdx(0));
+        assert!(path.ends_with("global/shard-0/raft.db"));
 
-        let path = mgr.raft_db_path(Region::US_WEST_OR);
-        assert!(path.ends_with("regions/us-west-or/raft.db"));
+        let path = mgr.raft_db_path(Region::US_WEST_OR, ShardIdx(7));
+        assert!(path.ends_with("regions/us-west-or/shard-7/raft.db"));
+    }
+
+    #[test]
+    fn test_shard_dir_layout() {
+        let temp = TestDir::new();
+        let mgr = RegionStorageManager::new(temp.path().to_path_buf());
+
+        let dir = mgr.shard_dir(Region::GLOBAL, ShardIdx(0));
+        assert!(dir.ends_with("global/shard-0"));
+
+        let dir = mgr.shard_dir(Region::US_EAST_VA, ShardIdx(5));
+        assert!(dir.ends_with("regions/us-east-va/shard-5"));
     }
 
     #[test]
@@ -420,12 +514,13 @@ mod tests {
         let storage = mgr.open_region(Region::GLOBAL).expect("open global");
         assert_eq!(storage.region(), Region::GLOBAL);
 
-        // Verify directory structure
-        let global_dir = temp.path().join("global");
-        assert!(global_dir.exists());
-        assert!(global_dir.join("state.db").exists());
-        assert!(global_dir.join("blocks.db").exists());
-        assert!(global_dir.join("events.db").exists());
+        // Verify directory structure — files land under `shard-0/` (Phase
+        // A single-shard layout). The legacy flat layout is gone.
+        let shard_dir = temp.path().join("global").join("shard-0");
+        assert!(shard_dir.exists());
+        assert!(shard_dir.join("state.db").exists());
+        assert!(shard_dir.join("blocks.db").exists());
+        assert!(shard_dir.join("events.db").exists());
     }
 
     #[test]
@@ -435,11 +530,36 @@ mod tests {
 
         mgr.open_region(Region::US_EAST_VA).expect("open us-east-va");
 
-        let region_dir = temp.path().join("regions").join("us-east-va");
-        assert!(region_dir.exists());
-        assert!(region_dir.join("state.db").exists());
-        assert!(region_dir.join("blocks.db").exists());
-        assert!(region_dir.join("events.db").exists());
+        let shard_dir =
+            temp.path().join("regions").join("us-east-va").join("shard-0");
+        assert!(shard_dir.exists());
+        assert!(shard_dir.join("state.db").exists());
+        assert!(shard_dir.join("blocks.db").exists());
+        assert!(shard_dir.join("events.db").exists());
+    }
+
+    #[test]
+    fn test_open_multiple_shards_per_region() {
+        let temp = TestDir::new();
+        let mgr = RegionStorageManager::new(temp.path().to_path_buf());
+
+        mgr.open_shard(Region::US_EAST_VA, ShardIdx(0)).expect("shard 0");
+        mgr.open_shard(Region::US_EAST_VA, ShardIdx(1)).expect("shard 1");
+        mgr.open_shard(Region::US_EAST_VA, ShardIdx(2)).expect("shard 2");
+
+        for shard in 0..3 {
+            let dir = temp
+                .path()
+                .join("regions")
+                .join("us-east-va")
+                .join(format!("shard-{shard}"));
+            assert!(dir.exists(), "shard-{shard} dir missing");
+            assert!(dir.join("state.db").exists());
+            assert!(dir.join("blocks.db").exists());
+            assert!(dir.join("events.db").exists());
+        }
+
+        assert_eq!(mgr.open_count(), 3);
     }
 
     #[test]

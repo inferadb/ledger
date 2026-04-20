@@ -492,7 +492,10 @@ pub async fn bootstrap_node(
         message: "system region missing events_db".to_string(),
     })?;
 
-    let snapshot_dir = storage_manager.snapshot_dir(inferadb_ledger_types::Region::GLOBAL);
+    let snapshot_dir = storage_manager.snapshot_dir(
+        inferadb_ledger_types::Region::GLOBAL,
+        inferadb_ledger_state::shard_routing::ShardIdx(0),
+    );
     let snapshot_manager = Arc::new(SnapshotManager::new(snapshot_dir.clone(), 5));
     let snapshot_manager_for_backup = snapshot_manager.clone();
 
@@ -1170,8 +1173,10 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
         .start();
     tracing::info!("Started learner refresh job");
 
-    let snapshot_dir_for_metrics =
-        input.storage_manager.snapshot_dir(inferadb_ledger_types::Region::GLOBAL);
+    let snapshot_dir_for_metrics = input.storage_manager.snapshot_dir(
+        inferadb_ledger_types::Region::GLOBAL,
+        inferadb_ledger_state::shard_routing::ShardIdx(0),
+    );
     let resource_metrics_handle = ResourceMetricsCollector::builder()
         .state(input.state.clone())
         .data_dir(input.data_dir.to_path_buf())
@@ -1616,16 +1621,33 @@ mod tests {
             .await
             .expect("bootstrap should succeed");
 
-        // Per-region databases should be under global/ directory
-        let global_dir = data_dir.join("global");
-        assert!(global_dir.join("events.db").exists(), "events.db should be in global/");
-        assert!(global_dir.join("state.db").exists(), "state.db should be in global/");
-        assert!(global_dir.join("blocks.db").exists(), "blocks.db should be in global/");
-        assert!(global_dir.join("raft.db").exists(), "raft.db should be in global/");
+        // Per-shard databases land under global/shard-0/ in the Phase A
+        // single-shard layout. The flat layout (global/state.db) is gone.
+        let shard_dir = data_dir.join("global").join("shard-0");
+        assert!(
+            shard_dir.join("events.db").exists(),
+            "events.db should be in global/shard-0/"
+        );
+        assert!(
+            shard_dir.join("state.db").exists(),
+            "state.db should be in global/shard-0/"
+        );
+        assert!(
+            shard_dir.join("blocks.db").exists(),
+            "blocks.db should be in global/shard-0/"
+        );
+        assert!(
+            shard_dir.join("raft.db").exists(),
+            "raft.db should be in global/shard-0/"
+        );
 
-        // No databases in root (flat layout is legacy)
+        // Legacy layouts are gone entirely.
         assert!(!data_dir.join("state.db").exists(), "state.db should not be in root");
         assert!(!data_dir.join("events.db").exists(), "events.db should not be in root");
+        assert!(
+            !data_dir.join("global").join("state.db").exists(),
+            "flat global/state.db layout is legacy"
+        );
 
         // Events GC should be running (default config has events.enabled = true)
         assert!(
@@ -1650,9 +1672,10 @@ mod tests {
             .await
             .expect("bootstrap should succeed");
 
-        // events.db is still created (needed for snapshot restore), but GC is not started
+        // events.db is still created (needed for snapshot restore), but GC is not started.
+        // Phase A single-shard layout: `global/shard-0/events.db`.
         assert!(
-            data_dir.join("global").join("events.db").exists(),
+            data_dir.join("global").join("shard-0").join("events.db").exists(),
             "events.db should still be created even when disabled"
         );
         assert!(

@@ -622,6 +622,16 @@ impl RaftManager {
         }
     }
 
+    /// Returns the shard router configured for this manager.
+    ///
+    /// The router resolves `(region, org_id)` → shard index via seahash %
+    /// `shards_per_region`. Used by services at the proposal boundary to
+    /// route each incoming write to the correct Raft group.
+    #[must_use]
+    pub fn shard_router(&self) -> inferadb_ledger_state::shard_routing::ShardRouter {
+        inferadb_ledger_state::shard_routing::ShardRouter::new(self.config.shards_per_region)
+    }
+
     /// Returns the last crash-recovery replay stats captured for `region`, if any.
     ///
     /// Populated by `start_region` immediately after
@@ -1088,7 +1098,12 @@ impl RaftManager {
             inferadb_ledger_consensus::types::Membership::new(voter_ids)
         };
 
-        let wal_dir = self.storage_manager.region_dir(region).join("wal");
+        // Task 3 stopgap: single-shard layout → `shard-0/wal/`. Task 4
+        // iterates per-shard.
+        let wal_dir = self
+            .storage_manager
+            .shard_dir(region, inferadb_ledger_state::shard_routing::ShardIdx(0))
+            .join("wal");
         let wal =
             inferadb_ledger_consensus::wal::SegmentedWalBackend::open(&wal_dir).map_err(|e| {
                 RaftManagerError::Storage { region, message: format!("failed to open WAL: {e}") }
@@ -1489,7 +1504,12 @@ impl RaftManager {
         let (block_announcements, _) = broadcast::channel(1024);
 
         // Open Raft log store (uses inferadb-ledger-store storage - handles open/create internally)
-        let log_path = self.storage_manager.raft_db_path(region);
+        // Task 3 stopgap: single-shard layout forces ShardIdx(0). Task 4
+        // parameterizes RegionGroup over the full shard set.
+        let log_path = self.storage_manager.raft_db_path(
+            region,
+            inferadb_ledger_state::shard_routing::ShardIdx(0),
+        );
         // Derive leader lease duration from election_timeout_min / 2.
         // This guarantees no new leader can be elected while the lease is valid.
         let lease_duration =

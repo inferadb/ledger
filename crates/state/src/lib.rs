@@ -18,6 +18,8 @@ pub mod apply_pool;
 pub mod binary_keys;
 mod block_archive;
 mod bucket;
+/// Deterministic org → shard routing (Phase A multi-shard).
+pub mod shard_routing;
 pub mod dictionary;
 mod engine;
 mod entity;
