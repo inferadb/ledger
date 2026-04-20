@@ -208,6 +208,20 @@ pub struct Config {
     #[serde(default)]
     pub raft: Option<inferadb_ledger_types::config::RaftConfig>,
 
+    // === Write Batching ===
+    /// Per-region write-batching configuration.
+    ///
+    /// Each started region spawns a `BatchWriter` that coalesces concurrent
+    /// `Write` RPCs into a single Raft proposal, amortizing one WAL `fsync`
+    /// across the batch. Controls the per-batch cap and the time bound before
+    /// a partial batch flushes. Production defaults (500 / 10ms) are tuned for
+    /// throughput over single-client latency — see
+    /// [`BatchConfig`](inferadb_ledger_types::config::BatchConfig).
+    #[arg(skip)]
+    #[serde(default)]
+    #[builder(default)]
+    pub batching: inferadb_ledger_types::config::BatchConfig,
+
     // === Logging ===
     /// Logging configuration for comprehensive request logging.
     ///
@@ -394,6 +408,7 @@ impl Default for Config {
             max_concurrent: default_max_concurrent(),
             timeout_secs: default_timeout_secs(),
             raft: None,
+            batching: inferadb_ledger_types::config::BatchConfig::default(),
             logging: LoggingConfig::default(),
             backup: None,
             events: inferadb_ledger_types::events::EventConfig::default(),

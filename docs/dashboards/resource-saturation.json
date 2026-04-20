@@ -255,8 +255,8 @@
       ]
     },
     {
-      "title": "Batch Writer — Eager vs Timeout Commits",
-      "description": "Healthy: mostly eager commits. High timeout ratio indicates slow consumption.",
+      "title": "Raft Batch Coalescing",
+      "description": "Commit rate and average entries per flushed batch. Higher avg size indicates more efficient coalescing.",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
       "datasource": { "uid": "${datasource}" },
@@ -264,16 +264,25 @@
         "defaults": {
           "unit": "reqps",
           "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 }
-        }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "avg batch size" },
+            "properties": [
+              { "id": "unit", "value": "short" },
+              { "id": "custom.axisPlacement", "value": "right" }
+            ]
+          }
+        ]
       },
       "targets": [
         {
-          "expr": "rate(ledger_batch_eager_commits_total[$__rate_interval])",
-          "legendFormat": "Eager Commits/s"
+          "expr": "rate(ledger_batch_coalesce_total[$__rate_interval])",
+          "legendFormat": "commits/sec"
         },
         {
-          "expr": "rate(ledger_batch_timeout_commits_total[$__rate_interval])",
-          "legendFormat": "Timeout Commits/s"
+          "expr": "ledger_batch_coalesce_size_sum / ledger_batch_coalesce_size_count",
+          "legendFormat": "avg batch size"
         }
       ]
     },

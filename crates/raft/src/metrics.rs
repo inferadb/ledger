@@ -81,8 +81,6 @@ const GRPC_REQUEST_LATENCY: &str = "ledger_grpc_request_latency_seconds";
 const BATCH_COALESCE_TOTAL: &str = "ledger_batch_coalesce_total";
 const BATCH_COALESCE_SIZE: &str = "ledger_batch_coalesce_size";
 const BATCH_FLUSH_LATENCY: &str = "ledger_batch_flush_latency_seconds";
-const BATCH_EAGER_COMMITS_TOTAL: &str = "ledger_batch_eager_commits_total";
-const BATCH_TIMEOUT_COMMITS_TOTAL: &str = "ledger_batch_timeout_commits_total";
 
 // Rate limiting metrics
 const RATE_LIMIT_EXCEEDED: &str = "ledger_rate_limit_exceeded_total";
@@ -351,21 +349,6 @@ pub fn record_batch_coalesce(size: usize) {
 #[inline]
 pub fn record_batch_flush(latency_secs: f64) {
     histogram!(BATCH_FLUSH_LATENCY).record(latency_secs);
-}
-
-/// Records an eager commit (batch flushed due to queue draining).
-///
-/// Eager commits occur when the incoming queue drains and the batch is
-/// flushed immediately rather than waiting for timeout.
-#[inline]
-pub fn record_eager_commit() {
-    counter!(BATCH_EAGER_COMMITS_TOTAL).increment(1);
-}
-
-/// Records a timeout commit (batch flushed due to deadline).
-#[inline]
-pub fn record_timeout_commit() {
-    counter!(BATCH_TIMEOUT_COMMITS_TOTAL).increment(1);
 }
 
 // =============================================================================
@@ -1744,16 +1727,6 @@ mod tests {
     #[test]
     fn test_record_batch_flush() {
         record_batch_flush(0.002);
-    }
-
-    #[test]
-    fn test_record_eager_commit() {
-        record_eager_commit();
-    }
-
-    #[test]
-    fn test_record_timeout_commit() {
-        record_timeout_commit();
     }
 
     // --- Recovery ---

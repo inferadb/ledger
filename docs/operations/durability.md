@@ -6,7 +6,7 @@ Reference for Ledger's write-durability contract, crash-recovery behavior, and t
 
 A successful `WriteSuccess` response from Ledger means the write is **WAL-durable** — the consensus WAL has fsync'd the batch containing this entry (per root golden rule 10). It does **not** imply that the four state DBs (`state.db`, `raft.db`, `blocks.db`, `events.db`) have fsync'd the corresponding pages. Materialization is lazy for every persistent write on the hot apply path: applies land in each DB's in-process page cache via `WriteTransaction::commit_in_memory`, and the `StateCheckpointer` background task drives the dual-slot `persist_state_to_disk` fsync on a configurable cadence. On crash, state is re-derived by replaying `(applied_durable, last_committed]` from the WAL through the normal apply pipeline — the replay is idempotent by design.
 
-Sprint 1A profiling showed per-entry dual-slot fsync was 62% of p50 write latency (~26ms of 41.6ms). Sprint 1B2 amortized state.db / raft.db fsyncs; Sprint 1B3 extended the same amortization to blocks.db and events.db. Sprint 1B4 amortized the remaining per-emission fsync on the **handler-phase event** path behind a 100ms flush window, trading a bounded post-crash loss window for ~42% CPU reduction on the event-emission hot path under concurrency. Steady-state durability is preserved via periodic checkpoints and the handler-event flusher; correctness under crash is preserved via WAL replay for everything WAL-backed, and via the flush window for the handler-phase event path that has no WAL backstop.
+Sprint 1A profiling showed per-entry dual-slot fsync was 62% of p50 write latency (~26ms of 41.6ms). Sprint 1B2 amortized state.db / raft.db fsyncs; Sprint 1B3 extended the same amortization to blocks.db and events.db. Sprint 1B4 moved the handler-phase event path behind a bounded queue + background flusher; Sprint 1B5 then flipped the flusher's commit from strict-durable `commit()` to `commit_in_memory()`, so handler-phase events now reach disk on the same `StateCheckpointer` cadence as every other apply-path write. The loss window widened from "last flush tick" (default 100ms) to "last checkpoint tick" (default ~500ms) — still bounded, still WAL-less (the path has no WAL backstop), but now in the same durability class as apply-phase events. Steady-state durability is preserved via periodic checkpoints; correctness under crash is preserved via WAL replay for everything WAL-backed, and via the checkpoint cadence for the handler-phase path.
 
 This doc is for operators tuning the latency / recovery-window trade-off, and for anyone diagnosing post-crash state or investigating a widening crash gap.
 
@@ -16,7 +16,7 @@ Sprint 1B4 makes the event path three-way, not one-way. Each has a distinct cont
 
 - **Apply-phase events** (emitted inside the apply handler, driven by Raft committed entries; `EventWriter::write_events` via `commit_in_memory`) — WAL-durable on response, materialized lazily to `events.db` via the same checkpoint contract as state.db. Rebuilt deterministically on crash via `replay_crash_gap`. Unchanged from Sprint 1B3.
 - **External ingest events** (`IngestEvents` RPC; routed as `LedgerRequest::IngestExternalEvents` through REGIONAL Raft with IDs frozen pre-consensus) — WAL-durable on response. Rebuilt byte-identical on crash. Unchanged from Sprint 1B3.
-- **Handler-phase events** (emitted inline from RPC / admin / job / saga handlers via `RequestContext::record_event`, `JobContext::record_event`, or direct `EventHandle::record_handler_event` calls) — **NEW in Sprint 1B4**: enqueued into a bounded in-memory channel on emission; the `EventFlusher` background task batches emissions and commits once per flush window (default 100ms). There is no WAL backstop for this path, so a crash between enqueue and the next flush loses the queued entries permanently. Pre-1B4 this path was synchronous strict-durable `commit()` per emission.
+- **Handler-phase events** (emitted inline from RPC / admin / job / saga handlers via `RequestContext::record_event`, `JobContext::record_event`, or direct `EventHandle::record_handler_event` calls) — batched + amortized on the StateCheckpointer cadence: enqueued into a bounded in-memory channel on emission; the `EventFlusher` background task drains the queue on a time / size / shutdown trigger and commits via `commit_in_memory` (Sprint 1B5 Fix #2). Durability lands on the next `StateCheckpointer` tick — same contract as apply-phase events, except the emission itself is not WAL-backed, so a crash before the next checkpoint still loses the unflushed-and-unchecked-pointed entries. Pre-1B4 this path was synchronous strict-durable `commit()` per emission; Sprint 1B4 batched it behind a 100ms flush window; Sprint 1B5 widened that window to the StateCheckpointer cadence (~500ms default).
 
 ## The Durability Lifecycle
 
@@ -72,14 +72,15 @@ This is a strict **upgrade**. Before: a crash between handler-fsync and checkpoi
 
 ## Handler-phase event flush window
 
-Sprint 1B4 introduced a bounded in-memory queue + background flusher for the handler-phase event path. Handlers enqueue `EventEntry` values via `EventHandle::record_handler_event`; a single `EventFlusher` task per `EventHandle` drains the queue and commits once per flush window. Each drained batch is fsync'd through `EventWriter::write_entry`'s `commit()` — one fsync per batch, not per event.
+Sprint 1B4 introduced a bounded in-memory queue + background flusher for the handler-phase event path. Handlers enqueue `EventEntry` values via `EventHandle::record_handler_event`; a single `EventFlusher` task per `EventHandle` drains the queue and commits once per flush window. Sprint 1B5 (Fix #2) then flipped the flusher's commit from strict-durable `commit()` to `commit_in_memory()` — durability is now realized by the per-region `StateCheckpointer`'s `sync_state` sweep on events.db (already in the 4-DB sweep since Sprint 1B3), not by per-flush fsync. The handler-phase path is now the same durability class as apply-phase events (checkpoint-covered, WAL-less for the emission itself) rather than a separate per-batch-fsync path.
 
 ### What changed
 
 - **Pre-1B4:** `RequestContext::record_event` → synchronous `EventWriter::write_entry` → fsync → return. The RPC handler blocked on the fsync; a successful `Response` to the client implied every handler-phase event emitted during the request was fsync'd on `events.db`. A SIGKILL immediately after `Response` preserved the events.
-- **Post-1B4:** `RequestContext::record_event` → `FlushQueue::try_send` (lock-free enqueue) → return. The handler builds and sends its `Response` while the event is still in-memory. The `EventFlusher` drains the queue on a **time / size / shutdown** trigger (whichever fires first) and fsyncs the drained batch. A SIGKILL between enqueue and the next flush loses the queued entries.
+- **Sprint 1B4:** `RequestContext::record_event` → `FlushQueue::try_send` (lock-free enqueue) → return. The handler builds and sends its `Response` while the event is still in-memory. The `EventFlusher` drained the queue on a **time / size / shutdown** trigger (whichever fires first) and fsynced the drained batch. A SIGKILL between enqueue and the next flush lost the queued entries. Default flush window: 100ms.
+- **Sprint 1B5:** enqueue semantics unchanged. The `EventFlusher` still drains on the same triggers, but the drain invokes `commit_in_memory` — the batch commits into the events.db page cache and returns. The on-disk persist happens on the next `StateCheckpointer` tick (default 500ms), not inside the flusher. A SIGKILL between flush and the next checkpoint loses the flushed-but-un-checkpointed entries as well.
 
-The contract shifted from "fsync before handler returns success" to "enqueued before handler returns success; fsync within one flush window." Default window is **100ms**.
+The contract shifted in two steps: Sprint 1B4 went from "fsync before handler returns success" to "enqueued before handler returns success; fsync within one flush window." Sprint 1B5 widened that further to "enqueued before handler returns success; on disk within one StateCheckpointer tick." Default StateCheckpointer interval is **~500ms**.
 
 ### Trigger types
 
@@ -87,28 +88,28 @@ The flusher fires on **any** of three triggers:
 
 - **Time** — `flush_interval_ms` since the last flush (default 100ms).
 - **Size** — queue depth reaches `flush_size_threshold` (default 1,000 entries).
-- **Shutdown** — `EventHandle::flush_for_shutdown(timeout)` is invoked from Phase 5b of `GracefulShutdown`. The flusher drains the queue in one final `commit()` and exits.
+- **Shutdown** — `EventHandle::flush_for_shutdown(timeout)` is invoked from Phase 5b of `GracefulShutdown`. The flusher drains the queue via `commit_in_memory` (Sprint 1B5) and exits; Phase 5c's `sync_all_state_dbs` then fsyncs events.db alongside the other three DBs before the process exits.
 
 Each trigger emits its own label on `ledger_event_flush_triggers_total{trigger=time|size|shutdown}`, so operators can distinguish steady-state cadence flushes from load-driven backpressure flushes.
 
 ### What losing the flush window looks like
 
-- **SIGKILL / panic / OOM between enqueue and the next flush tick** — every handler-phase event in the queue at the moment of death is lost. Post-restart, those events are **not** replayed (no WAL backstop). The events do not appear in `events.db`; downstream consumers scanning the audit trail see the request's WAL-backed state transitions without the corresponding handler-phase audit rows.
-- **Worst case:** `flush_interval_ms` worth of handler-phase events (default: the last 100ms). Apply-phase events emitted during the same window are unaffected — they come out of `replay_crash_gap` deterministically.
-- **Clean shutdown (SIGTERM):** zero events lost. Phase 5b of `GracefulShutdown` invokes `EventHandle::flush_for_shutdown(5s)` between the WAL flush (Phase 5a) and `sync_all_state_dbs` (Phase 5c). The flusher drains the queue and fsyncs the final batch before exit.
+- **SIGKILL / panic / OOM between enqueue and the next `StateCheckpointer` tick** — every handler-phase event that was enqueued-but-not-yet-checkedpointed is lost. Post-restart, those events are **not** replayed (no WAL backstop). The events do not appear in `events.db`; downstream consumers scanning the audit trail see the request's WAL-backed state transitions without the corresponding handler-phase audit rows.
+- **Worst case:** `state_checkpoint.interval_ms` worth of handler-phase events (default: the last ~500ms), plus anything still in the flusher's in-memory queue. Apply-phase events emitted during the same window are unaffected — they come out of `replay_crash_gap` deterministically.
+- **Clean shutdown (SIGTERM):** zero events lost. Phase 5b of `GracefulShutdown` invokes `EventHandle::flush_for_shutdown(5s)` between the WAL flush (Phase 5a) and `sync_all_state_dbs` (Phase 5c). The flusher drains the queue (in-memory commit) and Phase 5c's `sync_all_state_dbs` then fsyncs events.db alongside state.db / raft.db / blocks.db before exit.
 
 ### Tuning
 
 All fields of `EventWriterBatchConfig` except `queue_capacity` are runtime-reconfigurable via the `UpdateConfig` RPC. See [configuration.md § Handler-Phase Event Batching](configuration.md#handler-phase-event-batching) for field semantics, defaults, and a full `UpdateConfig` example.
 
-- **Tighter window** (`flush_interval_ms=50`, `flush_size_threshold=500`) — narrower loss window at the cost of more fsyncs per second. Appropriate when the audit trail's recency guarantees matter and disk headroom allows.
-- **Looser window** (`flush_interval_ms=250`) — fewer fsyncs, wider loss window. Appropriate on low-write-volume nodes where fsync pressure hurts p99 tail more than a wider audit-loss budget does.
+- **Tighter loss window** — Sprint 1B5 made the StateCheckpointer the dominant loss-window knob, not `flush_interval_ms`. Narrow the window via `state_checkpoint.interval_ms` (floor 50ms); see [Tuning the StateCheckpointer](#tuning-the-statecheckpointer) above. `flush_interval_ms` still controls how quickly enqueued events reach the events.db page cache, which is the read-after-write visibility window for `list_events` queries issued against the same node.
+- **Looser window** — raise `state_checkpoint.interval_ms` and/or `flush_interval_ms`. Wider windows cut fsyncs per second; the trade-off is a wider post-crash audit-loss window and slower read-after-write visibility.
 - **Queue capacity** (`queue_capacity`) — not hot-reloadable (a bounded `mpsc` channel's capacity is fixed at construction). Change requires a restart. Raise it if `ledger_event_overflow_total{cause=queue_full}` is non-zero under normal load.
 - **Overflow behavior** — `Drop` (default, matches the pre-1B4 "best-effort on commit failure" semantics) or `Block`. Set to `Block` when no audit-loss tolerance is acceptable; understand that a full queue then backpressures the handler thread until space frees up.
 
-### Escapes hatch — strict synchronous durability (pre-1B4 semantics)
+### Escape hatch — strict synchronous durability (pre-1B4 semantics)
 
-Deployments with a compliance posture that cannot accept a 100ms audit-loss window can disable batching entirely:
+Deployments with a compliance posture that cannot accept any handler-phase audit-loss window can disable batching entirely and restore the pre-1B4 per-emission fsync contract:
 
 ```bash
 grpcurl -plaintext -d '{
@@ -128,17 +129,17 @@ Flip the switch via `UpdateConfig` rather than restarting with a different confi
 
 The pre-1B4 `record_handler_event` implementation was already best-effort on **commit failure**: if the synchronous `commit()` returned an error (disk full, transient IO error, corrupted page), the event was logged at `warn!` and swallowed — the RPC still returned success to the client. Pre-1B4 operators who believed they had absolute durability on handler-phase events were already exposed to silent drops on any transient disk error.
 
-Sprint 1B4 widens this window from "best-effort on commit failure" to "best-effort within a 100ms flush window on crash" — a quantitative widening, not a new category of loss. The `Drop` overflow behavior on a full queue is the same shape as a pre-1B4 commit-error drop: logged, metered, and swallowed.
+Sprint 1B4 widened this to "best-effort within a 100ms flush window on crash." Sprint 1B5 widened it again to "best-effort within one StateCheckpointer interval on crash" (default ~500ms, floor 50ms). Both are quantitative widenings of the same best-effort category, not a new category of loss. The `Drop` overflow behavior on a full queue is the same shape as a pre-1B4 commit-error drop: logged, metered, and swallowed.
 
 ## Tuning the StateCheckpointer
 
 The checkpointer is the operator's primary durability knob. It fires when **any** of three thresholds is crossed:
 
-| Field                   | Default | Range      | Unit     | Meaning                                                               |
-| ----------------------- | ------- | ---------- | -------- | --------------------------------------------------------------------- |
-| `interval_ms`           | 500     | [50, 60000] | ms       | Time since last successful checkpoint                                 |
-| `applies_threshold`     | 5000    | >= 1       | applies  | Applies accumulated in memory since last checkpoint                   |
-| `dirty_pages_threshold` | 10000   | >= 1       | pages    | Dirty pages in the state-DB page cache (~40 MB at 4 KB pages)         |
+| Field                   | Default | Range       | Unit    | Meaning                                                       |
+| ----------------------- | ------- | ----------- | ------- | ------------------------------------------------------------- |
+| `interval_ms`           | 500     | [50, 60000] | ms      | Time since last successful checkpoint                         |
+| `applies_threshold`     | 5000    | >= 1        | applies | Applies accumulated in memory since last checkpoint           |
+| `dirty_pages_threshold` | 10000   | >= 1        | pages   | Dirty pages in the state-DB page cache (~40 MB at 4 KB pages) |
 
 All three are runtime-reconfigurable via the `UpdateConfig` admin RPC; the `StateCheckpointer` re-reads from `RuntimeConfigHandle` on each wake-up, so changes take effect on the next tick.
 
@@ -181,17 +182,17 @@ See [configuration.md](configuration.md) for the `UpdateConfig` / `GetConfig` ad
 
 Nine Prometheus metrics track checkpoint and recovery behavior. Full signatures in [metrics-reference.md](metrics-reference.md).
 
-| Metric                                           | Type      | Labels                          | Purpose                                                  |
-| ------------------------------------------------ | --------- | ------------------------------- | -------------------------------------------------------- |
-| `ledger_state_checkpoints_total`                 | Counter   | `region`, `trigger`, `status`   | Checkpoint attempts; trigger ∈ `time`/`applies`/`dirty`/`snapshot`/`backup`/`shutdown` |
-| `ledger_state_checkpoint_duration_seconds`       | Histogram | `region`, `trigger`             | Per-checkpoint fsync latency                             |
-| `ledger_state_checkpoint_last_timestamp_seconds` | Gauge     | `region`                        | Unix timestamp of last successful checkpoint             |
-| `ledger_state_applies_since_checkpoint`          | Gauge     | `region`                        | In-memory applies accumulated since last checkpoint      |
-| `ledger_state_dirty_pages`                       | Gauge     | `region`                        | Dirty pages sampled at checkpointer wake-up              |
-| `ledger_state_page_cache_len`                    | Gauge     | `region`                        | Total in-memory pages resident in the state-DB cache     |
-| `ledger_state_last_synced_snapshot_id`           | Gauge     | `region`                        | Most recent snapshot id durably persisted to disk        |
-| `ledger_state_recovery_replay_count_total`       | Counter   | `region`                        | WAL entries replayed on startup (fires once per region)  |
-| `ledger_state_recovery_duration_seconds`         | Histogram | `region`                        | Duration of the post-open crash-recovery sweep           |
+| Metric                                           | Type      | Labels                        | Purpose                                                                                |
+| ------------------------------------------------ | --------- | ----------------------------- | -------------------------------------------------------------------------------------- |
+| `ledger_state_checkpoints_total`                 | Counter   | `region`, `trigger`, `status` | Checkpoint attempts; trigger ∈ `time`/`applies`/`dirty`/`snapshot`/`backup`/`shutdown` |
+| `ledger_state_checkpoint_duration_seconds`       | Histogram | `region`, `trigger`           | Per-checkpoint fsync latency                                                           |
+| `ledger_state_checkpoint_last_timestamp_seconds` | Gauge     | `region`                      | Unix timestamp of last successful checkpoint                                           |
+| `ledger_state_applies_since_checkpoint`          | Gauge     | `region`                      | In-memory applies accumulated since last checkpoint                                    |
+| `ledger_state_dirty_pages`                       | Gauge     | `region`                      | Dirty pages sampled at checkpointer wake-up                                            |
+| `ledger_state_page_cache_len`                    | Gauge     | `region`                      | Total in-memory pages resident in the state-DB cache                                   |
+| `ledger_state_last_synced_snapshot_id`           | Gauge     | `region`                      | Most recent snapshot id durably persisted to disk                                      |
+| `ledger_state_recovery_replay_count_total`       | Counter   | `region`                      | WAL entries replayed on startup (fires once per region)                                |
+| `ledger_state_recovery_duration_seconds`         | Histogram | `region`                      | Duration of the post-open crash-recovery sweep                                         |
 
 ### Suggested Grafana panels
 
@@ -223,7 +224,7 @@ Nine Prometheus metrics track checkpoint and recovery behavior. Full signatures 
 - Immediate state-DB fsync on `WriteSuccess`. A client that reads from a **different node** immediately after its write may not see the write until that node's apply pipeline + checkpointer catches up.
 - Durability of state / blocks / events DB pages between checkpoints. On crash, each DB is rolled back to `applied_durable` and re-derived from WAL — which is correct but not instant.
 - **Byte-identical block layout or apply-phase event IDs across a crash-recovery boundary.** See [apply-batching determinism](#apply-batching-determinism) below.
-- **Durability of handler-phase audit events inside the flush window on crash.** Up to `flush_interval_ms` worth of handler-phase events can be lost on SIGKILL / panic / OOM. Clean shutdown drains the queue and loses zero. External-ingest and apply-phase events are WAL-backed and unaffected. See [handler-phase event flush window](#handler-phase-event-flush-window) and the `enabled=false` escape hatch for strict synchronous semantics.
+- **Durability of handler-phase audit events inside the checkpoint window on crash.** As of Sprint 1B5, handler-phase events reach disk on the `StateCheckpointer` cadence (default ~500ms, not the flusher's 100ms). Up to `state_checkpoint.interval_ms` worth of flushed-but-uncheckpointed events plus anything still in the flusher queue can be lost on SIGKILL / panic / OOM. Clean shutdown drains the queue (Phase 5b) and fsyncs events.db (Phase 5c) — zero loss. External-ingest and apply-phase events are WAL-backed and unaffected. See [handler-phase event flush window](#handler-phase-event-flush-window) and the `enabled=false` escape hatch for strict synchronous semantics.
 
 ### Strict-durable exceptions (kept on `commit`, not flipped)
 
@@ -231,7 +232,7 @@ The commit-durability audit (`docs/superpowers/specs/2026-04-19-commit-durabilit
 
 - **`RaftLogStore::save_vote`** — Raft election safety. A lost vote after crash could produce split-brain.
 - **`RaftLogStore::install_snapshot`** — Receive-side of snapshot replication. Once the leader's WAL truncates past the installed snapshot's `last_applied`, losing the install means the follower has no WAL to replay.
-- **`EventWriter::write_entry`** — Handler-phase single-entry writes called from the saga orchestrator / admin RPC handlers / `RequestContext` / `JobContext`. NOT in the Raft apply pipeline — no WAL replay backstop. Sprint 1B4 reclassified this path from synchronous strict-durable to **batched-durable within one flush window** (default 100ms). The flusher still uses `commit()` (not `commit_in_memory`), so each flushed batch is fsync'd once — durability is preserved *per batch*, not per emission. `write_entry` remains callable directly when `EventWriterBatchConfig::enabled = false` (per-emission fsync, pre-1B4 semantics) and on the shutdown-drain path. See [handler-phase event flush window](#handler-phase-event-flush-window).
+- **`EventWriter::write_entry`** — Handler-phase single-entry writes. NOT in the Raft apply pipeline — no WAL replay backstop. Kept strict-durable so the `EventWriterBatchConfig::enabled = false` escape hatch restores pre-1B4 per-emission fsync semantics verbatim. In steady state this path is NOT on the hot path: production traffic flows through `EventHandle::record_handler_event` → `FlushQueue` → `EventFlusher::commit_batch`, which was flipped to `commit_in_memory` in Sprint 1B5 (covered by the `StateCheckpointer`'s per-tick events.db sync, same contract as apply-phase events). `write_entry` is only reached by (a) operators who flipped `enabled = false`, and (b) tests. See [handler-phase event flush window](#handler-phase-event-flush-window).
 - **`StateLayer::apply_operations`** (admin / recovery callers only) — `AdminService::recover_vault`, `check_integrity` temp-state replay, `ReadService` historical replay, `AutoRecoveryJob::replay_vault_from_blocks`. IN-APPLY-PIPELINE admin arms use `apply_operations_lazy` (see the audit's Task 2E addendum).
 - **`BlockArchive::compact_before`** — Background block compaction writing condensed blocks + watermark. Infrequent; fsync cost amortized.
 - **`EventsGc::tick_inner`** — TTL-GC sweep. Background cadence; strict-durable so GC progress survives crashes.
@@ -265,12 +266,12 @@ Crash-recovery replay complete
 - **Recovery duration unusually long** — The checkpoint window was too wide before the crash. If this recurs, tighten `StateCheckpointer` thresholds via `UpdateConfig`. Measure steady-state replay duration after the change to confirm.
 - **Post-restart clients see stale reads** — If the node was a follower during the crash, it may be lagging the leader. Wait for the follower to catch up (watch `ledger_state_last_synced_snapshot_id` advance) before directing reads at it.
 - **`ledger_state_recovery_replay_count_total > 0` after clean shutdown** — `sync_all_state_dbs` did not run or timed out. Check the graceful-shutdown timeout (`pre_shutdown_timeout_secs`) against observed sync latency, and the shutdown log for `sync_all_state_dbs: final state-DB sync ... timed out`.
-- **Handler-phase events missing from `events.db` after crash** — expected if the crash was not a clean shutdown. Handler-phase events are not WAL-backed (see [handler-phase event flush window](#handler-phase-event-flush-window)); up to `flush_interval_ms` worth of emissions can be lost. Look at `ledger_event_flush_triggers_total` immediately before the crash timestamp: if the last flush was more than one `flush_interval_ms` before the fault, the queue held unflushed entries that are now gone. Apply-phase events and external-ingest events are unaffected — they replay from the WAL. On clean shutdown (`ledger_event_flush_triggers_total{trigger="shutdown"}` incremented for the region), zero handler-phase events lost.
+- **Handler-phase events missing from `events.db` after crash** — expected if the crash was not a clean shutdown. Handler-phase events are not WAL-backed (see [handler-phase event flush window](#handler-phase-event-flush-window)); as of Sprint 1B5 the loss window is bounded by `state_checkpoint.interval_ms` (default ~500ms) rather than `flush_interval_ms`. Look at `ledger_state_checkpoint_last_timestamp_seconds` for the region against the crash timestamp: any handler-phase event whose flush landed after the last successful checkpoint was in the events.db page cache only and is gone. Apply-phase events and external-ingest events are unaffected — they replay from the WAL. On clean shutdown (`ledger_event_flush_triggers_total{trigger="shutdown"}` incremented plus `sync_all_state_dbs` completed for the region), zero handler-phase events lost.
 - **`ledger_event_overflow_total{cause=shutdown_timeout} > 0`** — Phase 5b's `flush_for_shutdown(5s)` drain budget was exceeded; some queued events did not make it to disk. Raise the 5s timeout in `crates/server/src/main.rs` (Phase 5b) if the queue-at-shutdown depth is regularly above the flusher's drain rate.
 
-## Sprint 1B2 / 1B3 / 1B4 Historical Note
+## Sprint 1B2 / 1B3 / 1B4 / 1B5 Historical Note
 
-The durability contract changed in Sprint 1B2 (April 2026), extended in Sprint 1B3, and gained a handler-phase batching path in Sprint 1B4. Design and audit artifacts:
+The durability contract changed in Sprint 1B2 (April 2026), extended in Sprint 1B3, gained a handler-phase batching path in Sprint 1B4, and in Sprint 1B5 the handler-phase path moved to the same checkpoint-covered class as apply-phase events. Design and audit artifacts:
 
 - **1B2 design doc**: `docs/superpowers/specs/2026-04-19-sprint-1b2-apply-batching-design.md` — state.db / raft.db rationale, primitives, and classification rules.
 - **1B3 design doc**: `docs/superpowers/specs/2026-04-19-sprint-1b3-blocks-events-batching-design.md` — blocks.db / events.db extension, external-ingest routing through Raft, and the `apply_operations` / `apply_operations_lazy` split.
@@ -278,4 +279,4 @@ The durability contract changed in Sprint 1B2 (April 2026), extended in Sprint 1
 - **Commit-durability audit**: `docs/superpowers/specs/2026-04-19-commit-durability-audit.md` — the authoritative `commit` vs `commit_in_memory` classification, kept current as sprint work lands.
 - **Simulation deferrals**: `docs/superpowers/specs/2026-04-19-task-3b-simulation-deferrals.md` — follow-up simulation scenarios not covered in Sprint 1B2.
 
-Before Sprint 1B2, the apply-path `WriteTransaction::commit` invoked a full dual-slot persist (2 fsyncs) per call. Sprint 1B2 added `WriteTransaction::commit_in_memory` + `Database::sync_state` + `StateCheckpointer`, flipped two specific state.db / raft.db call sites, and introduced `replay_crash_gap` to recover the gap between `applied_durable` and `last_committed` on crash. Sprint 1B3 flipped the blocks.db apply-path commit (`BlockArchive::append_block`) and the events.db apply-path commit (`EventWriter::write_events`), routed external `IngestEvents` through Raft as `LedgerRequest::IngestExternalEvents`, extended `StateCheckpointer` / `sync_all_state_dbs` / `replay_crash_gap` to cover all four DBs, and split `StateLayer::apply_operations` into a durable entrypoint (admin / recovery) and a lazy entrypoint (`apply_operations_lazy`, used by all IN-APPLY-PIPELINE admin-request arms). Sprint 1B4 put the handler-phase path — which has no WAL backstop, so `commit_in_memory` is unavailable — behind a bounded queue + flusher that batches fsyncs within a 100ms window, added `EventHandle::flush_for_shutdown` invoked from `GracefulShutdown` Phase 5b to preserve zero-loss on clean shutdown, and introduced the `EventWriterBatchConfig::enabled = false` escape hatch that restores pre-1B4 per-emission fsync semantics for strict-compliance workloads.
+Before Sprint 1B2, the apply-path `WriteTransaction::commit` invoked a full dual-slot persist (2 fsyncs) per call. Sprint 1B2 added `WriteTransaction::commit_in_memory` + `Database::sync_state` + `StateCheckpointer`, flipped two specific state.db / raft.db call sites, and introduced `replay_crash_gap` to recover the gap between `applied_durable` and `last_committed` on crash. Sprint 1B3 flipped the blocks.db apply-path commit (`BlockArchive::append_block`) and the events.db apply-path commit (`EventWriter::write_events`), routed external `IngestEvents` through Raft as `LedgerRequest::IngestExternalEvents`, extended `StateCheckpointer` / `sync_all_state_dbs` / `replay_crash_gap` to cover all four DBs, and split `StateLayer::apply_operations` into a durable entrypoint (admin / recovery) and a lazy entrypoint (`apply_operations_lazy`, used by all IN-APPLY-PIPELINE admin-request arms). Sprint 1B4 put the handler-phase path — which has no WAL backstop, so the emission itself cannot be WAL-replayed — behind a bounded queue + flusher that batched fsyncs within a 100ms window, added `EventHandle::flush_for_shutdown` invoked from `GracefulShutdown` Phase 5b to preserve zero-loss on clean shutdown, and introduced the `EventWriterBatchConfig::enabled = false` escape hatch that restores pre-1B4 per-emission fsync semantics for strict-compliance workloads. Sprint 1B5 then flipped `EventFlusher::commit_batch` from `commit()` to `commit_in_memory()` — durability is now realized by the `StateCheckpointer`'s per-tick events.db sync (already in the 4-DB sweep since Sprint 1B3), dropping the per-flush dual-slot fsync from the hot path. The crash-loss window widened from "one flush tick" (default 100ms) to "one StateCheckpointer tick" (default ~500ms); graceful-shutdown zero-loss is preserved via Phase 5b drain (in-memory) + Phase 5c `sync_all_state_dbs` (fsync). Sprint 1B5 also tuned the WAL `BatchWriter` defaults (`max_batch_size=500`, `batch_timeout=10ms`) and wired `NodeConfig.batching` through to the runtime — previously the BatchWriter was constructed with `None` and silently bypassed. See the 1B5 closure note in [`2026-04-19-commit-durability-audit.md`](../superpowers/specs/2026-04-19-commit-durability-audit.md#sprint-1b5-closure-note).

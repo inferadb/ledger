@@ -31,14 +31,19 @@
 //! for the apply-phase caveat.
 //!
 //! Handler-phase audit events (emitted as a side-effect of non-ingest RPCs —
-//! admin mutations, authorization checks, lifecycle operations) changed shape
-//! in Sprint 1B4: the server now enqueues them into an in-memory flush queue
-//! and the RPC returns before the event is fsynced, with a background flusher
-//! batching fsyncs within a ~100 ms default window (configurable; can be
-//! disabled for strict-durability deployments). Apply-phase and ingested
-//! events are unaffected. See `docs/operations/durability.md` for the full
-//! contract and the [`EventFilter::handler_phase_only`] docstring for the
-//! consumer-visible caveat.
+//! admin mutations, authorization checks, lifecycle operations) are now
+//! checkpoint-covered rather than per-emission-fsynced: the server enqueues
+//! them into an in-memory flush queue, a background flusher drains the queue
+//! into the events.db page cache, and durability lands on the next
+//! `StateCheckpointer` tick (~500 ms default). This is the same durability
+//! class as apply-phase events, except the emission itself is not WAL-backed,
+//! so a crash before the next checkpoint loses the flushed-but-uncheckpointed
+//! entries. Strict-durability deployments can disable the queue via the
+//! `UpdateConfig` admin RPC (`event_writer_batch.enabled = false`), restoring
+//! pre-1B4 per-emission fsync semantics. Apply-phase and ingested events are
+//! unaffected. See `docs/operations/durability.md` for the full contract and
+//! the [`EventFilter::handler_phase_only`] docstring for the consumer-visible
+//! caveat.
 //!
 //! # Quick Start
 //!

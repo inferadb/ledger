@@ -18,6 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use inferadb_ledger_types::config::BatchConfig;
 use parking_lot::Mutex;
 use tokio::{sync::oneshot, time::interval};
 use tracing::{debug, info, instrument, warn};
@@ -28,32 +29,85 @@ use crate::{
 };
 
 /// Configuration for the batch writer.
+///
+/// ## Tuning tradeoffs
+///
+/// Batching amortizes the cost of a single WAL `fsync` across many proposals.
+/// Under concurrent load the bottleneck is fsync-per-commit, so defaults favor
+/// throughput over single-client latency:
+///
+/// - Larger `max_batch_size` lets concurrent bursts coalesce into one fsync.
+/// - Longer `batch_timeout` gives proposals more time to accumulate before the timer-triggered
+///   flush caps added latency under single-client load.
+/// - Longer `tick_interval` reduces the probability that an isolated proposal is flushed on its own
+///   inside a sub-millisecond tick window.
 #[derive(Debug, Clone, bon::Builder)]
 pub struct BatchWriterConfig {
     /// Maximum number of writes to batch together.
-    #[builder(default = 100)]
+    ///
+    /// Upper bound on a single batch. Once reached, `should_flush` returns
+    /// true immediately regardless of `batch_timeout`. Caps memory growth
+    /// under bursty concurrent load; also caps the size of a single Raft
+    /// proposal.
+    #[builder(default = 500)]
     pub max_batch_size: usize,
-    /// Maximum time to wait before flushing a batch.
-    #[builder(default = Duration::from_millis(2))]
+    /// Maximum time to wait before flushing a partial batch.
+    ///
+    /// Caps added latency when proposals arrive one at a time. Under
+    /// single-client load this is the effective per-request overhead before
+    /// the fsync fires; under concurrent load `max_batch_size` usually wins
+    /// first.
+    #[builder(default = Duration::from_millis(10))]
     pub batch_timeout: Duration,
     /// Interval for checking batch timeout.
-    #[builder(default = Duration::from_micros(500))]
+    ///
+    /// The `run` loop wakes on this cadence to re-evaluate `should_flush`.
+    /// Shorter intervals mean tighter timeout granularity but burn more CPU
+    /// and — historically, when eager-commit flushed on queue-drain — caused
+    /// isolated proposals to fsync on their own. 5ms is a throughput-biased
+    /// compromise; lower it if single-client latency SLOs are tight.
+    #[builder(default = Duration::from_millis(5))]
     pub tick_interval: Duration,
-    /// Commit immediately when queue drains to zero.
-    ///
-    /// When true (default), flushes the batch as soon as the incoming queue
-    /// is empty rather than waiting for `batch_timeout`. This optimizes
-    /// latency for interactive workloads.
-    ///
-    /// Set to `false` for batch import workloads where throughput is more
-    /// important than latency.
-    #[builder(default = true)]
-    pub eager_commit: bool,
 }
 
 impl Default for BatchWriterConfig {
     fn default() -> Self {
         Self::builder().build()
+    }
+}
+
+/// Minimum tick interval derived from a [`BatchConfig`].
+///
+/// Guards against degenerate cases where `batch_timeout` is very small (or zero)
+/// and `batch_timeout / 2` rounds down to a sub-millisecond tick that burns CPU
+/// without meaningfully tightening timeout granularity.
+const DERIVED_TICK_INTERVAL_MIN: Duration = Duration::from_millis(1);
+
+/// Maximum tick interval derived from a [`BatchConfig`].
+///
+/// Caps `batch_timeout / 2` when operators configure a very long `batch_timeout`
+/// — above 10ms the loop is no longer "timeout-granularity" bound, it's just a
+/// background poller, and a longer tick adds latency without throughput gain.
+const DERIVED_TICK_INTERVAL_MAX: Duration = Duration::from_millis(10);
+
+impl From<&BatchConfig> for BatchWriterConfig {
+    /// Converts the operator-visible [`BatchConfig`] into the runtime-internal
+    /// [`BatchWriterConfig`] consumed by [`BatchWriter`].
+    ///
+    /// `max_batch_size` and `batch_timeout` are copied verbatim. `BatchConfig`
+    /// does not expose `tick_interval` — it's an internal polling knob — so it
+    /// is derived as `batch_timeout / 2`, clamped to
+    /// `[DERIVED_TICK_INTERVAL_MIN, DERIVED_TICK_INTERVAL_MAX]`. With the
+    /// default `batch_timeout` of 10ms this produces a 5ms tick, matching the
+    /// [`BatchWriterConfig::default()`] value.
+    fn from(config: &BatchConfig) -> Self {
+        let derived_tick =
+            (config.batch_timeout / 2).clamp(DERIVED_TICK_INTERVAL_MIN, DERIVED_TICK_INTERVAL_MAX);
+        Self::builder()
+            .max_batch_size(config.max_batch_size)
+            .batch_timeout(config.batch_timeout)
+            .tick_interval(derived_tick)
+            .build()
     }
 }
 
@@ -96,34 +150,22 @@ struct BatchState {
     pending: VecDeque<PendingWrite>,
     /// Time when the first pending write was queued.
     first_pending_at: Option<Instant>,
-    /// Time when the last write was added (for eager commit detection).
-    last_write_at: Option<Instant>,
-    /// Number of pending writes at last tick (for eager commit detection).
-    pending_at_last_tick: usize,
 }
 
 impl BatchState {
     fn new() -> Self {
-        Self {
-            pending: VecDeque::new(),
-            first_pending_at: None,
-            last_write_at: None,
-            pending_at_last_tick: 0,
-        }
+        Self { pending: VecDeque::new(), first_pending_at: None }
     }
 
     fn push(&mut self, write: PendingWrite) {
         if self.first_pending_at.is_none() {
             self.first_pending_at = Some(write.queued_at);
         }
-        self.last_write_at = Some(write.queued_at);
         self.pending.push_back(write);
     }
 
     fn take_batch(&mut self) -> Vec<PendingWrite> {
         self.first_pending_at = None;
-        self.last_write_at = None;
-        self.pending_at_last_tick = 0;
         self.pending.drain(..).collect()
     }
 
@@ -139,38 +181,30 @@ impl BatchState {
     /// Checks if the batch should be flushed.
     ///
     /// Returns true if:
-    /// 1. Batch size reached max_batch_size
-    /// 2. Batch timeout elapsed since first pending write
-    /// 3. Eager commit enabled AND queue has drained (no new writes since last tick)
+    /// 1. Batch size reached `max_batch_size` (short-circuit to cap batch size / memory /
+    ///    single-proposal payload), OR
+    /// 2. `batch_timeout` elapsed since the first pending write arrived.
+    ///
+    /// There is deliberately no "queue drained" predicate: under concurrent
+    /// load the queue is drained on every tick (clients wait on prior
+    /// responses before submitting), so a drain-based trigger fires per-tick
+    /// and defeats batching. Timer-only flushing amortizes WAL fsyncs across
+    /// concurrent bursts; `batch_timeout` caps added latency for single-client
+    /// workloads.
     fn should_flush(&self, config: &BatchWriterConfig) -> bool {
-        // Always flush if we hit max batch size
+        // Always flush if we hit max batch size.
         if self.pending.len() >= config.max_batch_size {
             return true;
         }
 
-        // Flush if batch timeout elapsed
+        // Flush if batch timeout elapsed.
         if let Some(first_at) = self.first_pending_at
             && first_at.elapsed() >= config.batch_timeout
         {
             return true;
         }
 
-        // Eager commit: flush if we have pending writes and the queue hasn't grown
-        // since the last tick (indicating the input queue has drained)
-        if config.eager_commit && !self.pending.is_empty() {
-            // If pending count hasn't changed since last tick, the queue is drained
-            if self.pending.len() == self.pending_at_last_tick && self.pending_at_last_tick > 0 {
-                return true;
-            }
-        }
-
         false
-    }
-
-    /// Updates tracking for eager commit detection.
-    /// Called at the start of each tick.
-    fn update_tick_tracking(&mut self) {
-        self.pending_at_last_tick = self.pending.len();
     }
 }
 
@@ -266,39 +300,24 @@ where
         info!(
             max_batch_size = self.config.max_batch_size,
             batch_timeout_ms = self.config.batch_timeout.as_millis(),
-            eager_commit = self.config.eager_commit,
+            tick_interval_us = self.config.tick_interval.as_micros(),
             "Starting batch writer"
         );
 
         loop {
             ticker.tick().await;
 
-            // Check if we should flush
-            let (batch, is_eager) = {
+            let batch = {
                 let mut state = self.state.lock();
 
-                // Emit batch queue depth gauge for SLI monitoring
+                // Emit batch queue depth gauge for SLI monitoring.
                 metrics::set_batch_queue_depth(state.pending.len(), &self.region);
 
-                // Track whether this is an eager commit (queue drained)
-                let is_eager = self.config.eager_commit
-                    && !state.pending.is_empty()
-                    && state.pending.len() == state.pending_at_last_tick
-                    && state.pending_at_last_tick > 0;
-
-                let batch = if state.should_flush(&self.config) {
-                    Some(state.take_batch())
-                } else {
-                    // Update tick tracking for next iteration
-                    state.update_tick_tracking();
-                    None
-                };
-
-                (batch, is_eager)
+                if state.should_flush(&self.config) { Some(state.take_batch()) } else { None }
             };
 
             if let Some(batch) = batch {
-                self.flush_batch(batch, is_eager).await;
+                self.flush_batch(batch).await;
             }
         }
     }
@@ -309,36 +328,32 @@ where
         skip_all,
         fields(
             batch_size = batch.len(),
-            is_eager = is_eager,
             region = %self.region,
         )
     )]
-    async fn flush_batch(&self, batch: Vec<PendingWrite>, is_eager: bool) {
+    async fn flush_batch(&self, batch: Vec<PendingWrite>) {
         let batch_size = batch.len();
         if batch_size == 0 {
             return;
         }
 
         let start = Instant::now();
-        debug!(batch_size, is_eager, "Flushing batch");
+        debug!(batch_size, "Flushing batch");
 
-        // Record batch metrics
+        // Record batch metrics.
         metrics::record_batch_coalesce(batch_size);
-        if is_eager {
-            metrics::record_eager_commit();
-        }
 
-        // Destructure batch into requests and response senders (zero clones)
+        // Destructure batch into requests and response senders (zero clones).
         let (requests, senders): (Vec<LedgerRequest>, Vec<_>) =
             batch.into_iter().map(|w| (w.request, w.response_tx)).unzip();
 
-        // Submit to Raft
+        // Submit to Raft.
         let result = (self.submit_fn)(requests).await;
 
         let latency = start.elapsed().as_secs_f64();
         metrics::record_batch_flush(latency);
 
-        // Distribute results to waiters
+        // Distribute results to waiters.
         match result {
             Ok(responses) => {
                 if responses.len() != batch_size {
@@ -349,12 +364,7 @@ where
                     let _ = sender.send(Ok(response));
                 }
 
-                info!(
-                    batch_size,
-                    latency_ms = latency * 1000.0,
-                    is_eager,
-                    "Batch flushed successfully"
-                );
+                info!(batch_size, latency_ms = latency * 1000.0, "Batch flushed successfully");
             },
             Err(e) => {
                 warn!(error = %e, batch_size, "Batch flush failed");
@@ -402,7 +412,6 @@ mod tests {
             max_batch_size: 10,
             batch_timeout: Duration::from_millis(100),
             tick_interval: Duration::from_millis(10),
-            eager_commit: false, // Disable for this test to use timeout-based batching
         };
 
         let call_count = Arc::new(AtomicUsize::new(0));
@@ -459,7 +468,6 @@ mod tests {
             max_batch_size: 3,
             batch_timeout: Duration::from_secs(10), // Long timeout
             tick_interval: Duration::from_millis(1),
-            eager_commit: false, // Disable to test size-based flushing
         };
 
         let call_count = Arc::new(AtomicUsize::new(0));
@@ -507,7 +515,6 @@ mod tests {
             max_batch_size: 2,
             batch_timeout: Duration::from_millis(10),
             tick_interval: Duration::from_millis(1),
-            eager_commit: false, // Disable for basic state tests
         };
 
         let mut state = BatchState::new();
@@ -540,29 +547,20 @@ mod tests {
         assert!(state.is_empty());
     }
 
-    /// Test that eager_commit flushes when queue drains.
-    ///
-    /// With eager_commit enabled, if the pending count hasn't grown since the
-    /// last tick, we should flush immediately rather than waiting for timeout.
+    /// Timer-only flushing: a lone pending proposal waits for `batch_timeout`
+    /// before fsync'ing, and additional concurrent proposals accumulate into
+    /// the same batch.
     #[test]
-    fn test_eager_commit_detection() {
-        let config_eager = BatchWriterConfig {
+    fn test_timer_only_flush_does_not_fire_on_drain() {
+        let config = BatchWriterConfig {
             max_batch_size: 10,
             batch_timeout: Duration::from_secs(10), // Long timeout
             tick_interval: Duration::from_millis(1),
-            eager_commit: true,
-        };
-
-        let config_no_eager = BatchWriterConfig {
-            max_batch_size: 10,
-            batch_timeout: Duration::from_secs(10), // Long timeout
-            tick_interval: Duration::from_millis(1),
-            eager_commit: false,
         };
 
         let mut state = BatchState::new();
 
-        // Add one write
+        // Add one write.
         let (tx1, _rx1) = oneshot::channel();
         state.push(PendingWrite {
             request: make_request(org(1), vault(1)),
@@ -570,45 +568,34 @@ mod tests {
             queued_at: Instant::now(),
         });
 
-        // First tick: record pending count
-        state.update_tick_tracking();
-        assert_eq!(state.pending_at_last_tick, 1);
+        // With only timer-based flushing, a single pending write does NOT
+        // flush until `batch_timeout` elapses — even though the queue has
+        // "drained" (no new arrivals). This is the fix for Sprint 1B5: under
+        // concurrent load, clients wait on responses before submitting, so
+        // the drained-queue predicate fires on every tick and forces
+        // one-proposal-per-fsync behavior.
+        assert!(!state.should_flush(&config));
 
-        // With eager=false, should NOT flush (no timeout, not at max size)
-        assert!(!state.should_flush(&config_no_eager));
-
-        // With eager=true, should flush because pending count hasn't changed
-        // (queue has drained)
-        assert!(state.should_flush(&config_eager));
-
-        // Now add another write to simulate more incoming
+        // Add another write — still under max_batch_size, still under
+        // batch_timeout, so still don't flush.
         let (tx2, _rx2) = oneshot::channel();
         state.push(PendingWrite {
             request: make_request(org(1), vault(2)),
             response_tx: tx2,
             queued_at: Instant::now(),
         });
-
-        // Even with eager=true, shouldn't flush now because count grew
-        // (state.pending.len() = 2, state.pending_at_last_tick = 1)
-        assert!(!state.should_flush(&config_eager));
-
-        // Update tick tracking again
-        state.update_tick_tracking();
-        assert_eq!(state.pending_at_last_tick, 2);
-
-        // Now with eager=true, should flush because queue drained
-        assert!(state.should_flush(&config_eager));
+        assert!(!state.should_flush(&config));
     }
 
-    /// Test that eager commit metrics are recorded correctly.
+    /// Flushing on timeout — once `batch_timeout` elapses since the first
+    /// pending write, `should_flush` returns true even if the batch is well
+    /// below `max_batch_size`.
     #[tokio::test]
-    async fn test_eager_commit_flushes_quickly() {
+    async fn test_batch_timeout_flushes() {
         let config = BatchWriterConfig {
-            max_batch_size: 100,                    // High limit
-            batch_timeout: Duration::from_secs(10), // Very long timeout
+            max_batch_size: 100,                      // High limit
+            batch_timeout: Duration::from_millis(20), // Short timeout
             tick_interval: Duration::from_millis(5),
-            eager_commit: true, // Enable eager commit
         };
 
         let call_count = Arc::new(AtomicUsize::new(0));
@@ -633,21 +620,19 @@ mod tests {
         let handle = writer.handle();
         let writer_task = tokio::spawn(writer.run());
 
-        // Submit a single write
+        // Submit a single write.
         let rx1 = handle.submit(make_request(org(1), vault(1)));
 
-        // With eager_commit, should flush quickly (within ~2 ticks) instead of
-        // waiting for the 10 second timeout
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Wait for the timeout to elapse plus a few tick intervals.
+        tokio::time::sleep(Duration::from_millis(80)).await;
 
-        // Should have flushed already due to eager commit
+        // Timer-based flush should have fired.
         assert_eq!(
             call_count.load(Ordering::SeqCst),
             1,
-            "Eager commit should have flushed the batch"
+            "batch_timeout should have triggered flush"
         );
 
-        // Verify we got the result
         let result = rx1.await;
         assert!(result.is_ok());
 
@@ -661,26 +646,242 @@ mod tests {
     #[test]
     fn test_batch_config_builder_custom_values() {
         let config = BatchWriterConfig::builder()
-            .max_batch_size(500)
+            .max_batch_size(250)
             .batch_timeout(Duration::from_millis(50))
             .tick_interval(Duration::from_millis(10))
-            .eager_commit(false)
             .build();
 
-        assert_eq!(config.max_batch_size, 500);
+        assert_eq!(config.max_batch_size, 250);
         assert_eq!(config.batch_timeout, Duration::from_millis(50));
         assert_eq!(config.tick_interval, Duration::from_millis(10));
-        assert!(!config.eager_commit);
     }
 
     #[test]
     fn test_batch_config_builder_partial_override() {
-        // Only override some fields, rest should use defaults
-        let config = BatchWriterConfig::builder().max_batch_size(200).eager_commit(false).build();
+        // Only override some fields, rest should use defaults.
+        let config = BatchWriterConfig::builder().max_batch_size(200).build();
 
         assert_eq!(config.max_batch_size, 200);
-        assert_eq!(config.batch_timeout, Duration::from_millis(2)); // default
-        assert_eq!(config.tick_interval, Duration::from_micros(500)); // default
-        assert!(!config.eager_commit);
+        assert_eq!(config.batch_timeout, Duration::from_millis(10)); // default
+        assert_eq!(config.tick_interval, Duration::from_millis(5)); // default
+    }
+
+    #[test]
+    fn test_batch_config_builder_defaults() {
+        let config = BatchWriterConfig::default();
+
+        assert_eq!(config.max_batch_size, 500);
+        assert_eq!(config.batch_timeout, Duration::from_millis(10));
+        assert_eq!(config.tick_interval, Duration::from_millis(5));
+    }
+
+    // =========================================================================
+    // From<&BatchConfig> tests (operator config → runtime config)
+    // =========================================================================
+
+    // `BatchConfig::builder().build()` returns `Result`; these tests unwrap
+    // with `.expect()` because each input is a literal known to validate.
+    #[allow(clippy::expect_used)]
+    mod from_batch_config {
+        use super::*;
+
+        #[test]
+        fn defaults_match_batch_writer_config_defaults() {
+            // Default BatchConfig (post-Fix-#1: 500 / 10ms) should produce a
+            // BatchWriterConfig matching its own defaults (500 / 10ms / 5ms).
+            let src = BatchConfig::default();
+            let dst = BatchWriterConfig::from(&src);
+            assert_eq!(dst.max_batch_size, src.max_batch_size);
+            assert_eq!(dst.batch_timeout, src.batch_timeout);
+            assert_eq!(dst.tick_interval, Duration::from_millis(5));
+        }
+
+        #[test]
+        fn custom_timeout_uses_half_as_tick() {
+            // batch_timeout / 2 falls inside [1ms, 10ms] — use it directly.
+            let src = BatchConfig::builder()
+                .max_batch_size(200)
+                .batch_timeout(Duration::from_millis(16))
+                .build()
+                .expect("valid batch config");
+            let dst = BatchWriterConfig::from(&src);
+            assert_eq!(dst.max_batch_size, 200);
+            assert_eq!(dst.batch_timeout, Duration::from_millis(16));
+            assert_eq!(dst.tick_interval, Duration::from_millis(8));
+        }
+
+        #[test]
+        fn clamps_tick_lower_bound() {
+            // batch_timeout / 2 < 1ms should be clamped up to 1ms.
+            let src = BatchConfig::builder()
+                .batch_timeout(Duration::from_micros(500))
+                .build()
+                .expect("valid batch config");
+            let dst = BatchWriterConfig::from(&src);
+            assert_eq!(dst.tick_interval, DERIVED_TICK_INTERVAL_MIN);
+        }
+
+        #[test]
+        fn clamps_tick_upper_bound() {
+            // batch_timeout / 2 > 10ms should be clamped down to 10ms.
+            let src = BatchConfig::builder()
+                .batch_timeout(Duration::from_millis(100))
+                .build()
+                .expect("valid batch config");
+            let dst = BatchWriterConfig::from(&src);
+            assert_eq!(dst.tick_interval, DERIVED_TICK_INTERVAL_MAX);
+        }
+    }
+
+    // =========================================================================
+    // Proptest: BatchWriter preserves FIFO submission order (Sprint 1B5 Phase 3)
+    // =========================================================================
+    //
+    // Sprint 1B5 Fix #1 reworked `BatchState::should_flush` (dropped
+    // `eager_commit`, retuned defaults). The existing `test_batch_state` and
+    // `test_timer_only_flush_does_not_fire_on_drain` cover size/timer triggers;
+    // this proptest pins the orthogonal invariant the apply pipeline depends
+    // on: when N proposals are submitted serially via
+    // `BatchWriterHandle::submit`, the flusher delivers them to the `submit_fn`
+    // in the same order. A regression here would silently reorder log entries
+    // in a Raft proposal and corrupt state-machine determinism across replicas.
+    //
+    // Runtime: 32 cases × one 2-worker tokio runtime + one short batch-timeout
+    // wait per case. Each case caps at 50 proposals — keeps total proptest wall
+    // clock under a couple of seconds for the full libtest run.
+    //
+    // `.expect()` appears inside the proptest case body for tokio runtime
+    // construction and oneshot receive — both are infrastructure failures that
+    // are legitimate test panics, not Result handling deficiencies.
+    #[allow(clippy::expect_used)]
+    mod proptest_fifo {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use proptest::prelude::*;
+
+        use super::*;
+
+        fn make_indexed_request(idx: u64) -> LedgerRequest {
+            LedgerRequest::Write {
+                organization: OrganizationId::new(idx as i64),
+                vault: VaultId::new(1),
+                transactions: vec![],
+                idempotency_key: [0u8; 16],
+                request_hash: 0,
+            }
+        }
+
+        // Static counter so each proptest case uses distinct organization ids
+        // across cases — belt-and-braces in case a case's observed vector is
+        // leaked into the next case via Arc sharing (it isn't, but this makes
+        // the invariant trivially true).
+        static CASE_BASE: AtomicUsize = AtomicUsize::new(1);
+
+        proptest! {
+            // 32 cases is the same cadence as `proptest_flush_correctness` in
+            // event_writer.rs — each case spins a fresh tokio runtime, so we
+            // keep iteration count low. The FIFO invariant is a single
+            // logical property: more cases would shrink tighter but not
+            // broaden coverage.
+            #![proptest_config(ProptestConfig::with_cases(32))]
+
+            /// Property: for any serial submission of 1..=50 proposals to
+            /// a single `BatchWriterHandle`, the flusher's `submit_fn`
+            /// observes them in the exact submission order.
+            #[test]
+            fn batch_writer_preserves_proposal_order(n in 1u64..=50u64) {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime");
+
+                runtime.block_on(async move {
+                    let config = BatchWriterConfig {
+                        max_batch_size: 64,
+                        batch_timeout: Duration::from_millis(20),
+                        tick_interval: Duration::from_millis(2),
+                    };
+
+                    // Capturing `submit_fn` — records each request's
+                    // organization id (used by the test as the submission
+                    // index) in the order the flusher hands them over.
+                    // BatchWriter pipes batches through this closure in
+                    // `take_batch()` order, which is push order in the
+                    // internal VecDeque, which is `submit` order.
+                    let observed: Arc<Mutex<Vec<u64>>> =
+                        Arc::new(Mutex::new(Vec::new()));
+                    let observed_clone = Arc::clone(&observed);
+
+                    let submit_fn = move |requests: Vec<LedgerRequest>| {
+                        let observed = Arc::clone(&observed_clone);
+                        let responses: Vec<LedgerResponse> = requests
+                            .iter()
+                            .enumerate()
+                            .map(|(i, _)| LedgerResponse::Write {
+                                block_height: i as u64,
+                                block_hash: [0u8; 32],
+                                assigned_sequence: 1,
+                            })
+                            .collect();
+
+                        for req in &requests {
+                            if let LedgerRequest::Write { organization, .. } = req {
+                                observed.lock().push(organization.value() as u64);
+                            }
+                        }
+
+                        Box::pin(async move { Ok(responses) })
+                            as futures::future::BoxFuture<
+                                'static,
+                                Result<Vec<LedgerResponse>, String>,
+                            >
+                    };
+
+                    let writer = BatchWriter::new(config, submit_fn, "proptest");
+                    let handle = writer.handle();
+                    let writer_task = tokio::spawn(writer.run());
+
+                    let base =
+                        CASE_BASE.fetch_add(100, Ordering::SeqCst) as u64;
+                    let expected: Vec<u64> =
+                        (0..n).map(|i| base + i).collect();
+
+                    // Serial submission: each call returns an oneshot rx
+                    // we hold to completion. Because submission is serial
+                    // from a single task, the mutex-guarded VecDeque
+                    // preserves push order by construction — the property
+                    // under test is that `run()`'s take_batch + submit_fn
+                    // chain preserves that order too.
+                    let mut rxs = Vec::with_capacity(n as usize);
+                    for idx in &expected {
+                        rxs.push(handle.submit(make_indexed_request(*idx)));
+                    }
+
+                    // Await each rx in submission order — this also
+                    // guarantees the flusher has drained every batch
+                    // before we inspect `observed`.
+                    for rx in rxs {
+                        let _ = rx.await.expect("oneshot");
+                    }
+
+                    writer_task.abort();
+
+                    let actual = observed.lock().clone();
+                    prop_assert_eq!(
+                        actual.len(),
+                        expected.len(),
+                        "flusher should observe every submitted proposal exactly once"
+                    );
+                    prop_assert_eq!(
+                        actual,
+                        expected,
+                        "BatchWriter must preserve serial submission order"
+                    );
+
+                    Ok(())
+                }).expect("proptest case body")
+            }
+        }
     }
 }

@@ -258,7 +258,7 @@ Client Request (with idempotency_key)
 [7] Record hot key accesses (Count-Min Sketch)
     │
     ▼
-[8] Batcher aggregates (up to 100 txs or batch_timeout)
+[8] Batcher aggregates (up to 500 txs or batch_timeout)
     │
     ▼
 [9] Batch becomes Raft proposal (with deadline-aware timeout)
@@ -441,11 +441,11 @@ Batching amortizes Raft consensus overhead:
 | N tuples to same resource       | 3N     | 1            | ~50K tuples/sec  |
 | Bulk import (1000 tuples/block) | 3000   | 1            | ~100K tuples/sec |
 
-Default batch configuration:
+Default batch configuration (Sprint 1B5):
 
-- Maximum batch size: 100 transactions
-- Maximum batch delay: 5ms (env var default); 2ms (runtime `BatchWriter` default)
-- Tick interval: 500µs (runtime `BatchWriter` polling interval)
+- Maximum batch size: 500 transactions
+- Maximum batch delay: 10ms (`batch_timeout`)
+- Tick interval: 5ms (runtime `BatchWriter` polling interval, derived from `batch_timeout / 2` clamped to `[1ms, 10ms]`)
 
 ### Fault Tolerance & Recovery
 

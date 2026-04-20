@@ -319,17 +319,20 @@ impl PostErasureCompactionConfig {
 pub struct BatchConfig {
     /// Maximum transactions per batch.
     ///
-    /// Must be > 0.
+    /// Upper bound on a single coalesced batch. Under concurrent load, a
+    /// larger cap lets more proposals amortize a single WAL fsync. Must be
+    /// > 0. Default: 500.
     #[serde(default = "default_max_batch_size")]
     pub max_batch_size: usize,
     /// Maximum wait time before flushing a partial batch.
+    ///
+    /// Caps added latency when proposals arrive one at a time. Under
+    /// concurrent load `max_batch_size` usually triggers first. Default:
+    /// 10ms.
     #[serde(default = "default_batch_timeout")]
     #[serde(with = "humantime_serde")]
     #[schemars(with = "String")]
     pub batch_timeout: Duration,
-    /// Enable batch coalescing for higher throughput.
-    #[serde(default = "default_coalesce_enabled")]
-    pub coalesce_enabled: bool,
 }
 
 #[bon::bon]
@@ -343,9 +346,8 @@ impl BatchConfig {
     pub fn new(
         #[builder(default = default_max_batch_size())] max_batch_size: usize,
         #[builder(default = default_batch_timeout())] batch_timeout: Duration,
-        #[builder(default = default_coalesce_enabled())] coalesce_enabled: bool,
     ) -> Result<Self, ConfigError> {
-        let config = Self { max_batch_size, batch_timeout, coalesce_enabled };
+        let config = Self { max_batch_size, batch_timeout };
         config.validate()?;
         Ok(config)
     }
@@ -371,24 +373,21 @@ impl BatchConfig {
 
 impl Default for BatchConfig {
     fn default() -> Self {
-        Self {
-            max_batch_size: default_max_batch_size(),
-            batch_timeout: default_batch_timeout(),
-            coalesce_enabled: default_coalesce_enabled(),
-        }
+        Self { max_batch_size: default_max_batch_size(), batch_timeout: default_batch_timeout() }
     }
 }
 
 fn default_max_batch_size() -> usize {
-    100
+    // Sprint 1B5 Fix #1: under concurrent load, a larger cap lets more
+    // proposals amortize a single WAL fsync. See `BatchWriterConfig`
+    // documentation for the tuning tradeoff.
+    500
 }
 
 fn default_batch_timeout() -> Duration {
-    Duration::from_millis(5)
-}
-
-fn default_coalesce_enabled() -> bool {
-    true
+    // Sprint 1B5 Fix #1: give proposals more time to accumulate; caps
+    // added latency under single-client load.
+    Duration::from_millis(10)
 }
 
 /// Configuration for client sequence TTL eviction.
@@ -641,9 +640,8 @@ mod tests {
     fn batch_config_default_is_valid() {
         let config = BatchConfig::default();
         assert!(config.validate().is_ok());
-        assert_eq!(config.max_batch_size, 100);
-        assert_eq!(config.batch_timeout, Duration::from_millis(5));
-        assert!(config.coalesce_enabled);
+        assert_eq!(config.max_batch_size, 500);
+        assert_eq!(config.batch_timeout, Duration::from_millis(10));
     }
 
     #[test]
@@ -663,13 +661,11 @@ mod tests {
         let config = BatchConfig::builder()
             .max_batch_size(50)
             .batch_timeout(Duration::from_millis(10))
-            .coalesce_enabled(false)
             .build()
             .unwrap();
 
         assert_eq!(config.max_batch_size, 50);
         assert_eq!(config.batch_timeout, Duration::from_millis(10));
-        assert!(!config.coalesce_enabled);
     }
 
     #[test]

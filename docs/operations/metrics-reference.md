@@ -182,20 +182,26 @@ rate(ledger_operations_total{result="hit"}[5m]) /
 
 ## Batching
 
-| Metric                               | Type      | Labels | Description                    |
-| ------------------------------------ | --------- | ------ | ------------------------------ |
-| `ledger_batch_coalesce_total`        | Counter   | -      | Batch coalesce events          |
-| `ledger_batch_coalesce_size`         | Histogram | -      | Requests coalesced per batch   |
-| `ledger_batch_flush_latency_seconds` | Histogram | -      | Batch flush duration           |
-| `ledger_batch_eager_commits_total`   | Counter   | -      | Batches flushed on queue drain |
-| `ledger_batch_timeout_commits_total` | Counter   | -      | Batches flushed on timeout     |
+| Metric                               | Type      | Labels   | Description                                         |
+| ------------------------------------ | --------- | -------- | --------------------------------------------------- |
+| `ledger_batch_coalesce_total`        | Counter   | -        | Batches flushed                                     |
+| `ledger_batch_coalesce_size`         | Histogram | -        | Requests coalesced per batch                        |
+| `ledger_batch_flush_latency_seconds` | Histogram | -        | Batch flush wall-clock (Raft submit round-trip)     |
+| `ledger_batch_queue_depth`           | Gauge     | `region` | Pending writes at tick entry (write-saturation SLI) |
 
-### Tuning Indicators
+### Removed in Sprint 1B5
+
+`ledger_batch_eager_commits_total` and `ledger_batch_timeout_commits_total` were removed with the `eager_commit` policy. Timer-only flushing is now the only policy; `ledger_batch_coalesce_total` fires once per flush regardless of trigger. Bundled Grafana dashboards (`docs/dashboards/resource-saturation.json`, `docs/operations/grafana/ledger-dashboard.json`) were updated in the same sprint.
+
+### Tuning indicators
 
 ```promql
-# Eager vs timeout commits ratio (higher eager = lower latency)
-rate(ledger_batch_eager_commits_total[5m]) /
-(rate(ledger_batch_eager_commits_total[5m]) + rate(ledger_batch_timeout_commits_total[5m]))
+# Average batch size under load — low values suggest batch_timeout is too short
+# for the incoming concurrency, or that max_batch_size is too high to be reached.
+rate(ledger_batch_coalesce_size_sum[5m]) / rate(ledger_batch_coalesce_size_count[5m])
+
+# Flushes per second. Pair with batch size to see throughput amortization.
+rate(ledger_batch_coalesce_total[5m])
 ```
 
 ## Recovery
@@ -219,17 +225,17 @@ ledger_determinism_bug_total > 0
 
 Lazy-commit + periodic-checkpoint durability (Sprint 1B2, extended to all four regional DBs in Sprint 1B3). Operator tuning + interpretation reference: [durability.md](durability.md).
 
-| Metric                                           | Type      | Labels                         | Description                                                                                                       |
-| ------------------------------------------------ | --------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
-| `ledger_state_checkpoints_total`                 | Counter   | `region`, `trigger`, `status`  | `StateCheckpointer` attempts. `trigger` ∈ `time`/`applies`/`dirty`/`snapshot`/`backup`/`shutdown`; `status` ∈ `ok`/`error` |
-| `ledger_state_checkpoint_duration_seconds`       | Histogram | `region`, `trigger`            | Per-checkpoint fsync latency across all 4 regional DBs (state.db + raft.db + blocks.db + events.db when present). Synced concurrently via `tokio::join!`; the histogram value is the max-of-concurrent-fsyncs per tick. |
-| `ledger_state_checkpoint_last_timestamp_seconds` | Gauge     | `region`                       | Unix seconds of the most recent successful checkpoint                                                             |
-| `ledger_state_applies_since_checkpoint`          | Gauge     | `region`                       | In-memory applies accumulated since last checkpoint                                                               |
-| `ledger_state_dirty_pages`                       | Gauge     | `region`                       | **Max** dirty-page count across all 4 regional DBs, sampled at the last checkpointer wake-up. Ingest-heavy workloads can drive this from events.db while state.db stays clean — the trigger still fires on the `max()`. |
-| `ledger_state_page_cache_len`                    | Gauge     | `region`                       | Total pages resident in the state.db page cache (state.db only; other DBs are not surfaced through this gauge)    |
-| `ledger_state_last_synced_snapshot_id`           | Gauge     | `region`                       | Most recent snapshot id durably persisted for state.db (monotonic). raft.db / blocks.db / events.db track their own snapshot ids internally; operators use this gauge as the representative "is the checkpointer progressing" signal. |
-| `ledger_state_recovery_replay_count_total`       | Counter   | `region`                       | WAL entries replayed on startup by `RaftLogStore::replay_crash_gap`. Fires once per region (0 on clean shutdown)  |
-| `ledger_state_recovery_duration_seconds`         | Histogram | `region`                       | Duration of the post-open crash-recovery sweep (includes post-replay sync of all 4 regional DBs)                  |
+| Metric                                           | Type      | Labels                        | Description                                                                                                                                                                                                                           |
+| ------------------------------------------------ | --------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ledger_state_checkpoints_total`                 | Counter   | `region`, `trigger`, `status` | `StateCheckpointer` attempts. `trigger` ∈ `time`/`applies`/`dirty`/`snapshot`/`backup`/`shutdown`; `status` ∈ `ok`/`error`                                                                                                            |
+| `ledger_state_checkpoint_duration_seconds`       | Histogram | `region`, `trigger`           | Per-checkpoint fsync latency across all 4 regional DBs (state.db + raft.db + blocks.db + events.db when present). Synced concurrently via `tokio::join!`; the histogram value is the max-of-concurrent-fsyncs per tick.               |
+| `ledger_state_checkpoint_last_timestamp_seconds` | Gauge     | `region`                      | Unix seconds of the most recent successful checkpoint                                                                                                                                                                                 |
+| `ledger_state_applies_since_checkpoint`          | Gauge     | `region`                      | In-memory applies accumulated since last checkpoint                                                                                                                                                                                   |
+| `ledger_state_dirty_pages`                       | Gauge     | `region`                      | **Max** dirty-page count across all 4 regional DBs, sampled at the last checkpointer wake-up. Ingest-heavy workloads can drive this from events.db while state.db stays clean — the trigger still fires on the `max()`.               |
+| `ledger_state_page_cache_len`                    | Gauge     | `region`                      | Total pages resident in the state.db page cache (state.db only; other DBs are not surfaced through this gauge)                                                                                                                        |
+| `ledger_state_last_synced_snapshot_id`           | Gauge     | `region`                      | Most recent snapshot id durably persisted for state.db (monotonic). raft.db / blocks.db / events.db track their own snapshot ids internally; operators use this gauge as the representative "is the checkpointer progressing" signal. |
+| `ledger_state_recovery_replay_count_total`       | Counter   | `region`                      | WAL entries replayed on startup by `RaftLogStore::replay_crash_gap`. Fires once per region (0 on clean shutdown)                                                                                                                      |
+| `ledger_state_recovery_duration_seconds`         | Histogram | `region`                      | Duration of the post-open crash-recovery sweep (includes post-replay sync of all 4 regional DBs)                                                                                                                                      |
 
 ### Key Indicators
 
@@ -248,14 +254,14 @@ ledger_state_dirty_pages
 
 Metrics for the handler-phase event queue + background flusher introduced in Sprint 1B4. Operator tuning + durability contract: [durability.md § Handler-phase event flush window](durability.md#handler-phase-event-flush-window). Configuration knobs: [configuration.md § Handler-Phase Event Batching](configuration.md#handler-phase-event-batching).
 
-| Metric                                | Type      | Labels                                                    | Description                                                                                                                                                                                                    |
-| ------------------------------------- | --------- | --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ledger_event_flush_triggers_total`   | Counter   | `region`, `trigger`                                       | `EventFlusher` flush attempts. `trigger` ∈ `time` (interval fired) / `size` (queue hit `flush_size_threshold`) / `shutdown` (Phase 5b `flush_for_shutdown` drain).                                              |
-| `ledger_event_flush_duration_seconds` | Histogram | `region`                                                  | Per-flush end-to-end latency (drain + events.db write-txn `commit()` fsync). Uses `SLI_HISTOGRAM_BUCKETS`.                                                                                                     |
-| `ledger_event_flush_queue_depth`      | Gauge     | `region`                                                  | Queue depth sampled at the moment a flush begins.                                                                                                                                                              |
-| `ledger_event_flush_entries_per_flush`| Histogram | `region`                                                  | Number of `EventEntry` values drained into one flush batch.                                                                                                                                                    |
-| `ledger_event_flush_failures_total`   | Counter   | `region`                                                  | Flush `commit()` failures — disk full, IO error, corrupted events.db page. Entries in the failing batch are logged + dropped (best-effort contract preserved).                                                  |
-| `ledger_event_overflow_total`         | Counter   | `region`, `cause`                                         | Handler-phase event emissions that never reached disk. `cause` ∈ `queue_full` (enqueue failed under `overflow_behavior=drop`) / `shutdown_timeout` (Phase 5b drain budget exceeded) / `channel_closed` (emission after flusher shutdown). |
+| Metric                                 | Type      | Labels              | Description                                                                                                                                                                                                                               |
+| -------------------------------------- | --------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ledger_event_flush_triggers_total`    | Counter   | `region`, `trigger` | `EventFlusher` flush attempts. `trigger` ∈ `time` (interval fired) / `size` (queue hit `flush_size_threshold`) / `shutdown` (Phase 5b `flush_for_shutdown` drain).                                                                        |
+| `ledger_event_flush_duration_seconds`  | Histogram | `region`            | Per-flush end-to-end latency (drain + events.db write-txn `commit()` fsync). Uses `SLI_HISTOGRAM_BUCKETS`.                                                                                                                                |
+| `ledger_event_flush_queue_depth`       | Gauge     | `region`            | Queue depth sampled at the moment a flush begins.                                                                                                                                                                                         |
+| `ledger_event_flush_entries_per_flush` | Histogram | `region`            | Number of `EventEntry` values drained into one flush batch.                                                                                                                                                                               |
+| `ledger_event_flush_failures_total`    | Counter   | `region`            | Flush `commit()` failures — disk full, IO error, corrupted events.db page. Entries in the failing batch are logged + dropped (best-effort contract preserved).                                                                            |
+| `ledger_event_overflow_total`          | Counter   | `region`, `cause`   | Handler-phase event emissions that never reached disk. `cause` ∈ `queue_full` (enqueue failed under `overflow_behavior=drop`) / `shutdown_timeout` (Phase 5b drain budget exceeded) / `channel_closed` (emission after flusher shutdown). |
 
 **Labels:**
 

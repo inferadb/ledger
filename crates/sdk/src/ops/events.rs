@@ -28,17 +28,22 @@ impl LedgerClient {
     ///
     /// # Read-after-write visibility for handler-phase events
     ///
-    /// As of Sprint 1B4, handler-phase audit events (events emitted as a
-    /// side-effect of RPCs such as admin mutations or authorization checks)
-    /// are batched through an in-memory flush queue on the server and fsynced
-    /// within a ~100 ms default window. A `list_events` (or `count_events` /
-    /// `get_event`) call issued immediately after such an RPC may not yet
-    /// observe those events — they can still be in the flush queue. Tests and
-    /// callers that require strict read-after-write audit visibility should
-    /// either wait past the configured flush interval or run against a
-    /// deployment configured with the handler-phase flush queue disabled.
-    /// Apply-phase events (committed entity writes) and ingested events are
-    /// not affected and remain immediately visible after a successful RPC.
+    /// Handler-phase audit events (events emitted as a side-effect of RPCs
+    /// such as admin mutations or authorization checks) are batched through
+    /// an in-memory flush queue on the server. As of Sprint 1B5 the flusher
+    /// commits into the events.db page cache (not per-flush fsync); the
+    /// events become visible to `list_events` / `count_events` / `get_event`
+    /// on the same node within a ~100 ms default flush interval, and reach
+    /// disk on the `StateCheckpointer` cadence (~500 ms default). A query
+    /// issued immediately after the RPC may not yet observe newly emitted
+    /// events — they can still be in the flush queue, or waiting on the next
+    /// checkpoint on a reader that goes through the raw on-disk layer. Tests
+    /// and callers that require strict read-after-write audit visibility
+    /// should either wait past the configured flush interval or run against
+    /// a deployment configured with the handler-phase flush queue disabled
+    /// (`event_writer_batch.enabled = false` via `UpdateConfig`). Apply-phase
+    /// events (committed entity writes) and ingested events are not affected
+    /// and remain immediately visible after a successful RPC.
     ///
     /// # Arguments
     ///

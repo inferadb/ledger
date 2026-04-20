@@ -1104,6 +1104,19 @@ impl<B: StorageBackend + 'static> EventHandle<B> {
 /// - **Time**: `flush_interval_ms` elapsed since the last successful drain.
 /// - **Size**: queue depth >= `flush_size_threshold`.
 /// - **Shutdown**: `flush_for_shutdown` called (drain-then-exit).
+///
+/// **Sprint 1B5 Fix #2 durability class.** Each tick commits the batch with
+/// `commit_in_memory` — the per-flush dual-slot fsync was removed to unblock
+/// throughput under concurrent-write workloads. Durability for handler-phase
+/// events is now realised by
+/// [`StateCheckpointer`](crate::state_checkpointer::StateCheckpointer),
+/// which syncs `events.db` alongside the other state DBs on every
+/// `checkpoint_interval_ms` tick (default 500ms). Clean-shutdown zero-loss
+/// is preserved via Phase 5b (`flush_for_shutdown` drains the queue) →
+/// Phase 5c (`sync_all_state_dbs` syncs `events.db`) in the server's
+/// `pre_shutdown` closure. See
+/// `docs/superpowers/specs/2026-04-19-commit-durability-audit.md` §
+/// "Sprint 1B5 Fix #2" for the full audit entry.
 struct EventFlusher<B: StorageBackend> {
     events_db: Arc<EventsDatabase<B>>,
     config: Arc<EventConfig>,
@@ -1266,10 +1279,27 @@ impl<B: StorageBackend + 'static> EventFlusher<B> {
         }
     }
 
-    /// Opens a single events.db write txn, writes each entry, commits with
-    /// strict-durable `commit()`. Does NOT flip to `commit_in_memory` —
-    /// handler-phase events have no WAL replay backstop, so each flush
-    /// batch is the durability boundary.
+    /// Opens a single events.db write txn, writes each entry, commits
+    /// in-memory only.
+    ///
+    /// Sprint 1B5 Fix #2: flipped from strict-durable `commit()` to
+    /// `commit_in_memory()`. The per-flush dual-slot fsync was the dominant
+    /// cost under `concurrent-writes @ 32` (~12% of wall-clock). Durability
+    /// is now realised by `StateCheckpointer`, which syncs `events.db` on
+    /// every tick (default `checkpoint_interval_ms = 500ms` — see
+    /// `crates/raft/src/state_checkpointer.rs` and
+    /// `crates/types/src/config/storage.rs` `default_checkpoint_interval_ms`).
+    /// The crash-loss window widens from "last flusher tick" (up to
+    /// `flush_interval_ms`, default 100ms) to "last checkpointer tick" (up
+    /// to `checkpoint_interval_ms`, default 500ms). Graceful shutdown still
+    /// preserves zero-loss via Phase 5b (`flush_for_shutdown` drains the
+    /// queue with `commit_in_memory`) immediately followed by Phase 5c
+    /// (`RaftManager::sync_all_state_dbs` syncs `events.db`); see
+    /// `crates/server/src/main.rs` `pre_shutdown` closure.
+    ///
+    /// Operators who require the pre-1B5 window set
+    /// `EventWriterBatchConfig::enabled = false` (see `write_entry` escape
+    /// hatch — unchanged, still strict-durable per invocation).
     #[tracing::instrument(
         level = "debug",
         skip_all,
@@ -1286,7 +1316,12 @@ impl<B: StorageBackend + 'static> EventFlusher<B> {
             let _ = self.config.enabled;
             EventStore::write(&mut txn, entry).context(WriteSnafu)?;
         }
-        txn.commit().context(CommitSnafu)?;
+        // Sprint 1B5 Fix #2: `commit_in_memory` skips the dual-slot persist.
+        // `StateCheckpointer::do_checkpoint` invokes `sync_state` on
+        // events.db alongside state.db / raft.db / blocks.db on every tick;
+        // graceful shutdown's Phase 5c sweep (`sync_all_state_dbs`) closes
+        // the window on clean exit.
+        txn.commit_in_memory().context(CommitSnafu)?;
         Ok(())
     }
 
@@ -2320,6 +2355,106 @@ mod tests {
         let txn = events_db.read().expect("read");
         let count = EventStore::count(&txn, OrganizationId::new(1)).expect("count");
         assert_eq!(count, 1);
+    }
+
+    /// Sprint 1B5 Fix #2 guard: `EventFlusher::commit_batch` commits
+    /// in-memory only. Mirrors Sprint 1B3's
+    /// `write_events_commits_in_memory_only_until_sync` — enqueue events,
+    /// trigger a flush via `flush_for_shutdown`, assert the entries are
+    /// visible via in-process reads but `last_synced_snapshot_id` has NOT
+    /// advanced. Forcing `sync_state` then advances it.
+    ///
+    /// Under the pre-1B5 contract, `commit_batch` would call `commit()` and
+    /// `last_synced_snapshot_id` would advance as part of the flush. This
+    /// test fires exactly when that contract is restored by accident.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn commit_batch_commits_in_memory_only_until_sync() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let events_db = Arc::new(EventsDatabase::open(dir.path()).expect("open"));
+        let config = Arc::new(test_config());
+
+        // Default flusher cadence is fine — we drive the drain ourselves via
+        // `flush_for_shutdown` so timing jitter doesn't affect the assertion.
+        let batch = EventWriterBatchConfig::builder()
+            .flush_interval_ms(60_000)
+            .flush_size_threshold(10_000)
+            .queue_capacity(100)
+            .drain_batch_max(100)
+            .build()
+            .expect("valid batch cfg");
+        let runtime = runtime_handle_with_batch(batch.clone());
+
+        let (handle, join) = EventHandle::with_batching(
+            Arc::clone(&events_db),
+            Arc::clone(&config),
+            1,
+            batch,
+            runtime,
+            "test-region",
+        );
+
+        let synced_before = events_db.db().last_synced_snapshot_id();
+
+        // Enqueue three events — these sit in the mpsc queue until the
+        // shutdown drain fires.
+        for i in 0..3 {
+            handle.record_handler_event(sample_handler_entry(i));
+        }
+        assert_eq!(handle.queue_depth(), 3);
+
+        // Drain via the shutdown path. Post-1B5 `commit_batch` uses
+        // `commit_in_memory`, so the dual-slot persist is skipped.
+        let drain = handle.flush_for_shutdown(Duration::from_secs(5)).await;
+        assert_eq!(drain.drained, 3, "shutdown drain must commit every queued entry");
+        assert_eq!(drain.lost, 0);
+        join.await.expect("flusher task exit");
+
+        // Read-your-own-writes through an in-process txn works immediately
+        // after `commit_in_memory` — dirty pages are visible to any reader
+        // on the same process.
+        let txn = events_db.read().expect("read");
+        let count = EventStore::count(&txn, OrganizationId::new(1)).expect("count");
+        assert_eq!(
+            count, 3,
+            "events must be readable in-process after commit_batch (in-memory commit)"
+        );
+        drop(txn);
+
+        // `last_synced_snapshot_id` MUST NOT have advanced — this is the
+        // Sprint 1B5 Fix #2 contract. `commit_in_memory` skips the
+        // dual-slot persist; durability is the StateCheckpointer's job.
+        let synced_after_commit = events_db.db().last_synced_snapshot_id();
+        assert_eq!(
+            synced_after_commit, synced_before,
+            "commit_batch must not advance last_synced_snapshot_id \
+             (Sprint 1B5 Fix #2: commit_in_memory skips the dual-slot persist)"
+        );
+
+        // Forcing a sync (what the StateCheckpointer does on every tick)
+        // advances the synced id, making the events durable across crashes.
+        Arc::clone(events_db.db()).sync_state().await.expect("sync_state");
+        let synced_after_sync = events_db.db().last_synced_snapshot_id();
+        assert!(
+            synced_after_sync > synced_before,
+            "sync_state must advance last_synced_snapshot_id past the \
+             in-memory flusher commit (before={synced_before} after={synced_after_sync})"
+        );
+
+        // Reopen the DB and confirm the events survived the sync. This is
+        // the end-to-end proof that commit_in_memory + sync_state yields a
+        // durable outcome.
+        drop(handle);
+        let db_path = dir.path().to_path_buf();
+        drop(events_db);
+
+        let reopened = EventsDatabase::open(&db_path).expect("reopen events db");
+        let txn = reopened.read().expect("read reopened");
+        let stored_after_reopen =
+            EventStore::count(&txn, OrganizationId::new(1)).expect("count after reopen");
+        assert_eq!(
+            stored_after_reopen, 3,
+            "synced flusher events must survive a reopen of the events database"
+        );
     }
 
     /// Test 3: time trigger drains the queue after `flush_interval_ms`.

@@ -107,11 +107,11 @@ The vault has detected a state divergence (determinism bug). This is a critical 
 
 Common causes:
 
-| Symptom                      | Cause                        | Solution                                            |
-| ---------------------------- | ---------------------------- | --------------------------------------------------- |
-| High `proposals_pending`     | Network latency to followers | Check network, consider geographically closer nodes |
-| High `apply_latency`         | Disk I/O bottleneck          | Use faster storage (NVMe SSD)                       |
-| High `batch_timeout_commits` | Low write volume             | Normal; reduce `batch_delay` for lower latency      |
+| Symptom                       | Cause                           | Solution                                            |
+| ----------------------------- | ------------------------------- | --------------------------------------------------- |
+| High `proposals_pending`      | Network latency to followers    | Check network, consider geographically closer nodes |
+| High `apply_latency`          | Disk I/O bottleneck             | Use faster storage (NVMe SSD)                       |
+| Low `batch_coalesce_size` avg | Low write volume or concurrency | Normal; reduce `batch_timeout` for lower latency    |
 
 ### Can I run a single-node cluster?
 

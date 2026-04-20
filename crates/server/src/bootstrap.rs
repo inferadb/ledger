@@ -282,6 +282,9 @@ pub async fn bootstrap_node(
         .region(inferadb_ledger_types::Region::GLOBAL)
         .initial_members(vec![(node_id, config.advertise_addr())])
         .events_config(config.events.clone())
+        .batch_writer_config(inferadb_ledger_raft::batching::BatchWriterConfig::from(
+            &config.batching,
+        ))
         .build();
     let system_region = manager.start_system_region(region_config).await.map_err(|e| {
         BootstrapError::Raft { message: format!("failed to start system region: {e}") }
@@ -299,6 +302,7 @@ pub async fn bootstrap_node(
     if let Some(mut region_rx) = system_region.take_region_creation_rx() {
         let mgr = manager.clone();
         let bootstrap_events_config = config.events.clone();
+        let bootstrap_batch_config = config.batching.clone();
         let healthy_flag = region_handler_healthy_clone;
         tokio::spawn(async move {
             // Each message is processed in a child task for panic isolation.
@@ -307,8 +311,16 @@ pub async fn bootstrap_node(
             while let Some((region, initial_members)) = region_rx.recv().await {
                 let mgr_clone = mgr.clone();
                 let events_clone = bootstrap_events_config.clone();
+                let batching_clone = bootstrap_batch_config.clone();
                 let result = tokio::spawn(async move {
-                    process_region_event(&mgr_clone, &events_clone, region, initial_members).await;
+                    process_region_event(
+                        &mgr_clone,
+                        &events_clone,
+                        &batching_clone,
+                        region,
+                        initial_members,
+                    )
+                    .await;
                 })
                 .await;
 
@@ -412,6 +424,9 @@ pub async fn bootstrap_node(
                     .region(region)
                     .initial_members(vec![(node_id, config.advertise_addr())])
                     .events_config(config.events.clone())
+                    .batch_writer_config(inferadb_ledger_raft::batching::BatchWriterConfig::from(
+                        &config.batching,
+                    ))
                     .build();
                 match manager.start_data_region(region_config).await {
                     Ok(_) => {
@@ -1358,6 +1373,7 @@ fn parse_hex_key(hex_str: &str) -> Result<[u8; 32], String> {
 async fn process_region_event(
     mgr: &inferadb_ledger_raft::RaftManager,
     events_config: &inferadb_ledger_types::events::EventConfig,
+    batch_config: &inferadb_ledger_types::config::BatchConfig,
     region: inferadb_ledger_types::Region,
     initial_members: Vec<(u64, String)>,
 ) {
@@ -1382,6 +1398,7 @@ async fn process_region_event(
         .region(region)
         .initial_members(initial_members)
         .events_config(events_config.clone())
+        .batch_writer_config(inferadb_ledger_raft::batching::BatchWriterConfig::from(batch_config))
         .build();
     match mgr.start_data_region(region_config).await {
         Ok(_) => {

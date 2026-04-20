@@ -1748,7 +1748,7 @@ These files sit between this crate's openraft integration and the multi-shard co
 
 - **Purpose**: Test config factories for `BatchConfig`
 - **Key Types/Functions**:
-- `test_batch_config() -> BatchConfig`: Returns config for tests (max_batch_size=10, batch_timeout=10ms, coalesce_enabled=false)
+- `test_batch_config() -> BatchConfig`: Returns config for tests (max_batch_size=10, batch_timeout=10ms)
 - **Insights**: Provides sensible batch config defaults for test suites. Avoids hardcoding batch parameters in each test file.
 
 #### `crash_injector.rs`

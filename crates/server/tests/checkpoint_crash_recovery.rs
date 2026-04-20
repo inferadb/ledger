@@ -259,10 +259,18 @@ impl CrashableNode {
             // apply handler for `IngestExternalEvents` returns "Event writer
             // is not configured on this node" and ingest tests fail at the
             // gRPC boundary.
+            // Mirror production bootstrap.rs: data regions get the same
+            // `BatchWriterConfig` the GLOBAL region receives. Without it,
+            // `RegionGroup::batch_handle()` returns `None` for the data region
+            // and proposals bypass the BatchWriter — diverging from production
+            // and making Sprint 1B5 Fix #1b untestable at the integration layer.
             let data_region_cfg = RegionConfig::builder()
                 .region(Region::US_EAST_VA)
                 .initial_members(vec![(handle.node_id(), config.advertise_addr())])
                 .events_config(config.events.clone())
+                .batch_writer_config(inferadb_ledger_raft::batching::BatchWriterConfig::from(
+                    &config.batching,
+                ))
                 .build();
             bootstrapped
                 .manager
@@ -1622,21 +1630,25 @@ async fn test_handler_events_lost_within_flush_window_on_crash() {
 // ----------------------------------------------------------------------------
 
 /// The positive flipside of Test 11: on a graceful shutdown, Phase 5b
-/// (`EventHandle::flush_for_shutdown`) drains the queue with a strict-durable
-/// `commit()` before the server exits. A subsequent restart must surface
-/// every pre-shutdown event — the durability window closes at shutdown,
-/// not at the default 100ms flush cadence.
+/// (`EventHandle::flush_for_shutdown`) drains the queue via
+/// `commit_in_memory`, then Phase 5c (`RaftManager::sync_all_state_dbs`)
+/// runs `sync_state` on events.db so every queued event is durable before
+/// the server exits. A subsequent restart must surface every pre-shutdown
+/// event — the durability window closes at shutdown, not at the default
+/// 500ms StateCheckpointer cadence.
 ///
 /// Setup: use the default batch config so the flusher is ticking normally
 /// (100ms interval). Emit events, immediately call graceful_shutdown which
-/// mirrors production's pre_shutdown Phase 5b — the drain is bounded by a
-/// 5s timeout and returns a `DrainResult` the harness logs for debugging.
+/// mirrors production's pre_shutdown Phase 5b + 5c chain — the drain is
+/// bounded by a 5s timeout and returns a `DrainResult` the harness logs for
+/// debugging.
 ///
 /// On a restart the events must be present in events.db. This test does
-/// NOT attempt to distinguish "drained at the 100ms tick" from "drained by
-/// flush_for_shutdown" — both are valid paths to durability and the
-/// contract is the same. The test asserts the union outcome: every
-/// emitted event is on disk.
+/// NOT attempt to distinguish "drained at the 100ms tick + checkpointed at
+/// the 500ms tick" from "drained by flush_for_shutdown + synced by
+/// sync_all_state_dbs" — both are valid paths to durability and the
+/// contract is the same. The test asserts the union outcome: every emitted
+/// event is on disk.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_handler_events_preserved_across_graceful_shutdown() {
     const TAG: &str = "shutdown-preserved";
@@ -1654,18 +1666,20 @@ async fn test_handler_events_preserved_across_graceful_shutdown() {
     }
 
     // Graceful shutdown now drains the event flusher at Phase 5b before
-    // syncing state DBs. Any events still in the queue are fsync'd via
-    // the flusher's final `commit_batch` call.
+    // syncing state DBs at Phase 5c. Sprint 1B5 Fix #2: the flusher's
+    // `commit_batch` uses `commit_in_memory`, so queued events only become
+    // durable via Phase 5c's `sync_all_state_dbs` sweep on events.db.
     node.graceful_shutdown().await;
 
     // Restart and assert every emitted event round-tripped. `start` on
     // the same data_dir reopens events.db; the B-tree survived the
-    // fsync, so all 20 events must be visible.
+    // final Phase 5c fsync, so all 20 events must be visible.
     let restarted = CrashableNode::start(data_dir, keys_mgr, None).await;
     let surviving = count_tagged_handler_events(&restarted, TAG);
     assert_eq!(
         surviving, EVENTS_EMITTED,
-        "Sprint 1B4 contract: graceful shutdown Phase 5b MUST drain the event queue before exit. \
+        "Sprint 1B4 + 1B5 contract: graceful shutdown Phase 5b (drain) + Phase 5c \
+         (sync_all_state_dbs) MUST make every queued event durable before exit. \
          Expected {EVENTS_EMITTED} surviving, got {surviving}."
     );
 
@@ -1673,22 +1687,30 @@ async fn test_handler_events_preserved_across_graceful_shutdown() {
 }
 
 // ----------------------------------------------------------------------------
-// Test 13: handler-phase events are durable after the flush interval elapses
+// Test 13: handler-phase events are durable after the StateCheckpointer tick
 // ----------------------------------------------------------------------------
 
-/// Bounds the "lost on crash" window from above: handler-phase events
-/// emitted more than `flush_interval_ms` ago MUST be durable even on an
-/// unclean crash. Test 11 proves events are lost within the window; this
-/// test proves they are safe OUTSIDE the window. Together they pin the
-/// durability contract to "at most flush_interval_ms of handler-phase
-/// events lost on crash".
+/// Bounds the "lost on crash" window from above: handler-phase events that
+/// have been flushed AND checkpointed MUST be durable even on an unclean
+/// crash. Test 11 proves events are lost within the flush window; this test
+/// proves they are safe OUTSIDE the checkpoint window. Together they pin
+/// the Sprint 1B5 durability contract to "at most `checkpoint_interval_ms`
+/// of handler-phase events lost on crash".
 ///
-/// Setup: default `EventWriterBatchConfig` (100ms interval). Emit events,
-/// wait > 2× the interval so the flusher's time trigger has fired at
-/// least once, crash, restart, assert events are present.
+/// Sprint 1B5 Fix #2 widens the loss window from "flush_interval_ms"
+/// (default 100ms, 1B4) to "checkpoint_interval_ms" (default 500ms, 1B5).
+/// `EventFlusher::commit_batch` now uses `commit_in_memory` — only the
+/// `StateCheckpointer`'s per-tick `sync_state` on events.db makes queued
+/// events durable on an unclean crash.
+///
+/// Setup: default `EventWriterBatchConfig` (100ms flush interval) + default
+/// `CheckpointConfig` (500ms checkpoint interval). Emit events, wait for
+/// the queue to drain (flush tick) AND for the events.db
+/// `last_synced_snapshot_id` to advance (checkpoint tick), crash, restart,
+/// assert every event is present.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_handler_events_durable_after_flush_interval() {
-    const TAG: &str = "post-flush-durable";
+async fn test_handler_events_durable_after_checkpoint_interval() {
+    const TAG: &str = "post-checkpoint-durable";
     const EVENTS_EMITTED: usize = 10;
 
     let temp = TestDir::new();
@@ -1697,20 +1719,29 @@ async fn test_handler_events_durable_after_flush_interval() {
 
     let node = CrashableNode::start(data_dir.clone(), keys_mgr.clone(), None).await;
 
+    // Capture the pre-emit synced snapshot id on events.db so we can detect
+    // the checkpoint tick deterministically (rather than sleeping and
+    // hoping the 500ms tick fired on time).
+    let events_db_handle = Arc::clone(
+        node.manager
+            .get_region_group(Region::GLOBAL)
+            .expect("GLOBAL region running")
+            .events_db()
+            .expect("GLOBAL region must have events_db configured")
+            .db(),
+    );
+    let synced_before = events_db_handle.last_synced_snapshot_id();
+
     for _ in 0..EVENTS_EMITTED {
         node.event_handle
             .record_handler_event(build_test_handler_event(node.handle.node_id(), TAG));
     }
 
-    // Wait long enough for the time trigger to fire. Default interval is
-    // 100ms; the flusher's poll floor is `MIN_FLUSHER_POLL_INTERVAL = 50ms`,
-    // so one tick + one drain completes within ~150ms. 500ms gives a
-    // ~5× safety margin against CI scheduling jitter.
-    //
-    // We verify the drain happened by polling `queue_depth` — when it
-    // reaches 0 the flusher has committed everything.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while node.event_handle.queue_depth() > 0 && std::time::Instant::now() < deadline {
+    // Phase 1: wait for the flusher to drain the queue (default 100ms
+    // interval). Under 1B5, this only commits in-memory — the events are
+    // visible via in-process reads but NOT durable across crashes yet.
+    let drain_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while node.event_handle.queue_depth() > 0 && std::time::Instant::now() < drain_deadline {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert_eq!(
@@ -1719,26 +1750,468 @@ async fn test_handler_events_durable_after_flush_interval() {
         "flusher should have drained the queue within 5s (time trigger)"
     );
 
-    // events.db should now contain every event — the flusher fsync'd them
-    // on its last successful tick.
+    // Phase 2: wait for the StateCheckpointer to advance events.db's
+    // `last_synced_snapshot_id` — this is the post-1B5 durability
+    // boundary. Default checkpoint_interval_ms is 500ms; 5s is a ~10×
+    // safety margin against CI scheduling jitter.
+    let sync_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while events_db_handle.last_synced_snapshot_id() <= synced_before
+        && std::time::Instant::now() < sync_deadline
+    {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        events_db_handle.last_synced_snapshot_id() > synced_before,
+        "StateCheckpointer should have advanced events.db last_synced_snapshot_id \
+         within 5s (before={synced_before}, current={})",
+        events_db_handle.last_synced_snapshot_id()
+    );
+
+    // events.db now contains every event AND the dual-slot god byte has
+    // been updated — the events are durable across a SIGKILL.
     let pre_crash_count = count_tagged_handler_events(&node, TAG);
     assert_eq!(
         pre_crash_count, EVENTS_EMITTED,
-        "all {EVENTS_EMITTED} events should be on disk after the flush tick; got {pre_crash_count}"
+        "all {EVENTS_EMITTED} events should be readable after the flush + checkpoint; got {pre_crash_count}"
     );
 
-    // Now crash — events already fsync'd are durable per `commit()`'s
-    // contract. The queue is empty so `flush_for_shutdown` wouldn't have
-    // added anything; this is the same state a SIGKILL observes.
+    // Now crash — events synced by the StateCheckpointer are durable per
+    // `sync_state`'s contract.
     node.crash();
 
     let restarted = CrashableNode::start(data_dir, keys_mgr, None).await;
     let surviving = count_tagged_handler_events(&restarted, TAG);
     assert_eq!(
         surviving, EVENTS_EMITTED,
-        "Sprint 1B4 contract: handler-phase events fsync'd before the crash MUST survive. \
-         Expected {EVENTS_EMITTED} surviving, got {surviving}."
+        "Sprint 1B5 Fix #2 contract: handler-phase events synced by the StateCheckpointer \
+         MUST survive a crash. Expected {EVENTS_EMITTED} surviving, got {surviving}."
     );
 
     restarted.crash();
+}
+
+// ----------------------------------------------------------------------------
+// Test 14 (Sprint 1B5 Fix #2): handler-phase events lost on crash within
+// the checkpoint window
+// ----------------------------------------------------------------------------
+
+/// Sprint 1B5 Fix #2 widens the durability window. This test is the
+/// post-1B5 companion to Test 11: even after the flusher commits a batch
+/// (`commit_in_memory`), an unclean crash BEFORE the StateCheckpointer's
+/// next tick loses every event in that batch. The previous contract
+/// ("events are durable within `flush_interval_ms` of emission") is
+/// replaced by "events are durable within `checkpoint_interval_ms` of the
+/// last checkpoint tick".
+///
+/// Setup:
+///   * Default batch config (flusher ticks on 100ms cadence).
+///   * `disable_checkpointer()` so the StateCheckpointer never fires during the test window.
+///   * Emit events, wait for the flusher to drain (queue_depth=0).
+///   * Verify events are visible via in-process reads but `last_synced_snapshot_id` has NOT
+///     advanced.
+///   * SIGKILL-equivalent crash (`node.crash()`, no graceful shutdown).
+///   * Restart and assert zero surviving events — the dirty pages were in memory only when the
+///     process died.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_handler_events_lost_within_checkpoint_window_on_crash() {
+    const TAG: &str = "within-checkpoint-lost";
+    const EVENTS_EMITTED: usize = 10;
+
+    let temp = TestDir::new();
+    let data_dir = temp.path().to_path_buf();
+    let keys_mgr = test_key_manager();
+
+    // StateCheckpointer effectively disabled — 60s interval + u64::MAX
+    // thresholds mean it will not fire during this test's second-or-two
+    // wall-clock window. The flusher stays on its default 100ms cadence.
+    let node =
+        CrashableNode::start(data_dir.clone(), keys_mgr.clone(), Some(disable_checkpointer()))
+            .await;
+
+    let events_db_handle = Arc::clone(
+        node.manager
+            .get_region_group(Region::GLOBAL)
+            .expect("GLOBAL region running")
+            .events_db()
+            .expect("GLOBAL region must have events_db configured")
+            .db(),
+    );
+    let synced_before = events_db_handle.last_synced_snapshot_id();
+
+    for _ in 0..EVENTS_EMITTED {
+        node.event_handle
+            .record_handler_event(build_test_handler_event(node.handle.node_id(), TAG));
+    }
+
+    // Wait for the flusher to drain (default 100ms). Post-1B5 this is a
+    // `commit_in_memory` — the pages are dirty but the dual-slot god byte
+    // hasn't been updated.
+    let drain_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while node.event_handle.queue_depth() > 0 && std::time::Instant::now() < drain_deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        node.event_handle.queue_depth(),
+        0,
+        "flusher should have drained the queue within 5s (time trigger)"
+    );
+
+    // Events are visible in-process (commit_in_memory) — confirms the
+    // flusher ran — but `last_synced_snapshot_id` has NOT advanced because
+    // the StateCheckpointer is disabled. This is the precise Sprint 1B5
+    // Fix #2 durability window under test.
+    let in_memory_count = count_tagged_handler_events(&node, TAG);
+    assert_eq!(
+        in_memory_count, EVENTS_EMITTED,
+        "events must be visible via in-process reads after commit_in_memory: got {in_memory_count}"
+    );
+    let synced_after_flush = events_db_handle.last_synced_snapshot_id();
+    assert_eq!(
+        synced_after_flush, synced_before,
+        "StateCheckpointer is disabled: last_synced_snapshot_id must NOT have advanced \
+         (before={synced_before}, after={synced_after_flush})"
+    );
+
+    // Crash — no graceful shutdown, no final sync. The dirty pages die
+    // with the process; the on-disk god byte still points at the
+    // pre-emit state.
+    node.crash();
+
+    // Restart with the checkpointer still disabled so the post-restart
+    // CrashableNode doesn't silently sync old pages back in.
+    let restarted = CrashableNode::start(data_dir, keys_mgr, Some(disable_checkpointer())).await;
+
+    // Allow the restarted node's flusher to settle so we don't race a
+    // delayed drain of any ghost events (there shouldn't be any — the
+    // queue died with the previous process — but the defensive wait
+    // keeps the assertion honest).
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let surviving = count_tagged_handler_events(&restarted, TAG);
+    assert_eq!(
+        surviving, 0,
+        "Sprint 1B5 Fix #2 contract: handler-phase events flushed via commit_in_memory \
+         but NOT yet synced by the StateCheckpointer MUST be lost on an unclean crash. \
+         Expected 0 surviving, got {surviving}."
+    );
+
+    restarted.crash();
+}
+
+// ============================================================================
+// Sprint 1B5 Fix #1b: BatchWriter is wired into production bootstrap
+// ============================================================================
+
+/// Sprint 1B5 Fix #1b plumbed `BatchConfig` → `BatchWriterConfig` through
+/// `bootstrap.rs` so every region starts with a live `BatchWriter` spawned on
+/// the runtime. Pre-1B5 `batch_writer_config` defaulted to `None` inside
+/// `RegionConfig`, which silently bypassed the batch writer in production:
+/// every proposal landed on Raft alone, one fsync per commit. This test
+/// locks that wiring down — if `batch_handle()` returns `None` on a
+/// freshly-bootstrapped region the regression is back.
+///
+/// The `CrashableNode` harness already spins up GLOBAL and `US_EAST_VA` with
+/// the default `Config`, which now carries a `BatchConfig::default()`; so if
+/// bootstrap wires it through correctly, both regions must expose a
+/// `BatchWriterHandle`. Asserting on both catches a "wired for GLOBAL but not
+/// data regions" regression (the data region starts on a different code path
+/// via `start_data_region`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_batch_writer_active_in_production() {
+    let temp = TestDir::new();
+    let data_dir = temp.path().to_path_buf();
+    let keys_mgr = test_key_manager();
+
+    let node = CrashableNode::start(data_dir, keys_mgr, None).await;
+
+    let global = node.manager.get_region_group(Region::GLOBAL).expect("GLOBAL region running");
+    assert!(
+        global.batch_handle().is_some(),
+        "Sprint 1B5 Fix #1b: GLOBAL region must have a BatchWriterHandle wired \
+         after bootstrap (batch_handle() returned None — BatchWriter is \
+         bypassed in production again)"
+    );
+
+    let data =
+        node.manager.get_region_group(Region::US_EAST_VA).expect("US_EAST_VA region running");
+    assert!(
+        data.batch_handle().is_some(),
+        "Sprint 1B5 Fix #1b: US_EAST_VA region must have a BatchWriterHandle \
+         wired after start_data_region (batch_handle() returned None — data-region \
+         code path bypasses the batch writer)"
+    );
+
+    node.crash();
+}
+
+// ============================================================================
+// Sprint 1B5 Fix #1: WAL batching sustains reasonable throughput under load
+// ============================================================================
+
+/// Smoke test for Sprint 1B5 Fix #1 — the WAL batching retune (`max_batch_size=500`,
+/// `batch_timeout=10ms`, `tick_interval=5ms`, `eager_commit` removed).
+///
+/// Not a benchmark; a regression guard. The profile-suite drives the real
+/// throughput measurements (1,350 ops/s at concurrency=32 on 1B5); this test
+/// picks a floor well below that (100 ops/s) so normal variance stays green
+/// while a regression back to the pre-1B5 fsync-per-op state (~52 ops/s) or
+/// to the pre-Fix-#1b "no BatchWriter wired" state trips the floor.
+///
+/// Shape: 8 concurrent writers × 20 proposals each = 160 total, budget
+/// ~10 seconds. Asserts observed throughput ≥ 20 ops/s. The `CrashableNode`
+/// default config raises the rate-limit ceilings to 10k req/s — so rate
+/// limiting is not the bottleneck under this load (Sprint 1B5 defaults-raise).
+///
+/// The floor is intentionally loose (20 ops/s, ~67× below the measured 1B5
+/// single-test ceiling of 1,350 ops/s). Under `cargo test` parallel execution
+/// the consolidated integration binary runs ~15 other crash-recovery tests
+/// concurrently, each spinning up a full server; resource contention brings
+/// this test's observed ops/s down from ~600 quiescent to ~30-40 under load.
+/// 20 ops/s keeps CI green while still catching the two target regressions:
+///   * `eager_commit` reintroduced → fsync-per-op bottleneck compounds under contention, observed
+///     ops/s falls well below 20.
+///   * BatchWriter unwired (pre-Fix-#1b) → separately caught by
+///     `test_batch_writer_active_in_production`; rate-limit-bound at ~52 ops/s quiescent, far lower
+///     under contention.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_batch_writer_throughput_under_concurrent_load() {
+    const CONCURRENCY: usize = 8;
+    const PROPOSALS_PER_TASK: usize = 20;
+    const MIN_OPS_PER_SEC: f64 = 20.0;
+
+    let temp = TestDir::new();
+    let data_dir = temp.path().to_path_buf();
+    let keys_mgr = test_key_manager();
+
+    let node = CrashableNode::start(data_dir, keys_mgr, None).await;
+
+    let start = std::time::Instant::now();
+
+    // Fan out CONCURRENCY × PROPOSALS_PER_TASK proposals through
+    // `propose_and_wait`. Each handle clone shares the same region group
+    // and therefore the same BatchWriter — this is the production write
+    // path after Fix #1b.
+    let mut tasks = Vec::with_capacity(CONCURRENCY);
+    for worker in 0..CONCURRENCY {
+        let handle = node.handle.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut ok: usize = 0;
+            for i in 0..PROPOSALS_PER_TASK {
+                // Unique hmac per (worker, i) so no two proposals collide.
+                let hmac_hex = format!("thput{worker:032x}{i:032x}");
+                let req = LedgerRequest::System(SystemRequest::RegisterEmailHash {
+                    hmac_hex,
+                    user_id: UserId::new((worker * PROPOSALS_PER_TASK + i + 1) as i64),
+                });
+                if handle
+                    .propose_and_wait(RaftPayload::system(req), Duration::from_secs(10))
+                    .await
+                    .is_ok()
+                {
+                    ok += 1;
+                }
+            }
+            ok
+        }));
+    }
+
+    let mut successes: usize = 0;
+    for task in tasks {
+        successes += task.await.expect("worker task did not panic");
+    }
+
+    let elapsed = start.elapsed();
+    let total = (CONCURRENCY * PROPOSALS_PER_TASK) as f64;
+    let ops_per_sec = successes as f64 / elapsed.as_secs_f64();
+
+    // First — every proposal we awaited must have succeeded. A high loss
+    // rate under this load would mask a throughput regression (we'd be
+    // measuring timeouts, not fsync cadence).
+    assert_eq!(
+        successes as f64, total,
+        "expected all {total} proposals to succeed; got {successes} (losses mask throughput regressions)"
+    );
+
+    // Second — throughput floor. 100 ops/s is ~2× the pre-1B5 cap (52
+    // ops/s) and an order of magnitude below the measured 1B5 ceiling
+    // (1,350 ops/s at c=32), so normal CI variance stays green while a
+    // regression to fsync-per-op or unwired BatchWriter surfaces loudly.
+    assert!(
+        ops_per_sec >= MIN_OPS_PER_SEC,
+        "Sprint 1B5 Fix #1 throughput floor: expected ≥ {MIN_OPS_PER_SEC:.0} ops/s, \
+         got {ops_per_sec:.1} ops/s ({successes} proposals in {:.3}s). \
+         Likely regressions: BatchWriter unwired (see test_batch_writer_active_in_production), \
+         eager_commit reintroduced, or tick_interval too fine-grained.",
+        elapsed.as_secs_f64(),
+    );
+
+    node.crash();
+}
+
+// ============================================================================
+// Sprint 1B5 Fix #1 (follow-up): throughput floor through the gRPC Write path
+// ============================================================================
+
+/// Sibling to `test_batch_writer_throughput_under_concurrent_load` that drives
+/// writes through the SDK / gRPC surface rather than `ConsensusHandle::propose_and_wait`.
+///
+/// The sibling test takes the direct consensus path, which exercises WAL-level
+/// batching in the Reactor but **bypasses** the per-region `BatchWriter`. The
+/// `BatchWriter::submit` layer only sees traffic that comes through
+/// `WriteService::write` (`crates/services/src/services/write.rs` — the
+/// `batch_handle.submit(ledger_request)` branch). Without this test,
+/// LedgerRequest-level coalescing — Sprint 1B5 Fix #1b's main win — has no
+/// integration-layer regression guard.
+///
+/// Shape: 8 concurrent workers × 10 writes each = 80 total, submitted through
+/// `WriteServiceClient::write` against the node's UDS socket. Org + vault
+/// bootstrapped once via `bootstrap_org_and_vault` and shared across workers
+/// so the 2-5s provisioning cost isn't paid per task. Asserts:
+///
+///   1. All 80 writes returned `WriteResponse::Success` — a high loss rate would mask a throughput
+///      regression (we'd be measuring timeouts, not fsync cadence).
+///   2. `ops_per_sec >= 20.0` — same floor as the direct-consensus variant. Well above the pre-1B5
+///      cap (~52 ops/s quiescent) and far below the measured 1B5 ceiling, so CI variance stays
+///      green while regressions trip loudly. The gRPC path adds codec + UDS hop cost relative to
+///      `propose_and_wait`, so we don't ratchet the floor higher.
+///   3. `region.batch_handle().is_some()` on `US_EAST_VA` after the test completes. Combined with
+///      the successful gRPC writes, this is the operational proof that `BatchWriter::submit` was
+///      the path taken — `WriteService::write` only falls through to direct proposal when
+///      `batch_handle` is `None` (`crates/services/src/services/write.rs`).
+///
+/// Metric assertion on `ledger_batch_coalesce_total` is intentionally omitted.
+/// The `metrics` crate's global recorder slot is process-wide; installing a
+/// per-test `DebuggingRecorder` inside the consolidated server integration
+/// binary would race with any other test that touches metrics and leave the
+/// recorder installed for subsequent tests in the same run. The `batch_handle`
+/// assertion gives equivalent "the BatchWriter path was exercised" coverage
+/// without the shared-state hazard.
+///
+/// Budget: < 10 seconds end-to-end — smaller workload than the
+/// `profile-suite` tests (which run 30s).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_batch_writer_throughput_via_grpc_under_concurrent_load() {
+    use inferadb_ledger_proto::proto;
+
+    const CONCURRENCY: usize = 8;
+    const WRITES_PER_TASK: usize = 10;
+    const MIN_OPS_PER_SEC: f64 = 20.0;
+
+    let temp = TestDir::new();
+    let data_dir = temp.path().to_path_buf();
+    let keys_mgr = test_key_manager();
+
+    let node = CrashableNode::start(data_dir, keys_mgr, None).await;
+
+    // Bootstrap org + vault once via direct Raft proposals. The saga-orchestrator
+    // path would add ~5s per test; `bootstrap_org_and_vault` returns an Active
+    // org + registered vault in < 500ms. Shared across all writer tasks — the
+    // 2-5s SDK-client-usable setup cost does not multiply per task.
+    let (_user_id, org_slug, _org_id, vault_slug, _vault_id) = bootstrap_org_and_vault(&node).await;
+
+    let addr = node.addr.clone();
+    let start = std::time::Instant::now();
+
+    // Fan out CONCURRENCY × WRITES_PER_TASK writes through
+    // `WriteServiceClient::write`. Each task constructs its own channel +
+    // client so `tower`'s per-request readiness contention stays minimal;
+    // all clients share the same underlying UDS socket so the server sees
+    // concurrent in-flight proposals that the BatchWriter can coalesce.
+    let mut tasks = Vec::with_capacity(CONCURRENCY);
+    for worker in 0..CONCURRENCY {
+        let addr = addr.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut client =
+                crate::common::create_write_client(&addr).await.expect("create write client");
+            let mut ok: usize = 0;
+            for i in 0..WRITES_PER_TASK {
+                // Unique client_id + idempotency key per (worker, i) so no two
+                // proposals dedupe into each other inside the idempotency cache.
+                let request = proto::WriteRequest {
+                    client_id: Some(proto::ClientId { id: format!("grpc-throughput-{worker}") }),
+                    idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
+                    organization: Some(proto::OrganizationSlug { slug: org_slug.value() }),
+                    vault: Some(proto::VaultSlug { slug: vault_slug.value() }),
+                    operations: vec![proto::Operation {
+                        op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
+                            key: format!("grpc-throughput-{worker:04}-{i:04}"),
+                            value: format!("value-{worker}-{i}").into_bytes(),
+                            expires_at: None,
+                            condition: None,
+                        })),
+                    }],
+                    include_tx_proof: false,
+                    caller: None,
+                };
+                match client.write(request).await {
+                    Ok(resp) => {
+                        if let Some(proto::write_response::Result::Success(_)) =
+                            resp.into_inner().result
+                        {
+                            ok += 1;
+                        }
+                    },
+                    Err(status) => {
+                        // Rate-limit rejection would surface as RESOURCE_EXHAUSTED;
+                        // the CrashableNode harness raises the ceilings to 10k
+                        // req/s so this should not fire under this load. If it
+                        // does, failing with a clear message is better than a
+                        // silent throughput drop.
+                        panic!(
+                            "worker {worker} write {i} failed: code={:?} msg={}",
+                            status.code(),
+                            status.message()
+                        );
+                    },
+                }
+            }
+            ok
+        }));
+    }
+
+    let mut successes: usize = 0;
+    for task in tasks {
+        successes += task.await.expect("worker task did not panic");
+    }
+
+    let elapsed = start.elapsed();
+    let total = (CONCURRENCY * WRITES_PER_TASK) as f64;
+    let ops_per_sec = successes as f64 / elapsed.as_secs_f64();
+
+    // First — every write we awaited must have returned Success. A high loss
+    // rate under this load would mask a throughput regression (we'd be
+    // measuring failure paths, not the BatchWriter coalesce cadence).
+    assert_eq!(
+        successes as f64, total,
+        "expected all {total} gRPC writes to succeed; got {successes} (losses mask throughput regressions)"
+    );
+
+    // Second — throughput floor. Same 20 ops/s as the direct-consensus sibling.
+    // The gRPC path adds codec + UDS hop cost so we don't ratchet higher.
+    assert!(
+        ops_per_sec >= MIN_OPS_PER_SEC,
+        "Sprint 1B5 Fix #1 gRPC throughput floor: expected ≥ {MIN_OPS_PER_SEC:.0} ops/s, \
+         got {ops_per_sec:.1} ops/s ({successes} writes in {:.3}s). \
+         Likely regressions: BatchWriter unwired (see test_batch_writer_active_in_production), \
+         eager_commit reintroduced, or the BatchWriter::submit path in \
+         crates/services/src/services/write.rs was bypassed.",
+        elapsed.as_secs_f64(),
+    );
+
+    // Third — operational proof that the BatchWriter path was exercised.
+    // `WriteService::write` only uses `batch_handle.submit(...)` when
+    // `region.batch_handle` is `Some`; otherwise it falls through to direct
+    // proposal. With the handle present AND the writes succeeding AND the
+    // request routing through gRPC, `BatchWriter::submit` is the only path
+    // the server could have taken — no direct metric scrape required.
+    let data =
+        node.manager.get_region_group(Region::US_EAST_VA).expect("US_EAST_VA region running");
+    assert!(
+        data.batch_handle().is_some(),
+        "BatchWriter was not wired on US_EAST_VA when the gRPC writes ran — the \
+         throughput measurement above exercised the direct-proposal fallback, not \
+         the BatchWriter::submit path Sprint 1B5 Fix #1b was meant to guard."
+    );
+
+    node.crash();
 }

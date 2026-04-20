@@ -9,29 +9,38 @@ use super::ConfigError;
 // Rate Limiting Configuration
 // =============================================================================
 
+// Default values bias heavily toward throughput. Sprint 1B5 profiling showed a
+// single node sustains 1,350+ ops/s under concurrent load; the prior 100/50
+// per-client defaults capped this at ~52 ops/s via `tokens_exhausted`
+// rejections. These defaults aim to be effectively inert for any
+// reasonable single-tenant or trusted-caller workload, with the rate limiter
+// acting only as a runaway-client / DDoS backstop. Multi-tenant production
+// deployments should tune down via `UpdateConfig` per the SLO model in
+// `docs/operations/configuration.md`.
+
 /// Default per-client token bucket capacity (max burst).
 fn default_client_burst() -> u64 {
-    100
+    10_000
 }
 
 /// Default per-client sustained rate (requests/sec).
 fn default_client_rate() -> f64 {
-    50.0
+    10_000.0
 }
 
 /// Default per-organization token bucket capacity (max burst).
 fn default_organization_burst() -> u64 {
-    1000
+    100_000
 }
 
 /// Default per-organization sustained rate (requests/sec).
 fn default_organization_rate() -> f64 {
-    500.0
+    100_000.0
 }
 
 /// Default backpressure threshold (pending Raft proposals).
 fn default_backpressure_threshold() -> u64 {
-    100
+    10_000
 }
 
 /// Configuration for multi-level token bucket rate limiting.
@@ -936,20 +945,9 @@ mod tests {
     // RateLimitConfig tests
 
     #[test]
-    fn rate_limit_default_valid() {
-        let config = RateLimitConfig::default();
-        assert!(config.validate().is_ok());
-        assert_eq!(config.client_burst, 100);
-        assert_eq!(config.client_rate, 50.0);
-        assert_eq!(config.organization_burst, 1000);
-        assert_eq!(config.organization_rate, 500.0);
-        assert_eq!(config.backpressure_threshold, 100);
-    }
-
-    #[test]
-    fn rate_limit_builder_defaults_valid() {
-        let config = RateLimitConfig::builder().build().unwrap();
-        assert_eq!(config.client_burst, 100);
+    fn rate_limit_defaults_validate() {
+        assert!(RateLimitConfig::default().validate().is_ok());
+        assert!(RateLimitConfig::builder().build().unwrap().validate().is_ok());
     }
 
     #[test]

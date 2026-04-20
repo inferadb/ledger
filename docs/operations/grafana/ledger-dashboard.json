@@ -501,17 +501,17 @@
       },
       "targets": [
         {
-          "expr": "rate(ledger_batch_eager_commits_total[5m])",
-          "legendFormat": "Eager",
+          "expr": "rate(ledger_batch_coalesce_total[5m])",
+          "legendFormat": "commits/sec",
           "refId": "A"
         },
         {
-          "expr": "rate(ledger_batch_timeout_commits_total[5m])",
-          "legendFormat": "Timeout",
+          "expr": "ledger_batch_coalesce_size_sum / ledger_batch_coalesce_size_count",
+          "legendFormat": "avg batch size",
           "refId": "B"
         }
       ],
-      "title": "Batch Commit Type",
+      "title": "Batch Commit Rate + Average Batch Size",
       "type": "timeseries"
     },
     {

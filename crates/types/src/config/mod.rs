@@ -145,13 +145,7 @@ mod tests {
                     .build()
                     .expect("valid"),
             )
-            .batching(
-                BatchConfig::builder()
-                    .max_batch_size(200)
-                    .coalesce_enabled(false)
-                    .build()
-                    .expect("valid"),
-            )
+            .batching(BatchConfig::builder().max_batch_size(200).build().expect("valid"))
             .build();
 
         let json = serde_json::to_string(&config).unwrap();

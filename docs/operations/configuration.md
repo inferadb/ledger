@@ -115,23 +115,41 @@ Data is lost when the process exits.
 
 ## Batching
 
-Controls write request batching for throughput vs latency trade-off.
+Controls Raft write batching for throughput vs latency trade-off. The `BatchWriter` coalesces concurrent write proposals into a single Raft proposal so the WAL fsync amortizes across many writes.
 
-Batching is configured via `RuntimeConfig` (the `UpdateConfig` admin RPC), not environment variables. Default values:
+Batching is configured via `NodeConfig.batching` (set at startup) plus `RuntimeConfig` (via the `UpdateConfig` admin RPC for the runtime-tunable fields). As of Sprint 1B5, the `BatchWriter` is **active by default** — earlier builds constructed it with `None` and silently bypassed batching on the write path. Upgrading from pre-1B5 builds activates batching without any config change.
 
-| Parameter        | Default | Description                         |
-| ---------------- | ------- | ----------------------------------- |
-| `max_batch_size` | 100     | Maximum writes per batch            |
-| `batch_timeout`  | 2ms     | Max wait before flushing            |
-| `tick_interval`  | 500µs   | Check interval for batch timeout    |
-| `eager_commit`   | true    | Flush immediately when queue drains |
+| Parameter        | Default | Description                                                            |
+| ---------------- | ------- | ---------------------------------------------------------------------- |
+| `max_batch_size` | 500     | Upper bound on writes coalesced into one Raft proposal / one WAL fsync |
+| `batch_timeout`  | 10ms    | Max wait before flushing a partial batch (caps single-client latency)  |
 
-### Eager vs Timeout Commits
+Internal polling cadence (`tick_interval`, not operator-facing) is derived as `batch_timeout / 2`, clamped to `[1ms, 10ms]`.
 
-- **Eager commit**: Batch flushes immediately when the request queue drains
-- **Timeout commit**: Batch flushes when `BATCH_DELAY` expires
+### Tuning trade-offs
 
-Monitor `ledger_batch_eager_commits_total` vs `ledger_batch_timeout_commits_total` to tune.
+- **Larger `max_batch_size`** — more proposals amortize one fsync under concurrent load. Upper bound is a memory / single-proposal-payload cap; the tail arrives once the timer fires.
+- **Shorter `batch_timeout`** — tighter per-request latency floor for single-client workloads, at the cost of smaller batches under concurrency.
+- **Longer `batch_timeout`** — larger batches, higher throughput under concurrency, wider latency tail under isolated / single-client load.
+
+Sprint 1B5 tuned these defaults for throughput: measured `concurrent-writes @ 32` moved from ~52 ops/s to 1,350 ops/s at p50 23ms / p99 42ms. The prior `max_batch_size=100` / `batch_timeout=2ms` combination coalesced too few proposals to amortize the WAL fsync. The old `eager_commit` knob (flush on queue drain) was removed in Sprint 1B5 — under concurrent load clients wait on prior responses before submitting, so the queue drains every tick and eager-commit defeated batching entirely. Timer-only flushing is now the only policy.
+
+### UpdateConfig example — widen the batch timeout on write-heavy workloads
+
+```bash
+grpcurl -plaintext -d '{
+  "config_json": "{\"batching\":{\"max_batch_size\":1000,\"batch_timeout\":\"20ms\"}}"
+}' localhost:9090 ledger.v1.AdminService/UpdateConfig
+```
+
+### Monitoring
+
+- `ledger_batch_coalesce_total` — counter, increments once per flushed batch.
+- `ledger_batch_coalesce_size` — histogram, entries per flushed batch. Sustained low values under load suggest `batch_timeout` is too short; sustained values at `max_batch_size` suggest raising the cap.
+- `ledger_batch_flush_latency_seconds` — histogram, per-flush wall-clock time (Raft submit round-trip).
+- `ledger_batch_queue_depth` — gauge per region, pending writes at tick entry. A sustained high depth indicates the WAL is the bottleneck.
+
+The pre-1B5 `ledger_batch_eager_commits_total` and `ledger_batch_timeout_commits_total` metrics no longer exist; there is no separate counter by trigger (the "eager" path was removed). Dashboards referencing the removed metrics will show "No data" — see the metrics-reference note for the cleanup list.
 
 ## Request Limits
 
@@ -142,6 +160,32 @@ INFERADB__LEDGER__MAX_CONCURRENT=200
 # 60-second request timeout
 INFERADB__LEDGER__TIMEOUT=60
 ```
+
+## Rate Limiting
+
+Three-tier token-bucket admission control. Configured via `RuntimeConfig` (the `UpdateConfig` admin RPC).
+
+**Defaults are tuned for single-tenant / trusted-caller deployments** — the rate limiter acts only as a runaway-client / DDoS backstop, not as a per-tenant SLO enforcement surface. **Multi-tenant production deployments should tune these down via `UpdateConfig` to match the SLO model** for each tenant class (see [slo.md](slo.md)). The defaults deliberately do not enforce a per-tenant budget; until you set one, one tenant can consume the full node's capacity.
+
+| Field                    | Default  | Unit       | Rationale                                                                                        |
+| ------------------------ | -------- | ---------- | ------------------------------------------------------------------------------------------------ |
+| `client_burst`           | `10000`  | tokens     | Per-client bucket capacity; bias-toward-throughput default. Tune down to enforce per-caller cap. |
+| `client_rate`            | `10000`  | requests/s | Per-client sustained refill.                                                                     |
+| `organization_burst`     | `100000` | tokens     | Per-organization bucket capacity across all callers in the org.                                  |
+| `organization_rate`      | `100000` | requests/s | Per-organization sustained refill.                                                               |
+| `backpressure_threshold` | `10000`  | proposals  | Pending-Raft-proposal threshold above which all new requests are rejected globally.              |
+
+Sprint 1B5 raised each default by ~100× (from `client_burst=100`, `client_rate=50`, `organization_burst=1000`, `organization_rate=500`, `backpressure_threshold=100`). Under Sprint 1B5's `concurrent-writes @ 32` measurement, the old per-client defaults capped a single node at ~52 ops/s via `tokens_exhausted` rejections — well below the 1,350 ops/s the WAL + apply pipeline can sustain. The new defaults are effectively inert for any reasonable single-tenant workload; `UpdateConfig` remains the authoritative knob for multi-tenant tuning.
+
+### UpdateConfig example — multi-tenant tuning
+
+```bash
+grpcurl -plaintext -d '{
+  "config_json": "{\"rate_limit\":{\"client_burst\":500,\"client_rate\":250.0,\"organization_burst\":5000,\"organization_rate\":2500.0,\"backpressure_threshold\":1000}}"
+}' localhost:9090 ledger.v1.AdminService/UpdateConfig
+```
+
+Validation enforces `> 0` on every field and caps (`client_*` ≤ 1,000,000; `organization_*` ≤ 10,000,000). Hot-reloadable — the `RateLimiter`'s backing atomics re-read on every admission check.
 
 ## Logging
 
@@ -298,15 +342,16 @@ Controls the per-region `StateCheckpointer` background task that drives `Databas
 
 Under Sprint 1B3 the checkpointer syncs **four** databases per region: `state.db` (entity tables), `raft.db` (Raft applied state), `blocks.db` (blockchain archive), and `events.db` (audit events, when the region is configured to own an events shard). The dirty-page trigger reads `max()` across all four DBs, so an ingest-heavy workload that dirties `events.db` while `state.db` stays clean still fires the checkpoint. Checkpoint duration scales roughly linearly with how many of the four are dirty at tick time — expect p99 `ledger_state_checkpoint_duration_seconds` ~2–4× higher than Sprint 1B2 on write-heavy workloads. Sync is concurrent via `tokio::join!`; accumulators advance only when every configured DB's sync succeeded, preserving the lock-step policy from the 2-DB version.
 
-| Field                   | Type | Default  | Description                                              |
-| ----------------------- | ---- | -------- | -------------------------------------------------------- |
-| `interval_ms`           | u64  | `500`    | Time trigger — fire at least this often (50–60,000 ms)   |
-| `applies_threshold`     | u64  | `5000`   | Apply-count trigger — fire after N entries applied (≥1)  |
-| `dirty_pages_threshold` | u64  | `10000`  | Dirty-page trigger — fire when cache dirty-pages ≥ N (≥1) |
+| Field                   | Type | Default | Description                                               |
+| ----------------------- | ---- | ------- | --------------------------------------------------------- |
+| `interval_ms`           | u64  | `500`   | Time trigger — fire at least this often (50–60,000 ms)    |
+| `applies_threshold`     | u64  | `5000`  | Apply-count trigger — fire after N entries applied (≥1)   |
+| `dirty_pages_threshold` | u64  | `10000` | Dirty-page trigger — fire when cache dirty-pages ≥ N (≥1) |
 
 The three triggers are OR'd — the checkpointer fires on whichever threshold hits first. Checkpoints coalesce across concurrent callers by `last_synced_snapshot_id`, so forced syncs (snapshot / backup / graceful shutdown) never duplicate work an in-flight checkpoint already covered.
 
 **Tuning trade-offs**:
+
 - **Tighter thresholds** (lower `interval_ms` / `applies_threshold`) — shorter post-crash replay window; more fsync pressure on the disk.
 - **Looser thresholds** — less fsync churn; post-crash WAL replay runs longer at startup.
 - **`dirty_pages_threshold`** is the backpressure safety valve. If applies outrun the time/apply triggers, this bounds the in-memory page cache growth.
@@ -327,14 +372,14 @@ Monitor the effect via `ledger_state_checkpoints_total{trigger}`, `ledger_state_
 
 Controls the in-memory queue + background `EventFlusher` introduced in Sprint 1B4 that amortizes `events.db` fsyncs on the handler-phase emission path. Handlers (RPC, admin, background-job, saga) call `EventHandle::record_handler_event`, which enqueues an `EventEntry`; the flusher drains the queue on a time / size / shutdown trigger and fsyncs the drained batch with a single `commit()`. Durability is **batched-durable within the flush window**, not per-emission — see [durability.md § Handler-phase event flush window](durability.md#handler-phase-event-flush-window) for the full contract and the clean-shutdown drain semantics.
 
-| Field                | Default | Description                                                                                                                   | Runtime-reconfig?       |
-| -------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
-| `enabled`            | `true`  | Master switch. Set `false` to restore pre-1B4 per-emission fsync (strict synchronous durability).                             | Yes                     |
-| `flush_interval_ms`  | `100`   | Time trigger — flush at least this often. Valid `[1, 60_000]`.                                                                | Yes                     |
-| `flush_size_threshold` | `1000` | Size trigger — flush when queue depth reaches N entries. Must be `>= 1`.                                                       | Yes                     |
-| `queue_capacity`     | `10000` | Bounded `mpsc` channel capacity. Capacity is fixed at channel construction.                                                    | **No — restart required** |
-| `overflow_behavior`  | `drop`  | `drop` or `block` when the queue is full. `drop` matches the pre-1B4 best-effort-on-failure contract.                         | Yes                     |
-| `drain_batch_max`    | `500`   | Per-flush drain cap, bounds how long each flush txn holds `events.db`'s write mutex.                                          | Yes                     |
+| Field                  | Default | Description                                                                                           | Runtime-reconfig?         |
+| ---------------------- | ------- | ----------------------------------------------------------------------------------------------------- | ------------------------- |
+| `enabled`              | `true`  | Master switch. Set `false` to restore pre-1B4 per-emission fsync (strict synchronous durability).     | Yes                       |
+| `flush_interval_ms`    | `100`   | Time trigger — flush at least this often. Valid `[1, 60_000]`.                                        | Yes                       |
+| `flush_size_threshold` | `1000`  | Size trigger — flush when queue depth reaches N entries. Must be `>= 1`.                              | Yes                       |
+| `queue_capacity`       | `10000` | Bounded `mpsc` channel capacity. Capacity is fixed at channel construction.                           | **No — restart required** |
+| `overflow_behavior`    | `drop`  | `drop` or `block` when the queue is full. `drop` matches the pre-1B4 best-effort-on-failure contract. | Yes                       |
+| `drain_batch_max`      | `500`   | Per-flush drain cap, bounds how long each flush txn holds `events.db`'s write mutex.                  | Yes                       |
 
 Triggers are OR'd — the flusher fires on whichever hits first. The shutdown trigger is invoked explicitly by `GracefulShutdown` Phase 5b via `EventHandle::flush_for_shutdown(5s)` and is not a time/size trigger variant.
 
