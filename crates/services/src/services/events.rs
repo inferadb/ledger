@@ -12,7 +12,7 @@
 //! generated them. Clients can filter by `emission_path` for deterministic
 //! cross-node results.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use inferadb_ledger_proto::proto;
@@ -21,6 +21,8 @@ use inferadb_ledger_raft::{
     log_storage::AppliedStateAccessor,
     metrics,
     pagination::{EventPageToken, PageTokenCodec},
+    raft_manager::RaftManager,
+    types::{LedgerRequest, LedgerResponse},
 };
 use inferadb_ledger_state::{EventStore, EventsDatabase};
 use inferadb_ledger_store::StorageBackend;
@@ -31,7 +33,8 @@ use inferadb_ledger_types::{
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-use super::{error_classify, slug_resolver::SlugResolver};
+use super::{error_classify, metadata::status_with_correlation, slug_resolver::SlugResolver};
+use crate::proposal::ProposalService;
 
 /// Default limit for `ListEvents` when the request specifies 0.
 const DEFAULT_LIMIT: usize = 100;
@@ -56,6 +59,7 @@ const COUNT_SCAN_LIMIT: usize = 100_000;
 #[derive(bon::Builder)]
 pub struct EventsService<B: StorageBackend> {
     /// Events database (local to this node).
+    #[allow(dead_code)] // reserved for read paths + test fixtures post Sprint 1B3 Task 2C
     events_db: EventsDatabase<B>,
 
     /// Applied state for slug resolution.
@@ -72,6 +76,23 @@ pub struct EventsService<B: StorageBackend> {
 
     /// Per-source rate limiter for ingestion.
     ingestion_rate_limiter: Option<Arc<IngestionRateLimiter>>,
+
+    /// Proposal service for routing `IngestExternalEvents` through Raft.
+    ///
+    /// Sprint 1B3 Task 2C: when set, `ingest_events` proposes the accepted
+    /// batch as [`LedgerRequest::IngestExternalEvents`] against the REGIONAL
+    /// Raft group owning the organization, instead of writing directly to
+    /// `events.db`. When `None`, ingestion is disabled (the RPC returns
+    /// `UNAVAILABLE`).
+    proposer: Option<Arc<dyn ProposalService>>,
+
+    /// Multi-Raft manager, used to resolve an organization to its REGIONAL
+    /// Raft group for `IngestExternalEvents` proposal routing.
+    manager: Option<Arc<RaftManager>>,
+
+    /// Maximum time to wait for an `IngestExternalEvents` Raft proposal to commit.
+    #[builder(default = Duration::from_secs(30))]
+    proposal_timeout: Duration,
 }
 
 impl<B: StorageBackend + 'static> EventsService<B> {
@@ -667,31 +688,87 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
             accepted_entries.push(entry);
         }
 
-        // 8. Write accepted events to events.db
+        // 8. Route the accepted batch through the REGIONAL Raft group (Sprint 1B3 Task 2C).
+        //    Rejections + accepted count are known locally — the apply response is just an ack.
         let accepted_count = accepted_entries.len() as u32;
         let rejected_count = rejections.len() as u32;
+        let caller = req.caller.as_ref().map_or(0, |c| c.slug);
+        let correlation_request_id = uuid::Uuid::new_v4();
+        let correlation_trace_id = String::new();
 
         if !accepted_entries.is_empty() {
-            let mut txn = self.events_db.write().map_err(|e| error_classify::storage_error(&e))?;
+            let proposer = self.proposer.as_ref().cloned().ok_or_else(|| {
+                Status::unavailable("Event ingestion proposer is not configured on this node")
+            })?;
 
-            for entry in &accepted_entries {
-                EventStore::write(&mut txn, entry)
-                    .map_err(|e| error_classify::storage_error(&e))?;
-            }
+            // Resolve the REGIONAL Raft group for this organization. External
+            // EventEntry payloads carry user-controlled strings (principal,
+            // event_type, details map) that are PII and must stay within the
+            // owning region's Raft log + events.db. Never route to GLOBAL.
+            //
+            // In production, `manager` is always wired. Tests that inject
+            // only a `proposer` (no `manager`) fall back to the mock's
+            // built-in regional-response queue — the `Region` value is
+            // inspected by the test mock for routing assertions, but the
+            // mock does not consult a real routing table.
+            let region = match self.manager.as_ref() {
+                Some(manager) => manager.get_organization_region(org_id).ok_or_else(|| {
+                    Status::not_found(format!("Organization {} not found in routing table", org_id))
+                })?,
+                None => inferadb_ledger_types::Region::GLOBAL,
+            };
 
-            txn.commit().map_err(|e| error_classify::storage_error(&e))?;
+            let proposal = LedgerRequest::IngestExternalEvents {
+                source: source.clone(),
+                events: accepted_entries,
+            };
 
-            // Emit per-event metrics
-            for entry in &accepted_entries {
-                metrics::record_event_write(
-                    "handler_phase",
-                    entry.action.scope().as_str(),
-                    entry.action.as_str(),
-                );
+            let timeout = self.proposal_timeout;
+            let response = proposer
+                .propose_to_region(region, proposal, caller, timeout)
+                .await
+                .map_err(|status| {
+                    status_with_correlation(status, &correlation_request_id, &correlation_trace_id)
+                })?;
+
+            match response {
+                LedgerResponse::Empty => {},
+                LedgerResponse::Error { code, message } => {
+                    tracing::error!(
+                        service = "EventsService",
+                        method = "IngestEvents",
+                        source_service = %source,
+                        org_id = org_id.value(),
+                        error_code = ?code,
+                        "IngestExternalEvents apply returned error"
+                    );
+                    return Err(status_with_correlation(
+                        super::helpers::error_code_to_status(code, message),
+                        &correlation_request_id,
+                        &correlation_trace_id,
+                    ));
+                },
+                other => {
+                    tracing::error!(
+                        service = "EventsService",
+                        method = "IngestEvents",
+                        response = ?std::mem::discriminant(&other),
+                        "IngestExternalEvents returned unexpected response variant"
+                    );
+                    return Err(status_with_correlation(
+                        Status::internal(
+                            "Unexpected response type from IngestExternalEvents apply handler",
+                        ),
+                        &correlation_request_id,
+                        &correlation_trace_id,
+                    ));
+                },
             }
         }
 
-        // 9. Record ingestion metrics
+        // 9. Record ingestion metrics (RPC-handler site, unchanged). Per-event
+        //    `ledger_event_writes_total` now fires on the apply side (Sprint 1B3 design §
+        //    Observability).
         metrics::record_events_ingest(source, "accepted", accepted_count);
         if rejected_count > 0 {
             metrics::record_events_ingest(source, "rejected", rejected_count);
@@ -723,7 +800,11 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
-    use std::{collections::BTreeMap, sync::Arc};
+    use std::{
+        collections::{BTreeMap, VecDeque},
+        sync::Arc,
+        time::Duration,
+    };
 
     use arc_swap::ArcSwap;
     use chrono::{DateTime, TimeZone, Utc};
@@ -732,17 +813,100 @@ mod tests {
         event_writer::IngestionRateLimiter,
         log_storage::{AppliedState, AppliedStateAccessor},
     };
-    use inferadb_ledger_state::EventsDatabase;
+    use inferadb_ledger_state::{EventStore, EventsDatabase};
     use inferadb_ledger_store::InMemoryBackend;
     use inferadb_ledger_types::{
-        OrganizationId,
+        OrganizationId, Region,
         events::{
             EventAction, EventConfig, EventEmission, EventEntry, EventOutcome, EventScope,
             IngestionConfig,
         },
     };
+    use parking_lot::Mutex;
 
     use super::*;
+
+    /// Test double that stands in for the apply-handler side of the
+    /// Sprint 1B3 Task 2C `IngestExternalEvents` flow.
+    ///
+    /// - Captures every `propose_to_region` call for assertion.
+    /// - Simulates the apply handler's write-through-and-ack by writing the proposed `EventEntry`
+    ///   batch into the shared `events_db` handle and returning `Ok(LedgerResponse::Empty)` — so
+    ///   tests that follow the ingest with a `ListEvents` call still observe the events.
+    /// - Optionally returns a canned error response (`set_next_error`) so tests can exercise the
+    ///   apply-error → gRPC-error propagation path.
+    struct TestIngestProposer {
+        events_db: EventsDatabase<InMemoryBackend>,
+        proposals: Mutex<Vec<(Region, LedgerRequest, u64)>>,
+        next_error: Mutex<VecDeque<Status>>,
+    }
+
+    impl TestIngestProposer {
+        fn new(events_db: EventsDatabase<InMemoryBackend>) -> Self {
+            Self {
+                events_db,
+                proposals: Mutex::new(Vec::new()),
+                next_error: Mutex::new(VecDeque::new()),
+            }
+        }
+
+        fn proposals(&self) -> Vec<(Region, LedgerRequest, u64)> {
+            self.proposals.lock().clone()
+        }
+
+        /// Enqueues a `tonic::Status` that the next `propose_to_region` call
+        /// will return instead of simulating a successful apply.
+        fn set_next_error(&self, status: Status) {
+            self.next_error.lock().push_back(status);
+        }
+    }
+
+    #[tonic::async_trait]
+    impl ProposalService for TestIngestProposer {
+        async fn propose(
+            &self,
+            _request: LedgerRequest,
+            _caller: u64,
+            _timeout: Duration,
+        ) -> Result<LedgerResponse, Status> {
+            Err(Status::unimplemented("TestIngestProposer only supports propose_to_region"))
+        }
+
+        async fn propose_to_region(
+            &self,
+            region: Region,
+            request: LedgerRequest,
+            caller: u64,
+            _timeout: Duration,
+        ) -> Result<LedgerResponse, Status> {
+            if let Some(err) = self.next_error.lock().pop_front() {
+                self.proposals.lock().push((region, request, caller));
+                return Err(err);
+            }
+
+            // Simulate the apply-handler side: write events to events.db via
+            // the same EventStore::write path the real apply handler uses.
+            if let LedgerRequest::IngestExternalEvents { ref events, .. } = request {
+                let mut txn = self.events_db.write().expect("test write txn");
+                for entry in events.iter() {
+                    EventStore::write(&mut txn, entry).expect("test write event");
+                }
+                txn.commit().expect("test commit");
+            }
+            self.proposals.lock().push((region, request, caller));
+            Ok(LedgerResponse::Empty)
+        }
+
+        fn regional_state(
+            &self,
+            _region: Region,
+        ) -> Result<
+            Arc<inferadb_ledger_state::StateLayer<inferadb_ledger_store::FileBackend>>,
+            Status,
+        > {
+            Err(Status::unimplemented("TestIngestProposer does not expose a regional state layer"))
+        }
+    }
 
     fn make_test_service() -> EventsService<InMemoryBackend> {
         let events_db = EventsDatabase::open_in_memory().expect("open");
@@ -778,15 +942,26 @@ mod tests {
 
     /// Builds a service wired for ingestion tests with default `IngestionConfig`.
     fn make_ingest_service(slug: u64, org_id: i64) -> EventsService<InMemoryBackend> {
+        make_ingest_service_with_config(slug, org_id, IngestionConfig::default()).0
+    }
+
+    /// Builds a service + proposer pair for ingestion tests that need to
+    /// inspect the captured proposals or inject an apply-error.
+    fn make_ingest_service_with_proposer(
+        slug: u64,
+        org_id: i64,
+    ) -> (EventsService<InMemoryBackend>, Arc<TestIngestProposer>) {
         make_ingest_service_with_config(slug, org_id, IngestionConfig::default())
     }
 
     /// Builds a service with custom `IngestionConfig` for testing edge cases.
+    /// Returns the service plus the test proposer so tests can assert on
+    /// the captured proposal stream or inject an apply-handler error.
     fn make_ingest_service_with_config(
         slug: u64,
         org_id: i64,
         ingestion: IngestionConfig,
-    ) -> EventsService<InMemoryBackend> {
+    ) -> (EventsService<InMemoryBackend>, Arc<TestIngestProposer>) {
         let events_db = EventsDatabase::open_in_memory().expect("open");
         let mut state = AppliedState::default();
         state.slug_index.insert(
@@ -801,14 +976,20 @@ mod tests {
         let rate_limit = ingestion.ingest_rate_limit_per_source;
         let config = EventConfig { ingestion, ..EventConfig::default() };
 
-        EventsService::builder()
+        let proposer = Arc::new(TestIngestProposer::new(events_db.clone()));
+        let proposer_trait: Arc<dyn ProposalService> = proposer.clone();
+
+        let service = EventsService::builder()
             .events_db(events_db)
             .applied_state(accessor)
             .page_token_codec(PageTokenCodec::with_random_key())
             .event_config(Arc::new(config))
             .node_id(1_u64)
             .ingestion_rate_limiter(Arc::new(IngestionRateLimiter::new(rate_limit)))
-            .build()
+            .proposer(proposer_trait)
+            .proposal_timeout(Duration::from_secs(5))
+            .build();
+        (service, proposer)
     }
 
     /// Helper to build a simple `IngestEventEntry` with required fields.
@@ -1284,7 +1465,7 @@ mod tests {
     #[tokio::test]
     async fn ingest_events_disabled_returns_unavailable() {
         let config = IngestionConfig { ingest_enabled: false, ..IngestionConfig::default() };
-        let service = make_ingest_service_with_config(100, 1, config);
+        let (service, _proposer) = make_ingest_service_with_config(100, 1, config);
         let req = Request::new(proto::IngestEventsRequest {
             source_service: "engine".to_string(),
             organization: Some(proto::OrganizationSlug { slug: 100 }),
@@ -1313,7 +1494,7 @@ mod tests {
     #[tokio::test]
     async fn ingest_events_batch_size_exceeded() {
         let config = IngestionConfig { max_ingest_batch_size: 2, ..IngestionConfig::default() };
-        let service = make_ingest_service_with_config(100, 1, config);
+        let (service, _proposer) = make_ingest_service_with_config(100, 1, config);
         let req = Request::new(proto::IngestEventsRequest {
             source_service: "engine".to_string(),
             organization: Some(proto::OrganizationSlug { slug: 100 }),
@@ -1526,7 +1707,7 @@ mod tests {
         // Very low rate limit: 1 event/sec
         let config =
             IngestionConfig { ingest_rate_limit_per_source: 1, ..IngestionConfig::default() };
-        let service = make_ingest_service_with_config(100, 1, config);
+        let (service, _proposer) = make_ingest_service_with_config(100, 1, config);
 
         // First request: 1 event — should succeed (bucket starts full)
         let req1 = Request::new(proto::IngestEventsRequest {
@@ -1555,7 +1736,7 @@ mod tests {
         // Low rate limit to trigger it quickly
         let config =
             IngestionConfig { ingest_rate_limit_per_source: 1, ..IngestionConfig::default() };
-        let service = make_ingest_service_with_config(100, 1, config);
+        let (service, _proposer) = make_ingest_service_with_config(100, 1, config);
 
         // "engine" drains its bucket
         let req1 = Request::new(proto::IngestEventsRequest {
@@ -1826,5 +2007,95 @@ mod tests {
 
         let resp = service.list_events(req).await.unwrap();
         assert_eq!(resp.get_ref().entries.len(), 1);
+    }
+
+    // ── Sprint 1B3 Task 2C: IngestExternalEvents Raft-routing tests ──
+
+    /// A valid batch must produce exactly one `LedgerRequest::IngestExternalEvents`
+    /// proposal via `propose_to_region`. The captured proposal's event list
+    /// must match the RPC's accepted entries so WAL replay is byte-identical.
+    #[tokio::test]
+    async fn ingest_events_proposes_to_regional_raft() {
+        let (service, proposer) = make_ingest_service_with_proposer(100, 1);
+        let req = Request::new(proto::IngestEventsRequest {
+            source_service: "engine".to_string(),
+            organization: Some(proto::OrganizationSlug { slug: 100 }),
+            entries: vec![
+                make_ingest_entry("engine.task_completed", "alice"),
+                make_ingest_entry("engine.task_failed", "bob"),
+            ],
+            caller: None,
+        });
+        let resp = service.ingest_events(req).await.unwrap();
+        assert_eq!(resp.get_ref().accepted_count, 2);
+        assert_eq!(resp.get_ref().rejected_count, 0);
+
+        // Exactly one proposal submitted; it is IngestExternalEvents with 2 events.
+        let proposals = proposer.proposals();
+        assert_eq!(proposals.len(), 1, "expected exactly one Raft proposal");
+        let (_region, request, _caller) = &proposals[0];
+        match request {
+            LedgerRequest::IngestExternalEvents { source, events } => {
+                assert_eq!(source, "engine");
+                assert_eq!(events.len(), 2);
+                // Pre-proposal validation assigns UUID v4 event_ids + source service.
+                for entry in events {
+                    assert_eq!(entry.source_service, "engine");
+                    assert_ne!(entry.event_id, [0u8; 16], "event_id must be assigned pre-proposal");
+                }
+            },
+            other => panic!("expected IngestExternalEvents, got {other:?}"),
+        }
+    }
+
+    /// When every entry is rejected by validation, no Raft proposal is
+    /// submitted — the RPC short-circuits with the rejection list. Validates
+    /// that failed validations don't consume Raft bandwidth.
+    #[tokio::test]
+    async fn ingest_events_empty_batch_skips_raft() {
+        let (service, proposer) = make_ingest_service_with_proposer(100, 1);
+        // Every entry has wrong prefix → all rejected, accepted_entries empty.
+        let req = Request::new(proto::IngestEventsRequest {
+            source_service: "engine".to_string(),
+            organization: Some(proto::OrganizationSlug { slug: 100 }),
+            entries: vec![
+                make_ingest_entry("control.wrong_prefix_a", "u1"),
+                make_ingest_entry("control.wrong_prefix_b", "u2"),
+            ],
+            caller: None,
+        });
+        let resp = service.ingest_events(req).await.unwrap();
+        assert_eq!(resp.get_ref().accepted_count, 0);
+        assert_eq!(resp.get_ref().rejected_count, 2);
+        // No proposal submitted — rejected batches never reach Raft.
+        assert!(proposer.proposals().is_empty(), "empty accepted batch must not propose to Raft");
+    }
+
+    /// When the apply handler returns an error (simulated via
+    /// `TestIngestProposer::set_next_error`), the RPC must propagate the
+    /// error to the gRPC client through `status_with_correlation`. This
+    /// validates the Option A error-propagation contract.
+    #[tokio::test]
+    async fn ingest_events_apply_error_propagates_to_caller() {
+        let (service, proposer) = make_ingest_service_with_proposer(100, 1);
+        // Inject an apply-error the proposer will surface on the next call.
+        proposer.set_next_error(Status::internal("simulated events.db commit_in_memory failure"));
+
+        let req = Request::new(proto::IngestEventsRequest {
+            source_service: "engine".to_string(),
+            organization: Some(proto::OrganizationSlug { slug: 100 }),
+            entries: vec![make_ingest_entry("engine.task_completed", "alice")],
+            caller: None,
+        });
+        let err = service.ingest_events(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Internal);
+        assert!(
+            err.message().contains("simulated events.db commit_in_memory failure"),
+            "unexpected error message: {}",
+            err.message()
+        );
+        // The proposal was submitted (captured) before the mock error fired,
+        // confirming the proposer was actually invoked.
+        assert_eq!(proposer.proposals().len(), 1);
     }
 }

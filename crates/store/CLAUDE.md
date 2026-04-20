@@ -17,7 +17,7 @@ These files are load-bearing — their invariants ripple beyond the local file. 
 | `src/page/mod.rs` and submodules | Page header layout and dual-slot commit. A stray byte here is a file-format break.                                       |
 | `src/backend/encrypted.rs`       | Per-vault AES-256-GCM envelope. Changing the nonce scheme or AAD breaks backward-compatible reads.                       |
 | `src/transaction.rs`             | Transaction semantics — atomicity assumed by `StorageEngine` above.                                                      |
-| `src/db/transactions.rs`         | `WriteTransaction::commit` (strict-durable; dual-slot fsync) vs `commit_in_memory` (lazy; cache-only). Mis-routing is a silent durability or latency regression. |
+| `src/db/transactions.rs`         | `WriteTransaction::commit` (strict-durable; dual-slot fsync) vs `commit_in_memory` (lazy; cache-only). Post-1B3, `commit_in_memory` is the dominant apply-path variant across all four regional DBs (state.db / raft.db / blocks.db / events.db). Mis-routing is a silent durability or latency regression. |
 | `src/db/mod.rs`                  | `Database::sync_state` + `last_synced_snapshot_id` — the durability primitives the raft-layer `StateCheckpointer` + graceful-shutdown paths drive. Coalesces concurrent callers. |
 
 ## Owned Surface

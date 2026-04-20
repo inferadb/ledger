@@ -294,7 +294,9 @@ Snapshot and cache settings. Configured via `UpdateConfig` RPC at runtime.
 
 ## State-DB Checkpointing
 
-Controls the per-region `StateCheckpointer` background task that drives `Database::sync_state()` on the state DB and the Raft log DB. Writes are WAL-durable on response; state-DB materialization is amortized via this checkpointer. See [durability.md](durability.md) for the full contract.
+Controls the per-region `StateCheckpointer` background task that drives `Database::sync_state()` on every regional DB. Writes are WAL-durable on response; DB materialization is amortized via this checkpointer. See [durability.md](durability.md) for the full contract.
+
+Under Sprint 1B3 the checkpointer syncs **four** databases per region: `state.db` (entity tables), `raft.db` (Raft applied state), `blocks.db` (blockchain archive), and `events.db` (audit events, when the region is configured to own an events shard). The dirty-page trigger reads `max()` across all four DBs, so an ingest-heavy workload that dirties `events.db` while `state.db` stays clean still fires the checkpoint. Checkpoint duration scales roughly linearly with how many of the four are dirty at tick time — expect p99 `ledger_state_checkpoint_duration_seconds` ~2–4× higher than Sprint 1B2 on write-heavy workloads. Sync is concurrent via `tokio::join!`; accumulators advance only when every configured DB's sync succeeded, preserving the lock-step policy from the 2-DB version.
 
 | Field                   | Type | Default  | Description                                              |
 | ----------------------- | ---- | -------- | -------------------------------------------------------- |

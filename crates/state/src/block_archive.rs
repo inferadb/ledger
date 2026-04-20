@@ -151,6 +151,16 @@ impl<B: StorageBackend> BlockArchive<B> {
         Ok(Self { db, blocks_dir: Some(blocks_dir), current_segment: RwLock::new(None) })
     }
 
+    /// Returns a shared reference to the underlying `blocks.db` database.
+    ///
+    /// Used by the durability lifecycle (`StateCheckpointer`,
+    /// `RaftManager::sync_all_state_dbs`, `RaftLogStore::replay_crash_gap`) to
+    /// drive `Database::sync_state` on blocks.db in lock-step with state.db,
+    /// raft.db, and events.db. Mirrors `EventsDatabase::db()`.
+    pub fn db(&self) -> &Arc<Database<B>> {
+        &self.db
+    }
+
     /// Appends a block to the archive.
     ///
     /// Idempotent by `region_height`: if a block at this height is already
@@ -188,7 +198,13 @@ impl<B: StorageBackend> BlockArchive<B> {
                 .context(StoreSnafu)?;
         }
 
-        txn.commit().context(StoreSnafu)?;
+        // Sprint 1B3 Task 2A: blocks.db apply-path commit flipped to
+        // `commit_in_memory`. The block is WAL-replayable via the originating
+        // Raft entry (apply_committed_entries re-calls append_block on replay).
+        // Idempotency-by-height (Task 1C) makes replay safe. Durability realized
+        // by the next StateCheckpointer tick, snapshot/backup sync, or graceful
+        // shutdown's sync_all_state_dbs sweep.
+        txn.commit_in_memory().context(StoreSnafu)?;
 
         if self.blocks_dir.is_some() {
             self.append_to_segment(block, &encoded)?;
@@ -951,6 +967,72 @@ mod tests {
             size_after_first,
             size_after_distinct,
         );
+    }
+
+    // =========================================================================
+    // Durability (Sprint 1B3 Task 2A) — commit_in_memory + sync_state
+    // =========================================================================
+
+    /// The FLIP: `append_block` uses `commit_in_memory` now. After the call
+    /// the block is visible in-process (read-your-own-writes), but
+    /// `last_synced_snapshot_id` on the backing `blocks.db` has NOT advanced
+    /// (no dual-slot persist fired). A subsequent `sync_state` advances the
+    /// synced id, and the block survives a close-reopen cycle afterwards.
+    ///
+    /// Mirrors Sprint 1B2 Task 2C's
+    /// `save_state_core_commits_in_memory_only_then_sync_advances_snapshot`
+    /// shape, adapted to the blocks.db durability lifecycle landed in Task 2D.
+    #[tokio::test]
+    async fn append_block_commits_in_memory_only_until_sync() {
+        use crate::engine::StorageEngine;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("blocks.db");
+
+        let engine = StorageEngine::open(&db_path).expect("open engine");
+        let archive = BlockArchive::new(engine.db());
+        let db = archive.db().clone();
+
+        let synced_before = db.last_synced_snapshot_id();
+
+        // Append one block via the now-`commit_in_memory` path.
+        let block = create_test_block(42);
+        archive.append_block(&block).expect("append block");
+
+        // In-process read-your-own-writes: the block is visible immediately
+        // via the shared page cache that `commit_in_memory` populates.
+        let loaded = archive.read_block(42).expect("read block in-process");
+        assert_eq!(loaded.region_height, 42);
+
+        // But `last_synced_snapshot_id` has NOT advanced — no dual-slot
+        // persist fired under the Task 2A flip.
+        let synced_after_commit = db.last_synced_snapshot_id();
+        assert_eq!(
+            synced_after_commit, synced_before,
+            "append_block must not advance last_synced_snapshot_id \
+             (Sprint 1B3 Task 2A: commit_in_memory skips the dual-slot persist)"
+        );
+
+        // Forcing a sync advances the synced id.
+        db.clone().sync_state().await.expect("sync_state");
+        let synced_after_sync = db.last_synced_snapshot_id();
+        assert!(
+            synced_after_sync > synced_before,
+            "sync_state must advance last_synced_snapshot_id past the \
+             in-memory commit (before={synced_before} after={synced_after_sync})"
+        );
+
+        // Drop the handle chain so the tempdir-backed file is released before
+        // we reopen it; the block must survive a full close-reopen cycle
+        // because the sync above ran a dual-slot persist.
+        drop(archive);
+        drop(db);
+        drop(engine);
+
+        let engine_reopened = StorageEngine::open(&db_path).expect("reopen engine");
+        let archive_reopened = BlockArchive::new(engine_reopened.db());
+        let reloaded = archive_reopened.read_block(42).expect("read block after reopen");
+        assert_eq!(reloaded.region_height, 42);
     }
 
     // =========================================================================

@@ -344,7 +344,7 @@ impl EventFilter {
         self
     }
 
-    /// Filters to handler-phase events only (node-local).
+    /// Filters to handler-phase events only (emitted outside the apply pipeline).
     pub fn handler_phase_only(mut self) -> Self {
         self.emission_path = Some(proto::EventEmissionPath::EmissionPathHandlerPhase);
         self

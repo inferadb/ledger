@@ -4144,6 +4144,180 @@ mod tests {
         assert_eq!(write_committed[0].organization_id, org_id);
     }
 
+    // ── Sprint 1B3 Task 2C: IngestExternalEvents apply handler tests ──
+
+    /// Build a HandlerPhase `EventEntry` shaped like the ones the RPC handler
+    /// constructs (UUID v4 event_id, fixed timestamp, no block_height).
+    fn make_external_event_entry(
+        org_id: OrganizationId,
+        source: &str,
+        event_type: &str,
+        principal: &str,
+        event_id: [u8; 16],
+    ) -> EventEntry {
+        EventEntry {
+            expires_at: 0,
+            event_id,
+            source_service: source.to_string(),
+            event_type: event_type.to_string(),
+            timestamp: fixed_timestamp(),
+            scope: inferadb_ledger_types::events::EventScope::Organization,
+            action: EventAction::WriteCommitted,
+            emission: inferadb_ledger_types::events::EventEmission::HandlerPhase { node_id: 1 },
+            principal: principal.to_string(),
+            organization_id: org_id,
+            organization: None,
+            vault: None,
+            outcome: inferadb_ledger_types::events::EventOutcome::Success,
+            details: std::collections::BTreeMap::new(),
+            block_height: None,
+            trace_id: None,
+            correlation_id: None,
+            operations_count: None,
+        }
+    }
+
+    #[test]
+    fn apply_ingest_external_events_writes_events_to_db() {
+        let dir = tempdir().expect("create temp dir");
+        let events_db = EventsDatabase::open(dir.path()).expect("open events db");
+        let events_db_arc = Arc::new(events_db);
+        let config = EventConfig::default();
+        let writer = crate::event_writer::EventWriter::new(Arc::clone(&events_db_arc), config);
+        // Residency debug_assert in the apply handler requires a REGIONAL
+        // region — external events must never apply on GLOBAL.
+        let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
+            .expect("open store")
+            .with_region_config(
+                Region::US_EAST_VA,
+                inferadb_ledger_types::NodeId::new("node-test"),
+                1,
+            )
+            .with_event_writer(writer);
+
+        let mut state = (*store.applied_state.load_full()).clone();
+        let (org_id, _vault_id) = setup_org_and_vault(&mut state);
+
+        let batch = vec![
+            make_external_event_entry(org_id, "engine", "engine.task_a", "alice", [1u8; 16]),
+            make_external_event_entry(org_id, "engine", "engine.task_b", "bob", [2u8; 16]),
+        ];
+        let request = LedgerRequest::IngestExternalEvents {
+            source: "engine".to_string(),
+            events: batch.clone(),
+        };
+
+        let mut events: Vec<EventEntry> = Vec::new();
+        let mut op_index = 0u32;
+        let ts = fixed_timestamp();
+        let (response, vault_entry) = store.apply_request_with_events(
+            &request,
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut events,
+            90,
+            &mut PendingExternalWrites::default(),
+            None,
+            false,
+            0,
+        );
+
+        assert_eq!(
+            response,
+            LedgerResponse::Empty,
+            "IngestExternalEvents must return Empty on success"
+        );
+        assert!(vault_entry.is_none(), "external events produce no vault entry");
+        assert!(events.is_empty(), "external events don't emit apply-phase events");
+
+        // Read back from events_db and verify both entries are present.
+        let read_txn = events_db_arc.read().expect("read txn");
+        let (stored, _cursor) =
+            EventStore::list(&read_txn, org_id, 0, u64::MAX, 100, None).expect("list events");
+        assert_eq!(stored.len(), 2, "both external events must be persisted");
+        // Verify bytes match the proposed entries byte-for-byte (event_id is
+        // the discriminator; timestamps + source + principal round-trip).
+        for entry in &batch {
+            assert!(
+                stored.iter().any(|e| e.event_id == entry.event_id
+                    && e.source_service == entry.source_service
+                    && e.principal == entry.principal),
+                "proposed event_id {:?} not found in events.db",
+                entry.event_id
+            );
+        }
+
+        // commit_in_memory was used: the on-disk dual-slot has NOT advanced.
+        // last_synced_snapshot_id stays at 0 until StateCheckpointer fires.
+        // We can't call a public accessor here without wider surface changes,
+        // but the write path has a compile-time check that the txn is
+        // commit_in_memory'd (see apply handler). A dedicated
+        // checkpointer/sync integration test covers the durability boundary.
+    }
+
+    #[test]
+    fn apply_ingest_external_events_replay_idempotency() {
+        let dir = tempdir().expect("create temp dir");
+        let events_db = EventsDatabase::open(dir.path()).expect("open events db");
+        let events_db_arc = Arc::new(events_db);
+        let config = EventConfig::default();
+        let writer = crate::event_writer::EventWriter::new(Arc::clone(&events_db_arc), config);
+        let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
+            .expect("open store")
+            .with_region_config(
+                Region::US_EAST_VA,
+                inferadb_ledger_types::NodeId::new("node-test"),
+                1,
+            )
+            .with_event_writer(writer);
+
+        let mut state = (*store.applied_state.load_full()).clone();
+        let (org_id, _vault_id) = setup_org_and_vault(&mut state);
+
+        let batch = vec![
+            make_external_event_entry(org_id, "engine", "engine.x", "alice", [10u8; 16]),
+            make_external_event_entry(org_id, "engine", "engine.y", "bob", [20u8; 16]),
+        ];
+        let request = LedgerRequest::IngestExternalEvents {
+            source: "engine".to_string(),
+            events: batch.clone(),
+        };
+
+        let mut events: Vec<EventEntry> = Vec::new();
+        let mut op_index = 0u32;
+        let ts = fixed_timestamp();
+
+        // Apply twice — simulating WAL replay re-driving the same proposal.
+        for _ in 0..2 {
+            let (response, _) = store.apply_request_with_events(
+                &request,
+                &mut state,
+                ts,
+                &mut op_index,
+                &mut events,
+                90,
+                &mut PendingExternalWrites::default(),
+                None,
+                false,
+                0,
+            );
+            assert_eq!(response, LedgerResponse::Empty);
+        }
+
+        // B-tree upsert idempotency: identical bytes re-applied produce the
+        // same row count (not duplicated).
+        let read_txn = events_db_arc.read().expect("read txn");
+        let (stored, _cursor) =
+            EventStore::list(&read_txn, org_id, 0, u64::MAX, 100, None).expect("list events");
+        assert_eq!(
+            stored.len(),
+            2,
+            "replay of IngestExternalEvents must upsert, not duplicate (got {})",
+            stored.len()
+        );
+    }
+
     // ── System-Level Event Hook Tests ─────────────────────────────
 
     #[test]
@@ -12498,6 +12672,131 @@ mod tests {
         );
     }
 
+    /// Sprint 1B3 Task 2D: post-replay sync must advance
+    /// `last_synced_snapshot_id` on EVERY configured domain DB
+    /// (state.db, blocks.db, events.db) in addition to raft.db. Before
+    /// 1B3 only state.db + raft.db were synced, so any dirty pages in
+    /// blocks.db or events.db (produced by the replayed commit-in-memory
+    /// applies in Task 2A/2B) would accumulate in memory until the next
+    /// checkpointer tick — a second crash during startup would lose
+    /// them.
+    #[tokio::test]
+    async fn replay_crash_gap_post_replay_syncs_all_four_dbs() {
+        let dir = tempdir().expect("create temp dir");
+
+        // Build state.db + blocks.db + events.db alongside raft.db so all
+        // three optional accessors on RaftLogStore are populated.
+        let state_db = Arc::new(
+            inferadb_ledger_store::Database::create(dir.path().join("state.db"))
+                .expect("create state db"),
+        );
+        let blocks_db = Arc::new(
+            inferadb_ledger_store::Database::create(dir.path().join("blocks.db"))
+                .expect("create blocks db"),
+        );
+        // `EventsDatabase::open(&data_dir)` appends `/events.db` itself;
+        // create a dedicated subdir so the events file doesn't collide
+        // with the other DBs sharing the tempdir.
+        let events_subdir = dir.path().join("events");
+        std::fs::create_dir_all(&events_subdir).expect("create events dir");
+        let events_db = Arc::new(EventsDatabase::open(&events_subdir).expect("open"));
+
+        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(Arc::clone(&state_db)));
+        let block_archive =
+            Arc::new(inferadb_ledger_state::BlockArchive::new(Arc::clone(&blocks_db)));
+        let event_writer =
+            crate::event_writer::EventWriter::new(Arc::clone(&events_db), EventConfig::default());
+
+        let mut store = RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
+            .expect("open store")
+            .with_state_layer(state_layer)
+            .with_block_archive(block_archive)
+            .with_event_writer(event_writer);
+
+        let shard_id = inferadb_ledger_consensus::types::ShardId(91);
+
+        // Set up a WAL with frames 1..=3 committed and a state DB that
+        // has only applied through index 1 — indexes 2..=3 get replayed.
+        let mut wal = inferadb_ledger_consensus::wal::InMemoryWalBackend::new();
+        use inferadb_ledger_consensus::wal_backend::WalBackend;
+        wal.append(&[
+            replay_wal_frame(shard_id, 1, 1),
+            replay_wal_frame(shard_id, 2, 1),
+            replay_wal_frame(shard_id, 3, 1),
+        ])
+        .expect("append frames");
+        wal.write_checkpoint(&inferadb_ledger_consensus::wal_backend::CheckpointFrame {
+            committed_index: 3,
+            term: 1,
+            voted_for: None,
+        })
+        .expect("write checkpoint");
+        wal.sync().expect("sync");
+
+        {
+            let current = store.applied_state.load_full();
+            let mut new_state = (*current).clone();
+            new_state.last_applied = Some(LogId::new(1, 0, 1));
+            store.applied_state.store(Arc::new(new_state));
+        }
+
+        // Dirty a page on each domain DB via `commit_in_memory` to force
+        // `sync_state` on that DB to advance its `last_synced_snapshot_id`.
+        // The no-op WAL entries don't touch these DBs themselves, so
+        // without the pre-dirtied page the post-replay sync would be a
+        // clean-cache no-op and the assertion would be vacuous.
+        for db in [&state_db, &blocks_db] {
+            let mut txn = db.write().expect("open write txn");
+            txn.insert::<inferadb_ledger_store::tables::Entities>(
+                &b"pre-replay-dirty".to_vec(),
+                &b"v".to_vec(),
+            )
+            .expect("insert");
+            txn.commit_in_memory().expect("commit_in_memory");
+        }
+        // events.db uses its own table types; dirty it via the Events
+        // table if available, otherwise via Entities which is present in
+        // every DB's schema.
+        {
+            let mut txn = events_db.write().expect("open events write txn");
+            txn.insert::<inferadb_ledger_store::tables::Entities>(
+                &b"pre-replay-dirty".to_vec(),
+                &b"v".to_vec(),
+            )
+            .expect("insert");
+            txn.commit_in_memory().expect("commit_in_memory");
+        }
+
+        let state_synced_before = state_db.last_synced_snapshot_id();
+        let raft_synced_before = store.db.last_synced_snapshot_id();
+        let blocks_synced_before = blocks_db.last_synced_snapshot_id();
+        let events_synced_before = events_db.db().last_synced_snapshot_id();
+
+        let stats = store.replay_crash_gap(&wal, shard_id).await.expect("replay");
+
+        assert_eq!(stats.replayed_entries, 2, "expected to replay indexes 2..=3");
+
+        // All four DBs must advance their last_synced_snapshot_id post-replay.
+        assert!(
+            store.db.last_synced_snapshot_id() > raft_synced_before,
+            "raft.db last_synced_snapshot_id must advance on post-replay sync"
+        );
+        assert!(
+            state_db.last_synced_snapshot_id() > state_synced_before,
+            "state.db last_synced_snapshot_id must advance on post-replay sync"
+        );
+        assert!(
+            blocks_db.last_synced_snapshot_id() > blocks_synced_before,
+            "blocks.db last_synced_snapshot_id must advance on post-replay sync \
+             (Sprint 1B3 Task 2D)"
+        );
+        assert!(
+            events_db.db().last_synced_snapshot_id() > events_synced_before,
+            "events.db last_synced_snapshot_id must advance on post-replay sync \
+             (Sprint 1B3 Task 2D)"
+        );
+    }
+
     #[tokio::test]
     async fn replay_crash_gap_is_idempotent_across_double_call() {
         let dir = tempdir().expect("create temp dir");
@@ -12527,5 +12826,209 @@ mod tests {
         assert_eq!(stats2.replayed_entries, 0, "idempotent: second call must replay zero entries",);
         assert_eq!(stats2.applied_durable, 2);
         assert_eq!(stats2.last_committed, 2);
+    }
+
+    // =========================================================================
+    // Sprint 1B3 Task 3B: property-based idempotency for IngestExternalEvents
+    // =========================================================================
+
+    /// Arbitrary sequences of `IngestExternalEvents` proposals are replay-safe:
+    /// applying the same sequence of proposals twice produces byte-identical
+    /// `events.db` state. Sweeps the scalar property covered by
+    /// [`apply_ingest_external_events_replay_idempotency`] across arbitrary
+    /// proposal counts, batch sizes, and entry payloads.
+    ///
+    /// `EventStore::write` upserts via `BTree::insert`, so re-applying an
+    /// identical `(source, Vec<EventEntry>)` proposal must be a no-op at the
+    /// b-tree level. A counterexample would expose a real idempotency bug in
+    /// the apply path.
+    mod proptest_ingest_replay_idempotency {
+        use inferadb_ledger_store::tables::{Entities, Relationships};
+        use proptest::prelude::*;
+
+        use super::*;
+
+        /// (primary-table rows, secondary-index rows) — byte-level snapshot
+        /// of an `EventsDatabase` used for equality assertions.
+        type EventsSnapshot = (Vec<(Vec<u8>, Vec<u8>)>, Vec<(Vec<u8>, Vec<u8>)>);
+
+        /// Reads every (key, value) pair from both events-db tables and
+        /// returns them as owned byte vectors. Since `events.db` re-uses
+        /// `TableId::Entities` for the primary Events table and
+        /// `TableId::Relationships` for the EventIndex secondary, the
+        /// store-level `tables::Entities` / `tables::Relationships`
+        /// accessors give us the full byte-level snapshot.
+        fn snapshot_events_db(db: &EventsDatabase<FileBackend>) -> EventsSnapshot {
+            let txn = db.read().expect("read txn");
+            let events: Vec<(Vec<u8>, Vec<u8>)> =
+                txn.iter::<Entities>().expect("iter events").collect();
+            let indices: Vec<(Vec<u8>, Vec<u8>)> =
+                txn.iter::<Relationships>().expect("iter index").collect();
+            (events, indices)
+        }
+
+        /// Coerces an arbitrary `EventEntry` into the shape the RPC handler
+        /// produces: `Organization` scope, `HandlerPhase` emission. Leaves
+        /// every other field untouched so proptest still explores the full
+        /// value-space exposed by `arb_event_entry`. Residency-backstop
+        /// `debug_assert` in the apply handler requires a REGIONAL shard,
+        /// which the fixture already satisfies.
+        fn coerce_external(entry: EventEntry) -> EventEntry {
+            let mut e = entry;
+            e.scope = EventScope::Organization;
+            e.emission = inferadb_ledger_types::events::EventEmission::HandlerPhase { node_id: 1 };
+            e
+        }
+
+        /// Arbitrary proposal list: 1..20 proposals, each carrying
+        /// 1..15 external events. `organization_id` is overwritten
+        /// post-generation so every entry targets the fixture's shared
+        /// org — maximising key-space overlap across proposals, which
+        /// is the stress case for b-tree upsert idempotency.
+        fn arb_proposal_list() -> impl Strategy<Value = Vec<(String, Vec<EventEntry>)>> {
+            let entries = proptest::collection::vec(
+                inferadb_ledger_test_utils::strategies::arb_event_entry(),
+                1..15usize,
+            )
+            .prop_map(|batch| batch.into_iter().map(coerce_external).collect::<Vec<_>>());
+            let proposal = ("[a-z]{3,10}", entries);
+            proptest::collection::vec(proposal, 1..20usize)
+        }
+
+        proptest! {
+            // 32 cases: each case opens a tempdir-backed RaftLogStore +
+            // EventsDatabase and applies up to ~300 events twice. Default
+            // 256 would dominate the raft-crate lib-test wall clock.
+            #![proptest_config(ProptestConfig::with_cases(32))]
+
+            /// Applying a proposal sequence once vs. twice produces byte-
+            /// identical events.db state (both `Events` and `EventIndex`
+            /// tables). Exercises the `IngestExternalEvents` apply handler
+            /// over a WAL-replay-shaped repeat.
+            #[test]
+            fn ingest_external_events_proposal_replay_safe(
+                mut proposals in arb_proposal_list(),
+            ) {
+                // Reuses the existing fixture helpers (`fixed_timestamp`,
+                // `setup_org_and_vault`, `make_external_event_entry`) to
+                // stay aligned with the unit test that this proptest
+                // generalises.
+                let dir = tempdir().expect("create temp dir");
+                let events_db = EventsDatabase::open(dir.path()).expect("open events db");
+                let events_db_arc = Arc::new(events_db);
+                let config = EventConfig::default();
+                let writer = crate::event_writer::EventWriter::new(
+                    Arc::clone(&events_db_arc),
+                    config,
+                );
+                let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
+                    .expect("open store")
+                    .with_region_config(
+                        Region::US_EAST_VA,
+                        inferadb_ledger_types::NodeId::new("node-test"),
+                        1,
+                    )
+                    .with_event_writer(writer);
+
+                let mut state = (*store.applied_state.load_full()).clone();
+                let (org_id, _vault_id) = setup_org_and_vault(&mut state);
+
+                // Route every generated event at the fixture's shared org.
+                for (_, batch) in proposals.iter_mut() {
+                    for entry in batch.iter_mut() {
+                        entry.organization_id = org_id;
+                    }
+                }
+
+                let ts = fixed_timestamp();
+
+                // Phase 1: apply every proposal once.
+                for (source, batch) in &proposals {
+                    let request = LedgerRequest::IngestExternalEvents {
+                        source: source.clone(),
+                        events: batch.clone(),
+                    };
+                    let mut events: Vec<EventEntry> = Vec::new();
+                    let mut op_index = 0u32;
+                    let (response, vault_entry) = store.apply_request_with_events(
+                        &request,
+                        &mut state,
+                        ts,
+                        &mut op_index,
+                        &mut events,
+                        90,
+                        &mut PendingExternalWrites::default(),
+                        None,
+                        false,
+                        0,
+                    );
+                    prop_assert_eq!(
+                        response,
+                        LedgerResponse::Empty,
+                        "phase 1: IngestExternalEvents must return Empty on success"
+                    );
+                    prop_assert!(
+                        vault_entry.is_none(),
+                        "phase 1: external events produce no vault entry"
+                    );
+                    prop_assert!(
+                        events.is_empty(),
+                        "phase 1: external events must not emit apply-phase events"
+                    );
+                }
+                let snap_phase1 = snapshot_events_db(&events_db_arc);
+
+                // Phase 2: re-apply every proposal in the same order. Upsert
+                // semantics make this a logical no-op — the b-tree layout
+                // must be byte-identical after the replay pass.
+                for (source, batch) in &proposals {
+                    let request = LedgerRequest::IngestExternalEvents {
+                        source: source.clone(),
+                        events: batch.clone(),
+                    };
+                    let mut events: Vec<EventEntry> = Vec::new();
+                    let mut op_index = 0u32;
+                    let (response, _vault_entry) = store.apply_request_with_events(
+                        &request,
+                        &mut state,
+                        ts,
+                        &mut op_index,
+                        &mut events,
+                        90,
+                        &mut PendingExternalWrites::default(),
+                        None,
+                        false,
+                        0,
+                    );
+                    prop_assert_eq!(
+                        response,
+                        LedgerResponse::Empty,
+                        "phase 2: replay must also return Empty"
+                    );
+                }
+                let snap_phase2 = snapshot_events_db(&events_db_arc);
+
+                prop_assert_eq!(
+                    snap_phase1.0.len(),
+                    snap_phase2.0.len(),
+                    "Events table row count must match after proposal replay"
+                );
+                prop_assert_eq!(
+                    &snap_phase1.0,
+                    &snap_phase2.0,
+                    "Events table must be byte-identical after proposal replay"
+                );
+                prop_assert_eq!(
+                    snap_phase1.1.len(),
+                    snap_phase2.1.len(),
+                    "EventIndex table row count must match after proposal replay"
+                );
+                prop_assert_eq!(
+                    &snap_phase1.1,
+                    &snap_phase2.1,
+                    "EventIndex table must be byte-identical after proposal replay"
+                );
+            }
+        }
     }
 }

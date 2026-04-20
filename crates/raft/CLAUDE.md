@@ -24,7 +24,7 @@ These files are load-bearing — their invariants ripple beyond the local file. 
 ## Owned Surface
 
 - **Connection pool**: `NodeConnectionRegistry` (`node_registry.rs`) — one `tonic::Channel` per peer, HTTP/2-multiplexed across every subsystem.
-- **Apply pipeline**: `ApplyPool` + `ApplyWorker` — bounded worker pool applying committed proposals to `StateLayer`.
+- **Apply pipeline**: `ApplyPool` + `ApplyWorker` — bounded worker pool applying committed proposals to `StateLayer`. Apply-path admin arms call `StateLayer::apply_operations_lazy` (lazy commit); out-of-apply-pipeline admin / recovery callers call `StateLayer::apply_operations` (strict-durable). `LedgerRequest::IngestExternalEvents` is the apply-path variant for external `IngestEvents` RPC traffic (Sprint 1B3) — routed through REGIONAL Raft with event IDs frozen pre-consensus, applied via `EventWriter::write_events` (`commit_in_memory`).
 - **Transport**: `consensus_transport/` (`mod.rs`, `peer_sender.rs`) — backpressure-aware peer messaging for consensus traffic.
 - **Saga orchestration**: `SagaOrchestrator` (`saga_orchestrator.rs`).
 - **Coordination**: `RaftManager` (`raft_manager.rs`), `ConsensusHandle` (`consensus_handle.rs`), leader orchestration (`leader_lease.rs`, `leader_transfer.rs`).

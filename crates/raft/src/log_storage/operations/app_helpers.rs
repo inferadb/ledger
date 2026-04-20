@@ -59,7 +59,7 @@ pub(crate) fn save_app<B: StorageBackend>(
         .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to encode app: {e}")))?;
     let ops = vec![Operation::SetEntity { key, value: bytes, condition: None, expires_at: None }];
     state_layer
-        .apply_operations(SYSTEM_VAULT_ID, &ops, 0)
+        .apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0)
         .map(|_| ())
         .map_err(|e| ledger_error(ErrorCode::Internal, format!("Failed to write app: {e}")))
 }

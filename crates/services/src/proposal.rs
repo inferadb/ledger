@@ -20,7 +20,7 @@ use tonic::Status;
 ///
 /// Replaces the full `openraft::RaftMetrics` with only the fields needed
 /// by downstream consumers (vault creation populates genesis block headers).
-pub(crate) struct LedgerRaftMetrics {
+pub struct LedgerRaftMetrics {
     /// Current leader node ID, if elected.
     pub(crate) current_leader: Option<u64>,
     /// Current Raft term.
@@ -34,8 +34,14 @@ pub(crate) struct LedgerRaftMetrics {
 /// Production code uses [`RaftProposalService`], which wraps `openraft::Raft`
 /// and [`RaftManager`]. Test code uses [`MockProposalService`], which returns
 /// canned responses and captures proposals for assertion.
+///
+/// Exposed as `pub` (rather than `pub(crate)`) because `EventsService` (public)
+/// accepts an `Arc<dyn ProposalService>` in its bon builder — the derived builder
+/// setters inherit `pub` visibility and cannot reference a `pub(crate)` trait.
+/// Consumers of the `services` crate should not implement this trait directly;
+/// wire through [`RaftProposalService`].
 #[tonic::async_trait]
-pub(crate) trait ProposalService: Send + Sync {
+pub trait ProposalService: Send + Sync {
     /// Proposes a [`LedgerRequest`] to the default (GLOBAL) Raft group.
     ///
     /// Wraps `request` + `caller` into a [`RaftPayload`] and submits it

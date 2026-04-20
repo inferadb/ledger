@@ -142,7 +142,9 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         }
 
         if !delete_ops.is_empty() {
-            self.state.apply_operations(SYSTEM_VAULT_ID, &delete_ops, 0).context(StateSnafu)?;
+            self.state
+                .apply_operations_lazy(SYSTEM_VAULT_ID, &delete_ops, 0)
+                .context(StateSnafu)?;
         }
 
         Ok(())

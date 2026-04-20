@@ -134,7 +134,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             },
         ];
 
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         Ok(credential)
     }
@@ -265,7 +265,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         require_tier(&key, KeyTier::Regional)?;
         let value = encode(&cred).context(CodecSnafu)?;
         let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         Ok(cred)
     }
@@ -316,7 +316,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             Operation::DeleteEntity { key: primary_key },
             Operation::DeleteEntity { key: type_idx_key },
         ];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         Ok(())
     }
@@ -360,7 +360,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         }
 
         if !ops.is_empty() {
-            self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+            self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         }
         Ok(())
     }
@@ -402,7 +402,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             condition: Some(SetCondition::MustNotExist),
             expires_at: Some(challenge.expires_at.timestamp() as u64),
         }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         Ok(())
     }
@@ -439,7 +439,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         let key = SystemKeys::totp_challenge_key(user_id, nonce);
         require_tier(&key, KeyTier::Regional)?;
         let ops = vec![Operation::DeleteEntity { key }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
     }
 
@@ -479,7 +479,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             condition: None,
             expires_at: Some(challenge.expires_at.timestamp() as u64),
         }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         Ok(challenge)
     }
@@ -503,7 +503,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         }
 
         if !ops.is_empty() {
-            self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+            self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         }
         Ok(())
     }
@@ -574,7 +574,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         require_tier(&key, KeyTier::Regional)?;
         let value = encode(&cred).context(CodecSnafu)?;
         let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         Ok(u32::try_from(remaining).unwrap_or(u32::MAX))
     }

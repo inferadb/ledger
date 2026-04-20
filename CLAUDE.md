@@ -4,7 +4,7 @@
 
 InferaDB Ledger is a blockchain database for cryptographically verifiable authorization. Every write produces a Merkle-chained block; every authorization check is provable. The system is always multi-Raft in production and handles PII under strict data-residency rules (EU-region data must stay in EU-region storage). Treat every change to storage keys, gRPC surfaces, error handling, or consensus primitives with that level of seriousness — a silent data-residency violation is a compliance incident, and a silent consensus bug is data loss.
 
-Writes are WAL-durable on response; state-DB materialization is lazy via `StateCheckpointer` (per-region, `crates/raft/src/state_checkpointer.rs`) and forced on shutdown, snapshot, and backup boundaries. On crash, state is re-derived by replaying `(applied_durable, last_committed]` from the WAL — see [`docs/operations/durability.md`](docs/operations/durability.md).
+Writes are WAL-durable on response. The four regional DBs — state.db, raft.db, blocks.db, events.db — all materialize lazily via `StateCheckpointer` (per-region, `crates/raft/src/state_checkpointer.rs`) and are force-synced on shutdown, snapshot, and backup boundaries. Strict-durable exceptions: `RaftLogStore::save_vote` (election safety), `EventWriter::write_entry` (handler-phase, no WAL backstop), `StateLayer::apply_operations` (admin / recovery callers — IN-APPLY-PIPELINE arms use `apply_operations_lazy`), backup producers, and the two background-compaction paths (`BlockArchive::compact_before`, `EventsGc::tick_inner`). On crash, state is re-derived by replaying `(applied_durable, last_committed]` from the WAL — see [`docs/operations/durability.md`](docs/operations/durability.md).
 
 ## Tech Stack
 

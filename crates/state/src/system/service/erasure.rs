@@ -106,7 +106,9 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             }
         }
         if !delete_ops.is_empty() {
-            self.state.apply_operations(SYSTEM_VAULT_ID, &delete_ops, 0).context(StateSnafu)?;
+            self.state
+                .apply_operations_lazy(SYSTEM_VAULT_ID, &delete_ops, 0)
+                .context(StateSnafu)?;
         }
 
         // Step 5: Delete all UserEmail records and their plaintext indices.
@@ -127,7 +129,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             require_tier(&ue_idx_key, KeyTier::Regional)?;
             email_delete_ops.push(Operation::DeleteEntity { key: ue_idx_key });
             self.state
-                .apply_operations(SYSTEM_VAULT_ID, &email_delete_ops, 0)
+                .apply_operations_lazy(SYSTEM_VAULT_ID, &email_delete_ops, 0)
                 .context(StateSnafu)?;
         }
 
@@ -145,13 +147,17 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         let shred_key = SystemKeys::user_shred_key(user_id);
         require_tier(&shred_key, KeyTier::Regional)?;
         let delete_key_ops = vec![Operation::DeleteEntity { key: shred_key }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &delete_key_ops, 0).context(StateSnafu)?;
+        self.state
+            .apply_operations_lazy(SYSTEM_VAULT_ID, &delete_key_ops, 0)
+            .context(StateSnafu)?;
 
         // Step 9: Delete the User record.
         let user_key = SystemKeys::user_key(user_id);
         require_tier(&user_key, KeyTier::Regional)?;
         let delete_user_ops = vec![Operation::DeleteEntity { key: user_key }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &delete_user_ops, 0).context(StateSnafu)?;
+        self.state
+            .apply_operations_lazy(SYSTEM_VAULT_ID, &delete_user_ops, 0)
+            .context(StateSnafu)?;
 
         // Step 10: Write erasure audit record.
         let audit_record = ErasureAuditRecord { user_id, erased_at: block_timestamp, region };
@@ -164,7 +170,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             condition: None,
             expires_at: None,
         }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &audit_ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &audit_ops, 0).context(StateSnafu)?;
 
         Ok(())
     }
@@ -195,7 +201,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             condition: None,
             expires_at: None,
         }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
     }
 
@@ -229,7 +235,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             condition: None,
             expires_at: None,
         }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
     }
 

@@ -139,7 +139,14 @@ impl<B: StorageBackend> EventWriter<B> {
             EventStore::write(&mut txn, entry).context(WriteSnafu)?;
         }
 
-        txn.commit().context(CommitSnafu)?;
+        // Sprint 1B3 Task 2B: events.db apply-path batched write flipped to
+        // `commit_in_memory`. Every EventEntry's event_id is deterministic
+        // (UUID v5 over {block_height, op_index, action} — see ApplyPhaseEmitter
+        // at event_writer.rs:~292-332), so replay produces byte-identical rows.
+        // EventStore::write is idempotent via B-tree upsert semantics; duplicate
+        // upsert of identical bytes is safe. Durability realized by
+        // StateCheckpointer / snapshot / backup / graceful-shutdown sync.
+        txn.commit_in_memory().context(CommitSnafu)?;
 
         let count = enabled_entries.len();
 
@@ -583,6 +590,12 @@ impl<B: StorageBackend> EventHandle<B> {
     fn write_entry(&self, entry: &EventEntry) -> Result<(), EventWriterError> {
         let mut txn = self.events_db.write().context(TransactionSnafu)?;
         EventStore::write(&mut txn, entry).context(WriteSnafu)?;
+        // DO NOT flip to `commit_in_memory` — handler-phase events have no WAL
+        // replay backstop (Sprint 1B3 design § "STAYS on commit" + consensus
+        // review Critical finding). Callers: saga orchestrator progress,
+        // admin RPC handlers, RequestContext::record_event, JobContext::record_event.
+        // None of these are proposed to Raft; strict-durable per-write fsync is
+        // the only guarantee against crash loss.
         txn.commit().context(CommitSnafu)?;
         Ok(())
     }
@@ -1059,6 +1072,119 @@ mod tests {
         // Both writes succeed
         assert_eq!(writer1.write_events(&[entry1]).expect("write1"), 1);
         assert_eq!(writer2.write_events(&[entry2]).expect("write2"), 1);
+    }
+
+    // ── Sprint 1B3 Task 2B: commit-in-memory semantics ─────────
+
+    /// Sprint 1B3 Task 2B: the FLIP. `write_events` commits in-memory only;
+    /// `sync_state` advances `last_synced_snapshot_id`. Mirrors the Sprint 1B2
+    /// `save_state_core_commits_in_memory_only_then_sync_advances_snapshot`
+    /// test pattern.
+    #[tokio::test]
+    async fn write_events_commits_in_memory_only_until_sync() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let events_db = EventsDatabase::open(dir.path()).expect("open events db");
+        let db_arc = Arc::new(events_db);
+        let writer = EventWriter::new(Arc::clone(&db_arc), test_config());
+
+        let synced_before = db_arc.db().last_synced_snapshot_id();
+
+        // Deterministically constructed entries (identical to what an apply
+        // pipeline would produce on any replica).
+        let entries: Vec<EventEntry> = (0..3u32)
+            .map(|i| {
+                ApplyPhaseEmitter::for_organization(
+                    EventAction::WriteCommitted,
+                    OrganizationId::new(1),
+                    Some(OrganizationSlug::new(100)),
+                )
+                .principal("user:alice")
+                .operations_count(1)
+                .build(42, i, sample_timestamp(), 90)
+            })
+            .collect();
+
+        let count = writer.write_events(&entries).expect("write_events");
+        assert_eq!(count, 3);
+
+        // In-process read-your-own-writes: events are visible immediately.
+        let txn = db_arc.read().expect("read");
+        let stored = EventStore::count(&txn, OrganizationId::new(1)).expect("count");
+        assert_eq!(stored, 3, "events must be readable in-process after write_events");
+        drop(txn);
+
+        // `last_synced_snapshot_id` has NOT advanced — `commit_in_memory`
+        // skips the dual-slot persist.
+        let synced_after_commit = db_arc.db().last_synced_snapshot_id();
+        assert_eq!(
+            synced_after_commit, synced_before,
+            "write_events must not advance last_synced_snapshot_id \
+             (Sprint 1B3 Task 2B: commit_in_memory skips the dual-slot persist)"
+        );
+
+        // Forcing a sync advances the synced id.
+        Arc::clone(db_arc.db()).sync_state().await.expect("sync_state");
+        let synced_after_sync = db_arc.db().last_synced_snapshot_id();
+        assert!(
+            synced_after_sync > synced_before,
+            "sync_state must advance last_synced_snapshot_id past the \
+             in-memory commit (before={synced_before} after={synced_after_sync})"
+        );
+
+        // Drop the writer + db handle so the file lock releases, then reopen
+        // and assert the events survived the sync.
+        drop(writer);
+        drop(db_arc);
+
+        let reopened = EventsDatabase::open(dir.path()).expect("reopen events db");
+        let txn = reopened.read().expect("read reopened");
+        let stored_after_reopen =
+            EventStore::count(&txn, OrganizationId::new(1)).expect("count after reopen");
+        assert_eq!(
+            stored_after_reopen, 3,
+            "synced events must survive a reopen of the events database"
+        );
+    }
+
+    /// Sprint 1B3 Task 2B guard: `write_entry` (handler-phase) STAYS
+    /// strict-durable. Mirrors Sprint 1B2's `save_vote_is_durable_before_returning`
+    /// test. Handler-phase events have no WAL replay backstop; losing them on
+    /// crash is the audit finding the DO-NOT-FLIP comment cites.
+    #[tokio::test]
+    async fn write_entry_stays_durable_per_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let events_db = EventsDatabase::open(dir.path()).expect("open events db");
+        let db_arc = Arc::new(events_db);
+        let handle = EventHandle::new(Arc::clone(&db_arc), Arc::new(test_config()), 1);
+
+        let synced_before = db_arc.db().last_synced_snapshot_id();
+
+        let entry = HandlerPhaseEmitter::for_organization(
+            EventAction::RequestRateLimited,
+            OrganizationId::new(1),
+            None,
+            1,
+        )
+        .principal("user:alice")
+        .outcome(EventOutcome::Denied { reason: "rate_limited".to_string() })
+        .build(90);
+
+        // Call the private `write_entry` path directly (what
+        // `record_handler_event` wraps).
+        handle.write_entry(&entry).expect("write_entry");
+
+        let synced_after = db_arc.db().last_synced_snapshot_id();
+        assert!(
+            synced_after > synced_before,
+            "write_entry MUST advance last_synced_snapshot_id before returning \
+             (handler-phase has no WAL replay backstop): \
+             before={synced_before} after={synced_after}"
+        );
+
+        // And the entry is readable after the call.
+        let txn = db_arc.read().expect("read");
+        let count = EventStore::count(&txn, OrganizationId::new(1)).expect("count");
+        assert_eq!(count, 1);
     }
 
     // ── HandlerPhaseEmitter ──────────────────────────────────

@@ -422,6 +422,8 @@ impl LedgerServer {
         });
 
         let invitation_service = InvitationService::new(svc_ctx.clone());
+        // Capture a proposer handle for EventsService before moving svc_ctx.
+        let events_proposer = svc_ctx.proposer.clone();
         let app_service = AppService::new(svc_ctx);
 
         // Extract connection tracker before health_state is moved into HealthService
@@ -559,6 +561,10 @@ impl LedgerServer {
                 .maybe_event_config(event_config)
                 .maybe_node_id(node_id)
                 .maybe_ingestion_rate_limiter(ingestion_rate_limiter)
+                // Sprint 1B3 Task 2C: route IngestEvents through REGIONAL Raft.
+                .proposer(events_proposer.clone())
+                .manager(self.manager.clone())
+                .proposal_timeout(self.proposal_timeout)
                 .build();
             router = router.add_service(EventsServiceServer::with_interceptor(
                 events_service,

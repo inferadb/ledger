@@ -22,7 +22,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             condition: Some(inferadb_ledger_types::SetCondition::MustNotExist),
             expires_at: None,
         }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).map_err(|e| {
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).map_err(|e| {
             if matches!(e, StateError::PreconditionFailed { .. }) {
                 SystemError::AlreadyExists { entity: format!("email_hash:{hmac_hex}") }
             } else {
@@ -50,7 +50,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     pub fn remove_email_hash(&self, hmac_hex: &str) -> Result<()> {
         let key = SystemKeys::email_hash_index_key(hmac_hex);
         let ops = vec![Operation::DeleteEntity { key }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
     }
 
@@ -80,7 +80,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             condition: None,
             expires_at: None,
         }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
     }
 
@@ -110,7 +110,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             condition: None,
             expires_at: None,
         }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
     }
 
@@ -118,7 +118,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     pub fn clear_rehash_progress(&self, region: Region) -> Result<()> {
         let key = SystemKeys::rehash_progress_key(region);
         let ops = vec![Operation::DeleteEntity { key }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
     }
 

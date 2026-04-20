@@ -114,7 +114,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             },
         ];
 
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).map_err(|e| {
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).map_err(|e| {
             if matches!(e, StateError::PreconditionFailed { .. }) {
                 SystemError::AlreadyExists { entity: format!("email:{email_lower}") }
             } else {
@@ -212,7 +212,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         let key = SystemKeys::user_key(user_id);
         let value = encode(&user).context(CodecSnafu)?;
         let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         Ok(user)
     }
@@ -237,7 +237,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         let key = SystemKeys::user_key(user_id);
         let value = encode(&user).context(CodecSnafu)?;
         let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         Ok(user)
     }
@@ -272,7 +272,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         let key = SystemKeys::user_key(user_id);
         let value = encode(&user).context(CodecSnafu)?;
         let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         Ok(user)
     }
@@ -385,7 +385,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             },
         ];
 
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).map_err(|e| {
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).map_err(|e| {
             if matches!(e, StateError::PreconditionFailed { .. }) {
                 SystemError::AlreadyExists { entity: format!("email:{email_lower}") }
             } else {
@@ -404,7 +404,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             condition: None,
             expires_at: None,
         }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &index_ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &index_ops, 0).context(StateSnafu)?;
 
         Ok(email_id)
     }
@@ -447,7 +447,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             Operation::DeleteEntity { key: email_key },
             Operation::DeleteEntity { key: idx_key },
         ];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         // Update user-to-emails index.
         let mut email_ids = self.get_user_email_ids(user_id)?;
@@ -460,7 +460,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             condition: None,
             expires_at: None,
         }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &index_ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &index_ops, 0).context(StateSnafu)?;
 
         Ok(())
     }
@@ -482,7 +482,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         let key = SystemKeys::user_email_key(email_id);
         let value = encode(&email).context(CodecSnafu)?;
         let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         Ok(email)
     }

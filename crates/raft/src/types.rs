@@ -14,6 +14,7 @@ use inferadb_ledger_types::{
     InviteId, InviteSlug, OrganizationId, OrganizationSlug, PasskeyCredential, PrimaryAuthMethod,
     RefreshTokenId, Region, SetCondition, SigningKeyId, TeamId, TeamSlug, TokenSubject, TokenType,
     TokenVersion, Transaction, UserCredentialId, UserEmailId, UserId, UserSlug, VaultId, VaultSlug,
+    events::EventEntry,
 };
 // Re-export domain types that originated here but now live in types crate.
 pub use inferadb_ledger_types::{BlockRetentionMode, BlockRetentionPolicy, LedgerNodeId};
@@ -701,6 +702,34 @@ pub enum LedgerRequest {
         node_id: u64,
         /// Network address of the node (host:port).
         address: String,
+    },
+
+    /// Sprint 1B3 Task 2C: external audit-event ingestion routed through Raft.
+    ///
+    /// Constructed by `EventsServiceImpl::ingest_events` AFTER validation +
+    /// allow-list filtering. Only accepted events reach this variant; rejections
+    /// are returned to the client synchronously without a Raft round-trip.
+    ///
+    /// Each `EventEntry` carries a frozen UUID v4 `event_id` and a frozen
+    /// timestamp (from the proto request or `Utc::now()` at RPC entry time).
+    /// Both are sealed into the proposal body before consensus, so WAL replay
+    /// on any replica reconstructs identical `events.db` rows.
+    ///
+    /// # Residency
+    ///
+    /// External ingest targets a single REGIONAL `events.db`; this variant
+    /// MUST only be proposed on REGIONAL Raft groups. It MUST NEVER appear as
+    /// a [`SystemRequest`] (GLOBAL) proposal — `EventEntry` fields contain
+    /// user-controlled strings (`principal`, `event_type`, `details`) that
+    /// are PII and must stay within the owning region's Raft log + `events.db`.
+    IngestExternalEvents {
+        /// Ingest source service identifier (e.g. `"engine"`, `"control"`).
+        /// Matches the validated value from `IngestEventsRequest.source`.
+        source: String,
+        /// Pre-validated, pre-UUIDv4-assigned, pre-timestamped events. Each
+        /// entry's `event_id` is frozen at propose time so replay re-writes
+        /// identical bytes on every replica.
+        events: Vec<EventEntry>,
     },
 }
 
@@ -4021,6 +4050,12 @@ mod tests {
             // AddRegionLearner is intercepted by regional_proposal
             // before reaching the Raft log. It carries no PII.
             LedgerRequest::AddRegionLearner { .. } => RaftScope::Global,
+            // Sprint 1B3 Task 2C: IngestExternalEvents carries user-controlled
+            // strings (principal, event_type, details) and MUST ride the
+            // REGIONAL Raft group owning the organization. Classified
+            // Regional so the PII-classification test fails loudly if the
+            // routing ever regresses.
+            LedgerRequest::IngestExternalEvents { .. } => RaftScope::Regional,
         }
     }
 

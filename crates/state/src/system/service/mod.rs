@@ -185,7 +185,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         }];
 
         self.state
-            .apply_operations(SYSTEM_VAULT_ID, &ops, 0) // height 0 for system ops
+            .apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0) // height 0 for system ops
             .context(StateSnafu)?;
 
         Ok(current)

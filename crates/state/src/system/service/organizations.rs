@@ -36,7 +36,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
                 expires_at: None,
             },
         ];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
     }
 

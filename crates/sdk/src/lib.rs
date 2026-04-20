@@ -23,6 +23,13 @@
 //! any unpersisted state; replay is idempotent. See
 //! `docs/operations/durability.md` for the full contract.
 //!
+//! External event ingestion (see [`LedgerClient::ingest_events`]) carries the
+//! same WAL-durability guarantee as of Sprint 1B3: a successful response means
+//! the events committed through Raft and applied to the events.db in-memory,
+//! not that they have been fsynced to the events-state DB. Ingested event IDs
+//! are stable byte-identical across crash recovery — see the method docstring
+//! for the apply-phase caveat.
+//!
 //! # Quick Start
 //!
 //! ```no_run

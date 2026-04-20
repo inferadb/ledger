@@ -38,7 +38,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         let value = encode(invitation).context(CodecSnafu)?;
 
         let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
     }
 
@@ -121,7 +121,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
 
         let value = encode(&record).context(CodecSnafu)?;
         let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         Ok(record)
     }
@@ -170,7 +170,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
 
         let value = encode(&record).context(CodecSnafu)?;
         let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         Ok(())
     }
@@ -187,7 +187,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         let key = SystemKeys::invite_key(organization, invite);
         require_tier(&key, KeyTier::Regional)?;
         let ops = vec![Operation::DeleteEntity { key }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
     }
 

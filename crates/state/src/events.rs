@@ -1434,4 +1434,123 @@ mod tests {
         assert_eq!(found1.organization_id, OrganizationId::new(1));
         assert_eq!(found2.organization_id, OrganizationId::new(2));
     }
+
+    // =========================================================================
+    // Property-based idempotency (Sprint 1B3 Task 3B)
+    // =========================================================================
+
+    /// Replay-idempotency invariant covered as a proptest.
+    ///
+    /// Post-Sprint 1B3, `EventStore::write` lands on the apply path for
+    /// `LedgerRequest::IngestExternalEvents` — and on crash recovery the
+    /// apply pipeline can re-drive the same proposal against events.db.
+    /// [`apply_ingest_external_events_replay_idempotency`] covers the
+    /// scalar property on a 2-entry batch; this proptest sweeps arbitrary
+    /// sequences (1..30 entries) with arbitrary replay-prefix lengths
+    /// (0..=N) and asserts byte-identical events.db state between:
+    ///
+    /// * Workload A: one full write of the sequence.
+    /// * Workload B: one full write followed by a prefix re-write.
+    ///
+    /// Upsert semantics of `BTree::insert` guarantee that identical
+    /// (key, value) bytes re-written produce the same on-disk layout.
+    /// A counterexample would expose a real idempotency bug in
+    /// `EventStore::write` or the underlying storage layer.
+    mod proptest_replay_idempotency {
+        use inferadb_ledger_test_utils::strategies::arb_event_entry;
+        use proptest::prelude::*;
+
+        use super::*;
+
+        /// (primary-table rows, secondary-index rows) — byte-level snapshot
+        /// of an `EventsDatabase` used for equality assertions.
+        type EventsSnapshot = (Vec<(Vec<u8>, Vec<u8>)>, Vec<(Vec<u8>, Vec<u8>)>);
+
+        /// Reads every (key, value) pair from both the `Events` primary
+        /// table and the `EventIndex` secondary table, in iteration order,
+        /// and returns them as owned byte vectors. Used as the byte-level
+        /// equality probe for `EventsDatabase` state.
+        fn snapshot_events_db<B: StorageBackend>(db: &Arc<Database<B>>) -> EventsSnapshot {
+            let txn = db.read().expect("read txn");
+            let events: Vec<(Vec<u8>, Vec<u8>)> =
+                txn.iter::<Events>().expect("iter events").collect();
+            let indices: Vec<(Vec<u8>, Vec<u8>)> =
+                txn.iter::<EventIndex>().expect("iter index").collect();
+            (events, indices)
+        }
+
+        proptest! {
+            // 64 cases: each case opens two tempdir-backed FileBackend
+            // events databases and performs up to 60 writes + iter snapshots.
+            // Default 256 makes the suite visibly slower; 64 preserves the
+            // shrinking coverage used by the block-archive proptest while
+            // keeping the runtime bounded.
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            /// Full sequence write followed by an arbitrary prefix re-write
+            /// leaves `events.db` byte-identical across the `Events` and
+            /// `EventIndex` tables.
+            #[test]
+            fn events_replay_is_byte_identical(
+                entries in proptest::collection::vec(arb_event_entry(), 1..30usize),
+                replay_prefix_len in 0usize..=30usize,
+            ) {
+                let prefix = replay_prefix_len.min(entries.len());
+
+                // Workload A: single full write on a fresh FileBackend events db.
+                let dir_a = tempfile::tempdir().expect("tempdir A");
+                let db_a = EventsDatabase::<FileBackend>::open(dir_a.path())
+                    .expect("open events db A");
+                {
+                    let mut txn = db_a.write().expect("write txn A");
+                    for entry in &entries {
+                        EventStore::write(&mut txn, entry).expect("write A");
+                    }
+                    txn.commit().expect("commit A");
+                }
+                let snap_a = snapshot_events_db(db_a.db());
+
+                // Workload B: full write + prefix replay on a fresh FileBackend db.
+                let dir_b = tempfile::tempdir().expect("tempdir B");
+                let db_b = EventsDatabase::<FileBackend>::open(dir_b.path())
+                    .expect("open events db B");
+                {
+                    let mut txn = db_b.write().expect("write txn B");
+                    for entry in &entries {
+                        EventStore::write(&mut txn, entry).expect("write B");
+                    }
+                    txn.commit().expect("commit B");
+                }
+                {
+                    let mut txn = db_b.write().expect("replay txn B");
+                    for entry in entries.iter().take(prefix) {
+                        EventStore::write(&mut txn, entry).expect("replay prefix B");
+                    }
+                    txn.commit().expect("commit replay B");
+                }
+                let snap_b = snapshot_events_db(db_b.db());
+
+                prop_assert_eq!(
+                    snap_a.0.len(),
+                    snap_b.0.len(),
+                    "Events table row count must match after prefix replay"
+                );
+                prop_assert_eq!(
+                    &snap_a.0,
+                    &snap_b.0,
+                    "Events table must be byte-identical after prefix replay"
+                );
+                prop_assert_eq!(
+                    snap_a.1.len(),
+                    snap_b.1.len(),
+                    "EventIndex table row count must match after prefix replay"
+                );
+                prop_assert_eq!(
+                    &snap_a.1,
+                    &snap_b.1,
+                    "EventIndex table must be byte-identical after prefix replay"
+                );
+            }
+        }
+    }
 }

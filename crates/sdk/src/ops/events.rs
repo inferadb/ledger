@@ -23,6 +23,9 @@ impl LedgerClient {
     /// Returns a paginated list of events matching the filter criteria.
     /// Pass `organization = 0` to query system-level events.
     ///
+    /// See [`ingest_events`](Self::ingest_events) for durability and event
+    /// ID stability semantics across crash recovery.
+    ///
     /// # Arguments
     ///
     /// * `caller` - Identity of the user performing this operation (external slug).
@@ -250,8 +253,8 @@ impl LedgerClient {
 
     /// Ingests external audit events from Engine or Control services.
     ///
-    /// Writes a batch of events into the organization's audit trail. Events
-    /// are stored as handler-phase entries (node-local, not Raft-replicated).
+    /// Writes a batch of events into the organization's audit trail as
+    /// handler-phase entries routed through the region's Raft log.
     ///
     /// # Arguments
     ///
@@ -264,6 +267,30 @@ impl LedgerClient {
     ///
     /// Returns `SdkError::Rpc` if ingestion fails. Individual events may be
     /// rejected; check `IngestResult::rejections` for per-event details.
+    ///
+    /// # Durability
+    ///
+    /// A successful response indicates the ingested events are **WAL-durable**
+    /// on the receiving region's Raft log — the proposal committed through
+    /// consensus and applied in-memory to the region's events.db. State-DB
+    /// materialization (the events.db dual-slot persist) lands on the next
+    /// `StateCheckpointer` tick (~500ms default) or immediately on a snapshot,
+    /// backup, or graceful shutdown. On crash, the events are re-applied from
+    /// the WAL during region recovery — no events are lost.
+    ///
+    /// # Event ID stability across recovery
+    ///
+    /// The `event_id` generated for each ingested event (UUID v4) is frozen
+    /// into the Raft proposal at RPC entry time — every replica and every
+    /// post-recovery replay produces byte-identical event IDs. External
+    /// consumers may rely on this ID stability for deduplication and
+    /// correlation.
+    ///
+    /// Note: this stability property applies to events submitted via this
+    /// RPC. Internal apply-phase audit events (generated as a side-effect
+    /// of entity writes) use deterministic UUID v5s keyed on apply-batch
+    /// layout, which can differ across crash+recovery — do not rely on
+    /// apply-phase event IDs for long-term external persistence.
     ///
     /// # Example
     ///

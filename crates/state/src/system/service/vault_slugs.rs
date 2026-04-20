@@ -12,7 +12,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         let key = SystemKeys::vault_slug_key(slug);
         let value = vault.value().to_string().into_bytes();
         let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
     }
 
@@ -20,7 +20,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     pub fn remove_vault_slug(&self, slug: VaultSlug) -> Result<()> {
         let key = SystemKeys::vault_slug_key(slug);
         let ops = vec![Operation::DeleteEntity { key }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
     }
 

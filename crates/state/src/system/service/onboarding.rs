@@ -21,7 +21,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         require_tier(&key, KeyTier::Regional)?;
         let value = encode(record).context(CodecSnafu)?;
         let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
     }
 
@@ -46,7 +46,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     pub fn delete_email_verification(&self, email_hmac: &str) -> Result<()> {
         let key = SystemKeys::onboard_verify_key(email_hmac);
         let ops = vec![Operation::DeleteEntity { key }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
     }
 
@@ -60,7 +60,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         require_tier(&key, KeyTier::Regional)?;
         let value = encode(account).context(CodecSnafu)?;
         let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
     }
 
@@ -85,7 +85,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
     pub fn delete_onboarding_account(&self, email_hmac: &str) -> Result<()> {
         let key = SystemKeys::onboard_account_key(email_hmac);
         let ops = vec![Operation::DeleteEntity { key }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
     }
 }

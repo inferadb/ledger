@@ -565,6 +565,59 @@ impl<B: StorageBackend> StateLayer<B> {
         }
     }
 
+    /// Applies a batch of operations lazily — identical semantics to
+    /// [`StateLayer::apply_operations`], but commits the internal transaction
+    /// via [`WriteTransaction::commit_in_memory`] instead of the strict-durable
+    /// [`WriteTransaction::commit`].
+    ///
+    /// Intended for IN-APPLY-PIPELINE callers invoked per committed Raft
+    /// entry (directly from `apply_request_with_events` or from its system-
+    /// service helpers). Durability is realized by `Database::sync_state`
+    /// driven by `StateCheckpointer` (periodic) and forced synchronously at
+    /// snapshot / backup / graceful-shutdown boundaries. On crash, every
+    /// write applied lazily is WAL-replayable via `apply_committed_entries`.
+    ///
+    /// OUT-OF-APPLY-PIPELINE callers (recovery, admin RPC migrations,
+    /// background jobs that write directly to state) MUST use
+    /// [`StateLayer::apply_operations`] so their writes are durable-on-return.
+    ///
+    /// See `docs/superpowers/specs/2026-04-19-commit-durability-audit.md`
+    /// (Sprint 1B3 Task 2E) for the classification rules governing the
+    /// split.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Store`] if any storage operation fails.
+    /// Returns [`StateError::Codec`] if entity serialization or deserialization fails.
+    /// Returns [`StateError::Index`] if a relationship index update fails.
+    /// Returns [`StateError::PreconditionFailed`] if a conditional write check fails.
+    pub fn apply_operations_lazy(
+        &self,
+        vault: VaultId,
+        operations: &[Operation],
+        block_height: u64,
+    ) -> Result<Vec<WriteStatus>> {
+        let mut dict = self.take_dictionary(vault)?;
+        let mut txn = self.begin_write()?;
+        match self.apply_operations_in_txn(&mut txn, &mut dict, vault, operations, block_height) {
+            Ok((statuses, dirty_keys)) => {
+                // Mark dirty before commit: dirty marks are conservative (trigger
+                // re-hash from storage). If commit fails, the re-hash reads old
+                // data and produces the correct (pre-commit) state root. If commit
+                // succeeds, dirty buckets are correctly tracked for the new data.
+                self.mark_dirty_keys(vault, &dirty_keys);
+                txn.commit_in_memory().context(StoreSnafu)?;
+                self.return_dictionary(vault, dict);
+                Ok(statuses)
+            },
+            Err(e) => {
+                // Discard potentially-dirty dictionary on failure.
+                // Next call will reload from storage.
+                Err(e)
+            },
+        }
+    }
+
     /// Clears all entities and relationships for a vault.
     ///
     /// Used during vault recovery to reset state before replay.
@@ -2632,5 +2685,168 @@ mod tests {
 
         // No relationships have been created — must return false, not an error.
         assert!(!state.relationship_exists(vault, "doc:1", "viewer", "user:alice").unwrap());
+    }
+
+    // ─── Sprint 1B3 Task 2E: apply_operations_lazy vs apply_operations ───────
+
+    /// `apply_operations_lazy` produces the same in-process observable
+    /// state as `apply_operations`. Test both paths against the same ops
+    /// and assert round-trip equivalence. This is the correctness backstop
+    /// for the IN-APPLY-PIPELINE flip: every lazy-applied batch must be
+    /// indistinguishable from a durable-applied batch for in-process reads.
+    #[test]
+    fn apply_operations_lazy_matches_apply_operations_in_process() {
+        let state_lazy = create_test_state();
+        let state_durable = create_test_state();
+        let vault = VaultId::new(1);
+
+        let ops = vec![
+            Operation::SetEntity {
+                key: "a".to_string(),
+                value: b"alpha".to_vec(),
+                condition: None,
+                expires_at: None,
+            },
+            Operation::SetEntity {
+                key: "b".to_string(),
+                value: b"bravo".to_vec(),
+                condition: None,
+                expires_at: None,
+            },
+        ];
+
+        let lazy = state_lazy.apply_operations_lazy(vault, &ops, 1).unwrap();
+        let durable = state_durable.apply_operations(vault, &ops, 1).unwrap();
+        assert_eq!(lazy, durable, "lazy and durable must return identical statuses");
+
+        // Both paths must surface the writes to subsequent in-process reads.
+        assert_eq!(state_lazy.get_entity(vault, b"a").unwrap().unwrap().value, b"alpha".to_vec(),);
+        assert_eq!(state_lazy.get_entity(vault, b"b").unwrap().unwrap().value, b"bravo".to_vec(),);
+        assert_eq!(
+            state_lazy.compute_state_root(vault).unwrap(),
+            state_durable.compute_state_root(vault).unwrap(),
+            "state roots must match across commit variants",
+        );
+    }
+
+    /// CAS semantics are preserved by `apply_operations_lazy`.
+    /// `PreconditionFailed` must surface from the lazy path exactly as
+    /// it does from the durable path; the dictionary must be dropped (not
+    /// reused) on failure.
+    #[test]
+    fn apply_operations_lazy_preserves_cas_semantics() {
+        let state = create_test_state();
+        let vault = VaultId::new(1);
+
+        state
+            .apply_operations_lazy(
+                vault,
+                &[Operation::SetEntity {
+                    key: "k".to_string(),
+                    value: b"v1".to_vec(),
+                    condition: Some(SetCondition::MustNotExist),
+                    expires_at: None,
+                }],
+                1,
+            )
+            .unwrap();
+
+        let result = state.apply_operations_lazy(
+            vault,
+            &[Operation::SetEntity {
+                key: "k".to_string(),
+                value: b"v2".to_vec(),
+                condition: Some(SetCondition::MustNotExist),
+                expires_at: None,
+            }],
+            2,
+        );
+
+        match result {
+            Err(StateError::PreconditionFailed { key, current_version, .. }) => {
+                assert_eq!(key, "k");
+                assert_eq!(current_version, Some(1));
+            },
+            other => panic!("expected PreconditionFailed, got {:?}", other),
+        }
+
+        // Original value must remain after the failed CAS.
+        let entity = state.get_entity(vault, b"k").unwrap().unwrap();
+        assert_eq!(entity.value, b"v1".to_vec());
+        assert_eq!(entity.version, 1);
+    }
+
+    /// `apply_operations_lazy` skips the dual-slot fsync. On a
+    /// `FileBackend` database, a lazy-applied write followed by a reopen
+    /// MUST NOT surface the write — that is the whole point of the split
+    /// (durability is deferred to the next `sync_state` call).
+    ///
+    /// The strict-durable `apply_operations` does not have this gap:
+    /// after a reopen, its writes remain visible. This test pins both
+    /// sides of the classification.
+    #[test]
+    fn apply_operations_lazy_skips_durable_commit_but_apply_operations_does_not() {
+        use std::sync::Arc;
+
+        use inferadb_ledger_store::{Database, FileBackend};
+        use tempfile::tempdir;
+
+        let tmp = tempdir().unwrap();
+        let lazy_path = tmp.path().join("lazy.ink");
+        let durable_path = tmp.path().join("durable.ink");
+
+        // Lazy side: apply_operations_lazy → reopen → write is GONE.
+        {
+            let db = Arc::new(Database::<FileBackend>::create(&lazy_path).unwrap());
+            let state = StateLayer::new(db);
+            state
+                .apply_operations_lazy(
+                    VaultId::new(1),
+                    &[Operation::SetEntity {
+                        key: "lazy_key".to_string(),
+                        value: b"lazy_value".to_vec(),
+                        condition: None,
+                        expires_at: None,
+                    }],
+                    1,
+                )
+                .unwrap();
+            // In-process visibility holds.
+            assert!(state.get_entity(VaultId::new(1), b"lazy_key").unwrap().is_some());
+        }
+
+        let reopened_lazy = Arc::new(Database::<FileBackend>::open(&lazy_path).unwrap());
+        let state_reopened_lazy = StateLayer::new(reopened_lazy);
+        assert!(
+            state_reopened_lazy.get_entity(VaultId::new(1), b"lazy_key").unwrap().is_none(),
+            "apply_operations_lazy must NOT persist the dual-slot state pointer — \
+             the write must be gone after reopen",
+        );
+
+        // Durable side: apply_operations → reopen → write IS there.
+        {
+            let db = Arc::new(Database::<FileBackend>::create(&durable_path).unwrap());
+            let state = StateLayer::new(db);
+            state
+                .apply_operations(
+                    VaultId::new(1),
+                    &[Operation::SetEntity {
+                        key: "durable_key".to_string(),
+                        value: b"durable_value".to_vec(),
+                        condition: None,
+                        expires_at: None,
+                    }],
+                    1,
+                )
+                .unwrap();
+        }
+
+        let reopened_durable = Arc::new(Database::<FileBackend>::open(&durable_path).unwrap());
+        let state_reopened_durable = StateLayer::new(reopened_durable);
+        let entity = state_reopened_durable
+            .get_entity(VaultId::new(1), b"durable_key")
+            .unwrap()
+            .expect("apply_operations must persist across reopen");
+        assert_eq!(entity.value, b"durable_value".to_vec());
     }
 }

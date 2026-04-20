@@ -26,7 +26,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
 
         let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
 
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         Ok(())
     }
@@ -82,7 +82,8 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         let key = SystemKeys::node_key(node_id);
         let ops = vec![Operation::DeleteEntity { key }];
 
-        let statuses = self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        let statuses =
+            self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         Ok(matches!(statuses.first(), Some(inferadb_ledger_types::WriteStatus::Deleted)))
     }

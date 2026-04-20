@@ -57,7 +57,7 @@ pub(crate) fn save_organization<B: StorageBackend>(
         ledger_error(ErrorCode::Internal, format!("Failed to encode organization: {e}"))
     })?;
     let ops = vec![Operation::SetEntity { key, value: bytes, condition: None, expires_at: None }];
-    state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0).map(|_| ()).map_err(|e| {
+    state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).map(|_| ()).map_err(|e| {
         ledger_error(ErrorCode::Internal, format!("Failed to write organization: {e}"))
     })
 }
@@ -74,7 +74,7 @@ pub(crate) fn save_org_profile<B: StorageBackend>(
         ledger_error(ErrorCode::Internal, format!("Failed to encode organization profile: {e}"))
     })?;
     let ops = vec![Operation::SetEntity { key, value: bytes, condition: None, expires_at: None }];
-    state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0).map(|_| ()).map_err(|e| {
+    state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).map(|_| ()).map_err(|e| {
         ledger_error(ErrorCode::Internal, format!("Failed to write organization profile: {e}"))
     })
 }

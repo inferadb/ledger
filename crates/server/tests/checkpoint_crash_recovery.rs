@@ -36,14 +36,14 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use inferadb_ledger_raft::{
-    HealthState, RaftManager, RecoveryStats, RuntimeConfigHandle,
+    HealthState, RaftManager, RecoveryStats, RegionConfig, RuntimeConfigHandle,
     types::{LedgerRequest, RaftPayload, SystemRequest},
 };
 use inferadb_ledger_server::{bootstrap::bootstrap_node, config::Config};
 use inferadb_ledger_store::crypto::{InMemoryKeyManager, RegionKeyManager};
 use inferadb_ledger_test_utils::TestDir;
 use inferadb_ledger_types::{
-    ALL_REGIONS, Region, UserId,
+    ALL_REGIONS, OrganizationId, OrganizationSlug, Region, UserId, VaultId, VaultSlug,
     config::{CheckpointConfig, RuntimeConfig},
 };
 
@@ -83,6 +83,12 @@ struct CrashableNode {
     /// the production `pre_shutdown` hook, which is owned by
     /// `main.rs` and calls `sync_all_state_dbs` before dropping.
     shutdown_tx: tokio::sync::watch::Sender<bool>,
+    /// UDS socket path as a string — used by gRPC client helpers in
+    /// `common::connect_channel` when tests need to exercise the
+    /// wire-level RPC surface (Sprint 1B3 Task 3A ingest + write
+    /// scenarios). `None` if no socket was provisioned (e.g. future
+    /// TCP-only test variant).
+    addr: String,
 }
 
 impl CrashableNode {
@@ -148,6 +154,8 @@ impl CrashableNode {
             ..Config::default()
         };
 
+        let addr = socket_path.to_string_lossy().to_string();
+
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let health_state = HealthState::new();
 
@@ -189,6 +197,50 @@ impl CrashableNode {
             "node failed to become GLOBAL leader within timeout"
         );
 
+        // Start the US_EAST_VA data region. Sprint 1B3 Task 3A tests need a
+        // REGIONAL Raft group so that `LedgerRequest::Write` can produce blocks
+        // in `blocks.db` and `LedgerRequest::IngestExternalEvents` has a target
+        // for its REGIONAL-only proposal. Skipped on restart: bootstrap_node's
+        // `discover_existing_regions` path auto-re-opens regions whose on-disk
+        // directories exist, so a second `start_data_region` call would return
+        // RegionExists — guard with `has_region`.
+        if !bootstrapped.manager.has_region(Region::US_EAST_VA) {
+            // Clone the events config off of the running server Config so the
+            // data region gets an `EventWriter` wired up. Without it, the
+            // apply handler for `IngestExternalEvents` returns "Event writer
+            // is not configured on this node" and ingest tests fail at the
+            // gRPC boundary.
+            let data_region_cfg = RegionConfig::builder()
+                .region(Region::US_EAST_VA)
+                .initial_members(vec![(handle.node_id(), config.advertise_addr())])
+                .events_config(config.events.clone())
+                .build();
+            bootstrapped
+                .manager
+                .start_data_region(data_region_cfg)
+                .await
+                .expect("start US_EAST_VA data region");
+        }
+
+        // Wait for the data region's leader election so proposals land
+        // immediately rather than hitting a leaderless rejection.
+        let data_region = bootstrapped
+            .manager
+            .get_region_group(Region::US_EAST_VA)
+            .expect("data region just started");
+        let data_deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < data_deadline {
+            if data_region.handle().current_leader() == Some(handle.node_id()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            data_region.handle().current_leader(),
+            Some(handle.node_id()),
+            "data region failed to elect self as leader within timeout"
+        );
+
         // Spawn the server task drain helper — matches TestCluster.
         let bg = bootstrapped.server_handle;
         let server_handle = tokio::spawn(async move {
@@ -202,6 +254,7 @@ impl CrashableNode {
             coordinator: bootstrapped.coordinator,
             server_handle,
             shutdown_tx,
+            addr,
         }
     }
 
@@ -264,6 +317,14 @@ impl CrashableNode {
     /// is a no-op replay that populates the map with `replayed=0`.
     fn global_recovery_stats(&self) -> Option<RecoveryStats> {
         self.manager.last_recovery_stats(Region::GLOBAL)
+    }
+
+    /// Returns the last captured recovery stats for the US_EAST_VA data
+    /// region, if any. Sprint 1B3 Task 3A needs this because the
+    /// `BlockArchive` + `events_db` flips land on the REGIONAL region;
+    /// the GLOBAL replay path never exercises them.
+    fn data_region_recovery_stats(&self) -> Option<RecoveryStats> {
+        self.manager.last_recovery_stats(Region::US_EAST_VA)
     }
 
     /// Returns `(applied, synced)` for the GLOBAL region, where
@@ -668,5 +729,625 @@ async fn test_shutdown_forces_sync() {
         "shutdown-forces-sync: applied_durable={} must equal last_committed={}",
         stats.applied_durable, stats.last_committed
     );
+    restarted.crash();
+}
+
+// ============================================================================
+// Sprint 1B3 Task 3A: blocks.db + events.db + external-ingest crash-recovery
+// ============================================================================
+//
+// Sprint 1B3 flipped `BlockArchive::append_block` (Task 2A) and the apply-path
+// `EventWriter::write_events` (Task 2B) to `commit_in_memory`, and routed the
+// external `IngestEvents` RPC through Raft via `LedgerRequest::IngestExternalEvents`
+// (Task 2C). Durability for all three is now realized via the `StateCheckpointer`
+// tick — periodic, or at snapshot/backup/shutdown. The three tests below prove
+// that with the checkpointer disabled, a WAL-committed proposal still survives
+// an unclean crash because `replay_crash_gap` re-runs `apply_committed_entries`
+// and the per-DB commit path is idempotent (idempotency-by-height for blocks,
+// upsert semantics for events).
+//
+// Scope extension to `CrashableNode`: each node now also starts the
+// `US_EAST_VA` data region during `start()` so `LedgerRequest::Write` and
+// `IngestExternalEvents` have a REGIONAL target. Restart auto-rediscovers the
+// region dir via `bootstrap_node`'s `discover_existing_regions` path.
+
+// ----------------------------------------------------------------------------
+// Shared setup helpers for Sprint 1B3 Task 3A tests
+// ----------------------------------------------------------------------------
+
+/// Bootstraps a user → organization → vault tuple on a fresh `CrashableNode` by
+/// issuing the minimal direct Raft proposals that bypass the saga orchestrator.
+///
+/// The saga path (GLOBAL `CreateOrganization` → REGIONAL `WriteOrganizationProfile`
+/// → GLOBAL activation) runs on a 1-2s poll interval; for crash tests that
+/// already burn 3-5s per crash + restart cycle, waiting for the saga adds ~5s
+/// per test. The direct-proposal shape below completes in < 500ms and produces
+/// an Active org + a fully-registered vault. It intentionally omits steps that
+/// are needed only for higher-level RPCs (profile, ownership, team) — the
+/// Sprint 1B3 tests exercise `IngestEvents` + `Write` only, and both require
+/// only (a) an Active org in the GLOBAL routing table, (b) a registered vault
+/// slug, (c) the US_EAST_VA region running.
+async fn bootstrap_org_and_vault(
+    node: &CrashableNode,
+) -> (UserId, OrganizationSlug, OrganizationId, VaultSlug, VaultId) {
+    use inferadb_ledger_state::system::{OrganizationStatus, OrganizationTier};
+
+    // Step 1: CreateUser on GLOBAL — allocates a UserId and registers the
+    //         admin slug required by `CreateOrganization.admin`.
+    let user_slug =
+        inferadb_ledger_types::snowflake::generate_user_slug().expect("generate user slug");
+    let create_user = LedgerRequest::System(SystemRequest::CreateUser {
+        user: UserId::new(0), // 0 = auto-allocate
+        admin: false,
+        slug: user_slug,
+        region: Region::US_EAST_VA,
+    });
+    let user_id = match node
+        .handle
+        .propose_and_wait(RaftPayload::system(create_user), Duration::from_secs(5))
+        .await
+        .expect("CreateUser propose")
+    {
+        inferadb_ledger_raft::types::LedgerResponse::UserCreated { user_id, .. } => user_id,
+        other => panic!("CreateUser expected UserCreated, got {other}"),
+    };
+
+    // Step 2: CreateOrganization on GLOBAL — status=Provisioning.
+    let org_slug =
+        inferadb_ledger_types::snowflake::generate_organization_slug().expect("generate org slug");
+    let create_org = LedgerRequest::System(SystemRequest::CreateOrganization {
+        slug: org_slug,
+        region: Region::US_EAST_VA,
+        tier: OrganizationTier::Free,
+        admin: user_id,
+    });
+    let org_id = match node
+        .handle
+        .propose_and_wait(RaftPayload::system(create_org), Duration::from_secs(5))
+        .await
+        .expect("CreateOrganization propose")
+    {
+        inferadb_ledger_raft::types::LedgerResponse::OrganizationCreated {
+            organization_id,
+            ..
+        } => organization_id,
+        other => panic!("CreateOrganization expected OrganizationCreated, got {other}"),
+    };
+
+    // Step 3: Activate the organization — `CreateVault` requires Active status.
+    let activate = LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
+        organization: org_id,
+        status: OrganizationStatus::Active,
+    });
+    let _ = node
+        .handle
+        .propose_and_wait(RaftPayload::system(activate), Duration::from_secs(5))
+        .await
+        .expect("UpdateOrganizationStatus propose");
+
+    // Step 4: CreateVault on GLOBAL — registers the vault slug index so
+    //         the service layer can resolve external slugs to internal IDs.
+    let vault_slug =
+        inferadb_ledger_types::snowflake::generate_vault_slug().expect("generate vault slug");
+    let create_vault = LedgerRequest::CreateVault {
+        organization: org_id,
+        slug: vault_slug,
+        name: Some("sprint-1b3-vault".to_string()),
+        retention_policy: None,
+    };
+    let vault_id = match node
+        .handle
+        .propose_and_wait(RaftPayload::new(create_vault, 0), Duration::from_secs(5))
+        .await
+        .expect("CreateVault propose")
+    {
+        inferadb_ledger_raft::types::LedgerResponse::VaultCreated { vault, .. } => vault,
+        other => panic!("CreateVault expected VaultCreated, got {other}"),
+    };
+
+    (user_id, org_slug, org_id, vault_slug, vault_id)
+}
+
+/// Proposes `count` single-entity writes against the REGIONAL Raft group,
+/// producing `count` region blocks (each `LedgerRequest::Write` that touches a
+/// vault produces one region block via `BlockArchive::append_block`). Returns
+/// the unique client-ID prefix used by each write so callers can verify they
+/// all survived post-recovery.
+async fn propose_regional_writes(
+    node: &CrashableNode,
+    organization: OrganizationId,
+    vault: VaultId,
+    count: usize,
+    prefix: &str,
+) -> Vec<String> {
+    let region_group =
+        node.manager.get_region_group(Region::US_EAST_VA).expect("US_EAST_VA region running");
+    let mut keys = Vec::with_capacity(count);
+    for i in 0..count {
+        let key = format!("{prefix}-{i:04}");
+        let op = inferadb_ledger_types::Operation::SetEntity {
+            key: key.clone(),
+            value: format!("value-{i}").into_bytes(),
+            condition: None,
+            expires_at: None,
+        };
+        let txn = inferadb_ledger_types::Transaction {
+            id: *uuid::Uuid::new_v4().as_bytes(),
+            client_id: inferadb_ledger_types::ClientId::new(format!("test:{prefix}:{i}")),
+            sequence: 0,
+            operations: vec![op],
+            timestamp: std::time::SystemTime::now().into(),
+        };
+        let req = LedgerRequest::Write {
+            organization,
+            vault,
+            transactions: vec![txn],
+            idempotency_key: *uuid::Uuid::new_v4().as_bytes(),
+            request_hash: i as u64,
+        };
+        let resp = region_group
+            .handle()
+            .propose_and_wait(RaftPayload::new(req, 0), Duration::from_secs(10))
+            .await;
+        assert!(resp.is_ok(), "propose write {i}: {:?}", resp.err());
+        keys.push(key);
+    }
+    keys
+}
+
+/// Invokes `IngestEvents` over gRPC against a `CrashableNode` via its UDS
+/// socket, using the `engine` source (default allow-list entry per
+/// `IngestionConfig::default`). Returns the raw `IngestEventsResponse`.
+async fn call_ingest_events(
+    addr: &str,
+    organization: OrganizationSlug,
+    caller: UserId,
+    entries: Vec<inferadb_ledger_proto::proto::IngestEventEntry>,
+) -> Result<inferadb_ledger_proto::proto::IngestEventsResponse, tonic::Status> {
+    use inferadb_ledger_proto::proto::events_service_client::EventsServiceClient;
+
+    let channel = crate::common::connect_channel(addr);
+    let mut client = EventsServiceClient::new(channel);
+    let req = inferadb_ledger_proto::proto::IngestEventsRequest {
+        source_service: "engine".to_string(),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: organization.value(),
+        }),
+        entries,
+        caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: caller.value() as u64 }),
+    };
+    client.ingest_events(req).await.map(|r| r.into_inner())
+}
+
+/// Builds a batch of `count` external `IngestEventEntry`s under the `engine.*`
+/// type prefix (satisfies allow-list + prefix validation in `ingest_events`).
+fn build_ingest_batch(
+    count: usize,
+    tag: &str,
+) -> Vec<inferadb_ledger_proto::proto::IngestEventEntry> {
+    (0..count)
+        .map(|i| inferadb_ledger_proto::proto::IngestEventEntry {
+            event_type: format!("engine.auth.decision.{tag}"),
+            principal: format!("user:{tag}:{i}"),
+            outcome: inferadb_ledger_proto::proto::EventOutcome::Success as i32,
+            details: std::collections::HashMap::from([
+                ("seq".to_string(), i.to_string()),
+                ("tag".to_string(), tag.to_string()),
+            ]),
+            trace_id: None,
+            correlation_id: Some(format!("{tag}-{i}")),
+            vault: None,
+            timestamp: None,
+            error_code: None,
+            error_detail: None,
+            denial_reason: None,
+        })
+        .collect()
+}
+
+/// Scans the REGIONAL `events.db` for all events belonging to `organization`,
+/// returning the full list in primary-key (time-ordered) order. Uses
+/// `EventStore::list` with an open time window and a large cap so every
+/// surviving event appears in the result regardless of emission phase.
+fn scan_all_events(
+    node: &CrashableNode,
+    organization: OrganizationId,
+) -> Vec<inferadb_ledger_types::events::EventEntry> {
+    use inferadb_ledger_state::EventStore;
+
+    let region =
+        node.manager.get_region_group(Region::US_EAST_VA).expect("US_EAST_VA region running");
+    let events_db = region.events_db().expect("events_db available on data region");
+    let txn = events_db.read().expect("events_db read txn");
+    let (entries, _cursor) = EventStore::list(&txn, organization, 0, u64::MAX, 100_000, None)
+        .expect("EventStore::list succeeds");
+    entries
+}
+
+/// Reads a region-height block from the REGIONAL `blocks.db`, returning the
+/// decoded `RegionBlock`.
+fn read_region_block(
+    node: &CrashableNode,
+    region_height: u64,
+) -> inferadb_ledger_types::RegionBlock {
+    let region =
+        node.manager.get_region_group(Region::US_EAST_VA).expect("US_EAST_VA region running");
+    region
+        .block_archive()
+        .read_block(region_height)
+        .unwrap_or_else(|e| panic!("read region block {region_height}: {e}"))
+}
+
+// ----------------------------------------------------------------------------
+// Test 8 (Sprint 1B3): external ingest is crash-recoverable
+// ----------------------------------------------------------------------------
+
+/// `IngestEvents` now routes through Raft (Sprint 1B3 Task 2C): the RPC
+/// handler builds a `Vec<EventEntry>` with pre-generated UUID v4 event IDs
+/// and proposes `LedgerRequest::IngestExternalEvents` to the organization's
+/// REGIONAL Raft group. The apply handler writes each event to `events.db`
+/// via `commit_in_memory`. With the checkpointer disabled, a crash leaves the
+/// events.db state behind the WAL, but the batch — including the frozen
+/// event_ids — is WAL-durable; `replay_crash_gap` re-runs the apply handler
+/// and re-writes the identical bytes via `EventStore::write`'s upsert
+/// semantics. Post-recovery the events must all be present with matching IDs.
+#[tokio::test]
+async fn test_crash_preserves_externally_ingested_events() {
+    let temp = TestDir::new();
+    let data_dir = temp.path().to_path_buf();
+    let keys_mgr = test_key_manager();
+
+    let node =
+        CrashableNode::start(data_dir.clone(), keys_mgr.clone(), Some(disable_checkpointer()))
+            .await;
+
+    // Bootstrap org + vault so IngestEvents resolves the slug to an Active
+    // organization in the GLOBAL routing table.
+    let (admin_user, org_slug, org_id, _vault_slug, _vault_id) =
+        bootstrap_org_and_vault(&node).await;
+
+    // Ingest 20 external events. Each entry generates a random UUID v4 at the
+    // RPC handler, which is frozen into the WAL payload before Raft accepts
+    // the proposal — see Sprint 1B3 design doc § "Event-ID determinism".
+    let batch = build_ingest_batch(20, "pre-crash");
+    let resp = call_ingest_events(&node.addr, org_slug, admin_user, batch)
+        .await
+        .expect("IngestEvents succeeds pre-crash");
+    assert_eq!(
+        resp.accepted_count, 20,
+        "all 20 entries should be accepted; rejections: {:?}",
+        resp.rejections
+    );
+    assert_eq!(resp.rejected_count, 0);
+
+    // Snapshot the ingested event_id set pre-crash so we can assert every
+    // event survives replay with byte-identical IDs.
+    let pre_events = scan_all_events(&node, org_id);
+    let pre_ids: std::collections::BTreeSet<[u8; 16]> =
+        pre_events.iter().map(|e| e.event_id).collect();
+    assert!(
+        pre_ids.len() >= 20,
+        "expected at least 20 ingested events on disk pre-crash, saw {}",
+        pre_ids.len()
+    );
+
+    node.crash();
+
+    let restarted = CrashableNode::start(data_dir, keys_mgr, Some(disable_checkpointer())).await;
+    let stats = restarted
+        .data_region_recovery_stats()
+        .expect("data region recovery stats populated on restart");
+    assert!(
+        stats.replayed_entries > 0,
+        "REGIONAL replay must run non-trivially with checkpointer disabled; stats={stats:?}"
+    );
+
+    // Every pre-crash event_id must round-trip on the restarted events.db.
+    let post_events = scan_all_events(&restarted, org_id);
+    let post_ids: std::collections::BTreeSet<[u8; 16]> =
+        post_events.iter().map(|e| e.event_id).collect();
+    for id in &pre_ids {
+        assert!(
+            post_ids.contains(id),
+            "event_id {:x?} lost across crash+replay; pre={} post={}",
+            id,
+            pre_ids.len(),
+            post_ids.len(),
+        );
+    }
+    // No new event_ids appear post-crash (replay re-writes the same bytes;
+    // any additional events would indicate an apply-phase side-effect that
+    // ran post-replay and wasn't present pre-crash).
+    for id in &post_ids {
+        assert!(pre_ids.contains(id), "unexpected new event_id {:x?} appeared after replay", id);
+    }
+
+    restarted.crash();
+}
+
+// ----------------------------------------------------------------------------
+// Test 9 (Sprint 1B3): blocks.db is idempotent on replay
+// ----------------------------------------------------------------------------
+
+/// Promoted from the Sprint 1B2 Task 3A deferral — Sprint 1B3 flipped
+/// `BlockArchive::append_block` to `commit_in_memory` (Task 2A), so the apply
+/// path's block-production side-effect now actually lags the WAL until the
+/// checkpoint tick. Task 1C's idempotency-by-height property guards replay:
+/// re-appending a block at an existing height is a no-op.
+///
+/// The test produces 30 region blocks via sequential entity writes, crashes
+/// before any checkpoint fires, and asserts that replay re-populates
+/// `blocks.db` with every vault_height preserved and no spurious blocks. The
+/// concrete block layout (how many vault entries per region block) can
+/// legitimately differ between pre- and post-recovery — the original writes
+/// landed in many small apply batches because each `propose_and_wait`
+/// completed before the next one was proposed, while replay re-drives the
+/// same WAL entries through a single batched `apply_committed_entries` call.
+/// What the WAL *does* guarantee is that every vault entry committed
+/// pre-crash is re-materialized post-recovery and lands in *some* region
+/// block at a consistent `(vault_height -> region_height)` mapping.
+#[tokio::test]
+async fn test_blocks_db_idempotent_on_replay() {
+    let temp = TestDir::new();
+    let data_dir = temp.path().to_path_buf();
+    let keys_mgr = test_key_manager();
+
+    let node =
+        CrashableNode::start(data_dir.clone(), keys_mgr.clone(), Some(disable_checkpointer()))
+            .await;
+
+    let (_admin_user, _org_slug, org_id, _vault_slug, vault_id) =
+        bootstrap_org_and_vault(&node).await;
+
+    // Produce 30 vault entries. Each `LedgerRequest::Write` (proposed
+    // sequentially — the next does not start until the prior returns) lands
+    // in its own apply batch and produces its own region block pre-crash.
+    let written_keys = propose_regional_writes(&node, org_id, vault_id, 30, "blk").await;
+    assert_eq!(written_keys.len(), 30);
+
+    // Snapshot the pre-crash (vault_height -> region_height) map. The *mapping*
+    // is a function of the WAL tail and must be preserved across recovery,
+    // even if the region-block grouping differs.
+    let pre_vault_heights = collect_vault_heights(&node, org_id, vault_id, 30);
+    assert_eq!(
+        pre_vault_heights.len(),
+        30,
+        "every write should be represented in VaultBlockIndex pre-crash"
+    );
+
+    // Snapshot the set of occupied region heights pre-crash — since every
+    // pre-crash write landed in its own apply batch, heights 1..=30 each
+    // map to exactly one region block.
+    let pre_region_heights = collect_region_heights(&node, 30);
+    assert!(
+        !pre_region_heights.is_empty(),
+        "pre-crash blocks.db must have at least one region block"
+    );
+
+    node.crash();
+
+    let restarted = CrashableNode::start(data_dir, keys_mgr, Some(disable_checkpointer())).await;
+    let stats = restarted
+        .data_region_recovery_stats()
+        .expect("data region recovery stats populated on restart");
+    assert!(
+        stats.replayed_entries > 0,
+        "REGIONAL replay must run non-trivially with checkpointer disabled; stats={stats:?}"
+    );
+
+    // Every pre-crash vault_height must re-materialize in the VaultBlockIndex
+    // after replay. Replay may collapse the blocks.db layout differently (all
+    // 30 writes can re-batch into fewer region blocks), but the vault-height
+    // coverage is WAL-deterministic.
+    let post_vault_heights = collect_vault_heights(&restarted, org_id, vault_id, 30);
+    assert_eq!(
+        post_vault_heights.len(),
+        30,
+        "every pre-crash vault_height must be recoverable post-replay; got {} of 30",
+        post_vault_heights.len()
+    );
+    for vh in 1..=30u64 {
+        assert!(
+            post_vault_heights.contains_key(&vh),
+            "vault_height {vh} missing from VaultBlockIndex post-replay"
+        );
+    }
+
+    // Every region_height reported by the VaultBlockIndex must decode to a
+    // valid region block. This catches a class of bugs where replay leaves a
+    // dangling index row pointing at a non-existent block (Task 1C's
+    // idempotency-by-height is the guard).
+    let post_region_heights: std::collections::BTreeSet<u64> =
+        post_vault_heights.values().copied().collect();
+    let region_group =
+        restarted.manager.get_region_group(Region::US_EAST_VA).expect("US_EAST_VA region running");
+    for rh in &post_region_heights {
+        region_group.block_archive().read_block(*rh).unwrap_or_else(|e| {
+            panic!("region_height {rh} referenced by VaultBlockIndex but not in blocks.db: {e}")
+        });
+    }
+
+    // Replay must not invent new region heights beyond what pre-crash wrote.
+    // Pre-crash region heights were 1..=30 (one block per write under
+    // sequential propose_and_wait); post-crash heights must be a subset.
+    for rh in &post_region_heights {
+        assert!(
+            pre_region_heights.contains(rh),
+            "replay produced spurious region_height {rh} not present pre-crash"
+        );
+    }
+
+    restarted.crash();
+}
+
+/// Walks the `VaultBlockIndex` and collects `(vault_height, region_height)`
+/// pairs for the supplied (organization, vault) up to `max_height`. Used by
+/// the blocks.db test to verify every pre-crash write is still reachable via
+/// the per-vault index after replay, independent of how region blocks were
+/// grouped.
+fn collect_vault_heights(
+    node: &CrashableNode,
+    organization: OrganizationId,
+    vault: VaultId,
+    max_height: u64,
+) -> std::collections::BTreeMap<u64, u64> {
+    let region =
+        node.manager.get_region_group(Region::US_EAST_VA).expect("US_EAST_VA region running");
+    let archive = region.block_archive();
+    let mut map = std::collections::BTreeMap::new();
+    for vh in 1..=max_height {
+        if let Ok(Some(rh)) = archive.find_region_height(organization, vault, vh) {
+            map.insert(vh, rh);
+        }
+    }
+    map
+}
+
+/// Collects every region_height from `blocks.db` in the range `1..=max_height`
+/// that decodes successfully. Used to snapshot pre-crash block layout so the
+/// post-recovery assertion can verify no spurious blocks appeared.
+fn collect_region_heights(
+    node: &CrashableNode,
+    max_height: u64,
+) -> std::collections::BTreeSet<u64> {
+    let region =
+        node.manager.get_region_group(Region::US_EAST_VA).expect("US_EAST_VA region running");
+    let archive = region.block_archive();
+    (1..=max_height).filter(|h| archive.read_block(*h).is_ok()).collect()
+}
+
+// ----------------------------------------------------------------------------
+// Test 10 (Sprint 1B3): events.db is idempotent on replay
+// ----------------------------------------------------------------------------
+
+/// Sprint 1B3 flipped the apply-path `EventWriter::write_events` to
+/// `commit_in_memory` (Task 2B) and routed external ingest through Raft
+/// (Task 2C). This test mixes both emission paths under a wide crash gap:
+///   * 20 external `IngestEvents` RPC calls (batch size 3 each — 60 events), each event tagged with
+///     a pre-generated UUID v4 frozen into the WAL payload
+///   * 10 entity writes (each produces apply-phase audit events)
+///
+/// Distinct guarantees per emission path:
+///
+/// * **External ingest events** are WAL-frozen pre-proposal. The UUID v4 bytes are part of the
+///   serialized `LedgerRequest::IngestExternalEvents` payload; replay deserializes the identical
+///   bytes and re-writes them via `EventStore::write`'s B-tree upsert. The test asserts every
+///   ingested `event_id` survives post-recovery with byte-identical contents.
+///
+/// * **Apply-phase events** use UUID v5 derived from `(block_height, op_index, action)`. The IDs
+///   are deterministic for a given apply batch but the *batch boundaries* themselves depend on the
+///   apply worker's batching cadence. Under sequential `propose_and_wait` (used here for test
+///   determinism), each write lands in its own apply batch with `block_height = N`. On crash,
+///   replay re-drives the full WAL range through a single batched `apply_committed_entries` call
+///   with `block_height = 1` — the resulting UUID v5s therefore differ pre- vs post-crash. What IS
+///   preserved is the action inventory: each of the 10 entity writes produces a `WriteCommitted`
+///   event in both cases. The test asserts the action counts match; per-ID byte equality is
+///   legitimately not guaranteed for apply-phase events under this load shape, and the WAL is the
+///   source of truth regardless.
+#[tokio::test]
+async fn test_events_db_idempotent_on_replay() {
+    use inferadb_ledger_types::events::{EventAction, EventEmission};
+
+    let temp = TestDir::new();
+    let data_dir = temp.path().to_path_buf();
+    let keys_mgr = test_key_manager();
+
+    let node =
+        CrashableNode::start(data_dir.clone(), keys_mgr.clone(), Some(disable_checkpointer()))
+            .await;
+
+    let (admin_user, org_slug, org_id, _vault_slug, vault_id) =
+        bootstrap_org_and_vault(&node).await;
+
+    // Wave A: 20 external IngestEvents RPCs, 3 events each = 60 entries.
+    for i in 0..20 {
+        let tag = format!("wave-a-{i}");
+        let batch = build_ingest_batch(3, &tag);
+        let resp = call_ingest_events(&node.addr, org_slug, admin_user, batch)
+            .await
+            .unwrap_or_else(|e| panic!("IngestEvents wave-a-{i} failed: {e:?}"));
+        assert_eq!(resp.accepted_count, 3, "batch {i} had rejections: {:?}", resp.rejections);
+    }
+
+    // Wave B: 10 entity writes — each produces one apply-phase WriteCommitted
+    // event (plus any other apply-phase events the pipeline emits for a write).
+    let _ = propose_regional_writes(&node, org_id, vault_id, 10, "ev").await;
+
+    // Snapshot pre-crash events, partitioning by emission path. Ingest events
+    // are byte-pinned pre-Raft; apply-phase events are batch-boundary-sensitive.
+    let pre_events = scan_all_events(&node, org_id);
+    let (pre_ingest, pre_apply): (Vec<_>, Vec<_>) = pre_events
+        .into_iter()
+        .partition(|e| matches!(e.emission, EventEmission::HandlerPhase { .. }));
+    let pre_ingest_by_id: std::collections::BTreeMap<
+        [u8; 16],
+        inferadb_ledger_types::events::EventEntry,
+    > = pre_ingest.iter().map(|e| (e.event_id, e.clone())).collect();
+    assert_eq!(
+        pre_ingest_by_id.len(),
+        60,
+        "expected exactly 60 external-ingest events pre-crash (20 RPCs x 3); saw {}",
+        pre_ingest_by_id.len()
+    );
+
+    // Count pre-crash apply-phase WriteCommitted events — one per entity
+    // write under sequential propose_and_wait.
+    let pre_write_committed =
+        pre_apply.iter().filter(|e| matches!(e.action, EventAction::WriteCommitted)).count();
+    assert_eq!(
+        pre_write_committed, 10,
+        "expected 10 apply-phase WriteCommitted events pre-crash; saw {pre_write_committed}"
+    );
+
+    node.crash();
+
+    let restarted = CrashableNode::start(data_dir, keys_mgr, Some(disable_checkpointer())).await;
+    let stats = restarted
+        .data_region_recovery_stats()
+        .expect("data region recovery stats populated on restart");
+    assert!(
+        stats.replayed_entries > 0,
+        "REGIONAL replay must run non-trivially with checkpointer disabled; stats={stats:?}"
+    );
+
+    let post_events = scan_all_events(&restarted, org_id);
+    let (post_ingest, post_apply): (Vec<_>, Vec<_>) = post_events
+        .into_iter()
+        .partition(|e| matches!(e.emission, EventEmission::HandlerPhase { .. }));
+
+    // Ingest events — byte-for-byte equality. UUID v4 frozen pre-Raft, so the
+    // replay path deserializes identical bytes and upserts them via the
+    // B-tree. Any divergence here means the WAL payload deserialized
+    // differently, or the apply handler produced a non-identical EventEntry
+    // from the same payload.
+    let post_ingest_by_id: std::collections::BTreeMap<
+        [u8; 16],
+        inferadb_ledger_types::events::EventEntry,
+    > = post_ingest.iter().map(|e| (e.event_id, e.clone())).collect();
+    assert_eq!(
+        pre_ingest_by_id.len(),
+        post_ingest_by_id.len(),
+        "ingest event count diverged: pre={} post={}",
+        pre_ingest_by_id.len(),
+        post_ingest_by_id.len()
+    );
+    for (id, pre) in &pre_ingest_by_id {
+        let post = post_ingest_by_id
+            .get(id)
+            .unwrap_or_else(|| panic!("ingest event_id {:x?} missing after replay", id));
+        assert_eq!(pre, post, "ingest event_id {:x?} bytes diverged across replay", id);
+    }
+
+    // Apply-phase coverage — the action inventory must be preserved even if
+    // the per-event UUID v5 changes because replay batches writes differently.
+    // Every pre-crash entity write must still produce a `WriteCommitted` event
+    // post-recovery (no apply-path side-effect was silently lost).
+    let post_write_committed =
+        post_apply.iter().filter(|e| matches!(e.action, EventAction::WriteCommitted)).count();
+    assert_eq!(
+        post_write_committed, pre_write_committed,
+        "apply-phase WriteCommitted count diverged: pre={pre_write_committed} post={post_write_committed}"
+    );
+
     restarted.crash();
 }

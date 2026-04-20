@@ -34,7 +34,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
                 expires_at: None,
             },
         ];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
     }
 
@@ -103,7 +103,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         {
             ops.push(Operation::DeleteEntity { key: SystemKeys::user_slug_index_key(slug) });
         }
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
     }
 
@@ -122,7 +122,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         let key = SystemKeys::user_directory_key(user_id);
         let value = encode(&entry).context(CodecSnafu)?;
         let ops = vec![Operation::SetEntity { key, value, condition: None, expires_at: None }];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
     }
 

@@ -217,19 +217,19 @@ ledger_determinism_bug_total > 0
 
 ## State Durability
 
-Lazy-commit + periodic-checkpoint durability (Sprint 1B2). Operator tuning + interpretation reference: [durability.md](durability.md).
+Lazy-commit + periodic-checkpoint durability (Sprint 1B2, extended to all four regional DBs in Sprint 1B3). Operator tuning + interpretation reference: [durability.md](durability.md).
 
 | Metric                                           | Type      | Labels                         | Description                                                                                                       |
 | ------------------------------------------------ | --------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
 | `ledger_state_checkpoints_total`                 | Counter   | `region`, `trigger`, `status`  | `StateCheckpointer` attempts. `trigger` ∈ `time`/`applies`/`dirty`/`snapshot`/`backup`/`shutdown`; `status` ∈ `ok`/`error` |
-| `ledger_state_checkpoint_duration_seconds`       | Histogram | `region`, `trigger`            | Per-checkpoint dual-slot fsync latency                                                                            |
+| `ledger_state_checkpoint_duration_seconds`       | Histogram | `region`, `trigger`            | Per-checkpoint fsync latency across all 4 regional DBs (state.db + raft.db + blocks.db + events.db when present). Synced concurrently via `tokio::join!`; the histogram value is the max-of-concurrent-fsyncs per tick. |
 | `ledger_state_checkpoint_last_timestamp_seconds` | Gauge     | `region`                       | Unix seconds of the most recent successful checkpoint                                                             |
 | `ledger_state_applies_since_checkpoint`          | Gauge     | `region`                       | In-memory applies accumulated since last checkpoint                                                               |
-| `ledger_state_dirty_pages`                       | Gauge     | `region`                       | Dirty pages sampled at the last checkpointer wake-up                                                              |
-| `ledger_state_page_cache_len`                    | Gauge     | `region`                       | Total pages resident in the state-DB page cache                                                                   |
-| `ledger_state_last_synced_snapshot_id`           | Gauge     | `region`                       | Most recent snapshot id durably persisted to disk (monotonic)                                                     |
+| `ledger_state_dirty_pages`                       | Gauge     | `region`                       | **Max** dirty-page count across all 4 regional DBs, sampled at the last checkpointer wake-up. Ingest-heavy workloads can drive this from events.db while state.db stays clean — the trigger still fires on the `max()`. |
+| `ledger_state_page_cache_len`                    | Gauge     | `region`                       | Total pages resident in the state.db page cache (state.db only; other DBs are not surfaced through this gauge)    |
+| `ledger_state_last_synced_snapshot_id`           | Gauge     | `region`                       | Most recent snapshot id durably persisted for state.db (monotonic). raft.db / blocks.db / events.db track their own snapshot ids internally; operators use this gauge as the representative "is the checkpointer progressing" signal. |
 | `ledger_state_recovery_replay_count_total`       | Counter   | `region`                       | WAL entries replayed on startup by `RaftLogStore::replay_crash_gap`. Fires once per region (0 on clean shutdown)  |
-| `ledger_state_recovery_duration_seconds`         | Histogram | `region`                       | Duration of the post-open crash-recovery sweep                                                                    |
+| `ledger_state_recovery_duration_seconds`         | Histogram | `region`                       | Duration of the post-open crash-recovery sweep (includes post-replay sync of all 4 regional DBs)                  |
 
 ### Key Indicators
 

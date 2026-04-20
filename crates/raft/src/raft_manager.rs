@@ -324,6 +324,17 @@ pub struct RegionGroup {
     /// the entire WAL. See the Task 3A follow-up in
     /// `docs/superpowers/specs/2026-04-19-commit-durability-audit.md`.
     raft_db: Arc<Database<FileBackend>>,
+    /// `blocks.db` handle for this region.
+    ///
+    /// Surfaced alongside `raft_db` so the [`StateCheckpointer`] and
+    /// [`RaftManager::sync_all_state_dbs`] can drive `sync_state` on
+    /// blocks.db in lock-step with state.db + raft.db. Sprint 1B3 flips
+    /// `BlockArchive::append_block` to `commit_in_memory`; without this
+    /// handle the dirty pages from apply-phase block writes would never
+    /// reach disk outside of ad-hoc flushes. The underlying database is
+    /// shared with `block_archive` — the `BlockArchive` owns the domain
+    /// API, while this field owns the durability lifecycle handle.
+    blocks_db: Arc<Database<FileBackend>>,
     /// Block archive for historical blocks.
     block_archive: Arc<BlockArchive<FileBackend>>,
     /// Accessor for applied state.
@@ -385,6 +396,37 @@ impl RegionGroup {
     #[must_use]
     pub fn raft_db(&self) -> &Arc<Database<FileBackend>> {
         &self.raft_db
+    }
+
+    /// Returns the `blocks.db` handle for this region.
+    ///
+    /// Used by [`RaftManager::sync_all_state_dbs`] and the
+    /// [`StateCheckpointer`] to drive `sync_state` on blocks.db alongside
+    /// state.db, raft.db, and events.db. The underlying database is shared
+    /// with `block_archive` — this accessor surfaces the raw `Database`
+    /// handle for the durability lifecycle, while `block_archive` exposes
+    /// the domain API.
+    #[must_use]
+    pub fn blocks_db(&self) -> &Arc<Database<FileBackend>> {
+        &self.blocks_db
+    }
+
+    /// Returns the underlying `events.db` database handle, if this region
+    /// has an events database configured.
+    ///
+    /// Used by [`RaftManager::sync_all_state_dbs`] and the
+    /// [`StateCheckpointer`] to drive `sync_state` on events.db alongside
+    /// state.db, raft.db, and blocks.db. Returns `None` for regions that
+    /// were constructed without an events database (test fixtures,
+    /// historical GLOBAL-only configurations); the checkpointer / shutdown
+    /// sweep silently skip events.db in that case.
+    ///
+    /// The return type intentionally surfaces an owned `Arc` rather than a
+    /// reference so callers can pass it directly to `Database::sync_state`
+    /// (which consumes an `Arc<Self>`).
+    #[must_use]
+    pub fn events_state_db(&self) -> Option<Arc<Database<FileBackend>>> {
+        self.events_db.as_ref().map(|ed| Arc::clone(ed.db()))
     }
 
     /// Returns the block archive.
@@ -727,12 +769,15 @@ impl RaftManager {
             return Err(RaftManagerError::RegionExists { region });
         }
 
+        let blocks_db = Arc::clone(block_archive.db());
+
         let region_group = Arc::new(RegionGroup {
             region,
 
             handle,
             state: state.clone(),
             raft_db,
+            blocks_db,
             block_archive,
             applied_state,
             block_announcements,
@@ -1214,6 +1259,8 @@ impl RaftManager {
                 handle.clone(),
                 state.clone(),
                 Arc::clone(&raft_db),
+                Arc::clone(block_archive.db()),
+                Some(Arc::clone(events_db.db())),
                 block_archive.clone(),
                 applied_state.clone(),
                 applied_index_rx.clone(),
@@ -1244,14 +1291,21 @@ impl RaftManager {
         }
         tokio::spawn(apply_worker.run(commit_rx));
 
-        // Create region group
+        // Create region group.
+        //
+        // `blocks_db` is surfaced here alongside `raft_db` so the
+        // `StateCheckpointer` and `sync_all_state_dbs` can reach the
+        // underlying `Database<FileBackend>` without holding a reference to
+        // `block_archive` (which owns a domain API, not a durability API).
         let jobs_running = enable_background_jobs;
+        let blocks_db = Arc::clone(block_archive.db());
         let region_group = Arc::new(RegionGroup {
             region,
 
             handle,
             state,
             raft_db,
+            blocks_db,
             block_archive,
             applied_state,
             block_announcements,
@@ -1279,12 +1333,21 @@ impl RaftManager {
     }
 
     /// Starts background jobs for a region.
+    ///
+    /// `raft_db`, `blocks_db`, and `events_db` are plumbed into the
+    /// [`StateCheckpointer`] so it can `sync_state` on every durability
+    /// DB in lock-step (Sprint 1B3 Task 2D). `events_db` is `Option`
+    /// because some regions (test fixtures, historical GLOBAL-only
+    /// configurations) are constructed without an events writer.
+    #[allow(clippy::too_many_arguments)]
     fn start_background_jobs(
         &self,
         region: Region,
         handle: Arc<ConsensusHandle>,
         state: Arc<StateLayer<FileBackend>>,
         raft_db: Arc<Database<FileBackend>>,
+        blocks_db: Arc<Database<FileBackend>>,
+        events_db: Option<Arc<Database<FileBackend>>>,
         block_archive: Arc<BlockArchive<FileBackend>>,
         applied_state: AppliedStateAccessor,
         applied_index_rx: tokio::sync::watch::Receiver<u64>,
@@ -1334,13 +1397,14 @@ impl RaftManager {
         let btree_compactor_handle = btree_compactor.start();
         info!(region = region.as_str(), "Started B+ tree compactor");
 
-        // State-DB Checkpointer (Sprint 1B2 Task 2B).
+        // State-DB Checkpointer (Sprint 1B2 Task 2B extended by 1B3 Task 2D).
         //
         // Drives `Database::sync_state` against in-memory commits produced by
-        // `WriteTransaction::commit_in_memory`. Task 2C flips the apply path
-        // to use `commit_in_memory`; until 2C lands the checkpointer still
-        // runs but has nothing dirty to flush because the apply path remains
-        // fully-durable-per-entry.
+        // `WriteTransaction::commit_in_memory`. Sprint 1B2 Task 2C flipped
+        // the apply path to `commit_in_memory` on state.db + raft.db;
+        // Sprint 1B3 Tasks 2A/2B extend the flip to blocks.db + events.db.
+        // This checkpointer is the sync driver for all 4 DBs (or 3 when a
+        // region has no events writer).
         //
         // Falls back to a fresh `RuntimeConfigHandle::default()` if
         // `set_runtime_config` was never called (test harnesses). The
@@ -1349,6 +1413,8 @@ impl RaftManager {
         let state_checkpointer = StateCheckpointer::from_config(
             state.database().clone(),
             raft_db,
+            blocks_db,
+            events_db,
             runtime_config,
             applied_index_rx,
             parent_token.child_token(),
@@ -1556,7 +1622,8 @@ impl RaftManager {
         info!(
             regions = regions.len(),
             per_region_timeout_ms = per_region_timeout.as_millis() as u64,
-            "sync_all_state_dbs: forcing final state.db + raft.db sync across all regions"
+            "sync_all_state_dbs: forcing final state.db + raft.db + blocks.db + events.db \
+             (if configured) sync across all regions"
         );
 
         for region in regions {
@@ -1573,20 +1640,39 @@ impl RaftManager {
             };
             let state_db = group.state().database().clone();
             let raft_db = Arc::clone(group.raft_db());
+            let blocks_db = Arc::clone(group.blocks_db());
+            let events_db_opt = group.events_state_db();
 
-            // Sync both DBs concurrently inside the per-region timeout. Using
-            // `tokio::join!` rather than splitting the budget means a slow
-            // raft.db fsync doesn't starve state.db or vice versa. `sync_state`
-            // consumes an `Arc<Self>`, so clone for the await and reuse the
-            // originals to read `last_synced_snapshot_id` after the join.
+            // Sync every configured DB concurrently inside the per-region
+            // timeout. Using `tokio::join!` rather than splitting the budget
+            // means a slow fsync on one DB doesn't starve the others.
+            // `sync_state` consumes an `Arc<Self>`, so clone for the await
+            // and reuse the originals to read `last_synced_snapshot_id`
+            // after the join. When `events_db_opt` is `None` the match
+            // picks the 3-arm variant so absent-events regions don't
+            // contribute a spurious Ok to the log.
             let state_fut = Arc::clone(&state_db).sync_state();
             let raft_fut = Arc::clone(&raft_db).sync_state();
-            match tokio::time::timeout(per_region_timeout, async {
-                tokio::join!(state_fut, raft_fut)
+            let blocks_fut = Arc::clone(&blocks_db).sync_state();
+            let events_db_for_sync = events_db_opt.clone();
+            let timeout_outcome = tokio::time::timeout(per_region_timeout, async {
+                match events_db_for_sync {
+                    Some(events_db) => {
+                        let events_fut = Arc::clone(&events_db).sync_state();
+                        let (s, r, b, e) =
+                            tokio::join!(state_fut, raft_fut, blocks_fut, events_fut);
+                        (s, r, b, Some(e))
+                    },
+                    None => {
+                        let (s, r, b) = tokio::join!(state_fut, raft_fut, blocks_fut);
+                        (s, r, b, None)
+                    },
+                }
             })
-            .await
-            {
-                Ok((state_result, raft_result)) => {
+            .await;
+
+            match timeout_outcome {
+                Ok((state_result, raft_result, blocks_result, events_result)) => {
                     match state_result {
                         Ok(()) => info!(
                             region = region.as_str(),
@@ -1615,13 +1701,55 @@ impl RaftManager {
                             "sync_all_state_dbs: final state-DB sync failed; crash gap narrowed but not zero"
                         ),
                     }
+                    match blocks_result {
+                        Ok(()) => info!(
+                            region = region.as_str(),
+                            db = "blocks",
+                            last_synced_snapshot_id = blocks_db.last_synced_snapshot_id(),
+                            "sync_all_state_dbs: final state-DB sync complete"
+                        ),
+                        Err(e) => warn!(
+                            region = region.as_str(),
+                            db = "blocks",
+                            error = %e,
+                            "sync_all_state_dbs: final state-DB sync failed; crash gap narrowed but not zero"
+                        ),
+                    }
+                    match (events_result, events_db_opt) {
+                        (Some(Ok(())), Some(events_db)) => info!(
+                            region = region.as_str(),
+                            db = "events",
+                            last_synced_snapshot_id = events_db.last_synced_snapshot_id(),
+                            "sync_all_state_dbs: final state-DB sync complete"
+                        ),
+                        (Some(Err(e)), _) => warn!(
+                            region = region.as_str(),
+                            db = "events",
+                            error = %e,
+                            "sync_all_state_dbs: final state-DB sync failed; crash gap narrowed but not zero"
+                        ),
+                        (None, _) => debug!(
+                            region = region.as_str(),
+                            "sync_all_state_dbs: region has no events_db; skipping events sync"
+                        ),
+                        (Some(Ok(())), None) => {
+                            // Unreachable: events_result Some implies the
+                            // 4-arm join fired, which implies
+                            // events_db_opt was Some at the call site.
+                            // Swallow defensively rather than panic.
+                            debug!(
+                                region = region.as_str(),
+                                "sync_all_state_dbs: events sync succeeded but handle no longer available"
+                            );
+                        },
+                    }
                 },
                 Err(_) => {
                     warn!(
                         region = region.as_str(),
                         timeout_ms = per_region_timeout.as_millis() as u64,
-                        "sync_all_state_dbs: final state-DB sync (state.db + raft.db) timed out; \
-                         continuing with remaining regions"
+                        "sync_all_state_dbs: final state-DB sync (state + raft + blocks + events) \
+                         timed out; continuing with remaining regions"
                     );
                 },
             }
@@ -1728,6 +1856,8 @@ impl RaftManager {
             group.handle().clone(),
             group.state().clone(),
             Arc::clone(group.raft_db()),
+            Arc::clone(group.blocks_db()),
+            group.events_state_db(),
             group.block_archive().clone(),
             group.applied_state().clone(),
             group.applied_index_watch(),
@@ -2274,6 +2404,10 @@ mod tests {
         // sync_state short-circuits to a no-op when there's nothing dirty,
         // but it still completes Ok(()) which is what this test asserts.
         //
+        // Sprint 1B3 Task 2D: the sweep now covers 4 DBs per region
+        // (state, raft, blocks, events when configured). This assertion
+        // confirms none of them regress their `last_synced_snapshot_id`.
+        //
         // A deeper test that commits-in-memory and asserts the snapshot id
         // actually advances belongs in Task 3A (crash-recovery integration),
         // where the full apply pipeline is in scope.
@@ -2286,16 +2420,44 @@ mod tests {
         manager.start_system_region(region_config).await.expect("start system");
 
         let region = manager.get_region_group(Region::GLOBAL).expect("get region");
-        let db = region.state().database().clone();
-        let before = db.last_synced_snapshot_id();
+        let state_db = region.state().database().clone();
+        let raft_db = Arc::clone(region.raft_db());
+        let blocks_db = Arc::clone(region.blocks_db());
+        let events_db = region.events_state_db();
+        let state_before = state_db.last_synced_snapshot_id();
+        let raft_before = raft_db.last_synced_snapshot_id();
+        let blocks_before = blocks_db.last_synced_snapshot_id();
+        let events_before = events_db.as_ref().map(|db| db.last_synced_snapshot_id());
 
         manager.sync_all_state_dbs(std::time::Duration::from_secs(5)).await;
 
-        let after = db.last_synced_snapshot_id();
+        let state_after = state_db.last_synced_snapshot_id();
+        let raft_after = raft_db.last_synced_snapshot_id();
+        let blocks_after = blocks_db.last_synced_snapshot_id();
+        let events_after = events_db.as_ref().map(|db| db.last_synced_snapshot_id());
+
         assert!(
-            after >= before,
-            "sync_all_state_dbs must not regress last_synced_snapshot_id (before={before}, after={after})"
+            state_after >= state_before,
+            "state.db last_synced_snapshot_id regressed (before={state_before}, after={state_after})"
         );
+        assert!(
+            raft_after >= raft_before,
+            "raft.db last_synced_snapshot_id regressed (before={raft_before}, after={raft_after})"
+        );
+        assert!(
+            blocks_after >= blocks_before,
+            "blocks.db last_synced_snapshot_id regressed (before={blocks_before}, after={blocks_after})"
+        );
+        match (events_before, events_after) {
+            (Some(before), Some(after)) => assert!(
+                after >= before,
+                "events.db last_synced_snapshot_id regressed (before={before}, after={after})"
+            ),
+            (None, None) => {},
+            (a, b) => panic!(
+                "events_db handle appeared or disappeared between calls: before={a:?}, after={b:?}"
+            ),
+        }
     }
 
     #[tokio::test]

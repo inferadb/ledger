@@ -24,7 +24,7 @@ use inferadb_ledger_state::{
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
     AppId, AppSlug, ErrorCode, Hash, InvitationStatus, InviteEmailEntry, InviteIndexEntry, NodeId,
-    Operation, OrganizationId, PendingTotpChallenge, PrimaryAuthMethod, TeamId, TeamSlug,
+    Operation, OrganizationId, PendingTotpChallenge, PrimaryAuthMethod, Region, TeamId, TeamSlug,
     TokenSubject, TokenType, TokenVersion, UserRole, UserStatus, VaultEntry, VaultId,
     compute_tx_merkle_root, decode, encode,
     events::{EventAction, EventEntry, EventOutcome},
@@ -100,7 +100,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
             let mut ops = Vec::new();
             write_audit_record(&mut ops, key, record);
             if !ops.is_empty()
-                && let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, block_height)
+                && let Err(e) =
+                    state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, block_height)
             {
                 tracing::warn!(error = %e, action = %record.action, "Failed to write audit record");
             }
@@ -642,7 +643,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                         expires_at: None,
                                     }];
                                     if let Err(e) =
-                                        state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0)
+                                        state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0)
                                     {
                                         tracing::error!(
                                             organization_id = organization.value(),
@@ -1152,7 +1153,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 expires_at: None,
                             },
                         ];
-                        if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                        if let Err(e) = state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0)
+                        {
                             return error_result(
                                 ErrorCode::Internal,
                                 format!("Failed to write invite indexes: {e}"),
@@ -1280,7 +1282,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             Operation::DeleteEntity { key: token_key },
                         ];
 
-                        if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                        if let Err(e) = state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0)
+                        {
                             return error_result(
                                 ErrorCode::Internal,
                                 format!("Failed to update invite indexes: {e}"),
@@ -1329,7 +1332,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         Operation::DeleteEntity { key: token_key },
                     ];
 
-                    if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                    if let Err(e) = state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0) {
                         return error_result(
                             ErrorCode::Internal,
                             format!("Failed to purge invite indexes: {e}"),
@@ -1392,7 +1395,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         },
                     ];
 
-                    if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                    if let Err(e) = state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0) {
                         return error_result(
                             ErrorCode::Internal,
                             format!("Failed to rehash invite email index: {e}"),
@@ -1450,7 +1453,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             condition: None,
                             expires_at: None,
                         }];
-                        if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                        if let Err(e) = state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0)
+                        {
                             return (
                                 LedgerResponse::Error {
                                     code: ErrorCode::Internal,
@@ -1511,7 +1515,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         // Delete slug index from GLOBAL state
                         let slug_key = SystemKeys::team_slug_key(slug);
                         let ops = vec![Operation::DeleteEntity { key: slug_key }];
-                        if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                        if let Err(e) = state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0)
+                        {
                             return (
                                 LedgerResponse::Error {
                                     code: ErrorCode::Internal,
@@ -1606,7 +1611,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     expires_at: None,
                                 },
                             ];
-                            if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                            if let Err(e) =
+                                state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0)
+                            {
                                 return (
                                     LedgerResponse::Error {
                                         code: ErrorCode::Internal,
@@ -1689,7 +1696,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         let assertion_prefix =
                             SystemKeys::app_assertion_prefix(*organization, *app);
                         collect_all_entities_for_deletion(state_layer, &assertion_prefix, &mut ops);
-                        if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                        if let Err(e) = state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0)
+                        {
                             return (
                                 LedgerResponse::Error {
                                     code: ErrorCode::Internal,
@@ -1921,7 +1929,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     expires_at: None,
                                 }];
                                 if let Err(e) =
-                                    state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0)
+                                    state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0)
                                 {
                                     return (
                                         LedgerResponse::Error {
@@ -1957,7 +1965,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             Ok(Some(_)) => {
                                 let ops = vec![Operation::DeleteEntity { key }];
                                 if let Err(e) =
-                                    state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0)
+                                    state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0)
                                 {
                                     return (
                                         LedgerResponse::Error {
@@ -2018,7 +2026,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                                     condition: None,
                                                     expires_at: None,
                                                 }];
-                                                if let Err(e) = state_layer.apply_operations(
+                                                if let Err(e) = state_layer.apply_operations_lazy(
                                                     SYSTEM_VAULT_ID,
                                                     &ops,
                                                     0,
@@ -2116,9 +2124,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                             condition: None,
                                             expires_at: None,
                                         }];
-                                        if let Err(e) =
-                                            state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0)
-                                        {
+                                        if let Err(e) = state_layer.apply_operations_lazy(
+                                            SYSTEM_VAULT_ID,
+                                            &ops,
+                                            0,
+                                        ) {
                                             return (
                                                 LedgerResponse::Error {
                                                     code: ErrorCode::Internal,
@@ -2169,7 +2179,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                                 condition: None,
                                                 expires_at: None,
                                             }];
-                                            if let Err(e) = state_layer.apply_operations(
+                                            if let Err(e) = state_layer.apply_operations_lazy(
                                                 SYSTEM_VAULT_ID,
                                                 &ops,
                                                 0,
@@ -2232,7 +2242,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             Ok(Some(_)) => {
                                 let ops = vec![Operation::DeleteEntity { key }];
                                 if let Err(e) =
-                                    state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0)
+                                    state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0)
                                 {
                                     return (
                                         LedgerResponse::Error {
@@ -2441,7 +2451,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             // App name index and app profile keys are REGIONAL —
                             // cleaned up by PurgeOrganizationRegional.
                             if let Err(e) =
-                                state_layer.apply_operations(SYSTEM_VAULT_ID, &cleanup_ops, 0)
+                                state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &cleanup_ops, 0)
                             {
                                 tracing::error!(
                                     organization_id = organization.value(),
@@ -3009,7 +3019,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 condition: None,
                                 expires_at: None,
                             }];
-                            if let Err(e) = sl.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                            if let Err(e) = sl.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0) {
                                 tracing::error!(
                                     node_id,
                                     ?status,
@@ -3290,7 +3300,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     },
                                 ];
                                 if let Err(e) =
-                                    state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0)
+                                    state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0)
                                 {
                                     tracing::error!(
                                         organization_id = organization_id.value(),
@@ -3826,7 +3836,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             }];
                             if let Some(state_layer) = &self.state_layer
                                 && let Err(e) =
-                                    state_layer.apply_operations(SYSTEM_VAULT_ID, &hmac_ops, 0)
+                                    state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &hmac_ops, 0)
                             {
                                 return (
                                     LedgerResponse::Error {
@@ -4075,7 +4085,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 },
                             ];
                             if let Err(e) =
-                                state_layer.apply_operations(SYSTEM_VAULT_ID, &user_ops, 0)
+                                state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &user_ops, 0)
                             {
                                 return (
                                     LedgerResponse::Error {
@@ -4143,7 +4153,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             let account_key = SystemKeys::onboard_account_key(email_hmac);
                             let cleanup_ops = vec![Operation::DeleteEntity { key: account_key }];
                             if let Err(e) =
-                                state_layer.apply_operations(SYSTEM_VAULT_ID, &cleanup_ops, 0)
+                                state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &cleanup_ops, 0)
                             {
                                 tracing::warn!(
                                     email_hmac = %email_hmac,
@@ -4209,7 +4219,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             }];
                             if let Some(state_layer) = &self.state_layer
                                 && let Err(e) =
-                                    state_layer.apply_operations(SYSTEM_VAULT_ID, &hmac_ops, 0)
+                                    state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &hmac_ops, 0)
                             {
                                 return (
                                     LedgerResponse::Error {
@@ -4290,7 +4300,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 }
                                 codes_deleted = delete_ops.len() as u32;
                                 if !delete_ops.is_empty()
-                                    && let Err(e) = state_layer.apply_operations(
+                                    && let Err(e) = state_layer.apply_operations_lazy(
                                         SYSTEM_VAULT_ID,
                                         &delete_ops,
                                         0,
@@ -4321,7 +4331,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 }
                                 accounts_deleted = delete_ops.len() as u32;
                                 if !delete_ops.is_empty()
-                                    && let Err(e) = state_layer.apply_operations(
+                                    && let Err(e) = state_layer.apply_operations_lazy(
                                         SYSTEM_VAULT_ID,
                                         &delete_ops,
                                         0,
@@ -4353,7 +4363,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 }
                                 totp_deleted = delete_ops.len() as u32;
                                 if !delete_ops.is_empty()
-                                    && let Err(e) = state_layer.apply_operations(
+                                    && let Err(e) = state_layer.apply_operations_lazy(
                                         SYSTEM_VAULT_ID,
                                         &delete_ops,
                                         0,
@@ -4513,7 +4523,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 expires_at: None,
                             }];
 
-                            if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                            if let Err(e) =
+                                state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0)
+                            {
                                 return error_result(
                                     ErrorCode::Internal,
                                     format!("Failed to write app profile: {e}"),
@@ -4569,7 +4581,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     let ops =
                                         vec![Operation::DeleteEntity { key: team_storage_key }];
                                     if let Err(e) =
-                                        state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0)
+                                        state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0)
                                     {
                                         return error_result(
                                             ErrorCode::Internal,
@@ -4753,7 +4765,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 condition: None,
                                 expires_at: None,
                             }];
-                            if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                            if let Err(e) =
+                                state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0)
+                            {
                                 return error_result(
                                     ErrorCode::Internal,
                                     format!("Failed to write assertion name: {e}"),
@@ -4775,7 +4789,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             let key =
                                 SystemKeys::assertion_name_key(*organization, *app, *assertion);
                             let ops = vec![Operation::DeleteEntity { key }];
-                            if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                            if let Err(e) =
+                                state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0)
+                            {
                                 return error_result(
                                     ErrorCode::Internal,
                                     format!("Failed to delete assertion name: {e}"),
@@ -4816,7 +4832,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 &mut ops,
                             );
 
-                            if let Err(e) = state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0) {
+                            if let Err(e) =
+                                state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0)
+                            {
                                 return error_result(
                                     ErrorCode::Internal,
                                     format!("Failed to delete app profile: {e}"),
@@ -4883,7 +4901,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                             if !ops.is_empty()
                                 && let Err(e) =
-                                    state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0)
+                                    state_layer.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0)
                             {
                                 tracing::error!(
                                     organization_id = organization.value(),
@@ -5479,9 +5497,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                             condition: None,
                                             expires_at: None,
                                         }];
-                                        if let Err(e) =
-                                            state_layer.apply_operations(SYSTEM_VAULT_ID, &ops, 0)
-                                        {
+                                        if let Err(e) = state_layer.apply_operations_lazy(
+                                            SYSTEM_VAULT_ID,
+                                            &ops,
+                                            0,
+                                        ) {
                                             tracing::warn!(
                                                 region = region.as_str(),
                                                 error = %e,
@@ -6685,6 +6705,141 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     },
                     None,
                 )
+            },
+
+            LedgerRequest::IngestExternalEvents { source, events: ingest_events } => {
+                // Sprint 1B3 Task 2C: external audit-event ingestion apply handler.
+                //
+                // Residency backstop: external EventEntry payloads carry
+                // user-controlled strings (principal, event_type, details).
+                // These MUST only land in REGIONAL events.db; routing to a
+                // GLOBAL shard would be a data-residency incident. The RPC
+                // handler routes to the regional leader; this debug_assert
+                // catches drift where a IngestExternalEvents proposal
+                // reaches the GLOBAL apply path during development.
+                debug_assert!(
+                    self.region != Region::GLOBAL,
+                    "IngestExternalEvents applied on GLOBAL shard — residency bug (Sprint 1B3)"
+                );
+
+                // External events are idempotent under replay: the entire
+                // Vec<EventEntry> (including UUIDv4 event_ids + timestamps)
+                // is frozen into the WAL payload before consensus, and
+                // EventStore::write upserts via B-tree insert. Re-applying
+                // the same proposal on replay writes byte-identical rows.
+                // skip_state_writes guards state.db atomicity; external
+                // events touch events.db only and don't participate in that
+                // sentinel's semantics, so the flag is intentionally ignored
+                // here (idempotency covers the replay correctness gap).
+                let _ = skip_state_writes;
+
+                let event_writer = match self.event_writer.as_ref() {
+                    Some(ew) => ew,
+                    None => {
+                        tracing::error!(
+                            source = %source,
+                            count = ingest_events.len(),
+                            "IngestExternalEvents apply handler: no event_writer configured"
+                        );
+                        return (
+                            LedgerResponse::Error {
+                                code: ErrorCode::Internal,
+                                message:
+                                    "Event writer is not configured on this node; cannot apply IngestExternalEvents"
+                                        .to_string(),
+                            },
+                            None,
+                        );
+                    },
+                };
+
+                if ingest_events.is_empty() {
+                    // Defensive: the RPC handler short-circuits empty batches
+                    // before proposing. If we hit this on the apply path, it
+                    // is benign — nothing to write.
+                    return (LedgerResponse::Empty, None);
+                }
+
+                let mut txn = match event_writer.events_db().write() {
+                    Ok(txn) => txn,
+                    Err(e) => {
+                        tracing::error!(
+                            source = %source,
+                            error = %e,
+                            count = ingest_events.len(),
+                            "IngestExternalEvents: failed to open events.db write txn"
+                        );
+                        return (
+                            LedgerResponse::Error {
+                                code: ErrorCode::Internal,
+                                message: format!("Failed to open events.db write transaction: {e}"),
+                            },
+                            None,
+                        );
+                    },
+                };
+
+                for entry in ingest_events.iter() {
+                    if let Err(e) = inferadb_ledger_state::EventStore::write(&mut txn, entry) {
+                        tracing::error!(
+                            source = %source,
+                            error = %e,
+                            "IngestExternalEvents: failed to write event to events.db"
+                        );
+                        return (
+                            LedgerResponse::Error {
+                                code: ErrorCode::Internal,
+                                message: format!(
+                                    "Failed to write external event to events.db: {e}"
+                                ),
+                            },
+                            None,
+                        );
+                    }
+                }
+
+                // Sprint 1B3 Task 2C: events.db external-ingest apply commit
+                // uses `commit_in_memory` — same durability class as the
+                // apply-phase write_events path (Task 2B). Durability is
+                // realized by StateCheckpointer / snapshot / backup /
+                // graceful-shutdown sync of events.db. On crash, every
+                // IngestExternalEvents proposal in the gap is WAL-replayable
+                // via apply_committed_entries.
+                if let Err(e) = txn.commit_in_memory() {
+                    tracing::error!(
+                        source = %source,
+                        error = %e,
+                        count = ingest_events.len(),
+                        "IngestExternalEvents: commit_in_memory failed"
+                    );
+                    return (
+                        LedgerResponse::Error {
+                            code: ErrorCode::Internal,
+                            message: format!(
+                                "Failed to commit external events batch to events.db: {e}"
+                            ),
+                        },
+                        None,
+                    );
+                }
+
+                // Per-event metrics. Label values match the RPC-handler site
+                // this replaces (Sprint 1B3 design § Observability):
+                // phase="handler_phase" because events were constructed as
+                // HandlerPhase emission at the RPC boundary.
+                for entry in ingest_events.iter() {
+                    crate::metrics::record_event_write(
+                        "handler_phase",
+                        entry.action.scope().as_str(),
+                        entry.action.as_str(),
+                    );
+                }
+
+                // External events are not vault entries; they never touch
+                // BlockArchive or the region-height counter. last_applied
+                // advancement is handled by the surrounding save_state_core
+                // batch commit.
+                (LedgerResponse::Empty, None)
             },
         }
     }

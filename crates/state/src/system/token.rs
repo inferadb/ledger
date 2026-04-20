@@ -124,7 +124,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             ops.push(set_entity(org_index_key, encode(&key.id).context(CodecSnafu)?));
         }
 
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         self.signing_key_cache.invalidate(&key.kid);
         Ok(())
     }
@@ -332,7 +332,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             ops.push(Operation::DeleteEntity { key: scope_key });
         }
 
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         self.signing_key_cache.invalidate(kid);
         Ok(Some(key))
     }
@@ -362,7 +362,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             key: SystemKeys::signing_key_scope_index(&SigningKeyScope::Organization(org)),
         });
 
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         for key in &keys {
             self.signing_key_cache.invalidate(&key.kid);
@@ -413,7 +413,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             ops.push(set_entity(av_key, id_value));
         }
 
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
     }
 
@@ -464,7 +464,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
 
         let value = encode(&token).context(CodecSnafu)?;
         let ops = vec![set_entity(primary_key, value)];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(true)
     }
 
@@ -475,7 +475,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         let key = SystemKeys::refresh_token_family_poisoned(family);
         require_tier(&key, KeyTier::Global)?;
         let ops = vec![set_entity(key, vec![1])];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         Ok(())
     }
 
@@ -539,7 +539,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         }
 
         if !ops.is_empty() {
-            self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+            self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         }
 
         // Only remove poisoned marker after all tokens are confirmed revoked.
@@ -548,7 +548,9 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
             let marker_ops = vec![Operation::DeleteEntity {
                 key: SystemKeys::refresh_token_family_poisoned(family),
             }];
-            self.state.apply_operations(SYSTEM_VAULT_ID, &marker_ops, 0).context(StateSnafu)?;
+            self.state
+                .apply_operations_lazy(SYSTEM_VAULT_ID, &marker_ops, 0)
+                .context(StateSnafu)?;
         }
 
         check_revocation_truncation(truncated, "revoke_token_family", revoked_count)?;
@@ -658,7 +660,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
         }
 
         if !ops.is_empty() {
-            self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+            self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
         }
 
         // Phase 2: Garbage-collect poisoned families
@@ -747,7 +749,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
 
         let value = encode(&user).context(CodecSnafu)?;
         let ops = vec![set_entity(user_key, value)];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         Ok(new_version)
     }
@@ -852,7 +854,7 @@ impl<B: StorageBackend> SystemOrganizationService<B> {
 
         let value = encode(&app).context(CodecSnafu)?;
         let ops = vec![set_entity(app_key, value)];
-        self.state.apply_operations(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
+        self.state.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0).context(StateSnafu)?;
 
         Ok(new_version)
     }
