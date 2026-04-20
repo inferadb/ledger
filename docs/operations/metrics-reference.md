@@ -244,6 +244,33 @@ histogram_quantile(0.99, sum by (region, le) (rate(ledger_state_recovery_duratio
 ledger_state_dirty_pages
 ```
 
+## Handler Event Flush
+
+Metrics for the handler-phase event queue + background flusher introduced in Sprint 1B4. Operator tuning + durability contract: [durability.md § Handler-phase event flush window](durability.md#handler-phase-event-flush-window). Configuration knobs: [configuration.md § Handler-Phase Event Batching](configuration.md#handler-phase-event-batching).
+
+| Metric                                | Type      | Labels                                                    | Description                                                                                                                                                                                                    |
+| ------------------------------------- | --------- | --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ledger_event_flush_triggers_total`   | Counter   | `region`, `trigger`                                       | `EventFlusher` flush attempts. `trigger` ∈ `time` (interval fired) / `size` (queue hit `flush_size_threshold`) / `shutdown` (Phase 5b `flush_for_shutdown` drain).                                              |
+| `ledger_event_flush_duration_seconds` | Histogram | `region`                                                  | Per-flush end-to-end latency (drain + events.db write-txn `commit()` fsync). Uses `SLI_HISTOGRAM_BUCKETS`.                                                                                                     |
+| `ledger_event_flush_queue_depth`      | Gauge     | `region`                                                  | Queue depth sampled at the moment a flush begins.                                                                                                                                                              |
+| `ledger_event_flush_entries_per_flush`| Histogram | `region`                                                  | Number of `EventEntry` values drained into one flush batch.                                                                                                                                                    |
+| `ledger_event_flush_failures_total`   | Counter   | `region`                                                  | Flush `commit()` failures — disk full, IO error, corrupted events.db page. Entries in the failing batch are logged + dropped (best-effort contract preserved).                                                  |
+| `ledger_event_overflow_total`         | Counter   | `region`, `cause`                                         | Handler-phase event emissions that never reached disk. `cause` ∈ `queue_full` (enqueue failed under `overflow_behavior=drop`) / `shutdown_timeout` (Phase 5b drain budget exceeded) / `channel_closed` (emission after flusher shutdown). |
+
+**Labels:**
+
+- `region`: the **emitting region** captured from the `EventEntry` at enqueue time (not the region of the events.db the flusher writes into — today all handler-phase events land in GLOBAL `events.db` regardless of emitter).
+- `trigger`: `time`, `size`, or `shutdown`.
+- `cause`: `queue_full`, `shutdown_timeout`, or `channel_closed`.
+
+### Suggested alerts
+
+- **`ledger_event_flush_queue_depth` climbing without bound** — flusher is stuck or `events.db` write is sluggish. Check `ledger_event_flush_failures_total` and disk / cgroup-IO health.
+- **`histogram_quantile(0.99, rate(ledger_event_flush_duration_seconds_bucket[5m])) > 0.5`** — flush taking > 500ms at p99. Typically disk slowness or `drain_batch_max` too large for the underlying events.db throughput. Lower `drain_batch_max` or provision faster disk.
+- **`rate(ledger_event_flush_failures_total[5m]) > 0`** — any flush failure is serious: disk full, corrupted events.db, or similar. Investigate immediately — every failed flush is a bucket of handler-phase events silently dropped.
+- **`rate(ledger_event_overflow_total{cause="queue_full"}[5m]) > 0`** — producer pressure exceeds flush rate under `overflow_behavior=drop`. Raise `queue_capacity` (restart required), tighten `flush_interval_ms`, or switch to `overflow_behavior=block` if lossless is required.
+- **`increase(ledger_event_overflow_total{cause="shutdown_timeout"}[1h]) > 0`** — shutdown drain budget (5s default) was exceeded; queued events did not make it to disk on a restart. Raise the `flush_for_shutdown(timeout)` value in `crates/server/src/main.rs` Phase 5b.
+
 ## Learner Refresh
 
 | Metric                                   | Type      | Labels                   | Description              |

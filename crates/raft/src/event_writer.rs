@@ -723,6 +723,18 @@ pub struct EventHandle<B: StorageBackend> {
     /// `Some(_)` → enqueue into the flusher queue; one fsync per flush
     /// window instead of one per event.
     queue: Option<Arc<FlushQueue>>,
+    /// Handle to the live runtime configuration.
+    ///
+    /// `None` → pre-1B4 construction via [`EventHandle::new`]; there is no
+    /// flusher to consult and `record_handler_event` unconditionally uses
+    /// the synchronous fallback.
+    ///
+    /// `Some(_)` → production construction via [`EventHandle::with_batching`].
+    /// `record_handler_event` reads `event_writer_batch.enabled` on every
+    /// emission — when `false`, the queue is bypassed and the entry is
+    /// written through `write_entry` with per-emission fsync
+    /// (strict-durability escape hatch).
+    runtime_config: Option<RuntimeConfigHandle>,
 }
 
 impl<B: StorageBackend> Clone for EventHandle<B> {
@@ -732,6 +744,7 @@ impl<B: StorageBackend> Clone for EventHandle<B> {
             config: Arc::clone(&self.config),
             node_id: self.node_id,
             queue: self.queue.clone(),
+            runtime_config: self.runtime_config.clone(),
         }
     }
 }
@@ -743,7 +756,7 @@ impl<B: StorageBackend + 'static> EventHandle<B> {
     /// Used by tests and legacy construction sites; production code should
     /// construct via [`EventHandle::with_batching`] instead.
     pub fn new(events_db: Arc<EventsDatabase<B>>, config: Arc<EventConfig>, node_id: u64) -> Self {
-        Self { events_db, config, node_id, queue: None }
+        Self { events_db, config, node_id, queue: None, runtime_config: None }
     }
 
     /// Creates a new event handle wired into a background flusher.
@@ -801,7 +814,7 @@ impl<B: StorageBackend + 'static> EventHandle<B> {
             size_hint,
             size_notify,
             drop_count,
-            runtime_config,
+            runtime_config: runtime_config.clone(),
             region,
             last_announced_capacity: batch_config.queue_capacity,
         };
@@ -810,19 +823,31 @@ impl<B: StorageBackend + 'static> EventHandle<B> {
             flusher.run().await;
         });
 
-        let handle = Self { events_db, config, node_id, queue: Some(queue) };
+        let handle = Self {
+            events_db,
+            config,
+            node_id,
+            queue: Some(queue),
+            runtime_config: Some(runtime_config),
+        };
         (handle, join)
     }
 
     /// Records a handler-phase event (best-effort).
     ///
-    /// When the handle was constructed with a flusher ([`Self::with_batching`])
-    /// and the runtime config's `enabled` flag is true, the entry is enqueued
-    /// into the bounded `FlushQueue` and the method returns without fsync'ing —
-    /// the flusher commits on its next cycle. When no queue is attached (or
-    /// `enabled = false`), falls back to the pre-1B4 strict-durable
-    /// `write_entry` path: one fsync per event, completed before the method
-    /// returns.
+    /// Routing decision:
+    ///
+    /// - When the handle has a flusher attached ([`Self::with_batching`]) **and**
+    ///   `RuntimeConfigHandle::load().event_writer_batch.enabled` is `true` (the default when the
+    ///   section is unset), the entry is enqueued into the bounded [`FlushQueue`] and the method
+    ///   returns without fsync'ing — the flusher commits on its next time / size / shutdown cycle.
+    /// - When `event_writer_batch.enabled = false` is set via the `UpdateConfig` RPC, the queue is
+    ///   **bypassed** and the entry is written synchronously through [`Self::write_entry`] with one
+    ///   fsync per emission. This is the strict-durability escape hatch for compliance deployments
+    ///   (see the Sprint 1B4 design doc § "enabled = false as escape hatch"). Entries already in
+    ///   the queue when the flag flips continue to drain on the next flush cycle — no data loss.
+    /// - When no flusher is attached ([`Self::new`], pre-1B4 construction), the same synchronous
+    ///   path is taken unconditionally.
     ///
     /// Best-effort: write / enqueue failures are logged and swallowed;
     /// callers never observe an error.
@@ -843,10 +868,20 @@ impl<B: StorageBackend + 'static> EventHandle<B> {
         let action_str = entry.action.as_str().to_string();
         let scope_str = scope.as_str().to_string();
 
-        if let Some(ref queue) = self.queue {
-            self.enqueue_or_fallback(queue, entry, &scope_str, &action_str);
-        } else {
-            self.write_sync(entry, &scope_str, &action_str);
+        // Strict-durability escape hatch: operators can toggle
+        // `event_writer_batch.enabled = false` at runtime via `UpdateConfig`
+        // RPC to bypass the queue and restore pre-1B4 per-emission fsync
+        // semantics. Default is `true` (Sprint 1B4 batching is the shipped
+        // default); an unset `event_writer_batch` section is also treated as
+        // batched, matching `EventWriterBatchConfig::default().enabled`.
+        let batch_enabled = self
+            .runtime_config
+            .as_ref()
+            .is_none_or(|rc| rc.load().event_writer_batch.as_ref().is_none_or(|b| b.enabled));
+
+        match (&self.queue, batch_enabled) {
+            (Some(queue), true) => self.enqueue_or_fallback(queue, entry, &scope_str, &action_str),
+            _ => self.write_sync(entry, &scope_str, &action_str),
         }
     }
 
@@ -2254,11 +2289,12 @@ mod tests {
         assert_eq!(count, 1);
     }
 
-    /// Test 2: `enabled = false` on the batch config still enqueues in
-    /// this implementation (enabled gates the flusher's write path, not
-    /// the producer) — but a handle constructed via `EventHandle::new`
-    /// with no queue at all uses the synchronous fallback and makes the
-    /// event visible immediately.
+    /// Test 2: a handle constructed via `EventHandle::new` has no queue
+    /// attached, so `record_handler_event` always routes through the
+    /// synchronous fallback and makes the event visible immediately.
+    /// The `enabled = false` runtime-config escape hatch on a batched
+    /// handle is covered by the `proptest_flush_correctness` module's
+    /// `disabled_flag_matches_batched_path_plus_flush`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn record_handler_event_falls_back_when_no_queue() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2634,5 +2670,415 @@ mod tests {
         let result = handle.flush_for_shutdown(Duration::from_secs(1)).await;
         assert_eq!(result.drained, 0);
         assert_eq!(result.lost, 0);
+    }
+
+    // =========================================================================
+    // Sprint 1B4 Task 3B — Proptests for queue ordering + flush correctness
+    // =========================================================================
+    //
+    // Two invariants drive these proptests:
+    //
+    // 1. **FIFO ordering per-producer is preserved** — a single producer serially emitting N
+    //    entries sees them land in `events.db` in the same order after a forced flush.
+    // 2. **Enabled=false == Enabled=true + forced flush** — the strict- durable escape hatch
+    //    produces byte-identical `events.db` state to the batched path once a shutdown-drain
+    //    completes. Proves the escape hatch is a true drop-in equivalent for compliance
+    //    deployments.
+    //
+    // Plus one cheap extra invariant:
+    //
+    // 3. **N concurrent producers each emitting M entries all commit** — count + set equality of
+    //    event_ids after a forced flush. No ordering claim across producers — the mpsc channel only
+    //    guarantees per-sender order.
+    //
+    // All three tests feed entries that are fully deterministic
+    // (construction uses `Utc.timestamp_opt(...)` with monotonic
+    // nanoseconds, NOT `HandlerPhaseEmitter` which derives `Utc::now()` +
+    // random UUID v4 bytes). That lets us assert strict B-tree read
+    // order — the storage primary key is `(org_id, timestamp_ns,
+    // event_id)`, so monotonic timestamps force the B-tree iteration
+    // order to match emission order.
+    //
+    // Case counts: 32 for the single-producer tests, 16 for the
+    // concurrent one. Each case opens a fresh tempdir-backed
+    // `FileBackend` events database, spawns the flusher, enqueues 1..N
+    // entries, and runs `flush_for_shutdown` — ~20-40ms per case.
+    // PROPTEST_CASES=256 would blow the lib-test wall clock; these are
+    // still enough to shrink any per-producer FIFO or enabled-false
+    // equivalence counterexample into a minimal repro.
+    mod proptest_flush_correctness {
+        use inferadb_ledger_state::Events;
+        use inferadb_ledger_store::FileBackend;
+        use proptest::prelude::*;
+
+        use super::*;
+
+        /// Constructs a deterministic `EventEntry` at emission sequence
+        /// `idx`. Timestamps are strictly monotonic in `idx` (nanosecond
+        /// granularity), event_ids encode `idx` as big-endian bytes, and
+        /// no random / wall-clock fields are used — so an
+        /// `enabled=false` vs `enabled=true` run that feeds the same
+        /// sequence produces byte-identical `events.db` state.
+        ///
+        /// # Determinism
+        /// - `timestamp` = `1_700_000_000s + idx ns` (strictly monotonic).
+        /// - `event_id` = `idx.to_be_bytes() ++ [0u8; 12]` (unique per emission index).
+        /// - `expires_at` = 0 (no GC interference).
+        fn deterministic_entry(idx: u32) -> EventEntry {
+            use chrono::TimeZone;
+
+            let ts = Utc.timestamp_opt(1_700_000_000, idx).single().expect("valid timestamp");
+
+            let mut event_id = [0u8; 16];
+            event_id[..4].copy_from_slice(&idx.to_be_bytes());
+
+            EventEntry {
+                emission: EventEmission::HandlerPhase { node_id: 1 },
+                expires_at: 0,
+                event_id,
+                source_service: "ledger".to_string(),
+                event_type: EventAction::RequestRateLimited.event_type().to_string(),
+                timestamp: ts,
+                scope: EventScope::Organization,
+                action: EventAction::RequestRateLimited,
+                principal: "user:alice".to_string(),
+                organization_id: OrganizationId::new(1),
+                organization: None,
+                vault: None,
+                outcome: EventOutcome::Denied { reason: "rate_limited".to_string() },
+                details: BTreeMap::new(),
+                block_height: None,
+                trace_id: None,
+                correlation_id: None,
+                operations_count: None,
+            }
+        }
+
+        /// Lists every event for org 1 in B-tree key order. With
+        /// monotonic `deterministic_entry` timestamps this is also the
+        /// emission order.
+        fn list_all_for_org1<B: StorageBackend>(events_db: &EventsDatabase<B>) -> Vec<EventEntry> {
+            let txn = events_db.read().expect("read");
+            let (entries, cursor) =
+                EventStore::list(&txn, OrganizationId::new(1), 0, u64::MAX, 10_000, None)
+                    .expect("list");
+            assert!(cursor.is_none(), "test sequences are bounded below pagination limit");
+            entries
+        }
+
+        /// Raw (key, value) snapshot of the `Events` primary table in
+        /// B-tree iteration order. Used for byte-identical equality
+        /// between the enabled=false and enabled=true+flush paths.
+        fn snapshot_events_table<B: StorageBackend>(
+            events_db: &EventsDatabase<B>,
+        ) -> Vec<(Vec<u8>, Vec<u8>)> {
+            let txn = events_db.read().expect("read");
+            txn.iter::<Events>().expect("iter events").collect()
+        }
+
+        /// Build a small-capacity batched handle backed by a tempdir
+        /// events.db. Caller owns the returned `TempDir` so the db
+        /// survives until the assertions run.
+        fn make_batched_handle(
+            flush_interval_ms: u64,
+            queue_capacity: usize,
+        ) -> (
+            tempfile::TempDir,
+            Arc<EventsDatabase<FileBackend>>,
+            EventHandle<FileBackend>,
+            tokio::task::JoinHandle<()>,
+        ) {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let events_db =
+                Arc::new(EventsDatabase::<FileBackend>::open(dir.path()).expect("open"));
+            let config = Arc::new(test_config());
+
+            let batch = EventWriterBatchConfig::builder()
+                .flush_interval_ms(flush_interval_ms)
+                .flush_size_threshold(10_000)
+                .queue_capacity(queue_capacity)
+                .drain_batch_max(1_000)
+                .build()
+                .unwrap();
+            let runtime = runtime_handle_with_batch(batch.clone());
+
+            let (handle, join) = EventHandle::with_batching(
+                Arc::clone(&events_db),
+                config,
+                1,
+                batch,
+                runtime,
+                "test-region",
+            );
+            (dir, events_db, handle, join)
+        }
+
+        proptest! {
+            // 32 cases: each case opens a tempdir-backed FileBackend
+            // events.db, spawns a flusher, enqueues up to 40 entries,
+            // and runs `flush_for_shutdown`. Heavier than the
+            // block-archive proptest; 32 keeps the total runtime
+            // bounded while still shrinking any FIFO-violation
+            // counterexample down to a minimal repro.
+            #![proptest_config(ProptestConfig::with_cases(32))]
+
+            /// Property 1: FIFO ordering per-producer is preserved.
+            ///
+            /// A single producer serially emitting N entries via
+            /// `record_handler_event`, followed by a `flush_for_shutdown`,
+            /// results in `events.db` holding the entries in the same
+            /// order. Uses `deterministic_entry(idx)` which produces
+            /// strictly-monotonic timestamps, so the B-tree primary key
+            /// `(org_id, timestamp_ns, event_id)` orders rows by
+            /// emission index.
+            #[test]
+            fn flusher_preserves_fifo_order_per_producer(n in 1u32..=40u32) {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime");
+
+                runtime.block_on(async move {
+                    // Use a generous flush_interval (won't fire mid-run);
+                    // `flush_for_shutdown` is the forced-drain primitive.
+                    let (_dir, events_db, handle, join) =
+                        make_batched_handle(60_000, 10_000);
+
+                    for idx in 0..n {
+                        handle.record_handler_event(deterministic_entry(idx));
+                    }
+
+                    let result = handle.flush_for_shutdown(Duration::from_secs(5)).await;
+                    prop_assert_eq!(result.drained, u64::from(n));
+                    prop_assert_eq!(result.lost, 0);
+                    join.await.expect("flusher task exit");
+
+                    // B-tree order == emission order under monotonic timestamps.
+                    let got = list_all_for_org1(&events_db);
+                    prop_assert_eq!(got.len(), n as usize);
+                    for (i, entry) in got.iter().enumerate() {
+                        let expected_id = (i as u32).to_be_bytes();
+                        prop_assert_eq!(
+                            &entry.event_id[..4],
+                            &expected_id[..],
+                            "event at position {} has wrong event_id prefix — \
+                             FIFO ordering violated",
+                            i
+                        );
+                    }
+
+                    Ok(())
+                })?;
+            }
+
+            /// Property 2: `enabled = false` escape hatch produces
+            /// byte-identical `events.db` state vs the batched path.
+            ///
+            /// The Sprint 1B4 design
+            /// (`docs/superpowers/specs/2026-04-19-sprint-1b4-handler-event-batching-design.md`
+            /// § "enabled = false is the strict-durability escape
+            /// hatch") specifies that operators can disable batching at
+            /// runtime via the `UpdateConfig` RPC; in that mode,
+            /// `record_handler_event` must bypass the queue and route
+            /// through the synchronous per-emission fsync path. This
+            /// property tests the exact production code path, including
+            /// the runtime-config read inside `record_handler_event`.
+            ///
+            /// Two handles, two fresh tempdir-backed events databases,
+            /// identical input sequence (fully deterministic, so no
+            /// wall-clock or random UUIDs to perturb the bytes).
+            ///
+            /// - Handle A: constructed via [`EventHandle::with_batching`]
+            ///   with `event_writer_batch.enabled = false` in the
+            ///   runtime config. `record_handler_event` consults the
+            ///   flag and falls through to `write_sync` (one fsync per
+            ///   event, matches pre-1B4 semantics).
+            /// - Handle B: constructed via [`EventHandle::with_batching`]
+            ///   with `enabled = true`; every emission enqueues into
+            ///   the flusher, and `flush_for_shutdown` drains the
+            ///   queue to events.db in one batched commit.
+            ///
+            /// After both paths complete, the `Events` table must be
+            /// byte-identical at the B-tree (key, value) level. Proves
+            /// the escape hatch is a true drop-in equivalent for
+            /// compliance deployments.
+            #[test]
+            fn disabled_flag_matches_batched_path_plus_flush(n in 1u32..=40u32) {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime");
+
+                runtime.block_on(async move {
+                    // Handle A: batched constructor, but the runtime
+                    // config has `enabled = false` — exercises the
+                    // strict-durability escape hatch on the production
+                    // code path.
+                    let dir_a = tempfile::tempdir().expect("tempdir A");
+                    let events_db_a =
+                        Arc::new(EventsDatabase::<FileBackend>::open(dir_a.path())
+                            .expect("open A"));
+                    let batch_off = EventWriterBatchConfig::builder()
+                        .enabled(false)
+                        .flush_interval_ms(60_000)
+                        .flush_size_threshold(10_000)
+                        .queue_capacity(10_000)
+                        .drain_batch_max(1_000)
+                        .build()
+                        .unwrap();
+                    let runtime_a = runtime_handle_with_batch(batch_off.clone());
+                    let (handle_a, join_a) = EventHandle::with_batching(
+                        Arc::clone(&events_db_a),
+                        Arc::new(test_config()),
+                        1,
+                        batch_off,
+                        runtime_a,
+                        "test-region-a",
+                    );
+
+                    // Handle B: batched path with batching enabled.
+                    let (_dir_b, events_db_b, handle_b, join_b) =
+                        make_batched_handle(60_000, 10_000);
+
+                    for idx in 0..n {
+                        let entry = deterministic_entry(idx);
+                        handle_a.record_handler_event(entry.clone());
+                        handle_b.record_handler_event(entry);
+                    }
+
+                    // Handle A wrote synchronously on every emission —
+                    // the queue should be empty, but we still drain to
+                    // stop the spawned flusher task cleanly.
+                    let result_a = handle_a.flush_for_shutdown(Duration::from_secs(5)).await;
+                    prop_assert_eq!(
+                        result_a.drained, 0,
+                        "escape-hatch handle must not have enqueued any entries"
+                    );
+                    prop_assert_eq!(result_a.lost, 0);
+                    join_a.await.expect("flusher A exit");
+
+                    let result_b = handle_b.flush_for_shutdown(Duration::from_secs(5)).await;
+                    prop_assert_eq!(result_b.drained, u64::from(n));
+                    prop_assert_eq!(result_b.lost, 0);
+                    join_b.await.expect("flusher B exit");
+
+                    let snap_a = snapshot_events_table(&events_db_a);
+                    let snap_b = snapshot_events_table(&events_db_b);
+
+                    prop_assert_eq!(
+                        snap_a.len(),
+                        snap_b.len(),
+                        "row counts diverged between enabled=false and batched+flush"
+                    );
+                    prop_assert_eq!(
+                        snap_a,
+                        snap_b,
+                        "Events table bytes diverged between enabled=false and \
+                         batched+flush — escape hatch is NOT a drop-in equivalent"
+                    );
+
+                    // Keep dir_a alive through the assertions.
+                    drop(dir_a);
+
+                    Ok(())
+                })?;
+            }
+        }
+
+        proptest! {
+            // 16 cases for the concurrent producers test: ~N*M tasks
+            // spawned per case plus flush latency. Heavier than the
+            // single-producer tests; 16 keeps the runtime bounded.
+            #![proptest_config(ProptestConfig::with_cases(16))]
+
+            /// Property 3: N concurrent producers each emitting M
+            /// entries all land in `events.db` after a forced flush.
+            ///
+            /// Asserts count == N*M, all event_ids are present
+            /// (set-equality), and no duplicates. No claim about order
+            /// — the mpsc channel only guarantees per-sender FIFO, and
+            /// producers race each other. The per-producer FIFO
+            /// property is covered by
+            /// [`flusher_preserves_fifo_order_per_producer`].
+            ///
+            /// Each producer's entries use `event_id` slots reserved
+            /// via `(producer_idx, entry_idx)` encoding — unique across
+            /// all producers.
+            #[test]
+            fn flusher_under_concurrent_emitters_preserves_all(
+                producers in 2u32..=8u32,
+                per_producer in 1u32..=10u32,
+            ) {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(4)
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime");
+
+                runtime.block_on(async move {
+                    let (_dir, events_db, handle, join) =
+                        make_batched_handle(60_000, 10_000);
+
+                    let mut tasks = Vec::with_capacity(producers as usize);
+                    for p in 0..producers {
+                        let h = handle.clone();
+                        let m = per_producer;
+                        tasks.push(tokio::spawn(async move {
+                            for i in 0..m {
+                                // Unique event_id per (producer, sequence):
+                                // first 4 bytes = producer, next 4 = seq.
+                                let mut entry = deterministic_entry(i);
+                                entry.event_id[..4].copy_from_slice(&p.to_be_bytes());
+                                entry.event_id[4..8].copy_from_slice(&i.to_be_bytes());
+                                h.record_handler_event(entry);
+                                // Yield between emissions so the multi-
+                                // thread runtime interleaves producers.
+                                tokio::task::yield_now().await;
+                            }
+                        }));
+                    }
+                    for t in tasks {
+                        t.await.expect("producer task exit");
+                    }
+
+                    let expected_total = u64::from(producers) * u64::from(per_producer);
+                    let result = handle.flush_for_shutdown(Duration::from_secs(5)).await;
+                    prop_assert_eq!(result.drained, expected_total);
+                    prop_assert_eq!(result.lost, 0);
+                    join.await.expect("flusher task exit");
+
+                    let got = list_all_for_org1(&events_db);
+                    prop_assert_eq!(got.len() as u64, expected_total);
+
+                    // Set equality: every (producer, seq) pair appears
+                    // exactly once.
+                    use std::collections::HashSet;
+                    let ids: HashSet<[u8; 16]> =
+                        got.iter().map(|e| e.event_id).collect();
+                    prop_assert_eq!(
+                        ids.len() as u64,
+                        expected_total,
+                        "duplicate event_ids — flusher committed the same entry twice"
+                    );
+                    for p in 0..producers {
+                        for i in 0..per_producer {
+                            let mut expected = [0u8; 16];
+                            expected[..4].copy_from_slice(&p.to_be_bytes());
+                            expected[4..8].copy_from_slice(&i.to_be_bytes());
+                            prop_assert!(
+                                ids.contains(&expected),
+                                "missing event_id for producer={} seq={}",
+                                p,
+                                i
+                            );
+                        }
+                    }
+
+                    Ok(())
+                })?;
+            }
+        }
     }
 }

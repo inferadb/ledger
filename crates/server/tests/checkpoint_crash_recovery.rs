@@ -37,14 +37,19 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use inferadb_ledger_raft::{
     HealthState, RaftManager, RecoveryStats, RegionConfig, RuntimeConfigHandle,
+    event_writer::{EventHandle, HandlerPhaseEmitter},
     types::{LedgerRequest, RaftPayload, SystemRequest},
 };
 use inferadb_ledger_server::{bootstrap::bootstrap_node, config::Config};
-use inferadb_ledger_store::crypto::{InMemoryKeyManager, RegionKeyManager};
+use inferadb_ledger_store::{
+    FileBackend,
+    crypto::{InMemoryKeyManager, RegionKeyManager},
+};
 use inferadb_ledger_test_utils::TestDir;
 use inferadb_ledger_types::{
     ALL_REGIONS, OrganizationId, OrganizationSlug, Region, UserId, VaultId, VaultSlug,
-    config::{CheckpointConfig, RuntimeConfig},
+    config::{CheckpointConfig, EventOverflowBehavior, EventWriterBatchConfig, RuntimeConfig},
+    events::{EventAction, EventEntry, EventOutcome},
 };
 
 use crate::common::allocate_ports;
@@ -89,6 +94,20 @@ struct CrashableNode {
     /// scenarios). `None` if no socket was provisioned (e.g. future
     /// TCP-only test variant).
     addr: String,
+    /// Handler-phase event handle cloned from `BootstrappedNode` — Sprint
+    /// 1B4 Task 3A. Retained so tests can:
+    ///   * Directly emit handler-phase events via [`EventHandle::record_handler_event`], bypassing
+    ///     the RPC stack.
+    ///   * Inspect `queue_depth()` between emission and flush.
+    ///   * Call `flush_for_shutdown()` from `graceful_shutdown()` to mirror the production
+    ///     `pre_shutdown` Phase 5b ordering.
+    ///   * Access the underlying GLOBAL `events_db` for scan assertions.
+    event_handle: EventHandle<FileBackend>,
+    /// Join handle for the spawned `EventFlusher` task. Taken (moved)
+    /// during `graceful_shutdown()` or `crash()` so the tokio runtime
+    /// can tear down cleanly — mirrors `main.rs`'s sequencing of
+    /// `event_handle.flush_for_shutdown()` → `await flusher handle`.
+    event_flusher_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl CrashableNode {
@@ -101,6 +120,26 @@ impl CrashableNode {
         data_dir: PathBuf,
         key_manager: Arc<dyn RegionKeyManager>,
         checkpoint: Option<CheckpointConfig>,
+    ) -> Self {
+        Self::start_with(data_dir, key_manager, checkpoint, None).await
+    }
+
+    /// Extended `start` that also accepts a post-bootstrap override for
+    /// the Sprint 1B4 `EventWriterBatchConfig`. When `Some`, the
+    /// runtime-config handle is swapped after the event flusher has been
+    /// spawned — so the already-created `mpsc` channel keeps its
+    /// bootstrap-time `queue_capacity` (not runtime-reconfigurable by
+    /// design) while the flusher's next tick picks up the new
+    /// `flush_interval_ms` / `flush_size_threshold`.
+    ///
+    /// This is the test hook Sprint 1B4 Task 3A uses to force the
+    /// flusher into a "never fires on its own" configuration so we can
+    /// observe the queued-but-not-yet-fsync'd window deterministically.
+    async fn start_with(
+        data_dir: PathBuf,
+        key_manager: Arc<dyn RegionKeyManager>,
+        checkpoint: Option<CheckpointConfig>,
+        batch_override: Option<EventWriterBatchConfig>,
     ) -> Self {
         // Unique UDS path per start so a crash-then-restart doesn't
         // race on the previous socket file.
@@ -170,14 +209,24 @@ impl CrashableNode {
         .expect("bootstrap node");
         health_state.mark_ready();
 
-        // Apply checkpoint override AFTER the system region is started
-        // — checkpointers already exist but they re-read from the
-        // runtime-config handle on every tick, so the next tick picks
-        // up the new thresholds. For tests that need to prevent the
-        // FIRST tick from firing, pass a short test window and trust
-        // the high thresholds — the `interval_ms` floor is 50ms.
-        if let Some(cp) = checkpoint {
-            let new = RuntimeConfig { state_checkpoint: Some(cp), ..RuntimeConfig::default() };
+        // Apply checkpoint + event-batch overrides AFTER the system
+        // region is started — checkpointers and the event flusher both
+        // re-read the runtime-config handle on every tick, so the next
+        // tick picks up the new thresholds. For tests that need to
+        // prevent the FIRST tick from firing, pass a short test window
+        // and trust the high thresholds — the `interval_ms` floor is
+        // 50ms. The `queue_capacity` + `overflow_behavior` fields are
+        // locked in at `EventHandle::with_batching` time and are NOT
+        // picked up by the running flusher; tests that depend on those
+        // must accept the defaults (10k capacity, Drop).
+        if checkpoint.is_some() || batch_override.is_some() {
+            let current = bootstrapped.runtime_config.load();
+            let new = RuntimeConfig {
+                state_checkpoint: checkpoint.or_else(|| current.state_checkpoint.clone()),
+                event_writer_batch: batch_override.or_else(|| current.event_writer_batch.clone()),
+                ..RuntimeConfig::default()
+            };
+            drop(current);
             bootstrapped.runtime_config.store(new);
         }
 
@@ -255,6 +304,8 @@ impl CrashableNode {
             server_handle,
             shutdown_tx,
             addr,
+            event_handle: bootstrapped.event_handle,
+            event_flusher_handle: Some(bootstrapped.event_flusher_handle),
         }
     }
 
@@ -281,17 +332,32 @@ impl CrashableNode {
 
     /// Invokes the production pre-shutdown sequence:
     ///   1. Cancel background jobs so nothing proposes new entries.
-    ///   2. Flush the WAL so every committed proposal is durable.
-    ///   3. Sync every region's state DB so `applied_durable == last_committed` for the next boot.
-    ///   4. Drop the watch sender so the gRPC server loop exits.
-    ///   5. Await the server task with a bounded timeout.
+    ///   2. Flush the WAL so every committed proposal is durable (Phase 5a).
+    ///   3. Drain the handler-phase event flusher + wait for its task to exit (Phase 5b — Sprint
+    ///      1B4 Task 2B). Any events enqueued during in-flight RPC completion land here.
+    ///   4. Sync every region's state DB so `applied_durable == last_committed` for the next boot
+    ///      (Phase 5c).
+    ///   5. Drop the watch sender so the gRPC server loop exits.
+    ///   6. Await the server task with a bounded timeout.
     ///
     /// Order mirrors `crates/server/src/main.rs` — reordering any of
     /// these steps can leak entries past the final sync and break the
-    /// zero-replay contract.
-    async fn graceful_shutdown(self) {
+    /// zero-replay contract, or (post-1B4) lose handler-phase events
+    /// that were enqueued but not yet committed to events.db.
+    async fn graceful_shutdown(mut self) {
         self.coordinator.shutdown().await;
         let _ = self.handle.flush_for_shutdown(Duration::from_secs(5)).await;
+        // Phase 5b — drain the event flusher and await task exit.
+        let drain = self.event_handle.flush_for_shutdown(Duration::from_secs(5)).await;
+        tracing::info!(
+            drained = drain.drained,
+            lost = drain.lost,
+            duration_ms = drain.duration.as_millis() as u64,
+            "Event flusher drain complete (test harness)"
+        );
+        if let Some(flusher) = self.event_flusher_handle.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(1), flusher).await;
+        }
         self.manager.sync_all_state_dbs(Duration::from_secs(5)).await;
         let _ = self.shutdown_tx.send(true);
         // Best-effort wait for the server to drain; in a test we don't
@@ -301,12 +367,19 @@ impl CrashableNode {
     }
 
     /// Simulates an unclean crash: aborts the server task without
-    /// signalling shutdown. No WAL flush, no `sync_all_state_dbs`.
-    /// The WAL is still durable — per root rule 10, every committed
-    /// proposal is WAL-fsynced before `propose_and_wait` returns — so
-    /// only the state DB can lag.
-    fn crash(self) {
+    /// signalling shutdown. No WAL flush, no `sync_all_state_dbs`, and
+    /// (post-1B4) no `event_handle.flush_for_shutdown`. The WAL is
+    /// still durable — per root rule 10, every committed proposal is
+    /// WAL-fsynced before `propose_and_wait` returns — so only the
+    /// state DB and the in-memory event flusher queue can lag.
+    fn crash(mut self) {
         self.server_handle.abort();
+        // Abort the flusher task too so it does not drain the queue on
+        // `EventHandle::Drop`. Mirrors SIGKILL on the whole process —
+        // queued-but-not-yet-fsync'd events are lost.
+        if let Some(flusher) = self.event_flusher_handle.take() {
+            flusher.abort();
+        }
         // `shutdown_tx` drops implicitly; its receiver is gone by the
         // time abort() completes, so nothing extra fires. State DB is
         // at whatever the last checkpointer tick (or none) captured.
@@ -365,6 +438,81 @@ fn count_surviving_email_hashes(node: &CrashableNode, keys: &[String]) -> usize 
     let region = node.manager.get_region_group(Region::GLOBAL).expect("global region available");
     let svc = SystemOrganizationService::new(region.state().clone());
     keys.iter().filter(|k| svc.get_email_hash(k).ok().flatten().is_some()).count()
+}
+
+/// Builds an `EventWriterBatchConfig` that effectively disables the
+/// time + size triggers so the flusher only drains on explicit
+/// `flush_for_shutdown`. The time interval is capped at
+/// `MAX_EVENT_FLUSH_INTERVAL_MS` (60_000ms) by the validator; the
+/// size threshold goes straight to `usize::MAX`. `queue_capacity`
+/// stays at the default (10k) — this value is bootstrap-locked and
+/// runtime overrides would only emit a warn! on the next flusher
+/// tick. Used by Sprint 1B4 Task 3A tests to hold events in the
+/// queue across an arbitrary wall-clock window before crashing.
+fn disable_event_flusher() -> EventWriterBatchConfig {
+    EventWriterBatchConfig::builder()
+        .enabled(true)
+        .flush_interval_ms(60_000)
+        .flush_size_threshold(usize::MAX)
+        .queue_capacity(10_000)
+        .overflow_behavior(EventOverflowBehavior::Block)
+        .drain_batch_max(10_000)
+        .build()
+        .expect("valid disabled-flusher cfg")
+}
+
+/// Constructs a handler-phase [`EventEntry`] keyed by a well-known
+/// action + detail tag so tests can search events.db for it
+/// deterministically. Using `RequestRateLimited` as the action avoids
+/// any interference with apply-phase event shapes produced by the
+/// apply pipeline. Organization ID is held constant so the entry lands
+/// under a predictable EventStore key prefix.
+///
+/// The `tag` string is stored in the `detail` map (key: `test_tag`) so
+/// `scan_global_events_with_tag` can recover the event set deterministically.
+fn build_test_handler_event(node_id: u64, tag: &str) -> EventEntry {
+    HandlerPhaseEmitter::for_organization(
+        EventAction::RequestRateLimited,
+        OrganizationId::new(1),
+        None,
+        node_id,
+    )
+    .principal("test:sprint-1b4-3a")
+    .outcome(EventOutcome::Denied { reason: "test-only".to_string() })
+    .detail("test_tag", tag)
+    .build(90)
+}
+
+/// Scans the GLOBAL `events.db` for all events matching `organization_id`,
+/// returning the full list. Handler-phase events emitted via
+/// `EventHandle::record_handler_event` land in the GLOBAL events.db
+/// regardless of the organization's home region (see Sprint 1B4 design
+/// doc § "Per-EventHandle isolation" invariant 5). Crash-recovery tests
+/// scan here rather than in the REGIONAL events.db used by the Sprint
+/// 1B3 ingest tests.
+fn scan_global_events(
+    node: &CrashableNode,
+    organization: OrganizationId,
+) -> Vec<inferadb_ledger_types::events::EventEntry> {
+    use inferadb_ledger_state::EventStore;
+
+    let region = node.manager.get_region_group(Region::GLOBAL).expect("GLOBAL region available");
+    let events_db = region.events_db().expect("events_db available on GLOBAL region");
+    let txn = events_db.read().expect("events_db read txn");
+    let (entries, _cursor) = EventStore::list(&txn, organization, 0, u64::MAX, 1_000_000, None)
+        .expect("EventStore::list succeeds");
+    entries
+}
+
+/// Filters `scan_global_events` down to events whose `detail["test_tag"]`
+/// matches the given tag. Used to assert that a specific cohort of
+/// pre-crash events either survived (graceful shutdown path) or was
+/// lost (crash-within-flush-window path).
+fn count_tagged_handler_events(node: &CrashableNode, tag: &str) -> usize {
+    scan_global_events(node, OrganizationId::new(1))
+        .into_iter()
+        .filter(|e| e.details.get("test_tag").map(String::as_str) == Some(tag))
+        .count()
 }
 
 // ============================================================================
@@ -1347,6 +1495,249 @@ async fn test_events_db_idempotent_on_replay() {
     assert_eq!(
         post_write_committed, pre_write_committed,
         "apply-phase WriteCommitted count diverged: pre={pre_write_committed} post={post_write_committed}"
+    );
+
+    restarted.crash();
+}
+
+// ============================================================================
+// Sprint 1B4 Task 3A: handler-phase event flusher crash + shutdown
+// ============================================================================
+//
+// Sprint 1B4 flipped `EventHandle::record_handler_event` from a synchronous
+// `commit()` per event to an enqueue into a bounded `tokio::sync::mpsc`
+// channel drained by a background `EventFlusher` task (one per `EventHandle`,
+// i.e. one per node today). The durability contract changes from "fsync
+// before handler returns success" to "enqueued before handler returns
+// success; fsync within one flush cadence window (default 100ms)". Graceful
+// shutdown preserves zero-loss by draining the queue via the new
+// `EventHandle::flush_for_shutdown` at `pre_shutdown` Phase 5b — between the
+// WAL flush (5a) and the per-region state-DB sync (5c). See the design doc
+// at `docs/superpowers/specs/2026-04-19-sprint-1b4-handler-event-batching-design.md`
+// § "Testing strategy" for the intended scenarios.
+//
+// The three tests below cover the visible-contract corners of that change:
+//   * Test 11 — crash before flush: events enqueued within the flush window are lost on SIGKILL
+//     (the `new` durability window the sprint introduces).
+//   * Test 12 — graceful shutdown: Phase 5b drains the queue; zero events lost on a clean exit.
+//   * Test 13 — time-triggered flush: with the flusher left on its default cadence, events emitted
+//     pre-crash ARE preserved if we wait longer than the flush interval before crashing. This
+//     bounds the "lost on crash" window to exactly `flush_interval_ms`, exactly as the contract
+//     promises.
+
+// ----------------------------------------------------------------------------
+// Test 11: handler-phase events enqueued within the flush window are lost on crash
+// ----------------------------------------------------------------------------
+
+/// Documents Sprint 1B4's new durability contract: a SIGKILL between a
+/// successful RPC response and the next flusher tick loses any handler-phase
+/// events emitted during that window. The pre-1B4 contract ("fsync before
+/// the handler returns success") would have preserved every event — that
+/// invariant no longer holds, and this test makes the change visible.
+///
+/// Setup: push an `EventWriterBatchConfig` that effectively disables the
+/// flusher's time + size triggers (60s interval, `usize::MAX` size
+/// threshold) via the runtime-config handle after bootstrap. The already-
+/// spawned flusher re-reads the config on its next loop iteration and
+/// settles into a 1s poll + 60s-or-bust cadence. Emit events directly via
+/// `EventHandle::record_handler_event` so we bypass the RPC handler stack
+/// entirely (the integration-test intent is to prove the durability
+/// contract at the flusher level; the RPC path is a Sprint 1B5 concern).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_handler_events_lost_within_flush_window_on_crash() {
+    const TAG: &str = "pre-crash-lost";
+    const EVENTS_EMITTED: usize = 10;
+
+    let temp = TestDir::new();
+    let data_dir = temp.path().to_path_buf();
+    let keys_mgr = test_key_manager();
+
+    let node = CrashableNode::start_with(
+        data_dir.clone(),
+        keys_mgr.clone(),
+        None,
+        Some(disable_event_flusher()),
+    )
+    .await;
+
+    // Allow the flusher to pick up the new runtime config — the flusher's
+    // loop re-reads the handle at the top of each iteration and the poll
+    // interval upper bound is `MAX_FLUSHER_POLL_INTERVAL = 1s`. Waiting
+    // 1.2s guarantees the flusher has exited its original 25ms sleep and
+    // observed the disabled-flusher thresholds.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+
+    // Emit N handler-phase events. Each call is a lock-free enqueue onto
+    // the flusher's mpsc channel; no fsync happens on this path.
+    for i in 0..EVENTS_EMITTED {
+        node.event_handle
+            .record_handler_event(build_test_handler_event(node.handle.node_id(), TAG));
+        let _ = i;
+    }
+
+    // The queue should hold every event — the flusher is tuned to NOT
+    // drain them. `queue_depth` is an approximate count (Relaxed atomic)
+    // but since no drain has run it must equal the emitted count.
+    let depth = node.event_handle.queue_depth();
+    assert_eq!(
+        depth, EVENTS_EMITTED,
+        "queue_depth should hold every emitted event (flusher disabled): got {depth}"
+    );
+
+    // events.db must NOT yet contain any tagged event — pre-flush, the
+    // only place these live is the in-memory queue.
+    let pre_crash_db_count = count_tagged_handler_events(&node, TAG);
+    assert_eq!(
+        pre_crash_db_count, 0,
+        "events.db must be empty for tag {TAG} before any flush tick: found {pre_crash_db_count}"
+    );
+
+    // Crash — no graceful_shutdown, no flush_for_shutdown. The queue and
+    // every event in it is gone with the process.
+    node.crash();
+
+    // Restart on the same data dir. The runtime config is NOT persisted
+    // (lives only in the `ArcSwap` on the previous run) so the flusher
+    // comes back with defaults — perfectly fine for post-restart scans.
+    let restarted = CrashableNode::start(data_dir, keys_mgr, None).await;
+
+    // Wait longer than one default flush interval (100ms) in case any
+    // ghost event somehow landed in events.db — we want the assertion to
+    // fire on the new-contract lost-event semantic, not race a delayed
+    // drain.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let surviving = count_tagged_handler_events(&restarted, TAG);
+    assert_eq!(
+        surviving, 0,
+        "Sprint 1B4 contract: handler-phase events enqueued within the flush window MUST be lost \
+         on crash before the flusher drains. Expected 0 surviving, got {surviving}."
+    );
+
+    restarted.crash();
+}
+
+// ----------------------------------------------------------------------------
+// Test 12: handler-phase events survive graceful shutdown
+// ----------------------------------------------------------------------------
+
+/// The positive flipside of Test 11: on a graceful shutdown, Phase 5b
+/// (`EventHandle::flush_for_shutdown`) drains the queue with a strict-durable
+/// `commit()` before the server exits. A subsequent restart must surface
+/// every pre-shutdown event — the durability window closes at shutdown,
+/// not at the default 100ms flush cadence.
+///
+/// Setup: use the default batch config so the flusher is ticking normally
+/// (100ms interval). Emit events, immediately call graceful_shutdown which
+/// mirrors production's pre_shutdown Phase 5b — the drain is bounded by a
+/// 5s timeout and returns a `DrainResult` the harness logs for debugging.
+///
+/// On a restart the events must be present in events.db. This test does
+/// NOT attempt to distinguish "drained at the 100ms tick" from "drained by
+/// flush_for_shutdown" — both are valid paths to durability and the
+/// contract is the same. The test asserts the union outcome: every
+/// emitted event is on disk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_handler_events_preserved_across_graceful_shutdown() {
+    const TAG: &str = "shutdown-preserved";
+    const EVENTS_EMITTED: usize = 20;
+
+    let temp = TestDir::new();
+    let data_dir = temp.path().to_path_buf();
+    let keys_mgr = test_key_manager();
+
+    let node = CrashableNode::start(data_dir.clone(), keys_mgr.clone(), None).await;
+
+    for _ in 0..EVENTS_EMITTED {
+        node.event_handle
+            .record_handler_event(build_test_handler_event(node.handle.node_id(), TAG));
+    }
+
+    // Graceful shutdown now drains the event flusher at Phase 5b before
+    // syncing state DBs. Any events still in the queue are fsync'd via
+    // the flusher's final `commit_batch` call.
+    node.graceful_shutdown().await;
+
+    // Restart and assert every emitted event round-tripped. `start` on
+    // the same data_dir reopens events.db; the B-tree survived the
+    // fsync, so all 20 events must be visible.
+    let restarted = CrashableNode::start(data_dir, keys_mgr, None).await;
+    let surviving = count_tagged_handler_events(&restarted, TAG);
+    assert_eq!(
+        surviving, EVENTS_EMITTED,
+        "Sprint 1B4 contract: graceful shutdown Phase 5b MUST drain the event queue before exit. \
+         Expected {EVENTS_EMITTED} surviving, got {surviving}."
+    );
+
+    restarted.crash();
+}
+
+// ----------------------------------------------------------------------------
+// Test 13: handler-phase events are durable after the flush interval elapses
+// ----------------------------------------------------------------------------
+
+/// Bounds the "lost on crash" window from above: handler-phase events
+/// emitted more than `flush_interval_ms` ago MUST be durable even on an
+/// unclean crash. Test 11 proves events are lost within the window; this
+/// test proves they are safe OUTSIDE the window. Together they pin the
+/// durability contract to "at most flush_interval_ms of handler-phase
+/// events lost on crash".
+///
+/// Setup: default `EventWriterBatchConfig` (100ms interval). Emit events,
+/// wait > 2× the interval so the flusher's time trigger has fired at
+/// least once, crash, restart, assert events are present.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_handler_events_durable_after_flush_interval() {
+    const TAG: &str = "post-flush-durable";
+    const EVENTS_EMITTED: usize = 10;
+
+    let temp = TestDir::new();
+    let data_dir = temp.path().to_path_buf();
+    let keys_mgr = test_key_manager();
+
+    let node = CrashableNode::start(data_dir.clone(), keys_mgr.clone(), None).await;
+
+    for _ in 0..EVENTS_EMITTED {
+        node.event_handle
+            .record_handler_event(build_test_handler_event(node.handle.node_id(), TAG));
+    }
+
+    // Wait long enough for the time trigger to fire. Default interval is
+    // 100ms; the flusher's poll floor is `MIN_FLUSHER_POLL_INTERVAL = 50ms`,
+    // so one tick + one drain completes within ~150ms. 500ms gives a
+    // ~5× safety margin against CI scheduling jitter.
+    //
+    // We verify the drain happened by polling `queue_depth` — when it
+    // reaches 0 the flusher has committed everything.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while node.event_handle.queue_depth() > 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        node.event_handle.queue_depth(),
+        0,
+        "flusher should have drained the queue within 5s (time trigger)"
+    );
+
+    // events.db should now contain every event — the flusher fsync'd them
+    // on its last successful tick.
+    let pre_crash_count = count_tagged_handler_events(&node, TAG);
+    assert_eq!(
+        pre_crash_count, EVENTS_EMITTED,
+        "all {EVENTS_EMITTED} events should be on disk after the flush tick; got {pre_crash_count}"
+    );
+
+    // Now crash — events already fsync'd are durable per `commit()`'s
+    // contract. The queue is empty so `flush_for_shutdown` wouldn't have
+    // added anything; this is the same state a SIGKILL observes.
+    node.crash();
+
+    let restarted = CrashableNode::start(data_dir, keys_mgr, None).await;
+    let surviving = count_tagged_handler_events(&restarted, TAG);
+    assert_eq!(
+        surviving, EVENTS_EMITTED,
+        "Sprint 1B4 contract: handler-phase events fsync'd before the crash MUST survive. \
+         Expected {EVENTS_EMITTED} surviving, got {surviving}."
     );
 
     restarted.crash();

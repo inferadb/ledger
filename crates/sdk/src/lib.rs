@@ -30,6 +30,16 @@
 //! are stable byte-identical across crash recovery — see the method docstring
 //! for the apply-phase caveat.
 //!
+//! Handler-phase audit events (emitted as a side-effect of non-ingest RPCs —
+//! admin mutations, authorization checks, lifecycle operations) changed shape
+//! in Sprint 1B4: the server now enqueues them into an in-memory flush queue
+//! and the RPC returns before the event is fsynced, with a background flusher
+//! batching fsyncs within a ~100 ms default window (configurable; can be
+//! disabled for strict-durability deployments). Apply-phase and ingested
+//! events are unaffected. See `docs/operations/durability.md` for the full
+//! contract and the [`EventFilter::handler_phase_only`] docstring for the
+//! consumer-visible caveat.
+//!
 //! # Quick Start
 //!
 //! ```no_run

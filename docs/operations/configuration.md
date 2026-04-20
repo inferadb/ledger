@@ -323,6 +323,56 @@ grpcurl -plaintext -d '{
 
 Monitor the effect via `ledger_state_checkpoints_total{trigger}`, `ledger_state_checkpoint_duration_seconds`, `ledger_state_dirty_pages`, and `ledger_state_applies_since_checkpoint` — see [metrics-reference.md](metrics-reference.md#state-durability) for the full metric set.
 
+## Handler-Phase Event Batching
+
+Controls the in-memory queue + background `EventFlusher` introduced in Sprint 1B4 that amortizes `events.db` fsyncs on the handler-phase emission path. Handlers (RPC, admin, background-job, saga) call `EventHandle::record_handler_event`, which enqueues an `EventEntry`; the flusher drains the queue on a time / size / shutdown trigger and fsyncs the drained batch with a single `commit()`. Durability is **batched-durable within the flush window**, not per-emission — see [durability.md § Handler-phase event flush window](durability.md#handler-phase-event-flush-window) for the full contract and the clean-shutdown drain semantics.
+
+| Field                | Default | Description                                                                                                                   | Runtime-reconfig?       |
+| -------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| `enabled`            | `true`  | Master switch. Set `false` to restore pre-1B4 per-emission fsync (strict synchronous durability).                             | Yes                     |
+| `flush_interval_ms`  | `100`   | Time trigger — flush at least this often. Valid `[1, 60_000]`.                                                                | Yes                     |
+| `flush_size_threshold` | `1000` | Size trigger — flush when queue depth reaches N entries. Must be `>= 1`.                                                       | Yes                     |
+| `queue_capacity`     | `10000` | Bounded `mpsc` channel capacity. Capacity is fixed at channel construction.                                                    | **No — restart required** |
+| `overflow_behavior`  | `drop`  | `drop` or `block` when the queue is full. `drop` matches the pre-1B4 best-effort-on-failure contract.                         | Yes                     |
+| `drain_batch_max`    | `500`   | Per-flush drain cap, bounds how long each flush txn holds `events.db`'s write mutex.                                          | Yes                     |
+
+Triggers are OR'd — the flusher fires on whichever hits first. The shutdown trigger is invoked explicitly by `GracefulShutdown` Phase 5b via `EventHandle::flush_for_shutdown(5s)` and is not a time/size trigger variant.
+
+**Tuning trade-offs**:
+
+- **Tighter window** (smaller `flush_interval_ms` / `flush_size_threshold`) — narrower loss window on SIGKILL, more fsyncs per second on the events.db disk.
+- **Looser window** (larger `flush_interval_ms`) — fewer fsyncs, wider loss window. Pre-1B4 crash behavior is the upper bound: disabling batching entirely via `enabled=false` reverts to one fsync per emission.
+- **`queue_capacity`** is the backpressure safety valve. If the producer rate exceeds the flusher's drain rate, a bounded queue fills up; `overflow_behavior` then chooses between dropping (lossy, fast) or blocking the producer (lossless, slow).
+
+### Tightening the flush window under latency-sensitive workloads
+
+```bash
+grpcurl -plaintext -d '{
+  "config_json": "{\"event_writer_batch\":{\"flush_interval_ms\":50,\"flush_size_threshold\":500}}"
+}' localhost:9090 ledger.v1.AdminService/UpdateConfig
+```
+
+### Disabling batching (strict synchronous durability, pre-1B4 semantics)
+
+```bash
+grpcurl -plaintext -d '{
+  "config_json": "{\"event_writer_batch\":{\"enabled\":false}}"
+}' localhost:9090 ledger.v1.AdminService/UpdateConfig
+```
+
+With `enabled = false`, every `record_handler_event` call fsyncs before returning. Expect throughput on the event-emission hot path to fall to the pre-1B4 ceiling (~50 ops/s on `concurrent-writes @ 32` in Sprint 1B4's measurements; the fsync serializes on `events.db`'s write-txn mutex). Use this only when the audit trail's per-emission durability matters more than the ~42% active-CPU cost on the event path.
+
+### Monitoring
+
+Six metrics track flusher behavior. See [metrics-reference.md § Handler Event Flush](metrics-reference.md#handler-event-flush) for full label sets and suggested alerts.
+
+- `ledger_event_flush_triggers_total{trigger}` — flushes by trigger (`time`, `size`, `shutdown`).
+- `ledger_event_flush_duration_seconds` — per-flush fsync latency.
+- `ledger_event_flush_queue_depth` — queue depth sampled at flush entry.
+- `ledger_event_flush_entries_per_flush` — entries drained per flush.
+- `ledger_event_flush_failures_total` — failed flushes (disk full, IO error, corrupted page).
+- `ledger_event_overflow_total{cause}` — dropped events by cause (`queue_full`, `shutdown_timeout`, `channel_closed`).
+
 ## Client Sequence Eviction
 
 Controls how expired client sequence entries are purged from the replicated state. These entries enable cross-failover idempotency deduplication within the TTL window.

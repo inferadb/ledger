@@ -26,6 +26,20 @@ impl LedgerClient {
     /// See [`ingest_events`](Self::ingest_events) for durability and event
     /// ID stability semantics across crash recovery.
     ///
+    /// # Read-after-write visibility for handler-phase events
+    ///
+    /// As of Sprint 1B4, handler-phase audit events (events emitted as a
+    /// side-effect of RPCs such as admin mutations or authorization checks)
+    /// are batched through an in-memory flush queue on the server and fsynced
+    /// within a ~100 ms default window. A `list_events` (or `count_events` /
+    /// `get_event`) call issued immediately after such an RPC may not yet
+    /// observe those events — they can still be in the flush queue. Tests and
+    /// callers that require strict read-after-write audit visibility should
+    /// either wait past the configured flush interval or run against a
+    /// deployment configured with the handler-phase flush queue disabled.
+    /// Apply-phase events (committed entity writes) and ingested events are
+    /// not affected and remain immediately visible after a successful RPC.
+    ///
     /// # Arguments
     ///
     /// * `caller` - Identity of the user performing this operation (external slug).
