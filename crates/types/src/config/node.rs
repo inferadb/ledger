@@ -37,6 +37,25 @@ pub struct NodeConfig {
     #[serde(default)]
     #[builder(default)]
     pub batching: BatchConfig,
+    /// Number of independent Raft shards to run per region.
+    ///
+    /// Each shard is its own Raft group with its own WAL, state DBs,
+    /// apply worker, and Merkle chain. Orgs route to shards via
+    /// `ShardManager::resolve_shard(region, org_id)`; multiple orgs can
+    /// share a shard. Per-node throughput scales roughly linearly with
+    /// shard count until ApplyWorker CPU saturates. Must be in `[1, 256]`.
+    ///
+    /// Default is 16 — matches the target configuration for typical
+    /// multi-core production hosts. Tune down for constrained test
+    /// fixtures or small deployments; tune up on higher-core hosts to
+    /// keep apply-pipeline CPU utilization near full.
+    #[serde(default = "default_shards_per_region")]
+    #[builder(default = default_shards_per_region())]
+    pub shards_per_region: usize,
+}
+
+fn default_shards_per_region() -> usize {
+    16
 }
 
 /// Configuration for a peer node.

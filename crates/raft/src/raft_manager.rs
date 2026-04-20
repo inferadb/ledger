@@ -175,6 +175,12 @@ pub struct RaftManagerConfig {
     /// Whether to inject trace context into Raft RPCs.
     #[builder(default = true)]
     pub trace_raft_rpcs: bool,
+    /// Number of independent Raft shards to run per region. Each shard is
+    /// its own Raft group with its own WAL + state DBs + apply worker.
+    /// Orgs route to shards via `ShardManager`. Must be in `[1, 256]`;
+    /// enforced at region-start time.
+    #[builder(default = 16)]
+    pub shards_per_region: usize,
 }
 
 impl RaftManagerConfig {

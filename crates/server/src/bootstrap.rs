@@ -243,6 +243,18 @@ pub async fn bootstrap_node(
     } else {
         (150, 300, 600) // RaftManagerConfig defaults
     };
+    // Validate shards_per_region at the start-region boundary so an
+    // operator misconfiguration surfaces early (before region-start creates
+    // directories / spawns tasks).
+    if config.shards_per_region == 0 || config.shards_per_region > 256 {
+        return Err(BootstrapError::Database {
+            message: format!(
+                "shards_per_region must be in [1, 256], got {}",
+                config.shards_per_region
+            ),
+        });
+    }
+
     let raft_manager_config = RaftManagerConfig::builder()
         .data_dir(data_dir.to_path_buf())
         .node_id(node_id)
@@ -250,6 +262,7 @@ pub async fn bootstrap_node(
         .heartbeat_interval_ms(hb_ms)
         .election_timeout_min_ms(el_min_ms)
         .election_timeout_max_ms(el_max_ms)
+        .shards_per_region(config.shards_per_region)
         .build();
     // Single shared per-node connection registry. All per-region consensus
     // transports created via `start_region` clone this Arc so that they

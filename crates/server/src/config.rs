@@ -208,6 +208,25 @@ pub struct Config {
     #[serde(default)]
     pub raft: Option<inferadb_ledger_types::config::RaftConfig>,
 
+    /// Number of independent Raft shards to run per region.
+    ///
+    /// Each shard is its own Raft group with its own WAL, state DBs, apply
+    /// worker, and Merkle chain. Orgs route to shards via `ShardManager`;
+    /// multiple orgs can share a shard. Per-node write throughput scales
+    /// roughly linearly in shard count until ApplyWorker CPU saturates.
+    ///
+    /// Default 16 — tuned for typical multi-core production hosts. Tune
+    /// down for single-core or constrained environments; tune up on
+    /// higher-core hosts. Must be in `[1, 256]`.
+    #[arg(
+        long = "shards-per-region",
+        env = "INFERADB__LEDGER__SHARDS_PER_REGION",
+        default_value_t = 16
+    )]
+    #[serde(default = "default_shards_per_region")]
+    #[builder(default = default_shards_per_region())]
+    pub shards_per_region: usize,
+
 
     // === Write Batching ===
     /// Per-region write-batching configuration.
@@ -395,6 +414,9 @@ fn default_timeout_secs() -> u64 {
 fn default_init_wait_timeout_secs() -> u64 {
     600 // 10 minutes
 }
+fn default_shards_per_region() -> usize {
+    16
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -409,6 +431,7 @@ impl Default for Config {
             max_concurrent: default_max_concurrent(),
             timeout_secs: default_timeout_secs(),
             raft: None,
+            shards_per_region: default_shards_per_region(),
             batching: inferadb_ledger_types::config::BatchConfig::default(),
             logging: LoggingConfig::default(),
             backup: None,
@@ -646,6 +669,11 @@ mod tests {
         assert_eq!(config.timeout_secs, 30);
         assert!(config.join.is_none());
         assert!(config.data_dir.is_none());
+        // Phase A default: 16 shards per region — tuned for typical
+        // multi-core production hosts. Assertion pins the value so any
+        // future retuning surfaces in review rather than silently shifting
+        // deployment shape.
+        assert_eq!(config.shards_per_region, 16);
     }
 
     #[test]
