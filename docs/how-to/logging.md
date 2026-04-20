@@ -665,7 +665,9 @@ Request logs include a `schema_version` field. See [Dashboard Templates](../dash
 - Field types never change without a major version bump
 - Removed fields are documented in release notes
 
-## Troubleshooting
+## Logging-specific troubleshooting
+
+For general operator symptom triage (failures, quorum loss, divergence), see [troubleshooting.md](troubleshooting.md). This section covers issues specific to the logging pipeline itself — sampling, query syntax, and log-format configuration.
 
 ### No Events Appearing
 

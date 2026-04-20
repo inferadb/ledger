@@ -19,10 +19,7 @@ kubectl config set-context --current --namespace=inferadb
 
 ## 2. Deploy Ledger
 
-### Using Helm (Recommended)
-
 ```bash
-# Add the repository (if published) or use local chart
 helm install ledger ./deploy/helm/inferadb-ledger \
   --set replicaCount=3 \
   --set persistence.size=50Gi \
@@ -30,156 +27,9 @@ helm install ledger ./deploy/helm/inferadb-ledger \
   --set resources.requests.cpu=4
 ```
 
-**Note**: `replicaCount` must be odd (1, 3, 5, 7) for Raft quorum. See `values.yaml` for all available options.
+`replicaCount` must be odd (1, 3, 5, 7) for Raft quorum. See `values.yaml` for all available options.
 
-### Using Raw Manifests
-
-Create the following resources:
-
-**ConfigMap:**
-
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: ledger-config
-  namespace: inferadb
-data:
-  INFERADB__LEDGER__LISTEN: "0.0.0.0:50051"
-  INFERADB__LEDGER__METRICS: "0.0.0.0:9090"
-  INFERADB__LEDGER__DATA: "/data"
-  INFERADB__LEDGER__JOIN: "ledger-headless.inferadb.svc.cluster.local:50051"
-```
-
-**Headless Service:**
-
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: ledger-headless
-  namespace: inferadb
-spec:
-  clusterIP: None
-  selector:
-    app: ledger
-  ports:
-    - name: grpc
-      port: 50051
-      targetPort: grpc
-    - name: metrics
-      port: 9090
-      targetPort: metrics
-```
-
-**Client Service:**
-
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: ledger
-  namespace: inferadb
-spec:
-  selector:
-    app: ledger
-  ports:
-    - name: grpc
-      port: 50051
-      targetPort: grpc
-```
-
-**StatefulSet:**
-
-```yaml
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: ledger
-  namespace: inferadb
-spec:
-  serviceName: ledger-headless
-  replicas: 3
-  selector:
-    matchLabels:
-      app: ledger
-  template:
-    metadata:
-      labels:
-        app: ledger
-    spec:
-      affinity:
-        podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchLabels:
-                  app: ledger
-              topologyKey: kubernetes.io/hostname
-      containers:
-        - name: ledger
-          image: inferadb/ledger:latest
-          ports:
-            - name: grpc
-              containerPort: 50051
-            - name: metrics
-              containerPort: 9090
-          envFrom:
-            - configMapRef:
-                name: ledger-config
-          volumeMounts:
-            - name: data
-              mountPath: /data
-          resources:
-            requests:
-              memory: "8Gi"
-              cpu: "4"
-            limits:
-              memory: "16Gi"
-              cpu: "8"
-          livenessProbe:
-            grpc:
-              port: 50051
-            initialDelaySeconds: 10
-            periodSeconds: 10
-          readinessProbe:
-            grpc:
-              port: 50051
-            initialDelaySeconds: 5
-            periodSeconds: 5
-  volumeClaimTemplates:
-    - metadata:
-        name: data
-      spec:
-        accessModes: ["ReadWriteOnce"]
-        resources:
-          requests:
-            storage: 50Gi
-```
-
-**PodDisruptionBudget:**
-
-```yaml
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: ledger-pdb
-  namespace: inferadb
-spec:
-  minAvailable: 2
-  selector:
-    matchLabels:
-      app: ledger
-```
-
-Apply the manifests:
-
-```bash
-kubectl apply -f ledger-config.yaml
-kubectl apply -f ledger-headless-service.yaml
-kubectl apply -f ledger-client-service.yaml
-kubectl apply -f ledger-statefulset.yaml
-kubectl apply -f ledger-pdb.yaml
-```
+If you can't use Helm (air-gapped registry, stricter manifests policy, Kustomize-based pipeline), see [`how-to/deployment.md § Raw Manifests`](../how-to/deployment.md#raw-manifests-alternative-to-helm) and [`§ Kustomize`](../how-to/deployment.md#kustomize) for the alternative packaging paths.
 
 ## 3. Verify Deployment
 
@@ -206,7 +56,7 @@ Expected output shows 3 members and one leader.
 
 ## 4. Security Considerations
 
-**Important**: The examples above deploy Ledger without TLS for simplicity. For production deployments, you must secure your cluster.
+**Important**: The examples above omit TLS to keep the tutorial's happy path short. Real production deployments must add TLS — typically at the service-mesh or ingress layer rather than in Ledger itself (Ledger trusts its network perimeter by design; see [architecture/security.md](../architecture/security.md)).
 
 ### Network Security
 
@@ -413,9 +263,7 @@ ledger.inferadb.svc.cluster.local:50051
 
 ### External Access (Ingress)
 
-For external gRPC access, use an Ingress with gRPC support:
-
-**NGINX Ingress:**
+For external gRPC access, use an NGINX Ingress with gRPC support:
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -443,32 +291,7 @@ spec:
       secretName: ledger-tls
 ```
 
-**AWS ALB (via ALB Ingress Controller):**
-
-```yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: ledger
-  namespace: inferadb
-  annotations:
-    kubernetes.io/ingress.class: alb
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/backend-protocol-version: GRPC
-spec:
-  rules:
-    - host: ledger.example.com
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: ledger
-                port:
-                  number: 50051
-```
+For AWS ALB, GKE (GCE Ingress), Azure (AGIC), or other cloud-specific ingress controllers, see [`how-to/deployment.md § Ingress alternatives`](../how-to/deployment.md#ingress-alternatives).
 
 ## 8. Setup Backups
 

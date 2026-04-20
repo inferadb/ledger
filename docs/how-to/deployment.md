@@ -234,46 +234,17 @@ cp -r /backup/ledger-node1 /var/lib/ledger
 ./target/release/inferadb-ledger --listen 0.0.0.0:50051 --data /var/lib/ledger --join node1:50051
 ```
 
-## Configuration Reference
+## Configuration
 
-Configuration can be set via CLI arguments or environment variables. CLI arguments take precedence.
+Every CLI flag and environment variable — with defaults, safe ranges, and security notes — is documented in [reference/configuration.md](../reference/configuration.md). The flags this guide uses (`--listen`, `--data`, `--join`, `--region`, `--metrics`, `--email-blinding-key`) are the minimum viable set for a cluster; `reference/configuration.md` covers the rest.
 
-### Core Options
+**Bootstrap in one line**: start every node with `--listen` + `--data` + (for joiners) `--join`, then run `inferadb-ledger init --host <any-node>` exactly once per cluster lifetime.
 
-| CLI                        | Environment Variable                       | Default       | Description                                                             |
-| -------------------------- | ------------------------------------------ | ------------- | ----------------------------------------------------------------------- |
-| `--listen`                 | `INFERADB__LEDGER__LISTEN`                 | _(none)_      | TCP address for gRPC API                                                |
-| `--socket`                 | `INFERADB__LEDGER__SOCKET`                 | _(none)_      | Unix domain socket path for gRPC API                                    |
-| `--data`                   | `INFERADB__LEDGER__DATA`                   | _(ephemeral)_ | Persistent storage directory                                            |
-| `--join`                   | `INFERADB__LEDGER__JOIN`                   | _(none)_      | Comma-separated seed addresses for cluster discovery                    |
-| `--region`                 | `INFERADB__LEDGER__REGION`                 | `global`      | Geographic data residency region                                        |
-| `--advertise`              | `INFERADB__LEDGER__ADVERTISE`              | _(auto)_      | Address advertised to peers                                             |
-| `--metrics`                | `INFERADB__LEDGER__METRICS`                | _(disabled)_  | Prometheus metrics address                                              |
-| `--email-blinding-key`     | `INFERADB__LEDGER__EMAIL_BLINDING_KEY`     | _(required)_  | HMAC key for email hashing (required for user onboarding RPCs)          |
-| `--enable-grpc-reflection` | `INFERADB__LEDGER__ENABLE_GRPC_REFLECTION` | `false`       | Enable gRPC reflection (needed for `grpcurl` and other dynamic clients) |
-| `--log-format`             | —                                          | `auto`        | Log format: `text`, `json`, or `auto`                                   |
-| `--concurrent`             | `INFERADB__LEDGER__MAX_CONCURRENT`         | `10000`       | Max concurrent requests                                                 |
-| `--timeout`                | `INFERADB__LEDGER__TIMEOUT`                | `30`          | Request timeout in seconds                                              |
+**Ephemeral mode**: omit `--data` to run against a temp dir; useful for development, unsuitable for production.
 
-At least one of `--listen` or `--socket` must be specified.
+**Unix domain sockets**: `--socket /path/to/ledger.sock` exposes a UDS listener in addition to TCP. Both can run simultaneously.
 
-### Bootstrap
-
-Nodes start their gRPC servers but wait for initialization before accepting writes.
-
-1. Start all nodes with `inferadb-ledger --listen ... --data ... [--join seed1,seed2]`
-2. Run `inferadb-ledger init --host <any-node>` once to initialize the cluster
-3. Nodes discover each other via `--join` seed addresses and form membership automatically
-
-The `init` subcommand sends a one-time `InitCluster` RPC to the specified host. Run it exactly once per cluster lifetime.
-
-### Notes
-
-**Ephemeral Mode**: When `--data` is omitted, the server runs in ephemeral mode using a temporary directory. All data is lost on shutdown. Useful for development and testing.
-
-**Unix Domain Sockets**: Use `--socket /path/to/ledger.sock` for local-only access without TCP overhead. Both `--listen` and `--socket` can be used simultaneously.
-
-Run `inferadb-ledger --help` for usage information.
+Run `inferadb-ledger --help` for the full usage line.
 
 ## Network Connectivity
 
@@ -300,9 +271,17 @@ See: [Request Routing](../architecture/request-routing.md).
 
 ## Kubernetes Deployment
 
-Use the provided Helm chart or raw manifests.
+For a guided first-deployment walkthrough with monitoring and alerts wired in, see the [production-deployment tutorial](../getting-started/production-deployment.md). This section covers Kubernetes deployment patterns in general — Helm, Kustomize, and raw manifests — for operators who already have a Kubernetes target and want to choose the right packaging approach.
 
-**Helm:**
+The Kubernetes deployment uses:
+
+- **StatefulSet** for stable pod identities and persistent storage.
+- **Headless Service** for DNS-based peer discovery (`$pod.ledger-headless.namespace.svc.cluster.local`).
+- **PodDisruptionBudget** to maintain Raft quorum during rolling updates.
+
+Pods discover each other via `--join` pointing at the headless service FQDN (e.g., `--join ledger-headless.inferadb.svc.cluster.local:50051`). Run `inferadb-ledger init --host <any-pod>:50051` once after the StatefulSet is Ready.
+
+### Helm (recommended)
 
 ```bash
 helm install ledger ./deploy/helm/inferadb-ledger \
@@ -312,18 +291,206 @@ helm install ledger ./deploy/helm/inferadb-ledger \
   --set persistence.size=50Gi
 ```
 
-**Kustomize:**
+`replicaCount` must be odd (1, 3, 5, 7) for Raft quorum. See `values.yaml` for all available options.
+
+### Kustomize
 
 ```bash
 kubectl apply -k deploy/kubernetes/
 ```
 
-The Kubernetes deployment uses:
+Use Kustomize when your pipeline already standardises on it or when your policy layer rejects arbitrary Helm templating. The `deploy/kubernetes/` base directory mirrors the Helm chart's default values.
 
-- **StatefulSet** for stable pod identities and persistent storage
-- **Headless Service** for DNS-based peer discovery
-- **PodDisruptionBudget** to maintain Raft quorum during rolling updates
+### Raw Manifests (alternative to Helm)
 
-Pods discover each other via `--join` with the headless service FQDN (e.g., `--join ledger.inferadb.svc.cluster.local`). Run `inferadb-ledger init` once after the StatefulSet is ready.
+Use this path if you can't use Helm (air-gapped registry, policy restrictions, bespoke manifest pipeline). Five resources compose the deployment.
+
+**ConfigMap:**
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ledger-config
+  namespace: inferadb
+data:
+  INFERADB__LEDGER__LISTEN: "0.0.0.0:50051"
+  INFERADB__LEDGER__METRICS: "0.0.0.0:9090"
+  INFERADB__LEDGER__DATA: "/data"
+  INFERADB__LEDGER__JOIN: "ledger-headless.inferadb.svc.cluster.local:50051"
+```
+
+**Headless Service:**
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: ledger-headless
+  namespace: inferadb
+spec:
+  clusterIP: None
+  selector:
+    app: ledger
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+```
+
+**Client Service:**
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: ledger
+  namespace: inferadb
+spec:
+  selector:
+    app: ledger
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+```
+
+**StatefulSet:**
+
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ledger
+  namespace: inferadb
+spec:
+  serviceName: ledger-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ledger
+  template:
+    metadata:
+      labels:
+        app: ledger
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: ledger
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: ledger
+          image: inferadb/ledger:latest
+          ports:
+            - name: grpc
+              containerPort: 50051
+            - name: metrics
+              containerPort: 9090
+          envFrom:
+            - configMapRef:
+                name: ledger-config
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              memory: "8Gi"
+              cpu: "4"
+            limits:
+              memory: "16Gi"
+              cpu: "8"
+          livenessProbe:
+            grpc:
+              port: 50051
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            grpc:
+              port: 50051
+            initialDelaySeconds: 5
+            periodSeconds: 5
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 50Gi
+```
+
+**PodDisruptionBudget:**
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ledger-pdb
+  namespace: inferadb
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: ledger
+```
+
+Apply in order:
+
+```bash
+kubectl apply -f ledger-config.yaml
+kubectl apply -f ledger-headless-service.yaml
+kubectl apply -f ledger-client-service.yaml
+kubectl apply -f ledger-statefulset.yaml
+kubectl apply -f ledger-pdb.yaml
+```
+
+Once the StatefulSet reports 3/3 Ready, bootstrap the cluster:
+
+```bash
+kubectl -n inferadb exec ledger-0 -- inferadb-ledger init --host localhost:50051
+```
+
+### Ingress alternatives
+
+The production-deployment tutorial's happy path uses **NGINX Ingress** for external gRPC. Alternatives for other cloud ingress controllers:
+
+**AWS ALB (via ALB Ingress Controller):**
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ledger
+  namespace: inferadb
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/backend-protocol-version: GRPC
+spec:
+  rules:
+    - host: ledger.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ledger
+                port:
+                  number: 50051
+```
+
+**GKE (GCE Ingress)**: gRPC support requires an HTTP/2 backend via `cloud.google.com/app-protocols` on the Service. See the [GKE gRPC load-balancing docs](https://cloud.google.com/kubernetes-engine/docs/how-to/ingress-configuration).
+
+**Azure (AGIC)**: Requires `appgw-ingress-class`; set `appgw.ingress.kubernetes.io/backend-protocol: http2` on the Ingress.
+
+All three need the cluster's `:50051` port reachable from the target nodes of the ingress fleet. Remember that under redirect-based routing, clients ultimately connect directly to individual cluster nodes — the ingress is used at cold start for discovery only.
 
 See [`deploy/kubernetes/`](../../deploy/kubernetes/) for raw manifests and [`deploy/helm/`](../../deploy/helm/) for the Helm chart.
