@@ -353,14 +353,14 @@
   "links": [
     {
       "title": "SLO Reference",
-      "url": "https://github.com/inferadb/ledger/blob/main/docs/operations/slo.md",
+      "url": "https://github.com/inferadb/ledger/blob/main/docs/reference/slo.md",
       "type": "link",
       "icon": "doc",
       "tooltip": "SLI/SLO thresholds and alert definitions"
     },
     {
       "title": "Background Jobs",
-      "url": "https://github.com/inferadb/ledger/blob/main/docs/operations/background-jobs.md",
+      "url": "https://github.com/inferadb/ledger/blob/main/docs/architecture/background-jobs.md",
       "type": "link",
       "icon": "doc",
       "tooltip": "Background job metric reference and alerting queries"

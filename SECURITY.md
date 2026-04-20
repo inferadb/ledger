@@ -67,7 +67,7 @@ InferaDB Ledger is designed to run inside a trusted network perimeter. Before re
 
 A report that an attacker with direct network access to the gRPC port can send requests without mTLS is **not** a vulnerability — that's the operator's perimeter responsibility. A report that an authenticated caller can escalate privileges, forge JWTs, bypass permission checks, access another tenant's data, or undermine cryptographic guarantees **is** in scope.
 
-See [`docs/operations/security.md`](docs/operations/security.md) for detailed operator security guidance.
+See [`docs/architecture/security.md`](docs/architecture/security.md) for detailed operator security guidance.
 
 ## Scope
 
@@ -246,8 +246,8 @@ Watch the repository and enable security advisory notifications to receive alert
 
 - [PII.md](PII.md) — data-residency model, key-tier rules, crypto-shredding architecture
 - [DESIGN.md](DESIGN.md) — consensus safety guarantees, storage layer, Merkle block chain
-- [`docs/operations/security.md`](docs/operations/security.md) — operator security guidance
-- [`docs/operations/data-residency-architecture.md`](docs/operations/data-residency-architecture.md) — residency enforcement details
+- [`docs/architecture/security.md`](docs/architecture/security.md) — operator security guidance
+- [`docs/architecture/data-residency.md`](docs/architecture/data-residency.md) — residency enforcement details
 - [CONTRIBUTING.md](CONTRIBUTING.md) — release process, version policy
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — community standards
 

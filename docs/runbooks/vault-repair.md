@@ -1,8 +1,58 @@
-# Vault Repair Workflow
+# Vault Repair
 
-This document describes how to diagnose and repair diverged vaults in InferaDB Ledger.
+On-call runbook for diverged vaults: a replica's computed state root no longer matches the leader's expected state root for a specific vault.
 
-## Overview
+## Symptom
+
+- `HealthService.Check` against the vault returns `UNAVAILABLE` with a `VAULT_UNAVAILABLE` error class.
+- Dashboards show a non-zero value for `ledger_state_root_divergences_total{vault_id=…}` on the affected node.
+- Recent node logs contain `state_root_divergence` or `vault_diverged` events naming the vault.
+
+## Alert / Trigger
+
+- `VaultDiverged` — fires when `ledger_state_root_divergences_total` increments.
+- `VaultRecoveryExhausted` — fires when automatic recovery fails three times in a row for the same vault.
+
+## Blast radius
+
+- **Scope**: one vault on one replica. Other vaults on the same node continue serving normally; other replicas of the same vault continue serving if they have not diverged. This is the per-vault isolation property documented in [DESIGN.md](../../DESIGN.md) § "Per-vault chains".
+- **Downstream impact**: reads to the diverged vault return `UNAVAILABLE`; writes keep replicating through Raft but are not applied on the diverged replica until recovery completes.
+
+## Preconditions
+
+- Authority to call `AdminService.RecoverVault` (typically requires the operator-tier admin token).
+- gRPC tooling (`grpcurl` or an SDK client) configured against the affected node's `--listen` address.
+- A recent clean backup is available if the repair needs to escalate to a rebuild (see [backup-verification playbook](../playbooks/backup-verification.md)).
+
+## Steps
+
+1. **Confirm the divergence** — query `HealthService.Check` for the affected vault; check `journalctl -u ledger --since "1 hour ago" | grep -E "(diverge|state_root)"` for the logged event. Note the vault slug + height.
+2. **Triage root cause** using the symptom → cause table in [Deep reference § Step 2: Identify Root Cause](#step-2-identify-root-cause). Classify as single-node (disk corruption), multi-node (non-determinism bug), or all-node (coordinated corruption) before acting.
+3. **Force a recovery attempt** via `AdminService.RecoverVault` — resets the attempt counter and replays from the latest snapshot. See the exact command in [Deep reference § Step 3: Force Recovery](#step-3-force-recovery).
+4. **If recovery cannot succeed** (classified multi-node divergence or a single-node fix that keeps failing), escalate per the **Escalation** section below — do not keep retrying the same recovery automatically.
+
+## Verification
+
+- `HealthService.Check` for the vault returns `OK`.
+- A test read via `ReadService.Read` against the vault succeeds.
+- `ledger_state_root_divergences_total{vault_id=…}` stops incrementing.
+- `ledger_recovery_success_total` incremented during the repair.
+
+## Rollback
+
+Recovery from a clean snapshot is idempotent — if the recovery misbehaves, stop the node, restore the pre-recovery state.db from `state.db.corrupt.<date>` (created by the [Runbook: Complete Vault Rebuild](#runbook-complete-vault-rebuild) procedure), and re-start. The vault returns to `Diverged` and can be repaired via a different path. Do **not** attempt to repair a vault by manually editing state files.
+
+## Escalation
+
+- Single-vault issue that RecoverVault fixes: no escalation.
+- After two failed RecoverVault attempts **or** if any replica shows `ledger_determinism_bug_total > 0`: page the consensus / state-layer owner; this indicates a code-level bug, not an operational one.
+- If all three replicas show divergence for the same vault at the same height: this is a coordinated-corruption incident — stop writes to the cluster and begin full incident response per your organization's policy.
+
+## Deep reference
+
+The sections below are the original long-form content — supporting detail the on-call can reach for after the quick-reference above. The 8 sections above are load-bearing; the material below is commentary and procedure detail.
+
+### Overview
 
 A vault can become **diverged** when a replica's computed state root doesn't match the expected state root from the leader. This is a critical condition that indicates either:
 
@@ -173,7 +223,7 @@ Before upgrading:
 
 1. Review changelog for state machine changes
 2. Test upgrade path in staging
-3. Follow the [Upgrade Runbook](runbooks/rolling-upgrade.md) (pre-GA: full cluster wipe required)
+3. Follow the [Rolling Upgrade Playbook](../playbooks/rolling-upgrade.md) (pre-GA: full cluster wipe required)
 4. Monitor for divergence during and after upgrade
 
 ## Runbook: Complete Vault Rebuild

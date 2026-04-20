@@ -287,7 +287,7 @@ spec:
 
 ### Additional Hardening
 
-See [Security Guide](security.md) for:
+See [Security Guide](../architecture/security.md) for:
 
 - WireGuard VPN setup for cross-region communication
 - Kubernetes RBAC configuration
@@ -554,7 +554,7 @@ kubectl exec ledger-0 -- grpcurl -plaintext \
 
 ## Next Steps
 
-- [Alerting Guide](alerting.md) - Configure PagerDuty/Slack notifications
-- [Upgrade Runbook](runbooks/rolling-upgrade.md) - Version upgrade procedures
-- [Disaster Recovery](runbooks/disaster-recovery.md) - Recovery procedures
-- [Capacity Planning](capacity-planning.md) - Sizing guidelines
+- [Alerting Guide](../reference/alerting.md) - Configure PagerDuty/Slack notifications
+- [Rolling Upgrade Playbook](../playbooks/rolling-upgrade.md) - Version upgrade procedures
+- [Disaster Recovery](../runbooks/disaster-recovery.md) - Recovery procedures
+- [Capacity Planning](../how-to/capacity-planning.md) - Sizing guidelines

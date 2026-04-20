@@ -1042,7 +1042,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             // already-acked responses — the client saw success, and the
             // entries survive process crash via kernel writeback. Kernel
             // panic or power loss between now and sync completion is the
-            // documented loss window (see docs/operations/durability.md).
+            // documented loss window (see docs/architecture/durability.md).
             let pending = std::mem::take(&mut self.pending_commits);
             self.dispatch_committed_batches(&pending).await;
             self.outbox.flush(&self.transport);

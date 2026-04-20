@@ -189,7 +189,7 @@ Validation enforces `> 0` on every field and caps (`client_*` ≤ 1,000,000; `or
 
 ## Logging
 
-Request logging emits one comprehensive JSON event per request for queryable observability. See [Logging](logging.md) for complete field reference and query cookbook.
+Request logging emits one comprehensive JSON event per request for queryable observability. See [Logging](../how-to/logging.md) for complete field reference and query cookbook.
 
 ### Log Format
 
@@ -338,7 +338,7 @@ Snapshot and cache settings. Configured via `UpdateConfig` RPC at runtime.
 
 ## State-DB Checkpointing
 
-Controls the per-region `StateCheckpointer` background task that drives `Database::sync_state()` on every regional DB. Writes are WAL-durable on response; DB materialization is amortized via this checkpointer. See [durability.md](durability.md) for the full contract.
+Controls the per-region `StateCheckpointer` background task that drives `Database::sync_state()` on every regional DB. Writes are WAL-durable on response; DB materialization is amortized via this checkpointer. See [durability.md](../architecture/durability.md) for the full contract.
 
 The checkpointer syncs **four** databases per region: `state.db` (entity tables), `raft.db` (Raft applied state), `blocks.db` (blockchain archive), and `events.db` (audit events, when the region is configured to own an events shard). The dirty-page trigger reads `max()` across all four DBs, so an ingest-heavy workload that dirties `events.db` while `state.db` stays clean still fires the checkpoint. Checkpoint duration scales roughly linearly with how many of the four are dirty at tick time — expect p99 `ledger_state_checkpoint_duration_seconds` to scale accordingly on write-heavy workloads. Sync is concurrent via `tokio::join!`; accumulators advance only when every configured DB's sync succeeded.
 
@@ -366,11 +366,11 @@ grpcurl -plaintext -d '{
 }' localhost:9090 ledger.v1.AdminService/UpdateConfig
 ```
 
-Monitor the effect via `ledger_state_checkpoints_total{trigger}`, `ledger_state_checkpoint_duration_seconds`, `ledger_state_dirty_pages`, and `ledger_state_applies_since_checkpoint` — see [metrics-reference.md](metrics-reference.md#state-durability) for the full metric set.
+Monitor the effect via `ledger_state_checkpoints_total{trigger}`, `ledger_state_checkpoint_duration_seconds`, `ledger_state_dirty_pages`, and `ledger_state_applies_since_checkpoint` — see [metrics-reference.md](metrics.md#state-durability) for the full metric set.
 
 ## Handler-Phase Event Batching
 
-Controls the in-memory queue + background `EventFlusher` that amortizes `events.db` fsyncs on the handler-phase emission path. Handlers (RPC, admin, background-job, saga) call `EventHandle::record_handler_event`, which enqueues an `EventEntry`; the flusher drains the queue on a time / size / shutdown trigger and commits the drained batch. Durability is **batched-durable within the StateCheckpointer cadence**, not per-emission — see [durability.md § Handler-phase event flush window](durability.md#handler-phase-event-flush-window) for the full contract and the clean-shutdown drain semantics.
+Controls the in-memory queue + background `EventFlusher` that amortizes `events.db` fsyncs on the handler-phase emission path. Handlers (RPC, admin, background-job, saga) call `EventHandle::record_handler_event`, which enqueues an `EventEntry`; the flusher drains the queue on a time / size / shutdown trigger and commits the drained batch. Durability is **batched-durable within the StateCheckpointer cadence**, not per-emission — see [durability.md § Handler-phase event flush window](../architecture/durability.md#handler-phase-event-flush-window) for the full contract and the clean-shutdown drain semantics.
 
 | Field                  | Default | Description                                                                                           | Runtime-reconfig?         |
 | ---------------------- | ------- | ----------------------------------------------------------------------------------------------------- | ------------------------- |
@@ -409,7 +409,7 @@ With `enabled = false`, every `record_handler_event` call fsyncs before returnin
 
 ### Monitoring
 
-Six metrics track flusher behavior. See [metrics-reference.md § Handler Event Flush](metrics-reference.md#handler-event-flush) for full label sets and suggested alerts.
+Six metrics track flusher behavior. See [metrics-reference.md § Handler Event Flush](metrics.md#handler-event-flush) for full label sets and suggested alerts.
 
 - `ledger_event_flush_triggers_total{trigger}` — flushes by trigger (`time`, `size`, `shutdown`).
 - `ledger_event_flush_duration_seconds` — per-flush fsync latency.
@@ -463,7 +463,7 @@ Token issuance and signing key management settings.
 
 ## Events Configuration
 
-Audit event logging and external ingestion. See [Events Operations Guide](events.md) for architecture and event catalog.
+Audit event logging and external ingestion. See [Events Operations Guide](../architecture/events.md) for architecture and event catalog.
 
 ### Event Logging
 

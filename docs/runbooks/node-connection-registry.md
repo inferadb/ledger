@@ -1,12 +1,55 @@
-# Node Connection Registry Runbook
+# Node Connection Registry
 
-Procedure for diagnosing issues with the node-level `NodeConnectionRegistry`
-using the `ledger_node_connections_*` Prometheus metrics. Use this runbook
-when peer connectivity appears inconsistent, active connection counts diverge
-from expected cluster topology, or membership changes fail to prune stale
-peers.
+On-call runbook for the node-level `NodeConnectionRegistry` — the per-node HTTP/2 gRPC channel pool that backs all inter-node traffic (consensus, cross-region forwarding, system discovery, admin).
 
-## Purpose
+## Symptom
+
+- `ledger_node_connections_active` diverges from the expected `cluster_size - 1` — too high (stale entries accumulating) or too low (peers not registering).
+- `rate(ledger_node_connection_events_total{event="registered"}[5m])` sustained high, indicating peer churn.
+- `ledger_node_connections_active` oscillating rather than stable.
+
+## Alert / Trigger
+
+- `LedgerNodeRegistryTopologyDrift` — `|active - (cluster_size - 1)| > 0` sustained for 5 minutes.
+- `LedgerNodeRegistryChurn` — `rate(registered_events[5m]) > 0.5` sustained for 10 minutes.
+
+## Blast radius
+
+- **Scope**: local node's outbound peer connectivity. Stale entries waste channel slots; missing entries cause inter-node traffic to that peer to fail.
+- **Downstream impact**: missing entries affect every subsystem borrowing the registry — consensus replication stalls, cross-region forwarding fails, admin RPCs to the affected peer time out.
+
+## Preconditions
+
+- Read access to node Prometheus metrics.
+- If the fix involves membership changes: authority to call `AdminService.JoinCluster` or `LeaveCluster`.
+- If the fix involves a code bug (missing `set_peer_via_registry` wiring): developer access to file the fix.
+
+## Steps
+
+1. **Measure the drift**: compare `ledger_node_connections_active` against `count by (instance) (up{job="ledger"}) - 1`. Determine whether the registry is too large (stale entries) or too small (missing entries).
+2. **Classify**: use the symptom → cause table in [Deep reference § Symptom → Cause → Action](#symptom--cause--action). Stale entries point to broken pruning; missing entries point to broken registration; oscillation points to redundant register/remove sequences.
+3. **If stale entries**: audit `on_membership_changed` wiring in `GrpcConsensusTransport`; verify `retain_peers` runs on every membership callback. File a bug if wiring is missing for a subsystem.
+4. **If missing entries**: check `RaftManager::start_region` and `AdminService::join_cluster` paths; confirm `set_peer_via_registry` is called on every join.
+5. **If churn**: investigate cluster stability — flapping nodes, unstable network partitions, or recent operator actions that may be triggering repeated join/leave.
+
+## Verification
+
+- `ledger_node_connections_active` equals `cluster_size - 1` on every node.
+- `rate(ledger_node_connection_events_total{event="registered"}[5m])` returns to 0 (outside of known membership-change windows).
+- Subsystems that were failing (consensus replication to affected peer, admin RPCs) succeed.
+
+## Rollback
+
+Registry entries are in-memory state rebuilt from GLOBAL directory on restart. If a manual intervention corrupts the registry, restarting the node reconciles it from authoritative cluster state. No destructive on-disk action is taken by this runbook.
+
+## Escalation
+
+- Persistent drift after verifying membership and pruning wiring: page the consensus / transport owner.
+- Cluster-wide registry churn: coordinate with the [consensus-transport-backpressure runbook](consensus-transport-backpressure.md) — connection churn often correlates with backpressure events.
+
+## Deep reference
+
+### Purpose
 
 Each node owns a single `NodeConnectionRegistry` that holds one HTTP/2 gRPC
 `Channel` per peer. Consensus (AppendEntries), cross-region forwarding,
@@ -19,11 +62,9 @@ holding and lifecycle events against that set.
 
 ## Related
 
-- [Node Connection Registry spec](../../superpowers/specs/2026-04-15-node-connection-registry.md)
-- [Node Connection Registry plan](../../superpowers/plans/2026-04-15-phase-3-node-connection-registry.md)
-- [Metrics Reference: Node Connection Registry](../metrics-reference.md#node-connection-registry)
-- [Consensus Transport Backpressure Runbook](consensus-transport-backpressure.md) — per-peer send queue (consumes the registry's channels)
-- [Leader Cache Diagnosis Runbook](leader-cache-diagnosis.md) — SDK-side leader routing
+- [Metrics Reference: Node Connection Registry](../reference/metrics.md#node-connection-registry)
+- [Consensus Transport Backpressure](consensus-transport-backpressure.md) — per-peer send queue (consumes the registry's channels)
+- [Leader Cache Diagnosis](leader-cache-diagnosis.md) — SDK-side leader routing
 
 ## Healthy Steady State
 

@@ -13,8 +13,8 @@ You review InferaDB Ledger's user-facing documentation against the current codeb
 - `README.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `PII.md`
 - `DESIGN.md`, `WHITEPAPER.md`
 - `Justfile` — audited as _documentation of the command catalog_: recipes referenced from other docs must exist; recipe docstrings must match behaviour; `just --list` output should read well.
-- `docs/**/*.md` — including `operations/`, `testing/`, `dashboards/`, `runbooks/`.
-- `docs/operations/grafana/**.json`, `docs/operations/dashboards/**.json`, `docs/dashboards/**.json` — dashboard JSON is documentation of the observability contract.
+- `docs/**/*.md` — including the Diátaxis tiers (`getting-started/`, `reference/`, `how-to/`, `architecture/`), plus `runbooks/`, `playbooks/`, `testing/`, `dashboards/`.
+- `docs/dashboards/**.json` and `docs/dashboards/**.ndjson` — dashboard templates are documentation of the observability contract.
 
 **Explicitly out of scope** (owned elsewhere):
 
@@ -43,7 +43,7 @@ Ledger has two primary reader populations, plus two secondary populations. Every
 |---|---|---|
 | A — onboarding (`README.md`, `CONTRIBUTING.md`, `Justfile`) | Operator-evaluator + Contributor | Internals-reader |
 | B — architecture (`DESIGN.md`, `WHITEPAPER.md`) | Internals-reader | Operator (evaluation) |
-| D — operator surface (`docs/operations/**`, all dashboard JSON) | Operator | — |
+| D — operator surface (`docs/{getting-started,reference,how-to,architecture,runbooks,playbooks}/**`, all dashboard JSON) | Operator | — |
 | E1 — testing (`docs/testing/**`) | Internals-reader + Contributor | — |
 | E2 — security / privacy (`SECURITY.md`, `PII.md`) | Operator + Internals-reader | — |
 | E3 — remainder (`CODE_OF_CONDUCT.md`, `docs/README.md`, `docs/overview.md`, `docs/faq.md`) | Operator-evaluator | — |
@@ -52,10 +52,10 @@ Ledger has two primary reader populations, plus two secondary populations. Every
 
 Every in-scope doc falls into one of four types, each with its own shape. Type mismatch is a FIX finding.
 
-- **Tutorial** (learning) — single happy path, reproducible in one session, does not branch, names its end state up front. Opinion-free optionality is a smell. _Example: `docs/operations/production-deployment-tutorial.md`._
-- **How-to guide** (task) — goal at top, preconditions stated, outcome-focused, no discursion. Every step ends in a verifiable state. _Example: `docs/operations/runbooks/*.md`, `docs/operations/vault-repair.md`._
-- **Reference** (information) — comprehensive, consistent shape per entry, opinion-free, alphabetised or grouped. _Example: `docs/operations/configuration.md`, `docs/operations/metrics-reference.md`, `docs/operations/api-versioning.md`._
-- **Explanation** (understanding) — discursive, _why_-focused, explicitly not task-oriented. No `kubectl`/`grpcurl` invocations mixed in. _Example: `DESIGN.md`, `WHITEPAPER.md`, `docs/operations/data-residency-architecture.md`, `docs/operations/multi-region.md`._
+- **Tutorial** (learning) — single happy path, reproducible in one session, does not branch, names its end state up front. Opinion-free optionality is a smell. _Example: `docs/getting-started/production-deployment.md`._
+- **How-to guide** (task) — goal at top, preconditions stated, outcome-focused, no discursion. Every step ends in a verifiable state. _Example: `docs/runbooks/*.md`, `docs/runbooks/vault-repair.md`._
+- **Reference** (information) — comprehensive, consistent shape per entry, opinion-free, alphabetised or grouped. _Example: `docs/reference/configuration.md`, `docs/reference/metrics.md`, `docs/reference/api-versioning.md`._
+- **Explanation** (understanding) — discursive, _why_-focused, explicitly not task-oriented. No `kubectl`/`grpcurl` invocations mixed in. _Example: `DESIGN.md`, `WHITEPAPER.md`, `docs/architecture/data-residency.md`, `docs/architecture/multi-region.md`._
 
 Type-shape violations: reference docs that editorialise, tutorials that branch, runbooks that explain architecture instead of executing steps, explanation docs peppered with operator commands — all FIX.
 
@@ -137,7 +137,7 @@ Spawn one `Explore`-type subagent per partition **in a single message** so they 
 
 - **A — onboarding**: `README.md`, `CONTRIBUTING.md`, `Justfile`. Audience: Operator-evaluator + Contributor. Thoroughness: `medium`.
 - **B — architecture**: `DESIGN.md`, `WHITEPAPER.md`. Audience: Internals-reader. Thoroughness: `very thorough`.
-- **D — operator surface**: `docs/operations/**` plus all dashboard JSON (`docs/operations/grafana/**.json`, `docs/operations/dashboards/**.json`, `docs/dashboards/**.json`). Audience: Operator. Thoroughness: `very thorough`.
+- **D — operator surface**: `docs/{getting-started,reference,how-to,architecture,runbooks,playbooks}/**` plus dashboard templates (`docs/dashboards/**.json`, `docs/dashboards/**.ndjson`). Audience: Operator. Thoroughness: `very thorough`.
 - **E1 — testing**: `docs/testing/**`. Audience: Internals-reader + Contributor. Thoroughness: `very thorough` (trust-claims are load-bearing).
 - **E2 — security / privacy**: `SECURITY.md`, `PII.md`. Audience: Operator + Internals-reader. Thoroughness: `very thorough`.
 - **E3 — remainder**: `CODE_OF_CONDUCT.md`, `docs/README.md`, `docs/overview.md`, `docs/faq.md`. Audience: Operator-evaluator. Thoroughness: `medium`.
@@ -205,24 +205,24 @@ All invariants are defined in the parent agent prompt. Summary:
 ## Worked examples — use these as the quality bar
 
 Good BLOCK finding:
-  docs/operations/configuration.md:142 [BLOCK] 6 defaults-match-code
+  docs/reference/configuration.md:142 [BLOCK] 6 defaults-match-code
     quote: "`INFERADB__LEDGER__RAFT_HEARTBEAT_MS` defaults to 100."
     reality: crates/types/src/config/raft.rs defines heartbeat_ms default = 250.
 
 Good FIX finding (runbook shape):
-  docs/operations/runbooks/disaster-recovery.md:1 [FIX] runbook-shape
+  docs/runbooks/disaster-recovery.md:1 [FIX] runbook-shape
     quote: (missing 'Rollback' heading)
     reality: File has Symptom, Steps, Verification, but no Rollback or
              Escalation sections.
 
 Good FIX finding (directional cross-link):
-  docs/operations/alerting.md:78 [FIX] cross-link-alert-to-runbook
+  docs/reference/alerting.md:78 [FIX] cross-link-alert-to-runbook
     quote: "LedgerVaultDiverged — triggers when divergence_total > 0."
-    reality: No link to docs/operations/vault-repair.md. Runbook exists; alert
+    reality: No link to docs/runbooks/vault-repair.md. Runbook exists; alert
              does not reference it.
 
 Not a finding (do not report):
-  docs/operations/slo.md:30 — "simply configure" is a weasel phrase but this
+  docs/reference/slo.md:30 — "simply configure" is a weasel phrase but this
   is explanatory context, not an operator-critical step; weasel-words are NOTE,
   and at that line the prose is not operator-critical.
 
@@ -259,7 +259,7 @@ Merge subagent reports. Deduplicate findings that reproduce across docs — the 
 2. **Path exists** — every file / directory / crate path referenced in docs resolves on disk.
 3. **Symbol exists** — every Rust type, function, trait, method, module, RPC, metric, config field, CLI flag, or environment variable named in docs is findable via `find_symbol` / `search_for_pattern` / `Grep`.
 4. **Proto surface matches** — every gRPC service and RPC referenced in docs exists in `proto/ledger/v1/*.proto`. Renamed or removed RPCs are flagged. `ForwardRegionalProposal` or `SubmitRegionalProposal` anywhere is a BLOCK — the RPC is named `RegionalProposal`.
-5. **Dashboard metric references resolve** — every `expr:` or metric name in shipped dashboard JSON (`docs/operations/grafana/**.json`, `docs/operations/dashboards/**.json`, `docs/dashboards/**.json`) resolves to a live Prometheus metric registered in `crates/raft/src/metrics.rs` or SDK `crates/sdk/src/metrics.rs`. Missing metric → BLOCK.
+5. **Dashboard metric references resolve** — every `expr:` or metric name in shipped dashboard JSON / NDJSON under `docs/dashboards/**` resolves to a live Prometheus metric registered in `crates/raft/src/metrics.rs` or SDK `crates/sdk/src/metrics.rs`. Missing metric → BLOCK.
 6. **Defaults match code** — for any flag / env var / config field whose default value is stated in docs, the value matches the Rust source of truth (struct `Default`, clap `default_value`, serde default, or `#[builder(default = …)]`). Mismatch → BLOCK. This is the highest-value check for the Operator audience.
 7. **Terminology consistency** — the rename trail is respected. "Namespace" where code says "organization" is BLOCK (Kubernetes-namespace references in `deploy/` and K8s-operator docs are legitimate; distinguish context). "Single-Raft" is BLOCK — the system is multi-Raft in production. "openraft" in current architecture descriptions is BLOCK — consensus is custom in-house. Only historical / migration contexts may mention legacy terms, and must frame them as historical.
 8. **Tooling matches reality** — `cargo nextest` references are BLOCK (project uses plain `cargo test`). `cargo` without a `+1.92` / `+nightly` pin in setup or contributor docs is BLOCK.
@@ -281,11 +281,11 @@ For Partition D (and for `README.md` where it claims quickstart status), verify 
 14. **Observe** — every metric in `metrics-reference.md` that is _alertable_ links to its alert rule in `alerting.md`; every metric that is _actionable_ links to its runbook. Missing linkage → FIX.
 15. **Operate** — each day-2 task (upgrade / backup / scale / rotate / failover) has a how-to page with pre-state and post-state verification commands.
 16. **Troubleshoot** — every `ErrorCode` variant in `crates/types/src/error_code.rs` appears in operator-visible troubleshooting with a remediation. An error class in code without a doc entry is FIX.
-17. **Recover** — every runbook under `docs/operations/runbooks/**` conforms to the runbook shape (invariant 18).
+17. **Recover** — every runbook under `docs/runbooks/**` conforms to the runbook shape (invariant 18).
 
 ### Runbook shape — FIX
 
-18. **Runbook sections present** — every file under `docs/operations/runbooks/**` contains the following headings (case-insensitive match): **Symptom**, **Alert / Trigger**, **Blast radius**, **Preconditions**, **Steps**, **Verification**, **Rollback**, **Escalation**. Each missing section is FIX. Optional ninth section **Post-incident actions** is NOTE when absent.
+18. **Runbook sections present** — every file under `docs/runbooks/**` contains the following headings (case-insensitive match): **Symptom**, **Alert / Trigger**, **Blast radius**, **Preconditions**, **Steps**, **Verification**, **Rollback**, **Escalation**. Each missing section is FIX. Optional ninth section **Post-incident actions** is NOTE when absent.
 
 ### Internals-audience — FIX (Partition B only)
 
@@ -296,10 +296,10 @@ For Partition D (and for `README.md` where it claims quickstart status), verify 
 
 21. **Audience stated** — every top-level doc (`README.md`, `CONTRIBUTING.md`, `DESIGN.md`, `WHITEPAPER.md`, each `docs/*/README.md`) identifies its intended reader using the audience model (operator / SDK consumer / core contributor / internals-reader) in the first section.
 22. **Problem framing** — top-level docs open with _what this solves / when to use / when not to_ within the first ~30 lines.
-23. **Hello World reachable** — `README.md` and `docs/operations/deployment.md` contain a self-contained, copy-pasteable path from zero to first successful outcome. Placeholders like `<your-token>` without adjacent instructions on where to get them → FIX.
+23. **Hello World reachable** — `README.md` and `docs/how-to/deployment.md` contain a self-contained, copy-pasteable path from zero to first successful outcome. Placeholders like `<your-token>` without adjacent instructions on where to get them → FIX.
 24. **Single source of truth** — the same concept explained in ≥2 places is FIX unless the second place is a short pointer to the first. Duplicated prose rots asymmetrically. Cross-partition duplication surfaces during aggregation.
 25. **Directional cross-links present** — replace generic "related docs link to each other":
-    - Every alert in `docs/operations/alerting.md` links to its runbook if one exists.
+    - Every alert in `docs/reference/alerting.md` links to its runbook if one exists.
     - Every runbook links back to its triggering alert and referenced metrics.
     - Every alertable metric in `metrics-reference.md` links to its alert rule.
     Missing directed link → FIX.

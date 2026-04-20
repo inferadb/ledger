@@ -22,7 +22,7 @@
 //!   mount options).
 //! - **Windows / other**: [`File::sync_data`].
 //!
-//! See `docs/operations/durability.md` for the operator-facing durability
+//! See `docs/architecture/durability.md` for the operator-facing durability
 //! matrix, and `crates/fs-sync/CLAUDE.md` for the escalation rationale
 //! behind this crate's `unsafe` exception to the workspace-wide ban.
 

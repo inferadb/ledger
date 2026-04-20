@@ -17,7 +17,7 @@ Query errors in your log aggregation system:
 outcome:"error" AND service:"WriteService"
 ```
 
-See [Configuration](configuration.md#logging) for all options.
+See [Configuration](../reference/configuration.md#logging) for all options.
 
 ## Field Reference
 
@@ -722,7 +722,7 @@ cargo bench -p inferadb-ledger-raft --bench logging_bench
 
 ## Related Documentation
 
-- [Configuration Reference](configuration.md#logging) - All environment variables
+- [Configuration Reference](../reference/configuration.md#logging) - All environment variables
 - [Dashboard Templates](../dashboards/) - Pre-built Grafana, Kibana, Datadog dashboards
-- [Metrics Reference](metrics-reference.md) - Prometheus metrics (complementary)
-- [Alerting Guide](alerting.md) - Using metrics for alerts
+- [Metrics Reference](../reference/metrics.md) - Prometheus metrics (complementary)
+- [Alerting Guide](../reference/alerting.md) - Using metrics for alerts

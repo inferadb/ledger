@@ -179,7 +179,7 @@ grpcurl -plaintext \
 curl -s localhost:9090/metrics | grep ledger_determinism_bug_total
 ```
 
-**Solution**: See [Vault Repair](runbooks/vault-repair.md) runbook
+**Solution**: See [Vault Repair](../runbooks/vault-repair.md) runbook
 
 ### Snapshot Issues
 

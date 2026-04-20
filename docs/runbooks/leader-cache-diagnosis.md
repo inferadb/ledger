@@ -1,11 +1,53 @@
-# Leader Cache Diagnosis Runbook
+# Leader Cache Diagnosis
 
-Procedure for diagnosing SDK region-leader cache health using Prometheus
-metrics. Use this runbook when clients report elevated tail latency,
-unexpected `UNAVAILABLE` errors on write paths, or when alerts fire on
-`ledger_sdk_leader_cache_flaps_total`.
+On-call runbook for SDK region-leader cache health — the client-side cache that routes writes directly to the Raft leader of the target region.
 
-## Purpose
+## Symptom
+
+- Elevated tail latency on SDK write paths (p99 above the normal single-digit-ms budget).
+- Clients see unexpected `UNAVAILABLE` / `NotLeader` errors on writes that should succeed.
+- Dashboards show non-zero `rate(ledger_sdk_leader_cache_flaps_total[5m])` sustained, or miss ratio above 20%.
+
+## Alert / Trigger
+
+- `SdkLeaderCacheFlapping` — `rate(ledger_sdk_leader_cache_flaps_total[5m]) > 0.1` sustained for 10 minutes.
+- `SdkLeaderCacheMissRatioHigh` — miss-rate ratio > 20% sustained for 15 minutes.
+
+## Blast radius
+
+- **Scope**: client-side — affects the SDK's routing efficiency, not the server's ability to serve. A flapping cache increases latency but doesn't cause data loss.
+- **Downstream impact**: elevated gateway load if many clients race to resolve simultaneously; increased `ResolveRegionLeader` RPC rate visible on server-side metrics.
+
+## Preconditions
+
+- Read access to SDK-side metrics (prefix `ledger_sdk_*`) and server-side metrics (`inferadb_ledger_raft_term`, `raft_elections_total`).
+- If the fix involves SDK configuration changes: authority to roll out an updated client config to the affected fleet.
+
+## Steps
+
+1. **Classify flap vs miss-heavy cache** — look at `flaps_total` and the hit-vs-miss ratio on dashboards. Flaps suggest real leader elections; high miss ratio suggests client lifecycle issues (short-lived clients creating fresh connection pools).
+2. **If flaps are elevated**: correlate with `inferadb_ledger_raft_term` and `raft_elections_total` server-side. A rising term confirms real elections — investigate Raft stability per the [consensus-transport-backpressure runbook](consensus-transport-backpressure.md) or peer reachability via the [node-connection-registry runbook](node-connection-registry.md).
+3. **If flaps are elevated but term is flat**: the cache is being populated from stale hints or misrouted responses — check server-side region metadata configuration and verify `ResolveRegionLeader` returns the correct region's leader.
+4. **If miss ratio is high without flaps**: verify SDK clients are long-lived (one `ConnectionPool` per process, not per request); review `region_leader_soft_ttl` / `hard_ttl` config; see the symptom table in [Deep reference § Symptom → Cause → Action](#symptom--cause--action) for full diagnostic flow.
+
+## Verification
+
+- `rate(ledger_sdk_leader_cache_flaps_total[5m])` returns to baseline (near zero).
+- Cache hit ratio (`hits / (hits + misses)`) returns above 0.95 in steady state.
+- SDK write latencies return to normal.
+
+## Rollback
+
+This runbook diagnoses and recommends configuration or lifecycle changes; it does not mutate cluster state. SDK configuration changes are rolled out via the client fleet's standard deployment process and reversible by re-deploying the prior config.
+
+## Escalation
+
+- If elections are real and unexplained (peer reachable, disk healthy, no membership change): page the consensus owner; leadership instability with healthy infrastructure is a symptom of a deeper issue.
+- If miss ratio remains high despite confirmed long-lived clients and correct TTL configuration: file an SDK bug; the cache may be under-populated by a code path.
+
+## Deep reference
+
+### Purpose
 
 The SDK's regional leader cache routes write requests directly to the Raft
 leader of the target region, bypassing gateway-side forwarding. It maintains
@@ -108,6 +150,6 @@ TTL issues.
 
 ## Related
 
-- [Metrics Reference: SDK Region Leader Cache](../metrics-reference.md#sdk-region-leader-cache)
-- [Region Management](../region-management.md)
-- [Multi-Region Operations](../multi-region.md)
+- [Metrics Reference: SDK Region Leader Cache](../reference/metrics.md#sdk-region-leader-cache)
+- [Region Management](../architecture/region-management.md)
+- [Multi-Region Operations](../architecture/multi-region.md)

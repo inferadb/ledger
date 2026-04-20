@@ -21,7 +21,7 @@
 //! on the next checkpointer tick, or immediately on graceful shutdown,
 //! snapshot, or backup. Crash recovery replays the WAL tail to rebuild
 //! any unpersisted state; replay is idempotent. See
-//! `docs/operations/durability.md` for the full contract.
+//! `docs/architecture/durability.md` for the full contract.
 //!
 //! External event ingestion (see [`LedgerClient::ingest_events`]) carries the
 //! same WAL-durability guarantee: a successful response means
@@ -41,7 +41,7 @@
 //! entries. Strict-durability deployments can disable the queue via the
 //! `UpdateConfig` admin RPC (`event_writer_batch.enabled = false`), restoring
 //! strict per-emission fsync semantics. Apply-phase and ingested events are
-//! unaffected. See `docs/operations/durability.md` for the full contract and
+//! unaffected. See `docs/architecture/durability.md` for the full contract and
 //! the [`EventFilter::handler_phase_only`] docstring for the consumer-visible
 //! caveat.
 //!

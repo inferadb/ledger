@@ -9,7 +9,7 @@
 //!
 //! Client-request forwarding was removed in Phase 5; clients route
 //! directly to regional leaders via `NotLeader` hints (see
-//! `docs/operations/runbooks/architecture-redirect-routing.md`).
+//! `docs/architecture/request-routing.md`).
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 

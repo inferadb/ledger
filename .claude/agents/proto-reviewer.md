@@ -43,7 +43,7 @@ You review gRPC boundary changes in InferaDB Ledger for consistency with the est
 
 - New services are subject to `ApiVersionLayer` unless explicitly exempt.
 - The exempt set is **only**: `Health`, `SystemDiscovery`, `Raft`. Flag additions to this exempt list with suspicion — requires justification (K8s probes, pre-negotiation clients, or peer-to-peer Raft transport).
-- New services should respect the `x-ledger-api-version` header contract (see `docs/operations/api-versioning.md`).
+- New services should respect the `x-ledger-api-version` header contract (see `docs/reference/api-versioning.md`).
 
 **Audit + validation**
 

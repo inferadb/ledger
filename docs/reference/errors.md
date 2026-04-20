@@ -40,7 +40,7 @@ The SDK's retry logic (in `crates/sdk/src/client.rs`) reads `ServerErrorDetails.
 
 ## Related
 
-- [Troubleshooting](troubleshooting.md) — symptom index routing to specific remediations.
+- [Troubleshooting](../how-to/troubleshooting.md) — symptom index routing to specific remediations.
 - [Alerting](alerting.md) — thresholds for error-rate alerts.
-- [Metrics reference](metrics-reference.md) — `ledger_grpc_requests_total` carries an `error_class` label derived from these codes.
+- [Metrics reference](metrics.md) — `ledger_grpc_requests_total` carries an `error_class` label derived from these codes.
 - Canonical source: [`crates/types/src/error_code.rs`](../../crates/types/src/error_code.rs).

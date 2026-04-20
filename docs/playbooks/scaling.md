@@ -1,8 +1,61 @@
-# Scaling Runbook
+# Scaling Playbook
 
-Procedures for scaling Ledger clusters up or down.
+Scheduled procedure for adding or removing nodes from a Ledger cluster. Planned work, not incident response.
 
-## Overview
+## Purpose
+
+Change the cluster's voter count to match capacity or fault-tolerance needs. Ledger uses Raft and requires odd voter counts (3, 5, 7) for clean quorum.
+
+- **When to run**: planned capacity increase (add voters), decommission (remove voters), replace-in-place (leave + join). For emergency scaling during an outage, see the relevant incident runbook first.
+- **Expected duration**: 2–15 minutes per node depending on how much log / snapshot must replicate.
+- **Who runs it**: SRE with cluster-admin authority.
+
+## Preconditions
+
+- Cluster currently healthy: `ledger_cluster_quorum_status` = 1, all voters responsive.
+- Target cluster size is odd (3, 5, 7) — avoid even counts, which create a larger quorum without more fault tolerance.
+- For **adding** a node: new node's binary version matches the cluster; storage provisioned; network path to existing voters established.
+- For **removing** a node: graceful-shutdown window announced; no in-flight writes that specifically target the departing node.
+
+## Steps
+
+For **scale up** (add a voter):
+
+1. Start the new node with `--listen` + `--data` + `--join` pointing at current voters.
+2. New node joins as a learner, catches up from the leader's Raft log + snapshot.
+3. Once caught up, the node is promoted to voter by the membership machinery.
+4. Verify cluster size increased via `AdminService.GetClusterInfo`.
+
+For **scale down** (remove a voter):
+
+1. Identify the target node (prefer a follower, not the leader — see [Deep reference § Removing the Leader](#removing-the-leader) if forced).
+2. Call `AdminService.LeaveCluster` to propose voter removal.
+3. Once removed from membership, gracefully stop the node.
+4. Verify cluster size decreased via `AdminService.GetClusterInfo`.
+
+Exact commands and K8s/Helm variants are in the deep reference below.
+
+## Verification
+
+- `AdminService.GetClusterInfo` returns the expected member count.
+- `ledger_cluster_quorum_status` remains 1 throughout the operation.
+- No new `ledger_state_root_divergences_total` or `ledger_determinism_bug_total` increments.
+- Post-scale smoke test (read + write against a sample vault) succeeds.
+
+## Rollback
+
+- **Scale up rollback**: if the new node misbehaves, call `AdminService.LeaveCluster` for it and stop the process. Cluster returns to the prior voter count.
+- **Scale down rollback**: restart the departed node with `--join` against any remaining voter. It re-registers (as a fresh learner — its prior `data_dir` is stale) and promotes to voter on catch-up.
+
+## Escalation
+
+- Quorum loss during the operation → follow [disaster-recovery.md](../runbooks/disaster-recovery.md) or [quorum-loss.md](../runbooks/quorum-loss.md).
+- New node cannot catch up (stuck at learner, failing snapshot install) → follow [snapshot-restore-failure.md](../runbooks/snapshot-restore-failure.md).
+- Cluster behaves inconsistently post-scale (divergence, unexpected leader flapping) → stop the operation, page the consensus owner.
+
+## Deep reference
+
+### Overview
 
 Ledger uses Raft consensus, which requires odd-numbered cluster sizes for optimal quorum:
 
@@ -318,6 +371,6 @@ See [Disaster Recovery](disaster-recovery.md) for detailed procedures.
 
 ## See Also
 
-- [Deployment Guide](../deployment.md) - Initial cluster setup
+- [Deployment Guide](../how-to/deployment.md) - Initial cluster setup
 - [Upgrade Runbook](rolling-upgrade.md) - Version upgrade procedures
 - [Disaster Recovery](disaster-recovery.md) - Recovery procedures

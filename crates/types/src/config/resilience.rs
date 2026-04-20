@@ -16,7 +16,7 @@ use super::ConfigError;
 // reasonable single-tenant or trusted-caller workload, with the rate limiter
 // acting only as a runaway-client / DDoS backstop. Multi-tenant production
 // deployments should tune down via `UpdateConfig` per the SLO model in
-// `docs/operations/configuration.md`.
+// `docs/reference/configuration.md`.
 
 /// Default per-client token bucket capacity (max burst).
 fn default_client_burst() -> u64 {

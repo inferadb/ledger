@@ -195,7 +195,7 @@ impl Region {
     ///
     /// US regions are non-protected by design — no US federal data residency law
     /// comparable to GDPR exists. PII for US-region users replicates to all nodes.
-    /// See `docs/operations/data-residency-architecture.md` for operational guidance.
+    /// See `docs/architecture/data-residency.md` for operational guidance.
     #[inline]
     pub const fn requires_residency(&self) -> bool {
         !matches!(self, Self::GLOBAL | Self::US_EAST_VA | Self::US_WEST_OR)

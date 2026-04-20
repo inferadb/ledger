@@ -1,7 +1,7 @@
 //! InferaDB Ledger profiling workload driver.
 //!
 //! Drives reproducible load against a running ledger node for flamegraph capture.
-//! See `docs/operations/profiling.md` for usage.
+//! See `docs/how-to/profiling.md` for usage.
 
 use clap::Parser;
 use snafu::{IntoError, ResultExt, Snafu};

@@ -1,65 +1,101 @@
-# InferaDB Ledger — Operator Documentation
+# InferaDB Ledger — Documentation
 
-Guides for deploying, configuring, monitoring, and maintaining InferaDB Ledger.
+Operator and contributor documentation. Structured by [Diátaxis](https://diataxis.fr/): each document is a tutorial, how-to guide, reference, or explanation — the directory tells you which.
 
-## Architecture (repo root)
+## Start here
 
-For design rationale, correctness proofs, and internal layout, see the root-level docs:
+- **First time?** Read [overview.md](overview.md) — what Ledger is and how its pieces fit together.
+- **Evaluating?** See [faq.md](faq.md) — common questions about the trust model, consistency, and design choices.
+- **Deploying?** Start with the tutorial in [getting-started/](getting-started/production-deployment.md).
+- **On-call, paged?** Go to [runbooks/](runbooks/README.md) and scan the symptom → runbook table.
 
-- [DESIGN.md](../DESIGN.md) — canonical system design (write/read paths, consensus, data residency, encryption, invariants)
-- [WHITEPAPER.md](../WHITEPAPER.md) — public-facing architecture summary + performance characteristics
+## The tiers
 
-Per-crate architecture lives in each crate's own `CLAUDE.md` (e.g. `crates/consensus/CLAUDE.md`, `crates/state/CLAUDE.md`).
+### [getting-started/](getting-started/) — tutorials
 
-## Understanding Ledger (operator-focused)
+Learning-oriented, single-happy-path, reproducible in one sitting.
 
-- [Architecture overview](overview.md) — what Ledger is, how its components fit together
-- [FAQ](faq.md) — trust model, Raft consensus, organizations, vaults
+- [Production deployment](getting-started/production-deployment.md) — step-by-step Kubernetes deployment.
 
-## Deploying
+### [reference/](reference/) — reference
 
-- [Deployment guide](operations/deployment.md) — production deployment patterns
-- [Production tutorial](operations/production-deployment-tutorial.md) — step-by-step Kubernetes deployment
-- [Configuration reference](operations/configuration.md) — CLI flags and environment variables
-- [Security](operations/security.md) — trust model, TLS, encryption at rest
-- [Multi-region](operations/multi-region.md) — geographic distribution and data residency
-- [Region management](operations/region-management.md) — organization-to-region routing
-- [Data residency](operations/data-residency-architecture.md) — PII isolation and compliance
+Information-oriented, comprehensive lookup. Consistent entry shape per item.
 
-## Monitoring
+- [Configuration](reference/configuration.md) — every CLI flag, env var, default, and validator.
+- [Metrics](reference/metrics.md) — every Prometheus metric (includes per-organization resource accounting).
+- [Alerting](reference/alerting.md) — recommended Prometheus thresholds and PromQL rules.
+- [SLOs](reference/slo.md) — service-level objectives and SLI definitions.
+- [API versioning](reference/api-versioning.md) — client/server compatibility and headers.
+- [Errors](reference/errors.md) — `ErrorCode` catalog: gRPC status, retryability, suggested action.
 
-- [Metrics reference](operations/metrics-reference.md) — all Prometheus metrics
-- [Logging](operations/logging.md) — canonical log lines, structured fields
-- [Events](operations/events.md) — audit event system, event catalog, retention
-- [Alerting](operations/alerting.md) — Prometheus alerting rules and thresholds
-- [Dashboard templates](dashboards/) — Grafana, Kibana, Datadog
-- [SLI/SLO reference](operations/slo.md) — service level indicators and objectives
-- [Per-organization metrics](operations/metrics-reference.md#per-organization-resource-metrics) — per-tenant resource tracking (subsection of the metrics reference)
-- [Background jobs](operations/background-jobs.md) — job observability and health
-- [Capacity planning](operations/capacity-planning.md) — sizing and resource estimation
-- [Observability cost](operations/observability-cost.md) — controlling metric and log ingestion costs across paid observability vendors
+### [how-to/](how-to/) — goal-oriented guides
 
-## Maintaining
+Task-oriented. Preconditions + steps + outcome.
 
-- [Troubleshooting](operations/troubleshooting.md) — common issues and solutions
-- [Vault repair](operations/runbooks/vault-repair.md) — recovering diverged vaults
-- [API versioning](operations/api-versioning.md) — version negotiation and compatibility
+- [Deployment](how-to/deployment.md) — cluster setup, bootstrap, backup, restore.
+- [Logging](how-to/logging.md) — enabling + querying canonical log lines.
+- [Profiling](how-to/profiling.md) — flamegraph capture and performance investigation.
+- [Observability cost](how-to/observability-cost.md) — cost-tuning for paid observability vendors.
+- [Troubleshooting](how-to/troubleshooting.md) — symptom index routing to runbooks.
+- [Capacity planning](how-to/capacity-planning.md) — sizing and resource estimation.
 
-## Runbooks
+### [architecture/](architecture/) — explanation
 
-- [Rolling upgrade](operations/runbooks/rolling-upgrade.md)
-- [Backup verification](operations/runbooks/backup-verification.md)
-- [Disaster recovery](operations/runbooks/disaster-recovery.md)
-- [Key provisioning](operations/runbooks/key-provisioning.md)
-- [Scaling](operations/runbooks/scaling.md)
-- [Leader cache diagnosis](operations/runbooks/leader-cache-diagnosis.md)
-- [Consensus transport backpressure](operations/runbooks/consensus-transport-backpressure.md)
+Understanding-oriented. Why things are the way they are.
+
+- [Durability](architecture/durability.md) — WAL, checkpoints, recovery contract.
+- [Security](architecture/security.md) — trust model, TLS, encryption at rest, hardening.
+- [Events](architecture/events.md) — audit event pipeline, catalog, retention.
+- [Multi-region](architecture/multi-region.md) — geographic distribution patterns.
+- [Region management](architecture/region-management.md) — organization-to-region routing mechanics.
+- [Data residency](architecture/data-residency.md) — GLOBAL/REGIONAL split, PII isolation, crypto-shredding.
+- [Request routing](architecture/request-routing.md) — redirect-based client routing to regional leaders.
+- [Background jobs](architecture/background-jobs.md) — scheduled jobs inside the node.
+
+## Operational artefacts
+
+### [runbooks/](runbooks/) — incident response
+
+Task-oriented, on-call-paged procedures. Each runbook has the 8-section shape (Symptom / Alert / Blast radius / Preconditions / Steps / Verification / Rollback / Escalation).
+
+- [Disaster recovery](runbooks/disaster-recovery.md) — parent runbook for catastrophic failures.
+- [Vault repair](runbooks/vault-repair.md) — diverged vaults.
+- [Quorum loss](runbooks/quorum-loss.md) — minority of voters surviving.
+- [Snapshot restore failure](runbooks/snapshot-restore-failure.md) — learner can't install snapshot.
+- [PII erasure failure](runbooks/pii-erasure-failure.md) — stuck or failing `EraseUser`.
+- [Key rotation failure](runbooks/key-rotation-failure.md) — RMK / blinding-key rotation stalled.
+- [Leader cache diagnosis](runbooks/leader-cache-diagnosis.md) — SDK leader-cache flapping.
+- [Consensus transport backpressure](runbooks/consensus-transport-backpressure.md) — peer send queue saturating.
+- [Node connection registry](runbooks/node-connection-registry.md) — channel-pool drift.
+
+### [playbooks/](playbooks/) — scheduled maintenance
+
+Task-oriented, planned-window procedures. 6-section shape (Purpose / Preconditions / Steps / Verification / Rollback / Escalation).
+
+- [Rolling upgrade](playbooks/rolling-upgrade.md)
+- [Backup verification](playbooks/backup-verification.md)
+- [Scaling](playbooks/scaling.md)
+- [Key provisioning](playbooks/key-provisioning.md)
+
+### [dashboards/](dashboards/) — observability templates
+
+Importable Grafana, Kibana, and Datadog dashboards. See [dashboards/README.md](dashboards/README.md) for import steps per platform.
+
+### [testing/](testing/) — test strategy (internals / contributors)
+
+- [README](testing/README.md) · [property](testing/property.md) · [simulation](testing/simulation.md) · [fuzzing](testing/fuzzing.md)
+
+## Related
+
+- [DESIGN.md](../DESIGN.md) (repo root) — canonical system design.
+- [WHITEPAPER.md](../WHITEPAPER.md) (repo root) — public-facing architecture summary.
+- Per-crate architecture lives in each crate's own `CLAUDE.md` (e.g. `crates/consensus/CLAUDE.md`).
 
 ## Quick reference
 
-| Task               | Command                                                           |
-| ------------------ | ----------------------------------------------------------------- |
-| Start single node  | `inferadb-ledger --listen 127.0.0.1:9090 --data /tmp/ledger`      |
-| Initialize cluster | `inferadb-ledger init --host 127.0.0.1:9090`                      |
-| Health check       | `grpcurl -plaintext localhost:9090 ledger.v1.HealthService/Check` |
-| View metrics       | `curl localhost:9091/metrics`                                     |
+| Task               | Command                                                            |
+| ------------------ | ------------------------------------------------------------------ |
+| Start single node  | `inferadb-ledger --listen 0.0.0.0:50051 --data /tmp/ledger`        |
+| Initialize cluster | `inferadb-ledger init --host localhost:50051`                      |
+| Health check       | `grpcurl -plaintext localhost:50051 ledger.v1.HealthService/Check` |
+| View metrics       | `curl localhost:9090/metrics` (requires `--metrics 0.0.0.0:9090`)  |

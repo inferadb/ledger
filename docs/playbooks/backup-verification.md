@@ -1,8 +1,50 @@
-# Backup Verification Runbook
+# Backup Verification Playbook
 
-Procedure for verifying backup integrity and testing restore procedures.
+Scheduled procedure for verifying backup integrity and testing restore paths. This is planned maintenance work, not incident response — run on a weekly cadence (or per your backup SLO).
 
-## Overview
+## Purpose
+
+Confirm that the cluster's backup pipeline actually produces restorable artifacts. A backup that has never been restored is a wish, not a backup.
+
+- **When to run**: weekly for full restore tests; daily for lightweight integrity checks.
+- **Expected duration**: 30–60 minutes for a full restore test on a scratch environment.
+- **Who runs it**: SRE / on-call during business hours (not on-call pages).
+
+## Preconditions
+
+- Write access to the backup location (S3 or equivalent) to enumerate + fetch the latest snapshot.
+- A scratch environment (local Docker, staging cluster, or isolated K8s namespace) distinct from production — restore tests must not touch the live cluster.
+- Docker (or equivalent container runtime) if using the containerized verification path below.
+
+## Steps
+
+1. Enumerate the latest backup artefact and fetch it to the scratch environment.
+2. Verify the SHA-256 checksum of the downloaded artefact before decompression.
+3. Start a scratch single-node cluster pointing at the restored `data_dir`.
+4. Run the verification queries in the [Deep reference § 3. Verify Restore](#3-verify-restore) section: list organizations, list vaults, confirm block heights match pre-backup records.
+5. Exercise `AdminService.CheckIntegrity` against a sample of restored vaults.
+6. Record results in the backup-verification tracker.
+
+## Verification
+
+- Scratch cluster responds to `HealthService.Check` with `SERVING`.
+- `AdminService.ListOrganizations` returns the expected organizations.
+- `AdminService.CheckIntegrity` returns `ok: true` on sampled vaults.
+- SHA-256 checksum of the restored artefact matches the manifest.
+
+## Rollback
+
+Scratch environment teardown is the rollback: `docker rm -f ledger-restore-test` (or equivalent). No production state is touched.
+
+## Escalation
+
+- SHA-256 checksum mismatch on a backup: halt backup rotation, preserve the failing artefact, and page the storage / backup pipeline owner. Investigate before overwriting the last known-good backup.
+- Restored cluster reports integrity errors: investigate whether the failure is in the backup artefact or the restore procedure. If the backup itself is bad, escalate per data-integrity incident policy.
+- Verification detected divergence from pre-backup state: escalate to the consensus / state-layer owner.
+
+## Deep reference
+
+### Overview
 
 Ledger backups consist of:
 

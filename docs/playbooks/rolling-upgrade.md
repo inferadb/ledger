@@ -1,10 +1,66 @@
-# Upgrade Runbook
+# Rolling Upgrade Playbook
 
-Procedure for upgrading Ledger to a new version.
+Scheduled procedure for upgrading Ledger to a new version. This is planned work, not incident response — run during a maintenance window with stakeholder notification.
 
 > **Pre-GA Disclaimer**: InferaDB Ledger is pre-1.0 software. Until 1.0, upgrades between minor versions require a full cluster wipe and restore. Rolling upgrades (zero-downtime, node-by-node) will be supported starting with 1.0 stable releases.
 
-## Version Compatibility (Pre-GA)
+## Purpose
+
+Move the cluster from one released version to another. Until 1.0 this requires a full wipe + restore from backup; post-1.0 this becomes a true rolling upgrade (node-by-node, zero-downtime).
+
+- **When to run**: during a scheduled maintenance window after validating the new version in staging.
+- **Expected duration**: 30–90 minutes depending on cluster size and backup size.
+- **Who runs it**: SRE with backup-operator access and cluster-admin authority.
+
+## Preconditions
+
+- New version validated in staging against the current production workload shape.
+- Recent backup taken and verified via the [backup-verification playbook](backup-verification.md) — the upgrade restores from this backup.
+- Maintenance window communicated to stakeholders; write traffic paused or rerouted.
+- Authority to stop, wipe, and restart every node in the cluster.
+- Rollback path identified (prior-version binary available, prior-version backup retained).
+
+## Steps
+
+1. Announce the maintenance window; pause writes per your traffic-management policy.
+2. Take a final pre-upgrade backup (in addition to the recent verified one) and confirm its checksum.
+3. Stop every node; confirm all are down.
+4. Wipe each node's `data_dir` (or rename aside for forensic preservation).
+5. Install the new binary / deploy the new container image on every node.
+6. On node 1: restore the backup into `data_dir` and start the node.
+7. Run `inferadb-ledger init --host node1:50051` to re-bootstrap the cluster with restored data.
+8. Start nodes 2 and 3 with `--join node1:50051`; confirm they catch up.
+9. Run the verification steps below before resuming write traffic.
+
+Exact commands live in [Deep reference](#restore-strategy-pre-ga) and the existing step-by-step content below.
+
+## Verification
+
+- `AdminService.GetClusterInfo` shows all three nodes as voters.
+- `ReadService.GetTip` for a sampled set of vaults returns block heights equal to pre-upgrade heights (recorded in step 1 of the deep reference).
+- `AdminService.CheckIntegrity` passes on sampled vaults.
+- No new entries in `ledger_determinism_bug_total`.
+
+## Rollback
+
+If verification fails at any step:
+
+1. Stop all nodes.
+2. Wipe `data_dir` again.
+3. Install the **prior** version binary.
+4. Restore from the same backup using the same steps.
+5. Re-bootstrap and verify the cluster is back to the pre-upgrade state.
+
+Post-1.0 rolling upgrades will have true per-node rollback; for pre-GA upgrades the rollback path is another full-restore cycle.
+
+## Escalation
+
+- Restore verification shows block heights below pre-upgrade values: **stop immediately** — you may be restoring from a stale backup. Verify backup freshness before any further action; page the data-integrity owner.
+- Any `ledger_determinism_bug_total` increment after upgrade: stop writes, page the consensus owner — version-to-version determinism broke.
+
+## Deep reference
+
+### Version Compatibility (Pre-GA)
 
 | From Version | To Version | Upgrade Path      | Notes                                 |
 | ------------ | ---------- | ----------------- | ------------------------------------- |

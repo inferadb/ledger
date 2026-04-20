@@ -8,7 +8,7 @@ This guide uses **Datadog** as the worked example because its pricing model and 
 
 Datadog bills by **unique time series**, where each time series is the combination of a metric name and a distinct tag set. A single metric emitted with 5 unique label combinations counts as 5 custom metrics. At scale, high-cardinality labels (organization ID, user ID, vault ID) are the primary cost driver.
 
-InferaDB Ledger avoids high-cardinality labels on Prometheus metrics by design. Entity IDs, user IDs, and region are emitted as structured log fields, not metric tags. See [Metrics Reference](metrics-reference.md) for the "What's NOT a metric" rules.
+InferaDB Ledger avoids high-cardinality labels on Prometheus metrics by design. Entity IDs, user IDs, and region are emitted as structured log fields, not metric tags. See [Metrics Reference](../reference/metrics.md) for the "What's NOT a metric" rules.
 
 ## Distributions vs Histograms
 

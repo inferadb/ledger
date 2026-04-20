@@ -290,7 +290,7 @@ ledger_determinism_bug_total > 0
 
 ## State Durability
 
-Lazy-commit + periodic-checkpoint durability, covering all four regional DBs. Operator tuning + interpretation reference: [durability.md](durability.md).
+Lazy-commit + periodic-checkpoint durability, covering all four regional DBs. Operator tuning + interpretation reference: [durability.md](../architecture/durability.md).
 
 | Metric                                           | Type      | Labels                        | Description                                                                                                                                                                                                                           |
 | ------------------------------------------------ | --------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -319,7 +319,7 @@ ledger_state_dirty_pages
 
 ## Handler Event Flush
 
-Metrics for the handler-phase event queue + background flusher. Operator tuning + durability contract: [durability.md § Handler-phase event flush window](durability.md#handler-phase-event-flush-window). Configuration knobs: [configuration.md § Handler-Phase Event Batching](configuration.md#handler-phase-event-batching).
+Metrics for the handler-phase event queue + background flusher. Operator tuning + durability contract: [durability.md § Handler-phase event flush window](../architecture/durability.md#handler-phase-event-flush-window). Configuration knobs: [configuration.md § Handler-Phase Event Batching](configuration.md#handler-phase-event-batching).
 
 | Metric                                 | Type      | Labels              | Description                                                                                                                                                                                                                               |
 | -------------------------------------- | --------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -434,7 +434,7 @@ heartbeats are self-healing).
 - `peer`: Raw node ID (numeric string); cardinality bounded by cluster size
 - `reason`: `queue_full` or `task_shutdown`
 
-See the [consensus transport backpressure runbook](runbooks/consensus-transport-backpressure.md)
+See the [consensus transport backpressure runbook](../runbooks/consensus-transport-backpressure.md)
 for symptom-to-cause mapping.
 
 ## Node Connection Registry
@@ -454,7 +454,7 @@ duplication.
 - `peer`: Raw node ID (numeric string); cardinality bounded by cluster size
 - `event`: `registered`, `unregistered`, or `pruned`
 
-See the [node connection registry runbook](runbooks/node-connection-registry.md)
+See the [node connection registry runbook](../runbooks/node-connection-registry.md)
 for symptom-to-cause mapping.
 
 ## SDK Region Leader Cache
@@ -474,7 +474,7 @@ default) and single-flight coalescing for concurrent miss resolutions.
 | `ledger_sdk_leader_watch_updates_total`                  | Counter | `region`           | Leader updates received over the `WatchLeader` stream (includes the initial state pushed on stream open).                                                                                                                                                                           |
 | `ledger_sdk_leader_watch_reconnects_total`               | Counter | `region`           | `WatchLeader` stream reconnect attempts after error or server-initiated close. Exponential backoff caps at 30s between attempts.                                                                                                                                                    |
 | `ledger_sdk_leader_stale_term_rejected_total`            | Counter | `region`, `source` | Cache writes rejected because the incoming Raft term is older than the currently-cached term. `source` ∈ `hint`, `watch`. Non-zero under message reordering; term-gating preserves monotonicity.                                                                                    |
-| `ledger_sdk_redirect_retries_total`                      | Counter | `region`           | Number of retries triggered by a leader-redirect hint. Expected to be non-zero on cold start for cross-region writes; should trend toward zero on warm paths with `preferred_region` configured. See: [architecture-redirect-routing.md](runbooks/architecture-redirect-routing.md) |
+| `ledger_sdk_redirect_retries_total`                      | Counter | `region`           | Number of retries triggered by a leader-redirect hint. Expected to be non-zero on cold start for cross-region writes; should trend toward zero on warm paths with `preferred_region` configured. See: [request-routing.md](../architecture/request-routing.md) |
 
 **Labels:**
 
@@ -491,7 +491,7 @@ rate(ledger_sdk_leader_cache_hits_total[5m]) /
 rate(ledger_sdk_leader_cache_flaps_total[5m])
 ```
 
-See the [leader cache diagnosis runbook](runbooks/leader-cache-diagnosis.md)
+See the [leader cache diagnosis runbook](../runbooks/leader-cache-diagnosis.md)
 for symptom-to-cause mapping.
 
 ## Alert Recommendations

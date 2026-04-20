@@ -29,7 +29,7 @@ curl -X POST \
   https://grafana.example.com/api/dashboards/db
 ```
 
-Prerequisites: Prometheus data source scraping the Ledger metrics endpoint (see `docs/operations/metrics-reference.md`).
+Prerequisites: Prometheus data source scraping the Ledger metrics endpoint (see `docs/reference/metrics.md`).
 
 ## Grafana (Loki data source)
 
@@ -37,7 +37,7 @@ Prerequisites: Prometheus data source scraping the Ledger metrics endpoint (see 
 | --------------------- | ------------------------------------------------ |
 | `grafana-loki.json`   | Request logs, error patterns, audit trail queries. |
 
-Prerequisites: Loki collecting Ledger stdout/stderr; server configured for JSON structured logging (see `docs/operations/logging.md`).
+Prerequisites: Loki collecting Ledger stdout/stderr; server configured for JSON structured logging (see `docs/how-to/logging.md`).
 
 ## Kibana
 
@@ -57,7 +57,7 @@ Prerequisites: Elasticsearch / OpenSearch index configured for Ledger log ingest
 
 **Import**: Datadog → Dashboards → New Dashboard → Import Dashboard JSON.
 
-Prerequisites: Datadog agent configured to ingest Ledger logs (`pipeline` + facet configuration for the request-log schema). See [`docs/operations/observability-cost.md`](../operations/observability-cost.md) for cost-tuning guidance.
+Prerequisites: Datadog agent configured to ingest Ledger logs (`pipeline` + facet configuration for the request-log schema). See [`docs/how-to/observability-cost.md`](../how-to/observability-cost.md) for cost-tuning guidance.
 
 ## Compatibility
 
@@ -67,8 +67,8 @@ Metric drift is protected by the `documentation-reviewer` agent (invariant #5 �
 
 ## Related
 
-- [Metrics reference](../operations/metrics-reference.md) — authoritative metric catalog.
-- [Alerting thresholds](../operations/alerting.md) — recommended warning/critical levels and PromQL expressions.
-- [SLO reference](../operations/slo.md) — service-level objectives and SLI definitions.
-- [Logging](../operations/logging.md) — log schema, fields, and query patterns.
-- [Observability cost](../operations/observability-cost.md) — cost-tuning for Datadog and comparable vendors.
+- [Metrics reference](../reference/metrics.md) — authoritative metric catalog.
+- [Alerting thresholds](../reference/alerting.md) — recommended warning/critical levels and PromQL expressions.
+- [SLO reference](../reference/slo.md) — service-level objectives and SLI definitions.
+- [Logging](../how-to/logging.md) — log schema, fields, and query patterns.
+- [Observability cost](../how-to/observability-cost.md) — cost-tuning for Datadog and comparable vendors.

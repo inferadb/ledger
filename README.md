@@ -71,7 +71,7 @@ cargo +1.92 install --locked --path crates/server
 # https://github.com/inferadb/ledger/releases
 ```
 
-For Kubernetes, Docker Compose, or systemd deployments, see the [deployment guide](docs/operations/deployment.md).
+For Kubernetes, Docker Compose, or systemd deployments, see the [deployment guide](docs/how-to/deployment.md).
 
 **Start a node:**
 
@@ -106,22 +106,22 @@ inferadb-ledger \
   --region ie-east-dublin
 ```
 
-See the [deployment guide](docs/operations/deployment.md) for multi-node setup, Kubernetes, adding/removing nodes, backup, and recovery.
+See the [deployment guide](docs/how-to/deployment.md) for multi-node setup, Kubernetes, adding/removing nodes, backup, and recovery.
 
 ## Configuration
 
 | CLI           | Purpose                                                                                               | Default         |
 | ------------- | ----------------------------------------------------------------------------------------------------- | --------------- |
-| `--data`      | Persistent [storage](docs/operations/durability.md) (WAL, state, snapshots)                           | _(ephemeral)_   |
+| `--data`      | Persistent [storage](docs/architecture/durability.md) (WAL, state, snapshots)                           | _(ephemeral)_   |
 | `--listen`    | TCP address for gRPC API                                                                              | _(none)_        |
 | `--socket`    | Unix domain socket path for gRPC API                                                                  | _(none)_        |
-| `--join`      | Seed addresses for [cluster discovery](docs/operations/deployment.md#adding-a-node) (comma-separated) | _(none)_        |
-| `--region`    | Geographic data residency [region](docs/operations/deployment.md)                                     | `global`        |
-| `--advertise` | Address advertised to peers ([details](docs/operations/deployment.md#advertise-address))              | _(auto-detect)_ |
+| `--join`      | Seed addresses for [cluster discovery](docs/how-to/deployment.md#adding-a-node) (comma-separated) | _(none)_        |
+| `--region`    | Geographic data residency [region](docs/how-to/deployment.md)                                     | `global`        |
+| `--advertise` | Address advertised to peers ([details](docs/how-to/deployment.md#advertise-address))              | _(auto-detect)_ |
 
 At least one of `--listen` or `--socket` must be specified. On restart, only `--data` is required. All other flags are persisted on first boot and ignored on subsequent starts.
 
-See [Configuration Reference](docs/operations/deployment.md#configuration-reference) for environment variables and all options including metrics, batching, and tuning.
+See [Configuration Reference](docs/how-to/deployment.md#configuration-reference) for environment variables and all options including metrics, batching, and tuning.
 
 ## Contributing
 
@@ -172,7 +172,7 @@ Read [CONTRIBUTING.md → Using AI Assistants](CONTRIBUTING.md#using-ai-assistan
 
 **Operate Ledger:**
 
-- [Deployment guide](docs/operations/deployment.md) — Multi-node setup, Kubernetes, adding/removing nodes, backup, recovery.
+- [Deployment guide](docs/how-to/deployment.md) — Multi-node setup, Kubernetes, adding/removing nodes, backup, recovery.
 - [Dashboards](docs/dashboards/) — Prometheus + Grafana references.
 
 **Contribute to Ledger:**

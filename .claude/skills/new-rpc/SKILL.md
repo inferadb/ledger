@@ -62,7 +62,7 @@ Confirm with the user:
 ### 7. API version negotiation
 
 - [ ] New RPCs are subject to `ApiVersionLayer` by default. Do NOT add the service to the exempt list (`Health`, `Discovery`, `Raft` only) without justification.
-- [ ] If the RPC has a version-gated field, document it in `docs/operations/api-versioning.md`.
+- [ ] If the RPC has a version-gated field, document it in `docs/reference/api-versioning.md`.
 
 ### 8. SDK client (`crates/sdk/src/`)
 
@@ -100,6 +100,6 @@ Confirm with the user:
 ## References
 
 - `DESIGN.md` — architecture overview
-- `docs/operations/api-versioning.md` — version header contract
+- `docs/reference/api-versioning.md` — version header contract
 - `docs/errors.md` — `ErrorCode` enum + classification
 - `CLAUDE.md` — data residency (Pattern 1/2/3), storage key prefixes, dual-ID rules

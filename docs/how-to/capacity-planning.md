@@ -102,7 +102,7 @@ Recommended per-region limits for stable performance:
 | Vaults per region   | <500              | Unlimited  |
 | Organizations       | <100              | Unlimited  |
 
-Beyond these limits, assign new organizations to a less loaded region. See [Region Management](region-management.md).
+Beyond these limits, assign new organizations to a less loaded region. See [Region Management](../architecture/region-management.md).
 
 ### CPU
 

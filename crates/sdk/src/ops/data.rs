@@ -265,7 +265,7 @@ impl LedgerClient {
     ///
     /// On crash, the state DB is rebuilt by replaying the WAL tail during
     /// recovery; replay is idempotent and transparent to callers. See
-    /// `docs/operations/durability.md` for the full contract.
+    /// `docs/architecture/durability.md` for the full contract.
     ///
     /// # Returns
     ///
@@ -497,7 +497,7 @@ impl LedgerClient {
     ///
     /// On crash, the state DB is rebuilt by replaying the WAL tail during
     /// recovery; replay is idempotent and preserves batch atomicity. See
-    /// `docs/operations/durability.md` for the full contract.
+    /// `docs/architecture/durability.md` for the full contract.
     ///
     /// # Returns
     ///

@@ -118,7 +118,7 @@ Everyday tests are covered by `just test`, `just test-integration`, and `just te
 
 **An audit agent flagged my change and I think it's wrong.** Surface the contradiction in the PR description rather than working around it. Golden rules exist because the same class of bug has surfaced at least twice.
 
-More operational issues: [`docs/faq.md`](docs/faq.md) and [`docs/operations/`](docs/operations/).
+More operational issues: [`docs/faq.md`](docs/faq.md) and the operator documentation tree starting at [`docs/README.md`](docs/README.md).
 
 ## Review Process
 

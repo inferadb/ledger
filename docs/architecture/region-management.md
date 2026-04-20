@@ -4,7 +4,7 @@
 
 Regions are geographic data residency zones. Each region maps 1:1 to a Raft consensus group with isolated storage. This guide covers region concepts, organization assignment, write forwarding, and monitoring.
 
-> **Related**: For multi-region deployment patterns (regional vs stretched clusters, DR strategies), see [Multi-Region Deployment](multi-region.md). For data-residency compliance guarantees (why GLOBAL/REGIONAL split exists, pseudonymization, crypto-shredding), see [Data Residency Architecture](data-residency-architecture.md).
+> **Related**: For multi-region deployment patterns (regional vs stretched clusters, DR strategies), see [Multi-Region Deployment](multi-region.md). For data-residency compliance guarantees (why GLOBAL/REGIONAL split exists, pseudonymization, crypto-shredding), see [Data Residency Architecture](data-residency.md).
 
 ## Overview
 
@@ -372,7 +372,7 @@ inferadb_ledger_disk_bytes / inferadb_ledger_disk_capacity_bytes > 0.85
 
 ## See Also
 
-- [Deployment Guide](deployment.md) - Cluster setup
+- [Deployment Guide](../how-to/deployment.md) - Cluster setup
 - [Multi-Region](multi-region.md) - Geographic distribution patterns
-- [Capacity Planning](capacity-planning.md) - Sizing guidelines
+- [Capacity Planning](../how-to/capacity-planning.md) - Sizing guidelines
 - SystemDiscoveryService `GetSystemState` RPC - Routing API

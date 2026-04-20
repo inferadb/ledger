@@ -2,7 +2,7 @@
 
 Guidance for deploying Ledger across multiple geographic regions.
 
-> **Related**: For the mechanics of how regions work (Region enum, storage layout, organization-to-region assignment, write forwarding), see [Region Management](region-management.md). For data-residency compliance guarantees (GLOBAL vs REGIONAL split, pseudonymization, crypto-shredding), see [Data Residency Architecture](data-residency-architecture.md).
+> **Related**: For the mechanics of how regions work (Region enum, storage layout, organization-to-region assignment, write forwarding), see [Region Management](region-management.md). For data-residency compliance guarantees (GLOBAL vs REGIONAL split, pseudonymization, crypto-shredding), see [Data Residency Architecture](data-residency.md).
 
 ## Architecture Options
 
@@ -117,7 +117,7 @@ Within a region, the SDK redirects directly to the regional Raft leader via
 requests across nodes on the client's behalf. Clients must therefore have
 direct network reachability to every node in the target region.
 
-See: [Redirect-Based Client Routing Architecture](runbooks/architecture-redirect-routing.md).
+See: [Request Routing](request-routing.md).
 
 ## Cross-Region Considerations
 

@@ -10,7 +10,7 @@ Ledger runs within a secure network perimeter (WireGuard, VPC) and trusts all in
 
 However, Ledger **is** the JWT signing authority for the platform — its TokenService issues, validates, and revokes JWTs consumed by Engine and Control for end-user authentication. The distinction: Ledger doesn't authenticate _who is calling it_, but it _issues the tokens_ that authenticate end users elsewhere.
 
-See [Security](operations/security.md) for the trust model.
+See [Security](architecture/security.md) for the trust model.
 
 ### How does Ledger relate to Engine and Control?
 

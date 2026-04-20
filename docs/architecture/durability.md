@@ -94,7 +94,7 @@ Each trigger emits its own label on `ledger_event_flush_triggers_total{trigger=t
 
 ### Tuning
 
-All fields of `EventWriterBatchConfig` except `queue_capacity` are runtime-reconfigurable via the `UpdateConfig` RPC. See [configuration.md § Handler-Phase Event Batching](configuration.md#handler-phase-event-batching) for field semantics, defaults, and a full `UpdateConfig` example.
+All fields of `EventWriterBatchConfig` except `queue_capacity` are runtime-reconfigurable via the `UpdateConfig` RPC. See [configuration.md § Handler-Phase Event Batching](../reference/configuration.md#handler-phase-event-batching) for field semantics, defaults, and a full `UpdateConfig` example.
 
 - **Tighter loss window** — the StateCheckpointer is the dominant loss-window knob, not `flush_interval_ms`. Narrow the window via `state_checkpoint.interval_ms` (floor 50ms); see [Tuning the StateCheckpointer](#tuning-the-statecheckpointer) above. `flush_interval_ms` still controls how quickly enqueued events reach the events.db page cache, which is the read-after-write visibility window for `list_events` queries issued against the same node.
 - **Looser window** — raise `state_checkpoint.interval_ms` and/or `flush_interval_ms`. Wider windows cut fsyncs per second; the trade-off is a wider post-crash audit-loss window and slower read-after-write visibility.
@@ -206,11 +206,11 @@ grpcurl -plaintext -d '{
 - **Do not set any threshold to zero.** Validation rejects `interval_ms < 50`, `applies_threshold < 1`, or `dirty_pages_threshold < 1`. The validation exists to prevent a zero-cadence checkpointer (which would pin a CPU) and a threshold-never-fires state (which would grow dirty pages unbounded until OOM).
 - **Do not bypass the `UpdateConfig` RPC** by editing config on disk — there is no config file, and runtime values live in `ArcSwap<RuntimeConfig>`. Changes must flow through the admin surface so audit logging captures them.
 
-See [configuration.md](configuration.md) for the `UpdateConfig` / `GetConfig` admin-RPC overview and the `RuntimeConfigHandle` architecture.
+See [configuration.md](../reference/configuration.md) for the `UpdateConfig` / `GetConfig` admin-RPC overview and the `RuntimeConfigHandle` architecture.
 
 ## Monitoring
 
-Nine Prometheus metrics track checkpoint and recovery behavior. Full signatures in [metrics-reference.md](metrics-reference.md).
+Nine Prometheus metrics track checkpoint and recovery behavior. Full signatures in [metrics-reference.md](../reference/metrics.md).
 
 | Metric                                           | Type      | Labels                        | Purpose                                                                                |
 | ------------------------------------------------ | --------- | ----------------------------- | -------------------------------------------------------------------------------------- |

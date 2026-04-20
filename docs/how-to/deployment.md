@@ -296,7 +296,7 @@ inferadb-ledger --socket /var/run/ledger.sock --data /var/lib/ledger
 
 Both `--listen` (TCP) and `--socket` (UDS) can be used simultaneously for mixed access patterns.
 
-See: [Redirect-Based Client Routing Architecture](runbooks/architecture-redirect-routing.md).
+See: [Request Routing](../architecture/request-routing.md).
 
 ## Kubernetes Deployment
 

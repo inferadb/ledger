@@ -1,8 +1,61 @@
-# Key Provisioning Runbook
+# Key Provisioning Playbook
 
-Operational guide for provisioning Region Master Keys (RMKs) to InferaDB Ledger nodes.
+Scheduled procedure for provisioning and rotating Region Master Keys (RMKs) on InferaDB Ledger nodes. This is planned maintenance, not incident response.
 
-## Overview
+## Purpose
+
+Ensure every node has the Region Master Keys it needs before it joins a Raft group, and rotate keys on the schedule your compliance posture requires.
+
+- **When to run**:
+  - Before adding a node to the cluster (provisioning).
+  - On a scheduled rotation cadence (typically quarterly or per compliance policy).
+  - On key compromise (out-of-schedule rotation).
+- **Expected duration**: 15–30 minutes for provisioning; key rotation is asynchronous but has an active window of ~60 minutes for RMK re-wrap across all regions.
+- **Who runs it**: SRE with access to the organization's secrets manager.
+
+## Preconditions
+
+- Access to the configured secrets manager (AWS Secrets Manager, HashiCorp Vault, or equivalent).
+- Knowledge of which regions the target node(s) will serve — determines the RMK set to provision.
+- For rotation: authority to call `AdminService.RotateRegionKey`.
+- The [Deep reference § Key Source Configuration](#key-source-configuration) section lists all supported sources.
+
+## Steps
+
+For **provisioning** a new node:
+
+1. Determine the required RMK set using the rules in [Deep reference § Required Regions](#required-regions).
+2. Retrieve each RMK from the secrets manager at the correct version.
+3. Configure the node's key source (`--key-manager` / `INFERADB__LEDGER__KEY_MANAGER` + per-source settings).
+4. Start the node; confirm it validates all required RMKs during startup (failures abort startup before Raft join).
+
+For **rotation** of an existing key:
+
+1. Generate a new RMK and store it in the secrets manager at the next version.
+2. Roll the new key out to every node's key source so all nodes can see both versions.
+3. Trigger the rotation via `AdminService.RotateRegionKey`; this proposes the version bump to GLOBAL Raft so all nodes learn the new active version.
+4. Optionally run background re-wrap to migrate existing ciphertext to the new key — progress tracked via `AdminService.GetRewrapStatus`.
+
+## Verification
+
+- Node startup logs confirm all required RMKs loaded.
+- `ledger_dek_rewrap_progress` (during rotation) advances and reaches completion.
+- `AdminService.GetRewrapStatus` reports `complete: true` for the rotated region.
+- Read + write smoke test against a sample vault in the rotated region succeeds.
+
+## Rollback
+
+- **Provisioning**: if a node fails to start because an RMK is missing or wrong version, fix the key source configuration and retry. No destructive state is written.
+- **Rotation**: if the new RMK is later found to be bad, roll forward to a new version (do not roll back — the cluster has already committed the version bump). The old version is still usable for reads until re-wrap completes.
+
+## Escalation
+
+- Rotation stalls (progress doesn't advance) → see [key-rotation-failure.md](../runbooks/key-rotation-failure.md).
+- Node startup consistently fails with "missing RMK" despite the secrets manager having the key: page the key-management owner and verify the node's IAM / secret-access policies.
+
+## Deep reference
+
+### Overview
 
 Each node independently acquires RMKs from its configured key source. Keys never travel via Raft or any cluster protocol. A node must have all required RMK versions for every region it participates in before joining any Raft group.
 

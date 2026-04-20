@@ -1,11 +1,55 @@
-# Consensus Transport Backpressure Runbook
+# Consensus Transport Backpressure
 
-Procedure for diagnosing inter-node consensus message backpressure using the
-`ledger_peer_send_*` Prometheus metrics. Use this runbook when peers report
-elevated apply latency, Raft leader-election churn, or alerts fire on peer
-send queue depth.
+On-call runbook for inter-node consensus backpressure — the outbound queue feeding peer messages is saturating faster than the drain task can flush it.
 
-## Purpose
+## Symptom
+
+- Apply latency rising on multiple regions simultaneously or leader-election churn becoming visible on dashboards.
+- `ledger_peer_send_queue_depth{peer=*}` shows non-zero values (healthy baseline is ~0).
+- Non-zero `rate(ledger_peer_send_drops_total{reason="queue_full"}[5m])`.
+
+## Alert / Trigger
+
+- `LedgerPeerSendBacklog` — `rate(ledger_peer_send_drops_total{reason="queue_full"}[5m]) > 0` sustained for 10 minutes.
+- Supporting alerts: elevated `inferadb_ledger_raft_apply_latency_seconds`, drops in `ledger_cluster_quorum_status`.
+
+## Blast radius
+
+- **Scope**: the affected peer-to-peer channel. If a single `peer=X` is saturating, only traffic to peer X is affected. If *all* peers show saturation simultaneously, the **local** node's tokio runtime is the bottleneck (not a peer problem).
+- **Downstream impact**: Raft commits stall; writes that require quorum take longer or time out. Other Raft groups on the same process may also slow if the runtime is the bottleneck.
+
+## Preconditions
+
+- Read access to the cluster's Prometheus metrics endpoint.
+- Ability to read the affected peer's CPU, network, and GC telemetry.
+- If the fix involves removing a node: authority to call `AdminService.LeaveCluster` for that peer.
+
+## Steps
+
+1. **Triage local vs peer**: check the dashboard for all `peer=*` series. If **all** peers saturating → local runtime bottleneck; investigate this node's CPU, GC, and `worker_threads` config. If **one** peer → peer-specific problem.
+2. **Classify the drop reason** — see the Symptom → Cause → Action table in [Deep reference](#symptom--cause--action). `queue_full` is actionable; `task_shutdown` is expected during membership changes.
+3. **Execute the remediation** per the table: check peer health, network telemetry, or initiate membership change for a persistently unreachable peer.
+4. **If all peers are saturating**, raise `tokio::runtime` worker thread count via `INFERADB__LEDGER__MAX_CONCURRENT` / `--concurrent` tuning OR shed load at the SDK layer until the saturation drains.
+
+## Verification
+
+- `ledger_peer_send_queue_depth{peer=*}` returns to ~0 baseline.
+- `rate(ledger_peer_send_drops_total{reason="queue_full"}[5m])` returns to 0.
+- Apply latency (`inferadb_ledger_raft_apply_latency_seconds`) returns to normal range.
+- Cluster quorum (`ledger_cluster_quorum_status`) is 1.
+
+## Rollback
+
+No destructive actions are taken by this runbook. Membership changes triggered while diagnosing are themselves reversible via `AdminService.JoinCluster`. If worker-thread count was increased and the cluster becomes unstable, revert to the prior value and restart the affected node.
+
+## Escalation
+
+- `queue_full` drops persist after peer remediation: page the consensus-transport owner.
+- Apply latency elevated cluster-wide despite local runtime headroom: escalate to disaster-recovery posture — see [disaster-recovery.md](disaster-recovery.md).
+
+## Deep reference
+
+### Purpose
 
 Each node maintains a bounded outbound queue (capacity 1024) per registered
 peer. A per-peer drain task dequeues messages and invokes the gRPC transport.
@@ -103,5 +147,5 @@ changes.
 ## Related
 
 - [Node Connection Registry spec](../../superpowers/specs/2026-04-15-node-connection-registry.md) (Phase 2 backpressure)
-- [Metrics Reference: Consensus Transport](../metrics-reference.md#consensus-transport)
+- [Metrics Reference: Consensus Transport](../reference/metrics.md#consensus-transport)
 - [Leader Cache Diagnosis Runbook](leader-cache-diagnosis.md) — SDK-side companion for leader routing

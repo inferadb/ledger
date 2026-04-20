@@ -1,8 +1,63 @@
-# Disaster Recovery Runbook
+# Disaster Recovery
 
-Procedures for recovering from catastrophic failures.
+On-call runbook for catastrophic failures: node failures, quorum loss, total cluster loss, data corruption, or regional failure. For specific narrow-scope failures (quorum loss with surviving minority, snapshot restore failing on a catching-up node) see the dedicated runbooks listed under [Escalation](#escalation); use this runbook as the parent entry point.
 
-## Failure Scenarios
+## Symptom
+
+- Cluster returns `UNAVAILABLE` on all write paths simultaneously (quorum loss).
+- Multiple nodes unreachable; `ledger_cluster_quorum_status` = 0.
+- Widespread state corruption indicated by `ledger_determinism_bug_total` or `ledger_state_root_divergences_total` across replicas.
+- An entire region's nodes are unreachable (regional failure).
+
+## Alert / Trigger
+
+- `LedgerClusterQuorumLost` — `ledger_cluster_quorum_status == 0` for > 2 minutes.
+- Cluster-wide `VaultUnavailable` alerts firing across many vaults (coordinated failure).
+- External monitoring (pingdom / synthetic probes) reporting total outage.
+
+## Blast radius
+
+- **Scope**: by scenario — see the Failure Scenarios table below. Ranges from a single node (no user impact, automatic recovery) to total cluster loss (full outage).
+- **Downstream impact**: application-visible write and read unavailability for affected regions / vaults. Cryptographic chain integrity is preserved in all recovery scenarios — no block is lost once committed.
+
+## Preconditions
+
+- Incident commander designated and incident response posture active.
+- Authority to perform destructive operations (full-cluster wipe + restore from backup requires this).
+- Recent backup available and verified per [backup-verification playbook](../playbooks/backup-verification.md).
+- Access to `AdminService` on surviving nodes.
+- DNS / load-balancer control if regional failover is needed.
+
+## Steps
+
+The recovery steps are scenario-specific. Start by classifying the failure using the [Failure Scenarios](#failure-scenarios) table below, then jump to the named procedure. Do **not** execute procedures outside of their classified scenario — in particular, do **not** run the quorum-loss re-bootstrap procedure while other nodes of the original cluster may rejoin (split-brain risk, called out explicitly in [Quorum Recovery](#quorum-recovery)).
+
+## Verification
+
+- `ledger_cluster_quorum_status` returns to 1.
+- All restored nodes report healthy via `HealthService.Check`.
+- Write-path smoke test succeeds: create a test vault, write an entity, read it back.
+- Block heights on all vaults match pre-incident values (verify via `ReadService.GetTip`).
+- `ledger_state_root_divergences_total` stable (not incrementing).
+
+## Rollback
+
+DR procedures are themselves the rollback path — you cannot "rollback" a disaster recovery. What you **can** do: before any destructive step (full-cluster wipe, force-new-cluster via re-init), snapshot the current `data_dir` to a parallel location so forensic analysis remains possible after the cluster is restored. This is called out in the relevant procedures below.
+
+## Escalation
+
+- Beyond the recovery-time targets in the Failure Scenarios table: escalate to engineering leadership.
+- If restored cluster shows `ledger_determinism_bug_total > 0` on first writes: stop writes and page the consensus owner — a determinism bug on a fresh cluster indicates a code-level issue, not a DR execution issue.
+- Specific failure modes with dedicated runbooks:
+  - Single vault diverged but cluster otherwise healthy → [vault-repair.md](vault-repair.md)
+  - Snapshot fails to install on a catching-up node → [snapshot-restore-failure.md](snapshot-restore-failure.md)
+  - Quorum loss with minority surviving → [quorum-loss.md](quorum-loss.md) (narrower than the Quorum Recovery procedure in this runbook; choose the one that matches your exact posture)
+  - PII erasure failing mid-procedure → [pii-erasure-failure.md](pii-erasure-failure.md)
+  - Encryption key rotation stalled → [key-rotation-failure.md](key-rotation-failure.md)
+
+## Deep reference
+
+### Failure Scenarios
 
 | Scenario                        | Impact                      | RTO       | Procedure                                        |
 | ------------------------------- | --------------------------- | --------- | ------------------------------------------------ |
@@ -309,4 +364,4 @@ Escalation path for production incidents:
 
 - [Backup Verification](backup-verification.md) - Ensure backups are restorable
 - [Upgrade Runbook](rolling-upgrade.md) - Version upgrade procedures
-- [Troubleshooting](../troubleshooting.md) - Common issues
+- [Troubleshooting](../how-to/troubleshooting.md) - Common issues

@@ -84,7 +84,7 @@ impl ConsensusEngine {
     /// Each shard is registered with the reactor before the event loop begins.
     ///
     /// The reactor always runs pipelined-commit mode (client responses resolve
-    /// before fsync) — see `docs/operations/durability.md` for the durability
+    /// before fsync) — see `docs/architecture/durability.md` for the durability
     /// contract.
     pub fn start<C, R, W, T>(
         shards: Vec<Shard<C, R>>,
