@@ -436,7 +436,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
     /// Returns the shared commitment buffer handle.
     ///
-    /// Used to pass the same `Arc` to `RegionGroup` so that the proposal path
+    /// Used to pass the same `Arc` to `OrganizationGroup` so that the proposal path
     /// can drain commitments without holding a reference to the log store.
     pub fn commitment_buffer(&self) -> Arc<Mutex<Vec<StateRootCommitment>>> {
         Arc::clone(&self.state_root_commitments)

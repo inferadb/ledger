@@ -194,12 +194,12 @@ pub trait RegionResolver: Send + Sync {
     }
 }
 
-/// Builds a [`RegionContext`] from a [`RegionGroup`], including block announcements.
+/// Builds a [`RegionContext`] from a [`OrganizationGroup`], including block announcements.
 ///
 /// Used by the multi-region resolver where every region group provides its own
 /// block announcement channel.
 fn region_context_from(
-    region: &inferadb_ledger_raft::raft_manager::RegionGroup,
+    region: &inferadb_ledger_raft::raft_manager::OrganizationGroup,
 ) -> Result<RegionContext, tonic::Status> {
     Ok(RegionContext {
         region: region.region(),

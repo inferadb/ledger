@@ -260,7 +260,7 @@ impl CrashableNode {
             // gRPC boundary.
             // Mirror production bootstrap.rs: data regions get the same
             // `BatchWriterConfig` the GLOBAL region receives. Without it,
-            // `RegionGroup::batch_handle()` returns `None` for the data region
+            // `OrganizationGroup::batch_handle()` returns `None` for the data region
             // and proposals bypass the BatchWriter — diverging from production
             // and making BatchWriter wiring untestable at the integration layer.
             let data_region_cfg = RegionConfig::builder()

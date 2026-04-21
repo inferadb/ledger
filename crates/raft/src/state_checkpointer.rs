@@ -122,7 +122,7 @@ pub struct StateCheckpointer {
     /// Region label used on emitted Prometheus metrics.
     region: String,
     /// Shard-index label used on emitted Prometheus metrics, pre-stringified
-    /// from the owning `RegionGroup`'s [`OrganizationId`]. Phase A always emits
+    /// from the owning `OrganizationGroup`'s [`OrganizationId`]. Phase A always emits
     /// `"0"` — the label exists so dashboards can split per-shard once Task
     /// 5 lights up `0..shards_per_region`.
     shard: String,

@@ -53,7 +53,7 @@ const RAFT_LEADER: &str = "inferadb_ledger_raft_is_leader";
 
 // Apply-worker metrics — per `(region, shard)`.
 //
-// The apply worker is the per-RegionGroup sink that drains committed Raft
+// The apply worker is the per-OrganizationGroup sink that drains committed Raft
 // batches into `StateLayer::apply_operations`. It is the ceiling on
 // per-shard write throughput — measuring it is how Phase A's scaling
 // hypothesis (N shards × single-shard ceiling ≈ per-node throughput)
@@ -194,7 +194,7 @@ pub fn record_raft_apply_latency(latency_secs: f64) {
 
 /// Records a single apply-worker batch.
 ///
-/// Every committed Raft batch drained by the per-RegionGroup `ApplyWorker`
+/// Every committed Raft batch drained by the per-OrganizationGroup `ApplyWorker`
 /// fires this exactly once. Labels cover the full `(region, shard)` matrix
 /// plus a `status` of `"ok"` or `"error"` so dashboards can alert on
 /// elevated apply-error rates without losing the healthy cadence.

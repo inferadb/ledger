@@ -93,7 +93,7 @@ impl RaftService {
     /// not the DR leader and needs the DR leader to add the new node.
     async fn handle_add_region_learner(
         &self,
-        group: &inferadb_ledger_raft::raft_manager::RegionGroup,
+        group: &inferadb_ledger_raft::raft_manager::OrganizationGroup,
         region: inferadb_ledger_types::Region,
         node_id: u64,
         address: &str,

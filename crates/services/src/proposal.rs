@@ -56,7 +56,7 @@ pub trait ProposalService: Send + Sync {
 
     /// Proposes a [`LedgerRequest`] to a specific region's Raft group.
     ///
-    /// Resolves `region` to a [`RegionGroup`](inferadb_ledger_raft::raft_manager::RegionGroup)
+    /// Resolves `region` to a [`OrganizationGroup`](inferadb_ledger_raft::raft_manager::OrganizationGroup)
     /// via the [`RaftManager`], then proposes through that group's Raft instance.
     ///
     /// If the local node is not the leader for the target region, returns a

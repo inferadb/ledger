@@ -5857,7 +5857,7 @@ mod tests {
         let store =
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
 
-        // Get a shared handle (same pattern as RegionGroup)
+        // Get a shared handle (same pattern as OrganizationGroup)
         let buffer = store.commitment_buffer();
 
         // Push via the shared handle

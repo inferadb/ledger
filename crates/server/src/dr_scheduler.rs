@@ -10,7 +10,7 @@ use std::{
 };
 
 use inferadb_ledger_raft::{
-    RaftManager, RegionGroup, raft_manager::SystemStateReader, types::NodeStatus,
+    RaftManager, OrganizationGroup, raft_manager::SystemStateReader, types::NodeStatus,
 };
 
 /// Priority for DR membership operators.
@@ -110,7 +110,7 @@ pub fn desired_dr_voters(reader: &SystemStateReader, global_voters: &[u64]) -> B
 /// present for longer than the learner stall timeout (5 min) without promotion generate
 /// a `RemoveLearner` operator so the scheduler can retry with a different target.
 pub fn check_dr_health(
-    group: &RegionGroup,
+    group: &OrganizationGroup,
     desired: &BTreeSet<u64>,
     reader: &SystemStateReader,
     local_node_id: u64,
@@ -197,7 +197,7 @@ pub fn check_dr_health(
 ///
 /// Generates operators for: learner addition, learner promotion.
 pub fn schedule_dr_growth(
-    group: &RegionGroup,
+    group: &OrganizationGroup,
     desired: &BTreeSet<u64>,
     region: inferadb_ledger_types::Region,
 ) -> Vec<Operator> {
@@ -236,7 +236,7 @@ pub fn schedule_dr_growth(
 
 /// Executes a single operator against a data region.
 pub async fn execute_operator(
-    group: &RegionGroup,
+    group: &OrganizationGroup,
     op: &Operator,
     reader: &SystemStateReader,
     manager: &RaftManager,
@@ -484,7 +484,7 @@ pub async fn execute_operator(
 /// handles the case where reports can't propagate).
 async fn report_membership_to_global(
     manager: &RaftManager,
-    group: &RegionGroup,
+    group: &OrganizationGroup,
     region: inferadb_ledger_types::Region,
 ) {
     let Ok(global) = manager.system_region() else { return };

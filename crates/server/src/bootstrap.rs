@@ -1454,7 +1454,7 @@ async fn process_region_event(
 async fn check_peer_liveness_quorum(
     manager: &inferadb_ledger_raft::RaftManager,
     local_liveness: &parking_lot::RwLock<std::collections::HashMap<u64, std::time::Instant>>,
-    global: &inferadb_ledger_raft::RegionGroup,
+    global: &inferadb_ledger_raft::OrganizationGroup,
     liveness_config: &inferadb_ledger_raft::LivenessConfig,
 ) {
     let Some(reader) = manager.system_state_reader() else { return };

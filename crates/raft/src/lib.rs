@@ -195,7 +195,8 @@ pub use peer_address_map::PeerAddressMap;
 pub use post_erasure_compaction::PostErasureCompactionJob;
 #[doc(hidden)]
 pub use raft_manager::{
-    RaftManager, RaftManagerConfig, RegionConfig, RegionGroup, SystemStateReader,
+    OrganizationGroup, RaftManager, RaftManagerConfig, RegionConfig, RegionGroup, SystemGroup,
+    SystemStateReader,
 };
 #[doc(hidden)]
 pub use rate_limit::RateLimiter;

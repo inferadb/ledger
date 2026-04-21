@@ -139,7 +139,7 @@ impl PlacementController {
     async fn check_drain(
         &self,
         reader: &SystemStateReader,
-        global: &inferadb_ledger_raft::RegionGroup,
+        global: &inferadb_ledger_raft::OrganizationGroup,
     ) {
         let statuses = reader.all_node_statuses();
         for &(node_id, status) in &statuses {

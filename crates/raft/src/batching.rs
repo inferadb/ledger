@@ -282,7 +282,7 @@ where
     /// Region identifier for metric labels.
     region: String,
     /// Shard identifier for metric labels, pre-stringified from the owning
-    /// `RegionGroup`'s
+    /// `OrganizationGroup`'s
     /// [`OrganizationId`](inferadb_ledger_types::OrganizationId). Phase A
     /// always emits `"0"`; dashboards can start splitting per shard once
     /// Task 5 stands up a BatchWriter per `(region, shard)`.

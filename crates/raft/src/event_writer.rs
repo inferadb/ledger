@@ -654,7 +654,7 @@ struct FlushQueue {
     /// Region label for emitted metrics.
     region: String,
     /// Shard label for emitted metrics, pre-stringified from the owning
-    /// RegionGroup's
+    /// OrganizationGroup's
     /// [`OrganizationId`](inferadb_ledger_types::OrganizationId). Phase A
     /// emits `"0"`; Task 5 fans flushers out.
     shard: String,
@@ -1153,7 +1153,7 @@ struct EventFlusher<B: StorageBackend> {
     runtime_config: RuntimeConfigHandle,
     region: String,
     /// Shard label for emitted metrics, pre-stringified from the owning
-    /// RegionGroup's
+    /// OrganizationGroup's
     /// [`OrganizationId`](inferadb_ledger_types::OrganizationId).
     shard: String,
     /// Most recently-observed `queue_capacity` — used to detect

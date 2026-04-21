@@ -71,7 +71,7 @@ pub fn connect_channel(addr: &str) -> tonic::transport::Channel {
 }
 
 use inferadb_ledger_proto::proto::{JoinClusterRequest, admin_service_client::AdminServiceClient};
-use inferadb_ledger_raft::{ConsensusHandle, RaftManager, RegionConfig, RegionGroup};
+use inferadb_ledger_raft::{ConsensusHandle, RaftManager, RegionConfig, OrganizationGroup};
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::{FileBackend, crypto::InMemoryKeyManager};
 use inferadb_ledger_test_utils::TestDir;
@@ -124,12 +124,12 @@ impl TestNode {
     }
 
     /// Returns the system (GLOBAL) region group.
-    pub fn system_region(&self) -> Arc<RegionGroup> {
+    pub fn system_region(&self) -> Arc<OrganizationGroup> {
         self.manager.system_region().expect("system region exists")
     }
 
     /// Returns a region group by region.
-    pub fn region_group(&self, region: inferadb_ledger_types::Region) -> Option<Arc<RegionGroup>> {
+    pub fn region_group(&self, region: inferadb_ledger_types::Region) -> Option<Arc<OrganizationGroup>> {
         self.manager.get_region_group(region).ok()
     }
 
@@ -143,7 +143,7 @@ impl TestNode {
     pub fn shard_groups(
         &self,
         region: inferadb_ledger_types::Region,
-    ) -> Vec<Arc<RegionGroup>> {
+    ) -> Vec<Arc<OrganizationGroup>> {
         self.manager
             .list_shards()
             .into_iter()

@@ -8,14 +8,14 @@
 //!
 //! ```text
 //! RaftManager
-//! ├── _system region (RegionGroup 0)
+//! ├── _system region (OrganizationGroup 0)
 //! │   ├── Raft instance
 //! │   ├── RaftLogStore + StateLayer
 //! │   ├── BlockArchive
 //! │   └── Background jobs
-//! ├── data region 1 (RegionGroup 1)
+//! ├── data region 1 (OrganizationGroup 1)
 //! │   └── ... (same structure)
-//! └── data region N (RegionGroup N)
+//! └── data region N (OrganizationGroup N)
 //!     └── ...
 //! ```
 //!
@@ -205,7 +205,7 @@ pub struct RegionConfig {
     #[builder(default = true)]
     pub enable_background_jobs: bool,
     /// Batch writer configuration. When set, the region starts its own
-    /// batch writer and exposes a `BatchWriterHandle` on `RegionGroup`.
+    /// batch writer and exposes a `BatchWriterHandle` on `OrganizationGroup`.
     pub batch_writer_config: Option<BatchWriterConfig>,
     /// Event writer for apply-phase audit event persistence.
     /// When set, events are recorded into the region's `events.db`.
@@ -307,20 +307,65 @@ impl Drop for RegionBackgroundJobs {
     }
 }
 
-/// A single region group with its own Raft instance and storage.
+/// Cluster control-plane Raft group (singleton). Hosts the organization
+/// directory, region directory, signing keys, refresh tokens, cross-region
+/// saga records, cluster membership.
 ///
-/// Each RegionGroup is a complete, isolated Raft cluster member for one region.
-/// Uses FileBackend for production storage - this is intentional as Raft requires
-/// durable storage for safety.
+/// **B.1.3 status:** skeleton type only. The fields and apply pipeline are
+/// added in B.1.6 (bootstrap rewrite + multi-tier orchestration). Until
+/// then, the cluster control plane is hosted on the
+/// [`OrganizationGroup`] for `(Region::GLOBAL, OrganizationId::new(0))` —
+/// the same shape Phase A used.
+///
+/// **Why a separate type even as a skeleton:** the spec's tier-discipline
+/// invariants (root `CLAUDE.md`) require system-tier operations to be
+/// unable to apply at any other tier. Reserving the type now lets B.1.4
+/// add a typed `SystemRequest` and B.1.6 wire it without a second renaming
+/// pass.
+#[allow(dead_code)]
+pub struct SystemGroup {
+    // Skeleton — fields land in B.1.6.
+}
+
+/// Regional control-plane Raft group (one per data region). Owns the
+/// region's organization placement, hibernation status (B.2),
+/// last-known-leader hint (B.2), region quotas, region audit log,
+/// region-scoped saga PII. Acts as the unified leader source for every
+/// `OrganizationGroup` in the region (B.1 unified leadership model;
+/// `LeadershipMode::Delegated`).
+///
+/// **B.1.3 status:** skeleton type only. The fields and apply pipeline are
+/// added in B.1.6 alongside the bootstrap rewrite. Until then, no region
+/// group exists — every region's Raft work is hosted on the
+/// [`OrganizationGroup`] for `(region, OrganizationId::new(0))`.
+///
+/// **Distinct from Phase A's `RegionGroup`:** that type has been renamed
+/// to [`OrganizationGroup`] (the data-plane Raft, one per organization).
+/// This new `RegionGroup` is the regional control plane — different role,
+/// reused name only because the new role is what "RegionGroup" naturally
+/// describes in the three-tier model.
+#[allow(dead_code)]
 pub struct RegionGroup {
-    /// Region identifier.
+    // Skeleton — fields land in B.1.6.
+}
+
+/// Organization data-plane Raft group (one per organization, per region).
+///
+/// Each `OrganizationGroup` owns the organization's entity writes, vault
+/// lifecycle, app credentials, user/team memberships, and
+/// organization-scoped saga PII. Storage is per-organization
+/// (`{data_dir}/{region}/{organization_id}/`); replication is via Raft
+/// AppendEntries; leader is delegated from the parent
+/// [`RegionGroup`](self::RegionGroup) under the B.1 unified-leadership
+/// model.
+///
+/// Uses FileBackend for production storage — Raft requires durable storage
+/// for safety.
+pub struct OrganizationGroup {
+    /// Region this organization belongs to.
     region: Region,
-    /// Shard index within the region. Each (region, shard) pair is its
-    /// own Raft group. Phase A has a single shard at
-    /// [`OrganizationId::new(0)`](inferadb_ledger_types::OrganizationId);
-    /// the field exists so metrics and diagnostics can label output by
-    /// shard without a separate lookup once Task 5 enables multi-shard
-    /// runtime routing.
+    /// Organization identifier. The pair `(region, organization_id)` is
+    /// the routing key to this group.
     organization_id: OrganizationId,
     /// Consensus handle for background jobs and services.
     handle: Arc<ConsensusHandle>,
@@ -378,12 +423,12 @@ pub struct RegionGroup {
     /// Receiver for data region creation signals from the GLOBAL apply handler.
     ///
     /// Only populated for the GLOBAL region group. Taken once by the bootstrap
-    /// handler via [`take_region_creation_rx`](RegionGroup::take_region_creation_rx).
+    /// handler via [`take_region_creation_rx`](OrganizationGroup::take_region_creation_rx).
     region_creation_rx:
         parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<RegionCreationRequest>>>,
 }
 
-impl RegionGroup {
+impl OrganizationGroup {
     /// Returns the region ID.
     pub fn region(&self) -> Region {
         self.region
@@ -416,7 +461,7 @@ impl RegionGroup {
     ///
     /// Used by [`RaftManager::sync_all_state_dbs`] and the
     /// [`StateCheckpointer`] to force the `KEY_APPLIED_STATE` blob to disk.
-    /// See [`RegionGroup::raft_db`] for the full durability rationale.
+    /// See [`OrganizationGroup::raft_db`] for the full durability rationale.
     #[must_use]
     pub fn raft_db(&self) -> &Arc<Database<FileBackend>> {
         &self.raft_db
@@ -574,11 +619,11 @@ pub struct RaftManager {
     /// Active shard groups indexed by `(region, organization_id)`.
     ///
     /// Each region hosts `self.config.shards_per_region` shards — one
-    /// `RegionGroup` per shard. Services that currently address a region
+    /// `OrganizationGroup` per shard. Services that currently address a region
     /// only (Task 5 will migrate them to explicit shard selection)
     /// resolve via `self.get_region_group(region)`, which routes to
     /// `OrganizationId::new(0)` as a compatibility shim until routing lands.
-    regions: RwLock<HashMap<(Region, OrganizationId), Arc<RegionGroup>>>,
+    regions: RwLock<HashMap<(Region, OrganizationId), Arc<OrganizationGroup>>>,
     /// Shared peer address map (node ID → network address).
     ///
     /// Populated from `initial_members` during region startup and updated
@@ -677,7 +722,7 @@ impl RaftManager {
         &self,
         region: Region,
         request: &crate::types::LedgerRequest,
-    ) -> Result<Arc<RegionGroup>> {
+    ) -> Result<Arc<OrganizationGroup>> {
         use crate::types::LedgerRequest;
         const SYSTEM_ORGANIZATION_ID: OrganizationId = OrganizationId::new(0);
         let org = match request {
@@ -700,7 +745,7 @@ impl RaftManager {
             // which uses `get_region_group` and thus reads from shard 0 —
             // sees what its writes produced.
             // B.1.1 + B.1.2 transitional: every region runs a single
-            // RegionGroup at `OrganizationId::new(0)`. Real per-organization
+            // OrganizationGroup at `OrganizationId::new(0)`. Real per-organization
             // Raft groups land in B.1.6.
             Some(_organization) => OrganizationId::new(0),
             None => OrganizationId::new(0),
@@ -783,7 +828,7 @@ impl RaftManager {
     ///
     /// Returns [`RaftManagerError::RegionNotFound`] if no region with the given ID
     /// is currently active.
-    pub fn get_region_group(&self, region: Region) -> Result<Arc<RegionGroup>> {
+    pub fn get_region_group(&self, region: Region) -> Result<Arc<OrganizationGroup>> {
         // Task 4 shim: single-shard-per-region runtime (Task 4.2 will loop
         // start_region over N shards; Task 5 will plumb OrganizationId through
         // services). Until then, legacy callers continue to address shard 0.
@@ -794,7 +839,7 @@ impl RaftManager {
             .ok_or(RaftManagerError::RegionNotFound { region })
     }
 
-    /// Looks up the `RegionGroup` owning `(region, organization_id)`.
+    /// Looks up the `OrganizationGroup` owning `(region, organization_id)`.
     ///
     /// Phase A routing: services resolve `OrganizationId` via
     /// [`inferadb_ledger_types::ShardRouter`] (see
@@ -802,7 +847,7 @@ impl RaftManager {
     /// reach the owning shard's Raft group. Task 5 migrates service call
     /// sites from [`get_region_group`](Self::get_region_group) to this
     /// method; until then the two are equivalent (single-shard runtime).
-    pub fn get_shard_group(&self, region: Region, shard: OrganizationId) -> Result<Arc<RegionGroup>> {
+    pub fn get_shard_group(&self, region: Region, shard: OrganizationId) -> Result<Arc<OrganizationGroup>> {
         self.regions
             .read()
             .get(&(region, shard))
@@ -816,7 +861,7 @@ impl RaftManager {
     ///
     /// Returns [`RaftManagerError::RegionNotFound`] if the system region (ID 0)
     /// has not been started.
-    pub fn system_region(&self) -> Result<Arc<RegionGroup>> {
+    pub fn system_region(&self) -> Result<Arc<OrganizationGroup>> {
         self.get_region_group(Region::GLOBAL)
     }
 
@@ -913,14 +958,14 @@ impl RaftManager {
         commitment_buffer: std::sync::Arc<std::sync::Mutex<Vec<crate::types::StateRootCommitment>>>,
         leader_lease: Arc<crate::leader_lease::LeaderLease>,
         applied_index_rx: tokio::sync::watch::Receiver<u64>,
-    ) -> Result<Arc<RegionGroup>> {
+    ) -> Result<Arc<OrganizationGroup>> {
         if self.has_region(region) {
             return Err(RaftManagerError::RegionExists { region });
         }
 
         let blocks_db = Arc::clone(block_archive.db());
 
-        let region_group = Arc::new(RegionGroup {
+        let region_group = Arc::new(OrganizationGroup {
             region,
             organization_id: OrganizationId::new(0),
             handle,
@@ -955,7 +1000,7 @@ impl RaftManager {
     ///
     /// Looks up the organization's region assignment in the `_system`
     /// service, resolves the shard via [`ShardRouter`], and returns the
-    /// per-`(region, shard)` `RegionGroup`. This is the single entry point
+    /// per-`(region, shard)` `OrganizationGroup`. This is the single entry point
     /// every service-layer write/read path uses to find the right shard's
     /// BatchWriter, ApplyWorker, and StateLayer.
     ///
@@ -966,10 +1011,10 @@ impl RaftManager {
     ///   caller falls through to the redirect path)
     ///
     /// * `organization` - Internal organization identifier (`OrganizationId`).
-    pub fn route_organization(&self, organization: OrganizationId) -> Option<Arc<RegionGroup>> {
+    pub fn route_organization(&self, organization: OrganizationId) -> Option<Arc<OrganizationGroup>> {
         let region = self.get_organization_region(organization)?;
         // B.1.1 + B.1.2 transitional: every region currently runs a single
-        // RegionGroup at `OrganizationId::new(0)` (bootstrap creates it via
+        // OrganizationGroup at `OrganizationId::new(0)` (bootstrap creates it via
         // `start_region`). Real per-organization Raft groups land in B.1.6
         // when `CreateOrganization` apply triggers `start_organization_group`.
         // Until then, all organization traffic routes to the bootstrap
@@ -1020,7 +1065,7 @@ impl RaftManager {
     pub async fn start_system_region(
         &self,
         region_config: RegionConfig,
-    ) -> Result<Arc<RegionGroup>> {
+    ) -> Result<Arc<OrganizationGroup>> {
         if region_config.region != Region::GLOBAL {
             return Err(RaftManagerError::Raft {
                 region: region_config.region,
@@ -1043,7 +1088,7 @@ impl RaftManager {
     /// not been started, [`RaftManagerError::Raft`] if `region` is 0,
     /// [`RaftManagerError::RegionExists`] if the region is already running,
     /// or a storage/Raft error if initialization fails.
-    pub async fn start_data_region(&self, region_config: RegionConfig) -> Result<Arc<RegionGroup>> {
+    pub async fn start_data_region(&self, region_config: RegionConfig) -> Result<Arc<OrganizationGroup>> {
         // Verify system region is running
         if !self.has_region(Region::GLOBAL) {
             return Err(RaftManagerError::SystemRegionRequired);
@@ -1090,7 +1135,7 @@ impl RaftManager {
         &self,
         region_config: RegionConfig,
         shard_count: u64,
-    ) -> Result<Arc<RegionGroup>> {
+    ) -> Result<Arc<OrganizationGroup>> {
         debug_assert!(shard_count >= 1, "shard_count must be >= 1");
         let region = region_config.region;
         if shard_count > 1 && region_config.event_writer.is_some() {
@@ -1103,7 +1148,7 @@ impl RaftManager {
                 ),
             });
         }
-        let mut shard_zero: Option<Arc<RegionGroup>> = None;
+        let mut shard_zero: Option<Arc<OrganizationGroup>> = None;
         for n in 0..shard_count {
             // B.1 transitional: shard_count is 1 for now. Subsequent commits
             // collapse this loop entirely — org-as-Raft-group means there is
@@ -1147,7 +1192,7 @@ impl RaftManager {
 
     /// Ensures a data region is active, creating it lazily if needed.
     ///
-    /// Returns the existing `RegionGroup` if the region is already running.
+    /// Returns the existing `OrganizationGroup` if the region is already running.
     /// Otherwise creates the region with the provided config. This is the
     /// entry point for lazy Raft group creation: the first organization or
     /// user assigned to a region triggers group creation.
@@ -1166,7 +1211,7 @@ impl RaftManager {
     pub async fn ensure_data_region(
         &self,
         region_config: RegionConfig,
-    ) -> Result<(Arc<RegionGroup>, bool)> {
+    ) -> Result<(Arc<OrganizationGroup>, bool)> {
         let region = region_config.region;
 
         // GLOBAL is the control plane — always created eagerly via start_system_region
@@ -1231,7 +1276,7 @@ impl RaftManager {
         &self,
         region_config: RegionConfig,
         organization_id: OrganizationId,
-    ) -> Result<Arc<RegionGroup>> {
+    ) -> Result<Arc<OrganizationGroup>> {
         // Destructure config upfront to avoid partial-move issues
         let RegionConfig {
             region,
@@ -1600,7 +1645,7 @@ impl RaftManager {
         // `block_archive` (which owns a domain API, not a durability API).
         let jobs_running = enable_background_jobs;
         let blocks_db = Arc::clone(block_archive.db());
-        let region_group = Arc::new(RegionGroup {
+        let region_group = Arc::new(OrganizationGroup {
             region,
             organization_id,
             handle,
@@ -2195,7 +2240,7 @@ impl RaftManager {
     ///
     /// The system region (`GLOBAL`) is never hibernated.
     pub fn hibernate_idle_regions(&self, idle_timeout_secs: u64) {
-        let regions: Vec<((Region, OrganizationId), Arc<RegionGroup>)> =
+        let regions: Vec<((Region, OrganizationId), Arc<OrganizationGroup>)> =
             self.regions.read().iter().map(|(k, g)| (*k, g.clone())).collect();
 
         for ((region, _shard), group) in regions {

@@ -75,7 +75,7 @@ pub struct ConsensusHandle {
     /// State-layer shard index (`0..shards_per_region`). Surfaced via
     /// [`ConsensusHandle::organization_id`] so the service-layer not-leader
     /// helpers can stamp it onto `LeaderHint.context["leader_shard"]`
-    /// without round-tripping through the `RegionGroup`.
+    /// without round-tripping through the `OrganizationGroup`.
     organization_id: OrganizationId,
     node_id: LedgerNodeId,
     state_rx: watch::Receiver<ShardState>,

@@ -18,7 +18,7 @@ use crate::{
 
 /// Runs the apply loop, applying consensus engine entries to the state machine.
 ///
-/// One apply worker per `RegionGroup` in the current Phase A layout; once
+/// One apply worker per `OrganizationGroup` in the current Phase A layout; once
 /// Task 5 fans `start_region` across `0..shards_per_region`, there will be
 /// one per `(region, shard)` pair. The `region` + `shard` fields below feed
 /// the Prometheus labels on every [`metrics::record_apply_batch`] — the
