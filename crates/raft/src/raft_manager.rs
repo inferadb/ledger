@@ -807,6 +807,31 @@ impl RaftManager {
         self.regions.read().contains_key(&(region, ShardIdx(0)))
     }
 
+    /// Checks if a specific `(region, shard)` Raft group is active.
+    ///
+    /// `start_region`'s pre-insert duplicate guard uses this so per-shard
+    /// loops can re-enter `start_region` for the next `shard_idx` without
+    /// the prior shard's registration tripping the check.
+    pub fn has_shard(&self, region: Region, shard_idx: ShardIdx) -> bool {
+        self.regions.read().contains_key(&(region, shard_idx))
+    }
+
+    /// Returns the number of shards a `region` should run.
+    ///
+    /// GLOBAL is always single-shard — cluster-wide control state has no
+    /// routing dimension to spread across additional shards, and adding
+    /// shards would only multiply coordination cost without throughput
+    /// benefit. Data regions honour `RaftManagerConfig::shards_per_region`
+    /// (default 16). The shard count is fixed at region creation in Phase
+    /// A; Phase C introduces dynamic split / merge.
+    pub fn shards_for(&self, region: Region) -> u64 {
+        if region == Region::GLOBAL {
+            1
+        } else {
+            self.config.shards_per_region as u64
+        }
+    }
+
     /// Registers an externally created region group.
     ///
     /// Used by bootstrap code that creates Raft/state resources manually
@@ -964,10 +989,88 @@ impl RaftManager {
             });
         }
 
-        // Phase A stopgap: single shard. Step 5.1b will loop
-        // `0..self.config.shards_per_region` here so each data region runs
-        // N independent Raft groups.
-        self.start_region(region_config, ShardIdx(0)).await
+        // Phase A: each data region runs `shards_per_region` independent
+        // Raft groups. Each iteration opens its own per-shard storage,
+        // builds its own consensus engine + reactor + WAL, and registers
+        // itself under `(region, ShardIdx(N))` in the regions map.
+        //
+        // Failure semantics: if any shard fails to start, propagate the
+        // error. Earlier shards remain registered — a retry through
+        // `ensure_data_region` will see them via `has_shard` and skip them,
+        // attempting only the missing shards. Rolling back partial state on
+        // failure is risky (Raft groups already accepted commits) so we
+        // leave them running.
+        let region = region_config.region;
+        let shard_count = self.shards_for(region);
+        self.start_region_shards(region_config, shard_count).await
+    }
+
+    /// Loops `start_region` over `0..shard_count`, returning the
+    /// `ShardIdx(0)` group as a legacy convenience for callers that don't
+    /// yet route via [`ShardRouter`](inferadb_ledger_state::shard_routing::ShardRouter).
+    ///
+    /// Each iteration receives a fresh clone of `region_config`. The
+    /// `event_writer` field — when `Some` — is wired to a single
+    /// `events.db` handle and would silently alias across shards if
+    /// shared, so this helper rejects pre-built event writers when
+    /// `shard_count > 1`. Production callers always pass `events_config`
+    /// (not `event_writer`) so each shard builds its own writer from its
+    /// own `events.db` inside `open_region_storage`.
+    ///
+    /// Phase A always returns the shard-0 group; the wider set is
+    /// addressable via `get_shard_group(region, ShardIdx(N))`.
+    async fn start_region_shards(
+        &self,
+        region_config: RegionConfig,
+        shard_count: u64,
+    ) -> Result<Arc<RegionGroup>> {
+        debug_assert!(shard_count >= 1, "shard_count must be >= 1");
+        let region = region_config.region;
+        if shard_count > 1 && region_config.event_writer.is_some() {
+            return Err(RaftManagerError::Raft {
+                region,
+                message: format!(
+                    "RegionConfig.event_writer cannot be pre-built for multi-shard regions \
+                     (shard_count={shard_count}); use events_config so each shard builds its own \
+                     writer from its own events.db"
+                ),
+            });
+        }
+        let mut shard_zero: Option<Arc<RegionGroup>> = None;
+        for n in 0..shard_count {
+            let shard_idx = ShardIdx(n);
+            // Idempotent retry: if a prior attempt already started this
+            // shard, skip it. Without the skip, partial-progress recovery
+            // would loop forever — every retry would re-trip start_region's
+            // `has_shard` guard on shards 0..k and return RegionExists.
+            if self.has_shard(region, shard_idx) {
+                if n == 0
+                    && let Ok(existing) = self.get_shard_group(region, shard_idx)
+                {
+                    shard_zero = Some(existing);
+                }
+                continue;
+            }
+            let per_shard_config = region_config.clone();
+            match self.start_region(per_shard_config, shard_idx).await {
+                Ok(group) => {
+                    if n == 0 {
+                        shard_zero = Some(group);
+                    }
+                },
+                Err(e) => {
+                    warn!(
+                        region = region.as_str(),
+                        shard = n,
+                        error = %e,
+                        "Failed to start shard — earlier shards remain running; \
+                         retry via ensure_data_region to attempt the missing shards"
+                    );
+                    return Err(e);
+                },
+            }
+        }
+        shard_zero.ok_or(RaftManagerError::RegionExists { region })
     }
 
     /// Ensures a data region is active, creating it lazily if needed.
@@ -1009,13 +1112,16 @@ impl RaftManager {
             return Err(RaftManagerError::SystemRegionRequired);
         }
 
-        // Attempt to start — if a concurrent caller beat us, fall through.
-        // Two error variants can indicate concurrency:
-        // - RegionExists: start_region's has_region check saw it after map insert
+        // Attempt to start all shards — if a concurrent caller beat us,
+        // fall through. Two error variants can indicate concurrency:
+        // - RegionExists: start_region's has_shard check saw it after map insert
         // - RegionAlreadyOpen: RegionStorageManager rejected a second opener
         //
-        // Phase A stopgap: ShardIdx(0). Step 5.1b loops shards here.
-        match self.start_region(region_config, ShardIdx(0)).await {
+        // The fan-out across `0..shards_per_region` lives in
+        // `start_region_shards`; partial-progress retry semantics are
+        // documented there.
+        let shard_count = self.shards_for(region);
+        match self.start_region_shards(region_config, shard_count).await {
             Ok(group) => {
                 info!(region = region.as_str(), "Lazily created region group");
                 Ok((group, true))
@@ -1065,12 +1171,15 @@ impl RaftManager {
             events_config,
         } = region_config;
 
-        // Check if region already exists (early exit for the common case).
-        // Note: this check-then-insert has a TOCTOU window — concurrent callers
-        // may both pass this check. RegionStorageManager::open_region provides the
-        // true guard (returns AlreadyOpen), and ensure_data_region handles both
-        // RegionExists and RegionAlreadyOpen gracefully.
-        if self.has_region(region) {
+        // Check if this specific `(region, shard_idx)` Raft group is already
+        // running. The check is per-shard because step 5.1b loops
+        // `start_region` across `0..shards_per_region`, so re-entry for the
+        // next shard must NOT see the prior shard as a duplicate.
+        // Concurrent callers can race past this check (TOCTOU);
+        // `RegionStorageManager::open_shard` provides the true guard
+        // (returns `AlreadyOpen`) and `ensure_data_region` handles both
+        // `RegionExists` and `RegionAlreadyOpen` gracefully.
+        if self.has_shard(region, shard_idx) {
             return Err(RaftManagerError::RegionExists { region });
         }
 
@@ -1590,8 +1699,11 @@ impl RaftManager {
         events_config: Option<inferadb_ledger_types::events::EventConfig>,
         divergence_sender: tokio::sync::mpsc::UnboundedSender<crate::types::StateRootDivergence>,
     ) -> Result<OpenedRegionStorage> {
-        // Open databases via storage manager (creates directory + state.db, blocks.db, events.db)
-        let storage = self.storage_manager.open_region(region).map_err(|e| {
+        // Open per-shard databases via storage manager. Each `(region, shard_idx)`
+        // gets its own state.db / blocks.db / events.db / raft.db under the
+        // shard-{N}/ subdirectory laid out by Task 3 — independent IO paths so
+        // shard A's fsync stream does not block shard B's commit.
+        let storage = self.storage_manager.open_shard(region, shard_idx).map_err(|e| {
             if matches!(e, crate::region_storage::RegionStorageError::AlreadyOpen { .. }) {
                 RaftManagerError::RegionAlreadyOpen { region }
             } else {
