@@ -28,6 +28,7 @@ mod redirect_routing;
 mod replication;
 mod saga_orchestrator;
 mod telemetry_context;
+mod three_tier_consensus;
 mod token_lifecycle;
 mod ttl_gc;
 mod watch_blocks_realtime;

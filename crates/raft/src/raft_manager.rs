@@ -739,46 +739,47 @@ impl RaftManager {
         }
     }
 
-    /// Resolves the `(region, shard)` Raft group that should own a
+    /// Resolves the `(region, organization_id)` Raft group that should own a
     /// [`LedgerRequest`] under saga / `RegionalProposal` forwarding.
     ///
-    /// Routing rules (Phase A):
+    /// Routing rules:
     ///
     /// - `Write { organization, .. }` and `BatchWrite { requests: [Write,
-    ///   ..] }` route to the org's shard via [`ShardRouter`]. User-domain
-    ///   saga writes land on the same shard the user's normal traffic
-    ///   does — ensuring read-after-write consistency across the saga
-    ///   write and the user's regular reads.
-    /// - **Saga records (`organization == SYSTEM_ORGANIZATION_ID`,
-    ///   i.e. `0`) and other org-less variants pin to
-    ///   [`OrganizationId::new(0)`](inferadb_ledger_types::OrganizationId).**
-    ///   This colocates saga state on a single shard so saga read paths
-    ///   (`load_saga_pii`, `load_pending_sagas`) — which read from the
-    ///   shard-0 group via `get_region_group` — find what saga writes
-    ///   produced. Treating saga state as a "system shard" trades a small
-    ///   load asymmetry for read/write path symmetry; sharding saga
-    ///   state by `saga_id` is a Phase B optimization.
+    ///   ..] }` route to the per-organization delegated-leadership group.
+    ///   User-domain saga writes land on the same group the user's
+    ///   normal traffic does — preserving read-after-write consistency.
+    /// - Cross-organization / org-less traffic (saga records, `SystemRequest`,
+    ///   `RegionRequest`, and `OrganizationRequest::Write` targeting
+    ///   [`OrganizationId::new(0)`](inferadb_ledger_types::OrganizationId) —
+    ///   the system org) routes to the data-region group at
+    ///   [`OrganizationId::new(0)`]. This is the same group that hosts the
+    ///   regional control plane (B.1 compat shim until `RegionGroup` gets
+    ///   its own storage path), so cross-org saga PII writes and reads
+    ///   land in the same place.
+    /// - Per-org routing falls back to the data-region group while the
+    ///   per-organization group is bootstrapping (race between
+    ///   `CreateOrganization` apply on this node and
+    ///   `start_organization_group` registering locally).
     ///
     /// Used by:
     /// - `RaftService::regional_proposal` on the receiver side, after
-    ///   decoding the saga-forwarded payload, to find the right shard's
+    ///   decoding the saga-forwarded payload, to find the right group's
     ///   Raft handle.
     /// - `SagaOrchestrator::propose_to_region` on the local-fast-path side
     ///   so a saga running on the same node as a region's leader still
-    ///   lands on the correct shard.
+    ///   lands on the correct group.
     pub fn route_request(
         &self,
         region: Region,
         request: &crate::types::LedgerRequest,
     ) -> Result<Arc<OrganizationGroup>> {
         use crate::types::{LedgerRequest, OrganizationRequest};
-        const SYSTEM_ORGANIZATION_ID: OrganizationId = OrganizationId::new(0);
         let org = match request {
             LedgerRequest::Organization(OrganizationRequest::Write { organization, .. }) => Some(*organization),
             // BatchWrite carries nested requests; saga forwarding sends
             // single-org batches in practice. Pick the first inner Write's
-            // organization; fall back to None (shard 0) if the batch is
-            // empty or non-Write.
+            // organization; fall back to None (data-region group) if the
+            // batch is empty or non-Write.
             LedgerRequest::Organization(OrganizationRequest::BatchWrite { requests }) => {
                 requests.iter().find_map(|inner| match inner {
                     LedgerRequest::Organization(OrganizationRequest::Write { organization, .. }) => Some(*organization),
@@ -787,27 +788,24 @@ impl RaftManager {
             },
             _ => None,
         };
-        // B.1.8 + B.1.7: route org-bearing requests to the per-org
-        // delegated-leadership group. Falls back to the legacy
-        // OrganizationId::new(0) group when the per-org group isn't yet
-        // registered locally (race with CreateOrganization apply →
-        // bootstrap handler) or when no organization is identified in
-        // the request payload. System-org writes (saga records) pin to
-        // OrganizationId::new(0) so the saga orchestrator's read path
-        // (which uses `get_region_group` → reads from the legacy group)
-        // sees what its writes produced.
+        // Per-org routing when the target group is registered locally,
+        // otherwise fall back to the data-region group at
+        // `OrganizationId::new(0)`. The fallback covers:
+        //
+        // - Race between `CreateOrganization` apply on this node and
+        //   `start_organization_group` registering the per-org group.
+        // - System-org writes (`organization == OrganizationId::new(0)` —
+        //   saga PII / saga records / cross-org system traffic) — the
+        //   data-region group IS the `OrganizationId(0)` group, so the
+        //   natural per-org routing lands in the right place without a
+        //   special case.
+        // - `RegionRequest` / `SystemRequest` / org-less payloads that
+        //   return `None` above.
         let organization_id = match org {
-            Some(organization) if organization == SYSTEM_ORGANIZATION_ID => {
-                OrganizationId::new(0)
+            Some(organization) if self.regions.read().contains_key(&(region, organization)) => {
+                organization
             },
-            Some(organization) => {
-                if self.regions.read().contains_key(&(region, organization)) {
-                    organization
-                } else {
-                    OrganizationId::new(0)
-                }
-            },
-            None => OrganizationId::new(0),
+            _ => OrganizationId::new(0),
         };
         self.get_shard_group(region, organization_id)
     }
