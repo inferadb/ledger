@@ -327,16 +327,6 @@ impl TestCluster {
             } else {
                 None
             },
-            // Phase A multi-shard: production default is 16. Existing
-            // tests assume single-shard semantics in their cluster-join
-            // and convergence helpers. A dedicated `tests/multi_shard.rs`
-            // (Task 7) validates the >1 shard routing path against an
-            // explicit `shards_per_region: N` cluster. Leaving the
-            // generic `TestCluster` at 1 keeps those legacy tests stable
-            // while the multi-shard infrastructure (route_request,
-            // ShardRouter, per-shard storage) is exercised end-to-end by
-            // the dedicated test.
-            shards_per_region: 1,
             ..inferadb_ledger_server::config::Config::default()
         };
 
@@ -495,11 +485,6 @@ impl TestCluster {
                 email_blinding_key: Some(
                     "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
                 ),
-                // Match the bootstrap node's shards_per_region: every node
-                // MUST agree on the shard count or ShardRouter produces
-                // divergent routing decisions. See bootstrap-node config
-                // for the rationale on the test default.
-                shards_per_region: 1,
                 ..inferadb_ledger_server::config::Config::default()
             };
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);

@@ -85,13 +85,14 @@ impl RaftService {
         })
     }
 
-    /// Handles an `AddRegionLearner` request by calling `add_learner` and
-    /// `promote_voter` directly on the data region's consensus handle.
+    /// Handles a `RegionRequest::AddRegionVoter` request by calling
+    /// `add_learner` and `promote_voter` directly on the data-region group's
+    /// consensus handle.
     ///
     /// This is a membership change, not a Raft log proposal, so it bypasses
     /// `propose_and_wait`. The caller (GLOBAL leader) sends this when it is
     /// not the DR leader and needs the DR leader to add the new node.
-    async fn handle_add_region_learner(
+    async fn handle_add_region_voter(
         &self,
         group: &inferadb_ledger_raft::raft_manager::OrganizationGroup,
         region: inferadb_ledger_types::Region,
@@ -108,7 +109,7 @@ impl RaftService {
                 node_id,
                 address,
                 error = %e,
-                "Failed to register node transport for AddRegionLearner",
+                "Failed to register node transport for AddRegionVoter",
             );
         }
 
@@ -157,7 +158,7 @@ impl RaftService {
                     tracing::info!(
                         region = region.as_str(),
                         node_id,
-                        "AddRegionLearner: node added and promoted to voter"
+                        "AddRegionVoter: node added and promoted to voter"
                     );
                     return Ok(Response::new(RegionalProposalResult {
                         response_payload: Vec::new(),
@@ -177,7 +178,7 @@ impl RaftService {
                         region = region.as_str(),
                         node_id,
                         error = %e,
-                        "AddRegionLearner: learner added but promote_voter failed"
+                        "AddRegionVoter: learner added but promote_voter failed"
                     );
                     // Learner was added; DR scheduler will reconcile promotion.
                     return Ok(Response::new(RegionalProposalResult {
@@ -194,7 +195,7 @@ impl RaftService {
         tracing::warn!(
             region = region.as_str(),
             node_id,
-            "AddRegionLearner: learner added but promote_voter retries exhausted"
+            "AddRegionVoter: learner added but promote_voter retries exhausted"
         );
         Ok(Response::new(RegionalProposalResult {
             response_payload: Vec::new(),
@@ -336,17 +337,17 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
         let ledger_request: LedgerRequest = decode(&req.request_payload)
             .map_err(|e| Status::invalid_argument(format!("deserialize request: {e}")))?;
 
-        // AddRegionLearner is a membership change — handle it directly via
+        // AddRegionVoter is a membership change — handle it directly via
         // the consensus handle instead of proposing through the Raft log.
         // Membership changes are not org-scoped, so they always operate on
-        // the region's shard 0 group (the one that holds the membership
-        // log).
+        // the region's data-region group (`OrganizationId(0)`), which holds
+        // the membership log.
         if let LedgerRequest::Region(RegionRequest::AddRegionVoter { node_id, ref address }) = ledger_request {
             let group = self
                 .manager
                 .get_region_group(region)
                 .map_err(|_| Status::not_found("region group not found"))?;
-            return self.handle_add_region_learner(&group, region, node_id, address).await;
+            return self.handle_add_region_voter(&group, region, node_id, address).await;
         }
 
         // For all other requests, route to the owning shard via

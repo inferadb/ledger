@@ -121,10 +121,11 @@ pub struct StateCheckpointer {
     cancellation_token: CancellationToken,
     /// Region label used on emitted Prometheus metrics.
     region: String,
-    /// Shard-index label used on emitted Prometheus metrics, pre-stringified
-    /// from the owning `OrganizationGroup`'s [`OrganizationId`]. Phase A always emits
-    /// `"0"` — the label exists so dashboards can split per-shard once Task
-    /// 5 lights up `0..shards_per_region`.
+    /// Organization-id label used on emitted Prometheus metrics, pre-
+    /// stringified from the owning `OrganizationGroup`'s
+    /// [`OrganizationId`]. The data-region group emits `"0"`; per-
+    /// organization groups emit the organization's id so dashboards can
+    /// split checkpoint cadence per organization.
     shard: String,
     /// Applied index observed at the most recent successful checkpoint.
     /// Used to compute the apply-count trigger.
@@ -146,11 +147,10 @@ impl StateCheckpointer {
     /// trigger.
     ///
     /// `region` and `shard` are used as the labels for emitted Prometheus
-    /// metrics (`ledger_state_*{region=..., shard=...}`). Phase A always
-    /// passes `OrganizationId::new(0)`; once Task 5 fans checkpointers out across
-    /// `0..shards_per_region`, `{region, shard}` pairs become unique per
-    /// checkpointer and dashboards can split their cadence per shard without
-    /// any further metric-schema changes.
+    /// metrics (`ledger_state_*{region=..., organization_id=...}`). The
+    /// data-region group's checkpointer emits `"0"`; per-organization
+    /// group checkpointers emit the organization's id, so dashboards can
+    /// split cadence per organization without any metric-schema change.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn from_config(

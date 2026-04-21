@@ -149,14 +149,17 @@ pub struct LeaderHint {
     pub leader_endpoint: Option<String>,
     /// Raft term the leader was last observed in, if known.
     pub term: Option<u64>,
-    /// State-layer shard index (`0..shards_per_region`) the leader is for,
-    /// if known.
+    /// Organization id the leader is for, if known.
     ///
-    /// Each `(region, shard)` runs an independent Raft group, so leadership
-    /// is per-shard. A future SDK enhancement keys its `RegionLeaderCache`
-    /// on `(region, shard)` rather than just region — until then, the SDK
-    /// retries against the hinted endpoint and bounces once if the
-    /// resolved cache leader does not match the requested shard.
+    /// Each `(region, organization_id)` runs an independent Raft group
+    /// under the three-tier topology — the data-region group at
+    /// `OrganizationId(0)` plus one per active organization — so
+    /// leadership is per-`(region, organization_id)`. A future SDK
+    /// enhancement keys its `RegionLeaderCache` on
+    /// `(region, organization_id)` rather than just region; until then,
+    /// the SDK retries against the hinted endpoint and bounces once if
+    /// the resolved cache leader does not match the requested
+    /// organization.
     pub organization_id: Option<u64>,
 }
 

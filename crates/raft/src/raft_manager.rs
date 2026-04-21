@@ -185,12 +185,6 @@ pub struct RaftManagerConfig {
     /// Whether to inject trace context into Raft RPCs.
     #[builder(default = true)]
     pub trace_raft_rpcs: bool,
-    /// Number of independent Raft shards to run per region. Each shard is
-    /// its own Raft group with its own WAL + state DBs + apply worker.
-    /// Orgs route to shards via `ShardManager`. Must be in `[1, 256]`;
-    /// enforced at region-start time.
-    #[builder(default = 16)]
-    pub shards_per_region: usize,
 }
 
 impl RaftManagerConfig {
@@ -470,13 +464,13 @@ impl OrganizationGroup {
         self.region
     }
 
-    /// Returns the shard index within the region.
+    /// Returns the organization this Raft group owns.
     ///
-    /// Phase A always returns
-    /// [`OrganizationId::new(0)`](inferadb_ledger_types::OrganizationId); the
-    /// accessor exists so metrics, tracing, and diagnostics can label output
-    /// with a stable `shard` dimension before Task 5 enables runtime routing
-    /// across `0..shards_per_region`.
+    /// `OrganizationId::new(0)` identifies the data-region group (the
+    /// regional control plane under B.1's compat shim); any other value
+    /// identifies a per-organization data-plane group. Surfaced so
+    /// metrics, tracing, and diagnostics can label output with the
+    /// `organization_id` dimension.
     pub fn organization_id(&self) -> OrganizationId {
         self.organization_id
     }
@@ -664,13 +658,13 @@ pub struct RaftManager {
     config: RaftManagerConfig,
     /// Per-region database storage manager.
     storage_manager: RegionStorageManager,
-    /// Active shard groups indexed by `(region, organization_id)`.
+    /// Active Raft groups indexed by `(region, organization_id)`.
     ///
-    /// Each region hosts `self.config.shards_per_region` shards — one
-    /// `OrganizationGroup` per shard. Services that currently address a region
-    /// only (Task 5 will migrate them to explicit shard selection)
-    /// resolve via `self.get_region_group(region)`, which routes to
-    /// `OrganizationId::new(0)` as a compatibility shim until routing lands.
+    /// Each region hosts one data-region group at `OrganizationId::new(0)`
+    /// plus one per-organization group per active organization. Services
+    /// that address a region alone resolve via `get_region_group(region)`,
+    /// which returns the data-region group. Per-organization routing goes
+    /// through `route_organization(organization_id)`.
     regions: RwLock<HashMap<(Region, OrganizationId), Arc<OrganizationGroup>>>,
     /// Shared peer address map (node ID → network address).
     ///
@@ -995,22 +989,6 @@ impl RaftManager {
         self.regions.read().contains_key(&(region, organization_id))
     }
 
-    /// Returns the number of shards a `region` should run.
-    ///
-    /// GLOBAL is always single-shard — cluster-wide control state has no
-    /// routing dimension to spread across additional shards, and adding
-    /// shards would only multiply coordination cost without throughput
-    /// benefit. Data regions honour `RaftManagerConfig::shards_per_region`
-    /// (default 16). The shard count is fixed at region creation in Phase
-    /// A; Phase C introduces dynamic split / merge.
-    pub fn shards_for(&self, region: Region) -> u64 {
-        if region == Region::GLOBAL {
-            1
-        } else {
-            self.config.shards_per_region as u64
-        }
-    }
-
     /// Registers an externally created region group.
     ///
     /// Used by bootstrap code that creates Raft/state resources manually
@@ -1256,93 +1234,13 @@ impl RaftManager {
             });
         }
 
-        // Phase A: each data region runs `shards_per_region` independent
-        // Raft groups. Each iteration opens its own per-shard storage,
-        // builds its own consensus engine + reactor + WAL, and registers
-        // itself under `(region, OrganizationId(N))` in the regions map.
-        //
-        // Failure semantics: if any shard fails to start, propagate the
-        // error. Earlier shards remain registered — a retry through
-        // `ensure_data_region` will see them via `has_shard` and skip them,
-        // attempting only the missing shards. Rolling back partial state on
-        // failure is risky (Raft groups already accepted commits) so we
-        // leave them running.
-        let region = region_config.region;
-        let shard_count = self.shards_for(region);
-        self.start_region_shards(region_config, shard_count).await
-    }
-
-    /// Loops `start_region` over `0..shard_count`, returning the
-    /// `OrganizationId::new(0)` group as a legacy convenience for callers that don't
-    /// yet route via [`ShardRouter`](inferadb_ledger_types::ShardRouter).
-    ///
-    /// Each iteration receives a fresh clone of `region_config`. The
-    /// `event_writer` field — when `Some` — is wired to a single
-    /// `events.db` handle and would silently alias across shards if
-    /// shared, so this helper rejects pre-built event writers when
-    /// `shard_count > 1`. Production callers always pass `events_config`
-    /// (not `event_writer`) so each shard builds its own writer from its
-    /// own `events.db` inside `open_region_storage`.
-    ///
-    /// Phase A always returns the shard-0 group; the wider set is
-    /// addressable via `get_shard_group(region, OrganizationId(N))`.
-    async fn start_region_shards(
-        &self,
-        region_config: RegionConfig,
-        shard_count: u64,
-    ) -> Result<Arc<OrganizationGroup>> {
-        debug_assert!(shard_count >= 1, "shard_count must be >= 1");
-        let region = region_config.region;
-        if shard_count > 1 && region_config.event_writer.is_some() {
-            return Err(RaftManagerError::Raft {
-                region,
-                message: format!(
-                    "RegionConfig.event_writer cannot be pre-built for multi-shard regions \
-                     (shard_count={shard_count}); use events_config so each shard builds its own \
-                     writer from its own events.db"
-                ),
-            });
-        }
-        let mut shard_zero: Option<Arc<OrganizationGroup>> = None;
-        for n in 0..shard_count {
-            // B.1 transitional: shard_count is 1 for now. Subsequent commits
-            // collapse this loop entirely — org-as-Raft-group means there is
-            // no per-region shard count; each organization is its own group
-            // and is created by `CreateOrganization` apply, not by
-            // `start_region` iteration.
-            let organization_id = OrganizationId::new(n as i64);
-            // Idempotent retry: if a prior attempt already started this
-            // shard, skip it. Without the skip, partial-progress recovery
-            // would loop forever — every retry would re-trip start_region's
-            // `has_shard` guard on shards 0..k and return RegionExists.
-            if self.has_shard(region, organization_id) {
-                if n == 0
-                    && let Ok(existing) = self.get_shard_group(region, organization_id)
-                {
-                    shard_zero = Some(existing);
-                }
-                continue;
-            }
-            let per_shard_config = region_config.clone();
-            match self.start_region(per_shard_config, organization_id).await {
-                Ok(group) => {
-                    if n == 0 {
-                        shard_zero = Some(group);
-                    }
-                },
-                Err(e) => {
-                    warn!(
-                        region = region.as_str(),
-                        shard = n,
-                        error = %e,
-                        "Failed to start shard — earlier shards remain running; \
-                         retry via ensure_data_region to attempt the missing shards"
-                    );
-                    return Err(e);
-                },
-            }
-        }
-        shard_zero.ok_or(RaftManagerError::RegionExists { region })
+        // Under B.1, a data region materializes as a single data-region
+        // group at `OrganizationId::new(0)` — the regional control plane
+        // until `RegionGroup` fills its own fields. Per-organization
+        // groups are created by `CreateOrganization` apply + the bootstrap
+        // handler's `start_organization_group`, not by `start_region`
+        // iteration.
+        self.start_region(region_config, OrganizationId::new(0)).await
     }
 
     /// Ensures a data region is active, creating it lazily if needed.
@@ -1384,16 +1282,12 @@ impl RaftManager {
             return Err(RaftManagerError::SystemRegionRequired);
         }
 
-        // Attempt to start all shards — if a concurrent caller beat us,
-        // fall through. Two error variants can indicate concurrency:
+        // Attempt to start the region's data-region group at
+        // `OrganizationId(0)` — if a concurrent caller beat us, fall
+        // through. Two error variants can indicate concurrency:
         // - RegionExists: start_region's has_shard check saw it after map insert
         // - RegionAlreadyOpen: RegionStorageManager rejected a second opener
-        //
-        // The fan-out across `0..shards_per_region` lives in
-        // `start_region_shards`; partial-progress retry semantics are
-        // documented there.
-        let shard_count = self.shards_for(region);
-        match self.start_region_shards(region_config, shard_count).await {
+        match self.start_region(region_config, OrganizationId::new(0)).await {
             Ok(group) => {
                 info!(region = region.as_str(), "Lazily created region group");
                 Ok((group, true))
@@ -1418,15 +1312,14 @@ impl RaftManager {
         }
     }
 
-    /// Starts a region group for a specific shard.
+    /// Starts a Raft group for a specific `(region, organization_id)` pair.
     ///
-    /// Phase A always passes
-    /// [`OrganizationId::new(0)`](inferadb_ledger_types::OrganizationId); a
-    /// follow-up loop in the calling layer will iterate
-    /// `0..shards_per_region` so each `(region, organization_id)` pair gets its
-    /// own independent Raft group, WAL, and state DBs. The function is
-    /// already shaped to take a per-shard `organization_id`; the caller decides
-    /// how many shards to spin up.
+    /// Data-region groups use
+    /// [`OrganizationId::new(0)`](inferadb_ledger_types::OrganizationId);
+    /// per-organization groups use the organization's id. Each
+    /// `(region, organization_id)` pair gets its own independent Raft
+    /// group, WAL, and state DBs under
+    /// `{data_dir}/{region}/{organization_id}/`.
     async fn start_region(
         &self,
         region_config: RegionConfig,
@@ -1444,11 +1337,11 @@ impl RaftManager {
             delegated_leadership,
         } = region_config;
 
-        // Check if this specific `(region, organization_id)` Raft group is already
-        // running. The check is per-shard because step 5.1b loops
-        // `start_region` across `0..shards_per_region`, so re-entry for the
-        // next shard must NOT see the prior shard as a duplicate.
-        // Concurrent callers can race past this check (TOCTOU);
+        // Check if this `(region, organization_id)` Raft group is already
+        // running. Per-organization bootstrap can race with the system-
+        // apply path that dispatched it, so duplicate calls must be
+        // idempotent-rejected rather than double-initializing. Concurrent
+        // callers can race past this check (TOCTOU);
         // `RegionStorageManager::open_shard` provides the true guard
         // (returns `AlreadyOpen`) and `ensure_data_region` handles both
         // `RegionExists` and `RegionAlreadyOpen` gracefully.

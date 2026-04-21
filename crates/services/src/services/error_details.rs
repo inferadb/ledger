@@ -16,13 +16,13 @@ pub(crate) const LEADER_ID_KEY: &str = "leader_id";
 pub(crate) const LEADER_ENDPOINT_KEY: &str = "leader_endpoint";
 /// `ErrorDetails.context` key for the Raft term the leader was observed in (numeric string).
 pub(crate) const LEADER_TERM_KEY: &str = "leader_term";
-/// `ErrorDetails.context` key for the state-layer shard index the leader is
-/// for (numeric string in `0..shards_per_region`).
+/// `ErrorDetails.context` key for the organization id the leader is for
+/// (numeric string; `"0"` for the data-region group).
 ///
 /// Distinct from the consensus-layer `ShardId` (an opaque seahash) — the
-/// shard index is what the SDK uses for routing and what its
-/// `RegionLeaderCache` keys on. Phase A always emits `"0"` for the GLOBAL
-/// region (single-shard) and `0..shards_per_region` for data regions.
+/// organization id is what the SDK uses for routing and what its
+/// `RegionLeaderCache` keys on. Data-region groups emit `"0"`; per-
+/// organization groups emit the organization's id.
 pub(crate) const LEADER_SHARD_KEY: &str = "leader_shard";
 
 /// Builds an [`ErrorDetails`] proto message from error attributes.
@@ -56,7 +56,7 @@ pub(crate) fn build_error_details(
 /// - `leader_id` — numeric string (u64)
 /// - `leader_endpoint` — full URI (e.g. `"http://10.0.2.5:5000"`)
 /// - `leader_term` — numeric string (u64)
-/// - `leader_shard` — numeric string (state-layer shard index, `0..shards_per_region`)
+/// - `leader_shard` — numeric string (organization id; `"0"` for the data-region group)
 ///
 /// Any argument may be `None` when the server has no information for that
 /// field; the key is simply omitted.

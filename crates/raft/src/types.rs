@@ -214,9 +214,6 @@ impl<R> RaftPayload<R> {
 ///   `RevokeAllUserSessions`, `RevokeAllAppSessions` move from the top
 ///   level into `SystemRequest` (or stay in the existing nested one).
 ///   `CreateDataRegion` is system-tier.
-///
-/// - **Removed** in B.1.10 (cleanup): `AddRegionLearner` is replaced by
-///   `RegionRequest::AddRegionVoter`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LedgerRequest {
     /// Cluster control-plane request.
@@ -1202,7 +1199,6 @@ pub enum RegionRequest {
         saga_id: [u8; 16],
     },
     /// Adds a cluster node as a voter in this region's Raft group.
-    /// Replaces the pre-B.1 `LedgerRequest::AddRegionLearner`.
     AddRegionVoter {
         /// Node id to add.
         node_id: u64,
