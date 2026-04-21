@@ -38,7 +38,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use inferadb_ledger_raft::{
     HealthState, RaftManager, RecoveryStats, RegionConfig, RuntimeConfigHandle,
     event_writer::{EventHandle, HandlerPhaseEmitter},
-    types::{LedgerRequest, RaftPayload, SystemRequest},
+    types::{RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
 };
 use inferadb_ledger_server::{bootstrap::bootstrap_node, config::Config};
 use inferadb_ledger_store::{
@@ -799,7 +799,7 @@ async fn test_snapshot_forces_sync() {
 /// Per the design doc, writes that produce `RegionBlock`s must have
 /// idempotent `append_block` so replay after a crash doesn't
 /// duplicate blocks. The block-producing path is
-/// `LedgerRequest::Write { organization, vault, transactions, ... }`,
+/// `LedgerRequest::Organization(OrganizationRequest::Write { organization, vault, transactions, ... })`,
 /// which requires the org and vault to exist and be active in
 /// GLOBAL state.
 ///
@@ -984,12 +984,12 @@ async fn bootstrap_org_and_vault(
     //         the service layer can resolve external slugs to internal IDs.
     let vault_slug =
         inferadb_ledger_types::snowflake::generate_vault_slug().expect("generate vault slug");
-    let create_vault = LedgerRequest::CreateVault {
+    let create_vault = LedgerRequest::Organization(OrganizationRequest::CreateVault {
         organization: org_id,
         slug: vault_slug,
         name: Some("sprint-1b3-vault".to_string()),
         retention_policy: None,
-    };
+    });
     let vault_id = match node
         .handle
         .propose_and_wait(RaftPayload::new(create_vault, 0), Duration::from_secs(5))
@@ -1033,13 +1033,13 @@ async fn propose_regional_writes(
             operations: vec![op],
             timestamp: std::time::SystemTime::now().into(),
         };
-        let req = LedgerRequest::Write {
+        let req = LedgerRequest::Organization(OrganizationRequest::Write {
             organization,
             vault,
             transactions: vec![txn],
             idempotency_key: *uuid::Uuid::new_v4().as_bytes(),
             request_hash: i as u64,
-        };
+        });
         let resp = region_group
             .handle()
             .propose_and_wait(RaftPayload::new(req, 0), Duration::from_secs(10))

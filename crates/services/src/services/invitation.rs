@@ -19,7 +19,7 @@ use inferadb_ledger_proto::proto::{
 use inferadb_ledger_raft::{
     logging::RequestContext,
     metrics,
-    types::{LedgerRequest, LedgerResponse, SystemRequest},
+    types::{LedgerResponse, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
 };
 use inferadb_ledger_state::system::{
     Organization, OrganizationMemberRole as DomainMemberRole, OrganizationProfile, SYSTEM_VAULT_ID,
@@ -392,13 +392,13 @@ impl InvitationService {
         let global_resp = self
             .ctx
             .propose_request(
-                LedgerRequest::ResolveOrganizationInvite {
+                LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
                     invite: invite_id,
                     organization: org_id,
                     status,
                     invitee_email_hmac: invitee_email_hmac.to_owned(),
                     token_hash,
-                },
+                }),
                 grpc_metadata,
                 ctx,
             )
@@ -457,12 +457,12 @@ impl InvitationService {
         let _ = self
             .ctx
             .propose_request(
-                LedgerRequest::AddOrganizationMember {
+                LedgerRequest::Organization(OrganizationRequest::AddOrganizationMember {
                     organization: org_id,
                     user: user_id,
                     user_slug,
                     role,
-                },
+                }),
                 grpc_metadata,
                 ctx,
             )
@@ -666,13 +666,13 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
         let global_resp = self
             .ctx
             .propose_request(
-                LedgerRequest::CreateOrganizationInvite {
+                LedgerRequest::Organization(OrganizationRequest::CreateOrganizationInvite {
                     organization: org_id,
                     slug: invite_slug,
                     token_hash,
                     invitee_email_hmac: invitee_email_hmac.clone(),
                     ttl_hours,
-                },
+                }),
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -724,13 +724,13 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
             let _ = self
                 .ctx
                 .propose_request(
-                    LedgerRequest::ResolveOrganizationInvite {
+                    LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
                         invite: invite_id,
                         organization: org_id,
                         status: DomainInvitationStatus::Revoked,
                         invitee_email_hmac,
                         token_hash,
-                    },
+                    }),
                     &grpc_metadata,
                     &mut ctx,
                 )

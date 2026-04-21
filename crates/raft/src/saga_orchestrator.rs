@@ -104,7 +104,7 @@ use crate::{
     error::{SagaError, SerializationSnafu, StateReadSnafu},
     event_writer::{EventHandle, HandlerPhaseEmitter},
     raft_manager::RaftManager,
-    types::{LedgerNodeId, LedgerRequest, RaftPayload, SystemRequest},
+    types::{LedgerNodeId, RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
 };
 
 /// Key prefix for saga records in _system organization.
@@ -672,13 +672,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     ) -> Result<(), SagaError> {
         let transaction = Self::build_transaction(operations);
 
-        let request = LedgerRequest::Write {
+        let request = LedgerRequest::Organization(OrganizationRequest::Write {
             organization,
             vault,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,
-        };
+        });
 
         let region = if organization == SYSTEM_ORGANIZATION_ID {
             Region::GLOBAL
@@ -743,13 +743,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
         let operation = Operation::SetEntity { key, value, expires_at, condition: None };
         let transaction = Self::build_transaction(vec![operation]);
-        let request = LedgerRequest::Write {
+        let request = LedgerRequest::Organization(OrganizationRequest::Write {
             organization: SYSTEM_ORGANIZATION_ID,
             vault: SYSTEM_VAULT_ID,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,
-        };
+        });
         self.propose_to_region(region, request, traceparent).await?;
         Ok(())
     }
@@ -779,13 +779,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         let key = SystemKeys::saga_pii_key(saga_id.value());
         let operation = Operation::DeleteEntity { key };
         let transaction = Self::build_transaction(vec![operation]);
-        let request = LedgerRequest::Write {
+        let request = LedgerRequest::Organization(OrganizationRequest::Write {
             organization: SYSTEM_ORGANIZATION_ID,
             vault: SYSTEM_VAULT_ID,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,
-        };
+        });
         if let Err(e) = self.propose_to_region(region, request, traceparent).await {
             warn!(saga_id = %saga_id, error = %e, "Failed to delete saga PII scratch key");
         }
@@ -960,13 +960,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
         let transaction = Self::build_transaction(vec![operation]);
 
-        let request = LedgerRequest::Write {
+        let request = LedgerRequest::Organization(OrganizationRequest::Write {
             organization: SYSTEM_ORGANIZATION_ID,
             vault: SYSTEM_VAULT_ID,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,
-        };
+        });
 
         self.handle
             .propose_and_wait(RaftPayload::system(request), std::time::Duration::from_secs(10))
@@ -1007,7 +1007,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             // Propose CompleteMigration will fail because the org is still
             // Migrating — instead, propose a ResumeOrganization to revert status
             let request =
-                LedgerRequest::ResumeOrganization { organization: saga.input.organization_id };
+                LedgerRequest::System(SystemRequest::ResumeOrganization { organization: saga.input.organization_id });
             let _ = self.handle.propose(RaftPayload::system(request)).await;
 
             saga.transition(MigrateOrgSagaState::TimedOut);
@@ -1017,10 +1017,10 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         match saga.state.clone() {
             MigrateOrgSagaState::Pending => {
                 // Step 0: Propose StartMigration to set status to Migrating
-                let request = LedgerRequest::StartMigration {
+                let request = LedgerRequest::System(SystemRequest::StartMigration {
                     organization: saga.input.organization_id,
                     target_region_group: saga.input.target_region,
-                };
+                });
 
                 self.handle
                     .propose_and_wait(
@@ -1097,7 +1097,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             MigrateOrgSagaState::IntegrityVerified => {
                 // Step 4: Complete migration (updates region, sets Active)
                 let request =
-                    LedgerRequest::CompleteMigration { organization: saga.input.organization_id };
+                    LedgerRequest::System(SystemRequest::CompleteMigration { organization: saga.input.organization_id });
 
                 self.handle
                     .propose_and_wait(
@@ -1959,13 +1959,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 rmk_version,
             } => {
                 // Propose CreateSigningKey through Raft
-                let request = LedgerRequest::CreateSigningKey {
+                let request = LedgerRequest::System(SystemRequest::CreateSigningKey {
                     scope: saga.input.scope,
                     kid: kid.clone(),
                     public_key_bytes,
                     encrypted_private_key,
                     rmk_version,
-                };
+                });
 
                 let response = self
                     .handle

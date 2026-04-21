@@ -24,7 +24,7 @@ use crate::{
     consensus_handle::ConsensusHandle,
     metrics::record_org_purge_failure,
     raft_manager::RaftManager,
-    types::{LedgerRequest, RaftPayload, SystemRequest},
+    types::{RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
 };
 
 /// Maximum number of retry attempts per purge step.
@@ -170,7 +170,7 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
     /// were exhausted.
     async fn propose_global_with_retry(&self, org_id: OrganizationId, trace_id: &str) -> bool {
         for attempt in 0..MAX_RETRIES {
-            let request = LedgerRequest::PurgeOrganization { organization: org_id };
+            let request = LedgerRequest::System(SystemRequest::PurgeOrganization { organization: org_id });
 
             match self.handle.propose(RaftPayload::system(request)).await {
                 Ok(_) => return true,

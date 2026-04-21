@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 use crate::{
     consensus_handle::ConsensusHandle,
     raft_manager::RaftManager,
-    types::{LedgerRequest, RaftPayload, SystemRequest},
+    types::{RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
 };
 
 /// Default interval between token maintenance cycles (5 minutes).
@@ -100,7 +100,7 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
         match self
             .handle
             .propose_and_wait(
-                RaftPayload::system(LedgerRequest::DeleteExpiredRefreshTokens),
+                RaftPayload::system(LedgerRequest::System(SystemRequest::DeleteExpiredRefreshTokens)),
                 Duration::from_secs(10),
             )
             .await
@@ -140,9 +140,9 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
                     match self
                         .handle
                         .propose_and_wait(
-                            RaftPayload::system(LedgerRequest::TransitionSigningKeyRevoked {
+                            RaftPayload::system(LedgerRequest::System(SystemRequest::TransitionSigningKeyRevoked {
                                 kid: kid.clone(),
-                            }),
+                            })),
                             Duration::from_secs(10),
                         )
                         .await

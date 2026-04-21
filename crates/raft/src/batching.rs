@@ -29,7 +29,7 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::{
     metrics,
-    types::{LedgerRequest, LedgerResponse},
+    types::{LedgerResponse, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
 };
 
 /// Configuration for the batch writer.
@@ -451,13 +451,13 @@ mod tests {
     }
 
     fn make_request(organization: OrganizationId, vault: VaultId) -> LedgerRequest {
-        LedgerRequest::Write {
+        LedgerRequest::Organization(OrganizationRequest::Write {
             organization,
             vault,
             transactions: vec![],
             idempotency_key: [0; 16],
             request_hash: 0,
-        }
+        })
     }
 
     fn make_response(block_height: u64) -> LedgerResponse {
@@ -791,13 +791,13 @@ mod tests {
         use super::*;
 
         fn make_indexed_request(idx: u64) -> LedgerRequest {
-            LedgerRequest::Write {
+            LedgerRequest::Organization(OrganizationRequest::Write {
                 organization: OrganizationId::new(idx as i64),
                 vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
-            }
+            })
         }
 
         // Static counter so each proptest case uses distinct organization ids
@@ -856,7 +856,7 @@ mod tests {
                             .collect();
 
                         for req in &requests {
-                            if let LedgerRequest::Write { organization, .. } = req {
+                            if let LedgerRequest::Organization(OrganizationRequest::Write { organization, .. }) = req {
                                 observed.lock().push(organization.value() as u64);
                             }
                         }

@@ -22,7 +22,7 @@ use inferadb_ledger_raft::{
     proof::{self, ProofError},
     raft_manager::RaftManager,
     rate_limit::RateLimiter,
-    types::{LedgerRequest, LedgerResponse, RaftPayload},
+    types::{LedgerResponse, RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
 };
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{OrganizationId, SetCondition, VaultId, config::ValidationConfig};
@@ -424,13 +424,13 @@ impl WriteService {
             timestamp: chrono::Utc::now(),
         };
 
-        Ok(LedgerRequest::Write {
+        Ok(LedgerRequest::Organization(OrganizationRequest::Write {
             organization,
             vault: vault.unwrap_or(VaultId::new(0)),
             transactions: vec![transaction],
             idempotency_key,
             request_hash,
-        })
+        }))
     }
 }
 

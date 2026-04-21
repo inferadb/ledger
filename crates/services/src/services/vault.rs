@@ -14,7 +14,7 @@ use inferadb_ledger_proto::proto::{
 };
 use inferadb_ledger_raft::{
     metrics,
-    types::{BlockRetentionMode, BlockRetentionPolicy, LedgerRequest, LedgerResponse},
+    types::{BlockRetentionMode, BlockRetentionPolicy, LedgerResponse, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
 };
 use inferadb_ledger_types::{
     VaultEntry, ZERO_HASH,
@@ -87,12 +87,12 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         let vault = inferadb_ledger_types::snowflake::generate_vault_slug()
             .map_err(|e| error_classify::internal_error("id-generation", &e))?;
 
-        let ledger_request = LedgerRequest::CreateVault {
+        let ledger_request = LedgerRequest::Organization(OrganizationRequest::CreateVault {
             organization: organization_id,
             slug: vault,
             name: None,
             retention_policy,
-        };
+        });
 
         let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
@@ -212,7 +212,7 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
 
         // Submit delete vault through Raft
         let ledger_request =
-            LedgerRequest::DeleteVault { organization: organization_id, vault: vault_id };
+            LedgerRequest::Organization(OrganizationRequest::DeleteVault { organization: organization_id, vault: vault_id });
 
         let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
@@ -408,11 +408,11 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
                 ctx.set_error("InvalidArgument", status.message());
             })?;
 
-        let ledger_request = LedgerRequest::UpdateVault {
+        let ledger_request = LedgerRequest::Organization(OrganizationRequest::UpdateVault {
             organization: organization_id,
             vault: vault_id,
             retention_policy,
-        };
+        });
 
         let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 

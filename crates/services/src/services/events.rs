@@ -22,7 +22,7 @@ use inferadb_ledger_raft::{
     metrics,
     pagination::{EventPageToken, PageTokenCodec},
     raft_manager::RaftManager,
-    types::{LedgerRequest, LedgerResponse},
+    types::{LedgerResponse, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
 };
 use inferadb_ledger_state::{EventStore, EventsDatabase};
 use inferadb_ledger_store::StorageBackend;
@@ -718,10 +718,10 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
                 None => inferadb_ledger_types::Region::GLOBAL,
             };
 
-            let proposal = LedgerRequest::IngestExternalEvents {
+            let proposal = LedgerRequest::Organization(OrganizationRequest::IngestExternalEvents {
                 source: source.clone(),
                 events: accepted_entries,
-            };
+            });
 
             let timeout = self.proposal_timeout;
             let response = proposer
@@ -885,7 +885,7 @@ mod tests {
 
             // Simulate the apply-handler side: write events to events.db via
             // the same EventStore::write path the real apply handler uses.
-            if let LedgerRequest::IngestExternalEvents { ref events, .. } = request {
+            if let LedgerRequest::Organization(OrganizationRequest::IngestExternalEvents { ref events, .. }) = request {
                 let mut txn = self.events_db.write().expect("test write txn");
                 for entry in events.iter() {
                     EventStore::write(&mut txn, entry).expect("test write event");
@@ -2034,7 +2034,7 @@ mod tests {
         assert_eq!(proposals.len(), 1, "expected exactly one Raft proposal");
         let (_region, request, _caller) = &proposals[0];
         match request {
-            LedgerRequest::IngestExternalEvents { source, events } => {
+            LedgerRequest::Organization(OrganizationRequest::IngestExternalEvents { source, events }) => {
                 assert_eq!(source, "engine");
                 assert_eq!(events.len(), 2);
                 // Pre-proposal validation assigns UUID v4 event_ids + source service.

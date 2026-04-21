@@ -28,7 +28,7 @@ use inferadb_ledger_raft::{
     error::ServiceError,
     logging::RequestContext,
     metrics,
-    types::{LedgerRequest, LedgerResponse},
+    types::{LedgerResponse, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
 };
 use inferadb_ledger_state::system::{
     Organization, OrganizationMember as DomainOrganizationMember,
@@ -593,13 +593,13 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
                         continue;
                     }
                     // GLOBAL resolve
-                    let global_req = LedgerRequest::ResolveOrganizationInvite {
+                    let global_req = LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
                         invite: inv.id,
                         organization: organization_id,
                         status: inferadb_ledger_types::InvitationStatus::Revoked,
                         invitee_email_hmac: inv.invitee_email_hmac.clone(),
                         token_hash: inv.token_hash,
-                    };
+                    });
                     if let Err(e) =
                         self.ctx.propose_request(global_req, &grpc_metadata, &mut ctx).await
                     {
@@ -634,7 +634,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         }
 
         // Submit delete organization through Raft
-        let ledger_request = LedgerRequest::DeleteOrganization { organization: organization_id };
+        let ledger_request = LedgerRequest::System(SystemRequest::DeleteOrganization { organization: organization_id });
 
         let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
@@ -937,27 +937,27 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             timestamp: chrono::Utc::now(),
         };
 
-        let saga_write = LedgerRequest::Write {
+        let saga_write = LedgerRequest::Organization(OrganizationRequest::Write {
             organization: DomainOrganizationId::new(0), // _system
             vault: inferadb_ledger_types::VaultId::new(0),
             transactions: vec![saga_txn],
             idempotency_key: [0; 16],
             request_hash: 0,
-        };
+        });
 
         // Submit both StartMigration and saga write as a single atomic Raft
         // entry via BatchWrite. This ensures the organization status change
         // and saga persistence are committed together — if one fails, neither
         // takes effect.
-        let batch_request = LedgerRequest::BatchWrite {
+        let batch_request = LedgerRequest::Organization(OrganizationRequest::BatchWrite {
             requests: vec![
-                LedgerRequest::StartMigration {
+                LedgerRequest::System(SystemRequest::StartMigration {
                     organization: organization_id,
                     target_region_group: target_region,
-                },
+                }),
                 saga_write,
             ],
-        };
+        });
 
         let response = self.ctx.propose_request(batch_request, &grpc_metadata, &mut ctx).await?;
 
@@ -1259,10 +1259,10 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             }
         }
 
-        let ledger_request = LedgerRequest::RemoveOrganizationMember {
+        let ledger_request = LedgerRequest::Organization(OrganizationRequest::RemoveOrganizationMember {
             organization: organization_id,
             target: target_id,
-        };
+        });
         let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
         match response {
@@ -1352,11 +1352,11 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             ));
         }
 
-        let ledger_request = LedgerRequest::UpdateOrganizationMemberRole {
+        let ledger_request = LedgerRequest::Organization(OrganizationRequest::UpdateOrganizationMemberRole {
             organization: organization_id,
             target: target_id,
             role: new_role,
-        };
+        });
         let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
         match response {
@@ -1555,10 +1555,10 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         })?;
 
         // Step 1 (GLOBAL): Create team directory entry (ID + slug only, no PII).
-        let ledger_request = LedgerRequest::CreateOrganizationTeam {
+        let ledger_request = LedgerRequest::Organization(OrganizationRequest::CreateOrganizationTeam {
             organization: organization_id,
             slug: team_slug,
-        };
+        });
         let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
         let team_id = match response {
@@ -1685,7 +1685,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
 
         // Step 2 (GLOBAL): Clean up slug index and in-memory maps.
         let ledger_request =
-            LedgerRequest::DeleteOrganizationTeam { organization: organization_id, team: team_id };
+            LedgerRequest::Organization(OrganizationRequest::DeleteOrganizationTeam { organization: organization_id, team: team_id });
         let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
 
         match response {

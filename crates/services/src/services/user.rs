@@ -26,7 +26,7 @@ use inferadb_ledger_proto::proto::{
 };
 use inferadb_ledger_raft::{
     error::ServiceError,
-    types::{LedgerRequest, LedgerResponse, SystemRequest},
+    types::{LedgerResponse, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
 };
 use inferadb_ledger_state::system::{
     CreateUserInput, CreateUserSaga, EmailHashEntry, MigrateUserInput, MigrateUserSaga, Saga,
@@ -133,7 +133,7 @@ impl UserService {
         let (refresh_token_str, refresh_token_hash) = crate::jwt::generate_refresh_token();
         let family = crate::jwt::generate_family_id();
 
-        let refresh_request = LedgerRequest::CreateRefreshToken {
+        let refresh_request = LedgerRequest::System(SystemRequest::CreateRefreshToken {
             token_hash: refresh_token_hash,
             family,
             token_type: TokenType::UserSession,
@@ -142,7 +142,7 @@ impl UserService {
             vault: None,
             kid: signing_key.kid.clone(),
             ttl_secs: jwt_config.session_refresh_ttl_secs,
-        };
+        });
         self.ctx
             .propose_regional_ledger_request(region, refresh_request, grpc_metadata, ctx)
             .await?;
@@ -455,13 +455,13 @@ impl proto::user_service_server::UserService for UserService {
             operations: vec![saga_op],
             timestamp: Utc::now(),
         };
-        let saga_request = LedgerRequest::Write {
+        let saga_request = LedgerRequest::Organization(OrganizationRequest::Write {
             organization: inferadb_ledger_types::OrganizationId::new(0),
             vault: DomainVaultId::new(0),
             transactions: vec![saga_txn],
             idempotency_key: [0; 16],
             request_hash: 0,
-        };
+        });
 
         self.ctx.propose_request(saga_request, &grpc_metadata, &mut ctx).await?;
 
@@ -1293,13 +1293,13 @@ impl proto::user_service_server::UserService for UserService {
             operations: vec![saga_op],
             timestamp: Utc::now(),
         };
-        let saga_request = LedgerRequest::Write {
+        let saga_request = LedgerRequest::Organization(OrganizationRequest::Write {
             organization: inferadb_ledger_types::OrganizationId::new(0),
             vault: DomainVaultId::new(0),
             transactions: vec![saga_txn],
             idempotency_key: [0; 16],
             request_hash: 0,
-        };
+        });
 
         self.ctx.propose_request(saga_request, &grpc_metadata, &mut ctx).await?;
 

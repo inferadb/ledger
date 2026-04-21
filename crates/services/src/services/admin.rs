@@ -28,7 +28,7 @@ use inferadb_ledger_raft::{
     log_storage::{AppliedStateAccessor, VaultHealthStatus},
     logging::{OperationType, RequestContext, Sampler},
     metrics,
-    types::{LedgerRequest, LedgerResponse, RaftPayload, SystemRequest},
+    types::{LedgerResponse, RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
 };
 use inferadb_ledger_state::{BlockArchive, StateLayer, system::SystemOrganizationService};
 use inferadb_ledger_store::FileBackend;
@@ -1564,7 +1564,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             );
 
             // Update vault health to Diverged via Raft for cluster-wide consistency
-            let health_request = LedgerRequest::UpdateVaultHealth {
+            let health_request = LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
                 organization: organization_id,
                 vault: vault_id,
                 healthy: false,
@@ -1573,7 +1573,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 diverged_at_height: Some(expected_height),
                 recovery_attempt: None,
                 recovery_started_at: None,
-            };
+            });
 
             if let Err(e) = self.handle.propose(RaftPayload::system(health_request)).await {
                 tracing::error!("Failed to update vault health via Raft: {}", e);
@@ -1604,7 +1604,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             }))
         } else {
             // Update vault health to Healthy via Raft for cluster-wide consistency
-            let health_request = LedgerRequest::UpdateVaultHealth {
+            let health_request = LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
                 organization: organization_id,
                 vault: vault_id,
                 healthy: true,
@@ -1613,7 +1613,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 diverged_at_height: None,
                 recovery_attempt: None,
                 recovery_started_at: None,
-            };
+            });
 
             if let Err(e) = self.handle.propose(RaftPayload::system(health_request)).await {
                 tracing::error!("Failed to update vault health via Raft: {}", e);
@@ -1696,7 +1696,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         );
 
         // Update vault health to Diverged via Raft
-        let health_request = LedgerRequest::UpdateVaultHealth {
+        let health_request = LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
             organization: organization_id,
             vault: vault_id,
             healthy: false,
@@ -1705,7 +1705,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             diverged_at_height: Some(at_height),
             recovery_attempt: None,
             recovery_started_at: None,
-        };
+        });
 
         // Write to BOTH the GLOBAL and DATA REGION Raft groups.
         // - GLOBAL: HealthService reads vault health from GLOBAL applied state
@@ -1867,13 +1867,13 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 timestamp: chrono::Utc::now(),
             };
 
-            let gc_request = LedgerRequest::Write {
+            let gc_request = LedgerRequest::Organization(OrganizationRequest::Write {
                 organization: organization_id,
                 vault: vault_id,
                 transactions: vec![transaction],
                 idempotency_key: [0; 16],
                 request_hash: 0,
-            };
+            });
 
             // Propose to REGIONAL handle (where entity data lives), or fall back to GLOBAL
             let handle_target = regional_handle.as_ref().unwrap_or(&self.handle);

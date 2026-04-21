@@ -38,7 +38,7 @@ use crate::{
     consensus_handle::ConsensusHandle,
     error::OrphanCleanupError,
     log_storage::AppliedStateAccessor,
-    types::{LedgerRequest, RaftPayload},
+    types::{RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
 };
 
 /// Default interval between cleanup cycles (1 hour).
@@ -248,13 +248,13 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
             timestamp: chrono::Utc::now(),
         };
 
-        let request = LedgerRequest::Write {
+        let request = LedgerRequest::Organization(OrganizationRequest::Write {
             organization,
             vault: SYSTEM_VAULT_ID,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,
-        };
+        });
 
         self.handle.propose(RaftPayload::system(request)).await.map_err(|e| {
             OrphanCleanupError::OrphanRaftWrite {

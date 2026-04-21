@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     consensus_handle::ConsensusHandle,
-    types::{LedgerRequest, RaftPayload, SystemRequest},
+    types::{RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
 };
 
 /// Background job that erases users whose soft-delete retention period has expired.

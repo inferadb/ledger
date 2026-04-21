@@ -13,7 +13,7 @@ use inferadb_ledger_proto::proto::{
 };
 use inferadb_ledger_raft::{
     raft_manager::RaftManager,
-    types::{LedgerRequest, RaftPayload},
+    types::{RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
 };
 use inferadb_ledger_types::{decode, encode};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
@@ -341,7 +341,7 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
         // Membership changes are not org-scoped, so they always operate on
         // the region's shard 0 group (the one that holds the membership
         // log).
-        if let LedgerRequest::AddRegionLearner { node_id, ref address } = ledger_request {
+        if let LedgerRequest::Region(RegionRequest::AddRegionVoter { node_id, ref address }) = ledger_request {
             let group = self
                 .manager
                 .get_region_group(region)

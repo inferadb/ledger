@@ -24,7 +24,7 @@ use inferadb_ledger_proto::proto::{
     SetAppCredentialEnabledResponse, SetAppEnabledRequest, SetAppEnabledResponse, UpdateAppRequest,
     UpdateAppResponse, UpdateAppVaultRequest, UpdateAppVaultResponse,
 };
-use inferadb_ledger_raft::types::{LedgerRequest, LedgerResponse};
+use inferadb_ledger_raft::types::{LedgerResponse, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest};
 use inferadb_ledger_state::system::{
     App, AppCredentialType as DomainAppCredentialType, AppVaultConnection, ClientAssertionEntry,
     SYSTEM_VAULT_ID, SystemKeys,
@@ -343,7 +343,7 @@ impl proto::app_service_server::AppService for AppService {
         let response = self
             .ctx
             .propose_request(
-                LedgerRequest::CreateApp { organization: org_id, slug },
+                LedgerRequest::Organization(OrganizationRequest::CreateApp { organization: org_id, slug }),
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -547,7 +547,7 @@ impl proto::app_service_server::AppService for AppService {
         let response = self
             .ctx
             .propose_request(
-                LedgerRequest::DeleteApp { organization: org_id, app: app_id },
+                LedgerRequest::Organization(OrganizationRequest::DeleteApp { organization: org_id, app: app_id }),
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -586,11 +586,11 @@ impl proto::app_service_server::AppService for AppService {
         let response = self
             .ctx
             .propose_request(
-                LedgerRequest::SetAppEnabled {
+                LedgerRequest::Organization(OrganizationRequest::SetAppEnabled {
                     organization: org_id,
                     app: app_id,
                     enabled: inner.enabled,
-                },
+                }),
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -636,12 +636,12 @@ impl proto::app_service_server::AppService for AppService {
         let response = self
             .ctx
             .propose_request(
-                LedgerRequest::SetAppCredentialEnabled {
+                LedgerRequest::Organization(OrganizationRequest::SetAppCredentialEnabled {
                     organization: org_id,
                     app: app_id,
                     credential_type,
                     enabled: inner.enabled,
-                },
+                }),
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -731,11 +731,11 @@ impl proto::app_service_server::AppService for AppService {
         let response = self
             .ctx
             .propose_request(
-                LedgerRequest::RotateAppClientSecret {
+                LedgerRequest::Organization(OrganizationRequest::RotateAppClientSecret {
                     organization: org_id,
                     app: app_id,
                     new_secret_hash: secret_hash,
-                },
+                }),
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -853,12 +853,12 @@ impl proto::app_service_server::AppService for AppService {
         let response = self
             .ctx
             .propose_request(
-                LedgerRequest::CreateAppClientAssertion {
+                LedgerRequest::Organization(OrganizationRequest::CreateAppClientAssertion {
                     organization: org_id,
                     app: app_id,
                     expires_at,
                     public_key_bytes,
-                },
+                }),
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -984,11 +984,11 @@ impl proto::app_service_server::AppService for AppService {
         let response = self
             .ctx
             .propose_request(
-                LedgerRequest::DeleteAppClientAssertion {
+                LedgerRequest::Organization(OrganizationRequest::DeleteAppClientAssertion {
                     organization: org_id,
                     app: app_id,
                     assertion,
-                },
+                }),
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -1036,12 +1036,12 @@ impl proto::app_service_server::AppService for AppService {
         let response = self
             .ctx
             .propose_request(
-                LedgerRequest::SetAppClientAssertionEnabled {
+                LedgerRequest::Organization(OrganizationRequest::SetAppClientAssertionEnabled {
                     organization: org_id,
                     app: app_id,
                     assertion,
                     enabled: inner.enabled,
-                },
+                }),
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -1104,13 +1104,13 @@ impl proto::app_service_server::AppService for AppService {
         let response = self
             .ctx
             .propose_request(
-                LedgerRequest::AddAppVault {
+                LedgerRequest::Organization(OrganizationRequest::AddAppVault {
                     organization: org_id,
                     app: app_id,
                     vault: vault_id,
                     vault_slug,
                     allowed_scopes: inner.allowed_scopes,
-                },
+                }),
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -1155,12 +1155,12 @@ impl proto::app_service_server::AppService for AppService {
         let response = self
             .ctx
             .propose_request(
-                LedgerRequest::UpdateAppVault {
+                LedgerRequest::Organization(OrganizationRequest::UpdateAppVault {
                     organization: org_id,
                     app: app_id,
                     vault: vault_id,
                     allowed_scopes: inner.allowed_scopes,
-                },
+                }),
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -1205,11 +1205,11 @@ impl proto::app_service_server::AppService for AppService {
         let response = self
             .ctx
             .propose_request(
-                LedgerRequest::RemoveAppVault {
+                LedgerRequest::Organization(OrganizationRequest::RemoveAppVault {
                     organization: org_id,
                     app: app_id,
                     vault: vault_id,
-                },
+                }),
                 &grpc_metadata,
                 &mut ctx,
             )

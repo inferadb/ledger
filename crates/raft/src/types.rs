@@ -214,580 +214,12 @@ impl RaftPayload {
 ///   `RegionRequest::AddRegionVoter`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LedgerRequest {
-    /// Writes transactions to a vault.
-    Write {
-        /// Target organization.
-        organization: OrganizationId,
-        /// Target vault within the organization.
-        vault: VaultId,
-        /// Transactions to apply atomically.
-        transactions: Vec<Transaction>,
-        /// Idempotency key (16-byte UUID) for cross-failover deduplication.
-        /// Stored in the replicated `ClientSequenceEntry` so new leaders can
-        /// detect retries without the moka cache.
-        #[serde(default)]
-        idempotency_key: [u8; 16],
-        /// Hash of the request payload (seahash) for detecting key reuse
-        /// with different payloads after failover.
-        #[serde(default)]
-        request_hash: u64,
-    },
-
-    /// Creates a new vault within an organization.
-    CreateVault {
-        /// Organization to create the vault in.
-        organization: OrganizationId,
-        /// External slug for API lookups (generated before Raft proposal).
-        slug: VaultSlug,
-        /// Optional vault name (for display).
-        name: Option<String>,
-        /// Block retention policy for this vault.
-        /// Defaults to Full retention if not specified.
-        retention_policy: Option<BlockRetentionPolicy>,
-    },
-
-    /// Deletes an organization.
-    DeleteOrganization {
-        /// Organization ID to delete.
-        organization: OrganizationId,
-    },
-
-    /// Deletes a vault.
-    DeleteVault {
-        /// Organization containing the vault.
-        organization: OrganizationId,
-        /// Vault ID to delete.
-        vault: VaultId,
-    },
-
-    /// Updates vault metadata (retention policy).
-    UpdateVault {
-        /// Organization containing the vault.
-        organization: OrganizationId,
-        /// Vault to update.
-        vault: VaultId,
-        /// New retention policy (if provided).
-        retention_policy: Option<BlockRetentionPolicy>,
-    },
-
-    /// Suspends an organization (billing hold or policy violation).
-    /// Suspended organizations reject writes but allow reads.
-    SuspendOrganization {
-        /// Organization to suspend.
-        organization: OrganizationId,
-        /// Optional reason for suspension (e.g., "Payment overdue", "TOS violation").
-        reason: Option<String>,
-    },
-
-    /// Resumes a suspended organization.
-    ResumeOrganization {
-        /// Organization to resume.
-        organization: OrganizationId,
-    },
-
-    /// Removes a member from an organization.
-    RemoveOrganizationMember {
-        /// Organization to modify.
-        organization: OrganizationId,
-        /// User to remove.
-        target: UserId,
-    },
-
-    /// Updates a member's role within an organization.
-    UpdateOrganizationMemberRole {
-        /// Organization to modify.
-        organization: OrganizationId,
-        /// User whose role changes.
-        target: UserId,
-        /// New role for the member.
-        role: inferadb_ledger_state::system::OrganizationMemberRole,
-    },
-
-    /// Adds a user as a member of an organization. Idempotent: no-op if already a member.
-    AddOrganizationMember {
-        /// Organization to add the member to.
-        organization: OrganizationId,
-        /// User to add.
-        user: UserId,
-        /// External Snowflake slug for the user.
-        user_slug: UserSlug,
-        /// Role to assign upon joining.
-        role: inferadb_ledger_state::system::OrganizationMemberRole,
-    },
-
-    /// Creates a new organization invitation (GLOBAL indexes only).
-    ///
-    /// Allocates an `InviteId` from the sequence counter, computes
-    /// `expires_at = proposed_at + ttl_hours`, and writes three GLOBAL indexes:
-    /// - `_idx:invite:slug:{slug}` → `InviteIndexEntry`
-    /// - `_idx:invite:token_hash:{hex}` → `InviteIndexEntry`
-    /// - `_idx:invite:email_hash:{hmac}:{invite_id}` → `InviteEmailEntry`
-    ///
-    /// The full invitation record (with PII) is written separately via
-    /// `SystemRequest::WriteOrganizationInvite` to the REGIONAL Raft group.
-    /// No plaintext email appears in this GLOBAL entry.
-    CreateOrganizationInvite {
-        /// Organization issuing the invitation.
-        organization: OrganizationId,
-        /// External Snowflake slug for the invitation.
-        slug: InviteSlug,
-        /// SHA-256 hash of the raw invitation token.
-        token_hash: [u8; 32],
-        /// HMAC of the invitee's normalized email (blinding key).
-        invitee_email_hmac: String,
-        /// Invitation TTL in hours (1–720). `expires_at` is computed by
-        /// the apply handler as `proposed_at + ttl_hours`.
-        ttl_hours: u32,
-    },
-
-    /// Resolves an organization invitation to a terminal state (GLOBAL).
-    ///
-    /// CAS: apply handler verifies `current_status == Pending` in the email
-    /// hash index before applying. Updates `InviteEmailEntry.status` and
-    /// removes the `_idx:invite:token_hash` index entry. Returns
-    /// `LedgerResponse::Error { code: InvitationAlreadyResolved }` on
-    /// CAS failure.
-    ///
-    /// The `invitee_email_hmac` and `token_hash` fields are included so the
-    /// apply handler can construct exact index keys without scanning.
-    ResolveOrganizationInvite {
-        /// Invitation to resolve.
-        invite: InviteId,
-        /// Organization that owns the invitation.
-        organization: OrganizationId,
-        /// Terminal status to transition to (Accepted, Declined, Expired, or Revoked).
-        status: InvitationStatus,
-        /// HMAC of the invitee's email (for email hash index key construction).
-        invitee_email_hmac: String,
-        /// SHA-256 hash of the invitation token (for token hash index removal).
-        token_hash: [u8; 32],
-    },
-
-    /// Removes GLOBAL invitation indexes during retention reaping.
-    /// Used by `InviteMaintenanceJob` — deletes slug, email hash, and token hash entries.
-    PurgeOrganizationInviteIndexes {
-        /// Invitation being purged.
-        invite: InviteId,
-        /// Invitation slug for slug index cleanup.
-        slug: InviteSlug,
-        /// HMAC hex for email hash index cleanup.
-        invitee_email_hmac: String,
-        /// SHA-256 hash of the invitation token for token hash index cleanup.
-        token_hash: [u8; 32],
-    },
-
-    /// Re-keys the GLOBAL `_idx:invite:email_hash` index during blinding
-    /// key rotation. Deletes old HMAC entry, creates new HMAC entry.
-    RehashInviteEmailIndex {
-        /// Invitation ID (key suffix).
-        invite: InviteId,
-        /// Old HMAC hex (to delete).
-        old_hmac: String,
-        /// New HMAC hex (to create).
-        new_hmac: String,
-        /// Organization ID (preserved in new entry).
-        organization: OrganizationId,
-        /// Current invitation status (preserved in new entry).
-        status: InvitationStatus,
-    },
-
-    /// Purges a deleted organization after its retention cooldown.
-    ///
-    /// Force-deletes all remaining vaults and removes all organization
-    /// data including slug index entries. Submitted by the background
-    /// `OrganizationPurgeJob` after `region.retention_days()` elapses.
-    PurgeOrganization {
-        /// Organization to purge.
-        organization: OrganizationId,
-    },
-
-    /// Starts organization migration to a new region.
-    /// Sets status to Migrating, blocking writes until CompleteMigration.
-    StartMigration {
-        /// Organization to migrate.
-        organization: OrganizationId,
-        /// Target region for migration.
-        target_region_group: Region,
-    },
-
-    /// Completes a pending organization migration.
-    /// Updates region and returns status to Active.
-    CompleteMigration {
-        /// Organization being migrated.
-        organization: OrganizationId,
-    },
-
-    /// Updates vault health status (used during recovery).
-    UpdateVaultHealth {
-        /// Organization containing the vault.
-        organization: OrganizationId,
-        /// Vault ID to update.
-        vault: VaultId,
-        /// New health status: true = Healthy, false = Diverged/Recovering.
-        healthy: bool,
-        /// If diverged, the expected state root.
-        expected_root: Option<Hash>,
-        /// If diverged, the computed state root.
-        computed_root: Option<Hash>,
-        /// If diverged, the height at which divergence was detected.
-        diverged_at_height: Option<u64>,
-        /// If recovering, the recovery attempt number (1-based).
-        recovery_attempt: Option<u8>,
-        /// If recovering, the start timestamp (Unix seconds).
-        recovery_started_at: Option<i64>,
-    },
-
-    /// System operation (user management, node membership, etc.).
+    /// Cluster control-plane request.
     System(SystemRequest),
-
-    /// Batches of requests to apply atomically in a single Raft entry.
-    ///
-    /// Application-level batching coalesces multiple write requests into a
-    /// single Raft proposal to reduce consensus round-trips and improve
-    /// throughput.
-    ///
-    /// Each inner request is processed sequentially, and responses are
-    /// returned in the same order via `LedgerResponse::BatchWrite`.
-    BatchWrite {
-        /// The requests to process.
-        requests: Vec<LedgerRequest>,
-    },
-
-    /// Creates a new team within an organization (GLOBAL directory entry).
-    ///
-    /// Allocates the team ID and slug mapping. Does NOT include the team name —
-    /// plaintext names are PII and must be written via the regional
-    /// [`SystemRequest::WriteTeam`] to avoid leaking into the GLOBAL
-    /// Raft log.
-    CreateOrganizationTeam {
-        /// Organization to create the team in.
-        organization: OrganizationId,
-        /// External slug for API lookups (generated before Raft proposal).
-        slug: TeamSlug,
-    },
-
-    /// Deletes a team's GLOBAL directory entry (slug index + in-memory maps).
-    ///
-    /// Profile deletion and member migration are handled by the REGIONAL
-    /// [`SystemRequest::DeleteTeam`] (proposed first by the service handler).
-    DeleteOrganizationTeam {
-        /// Organization containing the team.
-        organization: OrganizationId,
-        /// Team to delete.
-        team: TeamId,
-    },
-
-    /// Creates a new application within an organization (GLOBAL directory entry).
-    ///
-    /// Allocates the app ID and slug mapping. Does NOT include the app name or
-    /// description — plaintext names are PII and must be written via the
-    /// regional [`SystemRequest::WriteAppProfile`] to avoid leaking into the
-    /// GLOBAL Raft log.
-    CreateApp {
-        /// Organization to create the app in.
-        organization: OrganizationId,
-        /// External slug for API lookups (generated before Raft proposal).
-        slug: AppSlug,
-    },
-
-    /// Deletes an application and all its sub-resources.
-    DeleteApp {
-        /// Organization containing the app.
-        organization: OrganizationId,
-        /// App to delete.
-        app: AppId,
-    },
-
-    /// Enables or disables an application.
-    SetAppEnabled {
-        /// Organization containing the app.
-        organization: OrganizationId,
-        /// App to toggle.
-        app: AppId,
-        /// Whether to enable (`true`) or disable (`false`).
-        enabled: bool,
-    },
-
-    /// Sets the enabled state of a credential type on an app.
-    SetAppCredentialEnabled {
-        /// Organization containing the app.
-        organization: OrganizationId,
-        /// App whose credential to modify.
-        app: AppId,
-        /// Which credential type to toggle.
-        credential_type: inferadb_ledger_state::system::AppCredentialType,
-        /// New enabled state.
-        enabled: bool,
-    },
-
-    /// Rotates the client secret for an app.
-    ///
-    /// Generates a new secret, stores the bcrypt hash, and returns
-    /// the plaintext secret once in the response.
-    RotateAppClientSecret {
-        /// Organization containing the app.
-        organization: OrganizationId,
-        /// App whose secret to rotate.
-        app: AppId,
-        /// Bcrypt hash of the new secret (computed before Raft proposal).
-        new_secret_hash: String,
-    },
-
-    /// Creates a client assertion entry (Ed25519 keypair).
-    ///
-    /// Structural entry only (public key, expiry). The user-provided name
-    /// is written separately via [`SystemRequest::WriteClientAssertionName`]
-    /// to the REGIONAL Raft group (PII isolation).
-    CreateAppClientAssertion {
-        /// Organization containing the app.
-        organization: OrganizationId,
-        /// App to add the assertion to.
-        app: AppId,
-        /// When this entry expires.
-        expires_at: DateTime<Utc>,
-        /// Raw 32-byte Ed25519 public key.
-        public_key_bytes: Vec<u8>,
-    },
-
-    /// Deletes a client assertion entry.
-    DeleteAppClientAssertion {
-        /// Organization containing the app.
-        organization: OrganizationId,
-        /// App containing the assertion.
-        app: AppId,
-        /// Assertion entry to delete.
-        assertion: ClientAssertionId,
-    },
-
-    /// Enables or disables an individual client assertion entry.
-    SetAppClientAssertionEnabled {
-        /// Organization containing the app.
-        organization: OrganizationId,
-        /// App containing the assertion.
-        app: AppId,
-        /// Assertion entry to toggle.
-        assertion: ClientAssertionId,
-        /// New enabled state.
-        enabled: bool,
-    },
-
-    /// Adds a vault connection to an app.
-    AddAppVault {
-        /// Organization containing the app.
-        organization: OrganizationId,
-        /// App to add the vault connection to.
-        app: AppId,
-        /// Vault to connect.
-        vault: VaultId,
-        /// External vault slug (for response construction).
-        vault_slug: VaultSlug,
-        /// Allowed scopes for this connection.
-        allowed_scopes: Vec<String>,
-    },
-
-    /// Updates a vault connection's allowed scopes.
-    UpdateAppVault {
-        /// Organization containing the app.
-        organization: OrganizationId,
-        /// App containing the vault connection.
-        app: AppId,
-        /// Vault whose connection to update.
-        vault: VaultId,
-        /// New allowed scopes.
-        allowed_scopes: Vec<String>,
-    },
-
-    /// Removes a vault connection from an app.
-    RemoveAppVault {
-        /// Organization containing the app.
-        organization: OrganizationId,
-        /// App containing the vault connection.
-        app: AppId,
-        /// Vault to disconnect.
-        vault: VaultId,
-    },
-
-    // ── Signing Key Management ──
-    /// Creates a new signing key for JWT token signing.
-    ///
-    /// The service layer generates the Ed25519 keypair, encrypts the private
-    /// key with the RMK (envelope encryption), and proposes this entry.
-    /// The state machine stores the key entity and indexes.
-    CreateSigningKey {
-        /// Key scope: Global (user sessions) or Organization (vault tokens).
-        scope: inferadb_ledger_state::system::SigningKeyScope,
-        /// UUID-format key identifier (generated before proposal).
-        kid: String,
-        /// 32-byte Ed25519 public key.
-        public_key_bytes: Vec<u8>,
-        /// `SigningKeyEnvelope` serialized bytes (100 bytes).
-        encrypted_private_key: Vec<u8>,
-        /// RMK version used to wrap the DEK.
-        rmk_version: u32,
-    },
-
-    /// Rotates a signing key by creating a new active key and transitioning
-    /// the old key to Rotated (grace period) or Revoked (immediate).
-    RotateSigningKey {
-        /// Kid of the key being rotated.
-        old_kid: String,
-        /// Kid of the replacement key.
-        new_kid: String,
-        /// 32-byte Ed25519 public key for the new key.
-        new_public_key_bytes: Vec<u8>,
-        /// Encrypted private key bytes for the new key.
-        new_encrypted_private_key: Vec<u8>,
-        /// RMK version used to wrap the new key's DEK.
-        rmk_version: u32,
-        /// Grace period in seconds. 0 = immediate revocation of old key.
-        grace_period_secs: u64,
-    },
-
-    /// Immediately revokes a signing key (Active or Rotated → Revoked).
-    RevokeSigningKey {
-        /// Kid of the key to revoke.
-        kid: String,
-    },
-
-    /// Transitions a rotated signing key past its grace period to Revoked.
-    /// Used by `TokenMaintenanceJob` — state changes must go through Raft.
-    TransitionSigningKeyRevoked {
-        /// Kid of the rotated key to transition.
-        kid: String,
-    },
-
-    // ── Refresh Token Management ──
-    /// Creates a refresh token record (paired with an access token).
-    CreateRefreshToken {
-        /// SHA-256 hash of the opaque refresh token string.
-        token_hash: [u8; 32],
-        /// Token family UUID for theft detection.
-        family: [u8; 16],
-        /// Whether this is a user session or vault access token.
-        token_type: TokenType,
-        /// Subject: User or App.
-        subject: TokenSubject,
-        /// Organization (None for user sessions).
-        organization: Option<OrganizationId>,
-        /// Vault (set for vault tokens).
-        vault: Option<VaultId>,
-        /// Which signing key signed the associated access token.
-        kid: String,
-        /// Refresh TTL in seconds. Apply handler computes `expires_at`
-        /// as `proposed_at + ttl_secs`.
-        ttl_secs: u64,
-    },
-
-    /// Atomically consumes a refresh token and creates a replacement.
-    ///
-    /// The state machine is the authority for all validation: used, expired,
-    /// revoked, family poisoned, version mismatch, app enabled, vault connected.
-    UseRefreshToken {
-        /// Hash of the token being consumed.
-        old_token_hash: [u8; 32],
-        /// Hash of the replacement token.
-        new_token_hash: [u8; 32],
-        /// Current active signing key kid for the new access token.
-        new_kid: String,
-        /// Refresh TTL in seconds for the new token.
-        ttl_secs: u64,
-        /// For user session refresh: the `TokenVersion` the caller observed.
-        /// State machine rejects if current version differs.
-        /// None for vault token refresh.
-        expected_version: Option<TokenVersion>,
-        /// Maximum family lifetime in seconds. The state machine rejects
-        /// the refresh if the family has exceeded this age.
-        max_family_lifetime_secs: u64,
-    },
-
-    /// Revokes all tokens in a family.
-    RevokeTokenFamily {
-        /// Token family UUID to revoke.
-        family: [u8; 16],
-    },
-
-    /// Atomically revokes all user sessions and increments `TokenVersion`.
-    RevokeAllUserSessions {
-        /// User whose sessions to revoke.
-        user: UserId,
-    },
-
-    /// Atomically revokes all app sessions and increments the app's `TokenVersion`.
-    RevokeAllAppSessions {
-        /// Organization owning the app.
-        organization: OrganizationId,
-        /// App whose sessions to revoke.
-        app: AppId,
-    },
-
-    /// Deletes expired refresh tokens and garbage-collects poisoned families.
-    /// Used by `TokenMaintenanceJob`. Apply handler uses `proposed_at` as cutoff.
-    DeleteExpiredRefreshTokens,
-
-    /// Encrypted form of a [`SystemRequest`] for PII crypto-shredding.
-    ///
-    /// User-scoped REGIONAL requests (profile writes, email operations) are
-    /// encrypted with the user's `UserShredKey` before entering the Raft log.
-    /// When the user is erased and their `UserShredKey` is destroyed, all
-    /// historical log entries become cryptographically unrecoverable.
-    ///
-    /// The apply handler decrypts using the `UserShredKey` from state. If the
-    /// key has been destroyed (user erased), the entry is skipped — the state
-    /// machine already reflects the erasure.
-    EncryptedUserSystem(crate::entry_crypto::EncryptedUserSystemRequest),
-
-    /// Organization-scoped encrypted form of a [`SystemRequest`].
-    ///
-    /// Organization-scoped REGIONAL requests (org/team/app profile writes) are
-    /// encrypted with the organization's `OrgShredKey` before entering the Raft log.
-    /// When the organization is purged and the `OrgShredKey` destroyed, all
-    /// historical log entries become cryptographically unrecoverable.
-    ///
-    /// The apply handler decrypts using the `OrgShredKey` from state. If the
-    /// key has been destroyed (org purged), the entry is skipped.
-    EncryptedOrgSystem(crate::entry_crypto::EncryptedOrgSystemRequest),
-
-    /// Adds a node as a learner to a data region's Raft group.
-    ///
-    /// Sent via `RegionalProposal` from the GLOBAL leader to the data
-    /// region leader when the GLOBAL leader is not the DR leader. The
-    /// `regional_proposal` handler intercepts this variant and calls
-    /// `add_learner` + `promote_voter` directly (membership changes bypass
-    /// the Raft log). This variant must never reach the apply handler.
-    AddRegionLearner {
-        /// Node ID to add as a learner (then promote to voter).
-        node_id: u64,
-        /// Network address of the node (host:port).
-        address: String,
-    },
-
-    /// External audit-event ingestion routed through Raft.
-    ///
-    /// Constructed by `EventsServiceImpl::ingest_events` AFTER validation +
-    /// allow-list filtering. Only accepted events reach this variant; rejections
-    /// are returned to the client synchronously without a Raft round-trip.
-    ///
-    /// Each `EventEntry` carries a frozen UUID v4 `event_id` and a frozen
-    /// timestamp (from the proto request or `Utc::now()` at RPC entry time).
-    /// Both are sealed into the proposal body before consensus, so WAL replay
-    /// on any replica reconstructs identical `events.db` rows.
-    ///
-    /// # Residency
-    ///
-    /// External ingest targets a single REGIONAL `events.db`; this variant
-    /// MUST only be proposed on REGIONAL Raft groups. It MUST NEVER appear as
-    /// a [`SystemRequest`] (GLOBAL) proposal — `EventEntry` fields contain
-    /// user-controlled strings (`principal`, `event_type`, `details`) that
-    /// are PII and must stay within the owning region's Raft log + `events.db`.
-    IngestExternalEvents {
-        /// Ingest source service identifier (e.g. `"engine"`, `"control"`).
-        /// Matches the validated value from `IngestEventsRequest.source`.
-        source: String,
-        /// Pre-validated, pre-UUIDv4-assigned, pre-timestamped events. Each
-        /// entry's `event_id` is frozen at propose time so replay re-writes
-        /// identical bytes on every replica.
-        events: Vec<EventEntry>,
-    },
+    /// Regional control-plane request.
+    Region(RegionRequest),
+    /// Organization data-plane request.
+    Organization(OrganizationRequest),
 }
 
 /// System-level requests that modify the `_system` organization.
@@ -1550,6 +982,155 @@ pub enum SystemRequest {
         /// Configuration epoch — stale reports with a lower epoch are ignored.
         conf_epoch: u64,
     },
+
+    // ── Moved from top-level `LedgerRequest` in B.1.6 ──
+
+    /// Deletes an organization.
+    DeleteOrganization {
+        /// Organization to delete.
+        organization: OrganizationId,
+    },
+
+    /// Suspends an organization (billing hold or policy violation).
+    SuspendOrganization {
+        /// Organization to suspend.
+        organization: OrganizationId,
+        /// Optional reason.
+        reason: Option<String>,
+    },
+
+    /// Resumes a suspended organization.
+    ResumeOrganization {
+        /// Organization to resume.
+        organization: OrganizationId,
+    },
+
+    /// Purges a deleted organization after its retention cooldown.
+    PurgeOrganization {
+        /// Organization to purge.
+        organization: OrganizationId,
+    },
+
+    /// Starts organization migration to a new region.
+    StartMigration {
+        /// Organization to migrate.
+        organization: OrganizationId,
+        /// Target region for migration.
+        target_region_group: Region,
+    },
+
+    /// Completes a pending organization migration.
+    CompleteMigration {
+        /// Organization being migrated.
+        organization: OrganizationId,
+    },
+
+    /// Creates a new signing key for JWT token signing.
+    CreateSigningKey {
+        /// Key scope.
+        scope: inferadb_ledger_state::system::SigningKeyScope,
+        /// UUID-format key identifier.
+        kid: String,
+        /// 32-byte Ed25519 public key.
+        public_key_bytes: Vec<u8>,
+        /// Encrypted private key bytes.
+        encrypted_private_key: Vec<u8>,
+        /// RMK version used to wrap the DEK.
+        rmk_version: u32,
+    },
+
+    /// Rotates a signing key.
+    RotateSigningKey {
+        /// Kid of the key being rotated.
+        old_kid: String,
+        /// Kid of the replacement key.
+        new_kid: String,
+        /// 32-byte Ed25519 public key for the new key.
+        new_public_key_bytes: Vec<u8>,
+        /// Encrypted private key bytes for the new key.
+        new_encrypted_private_key: Vec<u8>,
+        /// RMK version used to wrap the new key's DEK.
+        rmk_version: u32,
+        /// Grace period in seconds.
+        grace_period_secs: u64,
+    },
+
+    /// Immediately revokes a signing key.
+    RevokeSigningKey {
+        /// Kid of the key to revoke.
+        kid: String,
+    },
+
+    /// Transitions a rotated signing key past its grace period to Revoked.
+    TransitionSigningKeyRevoked {
+        /// Kid of the rotated key to transition.
+        kid: String,
+    },
+
+    /// Creates a refresh token record.
+    CreateRefreshToken {
+        /// SHA-256 hash of the opaque refresh token string.
+        token_hash: [u8; 32],
+        /// Token family UUID.
+        family: [u8; 16],
+        /// Whether this is a user session or vault access token.
+        token_type: TokenType,
+        /// Subject: User or App.
+        subject: TokenSubject,
+        /// Organization (None for user sessions).
+        organization: Option<OrganizationId>,
+        /// Vault (set for vault tokens).
+        vault: Option<VaultId>,
+        /// Signing key kid.
+        kid: String,
+        /// Refresh TTL in seconds.
+        ttl_secs: u64,
+    },
+
+    /// Atomically consumes a refresh token and creates a replacement.
+    UseRefreshToken {
+        /// Hash of the token being consumed.
+        old_token_hash: [u8; 32],
+        /// Hash of the replacement token.
+        new_token_hash: [u8; 32],
+        /// Current active signing key kid.
+        new_kid: String,
+        /// Refresh TTL in seconds for the new token.
+        ttl_secs: u64,
+        /// For user session refresh: the TokenVersion the caller observed.
+        expected_version: Option<TokenVersion>,
+        /// Maximum family lifetime in seconds.
+        max_family_lifetime_secs: u64,
+    },
+
+    /// Revokes all tokens in a family.
+    RevokeTokenFamily {
+        /// Token family UUID to revoke.
+        family: [u8; 16],
+    },
+
+    /// Atomically revokes all user sessions and increments TokenVersion.
+    RevokeAllUserSessions {
+        /// User whose sessions to revoke.
+        user: UserId,
+    },
+
+    /// Atomically revokes all app sessions.
+    RevokeAllAppSessions {
+        /// Organization owning the app.
+        organization: OrganizationId,
+        /// App whose sessions to revoke.
+        app: AppId,
+    },
+
+    /// Deletes expired refresh tokens and garbage-collects poisoned families.
+    DeleteExpiredRefreshTokens,
+
+    /// Encrypted form of a `SystemRequest` for PII crypto-shredding (user scope).
+    EncryptedUserSystem(crate::entry_crypto::EncryptedUserSystemRequest),
+
+    /// Organization-scoped encrypted form of a `SystemRequest`.
+    EncryptedOrgSystem(crate::entry_crypto::EncryptedOrgSystemRequest),
 }
 
 // =============================================================================
@@ -1584,7 +1165,50 @@ pub enum SystemRequest {
 /// prevents it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RegionRequest {
-    // Variants land in B.1.6.
+    /// Places an organization on this region's voter set.
+    PlaceOrganization {
+        /// Organization being placed.
+        id: OrganizationId,
+        /// Voter set for the organization group (in B.1 = region voters).
+        voter_set: Vec<u64>,
+    },
+    /// Unplaces an organization from this region.
+    UnplaceOrganization {
+        /// Organization being unplaced.
+        id: OrganizationId,
+    },
+    /// Updates a region-scoped byte quota for an org.
+    UpdateRegionQuota {
+        /// Organization being quota'd.
+        id: OrganizationId,
+        /// New quota.
+        quota_bytes_per_sec: u64,
+    },
+    /// Persists cross-org saga PII scoped to a single region.
+    SaveRegionalSagaPii {
+        /// Saga identifier.
+        saga_id: [u8; 16],
+        /// Opaque encrypted PII payload.
+        payload: Vec<u8>,
+    },
+    /// Removes regional saga PII on saga completion.
+    DeleteRegionalSagaPii {
+        /// Saga identifier.
+        saga_id: [u8; 16],
+    },
+    /// Adds a cluster node as a voter in this region's Raft group.
+    /// Replaces the pre-B.1 `LedgerRequest::AddRegionLearner`.
+    AddRegionVoter {
+        /// Node id to add.
+        node_id: u64,
+        /// Network address of the node (host:port).
+        address: String,
+    },
+    /// Removes a node from this region's Raft group.
+    RemoveRegionVoter {
+        /// Node id to remove.
+        node_id: u64,
+    },
 }
 
 /// Organization data-plane request applied via the per-organization Raft group.
@@ -1610,7 +1234,277 @@ pub enum RegionRequest {
 /// Cannot be proposed at the system or region tier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrganizationRequest {
-    // Variants land in B.1.6.
+    /// Writes transactions to a vault.
+    Write {
+        /// Target organization.
+        organization: OrganizationId,
+        /// Target vault within the organization.
+        vault: VaultId,
+        /// Transactions to apply atomically.
+        transactions: Vec<Transaction>,
+        /// Idempotency key (16-byte UUID) for cross-failover deduplication.
+        #[serde(default)]
+        idempotency_key: [u8; 16],
+        /// Hash of the request payload (seahash).
+        #[serde(default)]
+        request_hash: u64,
+    },
+    /// Batches of requests applied atomically in a single Raft entry.
+    BatchWrite {
+        /// The requests to process.
+        requests: Vec<LedgerRequest>,
+    },
+    /// Creates a new vault within the organization.
+    CreateVault {
+        /// Organization to create the vault in.
+        organization: OrganizationId,
+        /// External slug for API lookups.
+        slug: VaultSlug,
+        /// Optional vault name.
+        name: Option<String>,
+        /// Block retention policy.
+        retention_policy: Option<BlockRetentionPolicy>,
+    },
+    /// Updates vault metadata.
+    UpdateVault {
+        /// Organization containing the vault.
+        organization: OrganizationId,
+        /// Vault to update.
+        vault: VaultId,
+        /// New retention policy.
+        retention_policy: Option<BlockRetentionPolicy>,
+    },
+    /// Deletes a vault.
+    DeleteVault {
+        /// Organization containing the vault.
+        organization: OrganizationId,
+        /// Vault to delete.
+        vault: VaultId,
+    },
+    /// Updates vault health status (used during recovery).
+    UpdateVaultHealth {
+        /// Organization containing the vault.
+        organization: OrganizationId,
+        /// Vault to update.
+        vault: VaultId,
+        /// New health status.
+        healthy: bool,
+        /// If diverged, the expected state root.
+        expected_root: Option<Hash>,
+        /// If diverged, the computed state root.
+        computed_root: Option<Hash>,
+        /// If diverged, the height at which divergence was detected.
+        diverged_at_height: Option<u64>,
+        /// If recovering, the recovery attempt number.
+        recovery_attempt: Option<u8>,
+        /// If recovering, the start timestamp.
+        recovery_started_at: Option<i64>,
+    },
+    /// Adds a user as a member of the organization. Idempotent.
+    AddOrganizationMember {
+        /// Organization to add the member to.
+        organization: OrganizationId,
+        /// User to add.
+        user: UserId,
+        /// External Snowflake slug for the user.
+        user_slug: UserSlug,
+        /// Role to assign upon joining.
+        role: inferadb_ledger_state::system::OrganizationMemberRole,
+    },
+    /// Removes a member from the organization.
+    RemoveOrganizationMember {
+        /// Organization to modify.
+        organization: OrganizationId,
+        /// User to remove.
+        target: UserId,
+    },
+    /// Updates a member's role within the organization.
+    UpdateOrganizationMemberRole {
+        /// Organization to modify.
+        organization: OrganizationId,
+        /// User whose role changes.
+        target: UserId,
+        /// New role.
+        role: inferadb_ledger_state::system::OrganizationMemberRole,
+    },
+    /// Creates a new organization invitation (GLOBAL indexes only).
+    CreateOrganizationInvite {
+        /// Organization issuing the invitation.
+        organization: OrganizationId,
+        /// External Snowflake slug for the invitation.
+        slug: InviteSlug,
+        /// SHA-256 hash of the raw invitation token.
+        token_hash: [u8; 32],
+        /// HMAC of the invitee's normalized email.
+        invitee_email_hmac: String,
+        /// Invitation TTL in hours (1–720).
+        ttl_hours: u32,
+    },
+    /// Resolves an organization invitation to a terminal state.
+    ResolveOrganizationInvite {
+        /// Invitation to resolve.
+        invite: InviteId,
+        /// Organization that owns the invitation.
+        organization: OrganizationId,
+        /// Terminal status.
+        status: InvitationStatus,
+        /// HMAC of the invitee's email.
+        invitee_email_hmac: String,
+        /// SHA-256 hash of the invitation token.
+        token_hash: [u8; 32],
+    },
+    /// Removes GLOBAL invitation indexes during retention reaping.
+    PurgeOrganizationInviteIndexes {
+        /// Invitation being purged.
+        invite: InviteId,
+        /// Invitation slug for slug-index cleanup.
+        slug: InviteSlug,
+        /// HMAC hex for email-hash index cleanup.
+        invitee_email_hmac: String,
+        /// SHA-256 hash of the invitation token for token-hash index cleanup.
+        token_hash: [u8; 32],
+    },
+    /// Re-keys the GLOBAL `_idx:invite:email_hash` index during blinding-key rotation.
+    RehashInviteEmailIndex {
+        /// Invitation ID.
+        invite: InviteId,
+        /// Old HMAC hex (to delete).
+        old_hmac: String,
+        /// New HMAC hex (to create).
+        new_hmac: String,
+        /// Organization ID (preserved in new entry).
+        organization: OrganizationId,
+        /// Current invitation status.
+        status: InvitationStatus,
+    },
+    /// Creates a new team within the organization (GLOBAL directory entry).
+    CreateOrganizationTeam {
+        /// Organization to create the team in.
+        organization: OrganizationId,
+        /// External slug for API lookups.
+        slug: TeamSlug,
+    },
+    /// Deletes a team's GLOBAL directory entry.
+    DeleteOrganizationTeam {
+        /// Organization containing the team.
+        organization: OrganizationId,
+        /// Team to delete.
+        team: TeamId,
+    },
+    /// Creates a new application within the organization (GLOBAL directory entry).
+    CreateApp {
+        /// Organization to create the app in.
+        organization: OrganizationId,
+        /// External slug for API lookups.
+        slug: AppSlug,
+    },
+    /// Deletes an application and all its sub-resources.
+    DeleteApp {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App to delete.
+        app: AppId,
+    },
+    /// Enables or disables an application.
+    SetAppEnabled {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App to toggle.
+        app: AppId,
+        /// Whether to enable.
+        enabled: bool,
+    },
+    /// Sets the enabled state of a credential type on an app.
+    SetAppCredentialEnabled {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App whose credential to modify.
+        app: AppId,
+        /// Which credential type to toggle.
+        credential_type: inferadb_ledger_state::system::AppCredentialType,
+        /// New enabled state.
+        enabled: bool,
+    },
+    /// Rotates the client secret for an app.
+    RotateAppClientSecret {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App whose secret to rotate.
+        app: AppId,
+        /// Bcrypt hash of the new secret.
+        new_secret_hash: String,
+    },
+    /// Creates a client assertion entry (Ed25519 keypair).
+    CreateAppClientAssertion {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App to add the assertion to.
+        app: AppId,
+        /// When this entry expires.
+        expires_at: DateTime<Utc>,
+        /// Raw 32-byte Ed25519 public key.
+        public_key_bytes: Vec<u8>,
+    },
+    /// Deletes a client assertion entry.
+    DeleteAppClientAssertion {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App containing the assertion.
+        app: AppId,
+        /// Assertion entry to delete.
+        assertion: ClientAssertionId,
+    },
+    /// Enables or disables an individual client assertion entry.
+    SetAppClientAssertionEnabled {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App containing the assertion.
+        app: AppId,
+        /// Assertion entry to toggle.
+        assertion: ClientAssertionId,
+        /// New enabled state.
+        enabled: bool,
+    },
+    /// Adds a vault connection to an app.
+    AddAppVault {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App to add the vault connection to.
+        app: AppId,
+        /// Vault to connect.
+        vault: VaultId,
+        /// External vault slug.
+        vault_slug: VaultSlug,
+        /// Allowed scopes.
+        allowed_scopes: Vec<String>,
+    },
+    /// Updates a vault connection's allowed scopes.
+    UpdateAppVault {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App containing the vault connection.
+        app: AppId,
+        /// Vault whose connection to update.
+        vault: VaultId,
+        /// New allowed scopes.
+        allowed_scopes: Vec<String>,
+    },
+    /// Removes a vault connection from an app.
+    RemoveAppVault {
+        /// Organization containing the app.
+        organization: OrganizationId,
+        /// App containing the vault connection.
+        app: AppId,
+        /// Vault to disconnect.
+        vault: VaultId,
+    },
+    /// External audit-event ingestion routed through the org Raft.
+    IngestExternalEvents {
+        /// Ingest source service identifier.
+        source: String,
+        /// Pre-validated, pre-UUIDv4-assigned, pre-timestamped events.
+        events: Vec<EventEntry>,
+    },
 }
 
 /// Response from the Raft state machine.
@@ -2535,16 +2429,16 @@ mod tests {
 
     #[test]
     fn test_add_organization_member_request_serialization_roundtrip() {
-        let request = LedgerRequest::AddOrganizationMember {
+        let request = LedgerRequest::Organization(OrganizationRequest::AddOrganizationMember {
             organization: OrganizationId::new(5),
             user: UserId::new(42),
             user_slug: UserSlug::new(4200),
             role: inferadb_ledger_state::system::OrganizationMemberRole::Member,
-        };
+        });
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
         match deserialized {
-            LedgerRequest::AddOrganizationMember { organization, user, user_slug, role } => {
+            LedgerRequest::Organization(OrganizationRequest::AddOrganizationMember { organization, user, user_slug, role }) => {
                 assert_eq!(organization, OrganizationId::new(5));
                 assert_eq!(user, UserId::new(42));
                 assert_eq!(user_slug, UserSlug::new(4200));
@@ -2753,13 +2647,13 @@ mod tests {
 
         let ts = Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap();
         let payload = RaftPayload {
-            request: LedgerRequest::Write {
+            request: LedgerRequest::Organization(OrganizationRequest::Write {
                 organization: OrganizationId::new(1),
                 vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0; 16],
                 request_hash: 0,
-            },
+            }),
             proposed_at: ts,
             state_root_commitments: vec![],
             caller: 0,
@@ -2831,13 +2725,13 @@ mod tests {
         ];
 
         let payload = RaftPayload {
-            request: LedgerRequest::Write {
+            request: LedgerRequest::Organization(OrganizationRequest::Write {
                 organization: OrganizationId::new(1),
                 vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0; 16],
                 request_hash: 0,
-            },
+            }),
             proposed_at: Utc.with_ymd_and_hms(2099, 6, 15, 12, 0, 0).unwrap(),
             state_root_commitments: commitments.clone(),
             caller: 0,
@@ -2884,13 +2778,13 @@ mod tests {
         use chrono::TimeZone;
 
         let payload = RaftPayload {
-            request: LedgerRequest::Write {
+            request: LedgerRequest::Organization(OrganizationRequest::Write {
                 organization: OrganizationId::new(5),
                 vault: VaultId::new(3),
                 transactions: vec![],
                 idempotency_key: [42; 16],
                 request_hash: 12345,
-            },
+            }),
             proposed_at: Utc.with_ymd_and_hms(2099, 3, 1, 0, 0, 0).unwrap(),
             state_root_commitments: vec![StateRootCommitment {
                 organization: OrganizationId::new(5),
@@ -2914,21 +2808,21 @@ mod tests {
 
     #[test]
     fn test_create_signing_key_serialization() {
-        let request = LedgerRequest::CreateSigningKey {
+        let request = LedgerRequest::System(SystemRequest::CreateSigningKey {
             scope: inferadb_ledger_state::system::SigningKeyScope::Global,
             kid: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             public_key_bytes: vec![0xAA; 32],
             encrypted_private_key: vec![0xBB; 100],
             rmk_version: 1,
-        };
+        });
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::CreateSigningKey {
+            LedgerRequest::System(SystemRequest::CreateSigningKey {
                 scope, kid, public_key_bytes, rmk_version, ..
-            } => {
+            }) => {
                 assert_eq!(scope, inferadb_ledger_state::system::SigningKeyScope::Global);
                 assert_eq!(kid, "550e8400-e29b-41d4-a716-446655440000");
                 assert_eq!(public_key_bytes.len(), 32);
@@ -2940,7 +2834,7 @@ mod tests {
 
     #[test]
     fn test_create_signing_key_org_scope_serialization() {
-        let request = LedgerRequest::CreateSigningKey {
+        let request = LedgerRequest::System(SystemRequest::CreateSigningKey {
             scope: inferadb_ledger_state::system::SigningKeyScope::Organization(
                 OrganizationId::new(42),
             ),
@@ -2948,13 +2842,13 @@ mod tests {
             public_key_bytes: vec![0xCC; 32],
             encrypted_private_key: vec![0xDD; 100],
             rmk_version: 2,
-        };
+        });
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::CreateSigningKey { scope, rmk_version, .. } => {
+            LedgerRequest::System(SystemRequest::CreateSigningKey { scope, rmk_version, .. }) => {
                 assert_eq!(
                     scope,
                     inferadb_ledger_state::system::SigningKeyScope::Organization(
@@ -2969,26 +2863,26 @@ mod tests {
 
     #[test]
     fn test_rotate_signing_key_serialization() {
-        let request = LedgerRequest::RotateSigningKey {
+        let request = LedgerRequest::System(SystemRequest::RotateSigningKey {
             old_kid: "old-kid".to_string(),
             new_kid: "new-kid".to_string(),
             new_public_key_bytes: vec![0xAA; 32],
             new_encrypted_private_key: vec![0xBB; 100],
             rmk_version: 3,
             grace_period_secs: 14400,
-        };
+        });
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::RotateSigningKey {
+            LedgerRequest::System(SystemRequest::RotateSigningKey {
                 old_kid,
                 new_kid,
                 grace_period_secs,
                 rmk_version,
                 ..
-            } => {
+            }) => {
                 assert_eq!(old_kid, "old-kid");
                 assert_eq!(new_kid, "new-kid");
                 assert_eq!(grace_period_secs, 14400);
@@ -3000,13 +2894,13 @@ mod tests {
 
     #[test]
     fn test_revoke_signing_key_serialization() {
-        let request = LedgerRequest::RevokeSigningKey { kid: "kid-to-revoke".to_string() };
+        let request = LedgerRequest::System(SystemRequest::RevokeSigningKey { kid: "kid-to-revoke".to_string() });
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::RevokeSigningKey { kid } => {
+            LedgerRequest::System(SystemRequest::RevokeSigningKey { kid }) => {
                 assert_eq!(kid, "kid-to-revoke");
             },
             _ => panic!("unexpected variant"),
@@ -3015,13 +2909,13 @@ mod tests {
 
     #[test]
     fn test_transition_signing_key_revoked_serialization() {
-        let request = LedgerRequest::TransitionSigningKeyRevoked { kid: "rotated-kid".to_string() };
+        let request = LedgerRequest::System(SystemRequest::TransitionSigningKeyRevoked { kid: "rotated-kid".to_string() });
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::TransitionSigningKeyRevoked { kid } => {
+            LedgerRequest::System(SystemRequest::TransitionSigningKeyRevoked { kid }) => {
                 assert_eq!(kid, "rotated-kid");
             },
             _ => panic!("unexpected variant"),
@@ -3030,7 +2924,7 @@ mod tests {
 
     #[test]
     fn test_create_refresh_token_serialization() {
-        let request = LedgerRequest::CreateRefreshToken {
+        let request = LedgerRequest::System(SystemRequest::CreateRefreshToken {
             token_hash: [0x11; 32],
             family: [0x22; 16],
             token_type: TokenType::UserSession,
@@ -3039,13 +2933,13 @@ mod tests {
             vault: None,
             kid: "signing-kid".to_string(),
             ttl_secs: 1_209_600,
-        };
+        });
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::CreateRefreshToken {
+            LedgerRequest::System(SystemRequest::CreateRefreshToken {
                 token_hash,
                 family,
                 token_type,
@@ -3054,7 +2948,7 @@ mod tests {
                 vault,
                 kid,
                 ttl_secs,
-            } => {
+            }) => {
                 assert_eq!(token_hash, [0x11; 32]);
                 assert_eq!(family, [0x22; 16]);
                 assert_eq!(token_type, TokenType::UserSession);
@@ -3070,7 +2964,7 @@ mod tests {
 
     #[test]
     fn test_create_refresh_token_vault_serialization() {
-        let request = LedgerRequest::CreateRefreshToken {
+        let request = LedgerRequest::System(SystemRequest::CreateRefreshToken {
             token_hash: [0xAA; 32],
             family: [0xBB; 16],
             token_type: TokenType::VaultAccess,
@@ -3079,15 +2973,15 @@ mod tests {
             vault: Some(VaultId::new(3)),
             kid: "org-kid".to_string(),
             ttl_secs: 3600,
-        };
+        });
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::CreateRefreshToken {
+            LedgerRequest::System(SystemRequest::CreateRefreshToken {
                 token_type, subject, organization, vault, ..
-            } => {
+            }) => {
                 assert_eq!(token_type, TokenType::VaultAccess);
                 assert_eq!(subject, TokenSubject::App(AppSlug::new(55)));
                 assert_eq!(organization, Some(OrganizationId::new(7)));
@@ -3099,27 +2993,27 @@ mod tests {
 
     #[test]
     fn test_use_refresh_token_serialization() {
-        let request = LedgerRequest::UseRefreshToken {
+        let request = LedgerRequest::System(SystemRequest::UseRefreshToken {
             old_token_hash: [0x33; 32],
             new_token_hash: [0x44; 32],
             new_kid: "active-kid".to_string(),
             ttl_secs: 1_209_600,
             expected_version: Some(TokenVersion::new(5)),
             max_family_lifetime_secs: 2_592_000,
-        };
+        });
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::UseRefreshToken {
+            LedgerRequest::System(SystemRequest::UseRefreshToken {
                 old_token_hash,
                 new_token_hash,
                 new_kid,
                 ttl_secs,
                 expected_version,
                 max_family_lifetime_secs,
-            } => {
+            }) => {
                 assert_eq!(old_token_hash, [0x33; 32]);
                 assert_eq!(new_token_hash, [0x44; 32]);
                 assert_eq!(new_kid, "active-kid");
@@ -3133,20 +3027,20 @@ mod tests {
 
     #[test]
     fn test_use_refresh_token_no_version_serialization() {
-        let request = LedgerRequest::UseRefreshToken {
+        let request = LedgerRequest::System(SystemRequest::UseRefreshToken {
             old_token_hash: [0x55; 32],
             new_token_hash: [0x66; 32],
             new_kid: "vault-kid".to_string(),
             ttl_secs: 3600,
             expected_version: None,
             max_family_lifetime_secs: 2_592_000,
-        };
+        });
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::UseRefreshToken { expected_version, .. } => {
+            LedgerRequest::System(SystemRequest::UseRefreshToken { expected_version, .. }) => {
                 assert!(expected_version.is_none());
             },
             _ => panic!("unexpected variant"),
@@ -3155,13 +3049,13 @@ mod tests {
 
     #[test]
     fn test_revoke_token_family_serialization() {
-        let request = LedgerRequest::RevokeTokenFamily { family: [0xAB; 16] };
+        let request = LedgerRequest::System(SystemRequest::RevokeTokenFamily { family: [0xAB; 16] });
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::RevokeTokenFamily { family } => {
+            LedgerRequest::System(SystemRequest::RevokeTokenFamily { family }) => {
                 assert_eq!(family, [0xAB; 16]);
             },
             _ => panic!("unexpected variant"),
@@ -3170,13 +3064,13 @@ mod tests {
 
     #[test]
     fn test_revoke_all_user_sessions_serialization() {
-        let request = LedgerRequest::RevokeAllUserSessions { user: UserId::new(42) };
+        let request = LedgerRequest::System(SystemRequest::RevokeAllUserSessions { user: UserId::new(42) });
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::RevokeAllUserSessions { user } => {
+            LedgerRequest::System(SystemRequest::RevokeAllUserSessions { user }) => {
                 assert_eq!(user, UserId::new(42));
             },
             _ => panic!("unexpected variant"),
@@ -3185,16 +3079,16 @@ mod tests {
 
     #[test]
     fn test_revoke_all_app_sessions_serialization() {
-        let request = LedgerRequest::RevokeAllAppSessions {
+        let request = LedgerRequest::System(SystemRequest::RevokeAllAppSessions {
             organization: OrganizationId::new(1),
             app: AppId::new(42),
-        };
+        });
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::RevokeAllAppSessions { organization, app } => {
+            LedgerRequest::System(SystemRequest::RevokeAllAppSessions { organization, app }) => {
                 assert_eq!(organization, OrganizationId::new(1));
                 assert_eq!(app, AppId::new(42));
             },
@@ -3204,7 +3098,7 @@ mod tests {
 
     #[test]
     fn test_delete_expired_refresh_tokens_serialization() {
-        let request = LedgerRequest::DeleteExpiredRefreshTokens;
+        let request = LedgerRequest::System(SystemRequest::DeleteExpiredRefreshTokens);
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
@@ -3690,7 +3584,7 @@ mod tests {
 
         use crate::{
             log_storage::LogId,
-            types::{LedgerRequest, SystemRequest},
+            types::{LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
         };
 
         /// Helper to create a LogId from term and index.
@@ -3838,14 +3732,14 @@ mod tests {
                         tier: Default::default(),
                         admin: UserId::new(1),
                     }),
-                    1 => LedgerRequest::CreateVault {
+                    1 => LedgerRequest::Organization(OrganizationRequest::CreateVault {
                         organization,
                         slug: VaultSlug::new(42),
                         name: Some(name.clone()),
                         retention_policy: None,
-                    },
-                    2 => LedgerRequest::DeleteOrganization { organization },
-                    _ => LedgerRequest::DeleteVault { organization, vault },
+                    }),
+                    2 => LedgerRequest::System(SystemRequest::DeleteOrganization { organization }),
+                    _ => LedgerRequest::Organization(OrganizationRequest::DeleteVault { organization, vault }),
                 };
 
                 let bytes = postcard::to_allocvec(&request).expect("serialize");
@@ -3932,6 +3826,33 @@ mod tests {
             SystemRequest::UpdateOrganizationInviteStatus { .. } => RaftScope::Regional,
             SystemRequest::DeleteOrganizationInvite { .. } => RaftScope::Regional,
             SystemRequest::RehashInvitationEmailHmac { .. } => RaftScope::Regional,
+
+            // ── Moved from top-level `LedgerRequest` in B.1.6 ──
+            // Organization lifecycle (GLOBAL — directory state, no PII).
+            SystemRequest::DeleteOrganization { .. } => RaftScope::Global,
+            SystemRequest::SuspendOrganization { .. } => RaftScope::Global,
+            SystemRequest::ResumeOrganization { .. } => RaftScope::Global,
+            SystemRequest::PurgeOrganization { .. } => RaftScope::Global,
+            SystemRequest::StartMigration { .. } => RaftScope::Global,
+            SystemRequest::CompleteMigration { .. } => RaftScope::Global,
+
+            // Signing keys (GLOBAL — public metadata + wrapped keys).
+            SystemRequest::CreateSigningKey { .. } => RaftScope::Global,
+            SystemRequest::RotateSigningKey { .. } => RaftScope::Global,
+            SystemRequest::RevokeSigningKey { .. } => RaftScope::Global,
+            SystemRequest::TransitionSigningKeyRevoked { .. } => RaftScope::Global,
+
+            // Refresh tokens / session revocation (GLOBAL — token hashes only).
+            SystemRequest::CreateRefreshToken { .. } => RaftScope::Global,
+            SystemRequest::UseRefreshToken { .. } => RaftScope::Global,
+            SystemRequest::RevokeTokenFamily { .. } => RaftScope::Global,
+            SystemRequest::RevokeAllUserSessions { .. } => RaftScope::Global,
+            SystemRequest::RevokeAllAppSessions { .. } => RaftScope::Global,
+            SystemRequest::DeleteExpiredRefreshTokens => RaftScope::Global,
+
+            // Encrypted wrappers route to REGIONAL (their inner payload is PII).
+            SystemRequest::EncryptedUserSystem(_) => RaftScope::Regional,
+            SystemRequest::EncryptedOrgSystem(_) => RaftScope::Regional,
         }
     }
 
@@ -4126,60 +4047,69 @@ mod tests {
     /// they can be added without a compile error.
     fn classify_ledger_request(req: &LedgerRequest) -> RaftScope {
         match req {
-            LedgerRequest::Write { .. } => RaftScope::Global,
-            LedgerRequest::CreateVault { .. } => RaftScope::Global,
-            LedgerRequest::DeleteOrganization { .. } => RaftScope::Global,
-            LedgerRequest::DeleteVault { .. } => RaftScope::Global,
-            LedgerRequest::UpdateVault { .. } => RaftScope::Global,
-            LedgerRequest::SuspendOrganization { .. } => RaftScope::Global,
-            LedgerRequest::ResumeOrganization { .. } => RaftScope::Global,
-            LedgerRequest::RemoveOrganizationMember { .. } => RaftScope::Global,
-            LedgerRequest::UpdateOrganizationMemberRole { .. } => RaftScope::Global,
-            LedgerRequest::AddOrganizationMember { .. } => RaftScope::Global,
-            LedgerRequest::CreateOrganizationInvite { .. } => RaftScope::Global,
-            LedgerRequest::ResolveOrganizationInvite { .. } => RaftScope::Global,
-            LedgerRequest::PurgeOrganizationInviteIndexes { .. } => RaftScope::Global,
-            LedgerRequest::RehashInviteEmailIndex { .. } => RaftScope::Global,
-            LedgerRequest::PurgeOrganization { .. } => RaftScope::Global,
-            LedgerRequest::StartMigration { .. } => RaftScope::Global,
-            LedgerRequest::CompleteMigration { .. } => RaftScope::Global,
-            LedgerRequest::UpdateVaultHealth { .. } => RaftScope::Global,
-            LedgerRequest::BatchWrite { .. } => RaftScope::Global,
-            LedgerRequest::CreateOrganizationTeam { .. } => RaftScope::Global,
-            LedgerRequest::DeleteOrganizationTeam { .. } => RaftScope::Global,
-            LedgerRequest::CreateApp { .. } => RaftScope::Global,
-            LedgerRequest::DeleteApp { .. } => RaftScope::Global,
-            LedgerRequest::SetAppEnabled { .. } => RaftScope::Global,
-            LedgerRequest::SetAppCredentialEnabled { .. } => RaftScope::Global,
-            LedgerRequest::RotateAppClientSecret { .. } => RaftScope::Global,
-            LedgerRequest::CreateAppClientAssertion { .. } => RaftScope::Global,
-            LedgerRequest::DeleteAppClientAssertion { .. } => RaftScope::Global,
-            LedgerRequest::SetAppClientAssertionEnabled { .. } => RaftScope::Global,
-            LedgerRequest::AddAppVault { .. } => RaftScope::Global,
-            LedgerRequest::UpdateAppVault { .. } => RaftScope::Global,
-            LedgerRequest::RemoveAppVault { .. } => RaftScope::Global,
-            LedgerRequest::CreateSigningKey { .. } => RaftScope::Global,
-            LedgerRequest::RotateSigningKey { .. } => RaftScope::Global,
-            LedgerRequest::RevokeSigningKey { .. } => RaftScope::Global,
-            LedgerRequest::TransitionSigningKeyRevoked { .. } => RaftScope::Global,
-            LedgerRequest::CreateRefreshToken { .. } => RaftScope::Global,
-            LedgerRequest::UseRefreshToken { .. } => RaftScope::Global,
-            LedgerRequest::RevokeTokenFamily { .. } => RaftScope::Global,
-            LedgerRequest::RevokeAllUserSessions { .. } => RaftScope::Global,
-            LedgerRequest::RevokeAllAppSessions { .. } => RaftScope::Global,
-            LedgerRequest::DeleteExpiredRefreshTokens => RaftScope::Global,
-            LedgerRequest::System { .. } => RaftScope::Global,
-            LedgerRequest::EncryptedUserSystem(_) => RaftScope::Regional,
-            LedgerRequest::EncryptedOrgSystem(_) => RaftScope::Regional,
-            // AddRegionLearner is intercepted by regional_proposal
-            // before reaching the Raft log. It carries no PII.
-            LedgerRequest::AddRegionLearner { .. } => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::Write { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::CreateVault { .. }) => RaftScope::Global,
+            LedgerRequest::System(SystemRequest::DeleteOrganization { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::DeleteVault { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::UpdateVault { .. }) => RaftScope::Global,
+            LedgerRequest::System(SystemRequest::SuspendOrganization { .. }) => RaftScope::Global,
+            LedgerRequest::System(SystemRequest::ResumeOrganization { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::RemoveOrganizationMember { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::UpdateOrganizationMemberRole { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::AddOrganizationMember { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::CreateOrganizationInvite { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::PurgeOrganizationInviteIndexes { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::RehashInviteEmailIndex { .. }) => RaftScope::Global,
+            LedgerRequest::System(SystemRequest::PurgeOrganization { .. }) => RaftScope::Global,
+            LedgerRequest::System(SystemRequest::StartMigration { .. }) => RaftScope::Global,
+            LedgerRequest::System(SystemRequest::CompleteMigration { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::BatchWrite { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::CreateOrganizationTeam { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::DeleteOrganizationTeam { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::CreateApp { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::DeleteApp { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::SetAppEnabled { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::SetAppCredentialEnabled { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::RotateAppClientSecret { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::CreateAppClientAssertion { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::DeleteAppClientAssertion { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::SetAppClientAssertionEnabled { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::AddAppVault { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::UpdateAppVault { .. }) => RaftScope::Global,
+            LedgerRequest::Organization(OrganizationRequest::RemoveAppVault { .. }) => RaftScope::Global,
+            LedgerRequest::System(SystemRequest::CreateSigningKey { .. }) => RaftScope::Global,
+            LedgerRequest::System(SystemRequest::RotateSigningKey { .. }) => RaftScope::Global,
+            LedgerRequest::System(SystemRequest::RevokeSigningKey { .. }) => RaftScope::Global,
+            LedgerRequest::System(SystemRequest::TransitionSigningKeyRevoked { .. }) => RaftScope::Global,
+            LedgerRequest::System(SystemRequest::CreateRefreshToken { .. }) => RaftScope::Global,
+            LedgerRequest::System(SystemRequest::UseRefreshToken { .. }) => RaftScope::Global,
+            LedgerRequest::System(SystemRequest::RevokeTokenFamily { .. }) => RaftScope::Global,
+            LedgerRequest::System(SystemRequest::RevokeAllUserSessions { .. }) => RaftScope::Global,
+            LedgerRequest::System(SystemRequest::RevokeAllAppSessions { .. }) => RaftScope::Global,
+            LedgerRequest::System(SystemRequest::DeleteExpiredRefreshTokens) => RaftScope::Global,
+            LedgerRequest::System(SystemRequest::EncryptedUserSystem(_)) => RaftScope::Regional,
+            LedgerRequest::System(SystemRequest::EncryptedOrgSystem(_)) => RaftScope::Regional,
+            // Catch-all for remaining `SystemRequest` variants (pre-existing
+            // system-tier traffic — users, teams, tokens, onboarding, etc.).
+            LedgerRequest::System(_) => RaftScope::Global,
+            // Region control-plane variants carry no plaintext PII; saga
+            // PII variants carry encrypted payloads. Placement / quota /
+            // voter-set changes are cluster metadata.
+            LedgerRequest::Region(RegionRequest::PlaceOrganization { .. }) => RaftScope::Global,
+            LedgerRequest::Region(RegionRequest::UnplaceOrganization { .. }) => RaftScope::Global,
+            LedgerRequest::Region(RegionRequest::UpdateRegionQuota { .. }) => RaftScope::Global,
+            LedgerRequest::Region(RegionRequest::SaveRegionalSagaPii { .. }) => RaftScope::Regional,
+            LedgerRequest::Region(RegionRequest::DeleteRegionalSagaPii { .. }) => RaftScope::Regional,
+            LedgerRequest::Region(RegionRequest::AddRegionVoter { .. }) => RaftScope::Global,
+            LedgerRequest::Region(RegionRequest::RemoveRegionVoter { .. }) => RaftScope::Global,
             // IngestExternalEvents carries user-controlled strings
             // (principal, event_type, details) and MUST ride the
             // REGIONAL Raft group owning the organization. Classified
             // Regional so the PII-classification test fails loudly if the
             // routing ever regresses.
-            LedgerRequest::IngestExternalEvents { .. } => RaftScope::Regional,
+            LedgerRequest::Organization(OrganizationRequest::IngestExternalEvents { .. }) => RaftScope::Regional,
         }
     }
 
@@ -4187,43 +4117,43 @@ mod tests {
     /// `LedgerRequest` variant will cause a compile error until classified.
     #[test]
     fn test_ledger_request_pii_classification_exhaustive() {
-        let write = LedgerRequest::Write {
+        let write = LedgerRequest::Organization(OrganizationRequest::Write {
             organization: OrganizationId::new(1),
             vault: VaultId::new(1),
             transactions: vec![],
             idempotency_key: [0; 16],
             request_hash: 0,
-        };
+        });
         assert_eq!(classify_ledger_request(&write), RaftScope::Global);
 
-        let create_team = LedgerRequest::CreateOrganizationTeam {
+        let create_team = LedgerRequest::Organization(OrganizationRequest::CreateOrganizationTeam {
             organization: OrganizationId::new(1),
             slug: TeamSlug::new(100),
-        };
+        });
         assert_eq!(classify_ledger_request(&create_team), RaftScope::Global);
 
-        let create_app = LedgerRequest::CreateApp {
+        let create_app = LedgerRequest::Organization(OrganizationRequest::CreateApp {
             organization: OrganizationId::new(1),
             slug: AppSlug::new(200),
-        };
+        });
         assert_eq!(classify_ledger_request(&create_app), RaftScope::Global);
 
         // EncryptedUserSystem — REGIONAL (contains encrypted user PII)
         let encrypted =
-            LedgerRequest::EncryptedUserSystem(crate::entry_crypto::EncryptedUserSystemRequest {
+            LedgerRequest::System(SystemRequest::EncryptedUserSystem(crate::entry_crypto::EncryptedUserSystemRequest {
                 sealed: vec![0; 48],
                 nonce: [0; 12],
                 user_id: UserId::new(1),
-            });
+            }));
         assert_eq!(classify_ledger_request(&encrypted), RaftScope::Regional);
 
         // EncryptedOrgSystem — REGIONAL (contains encrypted org PII)
         let encrypted_org =
-            LedgerRequest::EncryptedOrgSystem(crate::entry_crypto::EncryptedOrgSystemRequest {
+            LedgerRequest::System(SystemRequest::EncryptedOrgSystem(crate::entry_crypto::EncryptedOrgSystemRequest {
                 sealed: vec![0; 48],
                 nonce: [0; 12],
                 organization: OrganizationId::new(1),
-            });
+            }));
         assert_eq!(classify_ledger_request(&encrypted_org), RaftScope::Regional);
     }
 
@@ -4231,23 +4161,23 @@ mod tests {
 
     #[test]
     fn test_create_organization_invite_serialization_roundtrip() {
-        let request = LedgerRequest::CreateOrganizationInvite {
+        let request = LedgerRequest::Organization(OrganizationRequest::CreateOrganizationInvite {
             organization: OrganizationId::new(5),
             slug: InviteSlug::new(9999),
             token_hash: [0xAB; 32],
             invitee_email_hmac: "deadbeef".to_string(),
             ttl_hours: 168,
-        };
+        });
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
         match deserialized {
-            LedgerRequest::CreateOrganizationInvite {
+            LedgerRequest::Organization(OrganizationRequest::CreateOrganizationInvite {
                 organization,
                 slug,
                 token_hash,
                 invitee_email_hmac,
                 ttl_hours,
-            } => {
+            }) => {
                 assert_eq!(organization, OrganizationId::new(5));
                 assert_eq!(slug, InviteSlug::new(9999));
                 assert_eq!(token_hash, [0xAB; 32]);
@@ -4260,23 +4190,23 @@ mod tests {
 
     #[test]
     fn test_resolve_organization_invite_serialization_roundtrip() {
-        let request = LedgerRequest::ResolveOrganizationInvite {
+        let request = LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
             invite: InviteId::new(42),
             organization: OrganizationId::new(5),
             status: InvitationStatus::Accepted,
             invitee_email_hmac: "cafe0123".to_string(),
             token_hash: [0xCD; 32],
-        };
+        });
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
         match deserialized {
-            LedgerRequest::ResolveOrganizationInvite {
+            LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
                 invite,
                 organization,
                 status,
                 invitee_email_hmac,
                 token_hash,
-            } => {
+            }) => {
                 assert_eq!(invite, InviteId::new(42));
                 assert_eq!(organization, OrganizationId::new(5));
                 assert_eq!(status, InvitationStatus::Accepted);
@@ -4400,42 +4330,42 @@ mod tests {
     #[test]
     fn test_invitation_ledger_request_pii_classification() {
         // CreateOrganizationInvite — GLOBAL (no PII, only IDs and HMAC)
-        let create = LedgerRequest::CreateOrganizationInvite {
+        let create = LedgerRequest::Organization(OrganizationRequest::CreateOrganizationInvite {
             organization: OrganizationId::new(1),
             slug: InviteSlug::new(100),
             token_hash: [0; 32],
             invitee_email_hmac: "hmac".to_string(),
             ttl_hours: 168,
-        };
+        });
         assert_eq!(classify_ledger_request(&create), RaftScope::Global);
 
         // ResolveOrganizationInvite — GLOBAL (no PII)
-        let resolve = LedgerRequest::ResolveOrganizationInvite {
+        let resolve = LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
             invite: InviteId::new(1),
             organization: OrganizationId::new(1),
             status: InvitationStatus::Accepted,
             invitee_email_hmac: "hmac".to_string(),
             token_hash: [0; 32],
-        };
+        });
         assert_eq!(classify_ledger_request(&resolve), RaftScope::Global);
 
         // PurgeOrganizationInviteIndexes — GLOBAL (no PII, only IDs and HMAC)
-        let purge = LedgerRequest::PurgeOrganizationInviteIndexes {
+        let purge = LedgerRequest::Organization(OrganizationRequest::PurgeOrganizationInviteIndexes {
             invite: InviteId::new(1),
             slug: InviteSlug::new(100),
             invitee_email_hmac: "hmac".to_string(),
             token_hash: [0; 32],
-        };
+        });
         assert_eq!(classify_ledger_request(&purge), RaftScope::Global);
 
         // RehashInviteEmailIndex — GLOBAL (no PII, only IDs and HMACs)
-        let rehash = LedgerRequest::RehashInviteEmailIndex {
+        let rehash = LedgerRequest::Organization(OrganizationRequest::RehashInviteEmailIndex {
             invite: InviteId::new(1),
             old_hmac: "old_hmac".to_string(),
             new_hmac: "new_hmac".to_string(),
             organization: OrganizationId::new(1),
             status: InvitationStatus::Pending,
-        };
+        });
         assert_eq!(classify_ledger_request(&rehash), RaftScope::Global);
     }
 
@@ -4444,21 +4374,21 @@ mod tests {
         let mut test_hash = [0u8; 32];
         test_hash[0] = 0xAB;
         test_hash[31] = 0xCD;
-        let request = LedgerRequest::PurgeOrganizationInviteIndexes {
+        let request = LedgerRequest::Organization(OrganizationRequest::PurgeOrganizationInviteIndexes {
             invite: InviteId::new(42),
             slug: InviteSlug::new(9999),
             invitee_email_hmac: "deadbeef".to_string(),
             token_hash: test_hash,
-        };
+        });
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
         match deserialized {
-            LedgerRequest::PurgeOrganizationInviteIndexes {
+            LedgerRequest::Organization(OrganizationRequest::PurgeOrganizationInviteIndexes {
                 invite,
                 slug,
                 invitee_email_hmac,
                 token_hash,
-            } => {
+            }) => {
                 assert_eq!(invite, InviteId::new(42));
                 assert_eq!(slug, InviteSlug::new(9999));
                 assert_eq!(invitee_email_hmac, "deadbeef");
@@ -4470,23 +4400,23 @@ mod tests {
 
     #[test]
     fn test_rehash_invite_email_index_serialization_roundtrip() {
-        let request = LedgerRequest::RehashInviteEmailIndex {
+        let request = LedgerRequest::Organization(OrganizationRequest::RehashInviteEmailIndex {
             invite: InviteId::new(7),
             old_hmac: "oldhmac123".to_string(),
             new_hmac: "newhmac456".to_string(),
             organization: OrganizationId::new(5),
             status: InvitationStatus::Pending,
-        };
+        });
         let bytes = postcard::to_allocvec(&request).expect("serialize");
         let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
         match deserialized {
-            LedgerRequest::RehashInviteEmailIndex {
+            LedgerRequest::Organization(OrganizationRequest::RehashInviteEmailIndex {
                 invite,
                 old_hmac,
                 new_hmac,
                 organization,
                 status,
-            } => {
+            }) => {
                 assert_eq!(invite, InviteId::new(7));
                 assert_eq!(old_hmac, "oldhmac123");
                 assert_eq!(new_hmac, "newhmac456");
@@ -4927,11 +4857,11 @@ mod tests {
 
     #[test]
     fn test_raft_payload_system_constructor() {
-        let payload = RaftPayload::system(LedgerRequest::DeleteExpiredRefreshTokens);
+        let payload = RaftPayload::system(LedgerRequest::System(SystemRequest::DeleteExpiredRefreshTokens));
         assert_eq!(payload.caller, 0);
         assert!(payload.state_root_commitments.is_empty());
         match payload.request {
-            LedgerRequest::DeleteExpiredRefreshTokens => {},
+            LedgerRequest::System(SystemRequest::DeleteExpiredRefreshTokens) => {},
             _ => panic!("unexpected variant"),
         }
     }
@@ -4939,7 +4869,7 @@ mod tests {
     #[test]
     fn test_raft_payload_new_constructor() {
         let payload = RaftPayload::new(
-            LedgerRequest::DeleteOrganization { organization: OrganizationId::new(1) },
+            LedgerRequest::System(SystemRequest::DeleteOrganization { organization: OrganizationId::new(1) }),
             42,
         );
         assert_eq!(payload.caller, 42);
@@ -4955,7 +4885,7 @@ mod tests {
             state_root: [0xAA; 32],
         }];
         let payload = RaftPayload::with_commitments(
-            LedgerRequest::DeleteExpiredRefreshTokens,
+            LedgerRequest::System(SystemRequest::DeleteExpiredRefreshTokens),
             commitments.clone(),
             99,
         );

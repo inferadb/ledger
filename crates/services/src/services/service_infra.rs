@@ -10,7 +10,7 @@ use std::{sync::Arc, time::Duration};
 use inferadb_ledger_raft::{
     log_storage::AppliedStateAccessor,
     logging::{OperationType, RequestContext, Sampler},
-    types::{LedgerRequest, LedgerResponse, SystemRequest},
+    types::{LedgerResponse, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
 };
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
@@ -270,7 +270,7 @@ impl ServiceContext {
 
         self.propose_regional_ledger_request(
             region,
-            LedgerRequest::EncryptedUserSystem(encrypted),
+            LedgerRequest::System(SystemRequest::EncryptedUserSystem(encrypted)),
             grpc_metadata,
             ctx,
         )
@@ -318,7 +318,7 @@ impl ServiceContext {
 
         self.propose_regional_ledger_request(
             region,
-            LedgerRequest::EncryptedOrgSystem(encrypted),
+            LedgerRequest::System(SystemRequest::EncryptedOrgSystem(encrypted)),
             grpc_metadata,
             ctx,
         )

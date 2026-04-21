@@ -30,7 +30,7 @@ use crate::{
         RecoveryError, StateRootComputationSnafu,
     },
     log_storage::{AppliedStateAccessor, MAX_RECOVERY_ATTEMPTS, VaultHealthStatus},
-    types::{LedgerNodeId, LedgerRequest, LedgerResponse, RaftPayload},
+    types::{LedgerNodeId, LedgerResponse, RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
 };
 
 /// Default interval between recovery scans.
@@ -442,7 +442,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         recovery_attempt: Option<u8>,
         recovery_started_at: Option<i64>,
     ) -> Result<(), RecoveryError> {
-        let request = LedgerRequest::UpdateVaultHealth {
+        let request = LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
             organization,
             vault,
             healthy,
@@ -451,7 +451,7 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
             diverged_at_height,
             recovery_attempt,
             recovery_started_at,
-        };
+        });
 
         let response = self
             .handle

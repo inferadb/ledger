@@ -1467,7 +1467,7 @@ fn test_blinding_key() -> inferadb_ledger_types::EmailBlindingKey {
 /// Returns the user's external slug.
 #[allow(dead_code)]
 pub async fn setup_user(_addr: &str, _name: &str, email: &str, node: &TestNode) -> u64 {
-    use inferadb_ledger_raft::types::{LedgerRequest, RaftPayload, SystemRequest};
+    use inferadb_ledger_raft::types::{RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest};
 
     let blinding_key = test_blinding_key();
     let email_hmac = inferadb_ledger_types::compute_email_hmac(&blinding_key, email);
@@ -1527,13 +1527,13 @@ pub async fn setup_user(_addr: &str, _name: &str, email: &str, node: &TestNode) 
                     operations: vec![slug_op],
                     timestamp: std::time::SystemTime::now().into(),
                 };
-                let slug_write = LedgerRequest::Write {
+                let slug_write = LedgerRequest::Organization(OrganizationRequest::Write {
                     organization: inferadb_ledger_types::OrganizationId::new(0),
                     vault: inferadb_ledger_types::VaultId::new(0),
                     transactions: vec![slug_txn],
                     idempotency_key: [0; 16],
                     request_hash: 0,
-                };
+                });
                 let _ = node
                     .handle
                     .propose_and_wait(RaftPayload::system(slug_write), Duration::from_secs(5))
@@ -1572,13 +1572,13 @@ pub async fn setup_user(_addr: &str, _name: &str, email: &str, node: &TestNode) 
                     operations: vec![user_op],
                     timestamp: std::time::SystemTime::now().into(),
                 };
-                let user_write = LedgerRequest::Write {
+                let user_write = LedgerRequest::Organization(OrganizationRequest::Write {
                     organization: inferadb_ledger_types::OrganizationId::new(0),
                     vault: inferadb_ledger_types::VaultId::new(0),
                     transactions: vec![user_txn],
                     idempotency_key: [0; 16],
                     request_hash: 0,
-                };
+                });
                 let _ = node
                     .handle
                     .propose_and_wait(RaftPayload::system(user_write), Duration::from_secs(5))

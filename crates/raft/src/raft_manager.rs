@@ -89,7 +89,7 @@ use crate::{
     runtime_config::RuntimeConfigHandle,
     state_checkpointer::StateCheckpointer,
     ttl_gc::TtlGarbageCollector,
-    types::{LedgerNodeId, LedgerRequest, LedgerResponse, RaftPayload},
+    types::{LedgerNodeId, LedgerResponse, RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
 };
 
 // ============================================================================
@@ -771,17 +771,17 @@ impl RaftManager {
         region: Region,
         request: &crate::types::LedgerRequest,
     ) -> Result<Arc<OrganizationGroup>> {
-        use crate::types::LedgerRequest;
+        use crate::types::{LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest};
         const SYSTEM_ORGANIZATION_ID: OrganizationId = OrganizationId::new(0);
         let org = match request {
-            LedgerRequest::Write { organization, .. } => Some(*organization),
+            LedgerRequest::Organization(OrganizationRequest::Write { organization, .. }) => Some(*organization),
             // BatchWrite carries nested requests; saga forwarding sends
             // single-org batches in practice. Pick the first inner Write's
             // organization; fall back to None (shard 0) if the batch is
             // empty or non-Write.
-            LedgerRequest::BatchWrite { requests } => {
+            LedgerRequest::Organization(OrganizationRequest::BatchWrite { requests }) => {
                 requests.iter().find_map(|inner| match inner {
-                    LedgerRequest::Write { organization, .. } => Some(*organization),
+                    LedgerRequest::Organization(OrganizationRequest::Write { organization, .. }) => Some(*organization),
                     _ => None,
                 })
             },
@@ -1735,7 +1735,7 @@ impl RaftManager {
                 let h = handle_clone.clone();
                 let buffer = buffer_clone.clone();
                 Box::pin(async move {
-                    let batch_request = LedgerRequest::BatchWrite { requests };
+                    let batch_request = LedgerRequest::Organization(OrganizationRequest::BatchWrite { requests });
                     let commitments =
                         std::mem::take(&mut *buffer.lock().unwrap_or_else(|e| e.into_inner()));
                     let payload = RaftPayload::with_commitments(batch_request, commitments, 0);

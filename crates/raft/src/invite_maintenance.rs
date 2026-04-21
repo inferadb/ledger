@@ -29,7 +29,7 @@ use tracing::{debug, info, warn};
 use crate::{
     consensus_handle::ConsensusHandle,
     raft_manager::RaftManager,
-    types::{LedgerRequest, RaftPayload, SystemRequest},
+    types::{RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
 };
 
 /// Default interval between maintenance cycles (5 minutes).
@@ -220,13 +220,13 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
             }
 
             // Propose GLOBAL resolve: Pending → Expired
-            let global_request = LedgerRequest::ResolveOrganizationInvite {
+            let global_request = LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
                 invite: scanned.invite_id,
                 organization: scanned.entry.organization,
                 status: InvitationStatus::Expired,
                 invitee_email_hmac: scanned.email_hmac.clone(),
                 token_hash: invitation.token_hash,
-            };
+            });
 
             match self.handle.propose(RaftPayload::system(global_request)).await {
                 Ok(_) => {},
@@ -322,12 +322,12 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
                     // REGIONAL record already gone — still clean up GLOBAL indexes.
                     // Use dummy slug and zeroed token hash; the delete operations
                     // are idempotent (no-op if already gone).
-                    let global_request = LedgerRequest::PurgeOrganizationInviteIndexes {
+                    let global_request = LedgerRequest::Organization(OrganizationRequest::PurgeOrganizationInviteIndexes {
                         invite: scanned.invite_id,
                         slug: inferadb_ledger_types::InviteSlug::new(0),
                         invitee_email_hmac: scanned.email_hmac.clone(),
                         token_hash: [0; 32],
-                    };
+                    });
                     if let Err(e) = self.handle.propose(RaftPayload::system(global_request)).await {
                         warn!(
                             trace_id = %trace_id,
@@ -387,12 +387,12 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
             // If this fails, the orphaned GLOBAL indexes are harmless (they
             // point to a deleted REGIONAL record, resolved as "not found")
             // and will be retried next cycle.
-            let global_request = LedgerRequest::PurgeOrganizationInviteIndexes {
+            let global_request = LedgerRequest::Organization(OrganizationRequest::PurgeOrganizationInviteIndexes {
                 invite: scanned.invite_id,
                 slug: invitation.slug,
                 invitee_email_hmac: scanned.email_hmac.clone(),
                 token_hash: invitation.token_hash,
-            };
+            });
 
             if let Err(e) = self.handle.propose(RaftPayload::system(global_request)).await {
                 warn!(
