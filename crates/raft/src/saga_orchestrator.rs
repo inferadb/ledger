@@ -408,8 +408,12 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         let payload = RaftPayload::system(request.clone());
         match &self.manager {
             Some(manager) => {
+                // Multi-shard routing: org-bearing requests land on the
+                // user's shard via `route_request`. Saga records (writes
+                // under SYSTEM_ORGANIZATION_ID) and non-org variants fall
+                // back to shard 0 deterministically.
                 let region_group =
-                    manager.get_region_group(region).map_err(|e| SagaError::SagaRaftWrite {
+                    manager.route_request(region, &request).map_err(|e| SagaError::SagaRaftWrite {
                         message: format!("Region {region} not active: {e}"),
                         backtrace: snafu::Backtrace::generate(),
                     })?;

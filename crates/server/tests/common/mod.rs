@@ -133,6 +133,25 @@ impl TestNode {
         self.manager.get_region_group(region).ok()
     }
 
+    /// Returns every shard group registered for `region` on this node.
+    ///
+    /// Multi-shard regions run N independent Raft groups; convergence
+    /// helpers (`data_regions_synced`) iterate all shards rather than
+    /// just shard 0 because writes route across shards via `ShardRouter`,
+    /// and waiting for shard 0 alone leaves later shards racing the
+    /// assertion.
+    pub fn shard_groups(
+        &self,
+        region: inferadb_ledger_types::Region,
+    ) -> Vec<Arc<RegionGroup>> {
+        self.manager
+            .list_shards()
+            .into_iter()
+            .filter(|(r, _)| *r == region)
+            .filter_map(|(r, s)| self.manager.get_shard_group(r, s).ok())
+            .collect()
+    }
+
     /// Returns all region IDs registered on this node.
     pub fn regions(&self) -> Vec<inferadb_ledger_types::Region> {
         self.manager.list_regions()
@@ -308,6 +327,16 @@ impl TestCluster {
             } else {
                 None
             },
+            // Phase A multi-shard: production default is 16. Existing
+            // tests assume single-shard semantics in their cluster-join
+            // and convergence helpers. A dedicated `tests/multi_shard.rs`
+            // (Task 7) validates the >1 shard routing path against an
+            // explicit `shards_per_region: N` cluster. Leaving the
+            // generic `TestCluster` at 1 keeps those legacy tests stable
+            // while the multi-shard infrastructure (route_request,
+            // ShardRouter, per-shard storage) is exercised end-to-end by
+            // the dedicated test.
+            shards_per_region: 1,
             ..inferadb_ledger_server::config::Config::default()
         };
 
@@ -388,17 +417,33 @@ impl TestCluster {
                 .unwrap_or_else(|e| panic!("start data region {:?}: {e}", data_region));
         }
 
-        // Wait for all data region leader elections
+        // Wait for all data region leader elections.
+        //
+        // Phase A multi-shard: each region runs N independent Raft groups,
+        // each with its own election. Writes route to a specific shard via
+        // `ShardRouter`, so a test write that lands on shard 5 will fail
+        // with "no leader" if we only waited for shard 0. Iterate every
+        // `(region, shard)` pair the manager has registered.
         let data_region_wait_start = tokio::time::Instant::now();
-        'data_wait: while data_region_wait_start.elapsed() < Duration::from_secs(15) {
+        'data_wait: while data_region_wait_start.elapsed() < Duration::from_secs(30) {
             let mut all_ready = true;
             for &dr in data_regions.iter().take(num_data_regions) {
-                if let Ok(rg) = manager_clone.get_region_group(dr) {
-                    if rg.handle().current_leader().is_none() {
-                        all_ready = false;
-                        break;
+                let shards = manager_clone
+                    .list_shards()
+                    .into_iter()
+                    .filter(|(r, _)| *r == dr);
+                let mut any_shard = false;
+                for (r, shard) in shards {
+                    any_shard = true;
+                    match manager_clone.get_shard_group(r, shard) {
+                        Ok(rg) if rg.handle().current_leader().is_some() => continue,
+                        _ => {
+                            all_ready = false;
+                            break;
+                        },
                     }
-                } else {
+                }
+                if !any_shard || !all_ready {
                     all_ready = false;
                     break;
                 }
@@ -449,6 +494,11 @@ impl TestCluster {
                 email_blinding_key: Some(
                     "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
                 ),
+                // Match the bootstrap node's shards_per_region: every node
+                // MUST agree on the shard count or ShardRouter produces
+                // divergent routing decisions. See bootstrap-node config
+                // for the rationale on the test default.
+                shards_per_region: 1,
                 ..inferadb_ledger_server::config::Config::default()
             };
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -622,38 +672,68 @@ impl TestCluster {
                     )
                 });
 
-                // Add this joining node to the bootstrap node's data region cluster
-                // via Raft membership change (same pattern as GLOBAL cluster join).
+                // Add this joining node to EVERY shard's Raft cluster via
+                // membership change. Phase A multi-shard: each shard runs an
+                // independent Raft group, so a single `add_learner` against
+                // shard 0 only joins shard 0. Writes routed to other shards
+                // (via `ShardRouter`) would never replicate to the joining
+                // node, breaking read-after-failover assertions. Iterate
+                // every `(region, shard)` pair the bootstrap node has
+                // registered.
                 let bootstrap_manager = &nodes[0].manager;
-                if let Ok(bootstrap_rg) = bootstrap_manager.get_region_group(data_region) {
-                    let bootstrap_handle = bootstrap_rg.handle();
+                let shards: Vec<inferadb_ledger_state::shard_routing::ShardIdx> =
+                    bootstrap_manager
+                        .list_shards()
+                        .into_iter()
+                        .filter(|(r, _)| *r == data_region)
+                        .map(|(_, s)| s)
+                        .collect();
 
-                    // Register bidirectional transport channels so the consensus
-                    // engines can replicate between the bootstrap node and the
-                    // joining node for this data region.
-                    let joining_addr_str = join_addr.clone();
-                    let bootstrap_addr_str = nodes[0].addr.clone();
-                    if let Some(bt) = bootstrap_rg.consensus_transport() {
-                        let _ = bt.set_peer_via_registry(joining_node_id, &joining_addr_str).await;
-                    }
-                    if let Ok(joining_rg) = joining_manager.get_region_group(data_region)
-                        && let Some(jt) = joining_rg.consensus_transport()
-                    {
-                        let _ = jt.set_peer_via_registry(nodes[0].id, &bootstrap_addr_str).await;
-                    }
-
-                    // Step 1: Add as learner first (required before voter promotion)
-                    let _ = bootstrap_handle.add_learner(joining_node_id, true).await;
-
-                    // Step 2: Wait for learner to sync before promoting to voter
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-
-                    // Step 3: Promote to voter
-                    let _ = bootstrap_handle.promote_voter(joining_node_id).await;
-
-                    // Step 4: Wait for membership to stabilize
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                // Register transport once per node pair — channels are
+                // multiplexed across shards by the consensus engine.
+                let joining_addr_str = join_addr.clone();
+                let bootstrap_addr_str = nodes[0].addr.clone();
+                if let Ok(bootstrap_rg_zero) =
+                    bootstrap_manager.get_shard_group(data_region, shards[0])
+                    && let Some(bt) = bootstrap_rg_zero.consensus_transport()
+                {
+                    let _ = bt.set_peer_via_registry(joining_node_id, &joining_addr_str).await;
                 }
+                if let Ok(joining_rg_zero) =
+                    joining_manager.get_shard_group(data_region, shards[0])
+                    && let Some(jt) = joining_rg_zero.consensus_transport()
+                {
+                    let _ = jt.set_peer_via_registry(nodes[0].id, &bootstrap_addr_str).await;
+                }
+
+                for shard in shards {
+                    if let Ok(bootstrap_rg) =
+                        bootstrap_manager.get_shard_group(data_region, shard)
+                    {
+                        let bootstrap_handle = bootstrap_rg.handle();
+
+                        // Per-shard transport registration — each shard's
+                        // consensus engine owns its own peer routing table.
+                        if let Some(bt) = bootstrap_rg.consensus_transport() {
+                            let _ = bt
+                                .set_peer_via_registry(joining_node_id, &joining_addr_str)
+                                .await;
+                        }
+                        if let Ok(joining_rg) =
+                            joining_manager.get_shard_group(data_region, shard)
+                            && let Some(jt) = joining_rg.consensus_transport()
+                        {
+                            let _ =
+                                jt.set_peer_via_registry(nodes[0].id, &bootstrap_addr_str).await;
+                        }
+
+                        let _ = bootstrap_handle.add_learner(joining_node_id, true).await;
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        let _ = bootstrap_handle.promote_voter(joining_node_id).await;
+                    }
+                }
+                // Wait once for all per-shard memberships to stabilize.
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
 
             // Wait for data region leader elections on this joining node (it should
@@ -832,20 +912,44 @@ impl TestCluster {
     /// all nodes and is positive. Compares applied (state-machine visible)
     /// rather than commit index: EVENTUAL reads serve from applied state,
     /// so callers need apply-level convergence.
+    ///
+    /// Phase A multi-shard: each region runs N independent Raft groups.
+    /// Convergence is a per-`(region, shard)` property — waiting for shard
+    /// 0 alone leaves writes routed to other shards racing the assertion.
+    /// `applied_index` for a shard with no traffic is `0`; we skip that
+    /// case (an idle shard is "synced" by definition since there is
+    /// nothing to apply yet).
     fn data_regions_synced(&self) -> bool {
         let data_regions = &inferadb_ledger_types::ALL_REGIONS[1..];
         for &dr in data_regions.iter().take(self.num_data_regions) {
-            let mut indices = Vec::new();
-            for node in &self.nodes {
-                if let Some(rg) = node.region_group(dr) {
-                    indices.push(*rg.applied_index_watch().borrow());
+            // Use the leader node as the reference for shard membership;
+            // every node should have the same set of `(region, shard)`
+            // groups registered.
+            let reference_node = &self.nodes[0];
+            for shard_group in reference_node.shard_groups(dr) {
+                let shard_idx = shard_group.shard_idx();
+                let mut indices = Vec::new();
+                for node in &self.nodes {
+                    if let Some(rg) = node
+                        .manager
+                        .get_shard_group(dr, shard_idx)
+                        .ok()
+                    {
+                        indices.push(*rg.applied_index_watch().borrow());
+                    }
                 }
-            }
-            if indices.len() < self.nodes.len()
-                || indices.is_empty()
-                || !indices.iter().all(|&i| i == indices[0] && i > 0)
-            {
-                return false;
+                if indices.len() < self.nodes.len() {
+                    // A node is missing this shard — not yet converged.
+                    return false;
+                }
+                let first = indices[0];
+                if first == 0 {
+                    // Idle shard: no writes yet. Treat as synced.
+                    continue;
+                }
+                if !indices.iter().all(|&i| i == first) {
+                    return false;
+                }
             }
         }
         true

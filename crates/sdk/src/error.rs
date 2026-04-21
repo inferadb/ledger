@@ -149,12 +149,21 @@ pub struct LeaderHint {
     pub leader_endpoint: Option<String>,
     /// Raft term the leader was last observed in, if known.
     pub term: Option<u64>,
+    /// State-layer shard index (`0..shards_per_region`) the leader is for,
+    /// if known.
+    ///
+    /// Each `(region, shard)` runs an independent Raft group, so leadership
+    /// is per-shard. A future SDK enhancement keys its `RegionLeaderCache`
+    /// on `(region, shard)` rather than just region — until then, the SDK
+    /// retries against the hinted endpoint and bounces once if the
+    /// resolved cache leader does not match the requested shard.
+    pub shard_idx: Option<u64>,
 }
 
 impl ServerErrorDetails {
     /// Extracts a leader hint from the `context` map if any of the well-known
-    /// keys (`leader_id`, `leader_endpoint`, `leader_term`) are present and
-    /// parseable.
+    /// keys (`leader_id`, `leader_endpoint`, `leader_term`, `leader_shard`)
+    /// are present and parseable.
     ///
     /// Empty-string endpoints are treated as absent to prevent dialing an
     /// empty URI.
@@ -166,11 +175,16 @@ impl ServerErrorDetails {
         let leader_endpoint =
             self.context.get("leader_endpoint").filter(|s| !s.is_empty()).cloned();
         let term = self.context.get("leader_term").and_then(|s| s.parse().ok());
+        let shard_idx = self.context.get("leader_shard").and_then(|s| s.parse().ok());
 
-        if leader_id.is_none() && leader_endpoint.is_none() && term.is_none() {
+        if leader_id.is_none()
+            && leader_endpoint.is_none()
+            && term.is_none()
+            && shard_idx.is_none()
+        {
             return None;
         }
-        Some(LeaderHint { leader_id, leader_endpoint, term })
+        Some(LeaderHint { leader_id, leader_endpoint, term, shard_idx })
     }
 }
 

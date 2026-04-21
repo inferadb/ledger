@@ -292,6 +292,7 @@ impl DiscoveryService {
                 None,
                 None,
                 Some(current_term),
+                Some(self.handle.shard_idx().value()),
             )
         })?;
 

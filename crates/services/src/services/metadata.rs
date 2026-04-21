@@ -76,9 +76,14 @@ pub(crate) fn status_with_not_leader_hint(
     leader_id: Option<u64>,
     leader_endpoint: Option<&str>,
     leader_term: Option<u64>,
+    leader_shard: Option<u64>,
 ) -> Status {
-    let details =
-        super::error_details::build_not_leader_details(leader_id, leader_endpoint, leader_term);
+    let details = super::error_details::build_not_leader_details(
+        leader_id,
+        leader_endpoint,
+        leader_term,
+        leader_shard,
+    );
     let encoded = details.encode_to_vec();
     Status::with_details(tonic::Code::Unavailable, message, encoded.into())
 }
@@ -100,7 +105,14 @@ pub(crate) fn not_leader_status_from_handle(
     let leader_id = shard_state.leader.map(|n| n.0);
     let leader_endpoint =
         leader_id.and_then(|id| peer_addresses.and_then(|m| m.get(id))).map(ensure_endpoint_url);
-    status_with_not_leader_hint(message, leader_id, leader_endpoint.as_deref(), Some(term))
+    let leader_shard = handle.shard_idx().value();
+    status_with_not_leader_hint(
+        message,
+        leader_id,
+        leader_endpoint.as_deref(),
+        Some(term),
+        Some(leader_shard),
+    )
 }
 
 /// Builds a `NotLeader` `Status` for a cross-region redirect, carrying the
@@ -115,7 +127,18 @@ pub(crate) fn not_leader_remote_region(
     redirect: &super::region_resolver::RedirectInfo,
     message: impl Into<String>,
 ) -> Status {
-    status_with_not_leader_hint(message, None, redirect.routing.leader_hint.as_deref(), None)
+    // Cross-region redirects don't include a per-shard hint: the local
+    // node has no view into the remote region's per-shard leadership map
+    // (each `(region, shard)` is its own Raft group). The SDK's
+    // `RegionLeaderCache` falls back to `ResolveRegionLeader` /
+    // `WatchLeader` against an in-region node to learn shard leaders.
+    status_with_not_leader_hint(
+        message,
+        None,
+        redirect.routing.leader_hint.as_deref(),
+        None,
+        None,
+    )
 }
 
 /// Prepends `http://` if the address has no URI scheme.
@@ -280,10 +303,11 @@ mod tests {
     #[test]
     fn status_with_not_leader_hint_populates_details() {
         let status = status_with_not_leader_hint(
-            "not leader for region us-east-va",
+            "not leader for region us-east-va shard 5",
             Some(42),
             Some("http://10.0.2.5:5000"),
             Some(7),
+            Some(5),
         );
         assert_eq!(status.code(), tonic::Code::Unavailable);
 
@@ -292,16 +316,18 @@ mod tests {
         assert_eq!(details.context.get("leader_id").unwrap(), "42");
         assert_eq!(details.context.get("leader_endpoint").unwrap(), "http://10.0.2.5:5000");
         assert_eq!(details.context.get("leader_term").unwrap(), "7");
+        assert_eq!(details.context.get("leader_shard").unwrap(), "5");
     }
 
     #[test]
     fn status_with_not_leader_hint_survives_correlation() {
-        let status = status_with_not_leader_hint("not leader", Some(1), None, None);
+        let status = status_with_not_leader_hint("not leader", Some(1), None, None, Some(0));
         let request_id = uuid::Uuid::new_v4();
         let enriched = status_with_correlation(status, &request_id, "trace");
 
         let details = proto::ErrorDetails::decode(enriched.details()).unwrap();
         assert_eq!(details.context.get("leader_id").unwrap(), "1");
+        assert_eq!(details.context.get("leader_shard").unwrap(), "0");
     }
 
     #[test]

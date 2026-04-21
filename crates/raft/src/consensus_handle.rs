@@ -10,6 +10,7 @@ use inferadb_ledger_consensus::{
     leadership::ShardState,
     types::{NodeId, ShardId},
 };
+use inferadb_ledger_state::shard_routing::ShardIdx;
 use parking_lot::Mutex;
 use snafu::{ResultExt, Snafu};
 use tokio::sync::{oneshot, watch};
@@ -61,10 +62,21 @@ pub type SpilloverMap = Arc<Mutex<HashMap<u64, LedgerResponse>>>;
 
 /// High-level handle for a single shard in the consensus engine.
 ///
-/// Each region gets its own `ConsensusHandle` bound to a specific shard.
+/// Each `(region, shard_idx)` Raft group gets its own `ConsensusHandle`. The
+/// handle carries both the consensus-layer `ShardId` (an opaque seahash of
+/// `region || shard_idx` used by the consensus engine to disambiguate Raft
+/// groups internally) and the state-layer `ShardIdx` (the user-facing
+/// `0..shards_per_region` value the SDK uses for routing). The two are
+/// kept distinct: `ShardId` is internal/opaque and not stable across
+/// renames; `ShardIdx` is the wire-visible routing dimension.
 pub struct ConsensusHandle {
     engine: ConsensusEngine,
     shard: ShardId,
+    /// State-layer shard index (`0..shards_per_region`). Surfaced via
+    /// [`ConsensusHandle::shard_idx`] so the service-layer not-leader
+    /// helpers can stamp it onto `LeaderHint.context["leader_shard"]`
+    /// without round-tripping through the `RegionGroup`.
+    shard_idx: ShardIdx,
     node_id: LedgerNodeId,
     state_rx: watch::Receiver<ShardState>,
     response_map: ResponseMap,
@@ -76,6 +88,7 @@ impl ConsensusHandle {
     pub fn new(
         engine: ConsensusEngine,
         shard: ShardId,
+        shard_idx: ShardIdx,
         node_id: LedgerNodeId,
         state_rx: watch::Receiver<ShardState>,
         response_map: ResponseMap,
@@ -83,6 +96,7 @@ impl ConsensusHandle {
         Self {
             engine,
             shard,
+            shard_idx,
             node_id,
             state_rx,
             response_map,
@@ -175,6 +189,15 @@ impl ConsensusHandle {
     /// Returns the shard ID this handle is bound to.
     pub fn shard_id(&self) -> ShardId {
         self.shard
+    }
+
+    /// Returns the state-layer shard index this handle is bound to.
+    ///
+    /// The value is the wire-visible `0..shards_per_region` index used by
+    /// the SDK for shard routing — distinct from the opaque consensus
+    /// `ShardId` returned by [`Self::shard_id`].
+    pub fn shard_idx(&self) -> ShardIdx {
+        self.shard_idx
     }
 
     /// Returns this node's ID.
@@ -350,7 +373,14 @@ mod tests {
         std::mem::forget(tx);
 
         let response_map: ResponseMap = Arc::new(Mutex::new(HashMap::new()));
-        let handle = ConsensusHandle::new(engine, shard_id, node_id, rx, Arc::clone(&response_map));
+        let handle = ConsensusHandle::new(
+            engine,
+            shard_id,
+            ShardIdx(0),
+            node_id,
+            rx,
+            Arc::clone(&response_map),
+        );
         (handle, response_map)
     }
 

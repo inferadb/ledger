@@ -329,20 +329,33 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
             },
         };
 
-        let group = self
-            .manager
-            .get_region_group(region)
-            .map_err(|_| Status::not_found("region group not found"))?;
-
-        // Deserialize the proposal payload.
+        // Deserialize the proposal payload before resolving the target
+        // shard so we can route org-bearing variants to the correct Raft
+        // group via `route_request`. Decoding twice would be wasteful and
+        // adds a risk of routing-vs-apply skew if the payload mutated.
         let ledger_request: LedgerRequest = decode(&req.request_payload)
             .map_err(|e| Status::invalid_argument(format!("deserialize request: {e}")))?;
 
         // AddRegionLearner is a membership change — handle it directly via
         // the consensus handle instead of proposing through the Raft log.
+        // Membership changes are not org-scoped, so they always operate on
+        // the region's shard 0 group (the one that holds the membership
+        // log).
         if let LedgerRequest::AddRegionLearner { node_id, ref address } = ledger_request {
+            let group = self
+                .manager
+                .get_region_group(region)
+                .map_err(|_| Status::not_found("region group not found"))?;
             return self.handle_add_region_learner(&group, region, node_id, address).await;
         }
+
+        // For all other requests, route to the owning shard via
+        // `route_request`: org-bearing variants land on the user's shard;
+        // org-less variants fall back to shard 0.
+        let group = self
+            .manager
+            .route_request(region, &ledger_request)
+            .map_err(|_| Status::not_found("region group not found"))?;
 
         let payload = RaftPayload::new(ledger_request, req.caller);
         let timeout = std::time::Duration::from_millis(u64::from(req.timeout_ms));

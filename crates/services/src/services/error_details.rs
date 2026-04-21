@@ -16,6 +16,14 @@ pub(crate) const LEADER_ID_KEY: &str = "leader_id";
 pub(crate) const LEADER_ENDPOINT_KEY: &str = "leader_endpoint";
 /// `ErrorDetails.context` key for the Raft term the leader was observed in (numeric string).
 pub(crate) const LEADER_TERM_KEY: &str = "leader_term";
+/// `ErrorDetails.context` key for the state-layer shard index the leader is
+/// for (numeric string in `0..shards_per_region`).
+///
+/// Distinct from the consensus-layer `ShardId` (an opaque seahash) — the
+/// shard index is what the SDK uses for routing and what its
+/// `RegionLeaderCache` keys on. Phase A always emits `"0"` for the GLOBAL
+/// region (single-shard) and `0..shards_per_region` for data regions.
+pub(crate) const LEADER_SHARD_KEY: &str = "leader_shard";
 
 /// Builds an [`ErrorDetails`] proto message from error attributes.
 ///
@@ -48,6 +56,7 @@ pub(crate) fn build_error_details(
 /// - `leader_id` — numeric string (u64)
 /// - `leader_endpoint` — full URI (e.g. `"http://10.0.2.5:5000"`)
 /// - `leader_term` — numeric string (u64)
+/// - `leader_shard` — numeric string (state-layer shard index, `0..shards_per_region`)
 ///
 /// Any argument may be `None` when the server has no information for that
 /// field; the key is simply omitted.
@@ -55,6 +64,7 @@ pub(crate) fn build_not_leader_details(
     leader_id: Option<u64>,
     leader_endpoint: Option<&str>,
     leader_term: Option<u64>,
+    leader_shard: Option<u64>,
 ) -> proto::ErrorDetails {
     let mut context = HashMap::new();
     if let Some(id) = leader_id {
@@ -65,6 +75,9 @@ pub(crate) fn build_not_leader_details(
     }
     if let Some(term) = leader_term {
         context.insert(LEADER_TERM_KEY.to_owned(), term.to_string());
+    }
+    if let Some(shard) = leader_shard {
+        context.insert(LEADER_SHARD_KEY.to_owned(), shard.to_string());
     }
 
     proto::ErrorDetails {
@@ -164,45 +177,50 @@ mod tests {
 
     #[test]
     fn build_not_leader_details_all_fields() {
-        let details = build_not_leader_details(Some(42), Some("http://10.0.2.5:5000"), Some(7));
+        let details =
+            build_not_leader_details(Some(42), Some("http://10.0.2.5:5000"), Some(7), Some(5));
         assert_eq!(details.error_code, "2000"); // ConsensusNotLeader
         assert!(details.is_retryable);
         assert_eq!(details.context.get("leader_id").unwrap(), "42");
         assert_eq!(details.context.get("leader_endpoint").unwrap(), "http://10.0.2.5:5000");
         assert_eq!(details.context.get("leader_term").unwrap(), "7");
+        assert_eq!(details.context.get("leader_shard").unwrap(), "5");
         assert!(details.suggested_action.as_deref().unwrap().contains("leader"));
     }
 
     #[test]
     fn build_not_leader_details_partial_fields() {
-        let details = build_not_leader_details(Some(42), None, None);
+        let details = build_not_leader_details(Some(42), None, None, None);
         assert!(details.context.contains_key("leader_id"));
         assert!(!details.context.contains_key("leader_endpoint"));
         assert!(!details.context.contains_key("leader_term"));
+        assert!(!details.context.contains_key("leader_shard"));
     }
 
     #[test]
     fn build_not_leader_details_no_hints() {
-        let details = build_not_leader_details(None, None, None);
+        let details = build_not_leader_details(None, None, None, None);
         assert!(details.context.is_empty());
         assert!(details.is_retryable);
     }
 
     #[test]
     fn build_not_leader_details_empty_endpoint_omitted() {
-        let details = build_not_leader_details(Some(42), Some(""), Some(7));
+        let details = build_not_leader_details(Some(42), Some(""), Some(7), Some(0));
         assert!(!details.context.contains_key("leader_endpoint"));
         assert!(details.context.contains_key("leader_id"));
         assert!(details.context.contains_key("leader_term"));
+        assert_eq!(details.context.get("leader_shard").unwrap(), "0");
     }
 
     #[test]
     fn build_not_leader_details_encode_decode() {
-        let details = build_not_leader_details(Some(1), Some("http://x:5000"), Some(3));
+        let details = build_not_leader_details(Some(1), Some("http://x:5000"), Some(3), Some(12));
         let encoded = details.encode_to_vec();
         let decoded = proto::ErrorDetails::decode(encoded.as_slice()).unwrap();
         assert_eq!(decoded.context.get("leader_id").unwrap(), "1");
         assert_eq!(decoded.context.get("leader_endpoint").unwrap(), "http://x:5000");
         assert_eq!(decoded.context.get("leader_term").unwrap(), "3");
+        assert_eq!(decoded.context.get("leader_shard").unwrap(), "12");
     }
 }

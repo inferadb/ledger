@@ -657,6 +657,66 @@ impl RaftManager {
         inferadb_ledger_state::shard_routing::ShardRouter::new(self.config.shards_per_region)
     }
 
+    /// Resolves the `(region, shard)` Raft group that should own a
+    /// [`LedgerRequest`] under saga / `RegionalProposal` forwarding.
+    ///
+    /// Routing rules (Phase A):
+    ///
+    /// - `Write { organization, .. }` and `BatchWrite { requests: [Write,
+    ///   ..] }` route to the org's shard via [`ShardRouter`]. User-domain
+    ///   saga writes land on the same shard the user's normal traffic
+    ///   does — ensuring read-after-write consistency across the saga
+    ///   write and the user's regular reads.
+    /// - **Saga records (`organization == SYSTEM_ORGANIZATION_ID`,
+    ///   i.e. `0`) and other org-less variants pin to
+    ///   [`ShardIdx(0)`](inferadb_ledger_state::shard_routing::ShardIdx).**
+    ///   This colocates saga state on a single shard so saga read paths
+    ///   (`load_saga_pii`, `load_pending_sagas`) — which read from the
+    ///   shard-0 group via `get_region_group` — find what saga writes
+    ///   produced. Treating saga state as a "system shard" trades a small
+    ///   load asymmetry for read/write path symmetry; sharding saga
+    ///   state by `saga_id` is a Phase B optimization.
+    ///
+    /// Used by:
+    /// - `RaftService::regional_proposal` on the receiver side, after
+    ///   decoding the saga-forwarded payload, to find the right shard's
+    ///   Raft handle.
+    /// - `SagaOrchestrator::propose_to_region` on the local-fast-path side
+    ///   so a saga running on the same node as a region's leader still
+    ///   lands on the correct shard.
+    pub fn route_request(
+        &self,
+        region: Region,
+        request: &crate::types::LedgerRequest,
+    ) -> Result<Arc<RegionGroup>> {
+        use crate::types::LedgerRequest;
+        const SYSTEM_ORGANIZATION_ID: OrganizationId = OrganizationId::new(0);
+        let org = match request {
+            LedgerRequest::Write { organization, .. } => Some(*organization),
+            // BatchWrite carries nested requests; saga forwarding sends
+            // single-org batches in practice. Pick the first inner Write's
+            // organization; fall back to None (shard 0) if the batch is
+            // empty or non-Write.
+            LedgerRequest::BatchWrite { requests } => {
+                requests.iter().find_map(|inner| match inner {
+                    LedgerRequest::Write { organization, .. } => Some(*organization),
+                    _ => None,
+                })
+            },
+            _ => None,
+        };
+        let shard_idx = match org {
+            // System-org writes (saga records, system-vault internals)
+            // pin to shard 0 so the saga orchestrator's read path —
+            // which uses `get_region_group` and thus reads from shard 0 —
+            // sees what its writes produced.
+            Some(organization) if organization == SYSTEM_ORGANIZATION_ID => ShardIdx(0),
+            Some(organization) => self.shard_router().resolve(region, organization),
+            None => ShardIdx(0),
+        };
+        self.get_shard_group(region, shard_idx)
+    }
+
     /// Returns the last crash-recovery replay stats captured for `region`, if any.
     ///
     /// Populated by `start_region` immediately after
@@ -899,24 +959,32 @@ impl RaftManager {
         Ok(region_group)
     }
 
-    /// Routes an organization to its region group.
+    /// Routes an organization to the `(region, shard)` Raft group that
+    /// owns its writes.
     ///
-    /// Looks up the organization's region assignment in the `_system` service
-    /// and returns the local RegionGroup if available.
+    /// Looks up the organization's region assignment in the `_system`
+    /// service, resolves the shard via [`ShardRouter`], and returns the
+    /// per-`(region, shard)` `RegionGroup`. This is the single entry point
+    /// every service-layer write/read path uses to find the right shard's
+    /// BatchWriter, ApplyWorker, and StateLayer.
     ///
     /// Returns `None` if:
     /// - System region not started
     /// - Organization not found in `_system`
-    /// - Region is on a different node (requires forwarding)
+    /// - Target region/shard is on a different node (requires forwarding —
+    ///   caller falls through to the redirect path)
     ///
     /// * `organization` - Internal organization identifier (`OrganizationId`).
     pub fn route_organization(&self, organization: OrganizationId) -> Option<Arc<RegionGroup>> {
         let region = self.get_organization_region(organization)?;
+        let shard_idx = self.shard_router().resolve(region, organization);
 
-        // Get local region group. Data regions are created through GLOBAL Raft
-        // consensus (CreateDataRegion), so we don't lazily create here — the
-        // region must already exist from a prior consensus proposal.
-        let group = self.regions.read().get(&(region, ShardIdx(0))).cloned()?;
+        // Get local `(region, shard)` group. Data regions + their N shards
+        // are created through GLOBAL Raft consensus (CreateDataRegion +
+        // start_region_shards), so we don't lazily create here — the shard
+        // must already exist from a prior consensus proposal + region
+        // start.
+        let group = self.regions.read().get(&(region, shard_idx)).cloned()?;
         group.touch();
 
         // Auto-wake hibernated regions on first request
@@ -1439,6 +1507,7 @@ impl RaftManager {
         let handle = Arc::new(ConsensusHandle::new(
             engine,
             shard_id,
+            shard_idx,
             self.config.node_id,
             state_rx,
             response_map,

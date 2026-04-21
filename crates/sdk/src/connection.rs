@@ -527,6 +527,7 @@ impl ConnectionPool {
                 leader_id: Some(1),
                 leader_endpoint: Some(endpoint.to_owned()),
                 term: Some(1),
+                shard_idx: None,
             };
             cache.apply_hint(&hint);
         }

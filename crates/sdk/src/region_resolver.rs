@@ -721,7 +721,7 @@ mod tests {
         let hint = LeaderHint {
             leader_id: Some(42),
             leader_endpoint: Some("http://10.0.2.5:5000".to_owned()),
-            term: Some(7),
+            term: Some(7), shard_idx: None,
         };
         cache.apply_hint(&hint);
         assert_eq!(cache.cached_endpoint().as_deref(), Some("http://10.0.2.5:5000"));
@@ -731,7 +731,7 @@ mod tests {
     fn apply_hint_without_endpoint_does_nothing() {
         use crate::error::LeaderHint;
         let cache = RegionLeaderCache::new(Region::US_EAST_VA);
-        let hint = LeaderHint { leader_id: Some(42), leader_endpoint: None, term: Some(7) };
+        let hint = LeaderHint { leader_id: Some(42), leader_endpoint: None, term: Some(7) , shard_idx: None};
         cache.apply_hint(&hint);
         assert!(cache.cached_endpoint().is_none());
     }
@@ -752,7 +752,7 @@ mod tests {
         let hint = LeaderHint {
             leader_id: Some(1),
             leader_endpoint: Some("http://new:5000".to_owned()),
-            term: None,
+            term: None, shard_idx: None,
         };
         cache.apply_hint(&hint);
 
@@ -934,7 +934,7 @@ mod tests {
         cache.apply_hint(&crate::error::LeaderHint {
             leader_id: Some(1),
             leader_endpoint: Some("http://B:5000".to_owned()),
-            term: None,
+            term: None, shard_idx: None,
         });
 
         assert_eq!(metrics.get("flap", "us-east-va"), 0);
@@ -1004,7 +1004,7 @@ mod tests {
         let hint = LeaderHint {
             leader_id: Some(1),
             leader_endpoint: Some("http://same:5000".to_owned()),
-            term: Some(5),
+            term: Some(5), shard_idx: None,
         };
         cache.apply_hint(&hint);
         assert_eq!(cache.cached_endpoint().as_deref(), Some("http://same:5000"));
@@ -1018,7 +1018,7 @@ mod tests {
         let hint = LeaderHint {
             leader_id: Some(1),
             leader_endpoint: Some("http://new:5000".to_owned()),
-            term: Some(7),
+            term: Some(7), shard_idx: None,
         };
         cache.apply_hint(&hint);
         assert_eq!(cache.cached_endpoint().as_deref(), Some("http://new:5000"));
@@ -1034,7 +1034,7 @@ mod tests {
         let hint = LeaderHint {
             leader_id: Some(1),
             leader_endpoint: Some("http://stale:5000".to_owned()),
-            term: Some(5),
+            term: Some(5), shard_idx: None,
         };
         cache.apply_hint(&hint);
         assert_eq!(cache.cached_endpoint().as_deref(), Some("http://old:5000"));
@@ -1059,7 +1059,7 @@ mod tests {
         let hint = LeaderHint {
             leader_id: Some(1),
             leader_endpoint: Some("http://first:5000".to_owned()),
-            term: None,
+            term: None, shard_idx: None,
         };
         cache.apply_hint(&hint);
         assert_eq!(cache.cached_endpoint().as_deref(), Some("http://first:5000"));
@@ -1088,7 +1088,7 @@ mod tests {
         let hint = LeaderHint {
             leader_id: Some(1),
             leader_endpoint: Some("http://untrusted:5000".to_owned()),
-            term: None,
+            term: None, shard_idx: None,
         };
         cache.apply_hint(&hint);
         assert_eq!(cache.cached_endpoint().as_deref(), Some("http://old:5000"));
