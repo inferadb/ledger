@@ -418,5 +418,4 @@ mod tests {
         assert_eq!(config.issuer, "inferadb");
         assert_eq!(config.session_access_ttl_secs, 1800);
     }
-
 }

@@ -554,6 +554,7 @@ pub async fn bootstrap_node(
         batch_config,
         runtime_config.clone(),
         config.region.as_str(),
+        inferadb_ledger_state::shard_routing::ShardIdx(0),
     );
     let event_handle_for_saga = Some(event_handle.clone());
     // Retained clone returned via `BootstrappedNode.event_handle` so the
@@ -1624,22 +1625,10 @@ mod tests {
         // Per-shard databases land under global/shard-0/ in the Phase A
         // single-shard layout. The flat layout (global/state.db) is gone.
         let shard_dir = data_dir.join("global").join("shard-0");
-        assert!(
-            shard_dir.join("events.db").exists(),
-            "events.db should be in global/shard-0/"
-        );
-        assert!(
-            shard_dir.join("state.db").exists(),
-            "state.db should be in global/shard-0/"
-        );
-        assert!(
-            shard_dir.join("blocks.db").exists(),
-            "blocks.db should be in global/shard-0/"
-        );
-        assert!(
-            shard_dir.join("raft.db").exists(),
-            "raft.db should be in global/shard-0/"
-        );
+        assert!(shard_dir.join("events.db").exists(), "events.db should be in global/shard-0/");
+        assert!(shard_dir.join("state.db").exists(), "state.db should be in global/shard-0/");
+        assert!(shard_dir.join("blocks.db").exists(), "blocks.db should be in global/shard-0/");
+        assert!(shard_dir.join("raft.db").exists(), "raft.db should be in global/shard-0/");
 
         // Legacy layouts are gone entirely.
         assert!(!data_dir.join("state.db").exists(), "state.db should not be in root");

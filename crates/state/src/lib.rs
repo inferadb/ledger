@@ -18,8 +18,6 @@ pub mod apply_pool;
 pub mod binary_keys;
 mod block_archive;
 mod bucket;
-/// Deterministic org → shard routing (Phase A multi-shard).
-pub mod shard_routing;
 pub mod dictionary;
 mod engine;
 mod entity;
@@ -31,6 +29,8 @@ mod relationship;
 /// In-memory hash index for O(1) relationship existence checks.
 pub mod relationship_index;
 mod shard;
+/// Deterministic org → shard routing (Phase A multi-shard).
+pub mod shard_routing;
 mod snapshot;
 mod state;
 /// System organization (`_system`) for global cluster data.

@@ -20,12 +20,11 @@ use inferadb_ledger_state::{StateLayer, system::SystemOrganizationService};
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
     InvitationStatus, InviteEmailEntry, InviteId, OrganizationId, Region, decode,
+    trace_context::TraceContext,
 };
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
-
-use inferadb_ledger_types::trace_context::TraceContext;
 
 use crate::{
     consensus_handle::ConsensusHandle,

@@ -51,6 +51,18 @@ const RAFT_COMMIT_INDEX: &str = "inferadb_ledger_raft_commit_index";
 const RAFT_TERM: &str = "inferadb_ledger_raft_term";
 const RAFT_LEADER: &str = "inferadb_ledger_raft_is_leader";
 
+// Apply-worker metrics — per `(region, shard)`.
+//
+// The apply worker is the per-RegionGroup sink that drains committed Raft
+// batches into `StateLayer::apply_operations`. It is the ceiling on
+// per-shard write throughput — measuring it is how Phase A's scaling
+// hypothesis (N shards × single-shard ceiling ≈ per-node throughput)
+// becomes testable.
+const APPLY_BATCHES_TOTAL: &str = "inferadb_ledger_raft_apply_batches_total";
+const APPLY_BATCH_LATENCY: &str = "inferadb_ledger_raft_apply_batch_latency_seconds";
+const APPLY_BATCH_SIZE: &str = "inferadb_ledger_raft_apply_batch_size";
+const APPLY_ENTRIES_TOTAL: &str = "inferadb_ledger_raft_apply_entries_total";
+
 // State machine metrics
 const STATE_ROOT_COMPUTATIONS: &str = "inferadb_ledger_state_root_computations_total";
 const STATE_ROOT_LATENCY: &str = "inferadb_ledger_state_root_latency_seconds";
@@ -178,6 +190,67 @@ pub fn set_pending_proposals(count: usize) {
 #[inline]
 pub fn record_raft_apply_latency(latency_secs: f64) {
     histogram!(RAFT_APPLY_LATENCY).record(latency_secs);
+}
+
+/// Records a single apply-worker batch.
+///
+/// Every committed Raft batch drained by the per-RegionGroup `ApplyWorker`
+/// fires this exactly once. Labels cover the full `(region, shard)` matrix
+/// plus a `status` of `"ok"` or `"error"` so dashboards can alert on
+/// elevated apply-error rates without losing the healthy cadence.
+///
+/// `batch_size` is the number of entries in the batch; the paired
+/// histogram captures distribution so we can see whether Raft is delivering
+/// large batches (good — WAL fsync amortized) or dribbles
+/// (bad — fsync-per-batch dominates).
+///
+/// `latency_secs` is the end-to-end apply duration for the batch,
+/// including `StateLayer::apply_operations`, response-map delivery, and
+/// spillover insertion. This is the Phase A scaling ceiling: a node's
+/// sustainable write rate is `shards_per_region × (batch_size / latency)`
+/// averaged across shards, so the p50/p99 of this histogram is the
+/// headline number for Task 8's scaling curve.
+#[inline]
+pub fn record_apply_batch(
+    region: &str,
+    shard: &str,
+    status: &str,
+    batch_size: usize,
+    latency_secs: f64,
+) {
+    gated!(
+        APPLY_BATCHES_TOTAL,
+        &[(fields::REGION, region), (fields::SHARD, shard), (fields::STATUS, status),],
+        {
+            counter!(
+                APPLY_BATCHES_TOTAL,
+                fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
+                fields::STATUS => status.to_string(),
+            )
+            .increment(1);
+            counter!(
+                APPLY_ENTRIES_TOTAL,
+                fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
+                fields::STATUS => status.to_string(),
+            )
+            .increment(batch_size as u64);
+            histogram!(
+                APPLY_BATCH_SIZE,
+                fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
+            )
+            .record(batch_size as f64);
+            histogram!(
+                APPLY_BATCH_LATENCY,
+                fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
+                fields::STATUS => status.to_string(),
+            )
+            .record(latency_secs);
+        }
+    );
 }
 
 /// Sets the current Raft commit index.
@@ -346,24 +419,20 @@ pub fn record_grpc_request(service: &str, method: &str, status: &str, latency_se
 /// `0..shards_per_region` and the label starts carrying real information.
 #[inline]
 pub fn record_batch_coalesce(size: usize, region: &str, shard: &str) {
-    gated!(
-        BATCH_COALESCE_TOTAL,
-        &[(fields::REGION, region), (fields::SHARD, shard)],
-        {
-            counter!(
-                BATCH_COALESCE_TOTAL,
-                fields::REGION => region.to_string(),
-                fields::SHARD => shard.to_string(),
-            )
-            .increment(1);
-            histogram!(
-                BATCH_COALESCE_SIZE,
-                fields::REGION => region.to_string(),
-                fields::SHARD => shard.to_string(),
-            )
-            .record(size as f64);
-        }
-    );
+    gated!(BATCH_COALESCE_TOTAL, &[(fields::REGION, region), (fields::SHARD, shard)], {
+        counter!(
+            BATCH_COALESCE_TOTAL,
+            fields::REGION => region.to_string(),
+            fields::SHARD => shard.to_string(),
+        )
+        .increment(1);
+        histogram!(
+            BATCH_COALESCE_SIZE,
+            fields::REGION => region.to_string(),
+            fields::SHARD => shard.to_string(),
+        )
+        .record(size as f64);
+    });
 }
 
 /// Records batch flush latency.
@@ -371,18 +440,14 @@ pub fn record_batch_coalesce(size: usize, region: &str, shard: &str) {
 /// See [`record_batch_coalesce`] for the role of `region` and `shard`.
 #[inline]
 pub fn record_batch_flush(latency_secs: f64, region: &str, shard: &str) {
-    gated!(
-        BATCH_FLUSH_LATENCY,
-        &[(fields::REGION, region), (fields::SHARD, shard)],
-        {
-            histogram!(
-                BATCH_FLUSH_LATENCY,
-                fields::REGION => region.to_string(),
-                fields::SHARD => shard.to_string(),
-            )
-            .record(latency_secs);
-        }
-    );
+    gated!(BATCH_FLUSH_LATENCY, &[(fields::REGION, region), (fields::SHARD, shard)], {
+        histogram!(
+            BATCH_FLUSH_LATENCY,
+            fields::REGION => region.to_string(),
+            fields::SHARD => shard.to_string(),
+        )
+        .record(latency_secs);
+    });
 }
 
 // =============================================================================
@@ -622,18 +687,14 @@ const LEADER_ELECTIONS_TOTAL: &str = "ledger_leader_elections_total";
 /// The `region` label identifies which region's batch writer is being measured.
 #[inline]
 pub fn set_batch_queue_depth(depth: usize, region: &str, shard: &str) {
-    gated!(
-        BATCH_QUEUE_DEPTH,
-        &[(fields::REGION, region), (fields::SHARD, shard)],
-        {
-            gauge!(
-                BATCH_QUEUE_DEPTH,
-                fields::REGION => region.to_string(),
-                fields::SHARD => shard.to_string(),
-            )
-            .set(depth as f64);
-        }
-    );
+    gated!(BATCH_QUEUE_DEPTH, &[(fields::REGION, region), (fields::SHARD, shard)], {
+        gauge!(
+            BATCH_QUEUE_DEPTH,
+            fields::REGION => region.to_string(),
+            fields::SHARD => shard.to_string(),
+        )
+        .set(depth as f64);
+    });
 }
 
 /// Sets the current rate limiter queue depth.
@@ -854,11 +915,7 @@ pub fn record_state_checkpoint(
     );
     gated!(
         LEDGER_STATE_CHECKPOINT_DURATION_SECONDS,
-        &[
-            (fields::REGION, region),
-            (fields::SHARD, shard),
-            (fields::TRIGGER, trigger),
-        ],
+        &[(fields::REGION, region), (fields::SHARD, shard), (fields::TRIGGER, trigger),],
         {
             histogram!(
                 LEDGER_STATE_CHECKPOINT_DURATION_SECONDS,
@@ -895,18 +952,14 @@ pub fn set_state_applies_since_checkpoint(region: &str, shard: &str, applies: u6
 /// See [`record_state_checkpoint`] for the role of `shard`.
 #[inline]
 pub fn set_state_dirty_pages(region: &str, shard: &str, dirty_pages: u64) {
-    gated!(
-        LEDGER_STATE_DIRTY_PAGES,
-        &[(fields::REGION, region), (fields::SHARD, shard)],
-        {
-            gauge!(
-                LEDGER_STATE_DIRTY_PAGES,
-                fields::REGION => region.to_string(),
-                fields::SHARD => shard.to_string(),
-            )
-            .set(dirty_pages as f64);
-        }
-    );
+    gated!(LEDGER_STATE_DIRTY_PAGES, &[(fields::REGION, region), (fields::SHARD, shard)], {
+        gauge!(
+            LEDGER_STATE_DIRTY_PAGES,
+            fields::REGION => region.to_string(),
+            fields::SHARD => shard.to_string(),
+        )
+        .set(dirty_pages as f64);
+    });
 }
 
 /// Updates the total page-cache-size gauge.
@@ -914,18 +967,14 @@ pub fn set_state_dirty_pages(region: &str, shard: &str, dirty_pages: u64) {
 /// See [`record_state_checkpoint`] for the role of `shard`.
 #[inline]
 pub fn set_state_page_cache_len(region: &str, shard: &str, cache_len: u64) {
-    gated!(
-        LEDGER_STATE_PAGE_CACHE_LEN,
-        &[(fields::REGION, region), (fields::SHARD, shard)],
-        {
-            gauge!(
-                LEDGER_STATE_PAGE_CACHE_LEN,
-                fields::REGION => region.to_string(),
-                fields::SHARD => shard.to_string(),
-            )
-            .set(cache_len as f64);
-        }
-    );
+    gated!(LEDGER_STATE_PAGE_CACHE_LEN, &[(fields::REGION, region), (fields::SHARD, shard)], {
+        gauge!(
+            LEDGER_STATE_PAGE_CACHE_LEN,
+            fields::REGION => region.to_string(),
+            fields::SHARD => shard.to_string(),
+        )
+        .set(cache_len as f64);
+    });
 }
 
 /// Updates the last-synced-snapshot-id gauge.
@@ -972,14 +1021,19 @@ pub fn set_state_checkpoint_last_timestamp(region: &str, shard: &str, unix_secs:
 /// shutdowns. Surfacing zero-count recoveries is deliberate: dashboards can
 /// plot `rate()` to see restarts per deploy.
 #[inline]
-pub fn record_state_recovery_replay(region: &str, count: u64) {
-    gated!(LEDGER_STATE_RECOVERY_REPLAY_COUNT_TOTAL, &[(fields::REGION, region)], {
-        counter!(
-            LEDGER_STATE_RECOVERY_REPLAY_COUNT_TOTAL,
-            fields::REGION => region.to_string(),
-        )
-        .increment(count);
-    });
+pub fn record_state_recovery_replay(region: &str, shard: &str, count: u64) {
+    gated!(
+        LEDGER_STATE_RECOVERY_REPLAY_COUNT_TOTAL,
+        &[(fields::REGION, region), (fields::SHARD, shard)],
+        {
+            counter!(
+                LEDGER_STATE_RECOVERY_REPLAY_COUNT_TOTAL,
+                fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
+            )
+            .increment(count);
+        }
+    );
 }
 
 /// Records the duration of the post-open crash-recovery sweep.
@@ -988,14 +1042,19 @@ pub fn record_state_recovery_replay(region: &str, count: u64) {
 /// (reading the last-applied sentinel + coalescing a no-op sync). Samples
 /// land in `SLI_HISTOGRAM_BUCKETS`; pathological long recoveries alert on p99.
 #[inline]
-pub fn record_state_recovery_duration(region: &str, duration: std::time::Duration) {
-    gated!(LEDGER_STATE_RECOVERY_DURATION_SECONDS, &[(fields::REGION, region)], {
-        histogram!(
-            LEDGER_STATE_RECOVERY_DURATION_SECONDS,
-            fields::REGION => region.to_string(),
-        )
-        .record(duration.as_secs_f64());
-    });
+pub fn record_state_recovery_duration(region: &str, shard: &str, duration: std::time::Duration) {
+    gated!(
+        LEDGER_STATE_RECOVERY_DURATION_SECONDS,
+        &[(fields::REGION, region), (fields::SHARD, shard)],
+        {
+            histogram!(
+                LEDGER_STATE_RECOVERY_DURATION_SECONDS,
+                fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
+            )
+            .record(duration.as_secs_f64());
+        }
+    );
 }
 
 // ─── Handler-Phase Event Flusher ──────────────────────
@@ -1026,53 +1085,79 @@ pub const LEDGER_EVENT_OVERFLOW_TOTAL: &str = "ledger_event_overflow_total";
 /// `trigger` is one of `"time"`, `"size"`, `"shutdown"` — emitted by the
 /// background flusher in `event_writer.rs`.
 #[inline]
-pub fn record_event_flush(region: &str, trigger: &str, duration_secs: f64, entries: u64) {
+pub fn record_event_flush(
+    region: &str,
+    shard: &str,
+    trigger: &str,
+    duration_secs: f64,
+    entries: u64,
+) {
     gated!(
         LEDGER_EVENT_FLUSH_TRIGGERS_TOTAL,
-        &[(fields::REGION, region), (fields::TRIGGER, trigger)],
+        &[(fields::REGION, region), (fields::SHARD, shard), (fields::TRIGGER, trigger),],
         {
             counter!(
                 LEDGER_EVENT_FLUSH_TRIGGERS_TOTAL,
                 fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
                 fields::TRIGGER => trigger.to_string(),
             )
             .increment(1);
         }
     );
-    gated!(LEDGER_EVENT_FLUSH_DURATION_SECONDS, &[(fields::REGION, region)], {
-        histogram!(
-            LEDGER_EVENT_FLUSH_DURATION_SECONDS,
-            fields::REGION => region.to_string(),
-        )
-        .record(duration_secs);
-    });
-    gated!(LEDGER_EVENT_FLUSH_ENTRIES_PER_FLUSH, &[(fields::REGION, region)], {
-        histogram!(
-            LEDGER_EVENT_FLUSH_ENTRIES_PER_FLUSH,
-            fields::REGION => region.to_string(),
-        )
-        .record(entries as f64);
-    });
+    gated!(
+        LEDGER_EVENT_FLUSH_DURATION_SECONDS,
+        &[(fields::REGION, region), (fields::SHARD, shard)],
+        {
+            histogram!(
+                LEDGER_EVENT_FLUSH_DURATION_SECONDS,
+                fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
+            )
+            .record(duration_secs);
+        }
+    );
+    gated!(
+        LEDGER_EVENT_FLUSH_ENTRIES_PER_FLUSH,
+        &[(fields::REGION, region), (fields::SHARD, shard)],
+        {
+            histogram!(
+                LEDGER_EVENT_FLUSH_ENTRIES_PER_FLUSH,
+                fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
+            )
+            .record(entries as f64);
+        }
+    );
 }
 
 /// Records a flush failure (events.db commit / write error).
 #[inline]
-pub fn record_event_flush_failure(region: &str) {
-    gated!(LEDGER_EVENT_FLUSH_FAILURES_TOTAL, &[(fields::REGION, region)], {
-        counter!(
-            LEDGER_EVENT_FLUSH_FAILURES_TOTAL,
-            fields::REGION => region.to_string(),
-        )
-        .increment(1);
-    });
+pub fn record_event_flush_failure(region: &str, shard: &str) {
+    gated!(
+        LEDGER_EVENT_FLUSH_FAILURES_TOTAL,
+        &[(fields::REGION, region), (fields::SHARD, shard)],
+        {
+            counter!(
+                LEDGER_EVENT_FLUSH_FAILURES_TOTAL,
+                fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
+            )
+            .increment(1);
+        }
+    );
 }
 
 /// Updates the pre-drain queue-depth gauge sampled at flush entry.
 #[inline]
-pub fn set_event_flush_queue_depth(region: &str, depth: u64) {
-    gated!(LEDGER_EVENT_FLUSH_QUEUE_DEPTH, &[(fields::REGION, region)], {
-        gauge!(LEDGER_EVENT_FLUSH_QUEUE_DEPTH, fields::REGION => region.to_string())
-            .set(depth as f64);
+pub fn set_event_flush_queue_depth(region: &str, shard: &str, depth: u64) {
+    gated!(LEDGER_EVENT_FLUSH_QUEUE_DEPTH, &[(fields::REGION, region), (fields::SHARD, shard)], {
+        gauge!(
+            LEDGER_EVENT_FLUSH_QUEUE_DEPTH,
+            fields::REGION => region.to_string(),
+            fields::SHARD => shard.to_string(),
+        )
+        .set(depth as f64);
     });
 }
 
@@ -1083,18 +1168,23 @@ pub fn set_event_flush_queue_depth(region: &str, depth: u64) {
 /// (flush-for-shutdown exited with queued entries remaining), or
 /// `"channel_closed"` (bug signal — producer saw a closed channel).
 #[inline]
-pub fn record_event_overflow(region: &str, cause: &str, count: u64) {
+pub fn record_event_overflow(region: &str, shard: &str, cause: &str, count: u64) {
     if count == 0 {
         return;
     }
-    gated!(LEDGER_EVENT_OVERFLOW_TOTAL, &[(fields::REGION, region), (fields::CAUSE, cause)], {
-        counter!(
-            LEDGER_EVENT_OVERFLOW_TOTAL,
-            fields::REGION => region.to_string(),
-            fields::CAUSE => cause.to_string(),
-        )
-        .increment(count);
-    });
+    gated!(
+        LEDGER_EVENT_OVERFLOW_TOTAL,
+        &[(fields::REGION, region), (fields::SHARD, shard), (fields::CAUSE, cause),],
+        {
+            counter!(
+                LEDGER_EVENT_OVERFLOW_TOTAL,
+                fields::REGION => region.to_string(),
+                fields::SHARD => shard.to_string(),
+                fields::CAUSE => cause.to_string(),
+            )
+            .increment(count);
+        }
+    );
 }
 
 /// SLI-aligned histogram bucket boundaries (in seconds).
@@ -1929,32 +2019,32 @@ mod tests {
 
     #[test]
     fn test_record_event_flush_triggers() {
-        record_event_flush("global", "time", 0.002, 5);
-        record_event_flush("global", "size", 0.012, 500);
-        record_event_flush("global", "shutdown", 0.050, 1_000);
+        record_event_flush("global", "0", "time", 0.002, 5);
+        record_event_flush("global", "0", "size", 0.012, 500);
+        record_event_flush("global", "0", "shutdown", 0.050, 1_000);
     }
 
     #[test]
     fn test_record_event_flush_failure() {
-        record_event_flush_failure("global");
+        record_event_flush_failure("global", "0");
     }
 
     #[test]
     fn test_set_event_flush_queue_depth() {
-        set_event_flush_queue_depth("global", 0);
-        set_event_flush_queue_depth("global", 1_234);
+        set_event_flush_queue_depth("global", "0", 0);
+        set_event_flush_queue_depth("global", "0", 1_234);
     }
 
     #[test]
     fn test_record_event_overflow_all_causes() {
-        record_event_overflow("global", "queue_full", 1);
-        record_event_overflow("global", "shutdown_timeout", 42);
-        record_event_overflow("global", "channel_closed", 1);
+        record_event_overflow("global", "0", "queue_full", 1);
+        record_event_overflow("global", "0", "shutdown_timeout", 42);
+        record_event_overflow("global", "0", "channel_closed", 1);
     }
 
     #[test]
     fn test_record_event_overflow_zero_count_is_noop() {
-        record_event_overflow("global", "queue_full", 0);
+        record_event_overflow("global", "0", "queue_full", 0);
     }
 
     #[test]

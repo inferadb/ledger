@@ -653,6 +653,11 @@ struct FlushQueue {
     overflow: EventOverflowBehavior,
     /// Region label for emitted metrics.
     region: String,
+    /// Shard label for emitted metrics, pre-stringified from the owning
+    /// RegionGroup's
+    /// [`ShardIdx`](inferadb_ledger_state::shard_routing::ShardIdx). Phase A
+    /// emits `"0"`; Task 5 fans flushers out.
+    shard: String,
 }
 
 impl FlushQueue {
@@ -781,8 +786,10 @@ impl<B: StorageBackend + 'static> EventHandle<B> {
         batch_config: EventWriterBatchConfig,
         runtime_config: RuntimeConfigHandle,
         region: impl Into<String>,
+        shard_idx: inferadb_ledger_state::shard_routing::ShardIdx,
     ) -> (Self, tokio::task::JoinHandle<()>) {
         let region: String = region.into();
+        let shard: String = shard_idx.0.to_string();
         let (entry_tx, entry_rx) = mpsc::channel::<EventEntry>(batch_config.queue_capacity);
         let (shutdown_tx, shutdown_rx) = mpsc::channel::<ShutdownCommand>(1);
 
@@ -800,10 +807,12 @@ impl<B: StorageBackend + 'static> EventHandle<B> {
             shutdown_tx: parking_lot::Mutex::new(Some(shutdown_tx)),
             overflow: batch_config.overflow_behavior,
             region: region.clone(),
+            shard: shard.clone(),
         });
 
         info!(
             region = %region,
+            shard = %shard,
             flush_interval_ms = batch_config.flush_interval_ms,
             flush_size_threshold = batch_config.flush_size_threshold,
             queue_capacity = batch_config.queue_capacity,
@@ -821,6 +830,7 @@ impl<B: StorageBackend + 'static> EventHandle<B> {
             drop_count,
             runtime_config: runtime_config.clone(),
             region,
+            shard,
             last_announced_capacity: batch_config.queue_capacity,
         };
 
@@ -915,7 +925,12 @@ impl<B: StorageBackend + 'static> EventHandle<B> {
             Err(mpsc::error::TrySendError::Full(entry)) => match queue.overflow {
                 EventOverflowBehavior::Drop => {
                     let total = queue.drop_count.fetch_add(1, Ordering::Relaxed) + 1;
-                    metrics::record_event_overflow(&queue.region, OVERFLOW_CAUSE_QUEUE_FULL, 1);
+                    metrics::record_event_overflow(
+                        &queue.region,
+                        &queue.shard,
+                        OVERFLOW_CAUSE_QUEUE_FULL,
+                        1,
+                    );
                     queue.maybe_warn_drop(total);
                     // Entry dropped — action/scope strings are left unused here
                     // deliberately: under sustained overflow, emitting one
@@ -953,6 +968,7 @@ impl<B: StorageBackend + 'static> EventHandle<B> {
                             Err(mpsc::error::TrySendError::Closed(_)) => {
                                 metrics::record_event_overflow(
                                     &queue.region,
+                                    &queue.shard,
                                     OVERFLOW_CAUSE_CHANNEL_CLOSED,
                                     1,
                                 );
@@ -969,7 +985,12 @@ impl<B: StorageBackend + 'static> EventHandle<B> {
                 },
             },
             Err(mpsc::error::TrySendError::Closed(_)) => {
-                metrics::record_event_overflow(&queue.region, OVERFLOW_CAUSE_CHANNEL_CLOSED, 1);
+                metrics::record_event_overflow(
+                    &queue.region,
+                    &queue.shard,
+                    OVERFLOW_CAUSE_CHANNEL_CLOSED,
+                    1,
+                );
                 warn!(
                     region = %queue.region,
                     action = action_str,
@@ -1131,6 +1152,10 @@ struct EventFlusher<B: StorageBackend> {
     drop_count: Arc<AtomicU64>,
     runtime_config: RuntimeConfigHandle,
     region: String,
+    /// Shard label for emitted metrics, pre-stringified from the owning
+    /// RegionGroup's
+    /// [`ShardIdx`](inferadb_ledger_state::shard_routing::ShardIdx).
+    shard: String,
     /// Most recently-observed `queue_capacity` — used to detect
     /// restart-only updates and warn operators once.
     last_announced_capacity: usize,
@@ -1219,7 +1244,7 @@ impl<B: StorageBackend + 'static> EventFlusher<B> {
     /// operator's signal.
     async fn tick(&mut self, config: &EventWriterBatchConfig, trigger: &'static str) {
         let depth_before = self.size_hint.load(Ordering::Relaxed) as u64;
-        metrics::set_event_flush_queue_depth(&self.region, depth_before);
+        metrics::set_event_flush_queue_depth(&self.region, &self.shard, depth_before);
 
         let start = Instant::now();
         let mut drained = Vec::with_capacity(config.drain_batch_max.min(1024));
@@ -1250,6 +1275,7 @@ impl<B: StorageBackend + 'static> EventFlusher<B> {
                 let duration = start.elapsed();
                 metrics::record_event_flush(
                     &self.region,
+                    &self.shard,
                     trigger,
                     duration.as_secs_f64(),
                     drained_count,
@@ -1267,7 +1293,7 @@ impl<B: StorageBackend + 'static> EventFlusher<B> {
                 // Drained entries are gone from the channel; we lose them.
                 // The metric + warn is the signal.
                 self.size_hint.fetch_sub(drained.len(), Ordering::Relaxed);
-                metrics::record_event_flush_failure(&self.region);
+                metrics::record_event_flush_failure(&self.region, &self.shard);
                 warn!(
                     error = %e,
                     region = %self.region,
@@ -1344,6 +1370,7 @@ impl<B: StorageBackend + 'static> EventFlusher<B> {
                 if remaining > 0 {
                     metrics::record_event_overflow(
                         &self.region,
+                        &self.shard,
                         OVERFLOW_CAUSE_SHUTDOWN_TIMEOUT,
                         remaining,
                     );
@@ -1379,7 +1406,7 @@ impl<B: StorageBackend + 'static> EventFlusher<B> {
                 },
                 Err(e) => {
                     self.size_hint.fetch_sub(batch.len(), Ordering::Relaxed);
-                    metrics::record_event_flush_failure(&self.region);
+                    metrics::record_event_flush_failure(&self.region, &self.shard);
                     warn!(
                         error = %e,
                         region = %self.region,
@@ -1397,6 +1424,7 @@ impl<B: StorageBackend + 'static> EventFlusher<B> {
         if drained_total > 0 {
             metrics::record_event_flush(
                 &self.region,
+                &self.shard,
                 FLUSH_TRIGGER_SHUTDOWN,
                 duration_secs,
                 drained_total,
@@ -2316,6 +2344,7 @@ mod tests {
             batch,
             runtime,
             "test-region",
+            inferadb_ledger_state::shard_routing::ShardIdx(0),
         );
 
         handle.record_handler_event(sample_handler_entry(1));
@@ -2390,6 +2419,7 @@ mod tests {
             batch,
             runtime,
             "test-region",
+            inferadb_ledger_state::shard_routing::ShardIdx(0),
         );
 
         let synced_before = events_db.db().last_synced_snapshot_id();
@@ -2479,6 +2509,7 @@ mod tests {
             batch,
             runtime,
             "test-region",
+            inferadb_ledger_state::shard_routing::ShardIdx(0),
         );
 
         for i in 0..3 {
@@ -2527,6 +2558,7 @@ mod tests {
             batch,
             runtime,
             "test-region",
+            inferadb_ledger_state::shard_routing::ShardIdx(0),
         );
 
         for i in 0..5 {
@@ -2576,6 +2608,7 @@ mod tests {
             batch,
             runtime,
             "test-region",
+            inferadb_ledger_state::shard_routing::ShardIdx(0),
         );
 
         // 5 entries — capacity 2 → at least 3 drops.
@@ -2621,6 +2654,7 @@ mod tests {
             batch,
             runtime,
             "test-region",
+            inferadb_ledger_state::shard_routing::ShardIdx(0),
         );
 
         // Fill the queue to capacity.
@@ -2681,6 +2715,7 @@ mod tests {
             initial,
             runtime.clone(),
             "test-region",
+            inferadb_ledger_state::shard_routing::ShardIdx(0),
         );
 
         handle.record_handler_event(sample_handler_entry(1));
@@ -2745,6 +2780,7 @@ mod tests {
             batch,
             runtime,
             "test-region",
+            inferadb_ledger_state::shard_routing::ShardIdx(0),
         );
 
         for i in 0..42 {
@@ -2785,6 +2821,7 @@ mod tests {
             batch,
             runtime,
             "test-region",
+            inferadb_ledger_state::shard_routing::ShardIdx(0),
         );
         let handle_b = handle_a.clone();
 
@@ -2953,6 +2990,7 @@ mod tests {
                 batch,
                 runtime,
                 "test-region",
+                inferadb_ledger_state::shard_routing::ShardIdx(0),
             );
             (dir, events_db, handle, join)
         }
@@ -3080,6 +3118,7 @@ mod tests {
                         batch_off,
                         runtime_a,
                         "test-region-a",
+                        inferadb_ledger_state::shard_routing::ShardIdx(0),
                     );
 
                     // Handle B: batched path with batching enabled.

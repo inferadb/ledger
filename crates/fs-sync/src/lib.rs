@@ -15,11 +15,10 @@
 //! last few seconds of writes under sudden power loss on hardware without
 //! power-loss-protection capacitors.
 //!
-//! - **Apple** (`target_vendor = "apple"`): `fcntl(F_BARRIERFSYNC)` — the
-//!   this crate's sole `unsafe` block.
-//! - **Linux / other Unix**: `fdatasync` via [`File::sync_data`] (already
-//!   has barrier semantics at the VFS layer on ext4/xfs/btrfs with default
-//!   mount options).
+//! - **Apple** (`target_vendor = "apple"`): `fcntl(F_BARRIERFSYNC)` — the this crate's sole
+//!   `unsafe` block.
+//! - **Linux / other Unix**: `fdatasync` via [`File::sync_data`] (already has barrier semantics at
+//!   the VFS layer on ext4/xfs/btrfs with default mount options).
 //! - **Windows / other**: [`File::sync_data`].
 //!
 //! See `docs/architecture/durability.md` for the operator-facing durability
@@ -56,11 +55,7 @@ fn sync_barrier_apple(file: &File) -> io::Result<()> {
     // returns -1 with `errno` set, which we propagate via
     // `io::Error::last_os_error()`.
     let rc = unsafe { libc::fcntl(fd, libc::F_BARRIERFSYNC) };
-    if rc == -1 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    if rc == -1 { Err(io::Error::last_os_error()) } else { Ok(()) }
 }
 
 #[cfg(test)]

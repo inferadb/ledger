@@ -390,10 +390,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 return (
                                     LedgerResponse::Error {
                                         code: ErrorCode::Internal,
-                                        message: format!(
-                                            "Failed to compute state root: {}",
-                                            e
-                                        ),
+                                        message: format!("Failed to compute state root: {}", e),
                                     },
                                     None,
                                 );

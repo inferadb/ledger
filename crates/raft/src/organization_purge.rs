@@ -13,12 +13,12 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 use chrono::Utc;
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
-use inferadb_ledger_types::{OrganizationId, config::OrganizationPurgeConfig};
+use inferadb_ledger_types::{
+    OrganizationId, config::OrganizationPurgeConfig, trace_context::TraceContext,
+};
 use tokio::time::{interval, sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
-
-use inferadb_ledger_types::trace_context::TraceContext;
 
 use crate::{
     consensus_handle::ConsensusHandle,

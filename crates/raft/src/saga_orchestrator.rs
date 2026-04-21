@@ -3358,8 +3358,9 @@ mod tests {
     fn build_regional_proposal_metadata_injects_traceparent() {
         let tp = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
         let metadata = build_regional_proposal_metadata(Some(tp));
-        let got =
-            metadata.get(inferadb_ledger_types::trace_context::TRACEPARENT_HEADER).and_then(|v| v.to_str().ok());
+        let got = metadata
+            .get(inferadb_ledger_types::trace_context::TRACEPARENT_HEADER)
+            .and_then(|v| v.to_str().ok());
         assert_eq!(got, Some(tp));
     }
 

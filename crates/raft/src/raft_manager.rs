@@ -751,11 +751,7 @@ impl RaftManager {
     /// reach the owning shard's Raft group. Task 5 migrates service call
     /// sites from [`get_region_group`](Self::get_region_group) to this
     /// method; until then the two are equivalent (single-shard runtime).
-    pub fn get_shard_group(
-        &self,
-        region: Region,
-        shard: ShardIdx,
-    ) -> Result<Arc<RegionGroup>> {
+    pub fn get_shard_group(&self, region: Region, shard: ShardIdx) -> Result<Arc<RegionGroup>> {
         self.regions
             .read()
             .get(&(region, shard))
@@ -1216,8 +1212,20 @@ impl RaftManager {
         // concurrent modifier of `applied_state`.
         match log_store.replay_crash_gap(&wal, shard_id).await {
             Ok(stats) => {
-                metrics::record_state_recovery_replay(region.as_str(), stats.replayed_entries);
-                metrics::record_state_recovery_duration(region.as_str(), stats.duration);
+                // Phase A: single shard per region. Task 5 expands to
+                // `0..shards_per_region` and will thread the actual shard
+                // index from the enclosing per-shard start loop.
+                let shard_label = ShardIdx(0).0.to_string();
+                metrics::record_state_recovery_replay(
+                    region.as_str(),
+                    &shard_label,
+                    stats.replayed_entries,
+                );
+                metrics::record_state_recovery_duration(
+                    region.as_str(),
+                    &shard_label,
+                    stats.duration,
+                );
                 info!(
                     region = region.as_str(),
                     applied_durable = stats.applied_durable,
@@ -1326,8 +1334,7 @@ impl RaftManager {
                     >
             };
 
-            let writer =
-                BatchWriter::new(batch_config, submit_fn, region.to_string(), ShardIdx(0));
+            let writer = BatchWriter::new(batch_config, submit_fn, region.to_string(), ShardIdx(0));
             let bw_handle = writer.handle();
             tokio::spawn(writer.run());
             Some(bw_handle)
@@ -1368,6 +1375,8 @@ impl RaftManager {
             log_store,
             handle.response_map().clone(),
             handle.spillover().clone(),
+            region.as_str().to_string(),
+            ShardIdx(0),
         );
         if region == inferadb_ledger_types::Region::GLOBAL {
             apply_worker = apply_worker.with_dr_event_tx(self.dr_event_tx.clone());
@@ -1570,10 +1579,9 @@ impl RaftManager {
         // Open Raft log store (uses inferadb-ledger-store storage - handles open/create internally)
         // Task 3 stopgap: single-shard layout forces ShardIdx(0). Task 4
         // parameterizes RegionGroup over the full shard set.
-        let log_path = self.storage_manager.raft_db_path(
-            region,
-            inferadb_ledger_state::shard_routing::ShardIdx(0),
-        );
+        let log_path = self
+            .storage_manager
+            .raft_db_path(region, inferadb_ledger_state::shard_routing::ShardIdx(0));
         // Derive leader lease duration from election_timeout_min / 2.
         // This guarantees no new leader can be elected while the lease is valid.
         let lease_duration =

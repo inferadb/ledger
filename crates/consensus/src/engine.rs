@@ -107,15 +107,8 @@ impl ConsensusEngine {
         let (proposal_tx, proposal_rx) = mpsc::channel(PROPOSAL_QUEUE_CAPACITY);
         let (commit_tx, commit_rx) = mpsc::channel(10_000);
 
-        let mut reactor = Reactor::new(
-            control_rx,
-            proposal_rx,
-            wal,
-            clock,
-            transport,
-            commit_tx,
-            flush_interval,
-        );
+        let mut reactor =
+            Reactor::new(control_rx, proposal_rx, wal, clock, transport, commit_tx, flush_interval);
         let mut state_receivers = HashMap::new();
 
         for shard in shards {

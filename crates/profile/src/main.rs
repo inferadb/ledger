@@ -218,13 +218,8 @@ async fn main() -> Result<(), MainError> {
                 concurrency = a.concurrency,
                 "concurrent-writes-multivault: provisioned vaults"
             );
-            workloads::concurrent_writes_multivault::run(
-                &harness,
-                duration,
-                a.concurrency,
-                vaults,
-            )
-            .await
+            workloads::concurrent_writes_multivault::run(&harness, duration, a.concurrency, vaults)
+                .await
         },
         Preset::ConcurrentWritesMultiorg(a) => {
             let mut targets = harness
@@ -239,13 +234,8 @@ async fn main() -> Result<(), MainError> {
                 concurrency = a.concurrency,
                 "concurrent-writes-multiorg: provisioned orgs"
             );
-            workloads::concurrent_writes_multiorg::run(
-                &harness,
-                duration,
-                a.concurrency,
-                targets,
-            )
-            .await
+            workloads::concurrent_writes_multiorg::run(&harness, duration, a.concurrency, targets)
+                .await
         },
     };
 

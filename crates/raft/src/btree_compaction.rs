@@ -10,16 +10,12 @@ use std::{
 
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
-use inferadb_ledger_types::config::BTreeCompactionConfig;
+use inferadb_ledger_types::{config::BTreeCompactionConfig, trace_context::TraceContext};
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use inferadb_ledger_types::trace_context::TraceContext;
-
-use crate::{
-    consensus_handle::ConsensusHandle, metrics::record_btree_compaction,
-};
+use crate::{consensus_handle::ConsensusHandle, metrics::record_btree_compaction};
 
 /// Default interval between B+ tree compaction cycles (1 hour).
 const DEFAULT_COMPACTION_INTERVAL: Duration = Duration::from_secs(3600);

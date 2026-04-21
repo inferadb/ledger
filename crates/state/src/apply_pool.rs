@@ -17,19 +17,17 @@
 //! runtime. In return you give up some of the theoretical parallel
 //! speedup, but the real-world gain dominates because:
 //!
-//! - Dirty-bucket counts are typically 10-50 per batch; parallelism above
-//!   ~8 workers rarely saturates the work queue.
-//! - Bucket hashing is bursty (sub-millisecond per bucket); thread spin-up
-//!   dominates beyond ~8 threads.
-//! - The tail-regression cost is measurable; the speedup ceiling above 8
-//!   threads is not.
+//! - Dirty-bucket counts are typically 10-50 per batch; parallelism above ~8 workers rarely
+//!   saturates the work queue.
+//! - Bucket hashing is bursty (sub-millisecond per bucket); thread spin-up dominates beyond ~8
+//!   threads.
+//! - The tail-regression cost is measurable; the speedup ceiling above 8 threads is not.
 //!
 //! # Callers
 //!
 //! - `state::StateLayer::compute_state_root` — inner dirty-bucket scan.
-//! - `raft::log_storage::raft_impl::apply_committed_entries` — post-loop
-//!   per-vault `compute_state_root` + per-entry `compute_vault_block_hash`
-//!   via the re-export below.
+//! - `raft::log_storage::raft_impl::apply_committed_entries` — post-loop per-vault
+//!   `compute_state_root` + per-entry `compute_vault_block_hash` via the re-export below.
 
 use std::sync::LazyLock;
 

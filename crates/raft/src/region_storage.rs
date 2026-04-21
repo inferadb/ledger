@@ -309,20 +309,12 @@ impl RegionStorageManager {
     /// # Errors
     ///
     /// Returns [`RegionStorageError::NotOpen`] if that shard is not open.
-    pub fn close_shard(
-        &self,
-        region: Region,
-        shard: ShardIdx,
-    ) -> Result<(), RegionStorageError> {
+    pub fn close_shard(&self, region: Region, shard: ShardIdx) -> Result<(), RegionStorageError> {
         let removed = self.shards.write().remove(&(region, shard));
         if removed.is_none() {
             return Err(RegionStorageError::NotOpen { region });
         }
-        tracing::info!(
-            region = region.as_str(),
-            shard = shard.value(),
-            "Closed shard storage"
-        );
+        tracing::info!(region = region.as_str(), shard = shard.value(), "Closed shard storage");
         Ok(())
     }
 
@@ -370,11 +362,7 @@ impl RegionStorageManager {
     /// this with full (region, shard) enumeration.
     #[doc(hidden)]
     pub fn regions(&self) -> Vec<Region> {
-        self.shards
-            .read()
-            .keys()
-            .filter_map(|(r, s)| (s.value() == 0).then_some(*r))
-            .collect()
+        self.shards.read().keys().filter_map(|(r, s)| (s.value() == 0).then_some(*r)).collect()
     }
 
     /// Discovers regions with existing data on disk.
@@ -530,8 +518,7 @@ mod tests {
 
         mgr.open_region(Region::US_EAST_VA).expect("open us-east-va");
 
-        let shard_dir =
-            temp.path().join("regions").join("us-east-va").join("shard-0");
+        let shard_dir = temp.path().join("regions").join("us-east-va").join("shard-0");
         assert!(shard_dir.exists());
         assert!(shard_dir.join("state.db").exists());
         assert!(shard_dir.join("blocks.db").exists());
@@ -548,11 +535,7 @@ mod tests {
         mgr.open_shard(Region::US_EAST_VA, ShardIdx(2)).expect("shard 2");
 
         for shard in 0..3 {
-            let dir = temp
-                .path()
-                .join("regions")
-                .join("us-east-va")
-                .join(format!("shard-{shard}"));
+            let dir = temp.path().join("regions").join("us-east-va").join(format!("shard-{shard}"));
             assert!(dir.exists(), "shard-{shard} dir missing");
             assert!(dir.join("state.db").exists());
             assert!(dir.join("blocks.db").exists());

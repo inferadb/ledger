@@ -14,12 +14,12 @@ use std::{sync::Arc, time::Duration};
 
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
-use inferadb_ledger_types::{ClientId, Operation, OrganizationId, Transaction, VaultId};
+use inferadb_ledger_types::{
+    ClientId, Operation, OrganizationId, Transaction, VaultId, trace_context::TraceContext,
+};
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
-
-use inferadb_ledger_types::trace_context::TraceContext;
 
 use crate::{
     consensus_handle::ConsensusHandle,

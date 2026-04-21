@@ -534,16 +534,13 @@ impl RaftLogStore {
         // response carries a stale placeholder `block_hash`.
         //
         // 1. Collect unique vault IDs (sorted for deterministic log output).
-        // 2. Compute `state_root` per vault in parallel via rayon —
-        //    `StorageEngine` supports concurrent read txns, so there is no
-        //    contention between vaults. With N unique vaults and M rayon
-        //    workers, this shrinks the phase from ~N × per-vault-work to
-        //    ~N/M.
+        // 2. Compute `state_root` per vault in parallel via rayon — `StorageEngine` supports
+        //    concurrent read txns, so there is no contention between vaults. With N unique vaults
+        //    and M rayon workers, this shrinks the phase from ~N × per-vault-work to ~N/M.
         // 3. Patch vault_entries' state_root field (serial, cheap).
-        // 4. Compute per-entry `block_hash` in parallel — pure CPU, each
-        //    entry independent.
-        // 5. Patch Write response block_hashes (serial walk to preserve the
-        //    original response ordering into BatchWrite.responses).
+        // 4. Compute per-entry `block_hash` in parallel — pure CPU, each entry independent.
+        // 5. Patch Write response block_hashes (serial walk to preserve the original response
+        //    ordering into BatchWrite.responses).
         //
         // Semantic model: within a batched commit, all vault heights for a
         // given vault share the post-batch state_root — they observe the
@@ -601,10 +598,7 @@ impl RaftLogStore {
 
             // Step 4: parallel block_hash computation (pure CPU).
             let block_hashes: Vec<inferadb_ledger_types::Hash> = pool.install(|| {
-                vault_entries
-                    .par_iter()
-                    .map(|e| self.compute_vault_block_hash(e))
-                    .collect()
+                vault_entries.par_iter().map(|e| self.compute_vault_block_hash(e)).collect()
             });
 
             // Step 5: serial patch of Write response block_hashes using the

@@ -152,6 +152,7 @@ impl StateCheckpointer {
     /// checkpointer and dashboards can split their cadence per shard without
     /// any further metric-schema changes.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn from_config(
         state_db: Arc<Database<FileBackend>>,
         raft_db: Arc<Database<FileBackend>>,

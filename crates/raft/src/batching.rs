@@ -357,11 +357,7 @@ where
                 let mut state = this.state.lock();
 
                 // Emit batch queue depth gauge for SLI monitoring.
-                metrics::set_batch_queue_depth(
-                    state.pending.len(),
-                    &this.region,
-                    &this.shard,
-                );
+                metrics::set_batch_queue_depth(state.pending.len(), &this.region, &this.shard);
 
                 if state.should_flush(&this.config) { Some(state.take_batch()) } else { None }
             };
@@ -474,7 +470,7 @@ mod tests {
             max_batch_size: 10,
             batch_timeout: Duration::from_millis(100),
             tick_interval: Duration::from_millis(10),
-        max_in_flight_batches: 1,
+            max_in_flight_batches: 1,
         };
 
         let call_count = Arc::new(AtomicUsize::new(0));
@@ -532,7 +528,7 @@ mod tests {
             max_batch_size: 3,
             batch_timeout: Duration::from_secs(10), // Long timeout
             tick_interval: Duration::from_millis(1),
-        max_in_flight_batches: 1,
+            max_in_flight_batches: 1,
         };
 
         let call_count = Arc::new(AtomicUsize::new(0));
@@ -581,7 +577,7 @@ mod tests {
             max_batch_size: 2,
             batch_timeout: Duration::from_millis(10),
             tick_interval: Duration::from_millis(1),
-        max_in_flight_batches: 1,
+            max_in_flight_batches: 1,
         };
 
         let mut state = BatchState::new();
@@ -623,7 +619,7 @@ mod tests {
             max_batch_size: 10,
             batch_timeout: Duration::from_secs(10), // Long timeout
             tick_interval: Duration::from_millis(1),
-        max_in_flight_batches: 1,
+            max_in_flight_batches: 1,
         };
 
         let mut state = BatchState::new();
@@ -663,7 +659,7 @@ mod tests {
             max_batch_size: 100,                      // High limit
             batch_timeout: Duration::from_millis(20), // Short timeout
             tick_interval: Duration::from_millis(5),
-        max_in_flight_batches: 1,
+            max_in_flight_batches: 1,
         };
 
         let call_count = Arc::new(AtomicUsize::new(0));

@@ -227,7 +227,6 @@ pub struct Config {
     #[builder(default = default_shards_per_region())]
     pub shards_per_region: usize,
 
-
     // === Write Batching ===
     /// Per-region write-batching configuration.
     ///

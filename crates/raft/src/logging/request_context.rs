@@ -398,14 +398,19 @@ impl RequestContext {
         ctx.event_handle = event_handle;
         ctx.extract_transport_metadata(request.metadata());
 
-        let trace_ctx = inferadb_ledger_types::trace_context::extract_or_generate(request.metadata());
+        let trace_ctx =
+            inferadb_ledger_types::trace_context::extract_or_generate(request.metadata());
         ctx.set_trace_context_from(&trace_ctx);
 
         ctx
     }
 
-    /// Copies trace fields from a [`TraceContext`](inferadb_ledger_types::trace_context::TraceContext).
-    pub fn set_trace_context_from(&mut self, trace_ctx: &inferadb_ledger_types::trace_context::TraceContext) {
+    /// Copies trace fields from a
+    /// [`TraceContext`](inferadb_ledger_types::trace_context::TraceContext).
+    pub fn set_trace_context_from(
+        &mut self,
+        trace_ctx: &inferadb_ledger_types::trace_context::TraceContext,
+    ) {
         self.trace_id = Some(trace_ctx.trace_id.clone());
         self.span_id = Some(trace_ctx.span_id.clone());
         self.parent_span_id = trace_ctx.parent_span_id.clone();

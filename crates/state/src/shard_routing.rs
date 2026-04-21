@@ -10,14 +10,12 @@
 //!
 //! The workspace has three distinct "shard" concepts:
 //!
-//! - [`crate::shard::ShardManager`] — per-shard state manager (one instance
-//!   per Raft group). Misleadingly named; tracks vault metadata *within*
-//!   a single shard. Unrelated to routing.
-//! - `consensus::router::Router` — an explicit (org → shard) mapping table
-//!   that supports dynamic split / merge operations. Reserved for Phase C
-//!   shard-splitting; unused in Phase A.
-//! - This module — the deterministic hash-based routing used at the service
-//!   boundary. Stateless, config-driven. **This is what Phase A consumes.**
+//! - [`crate::shard::ShardManager`] — per-shard state manager (one instance per Raft group).
+//!   Misleadingly named; tracks vault metadata *within* a single shard. Unrelated to routing.
+//! - `consensus::router::Router` — an explicit (org → shard) mapping table that supports dynamic
+//!   split / merge operations. Reserved for Phase C shard-splitting; unused in Phase A.
+//! - This module — the deterministic hash-based routing used at the service boundary. Stateless,
+//!   config-driven. **This is what Phase A consumes.**
 //!
 //! # Routing stability
 //!
@@ -70,11 +68,7 @@ impl ShardIdx {
 /// assert!(shard.value() < 16);
 /// ```
 #[must_use]
-pub fn resolve_shard(
-    region: Region,
-    org_id: OrganizationId,
-    shards_per_region: usize,
-) -> ShardIdx {
+pub fn resolve_shard(region: Region, org_id: OrganizationId, shards_per_region: usize) -> ShardIdx {
     debug_assert!(shards_per_region > 0, "shards_per_region must be > 0");
     if shards_per_region <= 1 {
         return ShardIdx(0);
@@ -145,10 +139,7 @@ mod tests {
     #[test]
     fn single_shard_always_returns_zero() {
         for org in 0..100 {
-            assert_eq!(
-                resolve_shard(Region::US_EAST_VA, OrganizationId::new(org), 1),
-                ShardIdx(0),
-            );
+            assert_eq!(resolve_shard(Region::US_EAST_VA, OrganizationId::new(org), 1), ShardIdx(0),);
         }
     }
 
@@ -186,11 +177,7 @@ mod tests {
         let shard_count = 16;
         let mut histogram: HashMap<ShardIdx, usize> = HashMap::new();
         for org in 0..10_000 {
-            let shard = resolve_shard(
-                Region::US_EAST_VA,
-                OrganizationId::new(org),
-                shard_count,
-            );
+            let shard = resolve_shard(Region::US_EAST_VA, OrganizationId::new(org), shard_count);
             *histogram.entry(shard).or_insert(0) += 1;
         }
         // Each shard should hold ~625 orgs (10_000 / 16). With 1 %
@@ -199,8 +186,7 @@ mod tests {
         let expected = 10_000 / shard_count;
         for shard_idx in 0..shard_count as u64 {
             let count = *histogram.get(&ShardIdx(shard_idx)).unwrap_or(&0);
-            let deviation =
-                (count as f64 - expected as f64).abs() / expected as f64;
+            let deviation = (count as f64 - expected as f64).abs() / expected as f64;
             assert!(
                 deviation < 0.25,
                 "shard {shard_idx} got {count} orgs (expected ~{expected}); distribution skewed"
