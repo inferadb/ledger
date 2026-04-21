@@ -282,6 +282,30 @@ impl ConsensusEngine {
         rx.await.map_err(|_| ConsensusError::ReactorShutdown)?
     }
 
+    /// Externally asserts a leader for a shard in delegated-leadership
+    /// mode (B.1 unified-leadership model).
+    ///
+    /// Routes [`crate::reactor::ReactorEvent::AdoptLeader`] to the target
+    /// shard. Caller is responsible for ensuring the asserted leader
+    /// actually has a quorum — typically by deriving the leader/term
+    /// from another shard whose Raft elections established quorum (the
+    /// region coordinator).
+    ///
+    /// Fire-and-forget: returns `Ok(())` once the event is enqueued. The
+    /// reactor processes the event asynchronously; observers see the new
+    /// leader via the shard's `state_rx` watch on the next state update.
+    pub async fn adopt_leader(
+        &self,
+        shard: ShardId,
+        leader: NodeId,
+        term: u64,
+    ) -> Result<(), ConsensusError> {
+        self.control_inbox
+            .send(ReactorEvent::AdoptLeader { shard, leader, term })
+            .await
+            .map_err(|_| ConsensusError::InboxFull)
+    }
+
     /// Promotes a learner to voter.
     pub async fn promote_voter(&self, shard: ShardId, node: NodeId) -> Result<(), ConsensusError> {
         let (tx, rx) = oneshot::channel();

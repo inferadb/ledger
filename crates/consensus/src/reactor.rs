@@ -126,6 +126,21 @@ pub enum ReactorEvent {
         /// Channel to acknowledge flush completion.
         ack: oneshot::Sender<Result<(), ConsensusError>>,
     },
+    /// Externally assert a leader for a delegated shard.
+    ///
+    /// Used by the unified-leadership model — when a region coordinator's
+    /// elected leader changes, every per-organization shard in
+    /// [`crate::LeadershipMode::Delegated`] mode adopts the same leader
+    /// without running its own election. The reactor routes this to
+    /// [`crate::Shard::adopt_leader`] on the target shard.
+    AdoptLeader {
+        /// Target shard.
+        shard: ShardId,
+        /// The asserted leader.
+        leader: NodeId,
+        /// The leader's term.
+        term: u64,
+    },
     /// Graceful shutdown request.
     Shutdown,
 }
@@ -613,6 +628,22 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                     },
                 };
                 let _ = ack.send(result);
+                vec![]
+            },
+            ReactorEvent::AdoptLeader { shard, leader, term } => {
+                // Route to the target shard's `adopt_leader` (delegated
+                // leadership). If the shard is not registered with this
+                // reactor, drop the event silently — typical when an
+                // organization shard hasn't been bootstrapped on this
+                // node yet (the next adopt_leader after bootstrap will
+                // converge state).
+                if let Some(s) = self.shards.get_mut(&shard) {
+                    let actions = s.adopt_leader(leader, term);
+                    if !actions.is_empty() {
+                        self.process_actions(actions);
+                        return vec![shard];
+                    }
+                }
                 vec![]
             },
             ReactorEvent::Shutdown => {

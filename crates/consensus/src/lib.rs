@@ -49,7 +49,7 @@ pub use leadership::ShardState;
 pub use lease::LeaderLease;
 pub use message::Message;
 pub use rng::{RngSource, SystemRng};
-pub use shard::Shard;
+pub use shard::{LeadershipMode, Shard};
 pub use state_machine::{ApplyResult, NoopStateMachine, SnapshotError, StateMachine};
 pub use transport::{InMemoryTransport, NetworkTransport};
 pub use types::*;

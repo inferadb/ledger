@@ -181,6 +181,31 @@ impl ConsensusHandle {
         self.state_rx.borrow().clone()
     }
 
+    /// Returns a clone of the underlying state-watch receiver so callers
+    /// can subscribe to leader / term / commit-index changes.
+    ///
+    /// Used by the B.1 unified-leadership propagator to react to the
+    /// data-region group's leader changes and re-`adopt_leader` on every
+    /// delegated organization shard.
+    pub fn state_rx(&self) -> &watch::Receiver<ShardState> {
+        &self.state_rx
+    }
+
+    /// Externally asserts a leader for this shard via the underlying
+    /// engine. Only meaningful for shards in
+    /// [`inferadb_ledger_consensus::LeadershipMode::Delegated`] mode; for
+    /// `SelfElect` shards the assertion may be overwritten by the next
+    /// election cycle. Caller is responsible for ensuring the asserted
+    /// leader has a quorum (typically by deriving from a shard whose Raft
+    /// elections established quorum).
+    pub async fn adopt_leader(
+        &self,
+        leader: NodeId,
+        term: u64,
+    ) -> Result<(), inferadb_ledger_consensus::ConsensusError> {
+        self.engine.adopt_leader(self.shard, leader, term).await
+    }
+
     /// Returns `true` if a membership change is currently in-flight.
     pub fn has_pending_membership(&self) -> bool {
         self.state_rx.borrow().pending_membership

@@ -66,6 +66,48 @@ pub struct Shard<C: Clock, R: RngSource> {
     /// fire spuriously, shutting down a shard the node is actually a
     /// member of at the log tip.
     was_ever_member: bool,
+    /// How this shard determines its leader.
+    ///
+    /// In [`LeadershipMode::SelfElect`] (the default), the shard runs
+    /// standard Raft elections — election-timeout fires transition to
+    /// PreCandidate, vote-collection promotes to Leader.
+    ///
+    /// In [`LeadershipMode::Delegated`], elections are disabled. The
+    /// shard's leader is set externally via [`Shard::adopt_leader`] —
+    /// typically driven by another shard's leader changes (the region
+    /// coordinator's leader becomes every per-organization shard's
+    /// leader under the B.1 unified-leadership model).
+    leadership_mode: LeadershipMode,
+}
+
+/// Determines how a [`Shard`] establishes its leader.
+///
+/// The default mode is `SelfElect` — standard Raft elections. The
+/// `Delegated` mode is used by per-organization shards under the B.1
+/// unified-leadership model: the region coordinator's elected leader is
+/// adopted as the org shard's leader without a separate election.
+///
+/// # Safety
+///
+/// In `Delegated` mode, the shard must NOT initiate elections (election
+/// timeouts no-op) and must accept externally-asserted leadership via
+/// [`Shard::adopt_leader`]. The caller (the consensus engine + reactor)
+/// is responsible for ensuring that adopted leaders actually have a quorum
+/// — typically by deriving them from another shard whose Raft elections
+/// already established quorum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeadershipMode {
+    /// Standard Raft elections.
+    SelfElect,
+    /// Leader is asserted externally via [`Shard::adopt_leader`].
+    /// Election timeouts no-op.
+    Delegated,
+}
+
+impl Default for LeadershipMode {
+    fn default() -> Self {
+        Self::SelfElect
+    }
 }
 
 impl<C: Clock + Clone, R: RngSource> Shard<C, R> {
@@ -130,7 +172,106 @@ impl<C: Clock + Clone, R: RngSource> Shard<C, R> {
             closed_ts,
             leader_id: None,
             was_ever_member,
+            leadership_mode: LeadershipMode::default(),
         }
+    }
+
+    /// Sets the shard's leadership mode.
+    ///
+    /// Called by the reactor at shard construction time to configure
+    /// per-organization shards as [`LeadershipMode::Delegated`]. Once a
+    /// shard has run any elections or accepted any AppendEntries,
+    /// switching modes mid-flight is unsafe — set the mode immediately
+    /// after construction and before the shard accepts any events.
+    pub fn set_leadership_mode(&mut self, mode: LeadershipMode) {
+        self.leadership_mode = mode;
+    }
+
+    /// Returns the shard's current leadership mode.
+    #[inline]
+    pub fn leadership_mode(&self) -> LeadershipMode {
+        self.leadership_mode
+    }
+
+    /// Externally asserts a leader for this shard.
+    ///
+    /// Used in [`LeadershipMode::Delegated`] mode to install the leader
+    /// derived from another shard's elected leader (the region
+    /// coordinator's leader becomes every per-organization shard's
+    /// leader). The caller is responsible for ensuring the asserted
+    /// leader has a quorum — typically by deriving it from a shard whose
+    /// Raft elections have already established quorum.
+    ///
+    /// Behavior:
+    /// - If `term < self.current_term`: rejected (stale assertion).
+    ///   Returns no actions.
+    /// - If `term > self.current_term`: term is advanced. State
+    ///   transitions to Leader if `leader == self.node_id`, otherwise
+    ///   Follower. Voted_for is cleared. Election timer is reset.
+    /// - If `term == self.current_term`: leader_id is updated (or
+    ///   confirmed). State adjusts as above. Election timer is reset.
+    ///
+    /// Calling this in [`LeadershipMode::SelfElect`] is permitted but
+    /// not recommended — it pre-empts the normal Raft election flow and
+    /// can cause split-brain if combined with concurrent elections.
+    pub fn adopt_leader(&mut self, leader: NodeId, term: u64) -> Vec<Action> {
+        if self.state == NodeState::Failed || self.state == NodeState::Shutdown {
+            return Vec::new();
+        }
+        if term < self.current_term {
+            return Vec::new();
+        }
+        // Idempotent: if already in the same term with the same leader,
+        // nothing to do.
+        if term == self.current_term
+            && self.leader_id == Some(leader)
+            && ((leader == self.node_id && self.state == NodeState::Leader)
+                || (leader != self.node_id && self.state == NodeState::Follower))
+        {
+            return Vec::new();
+        }
+        let mut actions = Vec::new();
+        if term > self.current_term {
+            self.current_term = term;
+            self.voted_for = None;
+        }
+        self.leader_id = Some(leader);
+        if leader == self.node_id {
+            // Local node is the new leader. Initialize per-peer match-index
+            // tracking and schedule heartbeats so followers learn about the
+            // leadership through standard AppendEntries flow. Skip the
+            // standard new-leader no-op entry: under unified leadership,
+            // term advancement comes from the data-region group's
+            // election, and the no-op pattern (forcing a quorum ack to
+            // resolve term-T-1 commits) is satisfied by the data-region
+            // group's own no-op entry on its term transition.
+            self.state = NodeState::Leader;
+            let next = self.log.len() as u64 + 1;
+            self.peer_states = self
+                .membership
+                .voters
+                .iter()
+                .filter(|&&id| id != self.node_id)
+                .map(|&id| PeerState::voter(id, next))
+                .chain(
+                    self.membership
+                        .learners
+                        .iter()
+                        .map(|&id| PeerState::learner(id, next, false)),
+                )
+                .collect();
+            self.self_match_index = self.log.len() as u64;
+            actions.push(Action::ScheduleTimer {
+                shard: self.id,
+                kind: TimerKind::Heartbeat,
+                deadline: self.clock.now() + self.config.heartbeat_interval,
+            });
+            actions.extend(self.send_append_entries_to_all());
+        } else {
+            self.state = NodeState::Follower;
+        }
+        self.reset_election_timer(&mut actions);
+        actions
     }
 
     /// Returns the actions that should be processed when this shard is first
@@ -311,6 +452,18 @@ impl<C: Clock + Clone, R: RngSource> Shard<C, R> {
     pub fn handle_election_timeout(&mut self) -> Vec<Action> {
         if self.state == NodeState::Failed {
             return Vec::new();
+        }
+        // Delegated-leadership shards never initiate elections — their
+        // leader is set externally via `adopt_leader`, derived from
+        // another shard's elected leader (the region coordinator's
+        // leader becomes every per-organization shard's leader under the
+        // B.1 unified-leadership model). The timer is rescheduled so the
+        // event loop continues to wake at the configured cadence; the
+        // wake is just a no-op for election purposes.
+        if self.leadership_mode == LeadershipMode::Delegated {
+            let mut actions = Vec::new();
+            self.reset_election_timer(&mut actions);
+            return actions;
         }
         // Non-voters must not start elections. This prevents a node that was
         // added to a data region (but isn't in the voter set yet) from winning

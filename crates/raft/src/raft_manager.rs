@@ -225,6 +225,19 @@ pub struct RegionConfig {
     /// inside `open_region_storage` from the locally-opened database, avoiding
     /// a double-open of the same file.
     pub events_config: Option<inferadb_ledger_types::events::EventConfig>,
+    /// Whether this group runs in delegated-leadership mode.
+    ///
+    /// When `true`, the consensus shard is constructed with
+    /// [`inferadb_ledger_consensus::LeadershipMode::Delegated`]: it never
+    /// initiates elections, and its leader is set externally via
+    /// [`crate::raft_manager::RaftManager::adopt_organization_leader`]
+    /// driven by the data-region group's elected leader (the B.1
+    /// unified-leadership model).
+    ///
+    /// `false` (default) keeps the standard self-electing Raft behavior
+    /// for the data-region and system groups.
+    #[builder(default = false)]
+    pub delegated_leadership: bool,
 }
 
 impl RegionConfig {
@@ -774,15 +787,26 @@ impl RaftManager {
             },
             _ => None,
         };
+        // B.1.8 + B.1.7: route org-bearing requests to the per-org
+        // delegated-leadership group. Falls back to the legacy
+        // OrganizationId::new(0) group when the per-org group isn't yet
+        // registered locally (race with CreateOrganization apply →
+        // bootstrap handler) or when no organization is identified in
+        // the request payload. System-org writes (saga records) pin to
+        // OrganizationId::new(0) so the saga orchestrator's read path
+        // (which uses `get_region_group` → reads from the legacy group)
+        // sees what its writes produced.
         let organization_id = match org {
-            // System-org writes (saga records, system-vault internals)
-            // pin to shard 0 so the saga orchestrator's read path —
-            // which uses `get_region_group` and thus reads from shard 0 —
-            // sees what its writes produced.
-            // B.1.1 + B.1.2 transitional: every region runs a single
-            // OrganizationGroup at `OrganizationId::new(0)`. Real per-organization
-            // Raft groups land in B.1.6.
-            Some(_organization) => OrganizationId::new(0),
+            Some(organization) if organization == SYSTEM_ORGANIZATION_ID => {
+                OrganizationId::new(0)
+            },
+            Some(organization) => {
+                if self.regions.read().contains_key(&(region, organization)) {
+                    organization
+                } else {
+                    OrganizationId::new(0)
+                }
+            },
             None => OrganizationId::new(0),
         };
         self.get_shard_group(region, organization_id)
@@ -882,6 +906,32 @@ impl RaftManager {
     /// reach the owning shard's Raft group. Task 5 migrates service call
     /// sites from [`get_region_group`](Self::get_region_group) to this
     /// method; until then the two are equivalent (single-shard runtime).
+    /// Looks up the local `OrganizationGroup` whose consensus engine is
+    /// bound to `shard_id`.
+    ///
+    /// Used by the gRPC `RaftService` to route incoming consensus
+    /// `Replicate` messages to the correct engine — each per-organization
+    /// engine has a distinct consensus `ShardId` derived from
+    /// `seahash(region.as_str() || organization_id.to_le_bytes())`, and
+    /// the receiver must dispatch by that id rather than by region
+    /// (looking up by region alone would always hit the legacy
+    /// data-region group at `OrganizationId::new(0)`).
+    ///
+    /// Linear scan over the local groups; at the B.1 target scale of
+    /// tens-to-hundreds of organizations per region, this is fine.
+    /// Future work could maintain a parallel `HashMap<ShardId, ...>` if
+    /// the scan becomes a hotspot.
+    pub fn lookup_by_consensus_shard(
+        &self,
+        shard_id: inferadb_ledger_consensus::types::ShardId,
+    ) -> Option<Arc<OrganizationGroup>> {
+        self.regions
+            .read()
+            .values()
+            .find(|group| group.handle().shard_id() == shard_id)
+            .cloned()
+    }
+
     pub fn get_shard_group(&self, region: Region, shard: OrganizationId) -> Result<Arc<OrganizationGroup>> {
         self.regions
             .read()
@@ -1049,15 +1099,21 @@ impl RaftManager {
     /// * `organization` - Internal organization identifier (`OrganizationId`).
     pub fn route_organization(&self, organization: OrganizationId) -> Option<Arc<OrganizationGroup>> {
         let region = self.get_organization_region(organization)?;
-        // B.1.1 + B.1.2 transitional: every region currently runs a single
-        // OrganizationGroup at `OrganizationId::new(0)` (bootstrap creates it via
-        // `start_region`). Real per-organization Raft groups land in B.1.6
-        // when `CreateOrganization` apply triggers `start_organization_group`.
-        // Until then, all organization traffic routes to the bootstrap
-        // group. The `organization` argument is unused by the lookup but
-        // retained on the signature so the call sites don't churn twice.
-        let _ = organization;
-        let organization_id = OrganizationId::new(0);
+        // B.1.8 + B.1.7: organization_id IS the routing key. The
+        // per-organization Raft group is in `LeadershipMode::Delegated`,
+        // following the data-region group's elected leader (no
+        // independent elections). Falls back to the legacy
+        // `OrganizationId::new(0)` data-region group if the per-org
+        // group isn't yet registered locally — handles the brief race
+        // between `CreateOrganization` apply on this node and the
+        // bootstrap handler awaiting `start_organization_group`. Also
+        // covers the system org (id 0) which IS the OrganizationId(0)
+        // group in GLOBAL.
+        let organization_id = if self.regions.read().contains_key(&(region, organization)) {
+            organization
+        } else {
+            OrganizationId::new(0)
+        };
 
         // Get local `(region, shard)` group. Data regions + their N shards
         // are created through GLOBAL Raft consensus (CreateDataRegion +
@@ -1154,8 +1210,39 @@ impl RaftManager {
             .region(region)
             .initial_members(voter_set)
             .bootstrap(bootstrap)
+            .delegated_leadership(true)
             .build();
-        self.start_region(region_config, organization_id).await
+        let org_group = self.start_region(region_config, organization_id).await?;
+
+        // Activate delegated leadership: the new org Shard does not run
+        // its own elections (LeadershipMode::Delegated). Its leader is
+        // adopted from the data-region group's elected leader. Bootstrap
+        // a one-time adoption now (in case the region already has a
+        // leader), then spawn a watcher that re-adopts on every region
+        // leader change.
+        if let Ok(region_group) = self.get_shard_group(region, OrganizationId::new(0)) {
+            let region_handle = region_group.handle().clone();
+            let org_handle = org_group.handle().clone();
+            let initial_state = region_handle.shard_state();
+            if let Some(leader) = initial_state.leader {
+                let _ = org_handle.adopt_leader(leader, initial_state.term).await;
+            }
+            // Spawn watcher: subscribe to data-region's leader/term and
+            // re-adopt on every change. Exits when the engine drops.
+            let mut state_rx = region_handle.state_rx().clone();
+            tokio::spawn(async move {
+                while state_rx.changed().await.is_ok() {
+                    let snap = state_rx.borrow().clone();
+                    if let Some(leader) = snap.leader
+                        && org_handle.adopt_leader(leader, snap.term).await.is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+        }
+
+        Ok(org_group)
     }
 
     pub async fn start_data_region(&self, region_config: RegionConfig) -> Result<Arc<OrganizationGroup>> {
@@ -1356,6 +1443,7 @@ impl RaftManager {
             batch_writer_config,
             event_writer,
             events_config,
+            delegated_leadership,
         } = region_config;
 
         // Check if this specific `(region, organization_id)` Raft group is already
@@ -1571,7 +1659,7 @@ impl RaftManager {
             },
         }
 
-        let consensus_shard = inferadb_ledger_consensus::Shard::new(
+        let mut consensus_shard = inferadb_ledger_consensus::Shard::new(
             shard_id,
             inferadb_ledger_consensus::types::NodeId(self.config.node_id),
             consensus_membership,
@@ -1582,6 +1670,11 @@ impl RaftManager {
             initial_voted_for,
             initial_committed_index,
         );
+        if delegated_leadership {
+            consensus_shard.set_leadership_mode(
+                inferadb_ledger_consensus::LeadershipMode::Delegated,
+            );
+        }
 
         let consensus_transport = crate::consensus_transport::GrpcConsensusTransport::new(
             self.config.node_id,

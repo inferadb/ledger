@@ -410,6 +410,7 @@ impl TestCluster {
                 batch_writer_config: None,
                 event_writer: None,
                 events_config: None,
+                delegated_leadership: false,
             };
             manager_clone
                 .start_data_region(data_region_config)
@@ -664,6 +665,7 @@ impl TestCluster {
                     batch_writer_config: None,
                     event_writer: None,
                     events_config: None,
+                    delegated_leadership: false,
                 };
                 joining_manager.start_data_region(data_region_config).await.unwrap_or_else(|e| {
                     panic!(
