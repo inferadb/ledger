@@ -3384,6 +3384,26 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             block_height,
                         );
 
+                        // B.1.6: signal the per-organization Raft group bootstrap.
+                        // Each in-region node receives this signal and calls
+                        // `start_organization_group(region, organization_id, voters)`
+                        // — fire-and-forget; the apply path does not wait for the
+                        // group to come up. Service-layer code that needs the new
+                        // group to be available before it returns
+                        // (`SystemService::create_organization`) waits on the
+                        // `RaftManager::has_organization_group` signal after the
+                        // proposal commits.
+                        if let Some(ref sender) = self.organization_creation_sender
+                            && sender.send((*region, organization_id)).is_err()
+                        {
+                            tracing::error!(
+                                region = region.as_str(),
+                                organization_id = organization_id.value(),
+                                "Organization handler channel closed — \
+                                 CreateOrganization signal dropped"
+                            );
+                        }
+
                         LedgerResponse::OrganizationCreated {
                             organization_id,
                             organization_slug: *slug,

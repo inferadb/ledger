@@ -129,6 +129,18 @@ pub struct RaftLogStore<B: StorageBackend = FileBackend> {
     /// during bootstrap) calls `start_data_region` on the manager.
     pub(super) region_creation_sender:
         Option<tokio::sync::mpsc::UnboundedSender<crate::raft_manager::RegionCreationRequest>>,
+    /// Channel for signaling organization creation to the `RaftManager`.
+    ///
+    /// When a `CreateOrganization` entry is applied on the GLOBAL log store,
+    /// the new organization's `(region, organization_id)` pair is sent
+    /// through this channel. The receiver task (spawned during bootstrap)
+    /// calls `start_organization_group` on the manager so each in-region
+    /// node spawns the per-organization Raft group.
+    ///
+    /// Mirrors `region_creation_sender` semantics — fire-and-forget
+    /// signal; the apply path does not wait for the group to come up.
+    pub(super) organization_creation_sender:
+        Option<tokio::sync::mpsc::UnboundedSender<crate::raft_manager::OrganizationCreationRequest>>,
     /// Shared peer address map for propagating addresses via Raft.
     ///
     /// When a `RegisterPeerAddress` entry is applied, the address is stored
@@ -219,6 +231,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             state_root_commitments: Arc::new(Mutex::new(Vec::new())),
             divergence_sender: None,
             region_creation_sender: None,
+            organization_creation_sender: None,
             peer_addresses: None,
             leader_lease: Arc::new(crate::leader_lease::LeaderLease::new(
                 std::time::Duration::from_millis(150),
@@ -490,6 +503,20 @@ impl<B: StorageBackend> RaftLogStore<B> {
         sender: tokio::sync::mpsc::UnboundedSender<crate::raft_manager::RegionCreationRequest>,
     ) -> Self {
         self.region_creation_sender = Some(sender);
+        self
+    }
+
+    /// Configures the organization-creation signal channel.
+    ///
+    /// When set, `CreateOrganization` entries applied on the GLOBAL log
+    /// store send the new organization's `(region, organization_id)` pair
+    /// through this channel so the `RaftManager` can spawn the
+    /// per-organization Raft group on each in-region node.
+    pub fn with_organization_creation_sender(
+        mut self,
+        sender: tokio::sync::mpsc::UnboundedSender<crate::raft_manager::OrganizationCreationRequest>,
+    ) -> Self {
+        self.organization_creation_sender = Some(sender);
         self
     }
 

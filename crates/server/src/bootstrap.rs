@@ -354,6 +354,72 @@ pub async fn bootstrap_node(
 
     let health_state = health_state.with_region_handler(region_handler_healthy);
 
+    // B.1.6 multi-tier orchestration: spawn the organization-creation
+    // handler. CreateOrganization apply on the GLOBAL log store sends a
+    // signal here; this task picks it up and spawns the per-organization
+    // Raft group on this node via `RaftManager::start_organization_group`.
+    //
+    // Each in-region voter runs this handler independently, so all voters
+    // for the new organization start the group concurrently. The group's
+    // Raft elects from a consistent voter set (the cluster's current voter
+    // set under uniform replication).
+    if let Some(mut org_rx) = system_region.take_organization_creation_rx() {
+        let mgr = manager.clone();
+        tokio::spawn(async move {
+            while let Some((region, organization_id)) = org_rx.recv().await {
+                let mgr_clone = mgr.clone();
+                let result = tokio::spawn(async move {
+                    // Voter set under B.1 uniform replication: all known cluster
+                    // voters (matches the system region's voter set, which is
+                    // always the full cluster).
+                    let voters: Vec<(u64, String)> = mgr_clone
+                        .peer_addresses()
+                        .iter_peers()
+                        .into_iter()
+                        .map(|(node_id, addr)| (node_id, addr))
+                        .collect();
+                    if voters.is_empty() {
+                        tracing::warn!(
+                            region = region.as_str(),
+                            organization_id = organization_id.value(),
+                            "Organization handler: no peers known yet — skipping group bootstrap"
+                        );
+                        return;
+                    }
+                    // First voter (lexically smallest node id) bootstraps;
+                    // others join via AppendEntries from the leader.
+                    let bootstrap_node_id =
+                        voters.iter().map(|(id, _)| *id).min().unwrap_or(0);
+                    let self_id =
+                        mgr_clone.peer_addresses().iter_peers().into_iter().next().map(|(id, _)| id);
+                    let bootstrap = self_id == Some(bootstrap_node_id);
+                    if let Err(e) = mgr_clone
+                        .start_organization_group(region, organization_id, voters, bootstrap)
+                        .await
+                    {
+                        tracing::error!(
+                            region = region.as_str(),
+                            organization_id = organization_id.value(),
+                            error = %e,
+                            "Failed to start organization group from CreateOrganization signal"
+                        );
+                    }
+                })
+                .await;
+
+                if let Err(join_err) = result
+                    && join_err.is_panic()
+                {
+                    tracing::error!(
+                        "Organization handler panicked processing event \
+                         — continuing with next message. Panic: {join_err:?}"
+                    );
+                }
+            }
+            tracing::warn!("Organization handler channel closed — handler task exiting");
+        });
+    }
+
     // Shared peer liveness map — updated by the Raft service on every incoming
     // consensus message, read by the admin service's CheckPeerLiveness RPC and
     // the GLOBAL leader's quorum-based dead node detection task.

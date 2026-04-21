@@ -139,6 +139,15 @@ pub type Result<T> = std::result::Result<T, RaftManagerError>;
 /// Region creation request: region + initial members for the Raft group.
 pub type RegionCreationRequest = (Region, Vec<(u64, String)>);
 
+/// Organization creation request: target region + the new organization id.
+///
+/// Sent on the GLOBAL log store's `organization_creation_sender` channel
+/// when a `CreateOrganization` entry applies. The receiver task spawned
+/// during bootstrap calls
+/// [`RaftManager::start_organization_group`](RaftManager::start_organization_group)
+/// on each in-region node so the per-organization Raft group spins up.
+pub type OrganizationCreationRequest = (Region, OrganizationId);
+
 /// Storage components returned from region opening (state, block archive, raft log store,
 /// block announcements, events db, optional region creation receiver).
 type OpenedRegionStorage = (
@@ -148,6 +157,7 @@ type OpenedRegionStorage = (
     broadcast::Sender<BlockAnnouncement>,
     Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>,
     Option<tokio::sync::mpsc::UnboundedReceiver<RegionCreationRequest>>,
+    Option<tokio::sync::mpsc::UnboundedReceiver<OrganizationCreationRequest>>,
 );
 
 // ============================================================================
@@ -426,6 +436,19 @@ pub struct OrganizationGroup {
     /// handler via [`take_region_creation_rx`](OrganizationGroup::take_region_creation_rx).
     region_creation_rx:
         parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<RegionCreationRequest>>>,
+    /// Receiver for organization creation signals from the GLOBAL apply handler.
+    ///
+    /// Only populated for the GLOBAL region group. Taken once by the bootstrap
+    /// handler via
+    /// [`take_organization_creation_rx`](OrganizationGroup::take_organization_creation_rx).
+    /// Drives B.1.6 multi-tier orchestration: each `CreateOrganization`
+    /// apply emits a signal here, the bootstrap handler picks it up, and
+    /// each in-region node calls
+    /// [`RaftManager::start_organization_group`](RaftManager::start_organization_group)
+    /// for the new `(region, organization_id)` pair.
+    organization_creation_rx: parking_lot::Mutex<
+        Option<tokio::sync::mpsc::UnboundedReceiver<OrganizationCreationRequest>>,
+    >,
 }
 
 impl OrganizationGroup {
@@ -599,6 +622,18 @@ impl OrganizationGroup {
         &self,
     ) -> Option<tokio::sync::mpsc::UnboundedReceiver<RegionCreationRequest>> {
         self.region_creation_rx.lock().take()
+    }
+
+    /// Takes the organization-creation receiver from the GLOBAL region group.
+    ///
+    /// Returns `Some` exactly once for the GLOBAL region. The bootstrap
+    /// handler calls this to spawn a task that starts per-organization
+    /// Raft groups as they are created through GLOBAL `CreateOrganization`
+    /// consensus.
+    pub fn take_organization_creation_rx(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<OrganizationCreationRequest>> {
+        self.organization_creation_rx.lock().take()
     }
 }
 
@@ -985,6 +1020,7 @@ impl RaftManager {
             last_activity: Arc::new(parking_lot::Mutex::new(std::time::Instant::now())),
             jobs_active: Arc::new(AtomicBool::new(false)),
             region_creation_rx: parking_lot::Mutex::new(None),
+            organization_creation_rx: parking_lot::Mutex::new(None),
         });
 
         {
@@ -1088,6 +1124,40 @@ impl RaftManager {
     /// not been started, [`RaftManagerError::Raft`] if `region` is 0,
     /// [`RaftManagerError::RegionExists`] if the region is already running,
     /// or a storage/Raft error if initialization fails.
+    /// Starts a per-organization Raft group on this node.
+    ///
+    /// Called by the bootstrap-side organization-creation handler when
+    /// `CreateOrganization` apply emits a signal on the system region's
+    /// `organization_creation_rx` channel. Each in-region node calls this
+    /// independently with the same `voter_set` so the new organization's
+    /// Raft group elects from a consistent membership.
+    ///
+    /// Idempotent: if the `(region, organization_id)` group is already
+    /// registered, returns the existing handle instead of failing.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage / Raft error if the underlying group bootstrap
+    /// fails.
+    pub async fn start_organization_group(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+        voter_set: Vec<(LedgerNodeId, String)>,
+        bootstrap: bool,
+    ) -> Result<Arc<OrganizationGroup>> {
+        // Idempotent: skip if already running.
+        if let Ok(group) = self.get_shard_group(region, organization_id) {
+            return Ok(group);
+        }
+        let region_config = RegionConfig::builder()
+            .region(region)
+            .initial_members(voter_set)
+            .bootstrap(bootstrap)
+            .build();
+        self.start_region(region_config, organization_id).await
+    }
+
     pub async fn start_data_region(&self, region_config: RegionConfig) -> Result<Arc<OrganizationGroup>> {
         // Verify system region is running
         if !self.has_region(Region::GLOBAL) {
@@ -1325,6 +1395,7 @@ impl RaftManager {
             block_announcements,
             events_db,
             region_creation_rx,
+            organization_creation_rx,
         ) = self.open_region_storage(
             region,
             organization_id,
@@ -1665,6 +1736,7 @@ impl RaftManager {
             last_activity: Arc::new(parking_lot::Mutex::new(std::time::Instant::now())),
             jobs_active: Arc::new(AtomicBool::new(jobs_running)),
             region_creation_rx: parking_lot::Mutex::new(region_creation_rx),
+            organization_creation_rx: parking_lot::Mutex::new(organization_creation_rx),
         });
 
         {
@@ -1874,6 +1946,19 @@ impl RaftManager {
             None
         };
 
+        // Wire organization creation channel for the GLOBAL log store.
+        // CreateOrganization entries applied on GLOBAL send the new
+        // (region, organization_id) pair through this channel; the bootstrap
+        // handler picks it up and calls `start_organization_group` on each
+        // in-region node so the per-organization Raft group spawns.
+        let organization_creation_rx = if region == Region::GLOBAL {
+            let (org_tx, org_rx) = tokio::sync::mpsc::unbounded_channel();
+            log_store = log_store.with_organization_creation_sender(org_tx);
+            Some(org_rx)
+        } else {
+            None
+        };
+
         // Wire event writer: use the explicitly provided writer, or create one
         // from the region's own events_db when only an EventConfig was supplied.
         // This avoids callers needing to pre-open the events database.
@@ -1885,7 +1970,15 @@ impl RaftManager {
             log_store = log_store.with_event_writer(writer);
         }
 
-        Ok((state, block_archive, log_store, block_announcements, events_db, region_creation_rx))
+        Ok((
+            state,
+            block_archive,
+            log_store,
+            block_announcements,
+            events_db,
+            region_creation_rx,
+            organization_creation_rx,
+        ))
     }
 
     /// Stops a region group.
