@@ -672,9 +672,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     ) -> Result<(), SagaError> {
         let transaction = Self::build_transaction(operations);
 
-        let request = LedgerRequest::Organization(OrganizationRequest::Write {
-            organization,
-            vault,
+        let request = LedgerRequest::Organization(OrganizationRequest::Write {            vault,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,
@@ -725,10 +723,12 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         .await
     }
 
-    /// Persists saga PII to REGIONAL scratch storage.
+    /// Persists saga PII to REGIONAL scratch storage via the typed
+    /// `RegionRequest::SaveRegionalSagaPii` variant.
     ///
-    /// Writes to `_tmp:saga_pii:{saga_id}` with a 24-hour TTL. The PII
-    /// survives leader crashes and is consumed by the saga step that needs it.
+    /// Apply handler writes to `_tmp:saga_pii:{saga_id}` in the regional
+    /// SYSTEM vault with a 24-hour TTL. The PII survives leader crashes
+    /// and is consumed by the saga step that needs it.
     async fn persist_saga_pii(
         &self,
         saga_id: &SagaId,
@@ -736,19 +736,12 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         pii: &SagaPii,
         traceparent: Option<&str>,
     ) -> Result<(), SagaError> {
-        let key = SystemKeys::saga_pii_key(saga_id.value());
-        let value = serde_json::to_vec(pii).context(SerializationSnafu)?;
-        let expires_at_ts = (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp() as u64;
-        let expires_at = Some(expires_at_ts);
-
-        let operation = Operation::SetEntity { key, value, expires_at, condition: None };
-        let transaction = Self::build_transaction(vec![operation]);
-        let request = LedgerRequest::Organization(OrganizationRequest::Write {
-            organization: SYSTEM_ORGANIZATION_ID,
-            vault: SYSTEM_VAULT_ID,
-            transactions: vec![transaction],
-            idempotency_key: [0; 16],
-            request_hash: 0,
+        let payload = serde_json::to_vec(pii).context(SerializationSnafu)?;
+        let expires_at = (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp() as u64;
+        let request = LedgerRequest::Region(crate::types::RegionRequest::SaveRegionalSagaPii {
+            saga_id: saga_id.value().to_string(),
+            payload,
+            expires_at,
         });
         self.propose_to_region(region, request, traceparent).await?;
         Ok(())
@@ -756,7 +749,8 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
     /// Loads saga PII from REGIONAL scratch storage.
     ///
-    /// Reads `_tmp:saga_pii:{saga_id}` from the regional state layer.
+    /// Reads `_tmp:saga_pii:{saga_id}` from the region group's applied
+    /// state — the same group `SaveRegionalSagaPii` applies against.
     /// Falls back to GLOBAL state when no `RaftManager` is configured
     /// (single-node test setups).
     fn load_saga_pii(&self, saga_id: &SagaId, region: Region) -> Option<SagaPii> {
@@ -774,17 +768,11 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         serde_json::from_slice(&entity.value).ok()
     }
 
-    /// Deletes saga PII from REGIONAL scratch storage after consumption.
+    /// Deletes saga PII from REGIONAL scratch storage after consumption
+    /// via the typed `RegionRequest::DeleteRegionalSagaPii` variant.
     async fn delete_saga_pii(&self, saga_id: &SagaId, region: Region, traceparent: Option<&str>) {
-        let key = SystemKeys::saga_pii_key(saga_id.value());
-        let operation = Operation::DeleteEntity { key };
-        let transaction = Self::build_transaction(vec![operation]);
-        let request = LedgerRequest::Organization(OrganizationRequest::Write {
-            organization: SYSTEM_ORGANIZATION_ID,
-            vault: SYSTEM_VAULT_ID,
-            transactions: vec![transaction],
-            idempotency_key: [0; 16],
-            request_hash: 0,
+        let request = LedgerRequest::Region(crate::types::RegionRequest::DeleteRegionalSagaPii {
+            saga_id: saga_id.value().to_string(),
         });
         if let Err(e) = self.propose_to_region(region, request, traceparent).await {
             warn!(saga_id = %saga_id, error = %e, "Failed to delete saga PII scratch key");
@@ -960,9 +948,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
         let transaction = Self::build_transaction(vec![operation]);
 
-        let request = LedgerRequest::Organization(OrganizationRequest::Write {
-            organization: SYSTEM_ORGANIZATION_ID,
-            vault: SYSTEM_VAULT_ID,
+        let request = LedgerRequest::Organization(OrganizationRequest::Write {            vault: SYSTEM_VAULT_ID,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,

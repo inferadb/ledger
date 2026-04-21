@@ -81,6 +81,12 @@ pub struct RaftLogStore<B: StorageBackend = FileBackend> {
     pub(super) block_archive: Option<Arc<BlockArchive<B>>>,
     /// Region for this Raft group.
     pub(super) region: Region,
+    /// Organization this Raft group owns. `OrganizationId::new(0)` for the
+    /// data-region group; the organization's id for per-organization groups.
+    /// Supplied at construction by `raft_manager::start_region`. Apply
+    /// handlers read from this instead of payload pattern-matching on
+    /// `OrganizationRequest::Write { organization }` and friends.
+    pub(super) organization_id: OrganizationId,
     /// Node ID for block metadata.
     pub(super) node_id: NodeId,
     /// Numeric node ID for leader lease comparisons.
@@ -218,6 +224,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             state_layer: None,
             block_archive: None,
             region: Region::GLOBAL,
+            organization_id: OrganizationId::new(0),
             node_id: NodeId::new(""),
             ledger_node_id: 0,
             region_chain: RwLock::new(RegionChainState {
@@ -273,6 +280,22 @@ impl<B: StorageBackend> RaftLogStore<B> {
         self.node_id = node_id;
         self.ledger_node_id = ledger_node_id;
         self
+    }
+
+    /// Configures the organization this Raft group owns.
+    ///
+    /// `OrganizationId::new(0)` for the data-region group; the
+    /// organization's id for per-organization groups. Apply handlers
+    /// read from [`RaftLogStore::organization_id`] instead of pattern-
+    /// matching the payload's `organization:` field.
+    pub fn with_organization_id(mut self, organization_id: OrganizationId) -> Self {
+        self.organization_id = organization_id;
+        self
+    }
+
+    /// Returns the organization this Raft group owns.
+    pub fn organization_id(&self) -> OrganizationId {
+        self.organization_id
     }
 
     /// Configures the block announcements broadcast channel.

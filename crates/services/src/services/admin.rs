@@ -1866,9 +1866,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 timestamp: chrono::Utc::now(),
             };
 
-            let gc_request = LedgerRequest::Organization(OrganizationRequest::Write {
-                organization: organization_id,
-                vault: vault_id,
+            let gc_request = LedgerRequest::Organization(OrganizationRequest::Write {                vault: vault_id,
                 transactions: vec![transaction],
                 idempotency_key: [0; 16],
                 request_hash: 0,

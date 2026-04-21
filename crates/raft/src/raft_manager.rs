@@ -767,41 +767,22 @@ impl RaftManager {
         region: Region,
         request: &crate::types::LedgerRequest,
     ) -> Result<Arc<OrganizationGroup>> {
-        use crate::types::{LedgerRequest, OrganizationRequest};
-        let org = match request {
-            LedgerRequest::Organization(OrganizationRequest::Write { organization, .. }) => Some(*organization),
-            // BatchWrite carries nested requests; saga forwarding sends
-            // single-org batches in practice. Pick the first inner Write's
-            // organization; fall back to None (data-region group) if the
-            // batch is empty or non-Write.
-            LedgerRequest::Organization(OrganizationRequest::BatchWrite { requests }) => {
-                requests.iter().find_map(|inner| match inner {
-                    LedgerRequest::Organization(OrganizationRequest::Write { organization, .. }) => Some(*organization),
-                    _ => None,
-                })
-            },
-            _ => None,
-        };
-        // Per-org routing when the target group is registered locally,
-        // otherwise fall back to the data-region group at
-        // `OrganizationId::new(0)`. The fallback covers:
+        // Under B.1.8, `OrganizationRequest::Write` no longer carries an
+        // `organization:` field — the owning organization is implicit in
+        // the Raft group the entry lands in. Callers that already know
+        // the organization route directly via `route_organization`;
+        // callers reaching this helper (saga forwarding with a
+        // region-only handle, `SystemRequest`/`RegionRequest` traffic)
+        // land on the data-region group at `OrganizationId::new(0)`,
+        // which is where the regional control plane + cross-org traffic
+        // live under the B.1 compat shim.
         //
-        // - Race between `CreateOrganization` apply on this node and
-        //   `start_organization_group` registering the per-org group.
-        // - System-org writes (`organization == OrganizationId::new(0)` —
-        //   saga PII / saga records / cross-org system traffic) — the
-        //   data-region group IS the `OrganizationId(0)` group, so the
-        //   natural per-org routing lands in the right place without a
-        //   special case.
-        // - `RegionRequest` / `SystemRequest` / org-less payloads that
-        //   return `None` above.
-        let organization_id = match org {
-            Some(organization) if self.regions.read().contains_key(&(region, organization)) => {
-                organization
-            },
-            _ => OrganizationId::new(0),
-        };
-        self.get_shard_group(region, organization_id)
+        // `request` is retained in the signature so future routing
+        // extensions (e.g. a `RegionalProposalRequest.organization` wire
+        // field that sets an explicit per-org target) can switch on it
+        // without changing the call sites.
+        let _ = request;
+        self.get_organization_group(region, OrganizationId::new(0))
     }
 
     /// Returns the last crash-recovery replay stats captured for `region`, if any.
@@ -924,7 +905,7 @@ impl RaftManager {
             .cloned()
     }
 
-    pub fn get_shard_group(&self, region: Region, shard: OrganizationId) -> Result<Arc<OrganizationGroup>> {
+    pub fn get_organization_group(&self, region: Region, shard: OrganizationId) -> Result<Arc<OrganizationGroup>> {
         self.regions
             .read()
             .get(&(region, shard))
@@ -959,7 +940,7 @@ impl RaftManager {
     }
 
     /// Lists all active (region, shard) pairs.
-    pub fn list_shards(&self) -> Vec<(Region, OrganizationId)> {
+    pub fn list_organization_groups(&self) -> Vec<(Region, OrganizationId)> {
         self.regions.read().keys().copied().collect()
     }
 
@@ -985,7 +966,7 @@ impl RaftManager {
     /// `start_region`'s pre-insert duplicate guard uses this so per-shard
     /// loops can re-enter `start_region` for the next `organization_id` without
     /// the prior shard's registration tripping the check.
-    pub fn has_shard(&self, region: Region, organization_id: OrganizationId) -> bool {
+    pub fn has_organization_group(&self, region: Region, organization_id: OrganizationId) -> bool {
         self.regions.read().contains_key(&(region, organization_id))
     }
 
@@ -1179,7 +1160,7 @@ impl RaftManager {
         bootstrap: bool,
     ) -> Result<Arc<OrganizationGroup>> {
         // Idempotent: skip if already running.
-        if let Ok(group) = self.get_shard_group(region, organization_id) {
+        if let Ok(group) = self.get_organization_group(region, organization_id) {
             return Ok(group);
         }
         let region_config = RegionConfig::builder()
@@ -1196,7 +1177,7 @@ impl RaftManager {
         // a one-time adoption now (in case the region already has a
         // leader), then spawn a watcher that re-adopts on every region
         // leader change.
-        if let Ok(region_group) = self.get_shard_group(region, OrganizationId::new(0)) {
+        if let Ok(region_group) = self.get_organization_group(region, OrganizationId::new(0)) {
             let region_handle = region_group.handle().clone();
             let org_handle = org_group.handle().clone();
             let initial_state = region_handle.shard_state();
@@ -1345,7 +1326,7 @@ impl RaftManager {
         // `RegionStorageManager::open_shard` provides the true guard
         // (returns `AlreadyOpen`) and `ensure_data_region` handles both
         // `RegionExists` and `RegionAlreadyOpen` gracefully.
-        if self.has_shard(region, organization_id) {
+        if self.has_organization_group(region, organization_id) {
             return Err(RaftManagerError::RegionExists { region });
         }
 
@@ -1914,6 +1895,7 @@ impl RaftManager {
                 NodeId::new(self.config.node_id.to_string()),
                 self.config.node_id,
             )
+            .with_organization_id(organization_id)
             .with_block_announcements(block_announcements.clone())
             .with_divergence_sender(divergence_sender)
             .with_leader_lease(leader_lease);

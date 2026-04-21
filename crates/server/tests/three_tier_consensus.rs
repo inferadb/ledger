@@ -369,12 +369,112 @@ async fn test_cross_region_independence() {
     // in `US_EAST_VA` (per `create_test_organization`). The creation must
     // not add any group in region B.
     let before_b: usize =
-        node.manager.list_shards().iter().filter(|(r, _)| *r == region_b).count();
+        node.manager.list_organization_groups().iter().filter(|(r, _)| *r == region_b).count();
     let _ = create_organization(&node.addr, "cross-region", node).await.expect("create org");
     let after_b: usize =
-        node.manager.list_shards().iter().filter(|(r, _)| *r == region_b).count();
+        node.manager.list_organization_groups().iter().filter(|(r, _)| *r == region_b).count();
     assert_eq!(
         before_b, after_b,
         "CreateOrganization in region A must not touch region B's group set"
+    );
+}
+
+// ============================================================================
+// Region-group leader transfer cascades to all per-org groups (B.1.7 delegated)
+// ============================================================================
+
+/// Transferring leadership of the region's data-region group atomically
+/// transfers leadership for every per-organization group in that region.
+/// Under `LeadershipMode::Delegated`, per-org groups follow the region's
+/// elected leader via the `adopt_leader` watcher — a single region-group
+/// leader transfer cascades to every organization without per-org
+/// elections.
+///
+/// Pre-B.1.7 this would have failed: each per-org group would have run
+/// its own election timer, so leadership transfer would only move the
+/// region group, leaving per-org groups stuck on the old leader until
+/// their timers fired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_region_leader_transfer_cascades_to_per_org_groups() {
+    let cluster = TestCluster::with_data_regions(3, 1).await;
+    assert!(cluster.wait_for_leaders(Duration::from_secs(10)).await, "leaders elected");
+    let leader = cluster.leader().expect("has leader");
+
+    // Create two organizations so the region hosts >1 per-org group.
+    let org_a = create_organization(&leader.addr, "xfer-a", leader).await.expect("create A");
+    let org_b = create_organization(&leader.addr, "xfer-b", leader).await.expect("create B");
+    let id_a = resolve_org_id(leader, org_a);
+    let id_b = resolve_org_id(leader, org_b);
+
+    // Wait for the initial delegated watcher to propagate leadership into
+    // each per-org group on the current leader node.
+    let initial_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let initial_leader = loop {
+        let region_leader = leader
+            .manager
+            .get_region_group(Region::US_EAST_VA)
+            .expect("region group")
+            .handle()
+            .current_leader();
+        if let Some(l) = region_leader {
+            break l;
+        }
+        if tokio::time::Instant::now() >= initial_deadline {
+            panic!("initial region leader never appeared");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    // Pick a different node to transfer leadership to.
+    let target_node = cluster
+        .nodes()
+        .iter()
+        .find(|n| n.id != initial_leader)
+        .expect("at least one non-leader node");
+    let target_id = target_node.id;
+
+    // Transfer leadership of the region's data-region group.
+    let region_group =
+        leader.manager.get_region_group(Region::US_EAST_VA).expect("region group");
+    region_group
+        .handle()
+        .transfer_leader(target_id)
+        .await
+        .expect("leader transfer should succeed");
+
+    // Poll until every node observes both the region group AND both per-org
+    // groups reporting the new leader.
+    let mut cascaded = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        let mut ok = true;
+        'outer: for node in cluster.nodes() {
+            let region_leader = node
+                .manager
+                .get_region_group(Region::US_EAST_VA)
+                .expect("region group")
+                .handle()
+                .current_leader();
+            if region_leader != Some(target_id) {
+                ok = false;
+                break;
+            }
+            for id in [id_a, id_b] {
+                let g = node.manager.route_organization(id).expect("org group");
+                if g.handle().current_leader() != Some(target_id) {
+                    ok = false;
+                    break 'outer;
+                }
+            }
+        }
+        if ok {
+            cascaded = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        cascaded,
+        "region leader transfer must cascade to every per-organization group"
     );
 }

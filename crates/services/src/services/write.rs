@@ -424,9 +424,7 @@ impl WriteService {
             timestamp: chrono::Utc::now(),
         };
 
-        Ok(LedgerRequest::Organization(OrganizationRequest::Write {
-            organization,
-            vault: vault.unwrap_or(VaultId::new(0)),
+        Ok(LedgerRequest::Organization(OrganizationRequest::Write {            vault: vault.unwrap_or(VaultId::new(0)),
             transactions: vec![transaction],
             idempotency_key,
             request_hash,

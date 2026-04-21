@@ -145,10 +145,10 @@ impl TestNode {
         region: inferadb_ledger_types::Region,
     ) -> Vec<Arc<OrganizationGroup>> {
         self.manager
-            .list_shards()
+            .list_organization_groups()
             .into_iter()
             .filter(|(r, _)| *r == region)
-            .filter_map(|(r, s)| self.manager.get_shard_group(r, s).ok())
+            .filter_map(|(r, s)| self.manager.get_organization_group(r, s).ok())
             .collect()
     }
 
@@ -420,13 +420,13 @@ impl TestCluster {
             let mut all_ready = true;
             for &dr in data_regions.iter().take(num_data_regions) {
                 let shards = manager_clone
-                    .list_shards()
+                    .list_organization_groups()
                     .into_iter()
                     .filter(|(r, _)| *r == dr);
                 let mut any_shard = false;
                 for (r, shard) in shards {
                     any_shard = true;
-                    match manager_clone.get_shard_group(r, shard) {
+                    match manager_clone.get_organization_group(r, shard) {
                         Ok(rg) if rg.handle().current_leader().is_some() => continue,
                         _ => {
                             all_ready = false;
@@ -670,7 +670,7 @@ impl TestCluster {
                 let bootstrap_manager = &nodes[0].manager;
                 let shards: Vec<inferadb_ledger_types::OrganizationId> =
                     bootstrap_manager
-                        .list_shards()
+                        .list_organization_groups()
                         .into_iter()
                         .filter(|(r, _)| *r == data_region)
                         .map(|(_, s)| s)
@@ -681,13 +681,13 @@ impl TestCluster {
                 let joining_addr_str = join_addr.clone();
                 let bootstrap_addr_str = nodes[0].addr.clone();
                 if let Ok(bootstrap_rg_zero) =
-                    bootstrap_manager.get_shard_group(data_region, shards[0])
+                    bootstrap_manager.get_organization_group(data_region, shards[0])
                     && let Some(bt) = bootstrap_rg_zero.consensus_transport()
                 {
                     let _ = bt.set_peer_via_registry(joining_node_id, &joining_addr_str).await;
                 }
                 if let Ok(joining_rg_zero) =
-                    joining_manager.get_shard_group(data_region, shards[0])
+                    joining_manager.get_organization_group(data_region, shards[0])
                     && let Some(jt) = joining_rg_zero.consensus_transport()
                 {
                     let _ = jt.set_peer_via_registry(nodes[0].id, &bootstrap_addr_str).await;
@@ -695,7 +695,7 @@ impl TestCluster {
 
                 for shard in shards {
                     if let Ok(bootstrap_rg) =
-                        bootstrap_manager.get_shard_group(data_region, shard)
+                        bootstrap_manager.get_organization_group(data_region, shard)
                     {
                         let bootstrap_handle = bootstrap_rg.handle();
 
@@ -707,7 +707,7 @@ impl TestCluster {
                                 .await;
                         }
                         if let Ok(joining_rg) =
-                            joining_manager.get_shard_group(data_region, shard)
+                            joining_manager.get_organization_group(data_region, shard)
                             && let Some(jt) = joining_rg.consensus_transport()
                         {
                             let _ =
@@ -919,7 +919,7 @@ impl TestCluster {
                 for node in &self.nodes {
                     if let Some(rg) = node
                         .manager
-                        .get_shard_group(dr, organization_id)
+                        .get_organization_group(dr, organization_id)
                         .ok()
                     {
                         indices.push(*rg.applied_index_watch().borrow());
@@ -1512,9 +1512,7 @@ pub async fn setup_user(_addr: &str, _name: &str, email: &str, node: &TestNode) 
                     operations: vec![slug_op],
                     timestamp: std::time::SystemTime::now().into(),
                 };
-                let slug_write = LedgerRequest::Organization(OrganizationRequest::Write {
-                    organization: inferadb_ledger_types::OrganizationId::new(0),
-                    vault: inferadb_ledger_types::VaultId::new(0),
+                let slug_write = LedgerRequest::Organization(OrganizationRequest::Write {                    vault: inferadb_ledger_types::VaultId::new(0),
                     transactions: vec![slug_txn],
                     idempotency_key: [0; 16],
                     request_hash: 0,
@@ -1557,9 +1555,7 @@ pub async fn setup_user(_addr: &str, _name: &str, email: &str, node: &TestNode) 
                     operations: vec![user_op],
                     timestamp: std::time::SystemTime::now().into(),
                 };
-                let user_write = LedgerRequest::Organization(OrganizationRequest::Write {
-                    organization: inferadb_ledger_types::OrganizationId::new(0),
-                    vault: inferadb_ledger_types::VaultId::new(0),
+                let user_write = LedgerRequest::Organization(OrganizationRequest::Write {                    vault: inferadb_ledger_types::VaultId::new(0),
                     transactions: vec![user_txn],
                     idempotency_key: [0; 16],
                     request_hash: 0,

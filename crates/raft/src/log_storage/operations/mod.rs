@@ -4683,22 +4683,79 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 )
             },
 
-            // ── B.1.6 migration stubs for new RegionRequest variants ──
+            RegionRequest::SaveRegionalSagaPii { saga_id, payload, expires_at } => {
+                // Writes the saga's PII scratch record at
+                // `_tmp:saga_pii:{saga_id}` in the regional SYSTEM vault.
+                // Re-apply is idempotent: a replay with identical
+                // `(saga_id, payload, expires_at)` overwrites in place,
+                // leaving the scratch key in the same state.
+                let key = inferadb_ledger_state::system::SystemKeys::saga_pii_key(saga_id);
+                let op = inferadb_ledger_types::Operation::SetEntity {
+                    key,
+                    value: payload.clone(),
+                    condition: None,
+                    expires_at: Some(*expires_at),
+                };
+                let vault = inferadb_ledger_types::VaultId::new(0);
+                if !skip_state_writes
+                    && let Some(ref state_layer) = self.state_layer
+                    && let Err(e) = state_layer.apply_operations(vault, &[op], block_height)
+                {
+                    tracing::warn!(
+                        saga_id = %saga_id,
+                        error = %e,
+                        "SaveRegionalSagaPii: failed to persist scratch record"
+                    );
+                    return (
+                        LedgerResponse::Error {
+                            code: inferadb_ledger_types::ErrorCode::Internal,
+                            message: format!("save saga pii: {e}"),
+                        },
+                        None,
+                    );
+                }
+                (LedgerResponse::Empty, None)
+            },
+
+            RegionRequest::DeleteRegionalSagaPii { saga_id } => {
+                // Deletes the saga's PII scratch record after consumption.
+                // Idempotent: deleting an already-deleted record is a no-op
+                // at the state-layer level.
+                let key = inferadb_ledger_state::system::SystemKeys::saga_pii_key(saga_id);
+                let op = inferadb_ledger_types::Operation::DeleteEntity { key };
+                let vault = inferadb_ledger_types::VaultId::new(0);
+                if !skip_state_writes
+                    && let Some(ref state_layer) = self.state_layer
+                    && let Err(e) = state_layer.apply_operations(vault, &[op], block_height)
+                {
+                    tracing::warn!(
+                        saga_id = %saga_id,
+                        error = %e,
+                        "DeleteRegionalSagaPii: failed to delete scratch record"
+                    );
+                    return (
+                        LedgerResponse::Error {
+                            code: inferadb_ledger_types::ErrorCode::Internal,
+                            message: format!("delete saga pii: {e}"),
+                        },
+                        None,
+                    );
+                }
+                (LedgerResponse::Empty, None)
+            },
+
+            // ── B.1.6 migration stubs for RegionRequest variants not yet wired ──
             //
-            // These variants were introduced in B.1.6 for the regional
-            // control plane (placement, hibernation, quotas, saga PII).
-            // Their apply logic lands alongside the bootstrap rewrite
-            // that gives `RegionGroup` its own storage path. Until then,
-            // no call site constructs them — these arms are unreachable.
+            // Placement + hibernation + quota apply logic lands with the
+            // SystemGroup/RegionGroup skeleton fill; no call site
+            // constructs them yet.
             RegionRequest::PlaceOrganization { .. }
             | RegionRequest::UnplaceOrganization { .. }
             | RegionRequest::UpdateRegionQuota { .. }
-            | RegionRequest::SaveRegionalSagaPii { .. }
-            | RegionRequest::DeleteRegionalSagaPii { .. }
             | RegionRequest::RemoveRegionVoter { .. } => (
                 LedgerResponse::Error {
                     code: inferadb_ledger_types::ErrorCode::Internal,
-                    message: "B.1.6 migration: RegionRequest variant apply logic not yet implemented"
+                    message: "RegionRequest variant apply logic not yet implemented"
                         .to_string(),
                 },
                 None,
@@ -4732,17 +4789,20 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
         match request {
             OrganizationRequest::Write {
-                organization,
                 vault,
                 transactions,
                 idempotency_key,
                 request_hash,
             } => {
-                if let Err(resp) = require_fully_active_org(organization, state) {
+                // Owning organization is implied by the Raft group this
+                // entry lands in; read from the log store field instead
+                // of a payload-carried `organization:` duplicate.
+                let organization = self.organization_id();
+                if let Err(resp) = require_fully_active_org(&organization, state) {
                     return (resp, None);
                 }
 
-                let key = (*organization, *vault);
+                let key = (organization, *vault);
                 if let Some(VaultHealthStatus::Diverged { .. }) = state.vault_health.get(&key) {
                     return (
                         LedgerResponse::Error {
@@ -5004,24 +5064,24 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 // Update organization storage accounting.
                 let current =
-                    state.organization_storage_bytes.get(organization).copied().unwrap_or(0);
+                    state.organization_storage_bytes.get(&organization).copied().unwrap_or(0);
                 let updated = if storage_delta >= 0 {
                     current.saturating_add(storage_delta as u64)
                 } else {
                     current.saturating_sub(storage_delta.unsigned_abs())
                 };
-                state.organization_storage_bytes.insert(*organization, updated);
-                crate::metrics::set_organization_storage_bytes(*organization, updated);
-                crate::metrics::record_organization_operation(*organization, "write");
+                state.organization_storage_bytes.insert(organization, updated);
+                crate::metrics::set_organization_storage_bytes(organization, updated);
+                crate::metrics::record_organization_operation(organization, "write");
 
                 // Mirror updated OrganizationMeta (with new storage_bytes) to pending
-                if let Some(org_meta) = state.organizations.get(organization) {
+                if let Some(org_meta) = state.organizations.get(&organization) {
                     let mut org_meta = org_meta.clone();
                     org_meta.storage_bytes = updated;
                     if let Some(blob) = try_encode(&org_meta, "org_meta") {
-                        pending.organizations.push((*organization, blob));
+                        pending.organizations.push((organization, blob));
                     }
-                    state.organizations.insert(*organization, org_meta);
+                    state.organizations.insert(organization, org_meta);
                 }
 
                 // Server-assigned sequences: assign monotonic sequence to each transaction.
@@ -5030,7 +5090,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 let sequenced_transactions: Vec<_> = transactions
                     .iter()
                     .map(|tx| {
-                        let client_key = (*organization, *vault, tx.client_id.clone());
+                        let client_key = (organization, *vault, tx.client_id.clone());
                         let current_seq =
                             state.client_sequences.get(&client_key).map_or(0, |e| e.sequence);
                         let new_sequence = current_seq + 1;
@@ -5044,7 +5104,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                         // Mirror to pending external writes
                         let cs_key = PendingExternalWrites::client_sequence_key(
-                            *organization,
+                            organization,
                             *vault,
                             tx.client_id.as_bytes(),
                         );
@@ -5070,7 +5130,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 // Build VaultEntry for RegionBlock with server-assigned sequences
                 let vault_entry = VaultEntry {
-                    organization: *organization,
+                    organization: organization,
                     vault: *vault,
                     vault_height: new_height,
                     previous_vault_hash,
@@ -5083,11 +5143,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 let block_hash = self.compute_vault_block_hash(&vault_entry);
 
                 // Emit WriteCommitted event
-                let org_slug = state.id_to_slug.get(organization).copied();
+                let org_slug = state.id_to_slug.get(&organization).copied();
                 let vault_slug = state.vault_id_to_slug.get(vault).copied();
                 let mut emitter = ApplyPhaseEmitter::for_organization(
                     EventAction::WriteCommitted,
-                    *organization,
+                    organization,
                     org_slug,
                 )
                 .outcome(EventOutcome::Success)
@@ -5104,7 +5164,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         if let Operation::ExpireEntity { key, .. } = op {
                             let mut exp_emitter = ApplyPhaseEmitter::for_organization(
                                 EventAction::EntityExpired,
-                                *organization,
+                                organization,
                                 org_slug,
                             )
                             .detail("key", key)

@@ -1187,16 +1187,24 @@ pub enum RegionRequest {
         quota_bytes_per_sec: u64,
     },
     /// Persists cross-org saga PII scoped to a single region.
+    ///
+    /// `saga_id` is the saga's UUID string — the apply handler keys the
+    /// scratch record at `_tmp:saga_pii:{saga_id}` in the regional
+    /// SYSTEM vault. Non-UUID saga ids (used in unit tests) are
+    /// accepted as-is.
     SaveRegionalSagaPii {
-        /// Saga identifier.
-        saga_id: [u8; 16],
-        /// Opaque encrypted PII payload.
+        /// Saga identifier (UUID string in production).
+        saga_id: String,
+        /// Opaque PII payload. The orchestrator JSON-encodes `SagaPii`
+        /// into this buffer; the apply handler treats it as opaque.
         payload: Vec<u8>,
+        /// Unix timestamp (seconds) at which the scratch record expires.
+        expires_at: u64,
     },
     /// Removes regional saga PII on saga completion.
     DeleteRegionalSagaPii {
         /// Saga identifier.
-        saga_id: [u8; 16],
+        saga_id: String,
     },
     /// Adds a cluster node as a voter in this region's Raft group.
     AddRegionVoter {
@@ -1235,10 +1243,11 @@ pub enum RegionRequest {
 /// Cannot be proposed at the system or region tier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrganizationRequest {
-    /// Writes transactions to a vault.
+    /// Writes transactions to a vault. The owning organization is implied
+    /// by the Raft group the entry lands in — apply handlers read it
+    /// from [`RaftLogStore::organization_id`] rather than carrying it
+    /// in the payload.
     Write {
-        /// Target organization.
-        organization: OrganizationId,
         /// Target vault within the organization.
         vault: VaultId,
         /// Transactions to apply atomically.
@@ -2648,9 +2657,7 @@ mod tests {
 
         let ts = Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap();
         let payload = RaftPayload {
-            request: LedgerRequest::Organization(OrganizationRequest::Write {
-                organization: OrganizationId::new(1),
-                vault: VaultId::new(1),
+            request: LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0; 16],
                 request_hash: 0,
@@ -2726,9 +2733,7 @@ mod tests {
         ];
 
         let payload = RaftPayload {
-            request: LedgerRequest::Organization(OrganizationRequest::Write {
-                organization: OrganizationId::new(1),
-                vault: VaultId::new(1),
+            request: LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0; 16],
                 request_hash: 0,
@@ -2779,9 +2784,7 @@ mod tests {
         use chrono::TimeZone;
 
         let payload = RaftPayload {
-            request: LedgerRequest::Organization(OrganizationRequest::Write {
-                organization: OrganizationId::new(5),
-                vault: VaultId::new(3),
+            request: LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(3),
                 transactions: vec![],
                 idempotency_key: [42; 16],
                 request_hash: 12345,
@@ -4118,9 +4121,7 @@ mod tests {
     /// `LedgerRequest` variant will cause a compile error until classified.
     #[test]
     fn test_ledger_request_pii_classification_exhaustive() {
-        let write = LedgerRequest::Organization(OrganizationRequest::Write {
-            organization: OrganizationId::new(1),
-            vault: VaultId::new(1),
+        let write = LedgerRequest::Organization(OrganizationRequest::Write {            vault: VaultId::new(1),
             transactions: vec![],
             idempotency_key: [0; 16],
             request_hash: 0,

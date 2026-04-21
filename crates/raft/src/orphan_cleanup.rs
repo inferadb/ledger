@@ -248,9 +248,7 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
             timestamp: chrono::Utc::now(),
         };
 
-        let request = LedgerRequest::Organization(OrganizationRequest::Write {
-            organization,
-            vault: SYSTEM_VAULT_ID,
+        let request = LedgerRequest::Organization(OrganizationRequest::Write {            vault: SYSTEM_VAULT_ID,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,

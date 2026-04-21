@@ -937,8 +937,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             timestamp: chrono::Utc::now(),
         };
 
-        let saga_write = LedgerRequest::Organization(OrganizationRequest::Write {
-            organization: DomainOrganizationId::new(0), // _system
+        let saga_write = LedgerRequest::Organization(OrganizationRequest::Write {// _system
             vault: inferadb_ledger_types::VaultId::new(0),
             transactions: vec![saga_txn],
             idempotency_key: [0; 16],

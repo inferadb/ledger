@@ -451,9 +451,7 @@ mod tests {
     }
 
     fn make_request(organization: OrganizationId, vault: VaultId) -> LedgerRequest {
-        LedgerRequest::Organization(OrganizationRequest::Write {
-            organization,
-            vault,
+        LedgerRequest::Organization(OrganizationRequest::Write {            vault,
             transactions: vec![],
             idempotency_key: [0; 16],
             request_hash: 0,
@@ -791,12 +789,15 @@ mod tests {
         use super::*;
 
         fn make_indexed_request(idx: u64) -> LedgerRequest {
+            // `organization:` was dropped from `OrganizationRequest::Write`
+            // in the B.1.13 field-drop; we now tag each submission via
+            // `request_hash` instead so the proptest's `observed` vector
+            // still reconstructs submission order.
             LedgerRequest::Organization(OrganizationRequest::Write {
-                organization: OrganizationId::new(idx as i64),
                 vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
-                request_hash: 0,
+                request_hash: idx,
             })
         }
 
@@ -856,8 +857,11 @@ mod tests {
                             .collect();
 
                         for req in &requests {
-                            if let LedgerRequest::Organization(OrganizationRequest::Write { organization, .. }) = req {
-                                observed.lock().push(organization.value() as u64);
+                            if let LedgerRequest::Organization(
+                                OrganizationRequest::Write { request_hash, .. },
+                            ) = req
+                            {
+                                observed.lock().push(*request_hash);
                             }
                         }
 

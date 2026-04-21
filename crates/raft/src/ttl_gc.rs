@@ -126,9 +126,7 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
             timestamp: chrono::Utc::now(),
         };
 
-        let request = LedgerRequest::Organization(OrganizationRequest::Write {
-            organization,
-            vault,
+        let request = LedgerRequest::Organization(OrganizationRequest::Write {            vault,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,

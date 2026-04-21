@@ -455,9 +455,7 @@ impl proto::user_service_server::UserService for UserService {
             operations: vec![saga_op],
             timestamp: Utc::now(),
         };
-        let saga_request = LedgerRequest::Organization(OrganizationRequest::Write {
-            organization: inferadb_ledger_types::OrganizationId::new(0),
-            vault: DomainVaultId::new(0),
+        let saga_request = LedgerRequest::Organization(OrganizationRequest::Write {            vault: DomainVaultId::new(0),
             transactions: vec![saga_txn],
             idempotency_key: [0; 16],
             request_hash: 0,
@@ -1293,9 +1291,7 @@ impl proto::user_service_server::UserService for UserService {
             operations: vec![saga_op],
             timestamp: Utc::now(),
         };
-        let saga_request = LedgerRequest::Organization(OrganizationRequest::Write {
-            organization: inferadb_ledger_types::OrganizationId::new(0),
-            vault: DomainVaultId::new(0),
+        let saga_request = LedgerRequest::Organization(OrganizationRequest::Write {            vault: DomainVaultId::new(0),
             transactions: vec![saga_txn],
             idempotency_key: [0; 16],
             request_hash: 0,
