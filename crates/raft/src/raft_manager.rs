@@ -1942,7 +1942,19 @@ impl RaftManager {
         // Spawn the apply worker — bridges consensus commits to state machine.
         // The GLOBAL region's worker gets the DR event sender so the
         // PlacementController wakes when GLOBAL membership changes are applied.
-        let mut apply_worker = crate::apply_worker::OrganizationApplyWorker::new(
+        //
+        // During the B.1.6 cutover the wire format is still
+        // `postcard(RaftPayload<LedgerRequest>)` for every group: propose
+        // sites construct `LedgerRequest::{System,Region,Organization}(...)`
+        // and the apply worker decodes the wrapper before dispatching to
+        // the tier-specific `apply_*_request_with_events` method. The
+        // tier-typed aliases (`SystemApplyWorker` /
+        // `RegionApplyWorker` / `OrganizationApplyWorker` =
+        // `ApplyWorker<R>` for each `R`) exist for the follow-up commit
+        // that atomically flips propose sites and apply workers to typed
+        // `R` per group, after which `LedgerRequest` deletes and the
+        // wire format becomes tier-native.
+        let mut apply_worker = crate::apply_worker::ApplyWorker::<crate::types::LedgerRequest>::new(
             log_store,
             handle.response_map().clone(),
             handle.spillover().clone(),
