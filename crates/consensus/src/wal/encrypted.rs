@@ -186,7 +186,7 @@ where
         self.inner.truncate_before(offset)
     }
 
-    fn shred_frames(&mut self, shard_id: crate::types::ShardId) -> Result<u64, WalError> {
+    fn shred_frames(&mut self, shard_id: crate::types::ConsensusStateId) -> Result<u64, WalError> {
         self.inner.shred_frames(shard_id)
     }
 }
@@ -199,12 +199,12 @@ mod tests {
     use super::*;
     use crate::{
         crypto::InMemoryKeyProvider,
-        types::ShardId,
+        types::ConsensusStateId,
         wal::{InMemoryWalBackend, SegmentedWalBackend},
     };
 
     fn frame(shard: u64, data: &[u8]) -> WalFrame {
-        WalFrame { shard_id: ShardId(shard), index: 0, term: 0, data: Arc::from(data) }
+        WalFrame { shard_id: ConsensusStateId(shard), index: 0, term: 0, data: Arc::from(data) }
     }
 
     fn setup_provider(vault_id: u64, dek_version: u16) -> Arc<InMemoryKeyProvider> {
@@ -231,7 +231,7 @@ mod tests {
         let read_back = wal.read_frames(0).unwrap();
         assert_eq!(read_back.len(), 3);
         assert_eq!(&*read_back[0].data, b"hello world");
-        assert_eq!(read_back[0].shard_id, ShardId(1));
+        assert_eq!(read_back[0].shard_id, ConsensusStateId(1));
         assert_eq!(&*read_back[1].data, b"second entry");
         assert_eq!(&*read_back[2].data, b"");
     }
@@ -333,7 +333,7 @@ mod tests {
         // Manually insert a frame with data shorter than MIN_PAYLOAD_SIZE.
         let short_payload = vec![0u8; 5];
         let bad_frame =
-            WalFrame { shard_id: ShardId(1), index: 0, term: 0, data: short_payload.into() };
+            WalFrame { shard_id: ConsensusStateId(1), index: 0, term: 0, data: short_payload.into() };
         inner.append(&[bad_frame]).unwrap();
         inner.sync().unwrap();
 

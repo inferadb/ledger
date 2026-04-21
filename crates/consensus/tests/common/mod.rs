@@ -7,12 +7,12 @@ use inferadb_ledger_consensus::{
     error::ConsensusError,
     message::Message,
     rng::SimulatedRng,
-    shard::Shard,
-    types::{Membership, MembershipChange, NodeId, NodeState, ShardId},
+    consensus_state::ConsensusState,
+    types::{Membership, MembershipChange, NodeId, NodeState, ConsensusStateId},
 };
 
 #[allow(dead_code)]
-pub type TestShard = Shard<Arc<SimulatedClock>, SimulatedRng>;
+pub type TestShard = ConsensusState<Arc<SimulatedClock>, SimulatedRng>;
 
 #[allow(dead_code)]
 pub struct TestCluster {
@@ -31,8 +31,8 @@ impl TestCluster {
         let mut shards = HashMap::new();
         for (i, &node_id) in node_ids.iter().enumerate() {
             let rng = SimulatedRng::new(100 + i as u64);
-            let shard = Shard::new(
-                ShardId(0),
+            let shard = ConsensusState::new(
+                ConsensusStateId(0),
                 node_id,
                 membership.clone(),
                 config.clone(),
@@ -143,7 +143,7 @@ impl TestCluster {
         Ok(())
     }
 
-    /// Adds a new node to the cluster (creates the `Shard` instance locally).
+    /// Adds a new node to the cluster (creates the `ConsensusState` instance locally).
     ///
     /// The new node starts as a follower with the given membership. This
     /// simulates a node that has just joined and is ready to receive
@@ -151,8 +151,8 @@ impl TestCluster {
     pub fn add_node(&mut self, node_id: NodeId, membership: Membership) {
         let rng = SimulatedRng::new(100 + node_id.0);
         let config = ShardConfig::default();
-        let shard = Shard::new(
-            ShardId(0),
+        let shard = ConsensusState::new(
+            ConsensusStateId(0),
             node_id,
             membership,
             config,

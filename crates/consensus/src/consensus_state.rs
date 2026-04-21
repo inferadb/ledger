@@ -1,6 +1,6 @@
 //! Core Raft state machine.
 //!
-//! The [`Shard`] receives events and returns [`Action`] values — it never
+//! The [`ConsensusState`] receives events and returns [`Action`] values — it never
 //! performs I/O directly. Parameterized by [`Clock`] and [`RngSource`] for
 //! deterministic simulation testing.
 
@@ -16,7 +16,7 @@ use crate::{
     message::Message,
     rng::RngSource,
     types::{
-        Entry, EntryKind, Membership, MembershipChange, NodeId, NodeState, PeerState, ShardId,
+        Entry, EntryKind, Membership, MembershipChange, NodeId, NodeState, PeerState, ConsensusStateId,
         TimerKind,
     },
 };
@@ -26,8 +26,8 @@ use crate::{
 /// All mutation happens through event handlers that return [`Action`] vectors.
 /// The reactor is responsible for executing those actions (sending messages,
 /// persisting entries, scheduling timers).
-pub struct Shard<C: Clock, R: RngSource> {
-    id: ShardId,
+pub struct ConsensusState<C: Clock, R: RngSource> {
+    id: ConsensusStateId,
     node_id: NodeId,
     state: NodeState,
     current_term: u64,
@@ -73,14 +73,14 @@ pub struct Shard<C: Clock, R: RngSource> {
     /// PreCandidate, vote-collection promotes to Leader.
     ///
     /// In [`LeadershipMode::Delegated`], elections are disabled. The
-    /// shard's leader is set externally via [`Shard::adopt_leader`] —
+    /// shard's leader is set externally via [`ConsensusState::adopt_leader`] —
     /// typically driven by another shard's leader changes (the region
     /// coordinator's leader becomes every per-organization shard's
     /// leader under the B.1 unified-leadership model).
     leadership_mode: LeadershipMode,
 }
 
-/// Determines how a [`Shard`] establishes its leader.
+/// Determines how a [`ConsensusState`] establishes its leader.
 ///
 /// The default mode is `SelfElect` — standard Raft elections. The
 /// `Delegated` mode is used by per-organization shards under the B.1
@@ -91,7 +91,7 @@ pub struct Shard<C: Clock, R: RngSource> {
 ///
 /// In `Delegated` mode, the shard must NOT initiate elections (election
 /// timeouts no-op) and must accept externally-asserted leadership via
-/// [`Shard::adopt_leader`]. The caller (the consensus engine + reactor)
+/// [`ConsensusState::adopt_leader`]. The caller (the consensus engine + reactor)
 /// is responsible for ensuring that adopted leaders actually have a quorum
 /// — typically by deriving them from another shard whose Raft elections
 /// already established quorum.
@@ -99,7 +99,7 @@ pub struct Shard<C: Clock, R: RngSource> {
 pub enum LeadershipMode {
     /// Standard Raft elections.
     SelfElect,
-    /// Leader is asserted externally via [`Shard::adopt_leader`].
+    /// Leader is asserted externally via [`ConsensusState::adopt_leader`].
     /// Election timeouts no-op.
     Delegated,
 }
@@ -110,7 +110,7 @@ impl Default for LeadershipMode {
     }
 }
 
-impl<C: Clock + Clone, R: RngSource> Shard<C, R> {
+impl<C: Clock + Clone, R: RngSource> ConsensusState<C, R> {
     /// Creates a new shard starting as a [`NodeState::Follower`].
     ///
     /// For first boot pass `initial_term = 0, initial_voted_for = None,
@@ -125,7 +125,7 @@ impl<C: Clock + Clone, R: RngSource> Shard<C, R> {
     /// worker.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        id: ShardId,
+        id: ConsensusStateId,
         node_id: NodeId,
         membership: Membership,
         config: ShardConfig,
@@ -292,7 +292,7 @@ impl<C: Clock + Clone, R: RngSource> Shard<C, R> {
 
     /// Returns the shard ID.
     #[inline]
-    pub fn id(&self) -> ShardId {
+    pub fn id(&self) -> ConsensusStateId {
         self.id
     }
 
@@ -1621,13 +1621,13 @@ mod tests {
         clock: Arc<SimulatedClock>,
         rng: SimulatedRng,
         membership: Membership,
-    ) -> Shard<Arc<SimulatedClock>, SimulatedRng> {
-        Shard::new(ShardId(1), node_id, membership, ShardConfig::default(), clock, rng, 0, None, 0)
+    ) -> ConsensusState<Arc<SimulatedClock>, SimulatedRng> {
+        ConsensusState::new(ConsensusStateId(1), node_id, membership, ShardConfig::default(), clock, rng, 0, None, 0)
     }
 
     fn make_3node_shard(
         node_id: u64,
-    ) -> (Arc<SimulatedClock>, Shard<Arc<SimulatedClock>, SimulatedRng>) {
+    ) -> (Arc<SimulatedClock>, ConsensusState<Arc<SimulatedClock>, SimulatedRng>) {
         let clock = make_clock();
         let shard = make_shard(NodeId(node_id), clock.clone(), make_rng(), make_membership_3());
         (clock, shard)
@@ -1661,7 +1661,7 @@ mod tests {
     }
 
     /// Elect a node as leader by simulating pre-vote + vote rounds.
-    fn elect_leader(shard: &mut Shard<Arc<SimulatedClock>, SimulatedRng>, clock: &SimulatedClock) {
+    fn elect_leader(shard: &mut ConsensusState<Arc<SimulatedClock>, SimulatedRng>, clock: &SimulatedClock) {
         // Advance past election deadline.
         clock.advance(std::time::Duration::from_secs(1));
         let _actions = shard.handle_election_timeout();
@@ -1724,7 +1724,7 @@ mod tests {
         let (clock, mut shard) = make_3node_shard(1);
 
         let snap = shard.state_snapshot();
-        assert_eq!(snap.shard, ShardId(1));
+        assert_eq!(snap.shard, ConsensusStateId(1));
         assert_eq!(snap.term, 0);
         assert_eq!(snap.state, NodeState::Follower);
         assert!(snap.leader.is_none());
@@ -2566,8 +2566,8 @@ mod tests {
     fn test_maybe_trigger_snapshot_does_not_advance_last_snapshot_index() {
         let clock = make_clock();
         let config = ShardConfig { snapshot_threshold: 3, ..ShardConfig::default() };
-        let mut shard = Shard::new(
-            ShardId(1),
+        let mut shard = ConsensusState::new(
+            ConsensusStateId(1),
             NodeId(1),
             make_membership_3(),
             config,
@@ -2605,8 +2605,8 @@ mod tests {
     fn test_handle_snapshot_completed_advances_last_snapshot_index() {
         let clock = make_clock();
         let config = ShardConfig { snapshot_threshold: 3, ..ShardConfig::default() };
-        let mut shard = Shard::new(
-            ShardId(1),
+        let mut shard = ConsensusState::new(
+            ConsensusStateId(1),
             NodeId(1),
             make_membership_3(),
             config,
@@ -2659,8 +2659,8 @@ mod tests {
     fn test_snapshot_in_flight_suppresses_duplicate_triggers() {
         let clock = make_clock();
         let config = ShardConfig { snapshot_threshold: 2, ..ShardConfig::default() };
-        let mut shard = Shard::new(
-            ShardId(1),
+        let mut shard = ConsensusState::new(
+            ConsensusStateId(1),
             NodeId(1),
             make_membership_3(),
             config,
@@ -2858,7 +2858,7 @@ mod tests {
 
     // ── log_entries / truncate_log_before ───────────────────────────
 
-    fn push_entry(shard: &mut Shard<Arc<SimulatedClock>, SimulatedRng>, index: u64) {
+    fn push_entry(shard: &mut ConsensusState<Arc<SimulatedClock>, SimulatedRng>, index: u64) {
         shard.log.push_back(Entry {
             term: 1,
             index,
@@ -3007,7 +3007,7 @@ mod tests {
         // cleanup timer, blocking replication until the timer expired —
         // even though the final entry in the same batch re-added the node.
         let clock = make_clock();
-        // Shard is created with all three nodes in the initial membership,
+        // ConsensusState is created with all three nodes in the initial membership,
         // so `was_ever_member` starts true on Node 3.
         let mut shard = make_shard(NodeId(3), clock.clone(), make_rng(), make_membership_3());
 
@@ -3347,8 +3347,8 @@ mod tests {
         assert_eq!(restarted.current_term(), 0);
 
         // Now create with recovered state.
-        let recovered = Shard::new(
-            ShardId(1),
+        let recovered = ConsensusState::new(
+            ConsensusStateId(1),
             NodeId(1),
             make_membership_3(),
             ShardConfig::default(),
@@ -3385,8 +3385,8 @@ mod tests {
         assert_eq!(shard.voted_for(), Some(NodeId(1)));
 
         // Simulate restart with recovered state.
-        let mut recovered = Shard::new(
-            ShardId(1),
+        let mut recovered = ConsensusState::new(
+            ConsensusStateId(1),
             NodeId(1),
             make_membership_3(),
             ShardConfig::default(),
@@ -3520,8 +3520,8 @@ mod tests {
         let clock = make_clock();
 
         // Create a shard that has already voted for NodeId(2) at term 5.
-        let mut shard = Shard::new(
-            ShardId(1),
+        let mut shard = ConsensusState::new(
+            ConsensusStateId(1),
             NodeId(1),
             make_membership_3(),
             ShardConfig::default(),
@@ -3560,11 +3560,11 @@ mod tests {
     fn restarted_shard_cannot_win_election_at_lower_term() {
         let clock = make_clock();
 
-        // Shard B was at term 5. On restart, if term were lost (reset to 0),
+        // ConsensusState B was at term 5. On restart, if term were lost (reset to 0),
         // it could start an election at term 1 which should be rejected.
         // With the fix, it correctly starts at term 5.
-        let mut shard_a = Shard::new(
-            ShardId(1),
+        let mut shard_a = ConsensusState::new(
+            ConsensusStateId(1),
             NodeId(1),
             make_membership_3(),
             ShardConfig::default(),
@@ -3603,8 +3603,8 @@ mod tests {
     #[test]
     fn initial_committed_index_sets_commit_and_last_applied() {
         let clock = make_clock();
-        let shard = Shard::new(
-            ShardId(1),
+        let shard = ConsensusState::new(
+            ConsensusStateId(1),
             NodeId(1),
             make_membership_3(),
             ShardConfig::default(),
@@ -3627,8 +3627,8 @@ mod tests {
     fn recovered_shard_only_commits_beyond_initial_committed_index() {
         let clock = make_clock();
         // Simulate a follower that crashed with committed_index=3.
-        let mut follower = Shard::new(
-            ShardId(1),
+        let mut follower = ConsensusState::new(
+            ConsensusStateId(1),
             NodeId(2),
             make_membership_3(),
             ShardConfig::default(),
@@ -3686,8 +3686,8 @@ mod tests {
         // Simulate a follower with committed_index=3. It will receive entries
         // 1-3 (matching) and 4-5 (new from leader, possibly different from
         // what was in the WAL before crash).
-        let mut follower = Shard::new(
-            ShardId(1),
+        let mut follower = ConsensusState::new(
+            ConsensusStateId(1),
             NodeId(2),
             make_membership_3(),
             ShardConfig::default(),

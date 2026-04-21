@@ -409,7 +409,7 @@ async fn handle_consensus_message(
     };
 
     // B.1.7 multi-engine routing: each per-organization Raft group runs
-    // its own ConsensusEngine with a distinct ShardId. Route by shard_id
+    // its own ConsensusEngine with a distinct ConsensusStateId. Route by shard_id
     // rather than by region — looking up by region alone would always
     // hit the legacy data-region group at OrganizationId::new(0) and
     // miss messages destined for per-organization groups under
@@ -417,7 +417,7 @@ async fn handle_consensus_message(
     // shard_id isn't found locally (covers the data-region group itself
     // and the brief race between message arrival and per-org group
     // bootstrap completion).
-    let consensus_shard = inferadb_ledger_consensus::types::ShardId(req.shard_id);
+    let consensus_shard = inferadb_ledger_consensus::types::ConsensusStateId(req.shard_id);
     let group = manager
         .lookup_by_consensus_shard(consensus_shard)
         .or_else(|| manager.get_region_group(region).ok())

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::types::{EntryKind, ShardId};
+use crate::types::{EntryKind, ConsensusStateId};
 
 /// A single committed log entry carried to the apply worker.
 #[derive(Debug, Clone)]
@@ -24,8 +24,8 @@ pub struct CommittedEntry {
 /// relative to the previous batch for this shard.
 #[derive(Debug, Clone)]
 pub struct CommittedBatch {
-    /// Shard that produced these entries.
-    pub shard: ShardId,
+    /// ConsensusState that produced these entries.
+    pub shard: ConsensusStateId,
     /// Committed entries in ascending index order.
     pub entries: Vec<CommittedEntry>,
     /// The leader node that committed these entries, if known.
@@ -63,7 +63,7 @@ mod tests {
 
     #[test]
     fn empty_batch_has_no_last_index() {
-        let batch = CommittedBatch { shard: ShardId(1), entries: vec![], leader_node: None };
+        let batch = CommittedBatch { shard: ConsensusStateId(1), entries: vec![], leader_node: None };
         assert!(batch.is_empty());
         assert_eq!(batch.last_index(), None);
     }
@@ -71,7 +71,7 @@ mod tests {
     #[test]
     fn single_entry_batch_returns_that_index() {
         let batch = CommittedBatch {
-            shard: ShardId(5),
+            shard: ConsensusStateId(5),
             entries: vec![make_entry(1, 1)],
             leader_node: None,
         };
@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn multi_entry_batch_returns_last_index() {
         let batch = CommittedBatch {
-            shard: ShardId(1),
+            shard: ConsensusStateId(1),
             entries: vec![make_entry(3, 1), make_entry(4, 1), make_entry(5, 2)],
             leader_node: None,
         };
@@ -122,19 +122,19 @@ mod tests {
 
     #[test]
     fn batch_leader_node_none() {
-        let batch = CommittedBatch { shard: ShardId(1), entries: vec![], leader_node: None };
+        let batch = CommittedBatch { shard: ConsensusStateId(1), entries: vec![], leader_node: None };
         assert!(batch.leader_node.is_none());
     }
 
     #[test]
     fn batch_leader_node_set() {
         let batch = CommittedBatch {
-            shard: ShardId(1),
+            shard: ConsensusStateId(1),
             entries: vec![make_entry(1, 1)],
             leader_node: Some(42),
         };
         assert_eq!(batch.leader_node, Some(42));
-        assert_eq!(batch.shard, ShardId(1));
+        assert_eq!(batch.shard, ConsensusStateId(1));
     }
 
     // -- CommittedBatch: shard identity preserved --
@@ -142,10 +142,10 @@ mod tests {
     #[test]
     fn batch_preserves_shard_id() {
         let batch = CommittedBatch {
-            shard: ShardId(999),
+            shard: ConsensusStateId(999),
             entries: vec![make_entry(1, 1)],
             leader_node: None,
         };
-        assert_eq!(batch.shard, ShardId(999));
+        assert_eq!(batch.shard, ConsensusStateId(999));
     }
 }

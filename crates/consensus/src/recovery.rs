@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::{
     committed::{CommittedBatch, CommittedEntry},
-    types::{EntryKind, ShardId},
+    types::{EntryKind, ConsensusStateId},
     wal_backend::{CHECKPOINT_SHARD_ID, WalBackend, WalError},
 };
 
@@ -37,7 +37,7 @@ pub struct RecoveryResult {
 /// Entries in `(last_applied, committed_index]` that need replay.
 pub fn recover_from_wal<W: WalBackend>(
     wal: &W,
-    last_applied: &HashMap<ShardId, u64>,
+    last_applied: &HashMap<ConsensusStateId, u64>,
 ) -> Result<RecoveryResult, WalError> {
     let checkpoint = wal.last_checkpoint()?;
     let (committed_index, term) = match checkpoint {
@@ -54,7 +54,7 @@ pub fn recover_from_wal<W: WalBackend>(
 
     // Read all frames and collect entries in the replay window.
     let frames = wal.read_frames(0)?;
-    let mut shard_entries: HashMap<ShardId, Vec<CommittedEntry>> = HashMap::new();
+    let mut shard_entries: HashMap<ConsensusStateId, Vec<CommittedEntry>> = HashMap::new();
 
     for frame in &frames {
         if frame.shard_id == CHECKPOINT_SHARD_ID {
@@ -103,7 +103,7 @@ mod tests {
 
     fn make_frame(shard: u64, index: u64, term: u64) -> WalFrame {
         WalFrame {
-            shard_id: ShardId(shard),
+            shard_id: ConsensusStateId(shard),
             index,
             term,
             data: std::sync::Arc::from(format!("entry-{index}").into_bytes().as_slice()),
@@ -132,7 +132,7 @@ mod tests {
         wal.sync().unwrap();
 
         let mut applied = HashMap::new();
-        applied.insert(ShardId(1), 1);
+        applied.insert(ConsensusStateId(1), 1);
 
         let result = recover_from_wal(&wal, &applied).expect("recover");
         assert_eq!(result.committed_index, 3);
@@ -164,7 +164,7 @@ mod tests {
         wal.sync().unwrap();
 
         let mut applied = HashMap::new();
-        applied.insert(ShardId(1), 1); // shard 1: needs index 2
+        applied.insert(ConsensusStateId(1), 1); // shard 1: needs index 2
         // shard 2: needs index 1 and 2
 
         let result = recover_from_wal(&wal, &applied).expect("recover");
@@ -180,7 +180,7 @@ mod tests {
         wal.sync().unwrap();
 
         let mut applied = HashMap::new();
-        applied.insert(ShardId(1), 2);
+        applied.insert(ConsensusStateId(1), 2);
 
         let result = recover_from_wal(&wal, &applied).expect("recover");
         assert_eq!(result.replay_count, 0);
@@ -222,7 +222,7 @@ mod tests {
     fn empty_wal_with_no_frames_returns_zero_state() {
         let wal = InMemoryWalBackend::new();
         let mut applied = HashMap::new();
-        applied.insert(ShardId(1), 5);
+        applied.insert(ConsensusStateId(1), 5);
 
         let result = recover_from_wal(&wal, &applied).expect("recover");
         assert_eq!(result.committed_index, 0);

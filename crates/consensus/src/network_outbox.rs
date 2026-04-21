@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::{
     message::Message,
     transport::{NetworkTransport, OutboundMessage},
-    types::{NodeId, ShardId},
+    types::{NodeId, ConsensusStateId},
 };
 
 /// Groups outbound messages by destination node for batch sending.
@@ -15,7 +15,7 @@ use crate::{
 /// tick produces many sends to the same peer. Vote messages bypass the outbox
 /// entirely so that election latency is unaffected.
 pub struct NetworkOutbox {
-    buffers: HashMap<NodeId, Vec<(ShardId, Message)>>,
+    buffers: HashMap<NodeId, Vec<(ConsensusStateId, Message)>>,
 }
 
 impl NetworkOutbox {
@@ -25,7 +25,7 @@ impl NetworkOutbox {
     }
 
     /// Enqueues a message for delivery to `to` on the given `shard`.
-    pub fn enqueue(&mut self, to: NodeId, shard: ShardId, msg: Message) {
+    pub fn enqueue(&mut self, to: NodeId, shard: ConsensusStateId, msg: Message) {
         self.buffers.entry(to).or_default().push((shard, msg));
     }
 
@@ -76,9 +76,9 @@ mod tests {
         assert!(outbox.is_empty());
         assert_eq!(outbox.len(), 0);
 
-        outbox.enqueue(NodeId(1), ShardId(0), Message::TimeoutNow);
-        outbox.enqueue(NodeId(2), ShardId(0), Message::TimeoutNow);
-        outbox.enqueue(NodeId(3), ShardId(0), Message::TimeoutNow);
+        outbox.enqueue(NodeId(1), ConsensusStateId(0), Message::TimeoutNow);
+        outbox.enqueue(NodeId(2), ConsensusStateId(0), Message::TimeoutNow);
+        outbox.enqueue(NodeId(3), ConsensusStateId(0), Message::TimeoutNow);
 
         assert_eq!(outbox.len(), 3);
         assert!(!outbox.is_empty());
@@ -89,9 +89,9 @@ mod tests {
         let mut outbox = NetworkOutbox::new();
         let transport = InMemoryTransport::new();
 
-        outbox.enqueue(NodeId(1), ShardId(0), Message::TimeoutNow);
-        outbox.enqueue(NodeId(2), ShardId(1), Message::TimeoutNow);
-        outbox.enqueue(NodeId(3), ShardId(2), Message::TimeoutNow);
+        outbox.enqueue(NodeId(1), ConsensusStateId(0), Message::TimeoutNow);
+        outbox.enqueue(NodeId(2), ConsensusStateId(1), Message::TimeoutNow);
+        outbox.enqueue(NodeId(3), ConsensusStateId(2), Message::TimeoutNow);
 
         outbox.flush(&transport);
 
@@ -115,8 +115,8 @@ mod tests {
         let mut outbox = NetworkOutbox::new();
         let transport = InMemoryTransport::new();
 
-        outbox.enqueue(NodeId(2), ShardId(0), Message::TimeoutNow);
-        outbox.enqueue(NodeId(2), ShardId(1), Message::TimeoutNow);
+        outbox.enqueue(NodeId(2), ConsensusStateId(0), Message::TimeoutNow);
+        outbox.enqueue(NodeId(2), ConsensusStateId(1), Message::TimeoutNow);
 
         assert_eq!(outbox.len(), 2);
 
@@ -131,12 +131,12 @@ mod tests {
         let mut outbox = NetworkOutbox::new();
         let transport = InMemoryTransport::new();
 
-        outbox.enqueue(NodeId(1), ShardId(0), Message::TimeoutNow);
+        outbox.enqueue(NodeId(1), ConsensusStateId(0), Message::TimeoutNow);
         outbox.flush(&transport);
         assert_eq!(transport.sent_count(), 1);
 
-        outbox.enqueue(NodeId(2), ShardId(0), Message::TimeoutNow);
-        outbox.enqueue(NodeId(3), ShardId(0), Message::TimeoutNow);
+        outbox.enqueue(NodeId(2), ConsensusStateId(0), Message::TimeoutNow);
+        outbox.enqueue(NodeId(3), ConsensusStateId(0), Message::TimeoutNow);
         outbox.flush(&transport);
 
         // Transport accumulates across flushes.

@@ -19,7 +19,7 @@ pub(crate) const LEADER_TERM_KEY: &str = "leader_term";
 /// `ErrorDetails.context` key for the organization id the leader is for
 /// (numeric string; `"0"` for the data-region group).
 ///
-/// Distinct from the consensus-layer `ShardId` (an opaque seahash) — the
+/// Distinct from the consensus-layer `ConsensusStateId` (an opaque seahash) — the
 /// organization id is what the SDK uses for routing and what its
 /// `RegionLeaderCache` keys on. Data-region groups emit `"0"`; per-
 /// organization groups emit the organization's id.

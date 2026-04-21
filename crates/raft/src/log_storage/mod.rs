@@ -12553,7 +12553,7 @@ mod tests {
 
     /// Helper: produce a WAL frame for the given shard + index (no-op entry).
     fn replay_wal_frame(
-        shard_id: inferadb_ledger_consensus::types::ShardId,
+        shard_id: inferadb_ledger_consensus::types::ConsensusStateId,
         index: u64,
         term: u64,
     ) -> inferadb_ledger_consensus::wal_backend::WalFrame {
@@ -12574,7 +12574,7 @@ mod tests {
 
         // Fresh WAL with no checkpoint and no frames.
         let wal = inferadb_ledger_consensus::wal::InMemoryWalBackend::new();
-        let shard_id = inferadb_ledger_consensus::types::ShardId(42);
+        let shard_id = inferadb_ledger_consensus::types::ConsensusStateId(42);
 
         let synced_before = store.db.last_synced_snapshot_id();
         let stats = store.replay_crash_gap(&wal, shard_id).await.expect("replay");
@@ -12596,7 +12596,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
         let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
 
-        let shard_id = inferadb_ledger_consensus::types::ShardId(7);
+        let shard_id = inferadb_ledger_consensus::types::ConsensusStateId(7);
 
         // Pre-populate the WAL with frames 1..=3 and a checkpoint at
         // committed_index=3. Simulate "state DB already caught up" by
@@ -12643,7 +12643,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
         let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
 
-        let shard_id = inferadb_ledger_consensus::types::ShardId(11);
+        let shard_id = inferadb_ledger_consensus::types::ConsensusStateId(11);
 
         // WAL has frames 1..=5 committed. State DB simulates a crash mid-way:
         // applied_durable = 2, so indexes 3..=5 must be replayed.
@@ -12736,7 +12736,7 @@ mod tests {
             .with_block_archive(block_archive)
             .with_event_writer(event_writer);
 
-        let shard_id = inferadb_ledger_consensus::types::ShardId(91);
+        let shard_id = inferadb_ledger_consensus::types::ConsensusStateId(91);
 
         // Set up a WAL with frames 1..=3 committed and a state DB that
         // has only applied through index 1 — indexes 2..=3 get replayed.
@@ -12824,7 +12824,7 @@ mod tests {
         let path = dir.path().join("raft_log.db");
         let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store");
 
-        let shard_id = inferadb_ledger_consensus::types::ShardId(99);
+        let shard_id = inferadb_ledger_consensus::types::ConsensusStateId(99);
 
         let mut wal = inferadb_ledger_consensus::wal::InMemoryWalBackend::new();
         use inferadb_ledger_consensus::wal_backend::WalBackend;

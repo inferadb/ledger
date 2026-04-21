@@ -653,7 +653,7 @@ struct FlushQueue {
     overflow: EventOverflowBehavior,
     /// Region label for emitted metrics.
     region: String,
-    /// Shard label for emitted metrics, pre-stringified from the owning
+    /// ConsensusState label for emitted metrics, pre-stringified from the owning
     /// OrganizationGroup's
     /// [`OrganizationId`](inferadb_ledger_types::OrganizationId). Phase A
     /// emits `"0"`; Task 5 fans flushers out.
@@ -1152,7 +1152,7 @@ struct EventFlusher<B: StorageBackend> {
     drop_count: Arc<AtomicU64>,
     runtime_config: RuntimeConfigHandle,
     region: String,
-    /// Shard label for emitted metrics, pre-stringified from the owning
+    /// ConsensusState label for emitted metrics, pre-stringified from the owning
     /// OrganizationGroup's
     /// [`OrganizationId`](inferadb_ledger_types::OrganizationId).
     shard: String,

@@ -6,7 +6,7 @@ use std::sync::{
 };
 
 use crate::{
-    types::ShardId,
+    types::ConsensusStateId,
     wal_backend::{CHECKPOINT_SHARD_ID, CheckpointFrame, WalBackend, WalError, WalFrame},
 };
 
@@ -107,7 +107,7 @@ impl WalBackend for InMemoryWalBackend {
         Ok(self.durable[offset..].to_vec())
     }
 
-    fn shred_frames(&mut self, shard_id: ShardId) -> Result<u64, WalError> {
+    fn shred_frames(&mut self, shard_id: ConsensusStateId) -> Result<u64, WalError> {
         let mut count = 0u64;
         for frame in &mut self.pending {
             if frame.shard_id == shard_id {
@@ -160,10 +160,10 @@ impl WalBackend for InMemoryWalBackend {
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
-    use crate::types::ShardId;
+    use crate::types::ConsensusStateId;
 
     fn frame(shard: u64, data: &[u8]) -> WalFrame {
-        WalFrame { shard_id: ShardId(shard), index: 0, term: 0, data: Arc::from(data) }
+        WalFrame { shard_id: ConsensusStateId(shard), index: 0, term: 0, data: Arc::from(data) }
     }
 
     // --- append / sync / read_frames ---
@@ -389,14 +389,14 @@ mod tests {
         wal.append(&[frame(2, b"shard-two-a"), frame(2, b"shard-two-b")]).unwrap();
         wal.sync().unwrap();
 
-        let zeroed = wal.shred_frames(ShardId(1)).unwrap();
+        let zeroed = wal.shred_frames(ConsensusStateId(1)).unwrap();
         assert_eq!(zeroed, 3);
 
         let frames = wal.read_frames(0).unwrap();
-        for f in frames.iter().filter(|f| f.shard_id == ShardId(1)) {
+        for f in frames.iter().filter(|f| f.shard_id == ConsensusStateId(1)) {
             assert!(f.data.iter().all(|&b| b == 0), "shard 1 frame not zeroed");
         }
-        let shard2: Vec<_> = frames.iter().filter(|f| f.shard_id == ShardId(2)).collect();
+        let shard2: Vec<_> = frames.iter().filter(|f| f.shard_id == ConsensusStateId(2)).collect();
         assert_eq!(&*shard2[0].data, b"shard-two-a");
         assert_eq!(&*shard2[1].data, b"shard-two-b");
     }
@@ -409,7 +409,7 @@ mod tests {
         wal.sync().unwrap();
         wal.append(&[frame(1, b"pending")]).unwrap();
 
-        let zeroed = wal.shred_frames(ShardId(1)).unwrap();
+        let zeroed = wal.shred_frames(ConsensusStateId(1)).unwrap();
         assert_eq!(zeroed, 2);
 
         // Durable frame zeroed.
@@ -430,7 +430,7 @@ mod tests {
         wal.append(&[frame(1, b"data")]).unwrap();
         wal.sync().unwrap();
 
-        assert_eq!(wal.shred_frames(ShardId(99)).unwrap(), 0);
+        assert_eq!(wal.shred_frames(ConsensusStateId(99)).unwrap(), 0);
         assert_eq!(&*wal.read_frames(0).unwrap()[0].data, b"data");
     }
 }

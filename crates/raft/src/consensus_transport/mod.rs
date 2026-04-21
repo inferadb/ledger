@@ -143,7 +143,7 @@ impl NetworkTransport for GrpcConsensusTransport {
 mod tests {
     use inferadb_ledger_consensus::{
         Message,
-        types::{NodeId, ShardId},
+        types::{NodeId, ConsensusStateId},
     };
 
     use super::*;
@@ -165,7 +165,7 @@ mod tests {
         let transport = make_transport();
         // Fire-and-forget with no channel for self — should not panic
         let messages =
-            vec![OutboundMessage { to: NodeId(1), shard: ShardId(1), msg: Message::TimeoutNow }];
+            vec![OutboundMessage { to: NodeId(1), shard: ConsensusStateId(1), msg: Message::TimeoutNow }];
         transport.send_batch(messages);
     }
 
@@ -173,7 +173,7 @@ mod tests {
     fn unknown_peer_is_silently_skipped() {
         let transport = make_transport();
         let messages =
-            vec![OutboundMessage { to: NodeId(99), shard: ShardId(1), msg: Message::TimeoutNow }];
+            vec![OutboundMessage { to: NodeId(99), shard: ConsensusStateId(1), msg: Message::TimeoutNow }];
         transport.send_batch(messages);
     }
 
@@ -220,7 +220,7 @@ mod tests {
 
         // Push 10 messages.
         let messages: Vec<_> = (0..10)
-            .map(|i| OutboundMessage { to: NodeId(2), shard: ShardId(i), msg: Message::TimeoutNow })
+            .map(|i| OutboundMessage { to: NodeId(2), shard: ConsensusStateId(i), msg: Message::TimeoutNow })
             .collect();
         transport.send_batch(messages);
 
@@ -266,7 +266,7 @@ mod tests {
         let messages: Vec<_> = (0..TOTAL)
             .map(|i| OutboundMessage {
                 to: NodeId(2),
-                shard: ShardId(i as u64),
+                shard: ConsensusStateId(i as u64),
                 msg: Message::TimeoutNow,
             })
             .collect();

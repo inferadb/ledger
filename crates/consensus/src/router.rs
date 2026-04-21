@@ -5,11 +5,11 @@
 
 use std::collections::HashMap;
 
-use crate::types::ShardId;
+use crate::types::ConsensusStateId;
 
 /// Routes organization IDs to their owning shard.
 pub struct Router {
-    routes: HashMap<u64, ShardId>,
+    routes: HashMap<u64, ConsensusStateId>,
 }
 
 impl Router {
@@ -19,7 +19,7 @@ impl Router {
     }
 
     /// Assigns an organization to a shard.
-    pub fn set(&mut self, org_id: u64, shard: ShardId) {
+    pub fn set(&mut self, org_id: u64, shard: ConsensusStateId) {
         self.routes.insert(org_id, shard);
     }
 
@@ -29,14 +29,14 @@ impl Router {
     }
 
     /// Resolves which shard owns the given organization.
-    pub fn resolve(&self, org_id: u64) -> Option<ShardId> {
+    pub fn resolve(&self, org_id: u64) -> Option<ConsensusStateId> {
         self.routes.get(&org_id).copied()
     }
 
     /// Splits organizations by moving all with `id >= split_key` to `new_shard`.
     ///
     /// Returns the IDs that were moved.
-    pub fn split(&mut self, split_key: u64, new_shard: ShardId) -> Vec<u64> {
+    pub fn split(&mut self, split_key: u64, new_shard: ConsensusStateId) -> Vec<u64> {
         let moved: Vec<u64> = self.routes.keys().copied().filter(|&id| id >= split_key).collect();
         for &id in &moved {
             self.routes.insert(id, new_shard);
@@ -45,7 +45,7 @@ impl Router {
     }
 
     /// Merges all organizations from `source_shard` into `target_shard`.
-    pub fn merge(&mut self, source_shard: ShardId, target_shard: ShardId) {
+    pub fn merge(&mut self, source_shard: ConsensusStateId, target_shard: ConsensusStateId) {
         for shard in self.routes.values_mut() {
             if *shard == source_shard {
                 *shard = target_shard;
@@ -78,18 +78,18 @@ mod tests {
     #[test]
     fn set_and_resolve() {
         let mut router = Router::new();
-        router.set(1, ShardId(10));
-        router.set(2, ShardId(20));
-        assert_eq!(router.resolve(1), Some(ShardId(10)));
-        assert_eq!(router.resolve(2), Some(ShardId(20)));
+        router.set(1, ConsensusStateId(10));
+        router.set(2, ConsensusStateId(20));
+        assert_eq!(router.resolve(1), Some(ConsensusStateId(10)));
+        assert_eq!(router.resolve(2), Some(ConsensusStateId(20)));
     }
 
     #[test]
     fn set_overwrites_existing_route() {
         let mut router = Router::new();
-        router.set(1, ShardId(10));
-        router.set(1, ShardId(20));
-        assert_eq!(router.resolve(1), Some(ShardId(20)));
+        router.set(1, ConsensusStateId(10));
+        router.set(1, ConsensusStateId(20));
+        assert_eq!(router.resolve(1), Some(ConsensusStateId(20)));
         assert_eq!(router.len(), 1);
     }
 
@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn remove_clears_route() {
         let mut router = Router::new();
-        router.set(1, ShardId(10));
+        router.set(1, ConsensusStateId(10));
         router.remove(1);
         assert_eq!(router.resolve(1), None);
         assert_eq!(router.len(), 0);
@@ -118,47 +118,47 @@ mod tests {
     #[test]
     fn remove_nonexistent_org_is_noop() {
         let mut router = Router::new();
-        router.set(1, ShardId(10));
+        router.set(1, ConsensusStateId(10));
         router.remove(999);
         assert_eq!(router.len(), 1);
-        assert_eq!(router.resolve(1), Some(ShardId(10)));
+        assert_eq!(router.resolve(1), Some(ConsensusStateId(10)));
     }
 
     #[test]
     fn split_moves_orgs_at_or_above_key() {
         let mut router = Router::new();
-        router.set(1, ShardId(10));
-        router.set(5, ShardId(10));
-        router.set(10, ShardId(10));
-        router.set(15, ShardId(10));
+        router.set(1, ConsensusStateId(10));
+        router.set(5, ConsensusStateId(10));
+        router.set(10, ConsensusStateId(10));
+        router.set(15, ConsensusStateId(10));
 
-        let mut moved = router.split(10, ShardId(20));
+        let mut moved = router.split(10, ConsensusStateId(20));
         moved.sort_unstable();
         assert_eq!(moved, vec![10, 15]);
 
-        assert_eq!(router.resolve(10), Some(ShardId(20)));
-        assert_eq!(router.resolve(15), Some(ShardId(20)));
-        assert_eq!(router.resolve(1), Some(ShardId(10)));
-        assert_eq!(router.resolve(5), Some(ShardId(10)));
+        assert_eq!(router.resolve(10), Some(ConsensusStateId(20)));
+        assert_eq!(router.resolve(15), Some(ConsensusStateId(20)));
+        assert_eq!(router.resolve(1), Some(ConsensusStateId(10)));
+        assert_eq!(router.resolve(5), Some(ConsensusStateId(10)));
     }
 
     #[test]
     fn split_with_no_matching_orgs_returns_empty() {
         let mut router = Router::new();
-        router.set(1, ShardId(10));
-        router.set(2, ShardId(10));
+        router.set(1, ConsensusStateId(10));
+        router.set(2, ConsensusStateId(10));
 
-        let moved = router.split(100, ShardId(20));
+        let moved = router.split(100, ConsensusStateId(20));
         assert!(moved.is_empty());
         // Original routes unchanged.
-        assert_eq!(router.resolve(1), Some(ShardId(10)));
-        assert_eq!(router.resolve(2), Some(ShardId(10)));
+        assert_eq!(router.resolve(1), Some(ConsensusStateId(10)));
+        assert_eq!(router.resolve(2), Some(ConsensusStateId(10)));
     }
 
     #[test]
     fn split_on_empty_table_returns_empty() {
         let mut router = Router::new();
-        let moved = router.split(0, ShardId(20));
+        let moved = router.split(0, ConsensusStateId(20));
         assert!(moved.is_empty());
         assert!(router.is_empty());
     }
@@ -166,69 +166,69 @@ mod tests {
     #[test]
     fn split_moves_orgs_across_multiple_source_shards() {
         let mut router = Router::new();
-        router.set(1, ShardId(10));
-        router.set(5, ShardId(20));
-        router.set(10, ShardId(10));
-        router.set(15, ShardId(20));
+        router.set(1, ConsensusStateId(10));
+        router.set(5, ConsensusStateId(20));
+        router.set(10, ConsensusStateId(10));
+        router.set(15, ConsensusStateId(20));
 
-        let mut moved = router.split(10, ShardId(30));
+        let mut moved = router.split(10, ConsensusStateId(30));
         moved.sort_unstable();
         // Both org 10 (was shard 10) and org 15 (was shard 20) move to shard 30.
         assert_eq!(moved, vec![10, 15]);
-        assert_eq!(router.resolve(10), Some(ShardId(30)));
-        assert_eq!(router.resolve(15), Some(ShardId(30)));
+        assert_eq!(router.resolve(10), Some(ConsensusStateId(30)));
+        assert_eq!(router.resolve(15), Some(ConsensusStateId(30)));
     }
 
     #[test]
     fn split_at_zero_moves_all_orgs() {
         let mut router = Router::new();
-        router.set(0, ShardId(10));
-        router.set(5, ShardId(10));
-        router.set(u64::MAX, ShardId(10));
+        router.set(0, ConsensusStateId(10));
+        router.set(5, ConsensusStateId(10));
+        router.set(u64::MAX, ConsensusStateId(10));
 
-        let moved = router.split(0, ShardId(20));
+        let moved = router.split(0, ConsensusStateId(20));
         assert_eq!(moved.len(), 3);
-        assert_eq!(router.resolve(0), Some(ShardId(20)));
-        assert_eq!(router.resolve(5), Some(ShardId(20)));
-        assert_eq!(router.resolve(u64::MAX), Some(ShardId(20)));
+        assert_eq!(router.resolve(0), Some(ConsensusStateId(20)));
+        assert_eq!(router.resolve(5), Some(ConsensusStateId(20)));
+        assert_eq!(router.resolve(u64::MAX), Some(ConsensusStateId(20)));
     }
 
     #[test]
     fn merge_reassigns_all_from_source_to_target() {
         let mut router = Router::new();
-        router.set(1, ShardId(10));
-        router.set(2, ShardId(10));
-        router.set(3, ShardId(20));
-        router.set(4, ShardId(20));
+        router.set(1, ConsensusStateId(10));
+        router.set(2, ConsensusStateId(10));
+        router.set(3, ConsensusStateId(20));
+        router.set(4, ConsensusStateId(20));
 
-        router.merge(ShardId(20), ShardId(10));
+        router.merge(ConsensusStateId(20), ConsensusStateId(10));
 
         for org_id in 1..=4 {
-            assert_eq!(router.resolve(org_id), Some(ShardId(10)));
+            assert_eq!(router.resolve(org_id), Some(ConsensusStateId(10)));
         }
     }
 
     #[test]
     fn merge_nonexistent_source_is_noop() {
         let mut router = Router::new();
-        router.set(1, ShardId(10));
-        router.merge(ShardId(99), ShardId(10));
-        assert_eq!(router.resolve(1), Some(ShardId(10)));
+        router.set(1, ConsensusStateId(10));
+        router.merge(ConsensusStateId(99), ConsensusStateId(10));
+        assert_eq!(router.resolve(1), Some(ConsensusStateId(10)));
         assert_eq!(router.len(), 1);
     }
 
     #[test]
     fn merge_leaves_third_shard_untouched() {
         let mut router = Router::new();
-        router.set(1, ShardId(10));
-        router.set(2, ShardId(20));
-        router.set(3, ShardId(30));
+        router.set(1, ConsensusStateId(10));
+        router.set(2, ConsensusStateId(20));
+        router.set(3, ConsensusStateId(30));
 
-        router.merge(ShardId(20), ShardId(10));
+        router.merge(ConsensusStateId(20), ConsensusStateId(10));
 
-        assert_eq!(router.resolve(1), Some(ShardId(10)));
-        assert_eq!(router.resolve(2), Some(ShardId(10)));
-        assert_eq!(router.resolve(3), Some(ShardId(30)));
+        assert_eq!(router.resolve(1), Some(ConsensusStateId(10)));
+        assert_eq!(router.resolve(2), Some(ConsensusStateId(10)));
+        assert_eq!(router.resolve(3), Some(ConsensusStateId(30)));
     }
 
     #[test]
@@ -237,11 +237,11 @@ mod tests {
         assert!(router.is_empty());
         assert_eq!(router.len(), 0);
 
-        router.set(1, ShardId(10));
+        router.set(1, ConsensusStateId(10));
         assert!(!router.is_empty());
         assert_eq!(router.len(), 1);
 
-        router.set(2, ShardId(20));
+        router.set(2, ConsensusStateId(20));
         assert_eq!(router.len(), 2);
 
         router.remove(1);

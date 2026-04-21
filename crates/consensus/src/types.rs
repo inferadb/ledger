@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
     rkyv::Deserialize
 )]
 #[rkyv(compare(PartialEq, PartialOrd), derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord))]
-pub struct ShardId(pub u64);
+pub struct ConsensusStateId(pub u64);
 
 /// Unique identifier for a node in the cluster.
 #[derive(
@@ -272,7 +272,7 @@ pub enum NodeState {
     Candidate,
     /// Leader replicating entries.
     Leader,
-    /// Shard experienced a panic and is non-functional.
+    /// ConsensusState experienced a panic and is non-functional.
     Failed,
     /// Node has been removed from this shard's membership.
     Shutdown,
@@ -285,7 +285,7 @@ pub enum TimerKind {
     Election,
     /// Heartbeat timeout (leader).
     Heartbeat,
-    /// Shard cleanup after removal from membership (grace period).
+    /// ConsensusState cleanup after removal from membership (grace period).
     Cleanup,
 }
 
@@ -481,12 +481,12 @@ mod tests {
         assert_ne!(NodeState::Leader, NodeState::Failed);
     }
 
-    // -- ShardId / NodeId --
+    // -- ConsensusStateId / NodeId --
 
     #[test]
     fn shard_id_ordering() {
-        assert!(ShardId(1) < ShardId(2));
-        assert_eq!(ShardId(5), ShardId(5));
+        assert!(ConsensusStateId(1) < ConsensusStateId(2));
+        assert_eq!(ConsensusStateId(5), ConsensusStateId(5));
     }
 
     #[test]

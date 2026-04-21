@@ -1,7 +1,7 @@
 //! Multi-shard event loop.
 //!
 //! The [`Reactor`] is a single tokio task that receives events via an mpsc
-//! channel, dispatches them to the appropriate [`Shard`], collects [`Action`]
+//! channel, dispatches them to the appropriate [`ConsensusState`], collects [`Action`]
 //! values, manages timer expirations, and performs periodic WAL flushes.
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -18,10 +18,10 @@ use crate::{
     message::Message,
     network_outbox::NetworkOutbox,
     rng::RngSource,
-    shard::Shard,
+    consensus_state::ConsensusState,
     timer::TimerWheel,
     transport::{NetworkTransport, OutboundMessage},
-    types::{MembershipChange, NodeId, ShardId, TimerKind},
+    types::{MembershipChange, NodeId, ConsensusStateId, TimerKind},
     wal_backend::{CheckpointFrame, FsyncPhase, WalBackend, WalFrame},
 };
 
@@ -31,7 +31,7 @@ pub enum ReactorEvent {
     /// Propose a single entry to a shard.
     Propose {
         /// Target shard.
-        shard: ShardId,
+        shard: ConsensusStateId,
         /// Opaque entry data.
         data: Vec<u8>,
         /// Channel to send the proposal result back on.
@@ -40,7 +40,7 @@ pub enum ReactorEvent {
     /// Propose a batch of entries to a shard.
     ProposeBatch {
         /// Target shard.
-        shard: ShardId,
+        shard: ConsensusStateId,
         /// Batch of opaque entry data.
         entries: Vec<Vec<u8>>,
         /// Channel to send the proposal result back on.
@@ -49,7 +49,7 @@ pub enum ReactorEvent {
     /// Deliver a peer message to a shard.
     PeerMessage {
         /// Target shard.
-        shard: ShardId,
+        shard: ConsensusStateId,
         /// Sender node.
         from: NodeId,
         /// The Raft message.
@@ -58,7 +58,7 @@ pub enum ReactorEvent {
     /// Membership change request.
     MembershipChange {
         /// Target shard.
-        shard: ShardId,
+        shard: ConsensusStateId,
         /// The membership change to apply.
         change: MembershipChange,
         /// Channel to send the result back on.
@@ -71,7 +71,7 @@ pub enum ReactorEvent {
     /// leader-lease check, or for monotonic reads on followers.
     ReadIndex {
         /// Target shard.
-        shard: ShardId,
+        shard: ConsensusStateId,
         /// Channel to send the result back on.
         response: oneshot::Sender<Result<u64, ConsensusError>>,
     },
@@ -82,7 +82,7 @@ pub enum ReactorEvent {
     /// be a voter in the current membership.
     TransferLeader {
         /// Target shard.
-        shard: ShardId,
+        shard: ConsensusStateId,
         /// Node to transfer leadership to.
         target: NodeId,
         /// Channel to send the result back on.
@@ -94,7 +94,7 @@ pub enum ReactorEvent {
     /// a snapshot was triggered, or `(0, 0)` if no snapshot was needed.
     TriggerSnapshot {
         /// Target shard.
-        shard: ShardId,
+        shard: ConsensusStateId,
         /// Channel to send the result back on.
         response: oneshot::Sender<Result<(u64, u64), ConsensusError>>,
     },
@@ -105,14 +105,14 @@ pub enum ReactorEvent {
     /// threshold checks use the correct baseline.
     SnapshotCompleted {
         /// Target shard.
-        shard: ShardId,
+        shard: ConsensusStateId,
         /// The last log index included in the completed snapshot.
         last_included_index: u64,
     },
     /// Query a peer's match_index for the specified shard.
     QueryPeerState {
         /// Target shard.
-        shard: ShardId,
+        shard: ConsensusStateId,
         /// The peer node to query.
         node: NodeId,
         /// Channel to send the result back on.
@@ -132,10 +132,10 @@ pub enum ReactorEvent {
     /// elected leader changes, every per-organization shard in
     /// [`crate::LeadershipMode::Delegated`] mode adopts the same leader
     /// without running its own election. The reactor routes this to
-    /// [`crate::Shard::adopt_leader`] on the target shard.
+    /// [`crate::ConsensusState::adopt_leader`] on the target shard.
     AdoptLeader {
         /// Target shard.
-        shard: ShardId,
+        shard: ConsensusStateId,
         /// The asserted leader.
         leader: NodeId,
         /// The leader's term.
@@ -151,7 +151,7 @@ pub enum ReactorEvent {
 /// and drives timer expirations. Generic over clock, RNG, and WAL backend
 /// for deterministic simulation testing.
 pub struct Reactor<C: Clock, R: RngSource, W: WalBackend, T: NetworkTransport> {
-    shards: HashMap<ShardId, Shard<C, R>>,
+    shards: HashMap<ConsensusStateId, ConsensusState<C, R>>,
     timers: TimerWheel,
     /// Control-plane events (membership, snapshots, shutdown, peer messages,
     /// read-index). Polled with higher priority in the event loop so that a
@@ -168,16 +168,16 @@ pub struct Reactor<C: Clock, R: RngSource, W: WalBackend, T: NetworkTransport> {
     pending_wal_frames: Vec<WalFrame>,
     outbox: NetworkOutbox,
     /// Intermediate buffer: (shard_id, up_to) pairs accumulated before flush.
-    pending_commits: Vec<(ShardId, u64)>,
+    pending_commits: Vec<(ConsensusStateId, u64)>,
     /// Proposal responses awaiting quorum commit. Each entry is (shard, log_index, sender).
     /// Resolved only when the shard's commit_index >= log_index (quorum confirmation).
     /// Rejected with `NotLeader` if the shard loses leadership before commit.
-    pending_responses: Vec<(ShardId, u64, oneshot::Sender<Result<u64, ConsensusError>>)>,
+    pending_responses: Vec<(ConsensusStateId, u64, oneshot::Sender<Result<u64, ConsensusError>>)>,
     flush_interval: Duration,
     /// Tracks the last index applied per shard so flush can collect the correct entry range.
-    last_applied: HashMap<ShardId, u64>,
+    last_applied: HashMap<ConsensusStateId, u64>,
     /// Watch senders for broadcasting per-shard leadership state.
-    state_watchers: HashMap<ShardId, watch::Sender<ShardState>>,
+    state_watchers: HashMap<ConsensusStateId, watch::Sender<ShardState>>,
     /// Async fsync lifecycle phase — `Idle` until entries are submitted, then
     /// `Submitted` until the fsync completes (or immediately for sync backends).
     fsync_phase: FsyncPhase,
@@ -227,7 +227,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
     /// recovery), the reactor initializes its `last_applied` tracking for
     /// this shard so committed entries up to that index are not
     /// re-dispatched to the apply worker.
-    pub fn add_shard(&mut self, id: ShardId, shard: Shard<C, R>) {
+    pub fn add_shard(&mut self, id: ConsensusStateId, shard: ConsensusState<C, R>) {
         let restored_commit = shard.commit_index();
         if restored_commit > 0 {
             self.last_applied.insert(id, restored_commit);
@@ -241,7 +241,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
     ///
     /// Called by the engine after adding a shard to wire up the watch channel
     /// created during engine startup.
-    pub fn add_state_watcher(&mut self, shard: ShardId, tx: watch::Sender<ShardState>) {
+    pub fn add_state_watcher(&mut self, shard: ConsensusStateId, tx: watch::Sender<ShardState>) {
         self.state_watchers.insert(shard, tx);
     }
 
@@ -357,7 +357,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
     ///
     /// Returns the shard IDs affected by this event so the caller can broadcast
     /// updated state snapshots.
-    fn handle_event(&mut self, event: ReactorEvent) -> Vec<ShardId> {
+    fn handle_event(&mut self, event: ReactorEvent) -> Vec<ConsensusStateId> {
         match event {
             ReactorEvent::Propose { shard, data, response } => {
                 let Some(s) = self.shards.get_mut(&shard) else {
@@ -391,7 +391,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                     },
                     Err(payload) => {
                         let msg = panic_message(&payload);
-                        tracing::error!(shard = shard.0, panic = %msg, "Shard panicked — marking as Failed");
+                        tracing::error!(shard = shard.0, panic = %msg, "ConsensusState panicked — marking as Failed");
                         counter!("consensus_shard_panic_total", "shard_id" => shard.0.to_string())
                             .increment(1);
                         s.mark_failed();
@@ -432,7 +432,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                     },
                     Err(payload) => {
                         let msg = panic_message(&payload);
-                        tracing::error!(shard = shard.0, panic = %msg, "Shard panicked — marking as Failed");
+                        tracing::error!(shard = shard.0, panic = %msg, "ConsensusState panicked — marking as Failed");
                         counter!("consensus_shard_panic_total", "shard_id" => shard.0.to_string())
                             .increment(1);
                         s.mark_failed();
@@ -455,7 +455,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                         },
                         Err(payload) => {
                             let msg = panic_message(&payload);
-                            tracing::error!(shard = shard.0, panic = %msg, "Shard panicked — marking as Failed");
+                            tracing::error!(shard = shard.0, panic = %msg, "ConsensusState panicked — marking as Failed");
                             counter!(
                                 "consensus_shard_panic_total",
                                 "shard_id" => shard.0.to_string()
@@ -489,7 +489,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                         },
                         Err(payload) => {
                             let msg = panic_message(&payload);
-                            tracing::error!(shard = shard.0, panic = %msg, "Shard panicked — marking as Failed");
+                            tracing::error!(shard = shard.0, panic = %msg, "ConsensusState panicked — marking as Failed");
                             counter!(
                                 "consensus_shard_panic_total",
                                 "shard_id" => shard.0.to_string()
@@ -534,7 +534,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                         },
                         Err(payload) => {
                             let msg = panic_message(&payload);
-                            tracing::error!(shard = shard.0, panic = %msg, "Shard panicked — marking as Failed");
+                            tracing::error!(shard = shard.0, panic = %msg, "ConsensusState panicked — marking as Failed");
                             counter!(
                                 "consensus_shard_panic_total",
                                 "shard_id" => shard.0.to_string()
@@ -657,7 +657,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
     ///
     /// Returns the shard IDs that processed at least one expired timer so the
     /// caller can broadcast updated state snapshots.
-    fn process_expired_timers(&mut self) -> Vec<ShardId> {
+    fn process_expired_timers(&mut self) -> Vec<ConsensusStateId> {
         let now = self.clock.now();
         let mut all_actions = Vec::new();
         let mut affected = Vec::new();
@@ -676,7 +676,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                                 Ok(actions) => actions,
                                 Err(payload) => {
                                     let msg = panic_message(&payload);
-                                    tracing::error!(shard = shard_id.0, panic = %msg, "Shard panicked — marking as Failed");
+                                    tracing::error!(shard = shard_id.0, panic = %msg, "ConsensusState panicked — marking as Failed");
                                     counter!(
                                         "consensus_shard_panic_total",
                                         "shard_id" => shard_id.0.to_string()
@@ -698,7 +698,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                                 Ok(actions) => actions,
                                 Err(payload) => {
                                     let msg = panic_message(&payload);
-                                    tracing::error!(shard = shard_id.0, panic = %msg, "Shard panicked — marking as Failed");
+                                    tracing::error!(shard = shard_id.0, panic = %msg, "ConsensusState panicked — marking as Failed");
                                     counter!(
                                         "consensus_shard_panic_total",
                                         "shard_id" => shard_id.0.to_string()
@@ -724,13 +724,13 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                         if still_removed {
                             tracing::info!(
                                 shard = shard_id.0,
-                                "Shard cleanup timer expired — removing"
+                                "ConsensusState cleanup timer expired — removing"
                             );
                             shards_to_remove.push(shard_id);
                         } else {
                             tracing::info!(
                                 shard = shard_id.0,
-                                "Shard cleanup timer expired but node is back in membership — keeping"
+                                "ConsensusState cleanup timer expired but node is back in membership — keeping"
                             );
                             shard.restore_from_shutdown();
                         }
@@ -860,7 +860,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                     self.timers.schedule(shard, kind, deadline);
                 },
                 Action::RenewLease { .. } => {
-                    // Lease renewal happens inside the Shard; no reactor action needed.
+                    // Lease renewal happens inside the ConsensusState; no reactor action needed.
                 },
                 Action::MembershipChanged { membership, .. } => {
                     self.transport.on_membership_changed(&membership);
@@ -917,7 +917,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
     ///
     /// Only shards that were touched by the preceding event are broadcast,
     /// avoiding unnecessary wakeups for idle shards.
-    fn broadcast_shard_states(&self, shard_ids: &[ShardId]) {
+    fn broadcast_shard_states(&self, shard_ids: &[ConsensusStateId]) {
         for shard_id in shard_ids {
             if let (Some(shard), Some(tx)) =
                 (self.shards.get(shard_id), self.state_watchers.get(shard_id))
@@ -937,7 +937,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
         skip_all,
         fields(shard_count = pending.len())
     )]
-    async fn dispatch_committed_batches(&mut self, pending: &[(ShardId, u64)]) {
+    async fn dispatch_committed_batches(&mut self, pending: &[(ConsensusStateId, u64)]) {
         for &(shard_id, up_to) in pending {
             let last = self.last_applied.get(&shard_id).copied().unwrap_or(0);
             let entries = if let Some(shard) = self.shards.get(&shard_id) {
@@ -1235,7 +1235,7 @@ mod tests {
             self.inner.truncate_before(offset)
         }
 
-        fn shred_frames(&mut self, shard_id: ShardId) -> Result<u64, crate::wal_backend::WalError> {
+        fn shred_frames(&mut self, shard_id: ConsensusStateId) -> Result<u64, crate::wal_backend::WalError> {
             self.inner.shred_frames(shard_id)
         }
 
@@ -1287,13 +1287,13 @@ mod tests {
     }
 
     fn make_shard(
-        id: ShardId,
+        id: ConsensusStateId,
         clock: Arc<SimulatedClock>,
-    ) -> Shard<Arc<SimulatedClock>, SimulatedRng> {
+    ) -> ConsensusState<Arc<SimulatedClock>, SimulatedRng> {
         let membership = Membership::new([NodeId(1)]);
         let config = ShardConfig::default();
         let rng = SimulatedRng::new(42);
-        Shard::new(id, NodeId(1), membership, config, clock, rng, 0, None, 0)
+        ConsensusState::new(id, NodeId(1), membership, config, clock, rng, 0, None, 0)
     }
 
     /// Creates a shard, triggers election to become leader, and adds it to the
@@ -1309,7 +1309,7 @@ mod tests {
             impl WalBackend,
             impl NetworkTransport,
         >,
-        id: ShardId,
+        id: ConsensusStateId,
     ) {
         let clock = reactor.clock.clone();
         let mut shard = make_shard(id, clock);
@@ -1328,7 +1328,7 @@ mod tests {
         // dispatches committed batches, advancing commit_index.
     }
 
-    // ── Shard registration ──────────────────────────────────────────
+    // ── ConsensusState registration ──────────────────────────────────────────
 
     #[test]
     fn test_add_shard_increases_count() {
@@ -1337,8 +1337,8 @@ mod tests {
         assert_eq!(reactor.shard_count(), 0);
 
         let clock = reactor.clock.clone();
-        let shard = make_shard(ShardId(1), clock);
-        reactor.add_shard(ShardId(1), shard);
+        let shard = make_shard(ConsensusStateId(1), clock);
+        reactor.add_shard(ConsensusStateId(1), shard);
 
         assert_eq!(reactor.shard_count(), 1);
     }
@@ -1350,7 +1350,7 @@ mod tests {
         let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let actions =
-            vec![Action::Send { to: NodeId(2), shard: ShardId(1), msg: Message::TimeoutNow }];
+            vec![Action::Send { to: NodeId(2), shard: ConsensusStateId(1), msg: Message::TimeoutNow }];
 
         reactor.process_actions(actions);
 
@@ -1363,7 +1363,7 @@ mod tests {
 
         let actions = vec![Action::Send {
             to: NodeId(2),
-            shard: ShardId(1),
+            shard: ConsensusStateId(1),
             msg: Message::PreVoteRequest {
                 term: 1,
                 candidate_id: NodeId(1),
@@ -1389,12 +1389,12 @@ mod tests {
         };
 
         reactor.process_actions(vec![Action::PersistEntries {
-            shard: ShardId(1),
+            shard: ConsensusStateId(1),
             entries: vec![entry],
         }]);
 
         assert_eq!(reactor.pending_wal_frames.len(), 1);
-        assert_eq!(reactor.pending_wal_frames[0].shard_id, ShardId(1));
+        assert_eq!(reactor.pending_wal_frames[0].shard_id, ConsensusStateId(1));
         assert_eq!(&*reactor.pending_wal_frames[0].data, b"hello");
     }
 
@@ -1405,7 +1405,7 @@ mod tests {
         let deadline = reactor.clock.now() + Duration::from_millis(100);
 
         reactor.process_actions(vec![Action::ScheduleTimer {
-            shard: ShardId(1),
+            shard: ConsensusStateId(1),
             kind: TimerKind::Election,
             deadline,
         }]);
@@ -1418,10 +1418,10 @@ mod tests {
     fn test_process_actions_committed_collects_pending_commits() {
         let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
-        reactor.process_actions(vec![Action::Committed { shard: ShardId(1), up_to: 5 }]);
+        reactor.process_actions(vec![Action::Committed { shard: ConsensusStateId(1), up_to: 5 }]);
 
         assert_eq!(reactor.pending_commits.len(), 1);
-        assert_eq!(reactor.pending_commits[0], (ShardId(1), 5));
+        assert_eq!(reactor.pending_commits[0], (ConsensusStateId(1), 5));
     }
 
     #[test]
@@ -1429,13 +1429,13 @@ mod tests {
         let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         reactor.process_actions(vec![
-            Action::RenewLease { shard: ShardId(1) },
+            Action::RenewLease { shard: ConsensusStateId(1) },
             Action::MembershipChanged {
-                shard: ShardId(1),
+                shard: ConsensusStateId(1),
                 membership: Membership::new([NodeId(1)]),
             },
             Action::TriggerSnapshot {
-                shard: ShardId(1),
+                shard: ConsensusStateId(1),
                 last_included_index: 5,
                 last_included_term: 1,
             },
@@ -1460,7 +1460,7 @@ mod tests {
             kind: crate::types::EntryKind::Normal,
         };
         reactor.process_actions(vec![Action::PersistEntries {
-            shard: ShardId(1),
+            shard: ConsensusStateId(1),
             entries: vec![entry],
         }]);
         assert_eq!(reactor.pending_wal_frames.len(), 1);
@@ -1479,14 +1479,14 @@ mod tests {
         let (mut reactor, _tx, _proposal_tx, mut _rx) = make_reactor();
 
         // Set up a leader shard so proposals can commit.
-        add_leader_shard(&mut reactor, ShardId(1));
+        add_leader_shard(&mut reactor, ConsensusStateId(1));
         // Flush the no-op entry from leader election.
         reactor.flush().await;
 
         // The leader's no-op committed at index 1. Propose via the shard
         // to get a real entry at index 2 that also commits immediately
         // (single-node quorum).
-        let shard = reactor.shards.get_mut(&ShardId(1)).unwrap();
+        let shard = reactor.shards.get_mut(&ConsensusStateId(1)).unwrap();
         let actions = shard.handle_propose(b"test".to_vec()).unwrap();
         let entry_index = actions
             .iter()
@@ -1498,7 +1498,7 @@ mod tests {
         reactor.process_actions(actions);
 
         let (resp_tx, resp_rx) = oneshot::channel();
-        reactor.pending_responses.push((ShardId(1), entry_index, resp_tx));
+        reactor.pending_responses.push((ConsensusStateId(1), entry_index, resp_tx));
 
         reactor.flush().await;
 
@@ -1510,12 +1510,12 @@ mod tests {
     async fn test_flush_dispatches_committed_batches() {
         let (mut reactor, _tx, _proposal_tx, mut commit_rx) = make_reactor();
 
-        reactor.pending_commits.push((ShardId(1), 10));
+        reactor.pending_commits.push((ConsensusStateId(1), 10));
 
         reactor.flush().await;
 
         let batch = commit_rx.try_recv().expect("should receive committed batch");
-        assert_eq!(batch.shard, ShardId(1));
+        assert_eq!(batch.shard, ConsensusStateId(1));
         assert!(batch.entries.is_empty());
     }
 
@@ -1523,7 +1523,7 @@ mod tests {
     async fn test_flush_drains_outbox() {
         let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
-        reactor.outbox.enqueue(NodeId(2), ShardId(1), Message::TimeoutNow);
+        reactor.outbox.enqueue(NodeId(2), ConsensusStateId(1), Message::TimeoutNow);
         assert_eq!(reactor.outbox.len(), 1);
 
         reactor.flush().await;
@@ -1537,7 +1537,7 @@ mod tests {
 
         let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
-        reactor.pending_commits.push((ShardId(1), 7));
+        reactor.pending_commits.push((ConsensusStateId(1), 7));
 
         reactor.flush().await;
 
@@ -1572,11 +1572,11 @@ mod tests {
             kind: crate::types::EntryKind::Normal,
         };
         reactor.process_actions(vec![Action::PersistEntries {
-            shard: ShardId(1),
+            shard: ConsensusStateId(1),
             entries: vec![entry],
         }]);
         let (resp_tx, resp_rx) = oneshot::channel();
-        reactor.pending_responses.push((ShardId(1), 1, resp_tx));
+        reactor.pending_responses.push((ConsensusStateId(1), 1, resp_tx));
 
         // Inject an append error.
         reactor.wal.inject_append_error(true);
@@ -1601,7 +1601,7 @@ mod tests {
         let (mut reactor, _tx, _proposal_tx, mut _rx) = make_reactor();
 
         // Set up a leader shard so responses can be resolved after commit.
-        add_leader_shard(&mut reactor, ShardId(1));
+        add_leader_shard(&mut reactor, ConsensusStateId(1));
         reactor.flush().await;
 
         // First flush: inject append error.
@@ -1612,11 +1612,11 @@ mod tests {
             kind: crate::types::EntryKind::Normal,
         };
         reactor.process_actions(vec![Action::PersistEntries {
-            shard: ShardId(1),
+            shard: ConsensusStateId(1),
             entries: vec![entry1],
         }]);
         let (resp_tx1, resp_rx1) = oneshot::channel();
-        reactor.pending_responses.push((ShardId(1), 99, resp_tx1));
+        reactor.pending_responses.push((ConsensusStateId(1), 99, resp_tx1));
         reactor.wal.inject_append_error(true);
 
         reactor.flush().await;
@@ -1628,7 +1628,7 @@ mod tests {
         // immediately (single-node quorum).
         reactor.wal.inject_append_error(false);
 
-        let shard = reactor.shards.get_mut(&ShardId(1)).unwrap();
+        let shard = reactor.shards.get_mut(&ConsensusStateId(1)).unwrap();
         let actions = shard.handle_propose(b"second".to_vec()).unwrap();
         let entry_index = actions
             .iter()
@@ -1640,7 +1640,7 @@ mod tests {
         reactor.process_actions(actions);
 
         let (resp_tx2, resp_rx2) = oneshot::channel();
-        reactor.pending_responses.push((ShardId(1), entry_index, resp_tx2));
+        reactor.pending_responses.push((ConsensusStateId(1), entry_index, resp_tx2));
 
         reactor.flush().await;
 
@@ -1656,13 +1656,13 @@ mod tests {
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
         reactor.handle_event(ReactorEvent::Propose {
-            shard: ShardId(99),
+            shard: ConsensusStateId(99),
             data: vec![1, 2, 3],
             response: resp_tx,
         });
 
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ShardId(99) })));
+        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })));
     }
 
     #[test]
@@ -1671,13 +1671,13 @@ mod tests {
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
         reactor.handle_event(ReactorEvent::ProposeBatch {
-            shard: ShardId(99),
+            shard: ConsensusStateId(99),
             entries: vec![vec![1]],
             response: resp_tx,
         });
 
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ShardId(99) })));
+        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })));
     }
 
     #[test]
@@ -1686,7 +1686,7 @@ mod tests {
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
         reactor.handle_event(ReactorEvent::MembershipChange {
-            shard: ShardId(99),
+            shard: ConsensusStateId(99),
             change: MembershipChange::AddLearner {
                 node_id: NodeId(2),
                 promotable: false,
@@ -1696,7 +1696,7 @@ mod tests {
         });
 
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ShardId(99) })));
+        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })));
     }
 
     #[test]
@@ -1705,13 +1705,13 @@ mod tests {
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
         reactor.handle_event(ReactorEvent::TransferLeader {
-            shard: ShardId(99),
+            shard: ConsensusStateId(99),
             target: NodeId(2),
             response: resp_tx,
         });
 
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ShardId(99) })));
+        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })));
     }
 
     #[test]
@@ -1720,10 +1720,10 @@ mod tests {
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
         reactor
-            .handle_event(ReactorEvent::TriggerSnapshot { shard: ShardId(99), response: resp_tx });
+            .handle_event(ReactorEvent::TriggerSnapshot { shard: ConsensusStateId(99), response: resp_tx });
 
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ShardId(99) })));
+        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })));
     }
 
     // ── handle_event: read_index ───────────────────────────────────
@@ -1733,11 +1733,11 @@ mod tests {
         let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let clock = reactor.clock.clone();
-        let shard = make_shard(ShardId(1), clock);
-        reactor.add_shard(ShardId(1), shard);
+        let shard = make_shard(ConsensusStateId(1), clock);
+        reactor.add_shard(ConsensusStateId(1), shard);
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
-        reactor.handle_event(ReactorEvent::ReadIndex { shard: ShardId(1), response: resp_tx });
+        reactor.handle_event(ReactorEvent::ReadIndex { shard: ConsensusStateId(1), response: resp_tx });
 
         let result = resp_rx.try_recv().expect("response should be available");
         assert_eq!(result.unwrap(), 0);
@@ -1748,10 +1748,10 @@ mod tests {
         let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
-        reactor.handle_event(ReactorEvent::ReadIndex { shard: ShardId(99), response: resp_tx });
+        reactor.handle_event(ReactorEvent::ReadIndex { shard: ConsensusStateId(99), response: resp_tx });
 
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ShardId(99) })));
+        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })));
     }
 
     // ── handle_event: failed shard ─────────────────────────────────
@@ -1761,19 +1761,19 @@ mod tests {
         let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let clock = reactor.clock.clone();
-        let mut shard = make_shard(ShardId(1), clock);
+        let mut shard = make_shard(ConsensusStateId(1), clock);
         shard.mark_failed();
-        reactor.add_shard(ShardId(1), shard);
+        reactor.add_shard(ConsensusStateId(1), shard);
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
         reactor.handle_event(ReactorEvent::Propose {
-            shard: ShardId(1),
+            shard: ConsensusStateId(1),
             data: vec![1, 2, 3],
             response: resp_tx,
         });
 
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ShardId(1) })));
+        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(1) })));
     }
 
     #[test]
@@ -1781,19 +1781,19 @@ mod tests {
         let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let clock = reactor.clock.clone();
-        let mut shard = make_shard(ShardId(1), clock);
+        let mut shard = make_shard(ConsensusStateId(1), clock);
         shard.mark_failed();
-        reactor.add_shard(ShardId(1), shard);
+        reactor.add_shard(ConsensusStateId(1), shard);
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
         reactor.handle_event(ReactorEvent::ProposeBatch {
-            shard: ShardId(1),
+            shard: ConsensusStateId(1),
             entries: vec![vec![1], vec![2]],
             response: resp_tx,
         });
 
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ShardId(1) })));
+        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(1) })));
     }
 
     #[test]
@@ -1801,13 +1801,13 @@ mod tests {
         let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let clock = reactor.clock.clone();
-        let mut shard = make_shard(ShardId(1), clock);
+        let mut shard = make_shard(ConsensusStateId(1), clock);
         shard.mark_failed();
-        reactor.add_shard(ShardId(1), shard);
+        reactor.add_shard(ConsensusStateId(1), shard);
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
         reactor.handle_event(ReactorEvent::MembershipChange {
-            shard: ShardId(1),
+            shard: ConsensusStateId(1),
             change: MembershipChange::AddLearner {
                 node_id: NodeId(2),
                 promotable: false,
@@ -1817,7 +1817,7 @@ mod tests {
         });
 
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ShardId(1) })));
+        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(1) })));
     }
 
     #[test]
@@ -1825,19 +1825,19 @@ mod tests {
         let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let clock = reactor.clock.clone();
-        let mut shard = make_shard(ShardId(1), clock);
+        let mut shard = make_shard(ConsensusStateId(1), clock);
         shard.mark_failed();
-        reactor.add_shard(ShardId(1), shard);
+        reactor.add_shard(ConsensusStateId(1), shard);
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
         reactor.handle_event(ReactorEvent::TransferLeader {
-            shard: ShardId(1),
+            shard: ConsensusStateId(1),
             target: NodeId(2),
             response: resp_tx,
         });
 
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ShardId(1) })));
+        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(1) })));
     }
 
     #[test]
@@ -1845,14 +1845,14 @@ mod tests {
         let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let clock = reactor.clock.clone();
-        let mut shard = make_shard(ShardId(1), clock);
+        let mut shard = make_shard(ConsensusStateId(1), clock);
         shard.mark_failed();
-        reactor.add_shard(ShardId(1), shard);
+        reactor.add_shard(ConsensusStateId(1), shard);
 
         // PeerMessage has no response channel — verify it returns empty affected list
         // without modifying shard state (the shard remains failed, not doubly-failed).
         let affected = reactor.handle_event(ReactorEvent::PeerMessage {
-            shard: ShardId(1),
+            shard: ConsensusStateId(1),
             from: NodeId(2),
             message: crate::message::Message::VoteRequest {
                 term: 1,
@@ -1863,10 +1863,10 @@ mod tests {
         });
 
         assert!(affected.is_empty(), "failed shard peer message should return no affected shards");
-        assert!(reactor.shards.get(&ShardId(1)).unwrap().is_failed(), "shard should remain failed");
+        assert!(reactor.shards.get(&ConsensusStateId(1)).unwrap().is_failed(), "shard should remain failed");
     }
 
-    // ── Shard isolation ────────────────────────────────────────────
+    // ── ConsensusState isolation ────────────────────────────────────────────
 
     #[test]
     fn test_healthy_shard_unaffected_when_another_is_failed() {
@@ -1875,23 +1875,23 @@ mod tests {
         let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
         let clock = reactor.clock.clone();
 
-        let mut failed_shard = make_shard(ShardId(1), clock.clone());
+        let mut failed_shard = make_shard(ConsensusStateId(1), clock.clone());
         failed_shard.mark_failed();
-        reactor.add_shard(ShardId(1), failed_shard);
+        reactor.add_shard(ConsensusStateId(1), failed_shard);
 
-        let healthy_shard = make_shard(ShardId(2), clock);
-        reactor.add_shard(ShardId(2), healthy_shard);
+        let healthy_shard = make_shard(ConsensusStateId(2), clock);
+        reactor.add_shard(ConsensusStateId(2), healthy_shard);
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
         reactor.handle_event(ReactorEvent::Propose {
-            shard: ShardId(1),
+            shard: ConsensusStateId(1),
             data: vec![1],
             response: resp_tx,
         });
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ShardId(1) })));
+        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(1) })));
 
-        assert_eq!(reactor.shards.get(&ShardId(2)).unwrap().state(), NodeState::Follower);
+        assert_eq!(reactor.shards.get(&ConsensusStateId(2)).unwrap().state(), NodeState::Follower);
     }
 
     // ── Shutdown ───────────────────────────────────────────────────
@@ -1939,7 +1939,7 @@ mod tests {
         let (mut reactor, _tx, _proposal_tx, mut _rx) = make_async_reactor();
 
         // Set up a leader shard for commit-based response resolution.
-        add_leader_shard(&mut reactor, ShardId(1));
+        add_leader_shard(&mut reactor, ConsensusStateId(1));
         // Mark the async WAL as completed so the leader's no-op flush goes
         // through, then reset for the actual test.
         reactor.wal.set_completed(true);
@@ -1948,7 +1948,7 @@ mod tests {
         reactor.fsync_phase = FsyncPhase::Idle;
 
         // Propose a real entry that commits immediately (single-node quorum).
-        let shard = reactor.shards.get_mut(&ShardId(1)).unwrap();
+        let shard = reactor.shards.get_mut(&ConsensusStateId(1)).unwrap();
         let actions = shard.handle_propose(b"deferred".to_vec()).unwrap();
         let entry_index = actions
             .iter()
@@ -1960,7 +1960,7 @@ mod tests {
         reactor.process_actions(actions);
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
-        reactor.pending_responses.push((ShardId(1), entry_index, resp_tx));
+        reactor.pending_responses.push((ConsensusStateId(1), entry_index, resp_tx));
 
         // Act: first flush submits async fsync, does NOT resolve responses.
         reactor.flush().await;
@@ -1991,10 +1991,10 @@ mod tests {
             kind: crate::types::EntryKind::Normal,
         };
         reactor.process_actions(vec![Action::PersistEntries {
-            shard: ShardId(1),
+            shard: ConsensusStateId(1),
             entries: vec![entry],
         }]);
-        reactor.outbox.enqueue(NodeId(2), ShardId(1), Message::TimeoutNow);
+        reactor.outbox.enqueue(NodeId(2), ConsensusStateId(1), Message::TimeoutNow);
 
         // Act: flush submits async fsync.
         reactor.flush().await;
@@ -2016,14 +2016,14 @@ mod tests {
             kind: crate::types::EntryKind::Normal,
         };
         reactor.process_actions(vec![Action::PersistEntries {
-            shard: ShardId(1),
+            shard: ConsensusStateId(1),
             entries: vec![entry],
         }]);
         reactor.flush().await;
         assert_eq!(reactor.fsync_phase, FsyncPhase::Submitted);
 
         // Arrange: enqueue a message while fsync is pending, keep completion false.
-        reactor.outbox.enqueue(NodeId(3), ShardId(1), Message::TimeoutNow);
+        reactor.outbox.enqueue(NodeId(3), ConsensusStateId(1), Message::TimeoutNow);
 
         // Act: flush again — poll returns false, so we only deliver outbound.
         reactor.flush().await;
@@ -2046,12 +2046,12 @@ mod tests {
             kind: crate::types::EntryKind::Normal,
         };
         reactor.process_actions(vec![Action::PersistEntries {
-            shard: ShardId(1),
+            shard: ConsensusStateId(1),
             entries: vec![entry],
         }]);
         let (resp_tx, resp_rx) = oneshot::channel();
-        reactor.pending_responses.push((ShardId(1), 1, resp_tx));
-        reactor.pending_commits.push((ShardId(1), 1));
+        reactor.pending_responses.push((ConsensusStateId(1), 1, resp_tx));
+        reactor.pending_commits.push((ConsensusStateId(1), 1));
 
         // Act
         reactor.flush().await;
@@ -2072,8 +2072,8 @@ mod tests {
 
         // Arrange: add a shard so commit dispatch can look up entries.
         let clock = reactor.clock.clone();
-        let shard = make_shard(ShardId(1), clock);
-        reactor.add_shard(ShardId(1), shard);
+        let shard = make_shard(ConsensusStateId(1), clock);
+        reactor.add_shard(ConsensusStateId(1), shard);
 
         // Queue a commit.
         let entry = Entry {
@@ -2083,10 +2083,10 @@ mod tests {
             kind: crate::types::EntryKind::Normal,
         };
         reactor.process_actions(vec![Action::PersistEntries {
-            shard: ShardId(1),
+            shard: ConsensusStateId(1),
             entries: vec![entry],
         }]);
-        reactor.pending_commits.push((ShardId(1), 1));
+        reactor.pending_commits.push((ConsensusStateId(1), 1));
 
         // Act: first flush — submits async fsync, commits deferred.
         reactor.flush().await;
@@ -2098,7 +2098,7 @@ mod tests {
 
         // Assert: committed batch dispatched.
         let batch = commit_rx.try_recv().expect("should receive committed batch");
-        assert_eq!(batch.shard, ShardId(1));
+        assert_eq!(batch.shard, ConsensusStateId(1));
     }
 
     // ── WAL sync failure under always-pipelined commit ─────────────
@@ -2121,10 +2121,10 @@ mod tests {
             kind: crate::types::EntryKind::Normal,
         };
         reactor.process_actions(vec![Action::PersistEntries {
-            shard: ShardId(1),
+            shard: ConsensusStateId(1),
             entries: vec![entry],
         }]);
-        reactor.pending_commits.push((ShardId(1), 1));
+        reactor.pending_commits.push((ConsensusStateId(1), 1));
         reactor.wal.inject_sync_error("disk full");
 
         // Act: flush, triggering append → dispatch → resolve → sync fail.
@@ -2143,9 +2143,9 @@ mod tests {
 
         // Arrange: register a shard, queue a commit, then close the channel.
         let clock = reactor.clock.clone();
-        let shard = make_shard(ShardId(1), clock);
-        reactor.add_shard(ShardId(1), shard);
-        reactor.pending_commits.push((ShardId(1), 1));
+        let shard = make_shard(ConsensusStateId(1), clock);
+        reactor.add_shard(ConsensusStateId(1), shard);
+        reactor.pending_commits.push((ConsensusStateId(1), 1));
         drop(commit_rx);
 
         // Act
@@ -2153,7 +2153,7 @@ mod tests {
 
         // Assert: shard is marked as failed.
         assert_eq!(
-            reactor.shards.get(&ShardId(1)).unwrap().state(),
+            reactor.shards.get(&ConsensusStateId(1)).unwrap().state(),
             crate::types::NodeState::Failed
         );
     }
@@ -2164,8 +2164,8 @@ mod tests {
 
         // Arrange: register a shard, queue WAL + commit, drop receiver.
         let clock = reactor.clock.clone();
-        let shard = make_shard(ShardId(1), clock);
-        reactor.add_shard(ShardId(1), shard);
+        let shard = make_shard(ConsensusStateId(1), clock);
+        reactor.add_shard(ConsensusStateId(1), shard);
 
         let entry = Entry {
             term: 1,
@@ -2174,10 +2174,10 @@ mod tests {
             kind: crate::types::EntryKind::Normal,
         };
         reactor.process_actions(vec![Action::PersistEntries {
-            shard: ShardId(1),
+            shard: ConsensusStateId(1),
             entries: vec![entry],
         }]);
-        reactor.pending_commits.push((ShardId(1), 1));
+        reactor.pending_commits.push((ConsensusStateId(1), 1));
         drop(commit_rx);
 
         // Act: submit fsync, then complete it.
@@ -2187,7 +2187,7 @@ mod tests {
 
         // Assert: shard is marked as failed.
         assert_eq!(
-            reactor.shards.get(&ShardId(1)).unwrap().state(),
+            reactor.shards.get(&ConsensusStateId(1)).unwrap().state(),
             crate::types::NodeState::Failed
         );
     }
@@ -2230,13 +2230,13 @@ mod tests {
         let rng = SimulatedRng::new(42);
 
         // Create shard with initial_committed_index = 10.
-        let shard = Shard::new(ShardId(1), NodeId(1), membership, config, clock, rng, 1, None, 10);
+        let shard = ConsensusState::new(ConsensusStateId(1), NodeId(1), membership, config, clock, rng, 1, None, 10);
 
-        reactor.add_shard(ShardId(1), shard);
+        reactor.add_shard(ConsensusStateId(1), shard);
 
         // The reactor should have initialized last_applied to 10.
         assert_eq!(
-            reactor.last_applied.get(&ShardId(1)).copied(),
+            reactor.last_applied.get(&ConsensusStateId(1)).copied(),
             Some(10),
             "reactor must initialize last_applied from shard commit_index"
         );
@@ -2245,13 +2245,13 @@ mod tests {
     #[test]
     fn add_shard_with_zero_committed_index_does_not_set_last_applied() {
         let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
-        let shard = make_shard(ShardId(1), Arc::new(SimulatedClock::new()));
+        let shard = make_shard(ConsensusStateId(1), Arc::new(SimulatedClock::new()));
 
-        reactor.add_shard(ShardId(1), shard);
+        reactor.add_shard(ConsensusStateId(1), shard);
 
         // A fresh shard with commit_index=0 should not have an entry.
         assert_eq!(
-            reactor.last_applied.get(&ShardId(1)),
+            reactor.last_applied.get(&ConsensusStateId(1)),
             None,
             "fresh shard should not have last_applied entry"
         );
@@ -2266,12 +2266,12 @@ mod tests {
         // Register a follower shard (not leader — proposals would fail at
         // handle_propose, but we're testing the flush path directly).
         let clock = reactor.clock.clone();
-        let shard = make_shard(ShardId(1), clock);
-        reactor.add_shard(ShardId(1), shard);
+        let shard = make_shard(ConsensusStateId(1), clock);
+        reactor.add_shard(ConsensusStateId(1), shard);
 
         // Manually push a pending response with an index above commit_index (0).
         let (resp_tx, mut resp_rx) = oneshot::channel();
-        reactor.pending_responses.push((ShardId(1), 5, resp_tx));
+        reactor.pending_responses.push((ConsensusStateId(1), 5, resp_tx));
 
         // Flush — the entry at index 5 is NOT committed (commit_index=0) and
         // the shard is not leader, so the response should be rejected.
@@ -2289,12 +2289,12 @@ mod tests {
         let (mut reactor, _tx, _proposal_tx, mut _rx) = make_reactor();
 
         // Set up a leader shard (single-node cluster commits immediately).
-        add_leader_shard(&mut reactor, ShardId(1));
+        add_leader_shard(&mut reactor, ConsensusStateId(1));
         reactor.flush().await;
 
         // Propose via the shard — single-node quorum means commit_index
         // advances in the same action batch.
-        let shard = reactor.shards.get_mut(&ShardId(1)).unwrap();
+        let shard = reactor.shards.get_mut(&ConsensusStateId(1)).unwrap();
         let actions = shard.handle_propose(b"single-node".to_vec()).unwrap();
         let entry_index = actions
             .iter()
@@ -2306,7 +2306,7 @@ mod tests {
         reactor.process_actions(actions);
 
         let (resp_tx, resp_rx) = oneshot::channel();
-        reactor.pending_responses.push((ShardId(1), entry_index, resp_tx));
+        reactor.pending_responses.push((ConsensusStateId(1), entry_index, resp_tx));
 
         // Single flush should resolve the response.
         reactor.flush().await;
@@ -2329,7 +2329,7 @@ mod tests {
         let config = ShardConfig::default();
         let rng = SimulatedRng::new(42);
         let mut shard =
-            Shard::new(ShardId(1), NodeId(1), membership, config, clock, rng, 0, None, 0);
+            ConsensusState::new(ConsensusStateId(1), NodeId(1), membership, config, clock, rng, 0, None, 0);
 
         // Force the shard to become leader by simulating the election process.
         // Step 1: Pre-vote (term 0 -> PreCandidate).
@@ -2347,11 +2347,11 @@ mod tests {
         reactor.process_actions(actions);
         assert_eq!(shard.state(), crate::types::NodeState::Leader);
 
-        reactor.add_shard(ShardId(1), shard);
+        reactor.add_shard(ConsensusStateId(1), shard);
         reactor.flush().await;
 
         // Propose an entry — it will NOT be committed because peer has not acked.
-        let shard = reactor.shards.get_mut(&ShardId(1)).unwrap();
+        let shard = reactor.shards.get_mut(&ConsensusStateId(1)).unwrap();
         let actions = shard.handle_propose(b"will-lose-leader".to_vec()).unwrap();
         let entry_index = actions
             .iter()
@@ -2363,16 +2363,16 @@ mod tests {
         reactor.process_actions(actions);
 
         let (resp_tx, resp_rx) = oneshot::channel();
-        reactor.pending_responses.push((ShardId(1), entry_index, resp_tx));
+        reactor.pending_responses.push((ConsensusStateId(1), entry_index, resp_tx));
 
         // Verify the entry is NOT committed (no quorum ack).
         assert!(
-            reactor.shards.get(&ShardId(1)).unwrap().commit_index() < entry_index,
+            reactor.shards.get(&ConsensusStateId(1)).unwrap().commit_index() < entry_index,
             "entry should not be committed without quorum"
         );
 
         // Simulate leadership loss: deliver a message from a higher-term leader.
-        let shard = reactor.shards.get_mut(&ShardId(1)).unwrap();
+        let shard = reactor.shards.get_mut(&ConsensusStateId(1)).unwrap();
         let current_term = shard.current_term();
         let actions = shard.handle_message(
             NodeId(2),
@@ -2390,7 +2390,7 @@ mod tests {
 
         // Verify the shard is no longer leader.
         assert_ne!(
-            reactor.shards.get(&ShardId(1)).unwrap().state(),
+            reactor.shards.get(&ConsensusStateId(1)).unwrap().state(),
             crate::types::NodeState::Leader,
             "shard should have stepped down after higher-term message"
         );
@@ -2410,12 +2410,12 @@ mod tests {
         let (mut reactor, _tx, _proposal_tx, mut _rx) = make_reactor();
 
         // Set up a leader shard.
-        add_leader_shard(&mut reactor, ShardId(1));
+        add_leader_shard(&mut reactor, ConsensusStateId(1));
         reactor.flush().await;
 
         // Manually push a response for a high index that hasn't been committed.
         let (resp_tx, mut resp_rx) = oneshot::channel();
-        reactor.pending_responses.push((ShardId(1), 999, resp_tx));
+        reactor.pending_responses.push((ConsensusStateId(1), 999, resp_tx));
 
         // Flush — index 999 is above commit_index, but shard is still leader.
         reactor.flush().await;
@@ -2438,7 +2438,7 @@ mod tests {
 
         // Push a response for a shard that doesn't exist.
         let (resp_tx, resp_rx) = oneshot::channel();
-        reactor.pending_responses.push((ShardId(99), 1, resp_tx));
+        reactor.pending_responses.push((ConsensusStateId(99), 1, resp_tx));
 
         reactor.flush().await;
 

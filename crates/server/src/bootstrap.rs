@@ -475,7 +475,7 @@ pub async fn bootstrap_node(
         //
         // On restart, only the GLOBAL region is started eagerly. Data regions
         // whose directories exist (created by prior CreateDataRegion entries)
-        // must be re-opened. The consensus Shard for each region will use its
+        // must be re-opened. The consensus ConsensusState for each region will use its
         // persisted membership (Fix 1) so it won't spuriously self-elect.
         {
             let discovered = storage_manager.discover_existing_regions();

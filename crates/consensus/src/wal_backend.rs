@@ -3,12 +3,12 @@
 
 use std::sync::Arc;
 
-use crate::types::ShardId;
+use crate::types::ConsensusStateId;
 
 /// Sentinel shard ID used to mark checkpoint frames in the WAL.
 ///
 /// No real shard uses `u64::MAX`, so this value is safe as a reserved marker.
-pub const CHECKPOINT_SHARD_ID: ShardId = ShardId(u64::MAX);
+pub const CHECKPOINT_SHARD_ID: ConsensusStateId = ConsensusStateId(u64::MAX);
 
 /// A checkpoint frame recording the committed index at a point in time.
 ///
@@ -80,8 +80,8 @@ impl CheckpointFrame {
 /// A single WAL frame ready for persistence.
 #[derive(Clone, Debug)]
 pub struct WalFrame {
-    /// Shard this frame belongs to.
-    pub shard_id: ShardId,
+    /// ConsensusState this frame belongs to.
+    pub shard_id: ConsensusStateId,
     /// Log index of this entry (0 for checkpoint frames).
     pub index: u64,
     /// Raft term of this entry (0 for checkpoint frames).
@@ -124,7 +124,7 @@ pub trait WalBackend: Send + Sync + 'static {
     /// but the data payload is overwritten with zeros.
     ///
     /// Returns the number of frames zeroed.
-    fn shred_frames(&mut self, shard_id: ShardId) -> Result<u64, WalError>;
+    fn shred_frames(&mut self, shard_id: ConsensusStateId) -> Result<u64, WalError>;
 
     /// Returns whether this backend supports async fsync (io_uring).
     ///
@@ -259,7 +259,7 @@ mod tests {
             Ok(())
         }
 
-        fn shred_frames(&mut self, shard_id: ShardId) -> Result<u64, WalError> {
+        fn shred_frames(&mut self, shard_id: ConsensusStateId) -> Result<u64, WalError> {
             let mut count = 0u64;
             for frame in &mut self.frames {
                 if frame.shard_id == shard_id {
@@ -334,7 +334,7 @@ mod tests {
         wal.write_checkpoint(&CheckpointFrame { committed_index: 3, term: 1, voted_for: None })
             .unwrap();
         wal.append(&[WalFrame {
-            shard_id: ShardId(1),
+            shard_id: ConsensusStateId(1),
             index: 4,
             term: 1,
             data: Arc::from(b"entry" as &[u8]),

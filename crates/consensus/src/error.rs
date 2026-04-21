@@ -22,10 +22,10 @@ pub enum ConsensusError {
     WalWriteError,
 
     /// The shard is unavailable.
-    #[snafu(display("Shard {shard:?} unavailable"))]
+    #[snafu(display("ConsensusState {shard:?} unavailable"))]
     ShardUnavailable {
         /// The shard that is unavailable.
-        shard: crate::types::ShardId,
+        shard: crate::types::ConsensusStateId,
     },
 
     /// A membership change is already in progress.

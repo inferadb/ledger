@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::types::{NodeId, NodeState, ShardId};
+use crate::types::{NodeId, NodeState, ConsensusStateId};
 
 /// Observable shard state snapshot.
 ///
@@ -23,7 +23,7 @@ use crate::types::{NodeId, NodeState, ShardId};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShardState {
     /// The shard this state belongs to.
-    pub shard: ShardId,
+    pub shard: ConsensusStateId,
     /// Current Raft term.
     pub term: u64,
     /// This node's role in the shard.
@@ -47,7 +47,7 @@ pub struct ShardState {
 impl Default for ShardState {
     fn default() -> Self {
         Self {
-            shard: ShardId(0),
+            shard: ConsensusStateId(0),
             term: 0,
             state: NodeState::Follower,
             leader: None,
@@ -64,12 +64,12 @@ impl Default for ShardState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{NodeId, NodeState, ShardId};
+    use crate::types::{NodeId, NodeState, ConsensusStateId};
 
     #[test]
     fn default_starts_as_follower_with_zeroed_fields() {
         let state = ShardState::default();
-        assert_eq!(state.shard, ShardId(0));
+        assert_eq!(state.shard, ConsensusStateId(0));
         assert_eq!(state.term, 0);
         assert_eq!(state.state, NodeState::Follower);
         assert!(state.leader.is_none());
@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn clone_preserves_all_fields() {
         let state = ShardState {
-            shard: ShardId(3),
+            shard: ConsensusStateId(3),
             term: 7,
             state: NodeState::Leader,
             leader: Some(NodeId(1)),
@@ -101,7 +101,7 @@ mod tests {
     #[test]
     fn inequality_per_field() {
         let base = ShardState {
-            shard: ShardId(1),
+            shard: ConsensusStateId(1),
             term: 5,
             state: NodeState::Follower,
             leader: Some(NodeId(2)),
@@ -114,7 +114,7 @@ mod tests {
         };
 
         // Each single-field change produces inequality.
-        let diff_shard = ShardState { shard: ShardId(99), ..base.clone() };
+        let diff_shard = ShardState { shard: ConsensusStateId(99), ..base.clone() };
         assert_ne!(base, diff_shard);
 
         let diff_term = ShardState { term: 999, ..base.clone() };

@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::{
     message::Message,
-    types::{NodeId, ShardId},
+    types::{NodeId, ConsensusStateId},
 };
 
 /// A message in flight through the simulated network.
@@ -15,7 +15,7 @@ pub struct InFlightMessage {
     /// Destination node.
     pub to: NodeId,
     /// The shard group this message belongs to.
-    pub shard_id: ShardId,
+    pub shard_id: ConsensusStateId,
     /// The Raft message payload.
     pub message: Message,
 }
@@ -49,7 +49,7 @@ impl SimulatedNetwork {
 
     /// Enqueues a message from `from` to `to` for the given shard group,
     /// or drops it if the pair is partitioned.
-    pub fn send(&mut self, from: NodeId, to: NodeId, shard_id: ShardId, message: Message) {
+    pub fn send(&mut self, from: NodeId, to: NodeId, shard_id: ConsensusStateId, message: Message) {
         if self.is_partitioned(from, to) {
             self.dropped_count += 1;
             return;
@@ -113,7 +113,7 @@ impl SimulatedNetwork {
 mod tests {
     use super::*;
 
-    const TEST_SHARD: ShardId = ShardId(1);
+    const TEST_SHARD: ConsensusStateId = ConsensusStateId(1);
 
     fn msg() -> Message {
         Message::PreVoteResponse { term: 1, vote_granted: true }
@@ -299,13 +299,13 @@ mod tests {
         }
     }
 
-    // ── Shard-aware routing ───────────────────────────────────────
+    // ── ConsensusState-aware routing ───────────────────────────────────────
 
     #[test]
     fn messages_preserve_shard_id() {
         let mut net = SimulatedNetwork::new();
-        let shard_a = ShardId(1);
-        let shard_b = ShardId(2);
+        let shard_a = ConsensusStateId(1);
+        let shard_b = ConsensusStateId(2);
 
         net.send(NodeId(1), NodeId(2), shard_a, msg());
         net.send(NodeId(1), NodeId(2), shard_b, msg());

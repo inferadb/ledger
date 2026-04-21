@@ -211,7 +211,7 @@ async fn test_per_organization_isolation() {
 /// region's data-region group — the unified-leadership contract. Under
 /// `LeadershipMode::Delegated`, per-org groups do not elect independently;
 /// a watcher propagates the region's leader into each per-org shard via
-/// `Shard::adopt_leader`.
+/// `ConsensusState::adopt_leader`.
 ///
 /// Pre-B.1.7 this would have been indeterminate — per-org groups ran
 /// their own election timers, so different orgs could momentarily disagree

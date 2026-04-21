@@ -289,7 +289,7 @@ impl WalBackend for SegmentedWalBackend {
                 }
 
                 frames.push(WalFrame {
-                    shard_id: crate::types::ShardId(shard_id),
+                    shard_id: crate::types::ConsensusStateId(shard_id),
                     index,
                     term,
                     data: Arc::from(data.as_slice()),
@@ -415,7 +415,7 @@ impl WalBackend for SegmentedWalBackend {
         Ok(None)
     }
 
-    fn shred_frames(&mut self, shard_id: crate::types::ShardId) -> Result<u64, WalError> {
+    fn shred_frames(&mut self, shard_id: crate::types::ConsensusStateId) -> Result<u64, WalError> {
         let segment_indices = list_segments(&self.dir)?;
         let mut total_zeroed = 0u64;
 
@@ -535,10 +535,10 @@ fn parse_segment_name(name: &str) -> Option<u64> {
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
-    use crate::types::ShardId;
+    use crate::types::ConsensusStateId;
 
     fn frame(shard: u64, data: &[u8]) -> WalFrame {
-        WalFrame { shard_id: ShardId(shard), index: 0, term: 0, data: Arc::from(data) }
+        WalFrame { shard_id: ConsensusStateId(shard), index: 0, term: 0, data: Arc::from(data) }
     }
 
     // --- append / read_frames ---
@@ -553,9 +553,9 @@ mod tests {
 
         let frames = wal.read_frames(0).unwrap();
         assert_eq!(frames.len(), 2);
-        assert_eq!(frames[0].shard_id, ShardId(1));
+        assert_eq!(frames[0].shard_id, ConsensusStateId(1));
         assert_eq!(&*frames[0].data, b"hello");
-        assert_eq!(frames[1].shard_id, ShardId(2));
+        assert_eq!(frames[1].shard_id, ConsensusStateId(2));
         assert_eq!(&*frames[1].data, b"world");
     }
 
@@ -579,7 +579,7 @@ mod tests {
         let frames = wal.read_frames(0).unwrap();
         assert_eq!(frames.len(), 1);
         assert!(frames[0].data.is_empty());
-        assert_eq!(frames[0].shard_id, ShardId(1));
+        assert_eq!(frames[0].shard_id, ConsensusStateId(1));
     }
 
     #[test]
@@ -600,12 +600,12 @@ mod tests {
         let mut wal = SegmentedWalBackend::open(dir.path()).unwrap();
 
         let f =
-            WalFrame { shard_id: ShardId(5), index: 42, term: 7, data: Arc::from(b"x".as_slice()) };
+            WalFrame { shard_id: ConsensusStateId(5), index: 42, term: 7, data: Arc::from(b"x".as_slice()) };
         wal.append(&[f]).unwrap();
         wal.sync().unwrap();
 
         let frames = wal.read_frames(0).unwrap();
-        assert_eq!(frames[0].shard_id, ShardId(5));
+        assert_eq!(frames[0].shard_id, ConsensusStateId(5));
         assert_eq!(frames[0].index, 42);
         assert_eq!(frames[0].term, 7);
         assert_eq!(&*frames[0].data, b"x");
@@ -627,7 +627,7 @@ mod tests {
         let frames = wal.read_frames(0).unwrap();
         assert_eq!(frames.len(), 2);
         assert_eq!(&*frames[0].data, b"persistent");
-        assert_eq!(frames[1].shard_id, ShardId(3));
+        assert_eq!(frames[1].shard_id, ConsensusStateId(3));
         assert_eq!(&*frames[1].data, b"data");
     }
 
@@ -1039,13 +1039,13 @@ mod tests {
             let mut wal = SegmentedWalBackend::open(dir.path()).unwrap();
             // Write two entry frames, then a checkpoint marking both committed.
             let f1 = WalFrame {
-                shard_id: ShardId(1),
+                shard_id: ConsensusStateId(1),
                 index: 1,
                 term: 1,
                 data: Arc::from(b"entry-one".as_slice()),
             };
             let f2 = WalFrame {
-                shard_id: ShardId(1),
+                shard_id: ConsensusStateId(1),
                 index: 2,
                 term: 1,
                 data: Arc::from(b"entry-two".as_slice()),
@@ -1088,7 +1088,7 @@ mod tests {
         .unwrap();
         wal.sync().unwrap();
 
-        let zeroed = wal.shred_frames(ShardId(1)).unwrap();
+        let zeroed = wal.shred_frames(ConsensusStateId(1)).unwrap();
         assert_eq!(zeroed, 3);
 
         // Verify by reading raw segment bytes (CRC won't match for zeroed frames).
@@ -1128,7 +1128,7 @@ mod tests {
         wal.append(&[frame(1, b"data")]).unwrap();
         wal.sync().unwrap();
 
-        assert_eq!(wal.shred_frames(ShardId(99)).unwrap(), 0);
+        assert_eq!(wal.shred_frames(ConsensusStateId(99)).unwrap(), 0);
     }
 
     #[test]
@@ -1145,7 +1145,7 @@ mod tests {
         let segments = list_segments(dir.path()).unwrap();
         assert!(segments.len() > 1, "expected multi-segment WAL");
 
-        let zeroed = wal.shred_frames(ShardId(1)).unwrap();
+        let zeroed = wal.shred_frames(ConsensusStateId(1)).unwrap();
         assert_eq!(zeroed, 10);
     }
 }

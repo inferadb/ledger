@@ -903,7 +903,7 @@ impl RaftManager {
     ///
     /// Used by the gRPC `RaftService` to route incoming consensus
     /// `Replicate` messages to the correct engine — each per-organization
-    /// engine has a distinct consensus `ShardId` derived from
+    /// engine has a distinct consensus `ConsensusStateId` derived from
     /// `seahash(region.as_str() || organization_id.to_le_bytes())`, and
     /// the receiver must dispatch by that id rather than by region
     /// (looking up by region alone would always hit the legacy
@@ -911,11 +911,11 @@ impl RaftManager {
     ///
     /// Linear scan over the local groups; at the B.1 target scale of
     /// tens-to-hundreds of organizations per region, this is fine.
-    /// Future work could maintain a parallel `HashMap<ShardId, ...>` if
+    /// Future work could maintain a parallel `HashMap<ConsensusStateId, ...>` if
     /// the scan becomes a hotspot.
     pub fn lookup_by_consensus_shard(
         &self,
-        shard_id: inferadb_ledger_consensus::types::ShardId,
+        shard_id: inferadb_ledger_consensus::types::ConsensusStateId,
     ) -> Option<Arc<OrganizationGroup>> {
         self.regions
             .read()
@@ -1190,7 +1190,7 @@ impl RaftManager {
             .build();
         let org_group = self.start_region(region_config, organization_id).await?;
 
-        // Activate delegated leadership: the new org Shard does not run
+        // Activate delegated leadership: the new org ConsensusState does not run
         // its own elections (LeadershipMode::Delegated). Its leader is
         // adopted from the data-region group's elected leader. Bootstrap
         // a one-time adoption now (in case the region already has a
@@ -1412,7 +1412,7 @@ impl RaftManager {
             auto_promote: region == Region::GLOBAL,
             ..Default::default()
         };
-        // Consensus `ShardId` must be unique across `(region, organization_id)` —
+        // Consensus `ConsensusStateId` must be unique across `(region, organization_id)` —
         // each Raft group runs independently, so colliding IDs would alias
         // two distinct groups in the engine's shard map. Mix the shard idx
         // into the seahash so all N shards in a region get distinct IDs.
@@ -1420,7 +1420,7 @@ impl RaftManager {
             let mut bytes = Vec::with_capacity(region.as_str().len() + 8);
             bytes.extend_from_slice(region.as_str().as_bytes());
             bytes.extend_from_slice(&organization_id.value().to_le_bytes());
-            inferadb_ledger_consensus::types::ShardId(seahash::hash(&bytes))
+            inferadb_ledger_consensus::types::ConsensusStateId(seahash::hash(&bytes))
         };
 
         // Initial membership for the consensus engine shard.
@@ -1550,7 +1550,7 @@ impl RaftManager {
             },
         }
 
-        let mut consensus_shard = inferadb_ledger_consensus::Shard::new(
+        let mut consensus_shard = inferadb_ledger_consensus::ConsensusState::new(
             shard_id,
             inferadb_ledger_consensus::types::NodeId(self.config.node_id),
             consensus_membership,

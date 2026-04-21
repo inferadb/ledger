@@ -68,7 +68,7 @@ impl ApplyPool {
 
 #[cfg(test)]
 mod tests {
-    use inferadb_ledger_consensus::{committed::CommittedBatch, types::ShardId};
+    use inferadb_ledger_consensus::{committed::CommittedBatch, types::ConsensusStateId};
 
     use super::*;
 
@@ -76,12 +76,12 @@ mod tests {
     async fn dispatch_routes_by_shard_id() {
         let (pool, mut rxs) = ApplyPool::new(3);
 
-        // Shard 0 → worker 0, Shard 1 → worker 1, Shard 3 → worker 0
-        pool.dispatch(CommittedBatch { shard: ShardId(0), entries: vec![], leader_node: None })
+        // ConsensusState 0 → worker 0, ConsensusState 1 → worker 1, ConsensusState 3 → worker 0
+        pool.dispatch(CommittedBatch { shard: ConsensusStateId(0), entries: vec![], leader_node: None })
             .await;
-        pool.dispatch(CommittedBatch { shard: ShardId(1), entries: vec![], leader_node: None })
+        pool.dispatch(CommittedBatch { shard: ConsensusStateId(1), entries: vec![], leader_node: None })
             .await;
-        pool.dispatch(CommittedBatch { shard: ShardId(3), entries: vec![], leader_node: None })
+        pool.dispatch(CommittedBatch { shard: ConsensusStateId(3), entries: vec![], leader_node: None })
             .await;
 
         // Worker 0 got 2 batches (shard 0 and 3)

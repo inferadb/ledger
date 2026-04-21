@@ -7,7 +7,7 @@
 use inferadb_ledger_consensus::{
     action::Action,
     simulation::Simulation,
-    types::{NodeId, ShardId},
+    types::{NodeId, ConsensusStateId},
 };
 
 // ── Election across seeds ─────────────────────────────────────────
@@ -103,7 +103,7 @@ fn commit_fails_after_majority_failure() {
     }
 
     // Leader alone cannot form quorum for new entries.
-    let shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ShardId(1)).unwrap();
+    let shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ConsensusStateId(1)).unwrap();
     let actions = shard.handle_propose(b"no-quorum".to_vec()).unwrap();
     for action in actions {
         if let Action::Send { to, shard, msg } = action {
@@ -131,7 +131,7 @@ fn partition_blocks_commit_when_leader_isolated() {
         [NodeId(1), NodeId(2), NodeId(3)].into_iter().filter(|&id| id != leader_id).collect();
     sim.partition(&[leader_id], &followers);
 
-    let shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ShardId(1)).unwrap();
+    let shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ConsensusStateId(1)).unwrap();
     let actions = shard.handle_propose(b"partitioned".to_vec()).unwrap();
     for action in actions {
         if let Action::Send { to, shard, msg } = action {
@@ -160,7 +160,7 @@ fn partition_increments_dropped_count() {
         [NodeId(1), NodeId(2), NodeId(3)].into_iter().filter(|&id| id != leader_id).collect();
     sim.partition(&[leader_id], &followers);
 
-    let shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ShardId(1)).unwrap();
+    let shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ConsensusStateId(1)).unwrap();
     let actions = shard.handle_propose(b"will-drop".to_vec()).unwrap();
     let send_count = actions.iter().filter(|a| matches!(a, Action::Send { .. })).count();
     for action in actions {
@@ -189,7 +189,7 @@ fn heal_after_partition_restores_commit() {
     sim.partition(&[leader_id], &followers);
 
     // Propose while partitioned — messages will be dropped.
-    let shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ShardId(1)).unwrap();
+    let shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ConsensusStateId(1)).unwrap();
     let actions = shard.handle_propose(b"blocked".to_vec()).unwrap();
     for action in actions {
         if let Action::Send { to, shard, msg } = action {
@@ -207,7 +207,7 @@ fn heal_after_partition_restores_commit() {
     sim.heal();
 
     // Trigger heartbeat to re-send pending entries.
-    let shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ShardId(1)).unwrap();
+    let shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ConsensusStateId(1)).unwrap();
     let hb_actions = shard.handle_heartbeat_timeout();
     for action in hb_actions {
         if let Action::Send { to, shard, msg } = action {
@@ -237,7 +237,7 @@ fn multiple_partition_heal_cycles() {
     for cycle in 0..3 {
         // Partition.
         sim.partition(&[leader_id], &followers);
-        let raft_shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ShardId(1)).unwrap();
+        let raft_shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ConsensusStateId(1)).unwrap();
         let actions = raft_shard.handle_propose(format!("blocked-{cycle}").into_bytes()).unwrap();
         for action in actions {
             if let Action::Send { to, shard: shard_id, msg } = action {
@@ -249,7 +249,7 @@ fn multiple_partition_heal_cycles() {
 
         // Heal.
         sim.heal();
-        let raft_shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ShardId(1)).unwrap();
+        let raft_shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ConsensusStateId(1)).unwrap();
         let hb = raft_shard.handle_heartbeat_timeout();
         for action in hb {
             if let Action::Send { to, shard: shard_id, msg } = action {
@@ -308,7 +308,7 @@ fn majority_partition_elects_new_leader() {
 
     // Trigger election from a majority-side node.
     let candidate = majority[0];
-    let shard = sim.nodes.get_mut(&candidate).unwrap().get_mut(&ShardId(1)).unwrap();
+    let shard = sim.nodes.get_mut(&candidate).unwrap().get_mut(&ConsensusStateId(1)).unwrap();
     let actions = shard.handle_election_timeout();
     for action in actions {
         if let Action::Send { to, shard, msg } = action {
@@ -321,7 +321,7 @@ fn majority_partition_elects_new_leader() {
     let new_leader = majority.iter().find(|&&id| {
         sim.nodes
             .get(&id)
-            .and_then(|m| m.get(&ShardId(1)))
+            .and_then(|m| m.get(&ConsensusStateId(1)))
             .is_some_and(|s| s.state() == inferadb_ledger_consensus::types::NodeState::Leader)
     });
     assert!(new_leader.is_some(), "majority partition should elect a new leader");
@@ -425,7 +425,7 @@ fn follower_commit_index_propagates_via_heartbeat() {
     sim.propose(b"replicated".to_vec());
 
     // Send an extra heartbeat round to propagate commit index to followers.
-    let shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ShardId(1)).unwrap();
+    let shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ConsensusStateId(1)).unwrap();
     let hb_actions = shard.handle_heartbeat_timeout();
     for action in hb_actions {
         if let Action::Send { to, shard, msg } = action {
@@ -456,7 +456,7 @@ fn all_followers_converge_commit_index() {
     }
 
     // Extra heartbeat + delivery to propagate.
-    let shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ShardId(1)).unwrap();
+    let shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ConsensusStateId(1)).unwrap();
     let hb = shard.handle_heartbeat_timeout();
     for action in hb {
         if let Action::Send { to, shard, msg } = action {
@@ -519,15 +519,15 @@ fn propose_returns_none_without_leader() {
 #[test]
 fn multi_shard_independent_groups() {
     let mut sim = Simulation::new(42, 3);
-    sim.add_shard_group(ShardId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
+    sim.add_shard_group(ConsensusStateId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
 
     // Elect leaders on both shard groups.
-    assert!(sim.elect_leader_on(ShardId(1), NodeId(1)), "shard 1 should elect a leader");
-    assert!(sim.elect_leader_on(ShardId(2), NodeId(2)), "shard 2 should elect a leader");
+    assert!(sim.elect_leader_on(ConsensusStateId(1), NodeId(1)), "shard 1 should elect a leader");
+    assert!(sim.elect_leader_on(ConsensusStateId(2), NodeId(2)), "shard 2 should elect a leader");
 
     // Propose to each shard group independently.
-    let ci1 = sim.propose_on(ShardId(1), b"shard1-entry".to_vec());
-    let ci2 = sim.propose_on(ShardId(2), b"shard2-entry".to_vec());
+    let ci1 = sim.propose_on(ConsensusStateId(1), b"shard1-entry".to_vec());
+    let ci2 = sim.propose_on(ConsensusStateId(2), b"shard2-entry".to_vec());
 
     assert!(ci1.is_some(), "shard 1 should commit");
     assert!(ci2.is_some(), "shard 2 should commit");
@@ -541,14 +541,14 @@ fn multi_shard_independent_groups() {
 #[test]
 fn multi_shard_partition_affects_all_groups() {
     let mut sim = Simulation::new(42, 3);
-    sim.add_shard_group(ShardId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
+    sim.add_shard_group(ConsensusStateId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
 
     // Elect NodeId(1) as leader for both shards.
-    sim.elect_leader_on(ShardId(1), NodeId(1));
-    sim.elect_leader_on(ShardId(2), NodeId(1));
+    sim.elect_leader_on(ConsensusStateId(1), NodeId(1));
+    sim.elect_leader_on(ConsensusStateId(2), NodeId(1));
 
-    let leader1 = sim.leader_on(ShardId(1)).unwrap();
-    let leader2 = sim.leader_on(ShardId(2)).unwrap();
+    let leader1 = sim.leader_on(ConsensusStateId(1)).unwrap();
+    let leader2 = sim.leader_on(ConsensusStateId(2)).unwrap();
 
     // Partition the leader from followers — network-level, affects both shards.
     let followers: Vec<NodeId> =
@@ -556,11 +556,11 @@ fn multi_shard_partition_affects_all_groups() {
     sim.partition(&[leader1], &followers);
 
     // Neither shard group should be able to commit through the partitioned leader.
-    let r1 = sim.propose_on(ShardId(1), b"blocked1".to_vec());
+    let r1 = sim.propose_on(ConsensusStateId(1), b"blocked1".to_vec());
     assert!(r1.is_none(), "shard 1 should not commit when leader is partitioned");
 
     if leader2 == leader1 {
-        let r2 = sim.propose_on(ShardId(2), b"blocked2".to_vec());
+        let r2 = sim.propose_on(ConsensusStateId(2), b"blocked2".to_vec());
         assert!(r2.is_none(), "shard 2 should not commit when leader is partitioned");
     }
 }
@@ -571,20 +571,20 @@ fn multi_shard_independent_leaders() {
     // Use multiple seeds to increase confidence that different leaders emerge.
     for seed in [42, 77, 123] {
         let mut sim = Simulation::new(seed, 3);
-        sim.add_shard_group(ShardId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
+        sim.add_shard_group(ConsensusStateId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
 
-        sim.elect_leader_on(ShardId(1), NodeId(1));
-        sim.elect_leader_on(ShardId(2), NodeId(2));
+        sim.elect_leader_on(ConsensusStateId(1), NodeId(1));
+        sim.elect_leader_on(ConsensusStateId(2), NodeId(2));
 
-        let leader1 = sim.leader_on(ShardId(1));
-        let leader2 = sim.leader_on(ShardId(2));
+        let leader1 = sim.leader_on(ConsensusStateId(1));
+        let leader2 = sim.leader_on(ConsensusStateId(2));
 
         assert!(leader1.is_some(), "seed {seed}: shard 1 should have a leader");
         assert!(leader2.is_some(), "seed {seed}: shard 2 should have a leader");
 
         // Both groups should function independently.
-        let ci1 = sim.propose_on(ShardId(1), b"s1".to_vec());
-        let ci2 = sim.propose_on(ShardId(2), b"s2".to_vec());
+        let ci1 = sim.propose_on(ConsensusStateId(1), b"s1".to_vec());
+        let ci2 = sim.propose_on(ConsensusStateId(2), b"s2".to_vec());
         assert!(ci1.is_some(), "seed {seed}: shard 1 proposals should commit");
         assert!(ci2.is_some(), "seed {seed}: shard 2 proposals should commit");
     }

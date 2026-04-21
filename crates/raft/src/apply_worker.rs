@@ -88,7 +88,7 @@ pub struct OrganizationApplyWorker {
     dr_event_tx: Option<tokio::sync::mpsc::UnboundedSender<()>>,
     /// Region label for apply-batch metrics.
     region: String,
-    /// Shard label for apply-batch metrics, pre-stringified from a
+    /// ConsensusState label for apply-batch metrics, pre-stringified from a
     /// [`OrganizationId`]. Phase A always emits `"0"`; Task 5 fans workers out.
     shard: String,
 }

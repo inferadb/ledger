@@ -111,7 +111,7 @@ mod tests {
     use super::*;
     use crate::types::{
         ArchivableEntry, ArchivedArchivableEntry, ArchivedMembership, EntryKind, Membership,
-        NodeId, ShardId,
+        NodeId, ConsensusStateId,
     };
 
     #[test]
@@ -127,12 +127,12 @@ mod tests {
 
     #[test]
     fn roundtrip_shard_id() {
-        let id = ShardId(99);
-        let bytes = to_archived_bytes(&id).expect("serialize ShardId");
-        let archived = access_archived::<ShardId>(&bytes).expect("access ShardId");
+        let id = ConsensusStateId(99);
+        let bytes = to_archived_bytes(&id).expect("serialize ConsensusStateId");
+        let archived = access_archived::<ConsensusStateId>(&bytes).expect("access ConsensusStateId");
         assert_eq!(archived.0, 99);
 
-        let deserialized: ShardId = from_archived_bytes(&bytes).expect("deserialize ShardId");
+        let deserialized: ConsensusStateId = from_archived_bytes(&bytes).expect("deserialize ConsensusStateId");
         assert_eq!(deserialized, id);
     }
 

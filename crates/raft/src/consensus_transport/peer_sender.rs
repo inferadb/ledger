@@ -428,7 +428,7 @@ async fn run_drain_loop(
 mod tests {
     use inferadb_ledger_consensus::{
         Message,
-        types::{NodeId, ShardId},
+        types::{NodeId, ConsensusStateId},
     };
 
     use super::*;
@@ -447,7 +447,7 @@ mod tests {
     }
 
     fn sample_msg(shard: u64) -> OutboundMessage {
-        OutboundMessage { to: NodeId(42), shard: ShardId(shard), msg: Message::TimeoutNow }
+        OutboundMessage { to: NodeId(42), shard: ConsensusStateId(shard), msg: Message::TimeoutNow }
     }
 
     #[test]

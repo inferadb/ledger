@@ -10,19 +10,19 @@ use inferadb_ledger_consensus::{
     error::ConsensusError,
     leadership::ShardState,
     rng::SimulatedRng,
-    shard::Shard,
+    consensus_state::ConsensusState,
     transport::InMemoryTransport,
-    types::{Membership, NodeId, NodeState, ShardId},
+    types::{Membership, NodeId, NodeState, ConsensusStateId},
     wal::InMemoryWalBackend,
 };
 use tokio::sync::{mpsc, watch};
 
-const SHARD: ShardId = ShardId(1);
+const SHARD: ConsensusStateId = ConsensusStateId(1);
 const NODE: NodeId = NodeId(1);
 /// Maximum time to wait for an async result before considering it hung.
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Shard config with very short election timeouts for fast tests.
+/// ConsensusState config with very short election timeouts for fast tests.
 fn fast_shard_config() -> ShardConfig {
     ShardConfig {
         election_timeout_min: Duration::from_millis(20),
@@ -44,7 +44,7 @@ fn make_engine() -> (
     Arc<SimulatedClock>,
 ) {
     let clock = Arc::new(SimulatedClock::new());
-    let shard = Shard::new(
+    let shard = ConsensusState::new(
         SHARD,
         NODE,
         Membership::new([NODE]),
@@ -218,9 +218,9 @@ async fn read_index_advances_after_propose() {
 async fn read_index_unknown_shard_returns_error() {
     let (engine, _commit_rx, _state_rx, _clock) = make_engine();
 
-    let result = engine.read_index(ShardId(99)).await;
+    let result = engine.read_index(ConsensusStateId(99)).await;
     assert!(
-        matches!(result, Err(ConsensusError::ShardUnavailable { shard: ShardId(99) })),
+        matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })),
         "expected ShardUnavailable, got {result:?}",
     );
 
@@ -234,7 +234,7 @@ async fn read_index_unknown_shard_returns_error() {
 #[tokio::test]
 async fn propose_to_missing_shard_returns_shard_unavailable() {
     let clock = Arc::new(SimulatedClock::new());
-    let shards: Vec<Shard<Arc<SimulatedClock>, SimulatedRng>> = vec![];
+    let shards: Vec<ConsensusState<Arc<SimulatedClock>, SimulatedRng>> = vec![];
     let (engine, _commit_rx, _state_rx) = ConsensusEngine::start(
         shards,
         InMemoryWalBackend::new(),
@@ -243,9 +243,9 @@ async fn propose_to_missing_shard_returns_shard_unavailable() {
         Duration::from_millis(10),
     );
 
-    let result = engine.propose(ShardId(99), b"test".to_vec()).await;
+    let result = engine.propose(ConsensusStateId(99), b"test".to_vec()).await;
     assert!(
-        matches!(result, Err(ConsensusError::ShardUnavailable { shard: ShardId(99) })),
+        matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })),
         "expected ShardUnavailable, got {result:?}",
     );
 
@@ -390,7 +390,7 @@ async fn remove_node_removes_learner() {
 async fn remove_node_on_unknown_shard_returns_error() {
     let (engine, _commit_rx, _state_rx, _clock) = make_engine();
 
-    let result = engine.remove_node(ShardId(99), NodeId(2)).await;
+    let result = engine.remove_node(ConsensusStateId(99), NodeId(2)).await;
     assert!(
         matches!(result, Err(ConsensusError::ShardUnavailable { .. })),
         "expected ShardUnavailable, got {result:?}",
@@ -449,7 +449,7 @@ async fn transfer_leader_on_follower_returns_not_leader() {
 async fn transfer_leader_to_unknown_shard_returns_error() {
     let (engine, _commit_rx, _state_rx, _clock) = make_engine();
 
-    let result = engine.transfer_leader(ShardId(99), NodeId(2)).await;
+    let result = engine.transfer_leader(ConsensusStateId(99), NodeId(2)).await;
     assert!(
         matches!(result, Err(ConsensusError::ShardUnavailable { .. })),
         "expected ShardUnavailable, got {result:?}",
@@ -503,7 +503,7 @@ async fn trigger_snapshot_after_propose_returns_nonzero() {
 async fn trigger_snapshot_unknown_shard_returns_error() {
     let (engine, _commit_rx, _state_rx, _clock) = make_engine();
 
-    let result = engine.trigger_snapshot(ShardId(99)).await;
+    let result = engine.trigger_snapshot(ConsensusStateId(99)).await;
     assert!(
         matches!(result, Err(ConsensusError::ShardUnavailable { .. })),
         "expected ShardUnavailable, got {result:?}",
@@ -519,11 +519,11 @@ async fn trigger_snapshot_unknown_shard_returns_error() {
 #[tokio::test]
 async fn multiple_shards_independent_proposals() {
     let clock = Arc::new(SimulatedClock::new());
-    let shard_a = ShardId(10);
-    let shard_b = ShardId(20);
+    let shard_a = ConsensusStateId(10);
+    let shard_b = ConsensusStateId(20);
 
     let shards = vec![
-        Shard::new(
+        ConsensusState::new(
             shard_a,
             NODE,
             Membership::new([NODE]),
@@ -534,7 +534,7 @@ async fn multiple_shards_independent_proposals() {
             None,
             0,
         ),
-        Shard::new(
+        ConsensusState::new(
             shard_b,
             NODE,
             Membership::new([NODE]),
@@ -694,9 +694,9 @@ async fn shutdown_drains_pending_proposals() {
 async fn propose_batch_to_missing_shard_returns_error() {
     let (engine, _commit_rx, _state_rx, _clock) = make_engine();
 
-    let result = engine.propose_batch(ShardId(99), vec![b"x".to_vec()]).await;
+    let result = engine.propose_batch(ConsensusStateId(99), vec![b"x".to_vec()]).await;
     assert!(
-        matches!(result, Err(ConsensusError::ShardUnavailable { shard: ShardId(99) })),
+        matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })),
         "expected ShardUnavailable, got {result:?}",
     );
 

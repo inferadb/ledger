@@ -1,13 +1,13 @@
-//! Actions returned by the Shard to the reactor.
+//! Actions returned by the ConsensusState to the reactor.
 //!
-//! The Shard never performs I/O directly. It returns Actions that
+//! The ConsensusState never performs I/O directly. It returns Actions that
 //! the reactor batches and executes.
 
 use std::time::Instant;
 
 use crate::{
     message::Message,
-    types::{Entry, Membership, NodeId, ShardId, TimerKind},
+    types::{Entry, Membership, NodeId, ConsensusStateId, TimerKind},
 };
 
 /// An action the reactor should execute on behalf of a shard.
@@ -20,8 +20,8 @@ pub enum Action {
     /// process this action (write checkpoint + fsync) **before** flushing any
     /// [`Send`](Action::Send) actions from the same batch.
     PersistTermState {
-        /// Shard whose term state changed.
-        shard: ShardId,
+        /// ConsensusState whose term state changed.
+        shard: ConsensusStateId,
         /// The current term to persist.
         term: u64,
         /// The candidate that received our vote in this term, or `None`.
@@ -31,29 +31,29 @@ pub enum Action {
     Send {
         /// Destination node.
         to: NodeId,
-        /// Shard this message belongs to.
-        shard: ShardId,
+        /// ConsensusState this message belongs to.
+        shard: ConsensusStateId,
         /// The Raft message to send.
         msg: Message,
     },
     /// Persist entries to the WAL.
     PersistEntries {
-        /// Shard owning the entries.
-        shard: ShardId,
+        /// ConsensusState owning the entries.
+        shard: ConsensusStateId,
         /// Entries to persist.
         entries: Vec<Entry>,
     },
     /// Entries have been committed up to this index.
     Committed {
-        /// Shard with committed entries.
-        shard: ShardId,
+        /// ConsensusState with committed entries.
+        shard: ConsensusStateId,
         /// Commit index (inclusive).
         up_to: u64,
     },
     /// Schedule a timer (election or heartbeat).
     ScheduleTimer {
-        /// Shard the timer belongs to.
-        shard: ShardId,
+        /// ConsensusState the timer belongs to.
+        shard: ConsensusStateId,
         /// Whether this is an election or heartbeat timer.
         kind: TimerKind,
         /// When the timer should fire.
@@ -61,20 +61,20 @@ pub enum Action {
     },
     /// Renew the leader lease (quorum acknowledged).
     RenewLease {
-        /// Shard whose lease is renewed.
-        shard: ShardId,
+        /// ConsensusState whose lease is renewed.
+        shard: ConsensusStateId,
     },
     /// Membership changed (new membership committed).
     MembershipChanged {
-        /// Shard with the new membership.
-        shard: ShardId,
+        /// ConsensusState with the new membership.
+        shard: ConsensusStateId,
         /// The new membership configuration.
         membership: Membership,
     },
     /// Log exceeded snapshot threshold — reactor should trigger snapshot creation.
     TriggerSnapshot {
-        /// Shard that needs a snapshot.
-        shard: ShardId,
+        /// ConsensusState that needs a snapshot.
+        shard: ConsensusStateId,
         /// Index of the last entry to include in the snapshot.
         last_included_index: u64,
         /// Term of the last entry to include in the snapshot.
@@ -88,8 +88,8 @@ pub enum Action {
     SendSnapshot {
         /// Target peer that needs the snapshot.
         to: NodeId,
-        /// Shard that needs the snapshot.
-        shard: ShardId,
+        /// ConsensusState that needs the snapshot.
+        shard: ConsensusStateId,
         /// Current term of the leader emitting this action.
         term: u64,
         /// Leader node ID.
@@ -102,7 +102,7 @@ pub enum Action {
     /// The local node was removed from this shard's voter and learner sets.
     /// The reactor should schedule cleanup (stop timers, remove shard).
     ShardRemoved {
-        /// Shard that should be cleaned up.
-        shard: ShardId,
+        /// ConsensusState that should be cleaned up.
+        shard: ConsensusStateId,
     },
 }

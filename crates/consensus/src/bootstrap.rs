@@ -5,7 +5,7 @@
 //! explicit cluster init command. This prevents accidental split-brain
 //! by requiring operator intent before forming a cluster.
 
-use crate::types::{NodeId, ShardId};
+use crate::types::{NodeId, ConsensusStateId};
 
 /// Initializes a new cluster.
 ///
@@ -27,7 +27,7 @@ pub fn init_cluster(
     let cluster_id = generate_cluster_id();
     *state = BootstrapState::Running { cluster_id };
 
-    Ok(InitResult { cluster_id, global_shard: ShardId(0) })
+    Ok(InitResult { cluster_id, global_shard: ConsensusStateId(0) })
 }
 
 /// Generates a unique cluster identifier using random bytes.
@@ -68,7 +68,7 @@ pub struct InitResult {
     /// Generated cluster ID.
     pub cluster_id: u64,
     /// The GLOBAL shard created during init.
-    pub global_shard: ShardId,
+    pub global_shard: ConsensusStateId,
 }
 
 impl BootstrapState {
@@ -93,7 +93,7 @@ impl BootstrapState {
         match self {
             Self::Running { cluster_id } if *cluster_id != incoming => {
                 Err(crate::error::ConsensusError::ShardUnavailable {
-                    shard: crate::types::ShardId(0),
+                    shard: crate::types::ConsensusStateId(0),
                 })
             },
             _ => Ok(()),
@@ -142,7 +142,7 @@ mod tests {
         let result = init_cluster(&mut state, &config).expect("init_cluster");
         assert!(state.is_running());
         assert_eq!(state.cluster_id(), Some(result.cluster_id));
-        assert_eq!(result.global_shard, ShardId(0));
+        assert_eq!(result.global_shard, ConsensusStateId(0));
     }
 
     #[test]

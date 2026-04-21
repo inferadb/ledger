@@ -3564,7 +3564,7 @@ message CommittedIndexResponse {
 // Envelope wrapping a consensus-engine message sent between peers over
 // the Replicate bidirectional RPC.
 message ConsensusEnvelope {
-  // Shard (consensus group) this message targets.
+  // ConsensusState (consensus group) this message targets.
   uint64 shard_id = 1;
   // Node ID of the sender.
   uint64 from_node = 2;

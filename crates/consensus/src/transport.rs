@@ -6,7 +6,7 @@
 
 use crate::{
     message::Message,
-    types::{NodeId, ShardId},
+    types::{NodeId, ConsensusStateId},
 };
 
 /// A message destined for a remote node.
@@ -14,8 +14,8 @@ use crate::{
 pub struct OutboundMessage {
     /// Target node.
     pub to: NodeId,
-    /// Shard the message belongs to.
-    pub shard: ShardId,
+    /// ConsensusState the message belongs to.
+    pub shard: ConsensusStateId,
     /// The Raft protocol message.
     pub msg: Message,
 }
@@ -78,8 +78,8 @@ mod tests {
         assert_eq!(transport.sent_count(), 0);
 
         transport.send_batch(vec![
-            OutboundMessage { to: NodeId(2), shard: ShardId(1), msg: Message::TimeoutNow },
-            OutboundMessage { to: NodeId(3), shard: ShardId(1), msg: Message::TimeoutNow },
+            OutboundMessage { to: NodeId(2), shard: ConsensusStateId(1), msg: Message::TimeoutNow },
+            OutboundMessage { to: NodeId(3), shard: ConsensusStateId(1), msg: Message::TimeoutNow },
         ]);
 
         assert_eq!(transport.sent_count(), 2);
@@ -100,12 +100,12 @@ mod tests {
 
         transport.send_batch(vec![OutboundMessage {
             to: NodeId(1),
-            shard: ShardId(0),
+            shard: ConsensusStateId(0),
             msg: Message::TimeoutNow,
         }]);
         transport.send_batch(vec![OutboundMessage {
             to: NodeId(2),
-            shard: ShardId(0),
+            shard: ConsensusStateId(0),
             msg: Message::TimeoutNow,
         }]);
 

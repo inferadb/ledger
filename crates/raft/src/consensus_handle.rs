@@ -8,7 +8,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use inferadb_ledger_consensus::{
     ConsensusEngine, ConsensusError,
     leadership::ShardState,
-    types::{NodeId, ShardId},
+    types::{NodeId, ConsensusStateId},
 };
 use inferadb_ledger_types::OrganizationId;
 use parking_lot::Mutex;
@@ -64,16 +64,16 @@ pub type SpilloverMap = Arc<Mutex<HashMap<u64, LedgerResponse>>>;
 ///
 /// Each `(region, organization_id)` Raft group gets its own
 /// `ConsensusHandle`. The handle carries both the consensus-layer
-/// `ShardId` (an opaque seahash of `region || organization_id` used by
+/// `ConsensusStateId` (an opaque seahash of `region || organization_id` used by
 /// the consensus engine to disambiguate Raft groups internally) and the
 /// state-layer `OrganizationId` (the user-facing routing key the SDK
 /// uses — `0` for the data-region group, the organization's id for per-
-/// organization groups). The two are kept distinct: `ShardId` is
+/// organization groups). The two are kept distinct: `ConsensusStateId` is
 /// internal/opaque and not stable across renames; `OrganizationId` is
 /// the wire-visible routing dimension.
 pub struct ConsensusHandle {
     engine: ConsensusEngine,
-    shard: ShardId,
+    shard: ConsensusStateId,
     /// Organization id this Raft group owns. Surfaced via
     /// [`ConsensusHandle::organization_id`] so the service-layer
     /// not-leader helpers can stamp it onto
@@ -90,7 +90,7 @@ impl ConsensusHandle {
     /// Creates a new handle bound to the given shard.
     pub fn new(
         engine: ConsensusEngine,
-        shard: ShardId,
+        shard: ConsensusStateId,
         organization_id: OrganizationId,
         node_id: LedgerNodeId,
         state_rx: watch::Receiver<ShardState>,
@@ -220,7 +220,7 @@ impl ConsensusHandle {
     }
 
     /// Returns the shard ID this handle is bound to.
-    pub fn shard_id(&self) -> ShardId {
+    pub fn shard_id(&self) -> ConsensusStateId {
         self.shard
     }
 
@@ -229,7 +229,7 @@ impl ConsensusHandle {
     /// `OrganizationId::new(0)` identifies the data-region group; any
     /// other value identifies a per-organization group. The value is the
     /// wire-visible routing key used by the SDK — distinct from the
-    /// opaque consensus `ShardId` returned by [`Self::shard_id`].
+    /// opaque consensus `ConsensusStateId` returned by [`Self::shard_id`].
     pub fn organization_id(&self) -> OrganizationId {
         self.organization_id
     }
@@ -344,18 +344,18 @@ impl ConsensusHandle {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
     use inferadb_ledger_consensus::{
-        InMemoryTransport, Shard,
+        InMemoryTransport, ConsensusState,
         clock::SystemClock,
         config::ShardConfig,
         rng::SystemRng,
-        types::{Membership, NodeId, NodeState, ShardId},
+        types::{Membership, NodeId, NodeState, ConsensusStateId},
         wal::InMemoryWalBackend,
     };
 
     use super::*;
 
     fn make_state(
-        shard: ShardId,
+        shard: ConsensusStateId,
         state: NodeState,
         leader: Option<NodeId>,
         term: u64,
@@ -381,7 +381,7 @@ mod tests {
         let shard_id = initial_state.shard;
         let config = ShardConfig::default();
         let membership = Membership::new([NodeId(node_id)]);
-        let shard = Shard::<SystemClock, SystemRng>::new(
+        let shard = ConsensusState::<SystemClock, SystemRng>::new(
             shard_id,
             NodeId(node_id),
             membership,
@@ -421,7 +421,7 @@ mod tests {
     #[tokio::test]
     async fn is_leader_when_state_shows_leader() {
         let node_id: LedgerNodeId = 1;
-        let state = make_state(ShardId(0), NodeState::Leader, Some(NodeId(1)), 3);
+        let state = make_state(ConsensusStateId(0), NodeState::Leader, Some(NodeId(1)), 3);
         let (handle, _map) = make_handle(node_id, state);
         assert!(handle.is_leader());
     }
@@ -429,7 +429,7 @@ mod tests {
     #[tokio::test]
     async fn is_leader_returns_false_for_follower() {
         let node_id: LedgerNodeId = 1;
-        let state = make_state(ShardId(0), NodeState::Follower, Some(NodeId(2)), 3);
+        let state = make_state(ConsensusStateId(0), NodeState::Follower, Some(NodeId(2)), 3);
         let (handle, _map) = make_handle(node_id, state);
         assert!(!handle.is_leader());
     }
@@ -437,7 +437,7 @@ mod tests {
     #[tokio::test]
     async fn current_leader_returns_node_id() {
         let node_id: LedgerNodeId = 5;
-        let state = make_state(ShardId(0), NodeState::Follower, Some(NodeId(3)), 1);
+        let state = make_state(ConsensusStateId(0), NodeState::Follower, Some(NodeId(3)), 1);
         let (handle, _map) = make_handle(node_id, state);
         assert_eq!(handle.current_leader(), Some(3));
     }
@@ -445,7 +445,7 @@ mod tests {
     #[tokio::test]
     async fn current_term_returns_from_state() {
         let node_id: LedgerNodeId = 1;
-        let state = make_state(ShardId(0), NodeState::Follower, None, 42);
+        let state = make_state(ConsensusStateId(0), NodeState::Follower, None, 42);
         let (handle, _map) = make_handle(node_id, state);
         assert_eq!(handle.current_term(), 42);
     }
@@ -453,7 +453,7 @@ mod tests {
     #[tokio::test]
     async fn response_map_starts_empty() {
         let node_id: LedgerNodeId = 1;
-        let state = make_state(ShardId(0), NodeState::Follower, None, 1);
+        let state = make_state(ConsensusStateId(0), NodeState::Follower, None, 1);
         let (handle, _map) = make_handle(node_id, state);
         assert!(handle.response_map().lock().is_empty());
     }
@@ -461,9 +461,9 @@ mod tests {
     #[tokio::test]
     async fn shard_id_and_node_id_accessors() {
         let node_id: LedgerNodeId = 7;
-        let state = make_state(ShardId(4), NodeState::Follower, None, 1);
+        let state = make_state(ConsensusStateId(4), NodeState::Follower, None, 1);
         let (handle, _map) = make_handle(node_id, state);
-        assert_eq!(handle.shard_id(), ShardId(4));
+        assert_eq!(handle.shard_id(), ConsensusStateId(4));
         assert_eq!(handle.node_id(), 7);
     }
 
@@ -509,7 +509,7 @@ mod tests {
     #[tokio::test]
     async fn spillover_starts_empty() {
         let node_id: LedgerNodeId = 1;
-        let state = make_state(ShardId(0), NodeState::Follower, None, 1);
+        let state = make_state(ConsensusStateId(0), NodeState::Follower, None, 1);
         let (handle, _map) = make_handle(node_id, state);
         assert!(handle.spillover().lock().is_empty());
     }
@@ -517,7 +517,7 @@ mod tests {
     #[tokio::test]
     async fn spillover_and_response_map_share_via_handle() {
         let node_id: LedgerNodeId = 1;
-        let state = make_state(ShardId(0), NodeState::Follower, None, 1);
+        let state = make_state(ConsensusStateId(0), NodeState::Follower, None, 1);
         let (handle, _map) = make_handle(node_id, state);
 
         // Insert into spillover through one reference.

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use inferadb_ledger_consensus::{
     crypto::InMemoryKeyProvider,
     snapshot_crypto::{decrypt_snapshot, encrypt_snapshot},
-    types::ShardId,
+    types::ConsensusStateId,
     wal::{EncryptedWalBackend, InMemoryWalBackend},
     wal_backend::{CHECKPOINT_SHARD_ID, CheckpointFrame, WalBackend, WalFrame},
 };
@@ -21,7 +21,7 @@ use inferadb_ledger_consensus::{
 // ---------------------------------------------------------------------------
 
 fn make_frame(shard: u64, index: u64, data: &[u8]) -> WalFrame {
-    WalFrame { shard_id: ShardId(shard), index, term: 1, data: Arc::from(data) }
+    WalFrame { shard_id: ConsensusStateId(shard), index, term: 1, data: Arc::from(data) }
 }
 
 fn provider_with_key(vault_id: u64, version: u16, key: [u8; 32]) -> Arc<InMemoryKeyProvider> {
@@ -54,7 +54,7 @@ fn wal_encrypt_decrypt_roundtrip_preserves_payload() {
     // Assert
     assert_eq!(frames.len(), 1);
     assert_eq!(&*frames[0].data, b"secret data");
-    assert_eq!(frames[0].shard_id, ShardId(1));
+    assert_eq!(frames[0].shard_id, ConsensusStateId(1));
     assert_eq!(frames[0].index, 1);
     assert_eq!(frames[0].term, 1);
 }
@@ -133,8 +133,8 @@ fn wal_different_vaults_use_independent_keys() {
     let frames = wal.read_frames(0).unwrap();
 
     // Assert
-    let v1 = frames.iter().find(|f| f.shard_id == ShardId(1)).unwrap();
-    let v2 = frames.iter().find(|f| f.shard_id == ShardId(2)).unwrap();
+    let v1 = frames.iter().find(|f| f.shard_id == ConsensusStateId(1)).unwrap();
+    let v2 = frames.iter().find(|f| f.shard_id == ConsensusStateId(2)).unwrap();
     assert_eq!(&*v1.data, b"vault-one");
     assert_eq!(&*v2.data, b"vault-two");
 }
@@ -277,14 +277,14 @@ fn shred_zeros_target_shard_preserves_others() {
     wal.sync().unwrap();
 
     // Act
-    let count = wal.shred_frames(ShardId(1)).unwrap();
+    let count = wal.shred_frames(ConsensusStateId(1)).unwrap();
 
     // Assert
     assert_eq!(count, 1);
     let frames = wal.read_frames(0).unwrap();
-    let shard1 = frames.iter().find(|f| f.shard_id == ShardId(1)).unwrap();
+    let shard1 = frames.iter().find(|f| f.shard_id == ConsensusStateId(1)).unwrap();
     assert!(shard1.data.iter().all(|&b| b == 0), "shard 1 data must be zeroed");
-    let shard2 = frames.iter().find(|f| f.shard_id == ShardId(2)).unwrap();
+    let shard2 = frames.iter().find(|f| f.shard_id == ConsensusStateId(2)).unwrap();
     assert_eq!(&*shard2.data, b"vault-2-data");
 }
 
@@ -297,7 +297,7 @@ fn shred_zeros_both_pending_and_durable_frames() {
     wal.append(&[make_frame(1, 2, b"pending-secret")]).unwrap();
 
     // Act
-    let zeroed = wal.shred_frames(ShardId(1)).unwrap();
+    let zeroed = wal.shred_frames(ConsensusStateId(1)).unwrap();
 
     // Assert
     assert_eq!(zeroed, 2);
@@ -321,7 +321,7 @@ fn shred_through_encrypted_backend_delegates_to_inner() {
     wal.sync().unwrap();
 
     // Act: shred shard 1 through the encrypted backend.
-    let count = wal.shred_frames(ShardId(1)).unwrap();
+    let count = wal.shred_frames(ConsensusStateId(1)).unwrap();
 
     // Assert: shard 1 zeroed (decryption fails since data is now zeros),
     // shard 2 still decrypts normally.

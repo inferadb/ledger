@@ -39,7 +39,7 @@ use crate::{
     message::Message,
     reactor::{Reactor, ReactorEvent},
     rng::RngSource,
-    shard::Shard,
+    consensus_state::ConsensusState,
     transport::NetworkTransport,
     types::*,
     wal_backend::WalBackend,
@@ -87,12 +87,12 @@ impl ConsensusEngine {
     /// before fsync) — see `docs/architecture/durability.md` for the durability
     /// contract.
     pub fn start<C, R, W, T>(
-        shards: Vec<Shard<C, R>>,
+        shards: Vec<ConsensusState<C, R>>,
         wal: W,
         clock: C,
         transport: T,
         flush_interval: Duration,
-    ) -> (Self, mpsc::Receiver<CommittedBatch>, HashMap<ShardId, watch::Receiver<ShardState>>)
+    ) -> (Self, mpsc::Receiver<CommittedBatch>, HashMap<ConsensusStateId, watch::Receiver<ShardState>>)
     where
         C: Clock + Clone + Send + 'static,
         R: RngSource + Send + 'static,
@@ -178,7 +178,7 @@ impl ConsensusEngine {
     /// Duplicate proposals (same content within the 60-second idempotency
     /// window) are short-circuited before reaching the reactor, returning the
     /// cached commit index immediately.
-    pub async fn propose(&self, shard: ShardId, data: Vec<u8>) -> Result<u64, ConsensusError> {
+    pub async fn propose(&self, shard: ConsensusStateId, data: Vec<u8>) -> Result<u64, ConsensusError> {
         // Pre-proposal access control.
         if let Some(validator) = &self.validator {
             validator(&data).map_err(|_reason| ConsensusError::ShardUnavailable { shard })?;
@@ -228,7 +228,7 @@ impl ConsensusEngine {
     /// [`ConsensusError::ShardUnavailable`] immediately.
     pub async fn propose_batch(
         &self,
-        shard: ShardId,
+        shard: ConsensusStateId,
         entries: Vec<Vec<u8>>,
     ) -> Result<u64, ConsensusError> {
         // Pre-proposal validation on each entry.
@@ -249,7 +249,7 @@ impl ConsensusEngine {
     /// Delivers a peer message to the reactor for the given shard.
     pub async fn peer_message(
         &self,
-        shard: ShardId,
+        shard: ConsensusStateId,
         from: NodeId,
         message: Message,
     ) -> Result<(), ConsensusError> {
@@ -262,7 +262,7 @@ impl ConsensusEngine {
     /// Adds a learner to a shard.
     pub async fn add_learner(
         &self,
-        shard: ShardId,
+        shard: ConsensusStateId,
         node: NodeId,
         promotable: bool,
     ) -> Result<(), ConsensusError> {
@@ -296,7 +296,7 @@ impl ConsensusEngine {
     /// leader via the shard's `state_rx` watch on the next state update.
     pub async fn adopt_leader(
         &self,
-        shard: ShardId,
+        shard: ConsensusStateId,
         leader: NodeId,
         term: u64,
     ) -> Result<(), ConsensusError> {
@@ -307,7 +307,7 @@ impl ConsensusEngine {
     }
 
     /// Promotes a learner to voter.
-    pub async fn promote_voter(&self, shard: ShardId, node: NodeId) -> Result<(), ConsensusError> {
+    pub async fn promote_voter(&self, shard: ConsensusStateId, node: NodeId) -> Result<(), ConsensusError> {
         let (tx, rx) = oneshot::channel();
         self.control_inbox
             .send(ReactorEvent::MembershipChange {
@@ -321,7 +321,7 @@ impl ConsensusEngine {
     }
 
     /// Removes a node from a shard.
-    pub async fn remove_node(&self, shard: ShardId, node: NodeId) -> Result<(), ConsensusError> {
+    pub async fn remove_node(&self, shard: ConsensusStateId, node: NodeId) -> Result<(), ConsensusError> {
         let (tx, rx) = oneshot::channel();
         self.control_inbox
             .send(ReactorEvent::MembershipChange {
@@ -348,7 +348,7 @@ impl ConsensusEngine {
     /// if the reactor inbox is full.
     pub async fn transfer_leader(
         &self,
-        shard: ShardId,
+        shard: ConsensusStateId,
         target: NodeId,
     ) -> Result<(), ConsensusError> {
         let (tx, rx) = oneshot::channel();
@@ -370,7 +370,7 @@ impl ConsensusEngine {
     /// Returns [`ConsensusError::ShardUnavailable`] if the shard is not
     /// registered, or [`ConsensusError::InboxFull`] if the reactor
     /// inbox is full.
-    pub async fn trigger_snapshot(&self, shard: ShardId) -> Result<(u64, u64), ConsensusError> {
+    pub async fn trigger_snapshot(&self, shard: ConsensusStateId) -> Result<(u64, u64), ConsensusError> {
         let (tx, rx) = oneshot::channel();
         self.control_inbox
             .send(ReactorEvent::TriggerSnapshot { shard, response: tx })
@@ -392,7 +392,7 @@ impl ConsensusEngine {
     /// shut down.
     pub async fn notify_snapshot_completed(
         &self,
-        shard: ShardId,
+        shard: ConsensusStateId,
         last_included_index: u64,
     ) -> Result<(), ConsensusError> {
         self.control_inbox
@@ -412,7 +412,7 @@ impl ConsensusEngine {
     /// Returns [`ConsensusError::ShardUnavailable`] if the shard is not
     /// registered with this engine, or [`ConsensusError::InboxFull`]
     /// if the reactor inbox is full or the reactor has shut down.
-    pub async fn read_index(&self, shard: ShardId) -> Result<u64, ConsensusError> {
+    pub async fn read_index(&self, shard: ConsensusStateId) -> Result<u64, ConsensusError> {
         let (tx, rx) = oneshot::channel();
         self.control_inbox
             .send(ReactorEvent::ReadIndex { shard, response: tx })
@@ -431,7 +431,7 @@ impl ConsensusEngine {
     /// full or the reactor has shut down.
     pub async fn query_peer_state(
         &self,
-        shard: ShardId,
+        shard: ConsensusStateId,
         node: NodeId,
         response: oneshot::Sender<Option<u64>>,
     ) -> Result<(), ConsensusError> {
@@ -502,7 +502,7 @@ mod tests {
         clock::SimulatedClock,
         config::ShardConfig,
         rng::SimulatedRng,
-        shard::Shard,
+        consensus_state::ConsensusState,
         transport::InMemoryTransport,
         types::{Membership, NodeId},
         wal::InMemoryWalBackend,
@@ -510,8 +510,8 @@ mod tests {
 
     fn make_engine() -> (ConsensusEngine, mpsc::Receiver<crate::committed::CommittedBatch>) {
         let clock = Arc::new(SimulatedClock::new());
-        let shard_id = ShardId(1);
-        let shard = Shard::new(
+        let shard_id = ConsensusStateId(1);
+        let shard = ConsensusState::new(
             shard_id,
             NodeId(1),
             Membership::new([NodeId(1)]),
@@ -557,7 +557,7 @@ mod tests {
 
         // Proposing the same data should short-circuit and return the cached
         // commit index without sending anything to the reactor.
-        let result = engine.propose(ShardId(1), data.clone()).await.unwrap();
+        let result = engine.propose(ConsensusStateId(1), data.clone()).await.unwrap();
         assert_eq!(
             result, expected_commit_index,
             "duplicate propose should return cached commit index"
@@ -583,7 +583,7 @@ mod tests {
         });
 
         // Blocked proposal must return an error.
-        let result = engine.propose(ShardId(1), b"BLOCKED:payload".to_vec()).await;
+        let result = engine.propose(ConsensusStateId(1), b"BLOCKED:payload".to_vec()).await;
         assert!(result.is_err(), "validator-rejected proposal must fail");
 
         // Cache must remain empty — rejected proposals are never cached.
@@ -591,7 +591,7 @@ mod tests {
 
         // Non-blocked proposal reaches the reactor (fails: no leader), but is
         // not rejected by the validator.
-        let result = engine.propose(ShardId(1), b"allowed-payload".to_vec()).await;
+        let result = engine.propose(ConsensusStateId(1), b"allowed-payload".to_vec()).await;
         assert!(result.is_err(), "non-blocked proposal to leaderless shard should fail");
         assert_eq!(engine.idempotency_cache_len(), 0, "failed propose must not be cached");
 
@@ -612,7 +612,7 @@ mod tests {
 
         // A batch containing a blocked entry must be rejected before the reactor.
         let result = engine
-            .propose_batch(ShardId(1), vec![b"allowed".to_vec(), b"BLOCKED:bad".to_vec()])
+            .propose_batch(ConsensusStateId(1), vec![b"allowed".to_vec(), b"BLOCKED:bad".to_vec()])
             .await;
         assert!(
             matches!(result, Err(ConsensusError::ShardUnavailable { .. })),
@@ -620,7 +620,7 @@ mod tests {
         );
 
         // A batch with only allowed entries reaches the reactor (fails: no leader).
-        let result = engine.propose_batch(ShardId(1), vec![b"allowed".to_vec()]).await;
+        let result = engine.propose_batch(ConsensusStateId(1), vec![b"allowed".to_vec()]).await;
         assert!(result.is_err(), "propose_batch to leaderless shard should fail");
 
         engine.shutdown().await;
@@ -631,7 +631,7 @@ mod tests {
     async fn read_index_returns_commit_index_for_known_shard() {
         let (engine, _commit_rx) = make_engine();
 
-        let result = engine.read_index(ShardId(1)).await;
+        let result = engine.read_index(ConsensusStateId(1)).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         assert_eq!(result.unwrap(), 0, "fresh shard has commit_index == 0");
 
@@ -643,9 +643,9 @@ mod tests {
     async fn read_index_returns_shard_unavailable_for_unknown_shard() {
         let (engine, _commit_rx) = make_engine();
 
-        let result = engine.read_index(ShardId(99)).await;
+        let result = engine.read_index(ConsensusStateId(99)).await;
         assert!(
-            matches!(result, Err(ConsensusError::ShardUnavailable { shard: ShardId(99) })),
+            matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })),
             "expected ShardUnavailable, got {result:?}",
         );
 
@@ -692,7 +692,7 @@ mod tests {
 
         // `other_data` is not in the cache — reaches the reactor and fails
         // (no leader), so the cache should still have exactly one entry.
-        let result = engine.propose(ShardId(1), other_data).await;
+        let result = engine.propose(ConsensusStateId(1), other_data).await;
         assert!(result.is_err(), "non-cached propose to leaderless shard should fail");
         assert_eq!(engine.idempotency_cache_len(), 1, "failed propose must not be cached");
 

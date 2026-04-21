@@ -878,7 +878,7 @@ impl RaftLogStore {
     pub async fn replay_crash_gap<W>(
         &mut self,
         wal: &W,
-        shard_id: inferadb_ledger_consensus::types::ShardId,
+        shard_id: inferadb_ledger_consensus::types::ConsensusStateId,
     ) -> Result<RecoveryStats, StoreError>
     where
         W: inferadb_ledger_consensus::WalBackend,

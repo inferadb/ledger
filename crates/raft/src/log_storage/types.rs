@@ -8,7 +8,7 @@
 // ============================================================================
 //
 // Storage types (LogId, Vote, StoredMembership) are intentionally separate
-// from consensus engine types (NodeId, ShardId, Membership in the consensus
+// from consensus engine types (NodeId, ConsensusStateId, Membership in the consensus
 // crate). Storage types carry serialization history (postcard format) and
 // fields like LogId.node_id that the consensus engine doesn't track.
 //

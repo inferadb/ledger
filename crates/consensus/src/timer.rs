@@ -1,6 +1,6 @@
 //! Timer wheel for managing per-shard election and heartbeat deadlines.
 //!
-//! Backed by a `BTreeMap` keyed by `(Instant, ShardId, TimerKind)` for
+//! Backed by a `BTreeMap` keyed by `(Instant, ConsensusStateId, TimerKind)` for
 //! efficient expiration polling and next-deadline queries.
 
 use std::{
@@ -8,20 +8,20 @@ use std::{
     time::Instant,
 };
 
-use crate::types::{ShardId, TimerKind};
+use crate::types::{ConsensusStateId, TimerKind};
 
 /// A timer wheel that tracks per-shard election and heartbeat deadlines.
 ///
 /// Timers are stored in a `BTreeMap` ordered by deadline, enabling O(log n)
 /// insertion, cancellation, and O(1) next-deadline queries. A reverse index
-/// maps `(ShardId, TimerKind)` to the current deadline for O(log n)
+/// maps `(ConsensusStateId, TimerKind)` to the current deadline for O(log n)
 /// replacement of existing timers.
 #[derive(Debug)]
 pub struct TimerWheel {
     /// Forward index: ordered by (deadline, shard, kind).
-    timers: BTreeMap<(Instant, ShardId, TimerKind), ()>,
+    timers: BTreeMap<(Instant, ConsensusStateId, TimerKind), ()>,
     /// Reverse index: (shard, kind) → current deadline for fast lookup on replace/cancel.
-    index: HashMap<(ShardId, TimerKind), Instant>,
+    index: HashMap<(ConsensusStateId, TimerKind), Instant>,
 }
 
 impl TimerWheel {
@@ -34,7 +34,7 @@ impl TimerWheel {
     ///
     /// If a timer already exists for the same `(shard, kind)`, it is replaced
     /// with the new deadline.
-    pub fn schedule(&mut self, shard: ShardId, kind: TimerKind, deadline: Instant) {
+    pub fn schedule(&mut self, shard: ConsensusStateId, kind: TimerKind, deadline: Instant) {
         // Remove any existing timer for this (shard, kind).
         if let Some(old_deadline) = self.index.remove(&(shard, kind)) {
             self.timers.remove(&(old_deadline, shard, kind));
@@ -47,7 +47,7 @@ impl TimerWheel {
     /// Cancels a specific timer for the given shard and kind.
     ///
     /// Returns `true` if a timer was removed, `false` if none existed.
-    pub fn cancel(&mut self, shard: ShardId, kind: TimerKind) -> bool {
+    pub fn cancel(&mut self, shard: ConsensusStateId, kind: TimerKind) -> bool {
         if let Some(deadline) = self.index.remove(&(shard, kind)) {
             self.timers.remove(&(deadline, shard, kind));
             true
@@ -57,7 +57,7 @@ impl TimerWheel {
     }
 
     /// Cancels all timers for the given shard (both election and heartbeat).
-    pub fn cancel_all(&mut self, shard: ShardId) {
+    pub fn cancel_all(&mut self, shard: ConsensusStateId) {
         for kind in [TimerKind::Election, TimerKind::Heartbeat] {
             self.cancel(shard, kind);
         }
@@ -67,7 +67,7 @@ impl TimerWheel {
     ///
     /// Removes the timer from the wheel before returning it. Call repeatedly
     /// until `None` to drain all expired timers.
-    pub fn poll_expired(&mut self, now: Instant) -> Option<(ShardId, TimerKind, Instant)> {
+    pub fn poll_expired(&mut self, now: Instant) -> Option<(ConsensusStateId, TimerKind, Instant)> {
         // Peek at the earliest entry.
         let (&(deadline, shard, kind), _) = self.timers.first_key_value()?;
 
@@ -118,17 +118,17 @@ mod tests {
         let early = base + Duration::from_millis(100);
         let late = base + Duration::from_millis(200);
 
-        wheel.schedule(ShardId(1), TimerKind::Election, late);
-        wheel.schedule(ShardId(2), TimerKind::Heartbeat, early);
+        wheel.schedule(ConsensusStateId(1), TimerKind::Election, late);
+        wheel.schedule(ConsensusStateId(2), TimerKind::Heartbeat, early);
 
         // Poll at a time after both deadlines.
         let now = base + Duration::from_millis(300);
 
         let first = wheel.poll_expired(now);
-        assert_eq!(first, Some((ShardId(2), TimerKind::Heartbeat, early)));
+        assert_eq!(first, Some((ConsensusStateId(2), TimerKind::Heartbeat, early)));
 
         let second = wheel.poll_expired(now);
-        assert_eq!(second, Some((ShardId(1), TimerKind::Election, late)));
+        assert_eq!(second, Some((ConsensusStateId(1), TimerKind::Election, late)));
 
         assert_eq!(wheel.poll_expired(now), None);
         assert!(wheel.is_empty());
@@ -139,14 +139,14 @@ mod tests {
         let mut wheel = TimerWheel::new();
         let deadline = Instant::now() + Duration::from_millis(100);
 
-        wheel.schedule(ShardId(1), TimerKind::Election, deadline);
+        wheel.schedule(ConsensusStateId(1), TimerKind::Election, deadline);
         assert_eq!(wheel.len(), 1);
 
-        assert!(wheel.cancel(ShardId(1), TimerKind::Election));
+        assert!(wheel.cancel(ConsensusStateId(1), TimerKind::Election));
         assert!(wheel.is_empty());
 
         // Cancel again returns false.
-        assert!(!wheel.cancel(ShardId(1), TimerKind::Election));
+        assert!(!wheel.cancel(ConsensusStateId(1), TimerKind::Election));
     }
 
     #[test]
@@ -156,11 +156,11 @@ mod tests {
         let first_deadline = base + Duration::from_millis(100);
         let second_deadline = base + Duration::from_millis(200);
 
-        wheel.schedule(ShardId(1), TimerKind::Election, first_deadline);
+        wheel.schedule(ConsensusStateId(1), TimerKind::Election, first_deadline);
         assert_eq!(wheel.len(), 1);
 
         // Replace with a later deadline.
-        wheel.schedule(ShardId(1), TimerKind::Election, second_deadline);
+        wheel.schedule(ConsensusStateId(1), TimerKind::Election, second_deadline);
         assert_eq!(wheel.len(), 1);
 
         // The old deadline should not fire.
@@ -170,7 +170,7 @@ mod tests {
         // The new deadline should fire.
         let after = base + Duration::from_millis(250);
         let result = wheel.poll_expired(after);
-        assert_eq!(result, Some((ShardId(1), TimerKind::Election, second_deadline)));
+        assert_eq!(result, Some((ConsensusStateId(1), TimerKind::Election, second_deadline)));
     }
 
     #[test]
@@ -178,16 +178,16 @@ mod tests {
         let mut wheel = TimerWheel::new();
         let base = Instant::now();
 
-        // Shard 1 gets both timer kinds.
-        wheel.schedule(ShardId(1), TimerKind::Election, base + Duration::from_millis(100));
-        wheel.schedule(ShardId(1), TimerKind::Heartbeat, base + Duration::from_millis(150));
+        // ConsensusState 1 gets both timer kinds.
+        wheel.schedule(ConsensusStateId(1), TimerKind::Election, base + Duration::from_millis(100));
+        wheel.schedule(ConsensusStateId(1), TimerKind::Heartbeat, base + Duration::from_millis(150));
 
-        // Shard 2 gets an election timer.
-        wheel.schedule(ShardId(2), TimerKind::Election, base + Duration::from_millis(200));
+        // ConsensusState 2 gets an election timer.
+        wheel.schedule(ConsensusStateId(2), TimerKind::Election, base + Duration::from_millis(200));
 
         assert_eq!(wheel.len(), 3);
 
-        wheel.cancel_all(ShardId(1));
+        wheel.cancel_all(ConsensusStateId(1));
 
         assert_eq!(wheel.len(), 1);
 
@@ -196,7 +196,7 @@ mod tests {
         let result = wheel.poll_expired(now);
         assert_eq!(
             result,
-            Some((ShardId(2), TimerKind::Election, base + Duration::from_millis(200)))
+            Some((ConsensusStateId(2), TimerKind::Election, base + Duration::from_millis(200)))
         );
         assert!(wheel.is_empty());
     }
@@ -207,7 +207,7 @@ mod tests {
         let base = Instant::now();
         let future = base + Duration::from_secs(60);
 
-        wheel.schedule(ShardId(1), TimerKind::Election, future);
+        wheel.schedule(ConsensusStateId(1), TimerKind::Election, future);
 
         // Poll at a time before the deadline.
         assert_eq!(wheel.poll_expired(base), None);
@@ -224,14 +224,14 @@ mod tests {
         let mid = base + Duration::from_millis(100);
         let late = base + Duration::from_millis(200);
 
-        wheel.schedule(ShardId(3), TimerKind::Heartbeat, late);
-        wheel.schedule(ShardId(1), TimerKind::Election, mid);
-        wheel.schedule(ShardId(2), TimerKind::Election, early);
+        wheel.schedule(ConsensusStateId(3), TimerKind::Heartbeat, late);
+        wheel.schedule(ConsensusStateId(1), TimerKind::Election, mid);
+        wheel.schedule(ConsensusStateId(2), TimerKind::Election, early);
 
         assert_eq!(wheel.next_deadline(), Some(early));
 
         // After cancelling the earliest, next_deadline advances.
-        wheel.cancel(ShardId(2), TimerKind::Election);
+        wheel.cancel(ConsensusStateId(2), TimerKind::Election);
         assert_eq!(wheel.next_deadline(), Some(mid));
     }
 
@@ -239,11 +239,11 @@ mod tests {
     fn poll_at_exact_deadline_fires() {
         let mut wheel = TimerWheel::new();
         let deadline = Instant::now() + Duration::from_millis(100);
-        wheel.schedule(ShardId(1), TimerKind::Election, deadline);
+        wheel.schedule(ConsensusStateId(1), TimerKind::Election, deadline);
 
         // Polling at exactly the deadline should fire (<=).
         let result = wheel.poll_expired(deadline);
-        assert_eq!(result, Some((ShardId(1), TimerKind::Election, deadline)));
+        assert_eq!(result, Some((ConsensusStateId(1), TimerKind::Election, deadline)));
         assert!(wheel.is_empty());
     }
 
@@ -252,16 +252,16 @@ mod tests {
         let mut wheel = TimerWheel::new();
         let base = Instant::now();
 
-        wheel.schedule(ShardId(1), TimerKind::Election, base + Duration::from_millis(100));
-        wheel.schedule(ShardId(1), TimerKind::Heartbeat, base + Duration::from_millis(200));
+        wheel.schedule(ConsensusStateId(1), TimerKind::Election, base + Duration::from_millis(100));
+        wheel.schedule(ConsensusStateId(1), TimerKind::Heartbeat, base + Duration::from_millis(200));
         assert_eq!(wheel.len(), 2);
 
         // Cancel only election; heartbeat remains.
-        wheel.cancel(ShardId(1), TimerKind::Election);
+        wheel.cancel(ConsensusStateId(1), TimerKind::Election);
         assert_eq!(wheel.len(), 1);
         assert_eq!(
             wheel.poll_expired(base + Duration::from_millis(300)),
-            Some((ShardId(1), TimerKind::Heartbeat, base + Duration::from_millis(200)))
+            Some((ConsensusStateId(1), TimerKind::Heartbeat, base + Duration::from_millis(200)))
         );
     }
 }

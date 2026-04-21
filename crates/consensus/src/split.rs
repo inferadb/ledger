@@ -5,7 +5,7 @@
 
 use snafu::Snafu;
 
-use crate::types::ShardId;
+use crate::types::ConsensusStateId;
 
 /// Configuration controlling when shards split or merge.
 pub struct SplitConfig {
@@ -35,13 +35,13 @@ pub struct SplitRequest {
     /// Organizations with ID >= this value move to the new shard.
     pub split_key: u64,
     /// The shard that will receive the migrated organizations.
-    pub new_shard: ShardId,
+    pub new_shard: ConsensusStateId,
 }
 
 /// A request to merge a shard back into its parent.
 pub struct MergeRequest {
     /// The shard to drain and decommission.
-    pub source_shard: ShardId,
+    pub source_shard: ConsensusStateId,
 }
 
 /// Tracks the current phase of a shard split operation.
@@ -52,12 +52,12 @@ pub enum SplitPhase {
     /// Writes to the affected key range are frozen.
     Frozen {
         /// The shard being created.
-        new_shard: ShardId,
+        new_shard: ConsensusStateId,
     },
     /// Data is being migrated to the new shard.
     Migrating {
         /// The shard receiving migrated data.
-        new_shard: ShardId,
+        new_shard: ConsensusStateId,
     },
     /// Split is complete; both shards are serving traffic.
     Complete,
@@ -170,7 +170,7 @@ mod tests {
     use super::*;
     use crate::router::Router;
 
-    fn make_router_with_orgs(shard: ShardId, org_ids: &[u64]) -> Router {
+    fn make_router_with_orgs(shard: ConsensusStateId, org_ids: &[u64]) -> Router {
         let mut router = Router::new();
         for &id in org_ids {
             router.set(id, shard);
@@ -178,7 +178,7 @@ mod tests {
         router
     }
 
-    fn make_request(split_key: u64, new_shard: ShardId) -> SplitRequest {
+    fn make_request(split_key: u64, new_shard: ConsensusStateId) -> SplitRequest {
         SplitRequest { split_key, new_shard }
     }
 
@@ -204,15 +204,15 @@ mod tests {
 
     #[test]
     fn full_lifecycle_none_frozen_migrating_complete_reset() {
-        let mut router = make_router_with_orgs(ShardId(10), &[1, 5, 10, 15]);
+        let mut router = make_router_with_orgs(ConsensusStateId(10), &[1, 5, 10, 15]);
         let mut sm = SplitStateMachine::new();
 
         // None -> Frozen
-        let request = make_request(10, ShardId(20));
+        let request = make_request(10, ConsensusStateId(20));
         let mut moved = sm.begin_split(&request, &mut router).expect("begin_split");
         moved.sort_unstable();
         assert_eq!(moved, vec![10, 15]);
-        assert_eq!(sm.phase(), SplitPhase::Frozen { new_shard: ShardId(20) });
+        assert_eq!(sm.phase(), SplitPhase::Frozen { new_shard: ConsensusStateId(20) });
 
         // Migrated orgs tracked through lifecycle.
         let mut tracked = sm.migrated_orgs().to_vec();
@@ -221,7 +221,7 @@ mod tests {
 
         // Frozen -> Migrating
         sm.begin_migration().expect("begin_migration");
-        assert_eq!(sm.phase(), SplitPhase::Migrating { new_shard: ShardId(20) });
+        assert_eq!(sm.phase(), SplitPhase::Migrating { new_shard: ConsensusStateId(20) });
 
         // Migrating -> Complete
         sm.complete().expect("complete");
@@ -249,9 +249,9 @@ mod tests {
 
         // begin_migration from Migrating
         {
-            let mut router = make_router_with_orgs(ShardId(10), &[1]);
+            let mut router = make_router_with_orgs(ConsensusStateId(10), &[1]);
             let mut sm = SplitStateMachine::new();
-            sm.begin_split(&make_request(0, ShardId(20)), &mut router).unwrap();
+            sm.begin_split(&make_request(0, ConsensusStateId(20)), &mut router).unwrap();
             sm.begin_migration().unwrap();
             let err = sm.begin_migration().expect_err("Migrating -> Migrating");
             assert!(matches!(err, SplitError::InvalidTransition { .. }));
@@ -259,9 +259,9 @@ mod tests {
 
         // begin_migration from Complete
         {
-            let mut router = make_router_with_orgs(ShardId(10), &[1]);
+            let mut router = make_router_with_orgs(ConsensusStateId(10), &[1]);
             let mut sm = SplitStateMachine::new();
-            sm.begin_split(&make_request(0, ShardId(20)), &mut router).unwrap();
+            sm.begin_split(&make_request(0, ConsensusStateId(20)), &mut router).unwrap();
             sm.begin_migration().unwrap();
             sm.complete().unwrap();
             let err = sm.begin_migration().expect_err("Complete -> Migrating");
@@ -277,18 +277,18 @@ mod tests {
 
         // complete from Frozen (must go through Migrating)
         {
-            let mut router = make_router_with_orgs(ShardId(10), &[1]);
+            let mut router = make_router_with_orgs(ConsensusStateId(10), &[1]);
             let mut sm = SplitStateMachine::new();
-            sm.begin_split(&make_request(0, ShardId(20)), &mut router).unwrap();
+            sm.begin_split(&make_request(0, ConsensusStateId(20)), &mut router).unwrap();
             let err = sm.complete().expect_err("Frozen -> Complete");
             assert!(matches!(err, SplitError::InvalidTransition { .. }));
         }
 
         // complete from Complete
         {
-            let mut router = make_router_with_orgs(ShardId(10), &[1]);
+            let mut router = make_router_with_orgs(ConsensusStateId(10), &[1]);
             let mut sm = SplitStateMachine::new();
-            sm.begin_split(&make_request(0, ShardId(20)), &mut router).unwrap();
+            sm.begin_split(&make_request(0, ConsensusStateId(20)), &mut router).unwrap();
             sm.begin_migration().unwrap();
             sm.complete().unwrap();
             let err = sm.complete().expect_err("Complete -> Complete");
@@ -300,39 +300,39 @@ mod tests {
 
     #[test]
     fn begin_split_rejects_when_already_frozen() {
-        let mut router = make_router_with_orgs(ShardId(10), &[5]);
+        let mut router = make_router_with_orgs(ConsensusStateId(10), &[5]);
         let mut sm = SplitStateMachine::new();
-        sm.begin_split(&make_request(1, ShardId(20)), &mut router).unwrap();
+        sm.begin_split(&make_request(1, ConsensusStateId(20)), &mut router).unwrap();
 
         let err = sm
-            .begin_split(&make_request(1, ShardId(30)), &mut router)
+            .begin_split(&make_request(1, ConsensusStateId(30)), &mut router)
             .expect_err("second begin_split");
         assert!(matches!(err, SplitError::AlreadyInProgress));
     }
 
     #[test]
     fn begin_split_rejects_when_migrating() {
-        let mut router = make_router_with_orgs(ShardId(10), &[5]);
+        let mut router = make_router_with_orgs(ConsensusStateId(10), &[5]);
         let mut sm = SplitStateMachine::new();
-        sm.begin_split(&make_request(1, ShardId(20)), &mut router).unwrap();
+        sm.begin_split(&make_request(1, ConsensusStateId(20)), &mut router).unwrap();
         sm.begin_migration().unwrap();
 
         let err = sm
-            .begin_split(&make_request(1, ShardId(30)), &mut router)
+            .begin_split(&make_request(1, ConsensusStateId(30)), &mut router)
             .expect_err("begin_split during Migrating");
         assert!(matches!(err, SplitError::AlreadyInProgress));
     }
 
     #[test]
     fn begin_split_rejects_when_complete() {
-        let mut router = make_router_with_orgs(ShardId(10), &[5]);
+        let mut router = make_router_with_orgs(ConsensusStateId(10), &[5]);
         let mut sm = SplitStateMachine::new();
-        sm.begin_split(&make_request(1, ShardId(20)), &mut router).unwrap();
+        sm.begin_split(&make_request(1, ConsensusStateId(20)), &mut router).unwrap();
         sm.begin_migration().unwrap();
         sm.complete().unwrap();
 
         let err = sm
-            .begin_split(&make_request(1, ShardId(30)), &mut router)
+            .begin_split(&make_request(1, ConsensusStateId(30)), &mut router)
             .expect_err("begin_split during Complete");
         assert!(matches!(err, SplitError::AlreadyInProgress));
     }
@@ -343,17 +343,17 @@ mod tests {
     fn begin_split_with_empty_router_moves_nothing() {
         let mut router = Router::new();
         let mut sm = SplitStateMachine::new();
-        let moved = sm.begin_split(&make_request(0, ShardId(20)), &mut router).unwrap();
+        let moved = sm.begin_split(&make_request(0, ConsensusStateId(20)), &mut router).unwrap();
         assert!(moved.is_empty());
         assert!(sm.migrated_orgs().is_empty());
-        assert_eq!(sm.phase(), SplitPhase::Frozen { new_shard: ShardId(20) });
+        assert_eq!(sm.phase(), SplitPhase::Frozen { new_shard: ConsensusStateId(20) });
     }
 
     #[test]
     fn reset_from_frozen_clears_state() {
-        let mut router = make_router_with_orgs(ShardId(10), &[1, 2]);
+        let mut router = make_router_with_orgs(ConsensusStateId(10), &[1, 2]);
         let mut sm = SplitStateMachine::new();
-        sm.begin_split(&make_request(1, ShardId(20)), &mut router).unwrap();
+        sm.begin_split(&make_request(1, ConsensusStateId(20)), &mut router).unwrap();
 
         sm.reset();
         assert_eq!(sm.phase(), SplitPhase::None);

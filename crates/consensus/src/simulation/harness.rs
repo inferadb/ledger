@@ -8,8 +8,8 @@ use crate::{
     clock::SimulatedClock,
     config::ShardConfig,
     rng::SimulatedRng,
-    shard::Shard,
-    types::{Membership, NodeId, NodeState, ShardId},
+    consensus_state::ConsensusState,
+    types::{Membership, NodeId, NodeState, ConsensusStateId},
 };
 
 /// Default shard configuration for simulation nodes.
@@ -30,38 +30,38 @@ fn default_shard_config() -> ShardConfig {
 /// supports partition injection. Randomness is seeded so that identical seeds
 /// produce identical execution traces.
 pub struct Simulation {
-    /// Per-node, per-shard mapping: `node -> shard_id -> Shard`.
-    pub nodes: HashMap<NodeId, HashMap<ShardId, Shard<Arc<SimulatedClock>, SimulatedRng>>>,
+    /// Per-node, per-shard mapping: `node -> shard_id -> ConsensusState`.
+    pub nodes: HashMap<NodeId, HashMap<ConsensusStateId, ConsensusState<Arc<SimulatedClock>, SimulatedRng>>>,
     /// The simulated network connecting all nodes.
     pub network: SimulatedNetwork,
     clock: Arc<SimulatedClock>,
     pub(crate) node_ids: Vec<NodeId>,
     /// Ordered list of shard IDs for deterministic iteration.
-    shard_ids: Vec<ShardId>,
+    shard_ids: Vec<ConsensusStateId>,
     /// The default shard ID (first shard group added).
-    default_shard: ShardId,
+    default_shard: ConsensusStateId,
     seed: u64,
 }
 
 impl Simulation {
     /// Creates a new simulation with `node_count` nodes and a single shard
-    /// group (`ShardId(1)`), all seeded deterministically.
+    /// group (`ConsensusStateId(1)`), all seeded deterministically.
     ///
     /// Each node gets `SimulatedRng::new(seed + node_index)` so they have
     /// different election timeouts while the overall simulation remains
     /// deterministic for a given seed.
     pub fn new(seed: u64, node_count: u64) -> Self {
         let clock = Arc::new(SimulatedClock::new());
-        let shard_id = ShardId(1);
+        let shard_id = ConsensusStateId(1);
         let node_ids: Vec<NodeId> = (1..=node_count).map(NodeId).collect();
         let membership = Membership::new(node_ids.clone());
 
-        let mut nodes: HashMap<NodeId, HashMap<ShardId, Shard<Arc<SimulatedClock>, SimulatedRng>>> =
+        let mut nodes: HashMap<NodeId, HashMap<ConsensusStateId, ConsensusState<Arc<SimulatedClock>, SimulatedRng>>> =
             HashMap::new();
         for (i, &node_id) in node_ids.iter().enumerate() {
             let rng = SimulatedRng::new(seed + i as u64);
             let config = default_shard_config();
-            let shard = Shard::new(
+            let shard = ConsensusState::new(
                 shard_id,
                 node_id,
                 membership.clone(),
@@ -94,14 +94,14 @@ impl Simulation {
     /// The RNG for each node's new shard is seeded deterministically using the
     /// original seed, the shard ID, and the node index to avoid collisions with
     /// other shard groups.
-    pub fn add_shard_group(&mut self, shard_id: ShardId, node_ids: &[NodeId]) {
+    pub fn add_shard_group(&mut self, shard_id: ConsensusStateId, node_ids: &[NodeId]) {
         let membership = Membership::new(node_ids.to_vec());
 
         for (i, &node_id) in node_ids.iter().enumerate() {
             // Seed incorporates shard_id to avoid collision with the default group.
             let rng = SimulatedRng::new(self.seed + shard_id.0 * 1000 + i as u64);
             let config = default_shard_config();
-            let shard = Shard::new(
+            let shard = ConsensusState::new(
                 shard_id,
                 node_id,
                 membership.clone(),
@@ -144,7 +144,7 @@ impl Simulation {
     /// Triggers an election on `candidate` for the specified shard group.
     ///
     /// Returns `true` if a leader was elected.
-    pub fn elect_leader_on(&mut self, shard_id: ShardId, candidate: NodeId) -> bool {
+    pub fn elect_leader_on(&mut self, shard_id: ConsensusStateId, candidate: NodeId) -> bool {
         // Advance time past election timeout so pre-vote grants succeed.
         self.clock.advance(Duration::from_millis(500));
 
@@ -171,7 +171,7 @@ impl Simulation {
     /// Proposes `data` on the specified shard group's leader.
     ///
     /// Returns the commit index if committed, or `None` otherwise.
-    pub fn propose_on(&mut self, shard_id: ShardId, data: Vec<u8>) -> Option<u64> {
+    pub fn propose_on(&mut self, shard_id: ConsensusStateId, data: Vec<u8>) -> Option<u64> {
         let leader_id = self.leader_on(shard_id)?;
         let shard = self.nodes.get_mut(&leader_id)?.get_mut(&shard_id)?;
         let ci_before = shard.commit_index();
@@ -244,7 +244,7 @@ impl Simulation {
     }
 
     /// Returns the `NodeId` of the current leader for the specified shard group.
-    pub fn leader_on(&self, shard_id: ShardId) -> Option<NodeId> {
+    pub fn leader_on(&self, shard_id: ConsensusStateId) -> Option<NodeId> {
         self.node_ids.iter().copied().find(|&id| {
             self.nodes
                 .get(&id)
@@ -259,7 +259,7 @@ impl Simulation {
     }
 
     /// Returns `true` if any live node is the leader for the specified shard group.
-    pub fn has_leader_on(&self, shard_id: ShardId) -> bool {
+    pub fn has_leader_on(&self, shard_id: ConsensusStateId) -> bool {
         self.leader_on(shard_id).is_some()
     }
 
@@ -271,7 +271,7 @@ impl Simulation {
     }
 
     /// Returns the commit index of a specific node for the specified shard group.
-    pub fn commit_index_on(&self, shard_id: ShardId, node: NodeId) -> Option<u64> {
+    pub fn commit_index_on(&self, shard_id: ConsensusStateId, node: NodeId) -> Option<u64> {
         self.nodes.get(&node)?.get(&shard_id).map(|s| s.commit_index())
     }
 
@@ -299,13 +299,13 @@ impl Simulation {
 
     /// Returns the default shard ID used in this simulation.
     #[allow(dead_code)]
-    pub fn shard_id(&self) -> ShardId {
+    pub fn shard_id(&self) -> ConsensusStateId {
         self.default_shard
     }
 
     /// Returns all shard IDs in this simulation.
     #[allow(dead_code)]
-    pub fn shard_ids(&self) -> &[ShardId] {
+    pub fn shard_ids(&self) -> &[ConsensusStateId] {
         &self.shard_ids
     }
 
@@ -378,7 +378,7 @@ mod tests {
         let leader_count = sim
             .nodes
             .values()
-            .filter_map(|m| m.get(&ShardId(1)))
+            .filter_map(|m| m.get(&ConsensusStateId(1)))
             .filter(|s| s.state() == NodeState::Leader)
             .count();
         assert_eq!(leader_count, 1);
@@ -466,7 +466,7 @@ mod tests {
 
         sim.partition(&[leader_id], &[NodeId(2), NodeId(3)]);
 
-        let raft_shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ShardId(1)).unwrap();
+        let raft_shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ConsensusStateId(1)).unwrap();
         let actions = raft_shard.handle_propose(b"partitioned".to_vec()).unwrap();
         for action in actions {
             if let Action::Send { to, shard: shard_id, msg } = action {
@@ -529,7 +529,7 @@ mod tests {
     #[test]
     fn shard_id_returns_fixed_value() {
         let sim = Simulation::new(42, 3);
-        assert_eq!(sim.shard_id(), ShardId(1));
+        assert_eq!(sim.shard_id(), ConsensusStateId(1));
     }
 
     #[test]
@@ -557,50 +557,50 @@ mod tests {
     #[test]
     fn add_shard_group_creates_shards_on_specified_nodes() {
         let mut sim = Simulation::new(42, 3);
-        sim.add_shard_group(ShardId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
+        sim.add_shard_group(ConsensusStateId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
 
         for nid in [NodeId(1), NodeId(2), NodeId(3)] {
             let shard_map = sim.nodes.get(&nid).unwrap();
-            assert!(shard_map.contains_key(&ShardId(1)), "node {nid:?} missing default shard");
-            assert!(shard_map.contains_key(&ShardId(2)), "node {nid:?} missing added shard");
+            assert!(shard_map.contains_key(&ConsensusStateId(1)), "node {nid:?} missing default shard");
+            assert!(shard_map.contains_key(&ConsensusStateId(2)), "node {nid:?} missing added shard");
         }
     }
 
     #[test]
     fn two_independent_shard_groups_elect_leaders_independently() {
         let mut sim = Simulation::new(42, 3);
-        sim.add_shard_group(ShardId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
+        sim.add_shard_group(ConsensusStateId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
 
-        assert!(sim.elect_leader_on(ShardId(1), NodeId(1)));
-        assert!(sim.elect_leader_on(ShardId(2), NodeId(2)));
+        assert!(sim.elect_leader_on(ConsensusStateId(1), NodeId(1)));
+        assert!(sim.elect_leader_on(ConsensusStateId(2), NodeId(2)));
 
-        assert!(sim.has_leader_on(ShardId(1)));
-        assert!(sim.has_leader_on(ShardId(2)));
+        assert!(sim.has_leader_on(ConsensusStateId(1)));
+        assert!(sim.has_leader_on(ConsensusStateId(2)));
     }
 
     #[test]
     fn two_shard_groups_have_independent_commit_indices() {
         let mut sim = Simulation::new(42, 3);
-        sim.add_shard_group(ShardId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
+        sim.add_shard_group(ConsensusStateId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
 
-        sim.elect_leader_on(ShardId(1), NodeId(1));
-        sim.elect_leader_on(ShardId(2), NodeId(2));
+        sim.elect_leader_on(ConsensusStateId(1), NodeId(1));
+        sim.elect_leader_on(ConsensusStateId(2), NodeId(2));
 
         // Propose different amounts to each shard group.
-        let ci1_a = sim.propose_on(ShardId(1), b"shard1-a".to_vec());
-        let ci1_b = sim.propose_on(ShardId(1), b"shard1-b".to_vec());
-        let ci2_a = sim.propose_on(ShardId(2), b"shard2-a".to_vec());
+        let ci1_a = sim.propose_on(ConsensusStateId(1), b"shard1-a".to_vec());
+        let ci1_b = sim.propose_on(ConsensusStateId(1), b"shard1-b".to_vec());
+        let ci2_a = sim.propose_on(ConsensusStateId(2), b"shard2-a".to_vec());
 
         assert!(ci1_a.is_some(), "shard 1 first proposal should commit");
         assert!(ci1_b.is_some(), "shard 1 second proposal should commit");
         assert!(ci2_a.is_some(), "shard 2 first proposal should commit");
 
-        // Shard 1 should be at commit index 2, shard 2 at commit index 1.
-        let leader1 = sim.leader_on(ShardId(1)).unwrap();
-        let leader2 = sim.leader_on(ShardId(2)).unwrap();
+        // ConsensusState 1 should be at commit index 2, shard 2 at commit index 1.
+        let leader1 = sim.leader_on(ConsensusStateId(1)).unwrap();
+        let leader2 = sim.leader_on(ConsensusStateId(2)).unwrap();
 
-        let s1_ci = sim.commit_index_on(ShardId(1), leader1).unwrap();
-        let s2_ci = sim.commit_index_on(ShardId(2), leader2).unwrap();
+        let s1_ci = sim.commit_index_on(ConsensusStateId(1), leader1).unwrap();
+        let s2_ci = sim.commit_index_on(ConsensusStateId(2), leader2).unwrap();
 
         // +1 for the no-op entry committed on leader election
         assert_eq!(s1_ci, 3, "shard 1 should have 3 committed entries (1 no-op + 2 proposed)");
@@ -610,13 +610,13 @@ mod tests {
     #[test]
     fn partition_affects_all_shards_on_a_node() {
         let mut sim = Simulation::new(42, 3);
-        sim.add_shard_group(ShardId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
+        sim.add_shard_group(ConsensusStateId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
 
-        sim.elect_leader_on(ShardId(1), NodeId(1));
-        sim.elect_leader_on(ShardId(2), NodeId(1));
+        sim.elect_leader_on(ConsensusStateId(1), NodeId(1));
+        sim.elect_leader_on(ConsensusStateId(2), NodeId(1));
 
-        let leader1 = sim.leader_on(ShardId(1)).unwrap();
-        let leader2 = sim.leader_on(ShardId(2)).unwrap();
+        let leader1 = sim.leader_on(ConsensusStateId(1)).unwrap();
+        let leader2 = sim.leader_on(ConsensusStateId(2)).unwrap();
 
         // Partition the leader(s) from followers.
         let followers: Vec<NodeId> =
@@ -624,11 +624,11 @@ mod tests {
         sim.partition(&[leader1], &followers);
 
         // Proposals on shard 1 should fail (leader is partitioned).
-        let s1_result = sim.propose_on(ShardId(1), b"blocked-s1".to_vec());
+        let s1_result = sim.propose_on(ConsensusStateId(1), b"blocked-s1".to_vec());
 
         // If leader2 is the same node as leader1, shard 2 proposals should also fail.
         if leader2 == leader1 {
-            let s2_result = sim.propose_on(ShardId(2), b"blocked-s2".to_vec());
+            let s2_result = sim.propose_on(ConsensusStateId(2), b"blocked-s2".to_vec());
             assert!(
                 s2_result.is_none(),
                 "shard 2 proposals should fail when its leader is partitioned"
@@ -641,21 +641,21 @@ mod tests {
     #[test]
     fn different_nodes_can_lead_different_shards() {
         let mut sim = Simulation::new(42, 3);
-        sim.add_shard_group(ShardId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
+        sim.add_shard_group(ConsensusStateId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
 
         // Elect different candidates for each shard.
-        sim.elect_leader_on(ShardId(1), NodeId(1));
-        sim.elect_leader_on(ShardId(2), NodeId(2));
+        sim.elect_leader_on(ConsensusStateId(1), NodeId(1));
+        sim.elect_leader_on(ConsensusStateId(2), NodeId(2));
 
-        let leader1 = sim.leader_on(ShardId(1));
-        let leader2 = sim.leader_on(ShardId(2));
+        let leader1 = sim.leader_on(ConsensusStateId(1));
+        let leader2 = sim.leader_on(ConsensusStateId(2));
 
         assert!(leader1.is_some(), "shard 1 should have a leader");
         assert!(leader2.is_some(), "shard 2 should have a leader");
 
         // Both shard groups should be functional regardless of leader placement.
-        let ci1 = sim.propose_on(ShardId(1), b"on-shard-1".to_vec());
-        let ci2 = sim.propose_on(ShardId(2), b"on-shard-2".to_vec());
+        let ci1 = sim.propose_on(ConsensusStateId(1), b"on-shard-1".to_vec());
+        let ci2 = sim.propose_on(ConsensusStateId(2), b"on-shard-2".to_vec());
         assert!(ci1.is_some(), "shard 1 should accept proposals");
         assert!(ci2.is_some(), "shard 2 should accept proposals");
     }
@@ -663,35 +663,35 @@ mod tests {
     #[test]
     fn kill_removes_all_shards_on_node() {
         let mut sim = Simulation::new(42, 3);
-        sim.add_shard_group(ShardId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
+        sim.add_shard_group(ConsensusStateId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
 
         sim.kill(NodeId(3));
 
         assert!(!sim.nodes.contains_key(&NodeId(3)));
-        assert!(sim.commit_index_on(ShardId(1), NodeId(3)).is_none());
-        assert!(sim.commit_index_on(ShardId(2), NodeId(3)).is_none());
+        assert!(sim.commit_index_on(ConsensusStateId(1), NodeId(3)).is_none());
+        assert!(sim.commit_index_on(ConsensusStateId(2), NodeId(3)).is_none());
     }
 
     #[test]
     fn shard_ids_returns_all_groups() {
         let mut sim = Simulation::new(42, 3);
-        sim.add_shard_group(ShardId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
-        sim.add_shard_group(ShardId(3), &[NodeId(1), NodeId(2), NodeId(3)]);
+        sim.add_shard_group(ConsensusStateId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
+        sim.add_shard_group(ConsensusStateId(3), &[NodeId(1), NodeId(2), NodeId(3)]);
 
-        assert_eq!(sim.shard_ids(), &[ShardId(1), ShardId(2), ShardId(3)]);
+        assert_eq!(sim.shard_ids(), &[ConsensusStateId(1), ConsensusStateId(2), ConsensusStateId(3)]);
     }
 
     #[test]
     fn backward_compat_default_methods_use_shard_1() {
         let mut sim = Simulation::new(42, 3);
         // Add a second shard group but use the default (backward-compat) methods.
-        sim.add_shard_group(ShardId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
+        sim.add_shard_group(ConsensusStateId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
 
         assert!(sim.elect_leader(NodeId(1)));
         let ci = sim.propose(b"compat".to_vec());
         assert!(ci.is_some());
 
-        // Default leader/commit_index should reflect ShardId(1).
+        // Default leader/commit_index should reflect ConsensusStateId(1).
         let leader = sim.leader().unwrap();
         let commit = sim.commit_index(leader).unwrap();
         assert!(commit >= 1);

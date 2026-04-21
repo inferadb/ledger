@@ -103,7 +103,7 @@ pub struct CompactionStats {
 /// for writing. The index is preserved for future optimization of segment file reads.
 #[derive(Debug, Clone, Copy)]
 struct BlockIndex {
-    /// Shard height of this block.
+    /// ConsensusState height of this block.
     _region_height: u64,
     /// Offset in segment file.
     _offset: u64,

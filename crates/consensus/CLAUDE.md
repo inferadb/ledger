@@ -23,7 +23,7 @@ These files are load-bearing — their invariants ripple beyond the local file. 
 ## Owned Surface
 
 - **`ConsensusEngine`** (`engine.rs`) — multi-shard API.
-- **`Shard`** (`shard.rs`), **`Reactor`** (`reactor.rs`), **`Action`** (`action.rs`) — event-driven core.
+- **`ConsensusState`** (`shard.rs`), **`Reactor`** (`reactor.rs`), **`Action`** (`action.rs`) — event-driven core.
 - **`WalBackend` trait** (`wal_backend.rs`) + impls under `wal/`: `segmented` (production), `encrypted`, `memory`, `io_uring_backend`.
 - **`StateMachine` trait** (`state_machine.rs`).
 - **Leadership + safety**: `leadership.rs`, `lease.rs`, `committed.rs`, `idempotency.rs`, `recovery.rs`, `split.rs`, `circuit_breaker.rs`.
@@ -41,8 +41,8 @@ These files are load-bearing — their invariants ripple beyond the local file. 
 
 ## Local Golden Rules
 
-1. **`Shard` returns `Action` values and performs no I/O** (root rule 10). Any blocking call, disk read, or network send inside `Shard` is a correctness bug caught by `consensus-reviewer`.
-2. **`Reactor` is the only place I/O happens.** A background task spawned from `Shard` or elsewhere to do fsync / send is a layering break.
+1. **`ConsensusState` returns `Action` values and performs no I/O** (root rule 10). Any blocking call, disk read, or network send inside `ConsensusState` is a correctness bug caught by `consensus-reviewer`.
+2. **`Reactor` is the only place I/O happens.** A background task spawned from `ConsensusState` or elsewhere to do fsync / send is a layering break.
 3. **WAL writes are batched with a single `fsync` per batch.** Never per proposal — destroys throughput and breaks batch ordering assumptions.
 4. **Production WAL is `wal/segmented.rs`.** `memory` and `io_uring_backend` are test/experiment backends. Don't default to `memory` in any production config path.
 5. **`ConsensusEngine` lives in `engine.rs`.** `lib.rs` re-exports the public surface. Moving `ConsensusEngine` back into `lib.rs` is a layering regression.
@@ -50,6 +50,6 @@ These files are load-bearing — their invariants ripple beyond the local file. 
 7. **Snapshots are encrypted end-to-end via `snapshot_crypto.rs`.** Never bypass this for "performance" — unencrypted snapshots on disk defeat the per-vault key rotation story.
 8. **`LogId` shape is internal; don't copy openraft's `LogId::new(CommittedLeaderId::new(term, node_id), index)` shape.** The in-house Raft uses its own log-id type.
 9. **Simulation coverage is preferred for new primitives** (leader lease, closed timestamps, apply pipeline). If a bug can reproduce under simulation, add a simulation test — don't rely solely on tokio-runtime integration tests.
-10. **Cross-shard state changes go through `ConsensusEngine`, never directly between shards.** A `Shard` calling into another `Shard` is a layering violation.
+10. **Cross-shard state changes go through `ConsensusEngine`, never directly between shards.** A `ConsensusState` calling into another `ConsensusState` is a layering violation.
 
-11. **`Shard::leadership_mode` gates election timers.** `LeadershipMode::SelfElect` runs normal Raft elections; `LeadershipMode::Delegated` no-ops the election timeout and requires the surrounding runtime to drive leadership via `Shard::adopt_leader` (handled by `ReactorEvent::AdoptLeader` routing). A `Delegated` shard without a corresponding `adopt_leader` driver will silently stay leaderless. The raft crate's `RaftManager` installs the driver for per-organization `Shard`s (root raft rule 14); the consensus crate does not know about orgs, so preserve the distinction — don't hard-wire delegated routing into `Shard` or `ConsensusEngine`. Audited by `consensus-reviewer`.
+11. **`ConsensusState::leadership_mode` gates election timers.** `LeadershipMode::SelfElect` runs normal Raft elections; `LeadershipMode::Delegated` no-ops the election timeout and requires the surrounding runtime to drive leadership via `ConsensusState::adopt_leader` (handled by `ReactorEvent::AdoptLeader` routing). A `Delegated` shard without a corresponding `adopt_leader` driver will silently stay leaderless. The raft crate's `RaftManager` installs the driver for per-organization `ConsensusState`s (root raft rule 14); the consensus crate does not know about orgs, so preserve the distinction — don't hard-wire delegated routing into `ConsensusState` or `ConsensusEngine`. Audited by `consensus-reviewer`.

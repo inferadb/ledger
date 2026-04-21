@@ -15,13 +15,13 @@ mod tests {
     use crate::{
         action::Action,
         simulation::Simulation,
-        types::{MembershipChange, NodeId, NodeState, ShardId},
+        types::{MembershipChange, NodeId, NodeState, ConsensusStateId},
     };
 
     /// GLOBAL shard ID used across all multi-Raft tests.
-    const GLOBAL_SHARD: ShardId = ShardId(1);
+    const GLOBAL_SHARD: ConsensusStateId = ConsensusStateId(1);
     /// Data region shard ID.
-    const DR_SHARD: ShardId = ShardId(2);
+    const DR_SHARD: ConsensusStateId = ConsensusStateId(2);
 
     /// Node lifecycle status (mirrors the raft crate's NodeStatus).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +46,7 @@ mod tests {
         /// Creates a new multi-Raft simulation with N nodes, GLOBAL + DR shards.
         fn new(seed: u64, node_count: u64) -> Self {
             let mut sim = Simulation::new(seed, node_count);
-            // The default shard (ShardId(1)) serves as GLOBAL.
+            // The default shard (ConsensusStateId(1)) serves as GLOBAL.
             // Add a data region shard on the same nodes.
             let node_ids: Vec<NodeId> = (1..=node_count).map(NodeId).collect();
             sim.add_shard_group(DR_SHARD, &node_ids);
@@ -273,7 +273,7 @@ mod tests {
                 if self.crashed.contains(&node_id) {
                     continue;
                 }
-                let shard_ids: Vec<ShardId> = self
+                let shard_ids: Vec<ConsensusStateId> = self
                     .sim
                     .nodes
                     .get(&node_id)

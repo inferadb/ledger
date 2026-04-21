@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use inferadb_ledger_consensus::{
     recovery::recover_from_wal,
-    types::ShardId,
+    types::ConsensusStateId,
     wal::InMemoryWalBackend,
     wal_backend::{CHECKPOINT_SHARD_ID, CheckpointFrame, WalBackend, WalFrame},
 };
@@ -20,15 +20,15 @@ use inferadb_ledger_consensus::{
 // ---------------------------------------------------------------------------
 
 fn frame(shard: u64, index: u64, term: u64, data: &[u8]) -> WalFrame {
-    WalFrame { shard_id: ShardId(shard), index, term, data: std::sync::Arc::from(data) }
+    WalFrame { shard_id: ConsensusStateId(shard), index, term, data: std::sync::Arc::from(data) }
 }
 
 fn checkpoint(committed: u64, term: u64) -> CheckpointFrame {
     CheckpointFrame { committed_index: committed, term, voted_for: None }
 }
 
-fn applied(pairs: &[(u64, u64)]) -> HashMap<ShardId, u64> {
-    pairs.iter().map(|&(shard, idx)| (ShardId(shard), idx)).collect()
+fn applied(pairs: &[(u64, u64)]) -> HashMap<ConsensusStateId, u64> {
+    pairs.iter().map(|&(shard, idx)| (ConsensusStateId(shard), idx)).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -74,7 +74,7 @@ fn recover_replays_entries_after_last_applied() {
     let result = recover_from_wal(&wal, &applied(&[(1, 7)])).expect("recover");
 
     assert_eq!(result.replay_count, 3);
-    let batch = result.entries_to_replay.iter().find(|b| b.shard == ShardId(1)).unwrap();
+    let batch = result.entries_to_replay.iter().find(|b| b.shard == ConsensusStateId(1)).unwrap();
     let indices: Vec<u64> = batch.entries.iter().map(|e| e.index).collect();
     assert_eq!(indices, vec![8, 9, 10]);
 }
@@ -193,15 +193,15 @@ fn recover_multi_shard_replays_per_shard_applied_index() {
     wal.write_checkpoint(&checkpoint(3, 1)).unwrap();
     wal.sync().unwrap();
 
-    // Shard 1 applied through 2, shard 2 applied through 1, shard 3 fully applied.
+    // ConsensusState 1 applied through 2, shard 2 applied through 1, shard 3 fully applied.
     let result = recover_from_wal(&wal, &applied(&[(1, 2), (2, 1), (3, 2)])).expect("recover");
 
-    // Shard 1: index 3. Shard 2: index 2. Shard 3: nothing. Total = 2.
+    // ConsensusState 1: index 3. ConsensusState 2: index 2. ConsensusState 3: nothing. Total = 2.
     assert_eq!(result.replay_count, 2);
 
-    let shard1 = result.entries_to_replay.iter().find(|b| b.shard == ShardId(1));
-    let shard2 = result.entries_to_replay.iter().find(|b| b.shard == ShardId(2));
-    let shard3 = result.entries_to_replay.iter().find(|b| b.shard == ShardId(3));
+    let shard1 = result.entries_to_replay.iter().find(|b| b.shard == ConsensusStateId(1));
+    let shard2 = result.entries_to_replay.iter().find(|b| b.shard == ConsensusStateId(2));
+    let shard3 = result.entries_to_replay.iter().find(|b| b.shard == ConsensusStateId(3));
 
     assert_eq!(shard1.unwrap().entries.len(), 1);
     assert_eq!(shard1.unwrap().entries[0].index, 3);
@@ -241,7 +241,7 @@ fn recover_unknown_shard_in_applied_map_is_ignored() {
     wal.write_checkpoint(&checkpoint(1, 1)).unwrap();
     wal.sync().unwrap();
 
-    // Shard 99 in applied but not in WAL — should not cause errors.
+    // ConsensusState 99 in applied but not in WAL — should not cause errors.
     let result = recover_from_wal(&wal, &applied(&[(99, 10)])).expect("recover");
 
     assert_eq!(result.replay_count, 1);
@@ -258,7 +258,7 @@ fn recover_after_shred_includes_zeroed_frames_in_replay() {
     wal.write_checkpoint(&checkpoint(1, 1)).unwrap();
     wal.sync().unwrap();
 
-    let zeroed = wal.shred_frames(ShardId(1)).unwrap();
+    let zeroed = wal.shred_frames(ConsensusStateId(1)).unwrap();
     assert_eq!(zeroed, 1);
 
     let result = recover_from_wal(&wal, &HashMap::new()).expect("recover");
@@ -268,9 +268,9 @@ fn recover_after_shred_includes_zeroed_frames_in_replay() {
 
     // Verify shard 1 data is zeroed, shard 2 intact.
     let frames = wal.read_frames(0).unwrap();
-    let s1 = frames.iter().find(|f| f.shard_id == ShardId(1)).unwrap();
+    let s1 = frames.iter().find(|f| f.shard_id == ConsensusStateId(1)).unwrap();
     assert!(s1.data.iter().all(|&b| b == 0));
-    let s2 = frames.iter().find(|f| f.shard_id == ShardId(2)).unwrap();
+    let s2 = frames.iter().find(|f| f.shard_id == ConsensusStateId(2)).unwrap();
     assert_eq!(&*s2.data, b"public");
 }
 
@@ -456,7 +456,7 @@ fn recover_replay_entries_contain_correct_data() {
     let result = recover_from_wal(&wal, &applied(&[(1, 1)])).expect("recover");
 
     assert_eq!(result.replay_count, 2);
-    let batch = result.entries_to_replay.iter().find(|b| b.shard == ShardId(1)).unwrap();
+    let batch = result.entries_to_replay.iter().find(|b| b.shard == ConsensusStateId(1)).unwrap();
     assert_eq!(&*batch.entries[0].data, b"beta");
     assert_eq!(batch.entries[0].term, 2);
     assert_eq!(batch.entries[0].index, 2);
@@ -564,7 +564,7 @@ fn recover_last_applied_beyond_committed_replays_nothing_for_that_shard() {
     wal.write_checkpoint(&checkpoint(3, 1)).unwrap();
     wal.sync().unwrap();
 
-    // Shard claims to have applied index 5, which is beyond committed_index 3.
+    // ConsensusState claims to have applied index 5, which is beyond committed_index 3.
     let result = recover_from_wal(&wal, &applied(&[(1, 5)])).expect("recover");
 
     assert_eq!(result.replay_count, 0);

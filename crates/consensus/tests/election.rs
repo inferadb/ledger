@@ -455,15 +455,15 @@ fn election_membership_change_rejected_before_noop_commits() {
 
     use inferadb_ledger_consensus::{
         clock::SimulatedClock, config::ShardConfig, error::ConsensusError, message::Message,
-        rng::SimulatedRng, shard::Shard, types::Membership,
+        rng::SimulatedRng, consensus_state::ConsensusState, types::Membership,
     };
 
     // Build a 3-node shard directly so we can control message delivery precisely.
     let clock = Arc::new(SimulatedClock::new());
     let membership = Membership::new([NodeId(1), NodeId(2), NodeId(3)]);
     let config = ShardConfig::default();
-    let mut shard = Shard::new(
-        ShardId(0),
+    let mut shard = ConsensusState::new(
+        ConsensusStateId(0),
         NodeId(1),
         membership,
         config,
@@ -523,7 +523,7 @@ fn election_membership_change_rejected_before_noop_commits() {
     assert!(result.is_ok(), "membership change should succeed after no-op commits: {result:?}");
 }
 
-// ── Shard Removed on Membership Eviction ───────────────────────────
+// ── ConsensusState Removed on Membership Eviction ───────────────────────────
 
 #[test]
 fn election_removed_node_emits_shard_removed() {
@@ -590,8 +590,8 @@ fn election_auto_promote_disabled_does_not_promote_caught_up_learner() {
         use inferadb_ledger_consensus::{
             clock::SimulatedClock,
             rng::SimulatedRng,
-            shard::Shard,
-            types::{Membership, ShardId},
+            consensus_state::ConsensusState,
+            types::{Membership, ConsensusStateId},
         };
 
         let clock = Arc::new(SimulatedClock::new());
@@ -602,8 +602,8 @@ fn election_auto_promote_disabled_does_not_promote_caught_up_learner() {
         let mut shards = HashMap::new();
         for (i, &node_id) in node_ids.iter().enumerate() {
             let rng = SimulatedRng::new(100 + i as u64);
-            let shard = Shard::new(
-                ShardId(0),
+            let shard = ConsensusState::new(
+                ConsensusStateId(0),
                 node_id,
                 membership.clone(),
                 config.clone(),
