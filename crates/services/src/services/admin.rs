@@ -1707,9 +1707,13 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             recovery_started_at: None,
         });
 
-        // Write to BOTH the GLOBAL and DATA REGION Raft groups.
-        // - GLOBAL: HealthService reads vault health from GLOBAL applied state
-        // - DATA REGION: WriteService's apply handler checks vault health at write time
+        // Write to BOTH the GLOBAL and the ORGANIZATION'S Raft group.
+        // - GLOBAL: HealthService reads vault health from GLOBAL applied
+        //   state (cluster-wide view).
+        // - ORGANIZATION group: WriteService / ReadService check vault
+        //   health at request time from the per-organization applied
+        //   state — that's where routing lands under B.1's per-org
+        //   Raft groups with delegated leadership.
         ctx.start_raft_timer();
 
         // GLOBAL write (for HealthService)
@@ -1719,15 +1723,17 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             return Err(error_classify::storage_error(&e));
         }
 
-        // DATA REGION write (for WriteService apply-time checks)
-        if let Some(ref manager) = self.raft_manager {
-            let sys_svc =
-                inferadb_ledger_state::system::SystemOrganizationService::new(self.state.clone());
-            if let Ok(Some(region)) = sys_svc.get_region_for_organization(organization_id)
-                && let Ok(rg) = manager.get_region_group(region)
-            {
-                let _ = rg.handle().propose(RaftPayload::system(health_request)).await;
-            }
+        // ORGANIZATION group write (for WriteService / ReadService
+        // apply-time checks). Route to the per-org group via
+        // `RaftManager::route_organization`, which returns the
+        // delegated-leadership organization group that services read
+        // from. Falls back to the data-region group at
+        // OrganizationId(0) while the per-org group is still
+        // bootstrapping (route_organization handles the race itself).
+        if let Some(ref manager) = self.raft_manager
+            && let Some(org_group) = manager.route_organization(organization_id)
+        {
+            let _ = org_group.handle().propose(RaftPayload::system(health_request)).await;
         }
 
         ctx.end_raft_timer();
@@ -1805,24 +1811,17 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         for ((organization_id, vault_id), _height) in vault_heights {
             vaults_scanned += 1;
 
-            // Resolve the vault's region to read entities from the correct state layer.
-            // Entity data lives in REGIONAL state, not GLOBAL.
-            let (regional_state, regional_handle) = if let Some(ref manager) = self.raft_manager {
-                let sys_svc = inferadb_ledger_state::system::SystemOrganizationService::new(
-                    self.state.clone(),
-                );
-                let region = sys_svc
-                    .get_region_for_organization(organization_id)
-                    .ok()
-                    .flatten()
-                    .unwrap_or(inferadb_ledger_types::Region::GLOBAL);
-                if let Ok(rg) = manager.get_region_group(region) {
-                    (rg.state().clone(), Some(rg.handle().clone()))
-                } else {
-                    (self.state.clone(), None)
-                }
+            // Resolve the vault's per-organization Raft group. Under B.1.8
+            // routing, both entity state AND writes land in the per-org group
+            // (not the data-region group), so both the read and the propose
+            // target must come from `route_organization`. Falls back to the
+            // local GLOBAL state + handle when no manager is configured
+            // (single-Raft / unit-test mode).
+            let (regional_state, regional_handle) = if let Some(ref manager) = self.raft_manager
+                && let Some(group) = manager.route_organization(organization_id)
+            {
+                (group.state().clone(), Some(group.handle().clone()))
             } else {
-                // Single-Raft mode: GLOBAL state has everything
                 (self.state.clone(), None)
             };
 

@@ -106,19 +106,17 @@ impl inferadb_ledger_proto::proto::health_service_server::HealthService for Heal
             let height = self.applied_state.vault_height(organization_id, vault_id);
             details.insert("block_height".to_string(), height.to_string());
 
-            // Get vault health status from the DATA REGION's applied state (where
-            // UpdateVaultHealth writes). Falls back to GLOBAL if no manager is configured.
+            // Get vault health status from the per-organization group's applied
+            // state (B.1.8 routing — `UpdateVaultHealth` lands in the per-org
+            // group, not the data-region group). `route_organization` resolves
+            // the org → region mapping internally and falls back to the data
+            // region's `OrganizationId(0)` group during the bootstrap race.
+            // Final fallback to `self.applied_state` (GLOBAL) covers the
+            // pre-manager test path and the dual-write that
+            // `simulate_divergence` issues to GLOBAL.
             let health_status = if let Some(ref manager) = self.manager {
-                let sys_svc = inferadb_ledger_state::system::SystemOrganizationService::new(
-                    self.state.clone(),
-                );
-                let resolved = sys_svc
-                    .get_region_for_organization(organization_id)
-                    .ok()
-                    .flatten()
-                    .and_then(|region| manager.get_region_group(region).ok());
-                if let Some(rg) = resolved {
-                    rg.applied_state().vault_health(organization_id, vault_id)
+                if let Some(group) = manager.route_organization(organization_id) {
+                    group.applied_state().vault_health(organization_id, vault_id)
                 } else {
                     self.applied_state.vault_health(organization_id, vault_id)
                 }
