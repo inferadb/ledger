@@ -9,7 +9,7 @@ use std::{sync::Arc, time::Duration};
 use inferadb_ledger_raft::{
     ConsensusHandle, HandleError,
     raft_manager::RaftManager,
-    types::{LedgerResponse, RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{LedgerResponse, RaftPayload, LedgerRequest},
 };
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
@@ -309,7 +309,7 @@ pub(crate) mod mock {
 
     use std::{collections::VecDeque, sync::Arc, time::Duration};
 
-    use inferadb_ledger_raft::types::{LedgerResponse, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest};
+    use inferadb_ledger_raft::types::{LedgerResponse, LedgerRequest};
     use inferadb_ledger_state::StateLayer;
     use inferadb_ledger_store::FileBackend;
     use inferadb_ledger_types::Region;

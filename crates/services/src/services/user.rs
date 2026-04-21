@@ -26,7 +26,7 @@ use inferadb_ledger_proto::proto::{
 };
 use inferadb_ledger_raft::{
     error::ServiceError,
-    types::{LedgerResponse, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{LedgerResponse, LedgerRequest, OrganizationRequest, SystemRequest},
 };
 use inferadb_ledger_state::system::{
     CreateUserInput, CreateUserSaga, EmailHashEntry, MigrateUserInput, MigrateUserSaga, Saga,

@@ -38,7 +38,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use inferadb_ledger_raft::{
     HealthState, RaftManager, RecoveryStats, RegionConfig, RuntimeConfigHandle,
     event_writer::{EventHandle, HandlerPhaseEmitter},
-    types::{RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{RaftPayload, LedgerRequest, OrganizationRequest, SystemRequest},
 };
 use inferadb_ledger_server::{bootstrap::bootstrap_node, config::Config};
 use inferadb_ledger_store::{

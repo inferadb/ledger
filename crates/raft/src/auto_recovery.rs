@@ -30,7 +30,7 @@ use crate::{
         RecoveryError, StateRootComputationSnafu,
     },
     log_storage::{AppliedStateAccessor, MAX_RECOVERY_ATTEMPTS, VaultHealthStatus},
-    types::{LedgerNodeId, LedgerResponse, RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{LedgerNodeId, LedgerResponse, RaftPayload, LedgerRequest, OrganizationRequest},
 };
 
 /// Default interval between recovery scans.

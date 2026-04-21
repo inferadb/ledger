@@ -28,7 +28,7 @@ use inferadb_ledger_raft::{
     log_storage::{AppliedStateAccessor, VaultHealthStatus},
     logging::{OperationType, RequestContext, Sampler},
     metrics,
-    types::{LedgerResponse, RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{LedgerResponse, RaftPayload, LedgerRequest, OrganizationRequest, SystemRequest},
 };
 use inferadb_ledger_state::{BlockArchive, StateLayer, system::SystemOrganizationService};
 use inferadb_ledger_store::FileBackend;

@@ -24,7 +24,7 @@ use crate::{
     consensus_handle::ConsensusHandle,
     metrics::record_org_purge_failure,
     raft_manager::RaftManager,
-    types::{RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{RaftPayload, LedgerRequest, SystemRequest},
 };
 
 /// Maximum number of retry attempts per purge step.

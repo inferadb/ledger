@@ -1467,7 +1467,7 @@ fn test_blinding_key() -> inferadb_ledger_types::EmailBlindingKey {
 /// Returns the user's external slug.
 #[allow(dead_code)]
 pub async fn setup_user(_addr: &str, _name: &str, email: &str, node: &TestNode) -> u64 {
-    use inferadb_ledger_raft::types::{RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest};
+    use inferadb_ledger_raft::types::{RaftPayload, LedgerRequest, OrganizationRequest, SystemRequest};
 
     let blinding_key = test_blinding_key();
     let email_hmac = inferadb_ledger_types::compute_email_hmac(&blinding_key, email);

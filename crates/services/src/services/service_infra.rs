@@ -10,7 +10,7 @@ use std::{sync::Arc, time::Duration};
 use inferadb_ledger_raft::{
     log_storage::AppliedStateAccessor,
     logging::{OperationType, RequestContext, Sampler},
-    types::{LedgerResponse, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{LedgerResponse, LedgerRequest, SystemRequest},
 };
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;

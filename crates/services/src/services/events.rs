@@ -22,7 +22,7 @@ use inferadb_ledger_raft::{
     metrics,
     pagination::{EventPageToken, PageTokenCodec},
     raft_manager::RaftManager,
-    types::{LedgerResponse, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{LedgerResponse, LedgerRequest, OrganizationRequest},
 };
 use inferadb_ledger_state::{EventStore, EventsDatabase};
 use inferadb_ledger_store::StorageBackend;

@@ -86,7 +86,7 @@ mod tests {
     use super::{types::estimate_write_storage_delta, *};
     use crate::{
         log_storage::types::{LogId, Vote},
-        types::{BlockRetentionPolicy, LedgerResponse, RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+        types::{BlockRetentionPolicy, LedgerResponse, RaftPayload, LedgerRequest, OrganizationRequest, SystemRequest},
     };
 
     /// Helper to create log IDs for tests.

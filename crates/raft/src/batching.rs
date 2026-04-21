@@ -29,7 +29,7 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::{
     metrics,
-    types::{LedgerResponse, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{LedgerRequest, LedgerResponse, OrganizationRequest},
 };
 
 /// Configuration for the batch writer.

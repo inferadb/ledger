@@ -24,7 +24,7 @@ use tracing::{debug, info, warn};
 use crate::{
     consensus_handle::ConsensusHandle,
     log_storage::AppliedStateAccessor,
-    types::{RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{RaftPayload, LedgerRequest, OrganizationRequest},
 };
 
 /// Default interval between GC cycles.

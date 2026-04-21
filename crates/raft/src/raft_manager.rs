@@ -89,7 +89,7 @@ use crate::{
     runtime_config::RuntimeConfigHandle,
     state_checkpointer::StateCheckpointer,
     ttl_gc::TtlGarbageCollector,
-    types::{LedgerNodeId, LedgerResponse, RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{LedgerNodeId, LedgerResponse, RaftPayload, LedgerRequest, OrganizationRequest},
 };
 
 // ============================================================================
@@ -771,7 +771,7 @@ impl RaftManager {
         region: Region,
         request: &crate::types::LedgerRequest,
     ) -> Result<Arc<OrganizationGroup>> {
-        use crate::types::{LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest};
+        use crate::types::{LedgerRequest, OrganizationRequest};
         const SYSTEM_ORGANIZATION_ID: OrganizationId = OrganizationId::new(0);
         let org = match request {
             LedgerRequest::Organization(OrganizationRequest::Write { organization, .. }) => Some(*organization),

@@ -24,7 +24,7 @@ use inferadb_ledger_proto::proto::{
     SetAppCredentialEnabledResponse, SetAppEnabledRequest, SetAppEnabledResponse, UpdateAppRequest,
     UpdateAppResponse, UpdateAppVaultRequest, UpdateAppVaultResponse,
 };
-use inferadb_ledger_raft::types::{LedgerResponse, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest};
+use inferadb_ledger_raft::types::{LedgerResponse, LedgerRequest, OrganizationRequest};
 use inferadb_ledger_state::system::{
     App, AppCredentialType as DomainAppCredentialType, AppVaultConnection, ClientAssertionEntry,
     SYSTEM_VAULT_ID, SystemKeys,

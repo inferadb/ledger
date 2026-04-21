@@ -14,7 +14,7 @@ use inferadb_ledger_proto::proto::{
 };
 use inferadb_ledger_raft::{
     metrics,
-    types::{BlockRetentionMode, BlockRetentionPolicy, LedgerResponse, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{BlockRetentionMode, BlockRetentionPolicy, LedgerResponse, LedgerRequest, OrganizationRequest},
 };
 use inferadb_ledger_types::{
     VaultEntry, ZERO_HASH,

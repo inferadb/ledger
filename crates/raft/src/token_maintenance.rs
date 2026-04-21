@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 use crate::{
     consensus_handle::ConsensusHandle,
     raft_manager::RaftManager,
-    types::{RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{RaftPayload, LedgerRequest, SystemRequest},
 };
 
 /// Default interval between token maintenance cycles (5 minutes).

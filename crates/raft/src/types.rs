@@ -3589,7 +3589,7 @@ mod tests {
 
         use crate::{
             log_storage::LogId,
-            types::{LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+            types::{LedgerRequest, OrganizationRequest, SystemRequest},
         };
 
         /// Helper to create a LogId from term and index.

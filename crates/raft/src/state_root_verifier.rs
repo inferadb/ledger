@@ -23,7 +23,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     consensus_handle::ConsensusHandle,
-    types::{RaftPayload, StateRootDivergence, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{RaftPayload, StateRootDivergence, LedgerRequest, OrganizationRequest},
 };
 
 /// Async task that receives divergence events and halts diverged vaults.

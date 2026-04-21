@@ -38,7 +38,7 @@ use crate::{
     consensus_handle::ConsensusHandle,
     error::OrphanCleanupError,
     log_storage::AppliedStateAccessor,
-    types::{RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{RaftPayload, LedgerRequest, OrganizationRequest},
 };
 
 /// Default interval between cleanup cycles (1 hour).

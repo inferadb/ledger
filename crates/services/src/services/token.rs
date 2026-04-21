@@ -21,7 +21,7 @@ use inferadb_ledger_proto::proto::{
 };
 use inferadb_ledger_raft::{
     rate_limit::RateLimiter,
-    types::{LedgerResponse, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{LedgerResponse, LedgerRequest, SystemRequest},
 };
 use inferadb_ledger_state::system::{
     App, AppVaultConnection, ClientAssertionEntry, SYSTEM_VAULT_ID, SigningKey, SigningKeyScope,

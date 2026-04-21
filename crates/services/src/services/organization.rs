@@ -28,7 +28,7 @@ use inferadb_ledger_raft::{
     error::ServiceError,
     logging::RequestContext,
     metrics,
-    types::{LedgerResponse, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{LedgerResponse, LedgerRequest, OrganizationRequest, SystemRequest},
 };
 use inferadb_ledger_state::system::{
     Organization, OrganizationMember as DomainOrganizationMember,

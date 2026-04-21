@@ -13,7 +13,7 @@ use inferadb_ledger_proto::proto::{
 };
 use inferadb_ledger_raft::{
     raft_manager::RaftManager,
-    types::{RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{RaftPayload, LedgerRequest, RegionRequest},
 };
 use inferadb_ledger_types::{decode, encode};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};

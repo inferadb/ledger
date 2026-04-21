@@ -104,7 +104,7 @@ use crate::{
     error::{SagaError, SerializationSnafu, StateReadSnafu},
     event_writer::{EventHandle, HandlerPhaseEmitter},
     raft_manager::RaftManager,
-    types::{LedgerNodeId, RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{LedgerNodeId, RaftPayload, LedgerRequest, OrganizationRequest, SystemRequest},
 };
 
 /// Key prefix for saga records in _system organization.

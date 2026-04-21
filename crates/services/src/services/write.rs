@@ -22,7 +22,7 @@ use inferadb_ledger_raft::{
     proof::{self, ProofError},
     raft_manager::RaftManager,
     rate_limit::RateLimiter,
-    types::{LedgerResponse, RaftPayload, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{LedgerResponse, RaftPayload, LedgerRequest, OrganizationRequest},
 };
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{OrganizationId, SetCondition, VaultId, config::ValidationConfig};

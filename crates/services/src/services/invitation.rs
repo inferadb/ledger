@@ -19,7 +19,7 @@ use inferadb_ledger_proto::proto::{
 use inferadb_ledger_raft::{
     logging::RequestContext,
     metrics,
-    types::{LedgerResponse, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{LedgerResponse, LedgerRequest, OrganizationRequest, SystemRequest},
 };
 use inferadb_ledger_state::system::{
     Organization, OrganizationMemberRole as DomainMemberRole, OrganizationProfile, SYSTEM_VAULT_ID,
