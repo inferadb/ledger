@@ -49,7 +49,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use inferadb_ledger_state::shard_routing::ShardIdx;
+use inferadb_ledger_types::OrganizationId;
 use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::config::CheckpointConfig;
 use parking_lot::Mutex;
@@ -122,7 +122,7 @@ pub struct StateCheckpointer {
     /// Region label used on emitted Prometheus metrics.
     region: String,
     /// Shard-index label used on emitted Prometheus metrics, pre-stringified
-    /// from the owning `RegionGroup`'s [`ShardIdx`]. Phase A always emits
+    /// from the owning `RegionGroup`'s [`OrganizationId`]. Phase A always emits
     /// `"0"` — the label exists so dashboards can split per-shard once Task
     /// 5 lights up `0..shards_per_region`.
     shard: String,
@@ -147,7 +147,7 @@ impl StateCheckpointer {
     ///
     /// `region` and `shard` are used as the labels for emitted Prometheus
     /// metrics (`ledger_state_*{region=..., shard=...}`). Phase A always
-    /// passes `ShardIdx(0)`; once Task 5 fans checkpointers out across
+    /// passes `OrganizationId::new(0)`; once Task 5 fans checkpointers out across
     /// `0..shards_per_region`, `{region, shard}` pairs become unique per
     /// checkpointer and dashboards can split their cadence per shard without
     /// any further metric-schema changes.
@@ -162,7 +162,7 @@ impl StateCheckpointer {
         applied_rx: watch::Receiver<u64>,
         cancellation_token: CancellationToken,
         region: impl Into<String>,
-        shard_idx: ShardIdx,
+        organization_id: OrganizationId,
     ) -> Self {
         let initial_applied = *applied_rx.borrow();
         Self {
@@ -174,7 +174,7 @@ impl StateCheckpointer {
             applied_rx,
             cancellation_token,
             region: region.into(),
-            shard: shard_idx.0.to_string(),
+            shard: organization_id.value().to_string(),
             applies_at_last_checkpoint: AtomicU64::new(initial_applied),
             last_checkpoint_at: Mutex::new(Instant::now()),
         }
@@ -553,7 +553,7 @@ mod tests {
             rx,
             token.clone(),
             "test-region",
-            ShardIdx(0),
+            OrganizationId::new(0),
         );
         (cp, runtime_config, token, tx)
     }
@@ -889,7 +889,7 @@ mod tests {
             rx,
             token,
             "test-region",
-            ShardIdx(0),
+            OrganizationId::new(0),
         );
 
         let cfg = cp.current_config();

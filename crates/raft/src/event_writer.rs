@@ -655,7 +655,7 @@ struct FlushQueue {
     region: String,
     /// Shard label for emitted metrics, pre-stringified from the owning
     /// RegionGroup's
-    /// [`ShardIdx`](inferadb_ledger_state::shard_routing::ShardIdx). Phase A
+    /// [`OrganizationId`](inferadb_ledger_types::OrganizationId). Phase A
     /// emits `"0"`; Task 5 fans flushers out.
     shard: String,
 }
@@ -786,10 +786,10 @@ impl<B: StorageBackend + 'static> EventHandle<B> {
         batch_config: EventWriterBatchConfig,
         runtime_config: RuntimeConfigHandle,
         region: impl Into<String>,
-        shard_idx: inferadb_ledger_state::shard_routing::ShardIdx,
+        organization_id: inferadb_ledger_types::OrganizationId,
     ) -> (Self, tokio::task::JoinHandle<()>) {
         let region: String = region.into();
-        let shard: String = shard_idx.0.to_string();
+        let shard: String = organization_id.value().to_string();
         let (entry_tx, entry_rx) = mpsc::channel::<EventEntry>(batch_config.queue_capacity);
         let (shutdown_tx, shutdown_rx) = mpsc::channel::<ShutdownCommand>(1);
 
@@ -1154,7 +1154,7 @@ struct EventFlusher<B: StorageBackend> {
     region: String,
     /// Shard label for emitted metrics, pre-stringified from the owning
     /// RegionGroup's
-    /// [`ShardIdx`](inferadb_ledger_state::shard_routing::ShardIdx).
+    /// [`OrganizationId`](inferadb_ledger_types::OrganizationId).
     shard: String,
     /// Most recently-observed `queue_capacity` — used to detect
     /// restart-only updates and warn operators once.
@@ -2344,7 +2344,7 @@ mod tests {
             batch,
             runtime,
             "test-region",
-            inferadb_ledger_state::shard_routing::ShardIdx(0),
+            inferadb_ledger_types::OrganizationId::new(0),
         );
 
         handle.record_handler_event(sample_handler_entry(1));
@@ -2419,7 +2419,7 @@ mod tests {
             batch,
             runtime,
             "test-region",
-            inferadb_ledger_state::shard_routing::ShardIdx(0),
+            inferadb_ledger_types::OrganizationId::new(0),
         );
 
         let synced_before = events_db.db().last_synced_snapshot_id();
@@ -2509,7 +2509,7 @@ mod tests {
             batch,
             runtime,
             "test-region",
-            inferadb_ledger_state::shard_routing::ShardIdx(0),
+            inferadb_ledger_types::OrganizationId::new(0),
         );
 
         for i in 0..3 {
@@ -2558,7 +2558,7 @@ mod tests {
             batch,
             runtime,
             "test-region",
-            inferadb_ledger_state::shard_routing::ShardIdx(0),
+            inferadb_ledger_types::OrganizationId::new(0),
         );
 
         for i in 0..5 {
@@ -2608,7 +2608,7 @@ mod tests {
             batch,
             runtime,
             "test-region",
-            inferadb_ledger_state::shard_routing::ShardIdx(0),
+            inferadb_ledger_types::OrganizationId::new(0),
         );
 
         // 5 entries — capacity 2 → at least 3 drops.
@@ -2654,7 +2654,7 @@ mod tests {
             batch,
             runtime,
             "test-region",
-            inferadb_ledger_state::shard_routing::ShardIdx(0),
+            inferadb_ledger_types::OrganizationId::new(0),
         );
 
         // Fill the queue to capacity.
@@ -2715,7 +2715,7 @@ mod tests {
             initial,
             runtime.clone(),
             "test-region",
-            inferadb_ledger_state::shard_routing::ShardIdx(0),
+            inferadb_ledger_types::OrganizationId::new(0),
         );
 
         handle.record_handler_event(sample_handler_entry(1));
@@ -2780,7 +2780,7 @@ mod tests {
             batch,
             runtime,
             "test-region",
-            inferadb_ledger_state::shard_routing::ShardIdx(0),
+            inferadb_ledger_types::OrganizationId::new(0),
         );
 
         for i in 0..42 {
@@ -2821,7 +2821,7 @@ mod tests {
             batch,
             runtime,
             "test-region",
-            inferadb_ledger_state::shard_routing::ShardIdx(0),
+            inferadb_ledger_types::OrganizationId::new(0),
         );
         let handle_b = handle_a.clone();
 
@@ -2990,7 +2990,7 @@ mod tests {
                 batch,
                 runtime,
                 "test-region",
-                inferadb_ledger_state::shard_routing::ShardIdx(0),
+                inferadb_ledger_types::OrganizationId::new(0),
             );
             (dir, events_db, handle, join)
         }
@@ -3118,7 +3118,7 @@ mod tests {
                         batch_off,
                         runtime_a,
                         "test-region-a",
-                        inferadb_ledger_state::shard_routing::ShardIdx(0),
+                        inferadb_ledger_types::OrganizationId::new(0),
                     );
 
                     // Handle B: batched path with batching enabled.

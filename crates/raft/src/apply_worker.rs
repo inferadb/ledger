@@ -6,7 +6,7 @@
 use std::time::Instant;
 
 use inferadb_ledger_consensus::committed::CommittedBatch;
-use inferadb_ledger_state::shard_routing::ShardIdx;
+use inferadb_ledger_types::OrganizationId;
 use inferadb_ledger_store::FileBackend;
 use tokio::sync::mpsc;
 
@@ -35,7 +35,7 @@ pub struct ApplyWorker {
     /// Region label for apply-batch metrics.
     region: String,
     /// Shard label for apply-batch metrics, pre-stringified from a
-    /// [`ShardIdx`]. Phase A always emits `"0"`; Task 5 fans workers out.
+    /// [`OrganizationId`]. Phase A always emits `"0"`; Task 5 fans workers out.
     shard: String,
 }
 
@@ -45,13 +45,13 @@ impl ApplyWorker {
     /// - `store` — the Raft log store containing state layer, block archive, etc.
     /// - `response_map` — shared map for delivering responses back to proposers.
     /// - `spillover` — buffer for responses when no waiter is registered yet.
-    /// - `region` / `shard_idx` — labels stamped on every [`metrics::record_apply_batch`] emission.
+    /// - `region` / `organization_id` — labels stamped on every [`metrics::record_apply_batch`] emission.
     pub fn new(
         store: RaftLogStore<FileBackend>,
         response_map: ResponseMap,
         spillover: SpilloverMap,
         region: impl Into<String>,
-        shard_idx: ShardIdx,
+        organization_id: OrganizationId,
     ) -> Self {
         Self {
             store,
@@ -59,7 +59,7 @@ impl ApplyWorker {
             spillover,
             dr_event_tx: None,
             region: region.into(),
-            shard: shard_idx.0.to_string(),
+            shard: organization_id.value().to_string(),
         }
     }
 

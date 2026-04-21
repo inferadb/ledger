@@ -681,7 +681,7 @@ impl TestCluster {
                 // every `(region, shard)` pair the bootstrap node has
                 // registered.
                 let bootstrap_manager = &nodes[0].manager;
-                let shards: Vec<inferadb_ledger_state::shard_routing::ShardIdx> =
+                let shards: Vec<inferadb_ledger_types::OrganizationId> =
                     bootstrap_manager
                         .list_shards()
                         .into_iter()
@@ -927,12 +927,12 @@ impl TestCluster {
             // groups registered.
             let reference_node = &self.nodes[0];
             for shard_group in reference_node.shard_groups(dr) {
-                let shard_idx = shard_group.shard_idx();
+                let organization_id = shard_group.organization_id();
                 let mut indices = Vec::new();
                 for node in &self.nodes {
                     if let Some(rg) = node
                         .manager
-                        .get_shard_group(dr, shard_idx)
+                        .get_shard_group(dr, organization_id)
                         .ok()
                     {
                         indices.push(*rg.applied_index_watch().borrow());

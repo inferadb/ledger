@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use inferadb_ledger_state::shard_routing::ShardIdx;
+use inferadb_ledger_types::OrganizationId;
 use inferadb_ledger_types::config::BatchConfig;
 use parking_lot::Mutex;
 use tokio::{
@@ -283,7 +283,7 @@ where
     region: String,
     /// Shard identifier for metric labels, pre-stringified from the owning
     /// `RegionGroup`'s
-    /// [`ShardIdx`](inferadb_ledger_state::shard_routing::ShardIdx). Phase A
+    /// [`OrganizationId`](inferadb_ledger_types::OrganizationId). Phase A
     /// always emits `"0"`; dashboards can start splitting per shard once
     /// Task 5 stands up a BatchWriter per `(region, shard)`.
     shard: String,
@@ -303,14 +303,14 @@ where
         config: BatchWriterConfig,
         submit_fn: F,
         region: impl Into<String>,
-        shard_idx: ShardIdx,
+        organization_id: OrganizationId,
     ) -> Self {
         Self {
             state: Arc::new(Mutex::new(BatchState::new())),
             config,
             submit_fn,
             region: region.into(),
-            shard: shard_idx.0.to_string(),
+            shard: organization_id.value().to_string(),
         }
     }
 
@@ -490,7 +490,7 @@ mod tests {
                 })
             },
             "global",
-            ShardIdx(0),
+            OrganizationId::new(0),
         );
 
         let handle = writer.handle();
@@ -548,7 +548,7 @@ mod tests {
                 })
             },
             "global",
-            ShardIdx(0),
+            OrganizationId::new(0),
         );
 
         let handle = writer.handle();
@@ -679,7 +679,7 @@ mod tests {
                 })
             },
             "global",
-            ShardIdx(0),
+            OrganizationId::new(0),
         );
 
         let handle = writer.handle();
@@ -868,7 +868,7 @@ mod tests {
                             >
                     };
 
-                    let writer = BatchWriter::new(config, submit_fn, "proptest", ShardIdx(0));
+                    let writer = BatchWriter::new(config, submit_fn, "proptest", OrganizationId::new(0));
                     let handle = writer.handle();
                     let writer_task = tokio::spawn(writer.run());
 

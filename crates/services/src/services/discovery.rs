@@ -292,7 +292,7 @@ impl DiscoveryService {
                 None,
                 None,
                 Some(current_term),
-                Some(self.handle.shard_idx().value()),
+                Some(self.handle.organization_id().value() as u64),
             )
         })?;
 

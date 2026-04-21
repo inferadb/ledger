@@ -105,13 +105,15 @@ pub(crate) fn not_leader_status_from_handle(
     let leader_id = shard_state.leader.map(|n| n.0);
     let leader_endpoint =
         leader_id.and_then(|id| peer_addresses.and_then(|m| m.get(id))).map(ensure_endpoint_url);
-    let leader_shard = handle.shard_idx().value();
+    // OrganizationId is i64 (Snowflake); the leader-hint wire field is u64.
+    // Snowflake IDs are positive so this cast preserves the value.
+    let leader_organization = handle.organization_id().value() as u64;
     status_with_not_leader_hint(
         message,
         leader_id,
         leader_endpoint.as_deref(),
         Some(term),
-        Some(leader_shard),
+        Some(leader_organization),
     )
 }
 

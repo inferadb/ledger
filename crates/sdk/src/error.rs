@@ -157,7 +157,7 @@ pub struct LeaderHint {
     /// on `(region, shard)` rather than just region — until then, the SDK
     /// retries against the hinted endpoint and bounces once if the
     /// resolved cache leader does not match the requested shard.
-    pub shard_idx: Option<u64>,
+    pub organization_id: Option<u64>,
 }
 
 impl ServerErrorDetails {
@@ -175,16 +175,16 @@ impl ServerErrorDetails {
         let leader_endpoint =
             self.context.get("leader_endpoint").filter(|s| !s.is_empty()).cloned();
         let term = self.context.get("leader_term").and_then(|s| s.parse().ok());
-        let shard_idx = self.context.get("leader_shard").and_then(|s| s.parse().ok());
+        let organization_id = self.context.get("leader_shard").and_then(|s| s.parse().ok());
 
         if leader_id.is_none()
             && leader_endpoint.is_none()
             && term.is_none()
-            && shard_idx.is_none()
+            && organization_id.is_none()
         {
             return None;
         }
-        Some(LeaderHint { leader_id, leader_endpoint, term, shard_idx })
+        Some(LeaderHint { leader_id, leader_endpoint, term, organization_id })
     }
 }
 

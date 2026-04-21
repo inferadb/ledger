@@ -10,7 +10,7 @@ use inferadb_ledger_consensus::{
     leadership::ShardState,
     types::{NodeId, ShardId},
 };
-use inferadb_ledger_state::shard_routing::ShardIdx;
+use inferadb_ledger_types::OrganizationId;
 use parking_lot::Mutex;
 use snafu::{ResultExt, Snafu};
 use tokio::sync::{oneshot, watch};
@@ -62,21 +62,21 @@ pub type SpilloverMap = Arc<Mutex<HashMap<u64, LedgerResponse>>>;
 
 /// High-level handle for a single shard in the consensus engine.
 ///
-/// Each `(region, shard_idx)` Raft group gets its own `ConsensusHandle`. The
+/// Each `(region, organization_id)` Raft group gets its own `ConsensusHandle`. The
 /// handle carries both the consensus-layer `ShardId` (an opaque seahash of
-/// `region || shard_idx` used by the consensus engine to disambiguate Raft
-/// groups internally) and the state-layer `ShardIdx` (the user-facing
+/// `region || organization_id` used by the consensus engine to disambiguate Raft
+/// groups internally) and the state-layer `OrganizationId` (the user-facing
 /// `0..shards_per_region` value the SDK uses for routing). The two are
 /// kept distinct: `ShardId` is internal/opaque and not stable across
-/// renames; `ShardIdx` is the wire-visible routing dimension.
+/// renames; `OrganizationId` is the wire-visible routing dimension.
 pub struct ConsensusHandle {
     engine: ConsensusEngine,
     shard: ShardId,
     /// State-layer shard index (`0..shards_per_region`). Surfaced via
-    /// [`ConsensusHandle::shard_idx`] so the service-layer not-leader
+    /// [`ConsensusHandle::organization_id`] so the service-layer not-leader
     /// helpers can stamp it onto `LeaderHint.context["leader_shard"]`
     /// without round-tripping through the `RegionGroup`.
-    shard_idx: ShardIdx,
+    organization_id: OrganizationId,
     node_id: LedgerNodeId,
     state_rx: watch::Receiver<ShardState>,
     response_map: ResponseMap,
@@ -88,7 +88,7 @@ impl ConsensusHandle {
     pub fn new(
         engine: ConsensusEngine,
         shard: ShardId,
-        shard_idx: ShardIdx,
+        organization_id: OrganizationId,
         node_id: LedgerNodeId,
         state_rx: watch::Receiver<ShardState>,
         response_map: ResponseMap,
@@ -96,7 +96,7 @@ impl ConsensusHandle {
         Self {
             engine,
             shard,
-            shard_idx,
+            organization_id,
             node_id,
             state_rx,
             response_map,
@@ -196,8 +196,8 @@ impl ConsensusHandle {
     /// The value is the wire-visible `0..shards_per_region` index used by
     /// the SDK for shard routing — distinct from the opaque consensus
     /// `ShardId` returned by [`Self::shard_id`].
-    pub fn shard_idx(&self) -> ShardIdx {
-        self.shard_idx
+    pub fn organization_id(&self) -> OrganizationId {
+        self.organization_id
     }
 
     /// Returns this node's ID.
@@ -376,7 +376,7 @@ mod tests {
         let handle = ConsensusHandle::new(
             engine,
             shard_id,
-            ShardIdx(0),
+            OrganizationId::new(0),
             node_id,
             rx,
             Arc::clone(&response_map),

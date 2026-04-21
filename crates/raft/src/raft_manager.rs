@@ -64,7 +64,6 @@ use inferadb_ledger_consensus::WalBackend as _;
 use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_state::{
     BlockArchive, StateLayer,
-    shard_routing::ShardIdx,
     system::{MIN_NODES_PER_PROTECTED_REGION, SystemOrganizationService},
 };
 use inferadb_ledger_store::{Database, FileBackend};
@@ -318,11 +317,11 @@ pub struct RegionGroup {
     region: Region,
     /// Shard index within the region. Each (region, shard) pair is its
     /// own Raft group. Phase A has a single shard at
-    /// [`ShardIdx(0)`](inferadb_ledger_state::shard_routing::ShardIdx);
+    /// [`OrganizationId::new(0)`](inferadb_ledger_types::OrganizationId);
     /// the field exists so metrics and diagnostics can label output by
     /// shard without a separate lookup once Task 5 enables multi-shard
     /// runtime routing.
-    shard_idx: ShardIdx,
+    organization_id: OrganizationId,
     /// Consensus handle for background jobs and services.
     handle: Arc<ConsensusHandle>,
     /// Shared state layer for this region.
@@ -393,12 +392,12 @@ impl RegionGroup {
     /// Returns the shard index within the region.
     ///
     /// Phase A always returns
-    /// [`ShardIdx(0)`](inferadb_ledger_state::shard_routing::ShardIdx); the
+    /// [`OrganizationId::new(0)`](inferadb_ledger_types::OrganizationId); the
     /// accessor exists so metrics, tracing, and diagnostics can label output
     /// with a stable `shard` dimension before Task 5 enables runtime routing
     /// across `0..shards_per_region`.
-    pub fn shard_idx(&self) -> ShardIdx {
-        self.shard_idx
+    pub fn organization_id(&self) -> OrganizationId {
+        self.organization_id
     }
 
     /// Returns the consensus handle.
@@ -572,14 +571,14 @@ pub struct RaftManager {
     config: RaftManagerConfig,
     /// Per-region database storage manager.
     storage_manager: RegionStorageManager,
-    /// Active shard groups indexed by `(region, shard_idx)`.
+    /// Active shard groups indexed by `(region, organization_id)`.
     ///
     /// Each region hosts `self.config.shards_per_region` shards — one
     /// `RegionGroup` per shard. Services that currently address a region
     /// only (Task 5 will migrate them to explicit shard selection)
     /// resolve via `self.get_region_group(region)`, which routes to
-    /// `ShardIdx(0)` as a compatibility shim until routing lands.
-    regions: RwLock<HashMap<(Region, ShardIdx), Arc<RegionGroup>>>,
+    /// `OrganizationId::new(0)` as a compatibility shim until routing lands.
+    regions: RwLock<HashMap<(Region, OrganizationId), Arc<RegionGroup>>>,
     /// Shared peer address map (node ID → network address).
     ///
     /// Populated from `initial_members` during region startup and updated
@@ -647,16 +646,6 @@ impl RaftManager {
         }
     }
 
-    /// Returns the shard router configured for this manager.
-    ///
-    /// The router resolves `(region, org_id)` → shard index via seahash %
-    /// `shards_per_region`. Used by services at the proposal boundary to
-    /// route each incoming write to the correct Raft group.
-    #[must_use]
-    pub fn shard_router(&self) -> inferadb_ledger_state::shard_routing::ShardRouter {
-        inferadb_ledger_state::shard_routing::ShardRouter::new(self.config.shards_per_region)
-    }
-
     /// Resolves the `(region, shard)` Raft group that should own a
     /// [`LedgerRequest`] under saga / `RegionalProposal` forwarding.
     ///
@@ -669,7 +658,7 @@ impl RaftManager {
     ///   write and the user's regular reads.
     /// - **Saga records (`organization == SYSTEM_ORGANIZATION_ID`,
     ///   i.e. `0`) and other org-less variants pin to
-    ///   [`ShardIdx(0)`](inferadb_ledger_state::shard_routing::ShardIdx).**
+    ///   [`OrganizationId::new(0)`](inferadb_ledger_types::OrganizationId).**
     ///   This colocates saga state on a single shard so saga read paths
     ///   (`load_saga_pii`, `load_pending_sagas`) — which read from the
     ///   shard-0 group via `get_region_group` — find what saga writes
@@ -705,16 +694,18 @@ impl RaftManager {
             },
             _ => None,
         };
-        let shard_idx = match org {
+        let organization_id = match org {
             // System-org writes (saga records, system-vault internals)
             // pin to shard 0 so the saga orchestrator's read path —
             // which uses `get_region_group` and thus reads from shard 0 —
             // sees what its writes produced.
-            Some(organization) if organization == SYSTEM_ORGANIZATION_ID => ShardIdx(0),
-            Some(organization) => self.shard_router().resolve(region, organization),
-            None => ShardIdx(0),
+            // B.1.1 + B.1.2 transitional: every region runs a single
+            // RegionGroup at `OrganizationId::new(0)`. Real per-organization
+            // Raft groups land in B.1.6.
+            Some(_organization) => OrganizationId::new(0),
+            None => OrganizationId::new(0),
         };
-        self.get_shard_group(region, shard_idx)
+        self.get_shard_group(region, organization_id)
     }
 
     /// Returns the last crash-recovery replay stats captured for `region`, if any.
@@ -794,24 +785,24 @@ impl RaftManager {
     /// is currently active.
     pub fn get_region_group(&self, region: Region) -> Result<Arc<RegionGroup>> {
         // Task 4 shim: single-shard-per-region runtime (Task 4.2 will loop
-        // start_region over N shards; Task 5 will plumb ShardIdx through
+        // start_region over N shards; Task 5 will plumb OrganizationId through
         // services). Until then, legacy callers continue to address shard 0.
         self.regions
             .read()
-            .get(&(region, ShardIdx(0)))
+            .get(&(region, OrganizationId::new(0)))
             .cloned()
             .ok_or(RaftManagerError::RegionNotFound { region })
     }
 
-    /// Looks up the `RegionGroup` owning `(region, shard_idx)`.
+    /// Looks up the `RegionGroup` owning `(region, organization_id)`.
     ///
-    /// Phase A routing: services resolve `ShardIdx` via
-    /// [`inferadb_ledger_state::shard_routing::ShardRouter`] (see
+    /// Phase A routing: services resolve `OrganizationId` via
+    /// [`inferadb_ledger_types::ShardRouter`] (see
     /// [`RaftManager::shard_router`](Self::shard_router)) and call this to
     /// reach the owning shard's Raft group. Task 5 migrates service call
     /// sites from [`get_region_group`](Self::get_region_group) to this
     /// method; until then the two are equivalent (single-shard runtime).
-    pub fn get_shard_group(&self, region: Region, shard: ShardIdx) -> Result<Arc<RegionGroup>> {
+    pub fn get_shard_group(&self, region: Region, shard: OrganizationId) -> Result<Arc<RegionGroup>> {
         self.regions
             .read()
             .get(&(region, shard))
@@ -846,7 +837,7 @@ impl RaftManager {
     }
 
     /// Lists all active (region, shard) pairs.
-    pub fn list_shards(&self) -> Vec<(Region, ShardIdx)> {
+    pub fn list_shards(&self) -> Vec<(Region, OrganizationId)> {
         self.regions.read().keys().copied().collect()
     }
 
@@ -864,16 +855,16 @@ impl RaftManager {
 
     /// Checks if a region is active (has at least shard 0 running).
     pub fn has_region(&self, region: Region) -> bool {
-        self.regions.read().contains_key(&(region, ShardIdx(0)))
+        self.regions.read().contains_key(&(region, OrganizationId::new(0)))
     }
 
     /// Checks if a specific `(region, shard)` Raft group is active.
     ///
     /// `start_region`'s pre-insert duplicate guard uses this so per-shard
-    /// loops can re-enter `start_region` for the next `shard_idx` without
+    /// loops can re-enter `start_region` for the next `organization_id` without
     /// the prior shard's registration tripping the check.
-    pub fn has_shard(&self, region: Region, shard_idx: ShardIdx) -> bool {
-        self.regions.read().contains_key(&(region, shard_idx))
+    pub fn has_shard(&self, region: Region, organization_id: OrganizationId) -> bool {
+        self.regions.read().contains_key(&(region, organization_id))
     }
 
     /// Returns the number of shards a `region` should run.
@@ -931,7 +922,7 @@ impl RaftManager {
 
         let region_group = Arc::new(RegionGroup {
             region,
-            shard_idx: ShardIdx(0),
+            organization_id: OrganizationId::new(0),
             handle,
             state: state.clone(),
             raft_db,
@@ -953,7 +944,7 @@ impl RaftManager {
 
         {
             let mut regions = self.regions.write();
-            regions.insert((region, ShardIdx(0)), region_group.clone());
+            regions.insert((region, OrganizationId::new(0)), region_group.clone());
         }
 
         Ok(region_group)
@@ -977,14 +968,22 @@ impl RaftManager {
     /// * `organization` - Internal organization identifier (`OrganizationId`).
     pub fn route_organization(&self, organization: OrganizationId) -> Option<Arc<RegionGroup>> {
         let region = self.get_organization_region(organization)?;
-        let shard_idx = self.shard_router().resolve(region, organization);
+        // B.1.1 + B.1.2 transitional: every region currently runs a single
+        // RegionGroup at `OrganizationId::new(0)` (bootstrap creates it via
+        // `start_region`). Real per-organization Raft groups land in B.1.6
+        // when `CreateOrganization` apply triggers `start_organization_group`.
+        // Until then, all organization traffic routes to the bootstrap
+        // group. The `organization` argument is unused by the lookup but
+        // retained on the signature so the call sites don't churn twice.
+        let _ = organization;
+        let organization_id = OrganizationId::new(0);
 
         // Get local `(region, shard)` group. Data regions + their N shards
         // are created through GLOBAL Raft consensus (CreateDataRegion +
         // start_region_shards), so we don't lazily create here — the shard
         // must already exist from a prior consensus proposal + region
         // start.
-        let group = self.regions.read().get(&(region, shard_idx)).cloned()?;
+        let group = self.regions.read().get(&(region, organization_id)).cloned()?;
         group.touch();
 
         // Auto-wake hibernated regions on first request
@@ -1031,7 +1030,7 @@ impl RaftManager {
 
         // GLOBAL is always single-shard — cluster-wide control state has no
         // routing dimension to spread across additional shards.
-        self.start_region(region_config, ShardIdx(0)).await
+        self.start_region(region_config, OrganizationId::new(0)).await
     }
 
     /// Starts a data region.
@@ -1060,7 +1059,7 @@ impl RaftManager {
         // Phase A: each data region runs `shards_per_region` independent
         // Raft groups. Each iteration opens its own per-shard storage,
         // builds its own consensus engine + reactor + WAL, and registers
-        // itself under `(region, ShardIdx(N))` in the regions map.
+        // itself under `(region, OrganizationId(N))` in the regions map.
         //
         // Failure semantics: if any shard fails to start, propagate the
         // error. Earlier shards remain registered — a retry through
@@ -1074,8 +1073,8 @@ impl RaftManager {
     }
 
     /// Loops `start_region` over `0..shard_count`, returning the
-    /// `ShardIdx(0)` group as a legacy convenience for callers that don't
-    /// yet route via [`ShardRouter`](inferadb_ledger_state::shard_routing::ShardRouter).
+    /// `OrganizationId::new(0)` group as a legacy convenience for callers that don't
+    /// yet route via [`ShardRouter`](inferadb_ledger_types::ShardRouter).
     ///
     /// Each iteration receives a fresh clone of `region_config`. The
     /// `event_writer` field — when `Some` — is wired to a single
@@ -1086,7 +1085,7 @@ impl RaftManager {
     /// own `events.db` inside `open_region_storage`.
     ///
     /// Phase A always returns the shard-0 group; the wider set is
-    /// addressable via `get_shard_group(region, ShardIdx(N))`.
+    /// addressable via `get_shard_group(region, OrganizationId(N))`.
     async fn start_region_shards(
         &self,
         region_config: RegionConfig,
@@ -1106,21 +1105,26 @@ impl RaftManager {
         }
         let mut shard_zero: Option<Arc<RegionGroup>> = None;
         for n in 0..shard_count {
-            let shard_idx = ShardIdx(n);
+            // B.1 transitional: shard_count is 1 for now. Subsequent commits
+            // collapse this loop entirely — org-as-Raft-group means there is
+            // no per-region shard count; each organization is its own group
+            // and is created by `CreateOrganization` apply, not by
+            // `start_region` iteration.
+            let organization_id = OrganizationId::new(n as i64);
             // Idempotent retry: if a prior attempt already started this
             // shard, skip it. Without the skip, partial-progress recovery
             // would loop forever — every retry would re-trip start_region's
             // `has_shard` guard on shards 0..k and return RegionExists.
-            if self.has_shard(region, shard_idx) {
+            if self.has_shard(region, organization_id) {
                 if n == 0
-                    && let Ok(existing) = self.get_shard_group(region, shard_idx)
+                    && let Ok(existing) = self.get_shard_group(region, organization_id)
                 {
                     shard_zero = Some(existing);
                 }
                 continue;
             }
             let per_shard_config = region_config.clone();
-            match self.start_region(per_shard_config, shard_idx).await {
+            match self.start_region(per_shard_config, organization_id).await {
                 Ok(group) => {
                     if n == 0 {
                         shard_zero = Some(group);
@@ -1217,16 +1221,16 @@ impl RaftManager {
     /// Starts a region group for a specific shard.
     ///
     /// Phase A always passes
-    /// [`ShardIdx(0)`](inferadb_ledger_state::shard_routing::ShardIdx); a
+    /// [`OrganizationId::new(0)`](inferadb_ledger_types::OrganizationId); a
     /// follow-up loop in the calling layer will iterate
-    /// `0..shards_per_region` so each `(region, shard_idx)` pair gets its
+    /// `0..shards_per_region` so each `(region, organization_id)` pair gets its
     /// own independent Raft group, WAL, and state DBs. The function is
-    /// already shaped to take a per-shard `shard_idx`; the caller decides
+    /// already shaped to take a per-shard `organization_id`; the caller decides
     /// how many shards to spin up.
     async fn start_region(
         &self,
         region_config: RegionConfig,
-        shard_idx: ShardIdx,
+        organization_id: OrganizationId,
     ) -> Result<Arc<RegionGroup>> {
         // Destructure config upfront to avoid partial-move issues
         let RegionConfig {
@@ -1239,7 +1243,7 @@ impl RaftManager {
             events_config,
         } = region_config;
 
-        // Check if this specific `(region, shard_idx)` Raft group is already
+        // Check if this specific `(region, organization_id)` Raft group is already
         // running. The check is per-shard because step 5.1b loops
         // `start_region` across `0..shards_per_region`, so re-entry for the
         // next shard must NOT see the prior shard as a duplicate.
@@ -1247,7 +1251,7 @@ impl RaftManager {
         // `RegionStorageManager::open_shard` provides the true guard
         // (returns `AlreadyOpen`) and `ensure_data_region` handles both
         // `RegionExists` and `RegionAlreadyOpen` gracefully.
-        if self.has_shard(region, shard_idx) {
+        if self.has_shard(region, organization_id) {
             return Err(RaftManagerError::RegionExists { region });
         }
 
@@ -1278,7 +1282,7 @@ impl RaftManager {
             region_creation_rx,
         ) = self.open_region_storage(
             region,
-            shard_idx,
+            organization_id,
             event_writer,
             events_config,
             divergence_sender,
@@ -1313,14 +1317,14 @@ impl RaftManager {
             auto_promote: region == Region::GLOBAL,
             ..Default::default()
         };
-        // Consensus `ShardId` must be unique across `(region, shard_idx)` —
+        // Consensus `ShardId` must be unique across `(region, organization_id)` —
         // each Raft group runs independently, so colliding IDs would alias
         // two distinct groups in the engine's shard map. Mix the shard idx
         // into the seahash so all N shards in a region get distinct IDs.
         let shard_id = {
             let mut bytes = Vec::with_capacity(region.as_str().len() + 8);
             bytes.extend_from_slice(region.as_str().as_bytes());
-            bytes.extend_from_slice(&shard_idx.0.to_le_bytes());
+            bytes.extend_from_slice(&organization_id.value().to_le_bytes());
             inferadb_ledger_consensus::types::ShardId(seahash::hash(&bytes))
         };
 
@@ -1365,7 +1369,8 @@ impl RaftManager {
             inferadb_ledger_consensus::types::Membership::new(voter_ids)
         };
 
-        let wal_dir = self.storage_manager.shard_dir(region, shard_idx).join("wal");
+        let wal_dir =
+            self.storage_manager.organization_dir(region, organization_id).join("wal");
         let wal =
             inferadb_ledger_consensus::wal::SegmentedWalBackend::open(&wal_dir).map_err(|e| {
                 RaftManagerError::Storage { region, message: format!("failed to open WAL: {e}") }
@@ -1417,7 +1422,7 @@ impl RaftManager {
         // concurrent modifier of `applied_state`.
         match log_store.replay_crash_gap(&wal, shard_id).await {
             Ok(stats) => {
-                let shard_label = shard_idx.0.to_string();
+                let shard_label = organization_id.value().to_string();
                 metrics::record_state_recovery_replay(
                     region.as_str(),
                     &shard_label,
@@ -1507,7 +1512,7 @@ impl RaftManager {
         let handle = Arc::new(ConsensusHandle::new(
             engine,
             shard_id,
-            shard_idx,
+            organization_id,
             self.config.node_id,
             state_rx,
             response_map,
@@ -1537,7 +1542,7 @@ impl RaftManager {
                     >
             };
 
-            let writer = BatchWriter::new(batch_config, submit_fn, region.to_string(), shard_idx);
+            let writer = BatchWriter::new(batch_config, submit_fn, region.to_string(), organization_id);
             let bw_handle = writer.handle();
             tokio::spawn(writer.run());
             Some(bw_handle)
@@ -1549,7 +1554,7 @@ impl RaftManager {
         let background_jobs = if enable_background_jobs {
             self.start_background_jobs(
                 region,
-                shard_idx,
+                organization_id,
                 handle.clone(),
                 state.clone(),
                 Arc::clone(&raft_db),
@@ -1580,7 +1585,7 @@ impl RaftManager {
             handle.response_map().clone(),
             handle.spillover().clone(),
             region.as_str().to_string(),
-            shard_idx,
+            organization_id,
         );
         if region == inferadb_ledger_types::Region::GLOBAL {
             apply_worker = apply_worker.with_dr_event_tx(self.dr_event_tx.clone());
@@ -1597,7 +1602,7 @@ impl RaftManager {
         let blocks_db = Arc::clone(block_archive.db());
         let region_group = Arc::new(RegionGroup {
             region,
-            shard_idx,
+            organization_id,
             handle,
             state,
             raft_db,
@@ -1619,12 +1624,12 @@ impl RaftManager {
 
         {
             let mut regions = self.regions.write();
-            regions.insert((region, shard_idx), region_group.clone());
+            regions.insert((region, organization_id), region_group.clone());
         }
 
         info!(
             region = region.as_str(),
-            shard = shard_idx.0,
+            shard = organization_id.value(),
             "Region group started successfully"
         );
 
@@ -1643,7 +1648,7 @@ impl RaftManager {
     fn start_background_jobs(
         &self,
         region: Region,
-        shard_idx: ShardIdx,
+        organization_id: OrganizationId,
         handle: Arc<ConsensusHandle>,
         state: Arc<StateLayer<FileBackend>>,
         raft_db: Arc<Database<FileBackend>>,
@@ -1719,7 +1724,7 @@ impl RaftManager {
             applied_index_rx,
             parent_token.child_token(),
             region.as_str().to_string(),
-            shard_idx,
+            organization_id,
         );
         let state_checkpointer_handle = state_checkpointer.start();
         info!(region = region.as_str(), "Started state checkpointer");
@@ -1763,16 +1768,16 @@ impl RaftManager {
     fn open_region_storage(
         &self,
         region: Region,
-        shard_idx: ShardIdx,
+        organization_id: OrganizationId,
         event_writer: Option<EventWriter<FileBackend>>,
         events_config: Option<inferadb_ledger_types::events::EventConfig>,
         divergence_sender: tokio::sync::mpsc::UnboundedSender<crate::types::StateRootDivergence>,
     ) -> Result<OpenedRegionStorage> {
-        // Open per-shard databases via storage manager. Each `(region, shard_idx)`
+        // Open per-shard databases via storage manager. Each `(region, organization_id)`
         // gets its own state.db / blocks.db / events.db / raft.db under the
         // shard-{N}/ subdirectory laid out by Task 3 — independent IO paths so
         // shard A's fsync stream does not block shard B's commit.
-        let storage = self.storage_manager.open_shard(region, shard_idx).map_err(|e| {
+        let storage = self.storage_manager.open_organization(region, organization_id).map_err(|e| {
             if matches!(e, crate::region_storage::RegionStorageError::AlreadyOpen { .. }) {
                 RaftManagerError::RegionAlreadyOpen { region }
             } else {
@@ -1789,7 +1794,7 @@ impl RaftManager {
         let (block_announcements, _) = broadcast::channel(1024);
 
         // Open Raft log store (uses inferadb-ledger-store storage - handles open/create internally)
-        let log_path = self.storage_manager.raft_db_path(region, shard_idx);
+        let log_path = self.storage_manager.raft_db_path(region, organization_id);
         // Derive leader lease duration from election_timeout_min / 2.
         // This guarantees no new leader can be elected while the lease is valid.
         let lease_duration =
@@ -1851,7 +1856,7 @@ impl RaftManager {
         let region_group = {
             let mut regions = self.regions.write();
             regions
-                .remove(&(region, ShardIdx(0)))
+                .remove(&(region, OrganizationId::new(0)))
                 .ok_or(RaftManagerError::RegionNotFound { region })?
         };
 
@@ -1868,9 +1873,19 @@ impl RaftManager {
             handle.request_shutdown().await;
         });
 
-        // Close region storage (removes from storage manager tracking)
-        if let Err(e) = self.storage_manager.close_region(region) {
-            warn!(region = region.as_str(), error = %e, "Error closing region storage");
+        // Close organization storage (removes from storage manager tracking).
+        // B.1 transitional: closes the (region, organization_id) pair the
+        // legacy `start_region` opened. Subsequent commits will iterate
+        // every active organization in the region.
+        if let Err(e) = self
+            .storage_manager
+            .close_organization(region, region_group.organization_id())
+        {
+            warn!(
+                region = region.as_str(),
+                error = %e,
+                "Error closing organization storage"
+            );
         }
 
         info!(region = region.as_str(), "Region group stopped");
@@ -1937,7 +1952,7 @@ impl RaftManager {
             // Snapshot the region group under the read lock, drop the lock
             // before awaiting so the shutdown sweep never contends with
             // other readers for the regions map.
-            let group = self.regions.read().get(&(region, ShardIdx(0))).cloned();
+            let group = self.regions.read().get(&(region, OrganizationId::new(0))).cloned();
             let Some(group) = group else {
                 debug!(
                     region = region.as_str(),
@@ -2080,7 +2095,7 @@ impl RaftManager {
             // Clone the region Arc so we can drop the lock before awaiting
             let region_group = {
                 let regions = self.regions.read();
-                regions.get(&(*region, ShardIdx(0))).cloned()
+                regions.get(&(*region, OrganizationId::new(0))).cloned()
             };
 
             if let Some(region_group) = region_group
@@ -2160,7 +2175,7 @@ impl RaftManager {
         group.touch();
         let jobs = self.start_background_jobs(
             region,
-            group.shard_idx(),
+            group.organization_id(),
             group.handle().clone(),
             group.state().clone(),
             Arc::clone(group.raft_db()),
@@ -2180,7 +2195,7 @@ impl RaftManager {
     ///
     /// The system region (`GLOBAL`) is never hibernated.
     pub fn hibernate_idle_regions(&self, idle_timeout_secs: u64) {
-        let regions: Vec<((Region, ShardIdx), Arc<RegionGroup>)> =
+        let regions: Vec<((Region, OrganizationId), Arc<RegionGroup>)> =
             self.regions.read().iter().map(|(k, g)| (*k, g.clone())).collect();
 
         for ((region, _shard), group) in regions {
@@ -2341,12 +2356,13 @@ mod tests {
         assert!(global_dir.ends_with("global"));
         assert!(!global_dir.to_string_lossy().contains("regions"));
 
-        // Data region directories
+        // Data region directories — B.1 layout drops the `regions/` parent.
         let data_dir = manager.region_dir(Region::US_EAST_VA);
-        assert!(data_dir.ends_with("regions/us-east-va"));
+        assert!(data_dir.ends_with("us-east-va"));
+        assert!(!data_dir.to_string_lossy().contains("regions"));
 
         let data_dir = manager.region_dir(Region::JP_EAST_TOKYO);
-        assert!(data_dir.ends_with("regions/jp-east-tokyo"));
+        assert!(data_dir.ends_with("jp-east-tokyo"));
     }
 
     #[test]

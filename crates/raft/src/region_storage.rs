@@ -1,43 +1,56 @@
-//! Per-shard database file layout management.
+//! Per-organization database file layout management.
 //!
-//! Each shard (Raft group) gets isolated database files under a dedicated
-//! directory. A region hosts N shards via
-//! `NodeConfig.shards_per_region`; orgs within the region route to shards
-//! via [`inferadb_ledger_state::shard_routing::ShardRouter`]. This
-//! eliminates write-lock contention between concurrent Raft-group applies,
-//! enables per-region encryption (one `EncryptedBackend` per file with
-//! that region's RMK), and keeps migration / snapshot / crypto-shredding
-//! scoped to a single shard directory.
+//! Each organization (Raft group, in the B.1 three-tier model) gets isolated
+//! database files under a dedicated directory. Routing is by `OrganizationId`
+//! — the organization id IS the storage key. No hash function, no fixed shard
+//! count.
 //!
-//! ## On-disk layout
+//! This commit (B.1.1 — storage layout migration) handles only the path
+//! scheme + the `ShardIdx → OrganizationId` rename. The three peer-group
+//! distinction (`SystemGroup` / `RegionGroup` / `OrganizationGroup`) and its
+//! storage shapes (system + organization carry blocks.db; region group does
+//! not) land in B.1.3. For now this module manages a uniform per-organization
+//! storage shape (state, blocks, events, raft + WAL); the region group's
+//! `_meta/` subdirectory will be introduced in B.1.3.
+//!
+//! ## On-disk layout (B.1.1)
 //!
 //! ```text
 //! {data_dir}/
 //! ├── node_id                          # node identity (unchanged)
-//! ├── global/                          # GLOBAL Raft group (_system control plane)
-//! │   └── shard-0/                     # GLOBAL is always single-shard (Phase A)
-//! │       ├── state.db                 # org registry, sequences, sagas, node info (no PII)
+//! ├── global/                          # GLOBAL region — hosts the system org only
+//! │   └── 0/                           # system org (OrganizationId(0))
+//! │       ├── state.db                 # cluster directory, signing keys, refresh tokens
 //! │       ├── blocks.db                # global blockchain
-//! │       ├── raft.db                  # Raft log for GLOBAL group
-//! │       ├── events.db                # audit events for GLOBAL group
+//! │       ├── raft.db                  # Raft log for system org
+//! │       ├── events.db                # audit events for system org
 //! │       └── wal/                     # consensus WAL segments
-//! ├── regions/                         # per-region data (orgs + user PII)
-//! │   ├── us_east_va/
-//! │   │   ├── shard-0/
-//! │   │   │   ├── state.db
-//! │   │   │   ├── blocks.db
-//! │   │   │   ├── raft.db
-//! │   │   │   ├── events.db
-//! │   │   │   └── wal/
-//! │   │   ├── shard-1/
-//! │   │   │   └── ...
-//! │   │   └── shard-N/
-//! │   └── .../
-//! ├── snapshots/                       # per-shard snapshot directories
-//! │   ├── global/shard-0/
-//! │   └── .../
+//! ├── {region}/                        # data regions — one subdirectory per region
+//! │   ├── {organization_id_a}/         # organization Raft group
+//! │   │   ├── state.db
+//! │   │   ├── blocks.db
+//! │   │   ├── raft.db
+//! │   │   ├── events.db
+//! │   │   └── wal/
+//! │   ├── {organization_id_b}/
+//! │   │   └── ...
+//! │   └── _meta/                       # added in B.1.3 — region group state
+//! ├── snapshots/                       # per-organization snapshot directories
+//! │   ├── global/0/
+//! │   └── {region}/{organization_id}/
 //! └── keys/                            # per-region RMK storage (managed by RegionKeyManager)
 //! ```
+//!
+//! Notes on the path scheme:
+//! - The data-region parent directory is `{data_dir}/{region}/` directly —
+//!   no intermediate `regions/` directory. Operators reading `ls` of the
+//!   data dir see one directory per region (plus `global/`, `snapshots/`,
+//!   `keys/`). Cleaner mental model than the Phase A `regions/{region}/`
+//!   nesting.
+//! - GLOBAL keeps the top-level `global/` name (rather than collapsing
+//!   into the data-region scheme) because the system org is structurally
+//!   special: it is the cluster control plane and is bootstrapped before
+//!   any data regions exist.
 
 use std::{
     collections::HashMap,
@@ -45,42 +58,46 @@ use std::{
     sync::Arc,
 };
 
-use inferadb_ledger_state::{EventsDatabase, shard_routing::ShardIdx};
+use inferadb_ledger_state::EventsDatabase;
 use inferadb_ledger_store::{Database, DatabaseConfig, FileBackend};
-use inferadb_ledger_types::Region;
+use inferadb_ledger_types::{OrganizationId, Region};
 use parking_lot::RwLock;
 use snafu::Snafu;
 
-/// Page size for all per-region databases (16KB).
+/// Page size for all per-organization databases (16KB).
 ///
 /// Matches `RAFT_PAGE_SIZE` in `RaftLogStore` to support larger batch sizes.
-const REGION_PAGE_SIZE: usize = 16 * 1024;
+const ORGANIZATION_PAGE_SIZE: usize = 16 * 1024;
 
 // ============================================================================
 // Error Types
 // ============================================================================
 
-/// Errors from region storage operations.
+/// Errors from organization storage operations.
 #[derive(Debug, Snafu)]
 pub enum RegionStorageError {
-    /// Region is already open.
-    #[snafu(display("Region {region} is already open"))]
+    /// Organization storage is already open.
+    #[snafu(display("Organization {organization_id} in region {region} is already open"))]
     AlreadyOpen {
-        /// The region that was already open.
+        /// The region.
         region: Region,
+        /// The organization that was already open.
+        organization_id: OrganizationId,
     },
 
-    /// Region is not open.
-    #[snafu(display("Region {region} is not open"))]
+    /// Organization storage is not open.
+    #[snafu(display("Organization {organization_id} in region {region} is not open"))]
     NotOpen {
-        /// The region that was not found.
+        /// The region.
         region: Region,
+        /// The organization that was not found.
+        organization_id: OrganizationId,
     },
 
     /// Legacy flat layout detected.
     #[snafu(display(
         "Legacy flat layout detected: found state.db in {data_dir}. \
-         Per-region directory layout required. \
+         Per-organization directory layout required. \
          Start with a fresh data directory or migrate via backup/restore."
     ))]
     LegacyLayout {
@@ -89,10 +106,12 @@ pub enum RegionStorageError {
     },
 
     /// Storage I/O or database error.
-    #[snafu(display("Storage error for region {region}: {message}"))]
+    #[snafu(display("Storage error for organization {organization_id} in region {region}: {message}"))]
     Storage {
         /// The region the error pertains to.
         region: Region,
+        /// The organization the error pertains to.
+        organization_id: OrganizationId,
         /// Description of the error.
         message: String,
     },
@@ -102,31 +121,46 @@ pub enum RegionStorageError {
 // RegionStorage
 // ============================================================================
 
-/// Storage components for a single region.
+/// Storage components for a single organization's Raft group.
 ///
-/// Holds the raw database handles (state, blocks, events) for one region.
+/// Holds the raw database handles (state, blocks, events) for one organization.
 /// The Raft log database (`raft.db`) is owned by
-/// [`RaftLogStore`](crate::log_storage::RaftLogStore), not this struct — it is consumed by the
-/// openraft `Adaptor`.
+/// [`RaftLogStore`](crate::log_storage::RaftLogStore), not this struct — it is
+/// consumed by the consensus engine's `Adaptor`.
 ///
 /// Higher-level wrappers ([`StateLayer`](inferadb_ledger_state::StateLayer),
 /// [`BlockArchive`](inferadb_ledger_state::BlockArchive)) are created from
-/// these raw handles in [`RegionGroup`](crate::raft_manager::RegionGroup).
+/// these raw handles in
+/// [`RegionGroup`](crate::raft_manager::RegionGroup) (which is renamed to
+/// `OrganizationGroup` in B.1.3).
+///
+/// **Naming note.** This struct retains its B.1.1 transitional name
+/// `RegionStorage` to keep the diff scoped. B.1.3 renames it to
+/// `OrganizationStorage` alongside the broader `RegionGroup → OrganizationGroup`
+/// type rename.
 pub struct RegionStorage {
-    /// Region this storage belongs to.
+    /// Region this organization belongs to.
     region: Region,
-    /// State database (entity/relationship stores, indexes, org registry for GLOBAL).
+    /// Organization this storage belongs to.
+    organization_id: OrganizationId,
+    /// State database (entity / relationship stores, indexes; for the system
+    /// org this also holds the cluster + organization directory).
     state_db: Arc<Database<FileBackend>>,
-    /// Blocks database (historical blockchain data).
+    /// Blocks database (historical blockchain data for this organization).
     blocks_db: Arc<Database<FileBackend>>,
-    /// Events database (audit event persistence).
+    /// Events database (apply-phase audit events for this organization).
     events_db: Arc<EventsDatabase<FileBackend>>,
 }
 
 impl RegionStorage {
-    /// Returns the region this storage belongs to.
+    /// Returns the region this organization belongs to.
     pub fn region(&self) -> Region {
         self.region
+    }
+
+    /// Returns the organization this storage belongs to.
+    pub fn organization_id(&self) -> OrganizationId {
+        self.organization_id
     }
 
     /// Returns the state database handle.
@@ -149,80 +183,90 @@ impl RegionStorage {
 // RegionStorageManager
 // ============================================================================
 
-/// Manages per-shard database file layout and lifecycle.
+/// Manages on-disk storage layout for organizations across regions.
 ///
-/// Opens and closes per-shard database directories under the per-region
-/// tree (`global/shard-{N}/`, `regions/{name}/shard-{N}/`). Detects legacy
-/// flat layouts and produces clear errors.
+/// Lays out one directory per `(Region, OrganizationId)` pair under the data
+/// directory. Tracks which `(region, organization)` storage handles are
+/// currently open and prevents double-opening.
 ///
-/// Each region hosts `shards_per_region` shards (Phase A: fixed at region
-/// creation). Orgs within the region route to shards via
-/// [`inferadb_ledger_state::shard_routing::ShardRouter`]; the storage
-/// manager is agnostic to routing — it just opens what it's asked to open.
+/// **Naming note.** Retains its B.1.1 transitional name `RegionStorageManager`
+/// alongside `RegionStorage` for diff scoping. B.1.3's broader rename pass
+/// renames it to `OrganizationStorageManager` (or absorbs it into the new
+/// per-tier storage manager triplet — TBD during B.1.3 implementation).
 pub struct RegionStorageManager {
-    /// Base data directory.
+    /// Root data directory.
     data_dir: PathBuf,
-    /// Open per-shard storage indexed by `(region, shard_idx)`.
-    shards: RwLock<HashMap<(Region, ShardIdx), Arc<RegionStorage>>>,
+    /// Open organization storage handles, keyed by `(region, organization_id)`.
+    organizations: RwLock<HashMap<(Region, OrganizationId), Arc<RegionStorage>>>,
 }
 
 impl RegionStorageManager {
-    /// Creates a new storage manager for the given data directory.
+    /// Creates a new storage manager rooted at `data_dir`.
     pub fn new(data_dir: PathBuf) -> Self {
-        Self { data_dir, shards: RwLock::new(HashMap::new()) }
+        Self { data_dir, organizations: RwLock::new(HashMap::new()) }
     }
 
-    /// Returns the base data directory.
+    /// Returns the root data directory.
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
     }
 
-    /// Returns the base directory for a region (parent of its shard subdirs).
+    /// Returns the base directory for a region (parent of its organization
+    /// subdirectories).
     ///
     /// - `GLOBAL` → `{data_dir}/global/`
-    /// - Others → `{data_dir}/regions/{region_name}/`
+    /// - Others → `{data_dir}/{region_name}/`
     ///
-    /// Per-shard files live under [`shard_dir`](Self::shard_dir). This
-    /// method is retained for operations that span all shards in a region
-    /// (e.g. directory discovery, region-level cleanup).
+    /// Per-organization files live under [`organization_dir`](Self::organization_dir).
+    /// This method is retained for operations that span all organizations
+    /// in a region (directory discovery, region-level cleanup).
     pub fn region_dir(&self, region: Region) -> PathBuf {
         if region == Region::GLOBAL {
             self.data_dir.join("global")
         } else {
-            self.data_dir.join("regions").join(region.as_str())
+            self.data_dir.join(region.as_str())
         }
     }
 
-    /// Returns the data directory for a specific (region, shard) pair.
+    /// Returns the data directory for a specific `(region, organization)` pair.
     ///
-    /// Layout: `{region_dir}/shard-{shard_idx}/`. Contains `state.db`,
-    /// `blocks.db`, `raft.db`, `events.db`, and `wal/` for that shard.
-    pub fn shard_dir(&self, region: Region, shard: ShardIdx) -> PathBuf {
-        self.region_dir(region).join(format!("shard-{}", shard.value()))
+    /// Layout: `{region_dir}/{organization_id}/`. Contains `state.db`,
+    /// `blocks.db`, `raft.db`, `events.db`, and `wal/` for that organization.
+    pub fn organization_dir(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+    ) -> PathBuf {
+        self.region_dir(region).join(organization_id.value().to_string())
     }
 
-    /// Returns the snapshot directory for a specific (region, shard) pair.
+    /// Returns the snapshot directory for a specific `(region, organization)` pair.
     ///
-    /// - `GLOBAL` → `{data_dir}/snapshots/global/shard-{N}/`
-    /// - Others → `{data_dir}/snapshots/{region_name}/shard-{N}/`
-    pub fn snapshot_dir(&self, region: Region, shard: ShardIdx) -> PathBuf {
+    /// - `GLOBAL` → `{data_dir}/snapshots/global/{organization_id}/`
+    /// - Others → `{data_dir}/snapshots/{region_name}/{organization_id}/`
+    pub fn snapshot_dir(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+    ) -> PathBuf {
         let base = if region == Region::GLOBAL {
             self.data_dir.join("snapshots").join("global")
         } else {
             self.data_dir.join("snapshots").join(region.as_str())
         };
-        base.join(format!("shard-{}", shard.value()))
+        base.join(organization_id.value().to_string())
     }
 
-    /// Returns the Raft log database path for a specific (region, shard).
-    pub fn raft_db_path(&self, region: Region, shard: ShardIdx) -> PathBuf {
-        self.shard_dir(region, shard).join("raft.db")
+    /// Returns the Raft log database path for a specific `(region, organization)`.
+    pub fn raft_db_path(&self, region: Region, organization_id: OrganizationId) -> PathBuf {
+        self.organization_dir(region, organization_id).join("raft.db")
     }
 
     /// Checks for legacy flat layout and returns an error if detected.
     ///
     /// A legacy flat layout has `state.db` directly in the data directory root.
-    /// The per-region layout places databases under `global/` or `regions/{name}/`.
+    /// The per-organization layout places databases under
+    /// `global/{organization_id}/` or `{region_name}/{organization_id}/`.
     ///
     /// # Errors
     ///
@@ -237,148 +281,139 @@ impl RegionStorageManager {
         Ok(())
     }
 
-    /// Opens storage for a specific shard of a region.
+    /// Opens storage for a specific organization in a region.
     ///
-    /// Creates the shard directory if it does not exist, then opens (or
-    /// creates) state, blocks, and events databases within it.
+    /// Creates the organization's directory if it does not exist, then opens
+    /// (or creates) state, blocks, and events databases within it.
     ///
     /// # Errors
     ///
-    /// Returns [`RegionStorageError::AlreadyOpen`] if that shard is
+    /// Returns [`RegionStorageError::AlreadyOpen`] if that organization is
     /// already open. Returns [`RegionStorageError::Storage`] if directory
     /// creation or database opening fails.
-    pub fn open_shard(
+    pub fn open_organization(
         &self,
         region: Region,
-        shard: ShardIdx,
+        organization_id: OrganizationId,
     ) -> Result<Arc<RegionStorage>, RegionStorageError> {
         // Hold write lock for the entire operation to prevent TOCTOU race
         // where two concurrent callers both pass the existence check and
         // open databases, with the second silently overwriting the first.
-        let mut shards = self.shards.write();
-        if shards.contains_key(&(region, shard)) {
-            return Err(RegionStorageError::AlreadyOpen { region });
+        let mut organizations = self.organizations.write();
+        if organizations.contains_key(&(region, organization_id)) {
+            return Err(RegionStorageError::AlreadyOpen { region, organization_id });
         }
 
-        let shard_dir = self.shard_dir(region, shard);
+        let organization_dir = self.organization_dir(region, organization_id);
 
         // Create directory tree
-        std::fs::create_dir_all(&shard_dir).map_err(|e| RegionStorageError::Storage {
+        std::fs::create_dir_all(&organization_dir).map_err(|e| RegionStorageError::Storage {
             region,
-            message: format!("failed to create shard directory {}: {e}", shard_dir.display()),
+            organization_id,
+            message: format!(
+                "failed to create organization directory {}: {e}",
+                organization_dir.display()
+            ),
         })?;
 
         // Open or create state database
-        let state_db_path = shard_dir.join("state.db");
-        let state_db = open_or_create_db(&state_db_path, region)?;
+        let state_db_path = organization_dir.join("state.db");
+        let state_db = open_or_create_db(&state_db_path, region, organization_id)?;
         let state_db = Arc::new(state_db);
 
         // Open or create blocks database
-        let blocks_db_path = shard_dir.join("blocks.db");
-        let blocks_db = open_or_create_db(&blocks_db_path, region)?;
+        let blocks_db_path = organization_dir.join("blocks.db");
+        let blocks_db = open_or_create_db(&blocks_db_path, region, organization_id)?;
         let blocks_db = Arc::new(blocks_db);
 
         // Open or create events database
-        let events_db = EventsDatabase::<FileBackend>::open(&shard_dir).map_err(|e| {
+        let events_db = EventsDatabase::<FileBackend>::open(&organization_dir).map_err(|e| {
             RegionStorageError::Storage {
                 region,
+                organization_id,
                 message: format!("failed to open events db: {e}"),
             }
         })?;
         let events_db = Arc::new(events_db);
 
-        let storage = Arc::new(RegionStorage { region, state_db, blocks_db, events_db });
+        let storage = Arc::new(RegionStorage {
+            region,
+            organization_id,
+            state_db,
+            blocks_db,
+            events_db,
+        });
 
-        shards.insert((region, shard), storage.clone());
+        organizations.insert((region, organization_id), storage.clone());
 
         tracing::info!(
             region = region.as_str(),
-            shard = shard.value(),
-            dir = %shard_dir.display(),
-            "Opened shard storage"
+            organization_id = organization_id.value(),
+            dir = %organization_dir.display(),
+            "Opened organization storage"
         );
 
         Ok(storage)
     }
 
-    /// Closes storage for a specific shard.
+    /// Closes storage for a specific organization.
     ///
-    /// Removes the shard from tracking. Actual database file closure
+    /// Removes the organization from tracking. Actual database file closure
     /// happens when all `Arc` references are dropped.
     ///
     /// # Errors
     ///
-    /// Returns [`RegionStorageError::NotOpen`] if that shard is not open.
-    pub fn close_shard(&self, region: Region, shard: ShardIdx) -> Result<(), RegionStorageError> {
-        let removed = self.shards.write().remove(&(region, shard));
+    /// Returns [`RegionStorageError::NotOpen`] if that organization is not open.
+    pub fn close_organization(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+    ) -> Result<(), RegionStorageError> {
+        let removed = self.organizations.write().remove(&(region, organization_id));
         if removed.is_none() {
-            return Err(RegionStorageError::NotOpen { region });
+            return Err(RegionStorageError::NotOpen { region, organization_id });
         }
-        tracing::info!(region = region.as_str(), shard = shard.value(), "Closed shard storage");
+        tracing::info!(
+            region = region.as_str(),
+            organization_id = organization_id.value(),
+            "Closed organization storage"
+        );
         Ok(())
     }
 
-    /// Returns the storage for a shard, if open.
-    pub fn get_shard(&self, region: Region, shard: ShardIdx) -> Option<Arc<RegionStorage>> {
-        self.shards.read().get(&(region, shard)).cloned()
+    /// Returns the storage for an organization, if open.
+    pub fn get_organization(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+    ) -> Option<Arc<RegionStorage>> {
+        self.organizations.read().get(&(region, organization_id)).cloned()
     }
 
-    /// Lists all currently open (region, shard) pairs.
-    pub fn open_shards(&self) -> Vec<(Region, ShardIdx)> {
-        self.shards.read().keys().copied().collect()
+    /// Lists all currently open `(region, organization_id)` pairs.
+    pub fn open_organizations(&self) -> Vec<(Region, OrganizationId)> {
+        self.organizations.read().keys().copied().collect()
     }
 
-    /// Returns the number of open shards (across all regions).
+    /// Returns the number of open organizations (across all regions).
     pub fn open_count(&self) -> usize {
-        self.shards.read().len()
-    }
-
-    // ── Legacy single-shard convenience aliases ──
-    //
-    // Task 3 keeps these so the raft_manager + tests don't all have to
-    // change at once. Task 4 (RegionGroup per-shard refactor) will call
-    // the shard-aware methods directly and these can be removed.
-
-    /// Legacy shim: opens shard-0 of `region`. Kept until Task 4 migrates
-    /// callers to iterate over `shards_per_region`.
-    #[doc(hidden)]
-    pub fn open_region(&self, region: Region) -> Result<Arc<RegionStorage>, RegionStorageError> {
-        self.open_shard(region, ShardIdx(0))
-    }
-
-    /// Legacy shim: closes shard-0 of `region`.
-    #[doc(hidden)]
-    pub fn close_region(&self, region: Region) -> Result<(), RegionStorageError> {
-        self.close_shard(region, ShardIdx(0))
-    }
-
-    /// Legacy shim: returns shard-0 storage of `region`.
-    #[doc(hidden)]
-    pub fn get(&self, region: Region) -> Option<Arc<RegionStorage>> {
-        self.get_shard(region, ShardIdx(0))
-    }
-
-    /// Legacy shim: lists regions that have shard-0 open. Task 4 replaces
-    /// this with full (region, shard) enumeration.
-    #[doc(hidden)]
-    pub fn regions(&self) -> Vec<Region> {
-        self.shards.read().keys().filter_map(|(r, s)| (s.value() == 0).then_some(*r)).collect()
+        self.organizations.read().len()
     }
 
     /// Discovers regions with existing data on disk.
     ///
-    /// Scans `{data_dir}/regions/` for subdirectories whose names match a known
-    /// `Region` variant. Returns the list of regions that have on-disk data and
-    /// should be opened eagerly on startup. GLOBAL is not included — it is always
-    /// started eagerly via `start_system_region`.
+    /// Scans `{data_dir}/` for top-level subdirectories whose names match a
+    /// known `Region` variant. Returns the list of regions that have on-disk
+    /// data and should be opened eagerly on startup. GLOBAL is not included
+    /// — it is always started eagerly via the system-group bootstrap.
     ///
-    /// Unknown directory names are silently skipped (future regions added after
-    /// a binary downgrade).
+    /// Unknown directory names are silently skipped (future regions added
+    /// after a binary downgrade, plus the special `global`, `snapshots`,
+    /// `keys` top-level directories).
     pub fn discover_existing_regions(&self) -> Vec<Region> {
-        let regions_dir = self.data_dir.join("regions");
-        let entries = match std::fs::read_dir(&regions_dir) {
+        let entries = match std::fs::read_dir(&self.data_dir) {
             Ok(entries) => entries,
-            Err(_) => return Vec::new(), // No regions/ directory yet
+            Err(_) => return Vec::new(),
         };
 
         let mut discovered = Vec::new();
@@ -390,7 +425,10 @@ impl RegionStorageManager {
                 Ok(name) => name,
                 Err(_) => continue,
             };
-            // Try to parse directory name as a Region (kebab-case)
+            // Try to parse directory name as a Region (kebab-case).
+            // Skips top-level directories like `global`, `snapshots`,
+            // `keys`, `node_id` (`global` would also fail to parse as a
+            // data Region; the `region != GLOBAL` guard is defensive).
             if let Ok(region) = dir_name.parse::<Region>()
                 && region != Region::GLOBAL
             {
@@ -405,19 +443,22 @@ impl RegionStorageManager {
 // Helpers
 // ============================================================================
 
-/// Opens an existing database or creates a new one with the region page size.
+/// Opens an existing database or creates a new one with the organization
+/// page size.
 fn open_or_create_db(
     path: &Path,
     region: Region,
+    organization_id: OrganizationId,
 ) -> Result<Database<FileBackend>, RegionStorageError> {
     if path.exists() {
         Database::<FileBackend>::open(path)
     } else {
-        let config = DatabaseConfig { page_size: REGION_PAGE_SIZE, ..Default::default() };
+        let config = DatabaseConfig { page_size: ORGANIZATION_PAGE_SIZE, ..Default::default() };
         Database::<FileBackend>::create_with_config(path, config)
     }
     .map_err(|e| RegionStorageError::Storage {
         region,
+        organization_id,
         message: format!("failed to open database {}: {e}", path.display()),
     })
 }
@@ -433,6 +474,10 @@ mod tests {
 
     use super::*;
 
+    /// System organization id (matches `state::system::SYSTEM_ORGANIZATION_ID`).
+    /// Used in tests as the canonical "always-present in GLOBAL" organization.
+    const SYSTEM_ORG: OrganizationId = OrganizationId::new(0);
+
     #[test]
     fn test_region_dir_global() {
         let temp = TestDir::new();
@@ -440,7 +485,6 @@ mod tests {
 
         let dir = mgr.region_dir(Region::GLOBAL);
         assert!(dir.ends_with("global"));
-        assert!(!dir.to_string_lossy().contains("regions"));
     }
 
     #[test]
@@ -449,13 +493,14 @@ mod tests {
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
         let dir = mgr.region_dir(Region::US_EAST_VA);
-        assert!(dir.ends_with("regions/us-east-va"));
+        assert!(dir.ends_with("us-east-va"));
+        assert!(!dir.to_string_lossy().contains("regions"));
 
         let dir = mgr.region_dir(Region::IE_EAST_DUBLIN);
-        assert!(dir.ends_with("regions/ie-east-dublin"));
+        assert!(dir.ends_with("ie-east-dublin"));
 
         let dir = mgr.region_dir(Region::JP_EAST_TOKYO);
-        assert!(dir.ends_with("regions/jp-east-tokyo"));
+        assert!(dir.ends_with("jp-east-tokyo"));
     }
 
     #[test]
@@ -463,11 +508,11 @@ mod tests {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        let dir = mgr.snapshot_dir(Region::GLOBAL, ShardIdx(0));
-        assert!(dir.ends_with("snapshots/global/shard-0"));
+        let dir = mgr.snapshot_dir(Region::GLOBAL, SYSTEM_ORG);
+        assert!(dir.ends_with("snapshots/global/0"));
 
-        let dir = mgr.snapshot_dir(Region::DE_CENTRAL_FRANKFURT, ShardIdx(3));
-        assert!(dir.ends_with("snapshots/de-central-frankfurt/shard-3"));
+        let dir = mgr.snapshot_dir(Region::DE_CENTRAL_FRANKFURT, OrganizationId::new(42));
+        assert!(dir.ends_with("snapshots/de-central-frankfurt/42"));
     }
 
     #[test]
@@ -475,68 +520,72 @@ mod tests {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        let path = mgr.raft_db_path(Region::GLOBAL, ShardIdx(0));
-        assert!(path.ends_with("global/shard-0/raft.db"));
+        let path = mgr.raft_db_path(Region::GLOBAL, SYSTEM_ORG);
+        assert!(path.ends_with("global/0/raft.db"));
 
-        let path = mgr.raft_db_path(Region::US_WEST_OR, ShardIdx(7));
-        assert!(path.ends_with("regions/us-west-or/shard-7/raft.db"));
+        let path = mgr.raft_db_path(Region::US_WEST_OR, OrganizationId::new(7));
+        assert!(path.ends_with("us-west-or/7/raft.db"));
     }
 
     #[test]
-    fn test_shard_dir_layout() {
+    fn test_organization_dir_layout() {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        let dir = mgr.shard_dir(Region::GLOBAL, ShardIdx(0));
-        assert!(dir.ends_with("global/shard-0"));
+        let dir = mgr.organization_dir(Region::GLOBAL, SYSTEM_ORG);
+        assert!(dir.ends_with("global/0"));
 
-        let dir = mgr.shard_dir(Region::US_EAST_VA, ShardIdx(5));
-        assert!(dir.ends_with("regions/us-east-va/shard-5"));
+        let dir = mgr.organization_dir(Region::US_EAST_VA, OrganizationId::new(5));
+        assert!(dir.ends_with("us-east-va/5"));
     }
 
     #[test]
-    fn test_open_region_creates_directory_and_databases() {
+    fn test_open_organization_creates_directory_and_databases() {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        let storage = mgr.open_region(Region::GLOBAL).expect("open global");
+        let storage =
+            mgr.open_organization(Region::GLOBAL, SYSTEM_ORG).expect("open system org");
         assert_eq!(storage.region(), Region::GLOBAL);
+        assert_eq!(storage.organization_id(), SYSTEM_ORG);
 
-        // Verify directory structure — files land under `shard-0/` (Phase
-        // A single-shard layout). The legacy flat layout is gone.
-        let shard_dir = temp.path().join("global").join("shard-0");
-        assert!(shard_dir.exists());
-        assert!(shard_dir.join("state.db").exists());
-        assert!(shard_dir.join("blocks.db").exists());
-        assert!(shard_dir.join("events.db").exists());
+        // Verify directory structure under the new layout.
+        let org_dir = temp.path().join("global").join("0");
+        assert!(org_dir.exists());
+        assert!(org_dir.join("state.db").exists());
+        assert!(org_dir.join("blocks.db").exists());
+        assert!(org_dir.join("events.db").exists());
     }
 
     #[test]
-    fn test_open_data_region_creates_under_regions() {
+    fn test_open_data_region_organization_creates_under_region() {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        mgr.open_region(Region::US_EAST_VA).expect("open us-east-va");
+        let org = OrganizationId::new(304789);
+        mgr.open_organization(Region::US_EAST_VA, org).expect("open us-east-va org");
 
-        let shard_dir = temp.path().join("regions").join("us-east-va").join("shard-0");
-        assert!(shard_dir.exists());
-        assert!(shard_dir.join("state.db").exists());
-        assert!(shard_dir.join("blocks.db").exists());
-        assert!(shard_dir.join("events.db").exists());
+        let org_dir = temp.path().join("us-east-va").join("304789");
+        assert!(org_dir.exists());
+        assert!(org_dir.join("state.db").exists());
+        assert!(org_dir.join("blocks.db").exists());
+        assert!(org_dir.join("events.db").exists());
     }
 
     #[test]
-    fn test_open_multiple_shards_per_region() {
+    fn test_open_multiple_organizations_per_region() {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        mgr.open_shard(Region::US_EAST_VA, ShardIdx(0)).expect("shard 0");
-        mgr.open_shard(Region::US_EAST_VA, ShardIdx(1)).expect("shard 1");
-        mgr.open_shard(Region::US_EAST_VA, ShardIdx(2)).expect("shard 2");
+        let orgs = [OrganizationId::new(100), OrganizationId::new(200), OrganizationId::new(300)];
+        for org in orgs {
+            mgr.open_organization(Region::US_EAST_VA, org)
+                .unwrap_or_else(|e| panic!("open org {}: {e}", org.value()));
+        }
 
-        for shard in 0..3 {
-            let dir = temp.path().join("regions").join("us-east-va").join(format!("shard-{shard}"));
-            assert!(dir.exists(), "shard-{shard} dir missing");
+        for org in orgs {
+            let dir = temp.path().join("us-east-va").join(org.value().to_string());
+            assert!(dir.exists(), "org-{} dir missing", org.value());
             assert!(dir.join("state.db").exists());
             assert!(dir.join("blocks.db").exists());
             assert!(dir.join("events.db").exists());
@@ -546,71 +595,75 @@ mod tests {
     }
 
     #[test]
-    fn test_open_multiple_regions() {
+    fn test_open_multiple_regions_distinct_directories() {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        mgr.open_region(Region::GLOBAL).expect("open global");
-        mgr.open_region(Region::US_EAST_VA).expect("open us-east-va");
-        mgr.open_region(Region::IE_EAST_DUBLIN).expect("open ie-east-dublin");
+        let org = OrganizationId::new(42);
+        mgr.open_organization(Region::GLOBAL, SYSTEM_ORG).expect("open global system");
+        mgr.open_organization(Region::US_EAST_VA, org).expect("open us-east-va org");
+        mgr.open_organization(Region::IE_EAST_DUBLIN, org).expect("open ie-east-dublin org");
 
         assert_eq!(mgr.open_count(), 3);
-
-        let mut regions = mgr.regions();
-        regions.sort_by_key(|r| r.as_str());
-        assert_eq!(regions.len(), 3);
+        assert!(temp.path().join("global").join("0").exists());
+        assert!(temp.path().join("us-east-va").join("42").exists());
+        assert!(temp.path().join("ie-east-dublin").join("42").exists());
     }
 
     #[test]
-    fn test_open_duplicate_region_errors() {
+    fn test_open_duplicate_organization_errors() {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        mgr.open_region(Region::GLOBAL).expect("open global");
+        mgr.open_organization(Region::GLOBAL, SYSTEM_ORG).expect("open system org");
 
-        let result = mgr.open_region(Region::GLOBAL);
+        let result = mgr.open_organization(Region::GLOBAL, SYSTEM_ORG);
         assert!(matches!(
             result,
-            Err(RegionStorageError::AlreadyOpen { region }) if region == Region::GLOBAL
+            Err(RegionStorageError::AlreadyOpen { region, organization_id })
+                if region == Region::GLOBAL && organization_id == SYSTEM_ORG
         ));
     }
 
     #[test]
-    fn test_close_region() {
+    fn test_close_organization() {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        mgr.open_region(Region::GLOBAL).expect("open global");
+        mgr.open_organization(Region::GLOBAL, SYSTEM_ORG).expect("open system org");
         assert_eq!(mgr.open_count(), 1);
 
-        mgr.close_region(Region::GLOBAL).expect("close global");
+        mgr.close_organization(Region::GLOBAL, SYSTEM_ORG).expect("close system org");
         assert_eq!(mgr.open_count(), 0);
-        assert!(mgr.get(Region::GLOBAL).is_none());
+        assert!(mgr.get_organization(Region::GLOBAL, SYSTEM_ORG).is_none());
     }
 
     #[test]
-    fn test_close_nonexistent_region_errors() {
+    fn test_close_nonexistent_organization_errors() {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        let result = mgr.close_region(Region::US_EAST_VA);
+        let org = OrganizationId::new(99);
+        let result = mgr.close_organization(Region::US_EAST_VA, org);
         assert!(matches!(
             result,
-            Err(RegionStorageError::NotOpen { region }) if region == Region::US_EAST_VA
+            Err(RegionStorageError::NotOpen { region, organization_id })
+                if region == Region::US_EAST_VA && organization_id == org
         ));
     }
 
     #[test]
-    fn test_get_region() {
+    fn test_get_organization() {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        assert!(mgr.get(Region::GLOBAL).is_none());
+        assert!(mgr.get_organization(Region::GLOBAL, SYSTEM_ORG).is_none());
 
-        mgr.open_region(Region::GLOBAL).expect("open global");
+        mgr.open_organization(Region::GLOBAL, SYSTEM_ORG).expect("open system org");
 
-        let storage = mgr.get(Region::GLOBAL).expect("should be open");
+        let storage = mgr.get_organization(Region::GLOBAL, SYSTEM_ORG).expect("should be open");
         assert_eq!(storage.region(), Region::GLOBAL);
+        assert_eq!(storage.organization_id(), SYSTEM_ORG);
     }
 
     #[test]
@@ -635,46 +688,49 @@ mod tests {
     }
 
     #[test]
-    fn test_reopen_region_after_close() {
+    fn test_reopen_organization_after_close() {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        // Open, close, reopen
-        mgr.open_region(Region::US_EAST_VA).expect("open");
-        mgr.close_region(Region::US_EAST_VA).expect("close");
-        mgr.open_region(Region::US_EAST_VA).expect("reopen");
+        let org = OrganizationId::new(7);
+        mgr.open_organization(Region::US_EAST_VA, org).expect("open");
+        mgr.close_organization(Region::US_EAST_VA, org).expect("close");
+        mgr.open_organization(Region::US_EAST_VA, org).expect("reopen");
 
         assert_eq!(mgr.open_count(), 1);
     }
 
     #[test]
-    fn test_concurrent_region_writes_no_contention() {
+    fn test_concurrent_organization_writes_no_contention() {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        let storage_a = mgr.open_region(Region::GLOBAL).expect("open global");
-        let storage_b = mgr.open_region(Region::US_EAST_VA).expect("open us-east-va");
+        let storage_a =
+            mgr.open_organization(Region::GLOBAL, SYSTEM_ORG).expect("open system org");
+        let storage_b = mgr
+            .open_organization(Region::US_EAST_VA, OrganizationId::new(42))
+            .expect("open us-east-va org");
 
-        // Each region has its own database files — no shared write lock
-        // Verify by starting write transactions on both simultaneously
+        // Each organization has its own database files — no shared write lock.
+        // Verify by starting write transactions on both simultaneously.
         let write_a = storage_a.state_db().write();
         let write_b = storage_b.state_db().write();
 
-        assert!(write_a.is_ok(), "write transaction on global state should succeed");
-        assert!(write_b.is_ok(), "write transaction on us-east-va state should succeed");
+        assert!(write_a.is_ok(), "write transaction on system state should succeed");
+        assert!(write_b.is_ok(), "write transaction on us-east-va org state should succeed");
     }
 
     #[test]
-    fn test_open_region_idempotent_directory() {
+    fn test_open_organization_idempotent_directory() {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        // Pre-create the directory
+        // Pre-create the parent directory
         let region_dir = temp.path().join("global");
         std::fs::create_dir_all(&region_dir).expect("pre-create dir");
 
         // Opening should succeed even if directory already exists
-        let storage = mgr.open_region(Region::GLOBAL).expect("open global");
+        let storage = mgr.open_organization(Region::GLOBAL, SYSTEM_ORG).expect("open system org");
         assert_eq!(storage.region(), Region::GLOBAL);
     }
 
@@ -683,85 +739,38 @@ mod tests {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        // No regions/ directory yet — should return empty
+        // Empty data dir — should return empty
         let discovered = mgr.discover_existing_regions();
         assert!(discovered.is_empty());
     }
 
     #[test]
-    fn test_discover_existing_regions_no_regions_dir() {
+    fn test_discover_existing_regions_only_global() {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        // Create global/ but not regions/ — only GLOBAL would exist
+        // Create global/ but no data region directories — only system org would exist
         std::fs::create_dir_all(temp.path().join("global")).expect("create global");
 
         let discovered = mgr.discover_existing_regions();
-        assert!(discovered.is_empty());
+        assert!(discovered.is_empty(), "GLOBAL is not a discovered data region");
     }
 
     #[test]
-    fn test_discover_existing_regions_finds_opened_regions() {
+    fn test_discover_existing_regions_finds_data_regions() {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        // Open some regions (creates directories with databases)
-        mgr.open_region(Region::GLOBAL).expect("open global");
-        mgr.open_region(Region::US_EAST_VA).expect("open us-east-va");
-        mgr.open_region(Region::IE_EAST_DUBLIN).expect("open ie-east-dublin");
-
-        // Close all (discover reads the filesystem, not the open map)
-        mgr.close_region(Region::GLOBAL).expect("close");
-        mgr.close_region(Region::US_EAST_VA).expect("close");
-        mgr.close_region(Region::IE_EAST_DUBLIN).expect("close");
+        std::fs::create_dir_all(temp.path().join("us-east-va")).expect("us-east-va");
+        std::fs::create_dir_all(temp.path().join("ie-east-dublin")).expect("ie-east-dublin");
+        // Non-Region directory names should be ignored.
+        std::fs::create_dir_all(temp.path().join("snapshots")).expect("snapshots");
+        std::fs::create_dir_all(temp.path().join("keys")).expect("keys");
 
         let mut discovered = mgr.discover_existing_regions();
         discovered.sort_by_key(|r| r.as_str());
-
-        // GLOBAL is excluded from discover — it's always opened eagerly
         assert_eq!(discovered.len(), 2);
-        assert_eq!(discovered[0], Region::IE_EAST_DUBLIN);
-        assert_eq!(discovered[1], Region::US_EAST_VA);
-    }
-
-    #[test]
-    fn test_discover_existing_regions_skips_unknown_dirs() {
-        let temp = TestDir::new();
-        let mgr = RegionStorageManager::new(temp.path().to_path_buf());
-
-        let regions_dir = temp.path().join("regions");
-        std::fs::create_dir_all(&regions_dir).expect("create regions/");
-
-        // Create a valid region directory
-        std::fs::create_dir_all(regions_dir.join("us-east-va")).expect("create us-east-va");
-
-        // Create invalid directories that should be skipped
-        std::fs::create_dir_all(regions_dir.join("unknown-region")).expect("create unknown");
-        std::fs::create_dir_all(regions_dir.join("temp")).expect("create temp");
-
-        // Create a file (not a directory) — should be skipped
-        std::fs::write(regions_dir.join("not-a-dir.txt"), b"").expect("create file");
-
-        let discovered = mgr.discover_existing_regions();
-        assert_eq!(discovered.len(), 1);
-        assert_eq!(discovered[0], Region::US_EAST_VA);
-    }
-
-    #[test]
-    fn test_discover_existing_regions_excludes_global() {
-        let temp = TestDir::new();
-        let mgr = RegionStorageManager::new(temp.path().to_path_buf());
-
-        let regions_dir = temp.path().join("regions");
-        std::fs::create_dir_all(&regions_dir).expect("create regions/");
-
-        // A directory named "global" under regions/ would match Region::GLOBAL
-        // but should be excluded from discovery
-        std::fs::create_dir_all(regions_dir.join("global")).expect("create global");
-        std::fs::create_dir_all(regions_dir.join("us-west-or")).expect("create us-west-or");
-
-        let discovered = mgr.discover_existing_regions();
-        assert_eq!(discovered.len(), 1);
-        assert_eq!(discovered[0], Region::US_WEST_OR);
+        assert!(discovered.contains(&Region::US_EAST_VA));
+        assert!(discovered.contains(&Region::IE_EAST_DUBLIN));
     }
 }
