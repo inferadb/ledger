@@ -936,7 +936,9 @@ impl RaftManager {
             });
         }
 
-        self.start_region(region_config).await
+        // GLOBAL is always single-shard — cluster-wide control state has no
+        // routing dimension to spread across additional shards.
+        self.start_region(region_config, ShardIdx(0)).await
     }
 
     /// Starts a data region.
@@ -962,7 +964,10 @@ impl RaftManager {
             });
         }
 
-        self.start_region(region_config).await
+        // Phase A stopgap: single shard. Step 5.1b will loop
+        // `0..self.config.shards_per_region` here so each data region runs
+        // N independent Raft groups.
+        self.start_region(region_config, ShardIdx(0)).await
     }
 
     /// Ensures a data region is active, creating it lazily if needed.
@@ -1008,7 +1013,9 @@ impl RaftManager {
         // Two error variants can indicate concurrency:
         // - RegionExists: start_region's has_region check saw it after map insert
         // - RegionAlreadyOpen: RegionStorageManager rejected a second opener
-        match self.start_region(region_config).await {
+        //
+        // Phase A stopgap: ShardIdx(0). Step 5.1b loops shards here.
+        match self.start_region(region_config, ShardIdx(0)).await {
             Ok(group) => {
                 info!(region = region.as_str(), "Lazily created region group");
                 Ok((group, true))
@@ -1033,8 +1040,20 @@ impl RaftManager {
         }
     }
 
-    /// Starts a region group.
-    async fn start_region(&self, region_config: RegionConfig) -> Result<Arc<RegionGroup>> {
+    /// Starts a region group for a specific shard.
+    ///
+    /// Phase A always passes
+    /// [`ShardIdx(0)`](inferadb_ledger_state::shard_routing::ShardIdx); a
+    /// follow-up loop in the calling layer will iterate
+    /// `0..shards_per_region` so each `(region, shard_idx)` pair gets its
+    /// own independent Raft group, WAL, and state DBs. The function is
+    /// already shaped to take a per-shard `shard_idx`; the caller decides
+    /// how many shards to spin up.
+    async fn start_region(
+        &self,
+        region_config: RegionConfig,
+        shard_idx: ShardIdx,
+    ) -> Result<Arc<RegionGroup>> {
         // Destructure config upfront to avoid partial-move issues
         let RegionConfig {
             region,
@@ -1080,7 +1099,13 @@ impl RaftManager {
             block_announcements,
             events_db,
             region_creation_rx,
-        ) = self.open_region_storage(region, event_writer, events_config, divergence_sender)?;
+        ) = self.open_region_storage(
+            region,
+            shard_idx,
+            event_writer,
+            events_config,
+            divergence_sender,
+        )?;
 
         // Get accessor, commitment buffer, leader lease, applied index watch,
         // and the raft.db handle before log_store is consumed by Adaptor.
@@ -1111,8 +1136,16 @@ impl RaftManager {
             auto_promote: region == Region::GLOBAL,
             ..Default::default()
         };
-        let shard_id =
-            inferadb_ledger_consensus::types::ShardId(seahash::hash(region.as_str().as_bytes()));
+        // Consensus `ShardId` must be unique across `(region, shard_idx)` —
+        // each Raft group runs independently, so colliding IDs would alias
+        // two distinct groups in the engine's shard map. Mix the shard idx
+        // into the seahash so all N shards in a region get distinct IDs.
+        let shard_id = {
+            let mut bytes = Vec::with_capacity(region.as_str().len() + 8);
+            bytes.extend_from_slice(region.as_str().as_bytes());
+            bytes.extend_from_slice(&shard_idx.0.to_le_bytes());
+            inferadb_ledger_consensus::types::ShardId(seahash::hash(&bytes))
+        };
 
         // Initial membership for the consensus engine shard.
         //
@@ -1155,12 +1188,7 @@ impl RaftManager {
             inferadb_ledger_consensus::types::Membership::new(voter_ids)
         };
 
-        // Task 3 stopgap: single-shard layout → `shard-0/wal/`. Task 4
-        // iterates per-shard.
-        let wal_dir = self
-            .storage_manager
-            .shard_dir(region, inferadb_ledger_state::shard_routing::ShardIdx(0))
-            .join("wal");
+        let wal_dir = self.storage_manager.shard_dir(region, shard_idx).join("wal");
         let wal =
             inferadb_ledger_consensus::wal::SegmentedWalBackend::open(&wal_dir).map_err(|e| {
                 RaftManagerError::Storage { region, message: format!("failed to open WAL: {e}") }
@@ -1212,10 +1240,7 @@ impl RaftManager {
         // concurrent modifier of `applied_state`.
         match log_store.replay_crash_gap(&wal, shard_id).await {
             Ok(stats) => {
-                // Phase A: single shard per region. Task 5 expands to
-                // `0..shards_per_region` and will thread the actual shard
-                // index from the enclosing per-shard start loop.
-                let shard_label = ShardIdx(0).0.to_string();
+                let shard_label = shard_idx.0.to_string();
                 metrics::record_state_recovery_replay(
                     region.as_str(),
                     &shard_label,
@@ -1334,7 +1359,7 @@ impl RaftManager {
                     >
             };
 
-            let writer = BatchWriter::new(batch_config, submit_fn, region.to_string(), ShardIdx(0));
+            let writer = BatchWriter::new(batch_config, submit_fn, region.to_string(), shard_idx);
             let bw_handle = writer.handle();
             tokio::spawn(writer.run());
             Some(bw_handle)
@@ -1346,6 +1371,7 @@ impl RaftManager {
         let background_jobs = if enable_background_jobs {
             self.start_background_jobs(
                 region,
+                shard_idx,
                 handle.clone(),
                 state.clone(),
                 Arc::clone(&raft_db),
@@ -1376,7 +1402,7 @@ impl RaftManager {
             handle.response_map().clone(),
             handle.spillover().clone(),
             region.as_str().to_string(),
-            ShardIdx(0),
+            shard_idx,
         );
         if region == inferadb_ledger_types::Region::GLOBAL {
             apply_worker = apply_worker.with_dr_event_tx(self.dr_event_tx.clone());
@@ -1393,7 +1419,7 @@ impl RaftManager {
         let blocks_db = Arc::clone(block_archive.db());
         let region_group = Arc::new(RegionGroup {
             region,
-            shard_idx: ShardIdx(0),
+            shard_idx,
             handle,
             state,
             raft_db,
@@ -1413,14 +1439,16 @@ impl RaftManager {
             region_creation_rx: parking_lot::Mutex::new(region_creation_rx),
         });
 
-        // Register region (Task 4 shim: single shard at ShardIdx(0); Task
-        // 4.2 will loop this for 0..shards_per_region).
         {
             let mut regions = self.regions.write();
-            regions.insert((region, ShardIdx(0)), region_group.clone());
+            regions.insert((region, shard_idx), region_group.clone());
         }
 
-        info!(region = region.as_str(), "Region group started successfully");
+        info!(
+            region = region.as_str(),
+            shard = shard_idx.0,
+            "Region group started successfully"
+        );
 
         Ok(region_group)
     }
@@ -1433,9 +1461,11 @@ impl RaftManager {
     /// because some regions (test fixtures, historical GLOBAL-only
     /// configurations) are constructed without an events writer.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn start_background_jobs(
         &self,
         region: Region,
+        shard_idx: ShardIdx,
         handle: Arc<ConsensusHandle>,
         state: Arc<StateLayer<FileBackend>>,
         raft_db: Arc<Database<FileBackend>>,
@@ -1511,7 +1541,7 @@ impl RaftManager {
             applied_index_rx,
             parent_token.child_token(),
             region.as_str().to_string(),
-            ShardIdx(0),
+            shard_idx,
         );
         let state_checkpointer_handle = state_checkpointer.start();
         info!(region = region.as_str(), "Started state checkpointer");
@@ -1555,6 +1585,7 @@ impl RaftManager {
     fn open_region_storage(
         &self,
         region: Region,
+        shard_idx: ShardIdx,
         event_writer: Option<EventWriter<FileBackend>>,
         events_config: Option<inferadb_ledger_types::events::EventConfig>,
         divergence_sender: tokio::sync::mpsc::UnboundedSender<crate::types::StateRootDivergence>,
@@ -1577,11 +1608,7 @@ impl RaftManager {
         let (block_announcements, _) = broadcast::channel(1024);
 
         // Open Raft log store (uses inferadb-ledger-store storage - handles open/create internally)
-        // Task 3 stopgap: single-shard layout forces ShardIdx(0). Task 4
-        // parameterizes RegionGroup over the full shard set.
-        let log_path = self
-            .storage_manager
-            .raft_db_path(region, inferadb_ledger_state::shard_routing::ShardIdx(0));
+        let log_path = self.storage_manager.raft_db_path(region, shard_idx);
         // Derive leader lease duration from election_timeout_min / 2.
         // This guarantees no new leader can be elected while the lease is valid.
         let lease_duration =
@@ -1952,6 +1979,7 @@ impl RaftManager {
         group.touch();
         let jobs = self.start_background_jobs(
             region,
+            group.shard_idx(),
             group.handle().clone(),
             group.state().clone(),
             Arc::clone(group.raft_db()),
