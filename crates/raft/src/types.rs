@@ -155,6 +155,63 @@ impl RaftPayload {
 ///
 /// Contains no plaintext PII — see [`SystemRequest`] for the data residency
 /// invariant. All variants use numeric IDs, hashes, and enums only.
+///
+/// # Three-tier split status (B.1.4 stub)
+///
+/// The B.1 design partitions this mega-enum into three peer enums:
+/// [`SystemRequest`], [`RegionRequest`], [`OrganizationRequest`] —
+/// enforced by separate apply pipelines so cross-tier misrouting is a
+/// compile error.
+///
+/// **B.1.4 scope (this commit):** declare the three peer enums + their
+/// re-exports. The skeleton enums currently have no variants; the existing
+/// `LedgerRequest` variants stay where they are. The apply pipelines and
+/// services still construct `LedgerRequest::*` directly.
+///
+/// **B.1.5 + B.1.6 scope (subsequent commits):** migrate variants out of
+/// `LedgerRequest` into the right peer enum, wire the three apply
+/// pipelines, and update construction sites. After B.1.6, `LedgerRequest`
+/// either disappears entirely or becomes a thin wrapper —
+/// `enum LedgerRequest { System(SystemRequest), Region(RegionRequest),
+/// Organization(OrganizationRequest) }` — TBD during B.1.6 implementation.
+///
+/// **Categorization plan** (where each variant lands):
+///
+/// - `OrganizationRequest` (data plane, per-organization Raft):
+///   `Write`, `BatchWrite`, `CreateVault`, `UpdateVault`, `DeleteVault`,
+///   `UpdateVaultHealth`, `CreateApp`, `DeleteApp`, `SetAppEnabled`,
+///   `RotateAppClientSecret`, `CreateAppClientAssertion`,
+///   `DeleteAppClientAssertion`, `SetAppClientAssertionEnabled`,
+///   `SetAppCredentialEnabled`, `AddAppVault`, `UpdateAppVault`,
+///   `RemoveAppVault`, `AddOrganizationMember`,
+///   `RemoveOrganizationMember`, `UpdateOrganizationMemberRole`,
+///   `CreateOrganizationInvite`, `ResolveOrganizationInvite`,
+///   `PurgeOrganizationInviteIndexes`, `RehashInviteEmailIndex`,
+///   `CreateOrganizationTeam`, `DeleteOrganizationTeam`,
+///   `IngestExternalEvents`, plus saga-PII writes for the organization.
+///
+/// - `RegionRequest` (regional control plane, per-region Raft —
+///   B.1.6 fields):
+///   `PlaceOrganization`, `UnplaceOrganization`, `UpdateOrganizationVoters`
+///   (for B.3 reconciliation), `HibernateOrganization` (B.2),
+///   `WakeOrganization` (B.2), `UpdateRegionQuota`,
+///   `SaveRegionalSagaPii`, `DeleteRegionalSagaPii`, `AddRegionVoter`,
+///   `RemoveRegionVoter`, plus today's `RegionMembershipReport` and
+///   `RegisterPeerAddress` if they belong at this tier.
+///
+/// - `SystemRequest` (cluster control plane, single Raft):
+///   The existing nested `SystemRequest` enum stays at the system tier.
+///   `CreateOrganization`, `DeleteOrganization`, `SuspendOrganization`,
+///   `ResumeOrganization`, `PurgeOrganization`, `StartMigration`,
+///   `CompleteMigration`, `CreateSigningKey`, `RotateSigningKey`,
+///   `RevokeSigningKey`, `TransitionSigningKeyRevoked`,
+///   `CreateRefreshToken`, `UseRefreshToken`, `RevokeTokenFamily`,
+///   `RevokeAllUserSessions`, `RevokeAllAppSessions` move from the top
+///   level into `SystemRequest` (or stay in the existing nested one).
+///   `CreateDataRegion` is system-tier.
+///
+/// - **Removed** in B.1.10 (cleanup): `AddRegionLearner` is replaced by
+///   `RegionRequest::AddRegionVoter`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LedgerRequest {
     /// Writes transactions to a vault.
@@ -759,6 +816,12 @@ pub enum LedgerRequest {
 /// - [`CleanupExpiredOnboarding`](SystemRequest::CleanupExpiredOnboarding) — regional GC
 ///
 /// All other variants are proposed to GLOBAL and contain no PII.
+///
+/// **Three-tier split status (B.1.4 stub):** this enum is the cluster
+/// control plane's request type. The B.1.6 commit moves variants like
+/// `CreateOrganization`, `CreateSigningKey`, `CreateRefreshToken` from the
+/// top-level [`LedgerRequest`] into this enum so the system tier owns its
+/// full surface. See [`LedgerRequest`] for the categorization plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SystemRequest {
     /// Creates a new user (global control-plane entry only).
@@ -1487,6 +1550,67 @@ pub enum SystemRequest {
         /// Configuration epoch — stale reports with a lower epoch are ignored.
         conf_epoch: u64,
     },
+}
+
+// =============================================================================
+// B.1.4 skeleton: peer request enums for the regional and organization tiers.
+//
+// The B.1 design partitions the request space across three peer Raft tiers:
+// SystemGroup ↔ SystemRequest, RegionGroup ↔ RegionRequest,
+// OrganizationGroup ↔ OrganizationRequest. The compiler enforces tier
+// discipline via the type signatures of each tier's apply pipeline.
+//
+// This commit (B.1.4) declares the type vocabulary. The variants land in
+// B.1.6 (bootstrap rewrite + multi-tier orchestration), interleaved with
+// the apply-pipeline split (B.1.5) and the migration of construction sites
+// across the workspace's ~700 LedgerRequest call sites. Until then, both
+// enums are empty placeholders — they exist so subsequent commits can
+// reference them without an additional type-introduction churn.
+//
+// See `LedgerRequest`'s doc comment for the full categorization plan.
+// =============================================================================
+
+/// Regional control-plane request applied via the per-region Raft group.
+///
+/// **B.1.4 status:** skeleton — no variants yet. Variants land in B.1.6 and
+/// include `PlaceOrganization`, `UnplaceOrganization`,
+/// `UpdateOrganizationVoters` (B.3), `HibernateOrganization` (B.2),
+/// `WakeOrganization` (B.2), `UpdateRegionQuota`, `SaveRegionalSagaPii`,
+/// `DeleteRegionalSagaPii`, `AddRegionVoter`, `RemoveRegionVoter`.
+///
+/// Tier discipline: applied only by `RegionApplyWorker` against the per-
+/// region [`RegionGroup`](crate::raft_manager::RegionGroup). Cannot be
+/// proposed at the system or organization tier — the type system
+/// prevents it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RegionRequest {
+    // Variants land in B.1.6.
+}
+
+/// Organization data-plane request applied via the per-organization Raft group.
+///
+/// **B.1.4 status:** skeleton — no variants yet. Variants land in B.1.6 and
+/// include `Write`, `BatchWrite`, vault lifecycle (`CreateVault`,
+/// `UpdateVault`, `DeleteVault`, `UpdateVaultHealth`), app credentials
+/// (`CreateApp`, `DeleteApp`, `RotateAppClientSecret`, etc.), team and
+/// member operations (`CreateOrganizationTeam`, `DeleteOrganizationTeam`,
+/// `AddOrganizationMember`, `RemoveOrganizationMember`,
+/// `UpdateOrganizationMemberRole`, `CreateOrganizationInvite` and
+/// related), `IngestExternalEvents`, plus saga-PII writes
+/// (`SaveOrganizationSagaPii`, `DeleteOrganizationSagaPii`).
+///
+/// Notably, `OrganizationRequest::Write` does NOT carry an `organization`
+/// field — the request is implicitly for the organization whose group
+/// accepted it. The `OrganizationId` is the routing key, not a payload
+/// field. This eliminates the "what if the request's organization_id
+/// doesn't match the routing target?" inconsistency class entirely.
+///
+/// Tier discipline: applied only by `OrganizationApplyWorker` against the
+/// per-organization [`OrganizationGroup`](crate::raft_manager::OrganizationGroup).
+/// Cannot be proposed at the system or region tier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrganizationRequest {
+    // Variants land in B.1.6.
 }
 
 /// Response from the Raft state machine.

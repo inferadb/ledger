@@ -225,4 +225,6 @@ pub use types::LedgerNodeId;
 pub use types::LivenessConfig;
 pub use types::NodeStatus;
 #[doc(hidden)]
+pub use types::{OrganizationRequest, RegionRequest};
+#[doc(hidden)]
 pub use user_retention::UserRetentionReaper;
