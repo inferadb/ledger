@@ -22,13 +22,14 @@
 //! into a single lock to eliminate internal ordering issues.
 
 mod accessor;
-mod operations;
+pub mod operations;
 mod raft_impl;
 mod store;
 mod types;
 
 pub use accessor::*;
 use inferadb_ledger_types::Hash;
+pub use operations::ApplyableRequest;
 pub use raft_impl::{LedgerSnapshotBuilder, RecoveryStats};
 pub use store::*;
 pub use types::*;
@@ -2580,7 +2581,7 @@ mod tests {
         let entry = make_committed_entry(1, 1, wrap_payload(write_request));
 
         let _start = Instant::now();
-        let responses = store.apply_committed_entries(&[entry], None).await.expect("apply");
+        let responses = store.apply_committed_entries::<crate::types::LedgerRequest>(&[entry], None).await.expect("apply");
 
         // Verify response is WriteCompleted
         assert_eq!(responses.len(), 1);
@@ -2650,7 +2651,7 @@ mod tests {
 
         let entry = make_committed_entry(1, 1, wrap_payload(write_request));
 
-        let responses = store.apply_committed_entries(&[entry], None).await.expect("apply");
+        let responses = store.apply_committed_entries::<crate::types::LedgerRequest>(&[entry], None).await.expect("apply");
         assert_eq!(responses.len(), 1);
         match &responses[0] {
             LedgerResponse::Write { .. } => {},
@@ -2718,7 +2719,7 @@ mod tests {
 
         let entry = make_committed_entry(1, 1, payload);
 
-        let responses = store.apply_committed_entries(&[entry], None).await.expect("apply");
+        let responses = store.apply_committed_entries::<crate::types::LedgerRequest>(&[entry], None).await.expect("apply");
         assert_eq!(responses.len(), 1);
 
         // Read events from the events DB
@@ -2792,7 +2793,7 @@ mod tests {
         };
         let entry = make_committed_entry(1, 1, payload);
 
-        store.apply_committed_entries(&[entry], None).await.expect("apply");
+        store.apply_committed_entries::<crate::types::LedgerRequest>(&[entry], None).await.expect("apply");
 
         // Check the broadcast announcement timestamp
         let announcement = receiver.try_recv().expect("should have received block announcement");
@@ -2863,8 +2864,8 @@ mod tests {
         let (mut store1, entry1) = apply_on_fresh_store(dir1.path());
         let (mut store2, entry2) = apply_on_fresh_store(dir2.path());
 
-        store1.apply_committed_entries(&[entry1], None).await.expect("apply1");
-        store2.apply_committed_entries(&[entry2], None).await.expect("apply2");
+        store1.apply_committed_entries::<crate::types::LedgerRequest>(&[entry1], None).await.expect("apply1");
+        store2.apply_committed_entries::<crate::types::LedgerRequest>(&[entry2], None).await.expect("apply2");
 
         // Read events from both stores
         let read_events = |store: &RaftLogStore<FileBackend>| {
@@ -5753,7 +5754,7 @@ mod tests {
             ),
         ];
 
-        store.apply_committed_entries(&entries, None).await.expect("apply batch");
+        store.apply_committed_entries::<crate::types::LedgerRequest>(&entries, None).await.expect("apply batch");
 
         // Now take two snapshots via different code paths.
         // No events DB configured, so event section is deterministically empty.
@@ -5973,7 +5974,7 @@ mod tests {
             wrap_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
         );
 
-        store.apply_committed_entries(&[entry], None).await.expect("apply");
+        store.apply_committed_entries::<crate::types::LedgerRequest>(&[entry], None).await.expect("apply");
 
         // Buffer should contain a commitment for this vault
         let commitments = store.drain_state_root_commitments();
@@ -6006,7 +6007,7 @@ mod tests {
             })),
         );
 
-        store.apply_committed_entries(&[entry], None).await.expect("apply");
+        store.apply_committed_entries::<crate::types::LedgerRequest>(&[entry], None).await.expect("apply");
 
         let commitments = store.drain_state_root_commitments();
         assert!(commitments.is_empty(), "admin ops should not produce commitments");
@@ -6074,7 +6075,7 @@ mod tests {
             ),
         ];
 
-        store.apply_committed_entries(&entries, None).await.expect("apply");
+        store.apply_committed_entries::<crate::types::LedgerRequest>(&entries, None).await.expect("apply");
 
         let commitments = store.drain_state_root_commitments();
         assert_eq!(commitments.len(), 2, "two writes → two commitments");
@@ -6107,7 +6108,7 @@ mod tests {
             1,
             wrap_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
         );
-        store.apply_committed_entries(&[write_entry], None).await.expect("apply write");
+        store.apply_committed_entries::<crate::types::LedgerRequest>(&[write_entry], None).await.expect("apply write");
 
         // Drain the commitment (simulating leader draining for next payload)
         let commitments = store.drain_state_root_commitments();
@@ -6130,7 +6131,7 @@ mod tests {
                 caller: 0,
             },
         );
-        store.apply_committed_entries(&[second_entry], None).await.expect("apply verify");
+        store.apply_committed_entries::<crate::types::LedgerRequest>(&[second_entry], None).await.expect("apply verify");
 
         // No divergence should have been sent
         assert!(
@@ -6168,7 +6169,7 @@ mod tests {
             1,
             wrap_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
         );
-        store.apply_committed_entries(&[write_entry], None).await.expect("apply write");
+        store.apply_committed_entries::<crate::types::LedgerRequest>(&[write_entry], None).await.expect("apply write");
 
         // Drain and tamper with the state root
         let mut commitments = store.drain_state_root_commitments();
@@ -6191,7 +6192,7 @@ mod tests {
                 caller: 0,
             },
         );
-        store.apply_committed_entries(&[verify_entry], None).await.expect("apply verify");
+        store.apply_committed_entries::<crate::types::LedgerRequest>(&[verify_entry], None).await.expect("apply verify");
 
         // Should have received a divergence event
         let divergence = divergence_rx.try_recv().expect("should receive divergence event");
@@ -6241,7 +6242,7 @@ mod tests {
                 caller: 0,
             },
         );
-        store.apply_committed_entries(&[entry], None).await.expect("apply");
+        store.apply_committed_entries::<crate::types::LedgerRequest>(&[entry], None).await.expect("apply");
 
         // No divergence — just skipped
         assert!(
@@ -6287,7 +6288,7 @@ mod tests {
             },
         );
         store
-            .apply_committed_entries(&[entry], None)
+            .apply_committed_entries::<crate::types::LedgerRequest>(&[entry], None)
             .await
             .expect("apply should succeed without archive");
     }
@@ -6325,7 +6326,7 @@ mod tests {
             1,
             wrap_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
         );
-        store.apply_committed_entries(&[entry], None).await.expect("apply");
+        store.apply_committed_entries::<crate::types::LedgerRequest>(&[entry], None).await.expect("apply");
 
         let buf = store.state_root_commitments.lock().unwrap();
         assert!(buf.len() <= 10_000, "buffer should not exceed 10K cap, got {}", buf.len());
@@ -6353,7 +6354,7 @@ mod tests {
             1,
             wrap_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
         );
-        store.apply_committed_entries(&[write_entry], None).await.expect("apply");
+        store.apply_committed_entries::<crate::types::LedgerRequest>(&[write_entry], None).await.expect("apply");
 
         // Drain and tamper
         let mut commitments = store.drain_state_root_commitments();
@@ -6376,7 +6377,7 @@ mod tests {
             },
         );
         store
-            .apply_committed_entries(&[verify_entry], None)
+            .apply_committed_entries::<crate::types::LedgerRequest>(&[verify_entry], None)
             .await
             .expect("should not panic without divergence sender");
     }
@@ -6403,7 +6404,7 @@ mod tests {
             1,
             wrap_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
         )];
-        store.apply_committed_entries(&batch1, None).await.expect("apply batch 1");
+        store.apply_committed_entries::<crate::types::LedgerRequest>(&batch1, None).await.expect("apply batch 1");
 
         let commitments_from_batch1 = store.drain_state_root_commitments();
         assert_eq!(commitments_from_batch1.len(), 1);
@@ -6419,7 +6420,7 @@ mod tests {
                 caller: 0,
             },
         )];
-        store.apply_committed_entries(&batch2, None).await.expect("apply batch 2");
+        store.apply_committed_entries::<crate::types::LedgerRequest>(&batch2, None).await.expect("apply batch 2");
 
         // Verification passed — no divergence
         assert!(

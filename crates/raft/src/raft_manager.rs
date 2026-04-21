@@ -339,9 +339,176 @@ impl Drop for RegionBackgroundJobs {
 /// unable to apply at any other tier. Reserving the type now lets B.1.4
 /// add a typed `SystemRequest` and B.1.6 wire it without a second renaming
 /// pass.
-#[allow(dead_code)]
 pub struct SystemGroup {
-    // Skeleton — fields land in B.1.6.
+    /// Underlying region-group primitives (state layer, raft.db, blocks.db,
+    /// events.db, handle, lease, transport, background jobs, creation
+    /// channels). The distinct `SystemGroup` type encodes tier discipline
+    /// at the type level — a `SystemRequest`-bearing apply worker can
+    /// only be attached to a `SystemGroup`, never to an
+    /// [`OrganizationGroup`] or [`RegionGroup`]. Structurally the fields
+    /// mirror `OrganizationGroup` (region pinned to `GLOBAL`, organization
+    /// pinned to `0`); sharing them avoids duplicating 500+ lines of
+    /// durability / checkpoint / bootstrap wiring.
+    pub(crate) inner: OrganizationGroup,
+}
+
+impl SystemGroup {
+    /// Wraps an existing `OrganizationGroup` as the system group. The
+    /// wrapped group must have `region = Region::GLOBAL` and
+    /// `organization_id = OrganizationId::new(0)`.
+    pub(crate) fn from_organization_group(inner: OrganizationGroup) -> Self {
+        debug_assert_eq!(inner.region(), Region::GLOBAL);
+        debug_assert_eq!(inner.organization_id(), OrganizationId::new(0));
+        Self { inner }
+    }
+
+    /// Region this group belongs to. Always [`Region::GLOBAL`].
+    pub fn region(&self) -> Region {
+        Region::GLOBAL
+    }
+
+    /// Organization id this group owns. Always `OrganizationId::new(0)`.
+    pub fn organization_id(&self) -> OrganizationId {
+        OrganizationId::new(0)
+    }
+
+    /// Consensus handle for background jobs and services.
+    #[must_use]
+    pub fn handle(&self) -> &Arc<ConsensusHandle> {
+        self.inner.handle()
+    }
+
+    /// State layer for entity / relationship / signing-key storage.
+    #[must_use]
+    pub fn state(&self) -> &Arc<StateLayer<FileBackend>> {
+        self.inner.state()
+    }
+
+    /// `raft.db` handle.
+    #[must_use]
+    pub fn raft_db(&self) -> &Arc<Database<FileBackend>> {
+        self.inner.raft_db()
+    }
+
+    /// `blocks.db` handle.
+    #[must_use]
+    pub fn blocks_db(&self) -> &Arc<Database<FileBackend>> {
+        self.inner.blocks_db()
+    }
+
+    /// Events database, if available.
+    #[must_use]
+    pub fn events_db(&self) -> Option<&Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>> {
+        self.inner.events_db()
+    }
+
+    /// Events `Database` handle for durability sync.
+    #[must_use]
+    pub fn events_state_db(&self) -> Option<Arc<Database<FileBackend>>> {
+        self.inner.events_state_db()
+    }
+
+    /// Block archive for historical blocks.
+    #[must_use]
+    pub fn block_archive(&self) -> &Arc<BlockArchive<FileBackend>> {
+        self.inner.block_archive()
+    }
+
+    /// Applied-state accessor.
+    #[must_use]
+    pub fn applied_state(&self) -> &AppliedStateAccessor {
+        self.inner.applied_state()
+    }
+
+    /// Block announcements broadcast channel.
+    #[must_use]
+    pub fn block_announcements(&self) -> &broadcast::Sender<BlockAnnouncement> {
+        self.inner.block_announcements()
+    }
+
+    /// Consensus transport for dynamic peer channel management.
+    #[must_use]
+    pub fn consensus_transport(
+        &self,
+    ) -> Option<&crate::consensus_transport::GrpcConsensusTransport> {
+        self.inner.consensus_transport()
+    }
+
+    /// Leader lease.
+    #[must_use]
+    pub fn leader_lease(&self) -> &Arc<crate::leader_lease::LeaderLease> {
+        self.inner.leader_lease()
+    }
+
+    /// Applied-index watch receiver.
+    pub fn applied_index_watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.inner.applied_index_watch()
+    }
+
+    /// Batch writer handle, if batch writing is enabled.
+    #[must_use]
+    pub fn batch_handle(&self) -> Option<&BatchWriterHandle> {
+        self.inner.batch_handle()
+    }
+
+    /// Commitment buffer handle.
+    pub fn commitment_buffer(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<Vec<crate::types::StateRootCommitment>>> {
+        self.inner.commitment_buffer()
+    }
+
+    /// Drains state root commitments for piggybacking on the next payload.
+    pub fn drain_state_root_commitments(&self) -> Vec<crate::types::StateRootCommitment> {
+        self.inner.drain_state_root_commitments()
+    }
+
+    /// Records activity on this group, resetting the idle timer.
+    pub fn touch(&self) {
+        self.inner.touch();
+    }
+
+    /// Seconds since the last recorded activity.
+    pub fn idle_secs(&self) -> u64 {
+        self.inner.idle_secs()
+    }
+
+    /// Background-jobs-active flag.
+    pub fn is_jobs_active(&self) -> bool {
+        self.inner.is_jobs_active()
+    }
+
+    /// True when this node is the system-group leader.
+    pub fn is_leader(&self, node_id: LedgerNodeId) -> bool {
+        self.inner.is_leader(node_id)
+    }
+
+    /// Current leader's node id, if known.
+    pub fn current_leader(&self) -> Option<LedgerNodeId> {
+        self.inner.current_leader()
+    }
+
+    /// Takes the region-creation receiver exactly once during bootstrap.
+    pub fn take_region_creation_rx(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<RegionCreationRequest>> {
+        self.inner.take_region_creation_rx()
+    }
+
+    /// Takes the organization-creation receiver exactly once during bootstrap.
+    pub fn take_organization_creation_rx(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<OrganizationCreationRequest>> {
+        self.inner.take_organization_creation_rx()
+    }
+
+    /// Surfaces the underlying `OrganizationGroup` for code paths that
+    /// haven't yet been migrated to tier-typed handles (notably the
+    /// durability sync sweep). Prefer the typed accessors above for new
+    /// call sites.
+    pub(crate) fn as_organization_group(&self) -> &OrganizationGroup {
+        &self.inner
+    }
 }
 
 /// Regional control-plane Raft group (one per data region). Owns the
@@ -361,9 +528,123 @@ pub struct SystemGroup {
 /// This new `RegionGroup` is the regional control plane — different role,
 /// reused name only because the new role is what "RegionGroup" naturally
 /// describes in the three-tier model.
-#[allow(dead_code)]
 pub struct RegionGroup {
-    // Skeleton — fields land in B.1.6.
+    /// Underlying region-group primitives. Region-tier spec says this
+    /// group has no `blocks.db` (no Merkle chain on the regional control
+    /// plane); during the B.1.6 cutover it still shares the
+    /// `OrganizationGroup` storage shape, so `blocks_db` is present but
+    /// unused by `RegionRequest` apply logic. The `RegionGroup` type
+    /// exists so a `RegionRequest`-bearing apply worker can only attach
+    /// to region groups, never to organization or system groups.
+    pub(crate) inner: OrganizationGroup,
+}
+
+impl RegionGroup {
+    /// Wraps an existing `OrganizationGroup` as the region group for its
+    /// region. The wrapped group must have `organization_id = OrganizationId::new(0)`
+    /// and a non-GLOBAL region.
+    pub(crate) fn from_organization_group(inner: OrganizationGroup) -> Self {
+        debug_assert_ne!(inner.region(), Region::GLOBAL);
+        debug_assert_eq!(inner.organization_id(), OrganizationId::new(0));
+        Self { inner }
+    }
+
+    /// Region this group controls.
+    pub fn region(&self) -> Region {
+        self.inner.region()
+    }
+
+    /// Organization id this group owns. Always `OrganizationId::new(0)`.
+    pub fn organization_id(&self) -> OrganizationId {
+        OrganizationId::new(0)
+    }
+
+    /// Consensus handle for background jobs and services.
+    #[must_use]
+    pub fn handle(&self) -> &Arc<ConsensusHandle> {
+        self.inner.handle()
+    }
+
+    /// State layer.
+    #[must_use]
+    pub fn state(&self) -> &Arc<StateLayer<FileBackend>> {
+        self.inner.state()
+    }
+
+    /// `raft.db` handle.
+    #[must_use]
+    pub fn raft_db(&self) -> &Arc<Database<FileBackend>> {
+        self.inner.raft_db()
+    }
+
+    /// Events database, if available.
+    #[must_use]
+    pub fn events_db(&self) -> Option<&Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>> {
+        self.inner.events_db()
+    }
+
+    /// Events `Database` handle for durability sync.
+    #[must_use]
+    pub fn events_state_db(&self) -> Option<Arc<Database<FileBackend>>> {
+        self.inner.events_state_db()
+    }
+
+    /// Applied-state accessor.
+    #[must_use]
+    pub fn applied_state(&self) -> &AppliedStateAccessor {
+        self.inner.applied_state()
+    }
+
+    /// Consensus transport for dynamic peer channel management.
+    #[must_use]
+    pub fn consensus_transport(
+        &self,
+    ) -> Option<&crate::consensus_transport::GrpcConsensusTransport> {
+        self.inner.consensus_transport()
+    }
+
+    /// Leader lease.
+    #[must_use]
+    pub fn leader_lease(&self) -> &Arc<crate::leader_lease::LeaderLease> {
+        self.inner.leader_lease()
+    }
+
+    /// Applied-index watch receiver.
+    pub fn applied_index_watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.inner.applied_index_watch()
+    }
+
+    /// Records activity on this group, resetting the idle timer.
+    pub fn touch(&self) {
+        self.inner.touch();
+    }
+
+    /// Seconds since the last recorded activity.
+    pub fn idle_secs(&self) -> u64 {
+        self.inner.idle_secs()
+    }
+
+    /// Background-jobs-active flag.
+    pub fn is_jobs_active(&self) -> bool {
+        self.inner.is_jobs_active()
+    }
+
+    /// True when this node is the region-group leader.
+    pub fn is_leader(&self, node_id: LedgerNodeId) -> bool {
+        self.inner.is_leader(node_id)
+    }
+
+    /// Current leader's node id, if known.
+    pub fn current_leader(&self) -> Option<LedgerNodeId> {
+        self.inner.current_leader()
+    }
+
+    /// Surfaces the underlying `OrganizationGroup` for code paths that
+    /// haven't yet been migrated to tier-typed handles (notably the
+    /// durability sync sweep).
+    pub(crate) fn as_organization_group(&self) -> &OrganizationGroup {
+        &self.inner
+    }
 }
 
 /// Organization data-plane Raft group (one per organization, per region).

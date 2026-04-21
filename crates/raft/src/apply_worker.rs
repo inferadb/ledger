@@ -1,29 +1,24 @@
 //! Decoupled apply workers — one per Raft tier.
 //!
-//! Each tier in the B.1 three-tier model has its own apply pipeline:
+//! Each tier in the B.1 three-tier model has its own typed apply pipeline:
 //!
 //! - [`SystemApplyWorker`] applies [`SystemRequest`](crate::types::SystemRequest)
 //!   committed entries against the cluster's [`SystemGroup`](crate::raft_manager::SystemGroup).
 //! - [`RegionApplyWorker`] applies [`RegionRequest`](crate::types::RegionRequest)
 //!   committed entries against a per-region
 //!   [`RegionGroup`](crate::raft_manager::RegionGroup).
-//! - [`OrganizationApplyWorker`] applies organization-tier committed entries
-//!   against a per-organization
+//! - [`OrganizationApplyWorker`] applies [`OrganizationRequest`](crate::types::OrganizationRequest)
+//!   committed entries against a per-organization
 //!   [`OrganizationGroup`](crate::raft_manager::OrganizationGroup) via
 //!   [`RaftLogStore::apply_committed_entries`].
 //!
-//! Tier discipline: each apply worker is typed to its tier's request enum.
-//! Cross-tier misrouting is a compile error — `SystemApplyWorker` cannot be
-//! handed an `OrganizationRequest`-bearing batch.
-//!
-//! **B.1.5 status:** `OrganizationApplyWorker` is the existing fully-wired
-//! apply pipeline (renamed from `ApplyWorker` in this commit).
-//! `SystemApplyWorker` and `RegionApplyWorker` are skeleton structs;
-//! their fields and `run` loops land in B.1.6 alongside the variant
-//! migration that populates [`SystemRequest`] and [`RegionRequest`] with
-//! their actual variants.
+//! Tier discipline: each apply worker is typed to its tier's request enum
+//! via the generic [`ApplyWorker<R>`] parameter. Cross-tier misrouting is a
+//! compile error — `SystemApplyWorker` cannot be handed an
+//! `OrganizationRequest`-bearing batch because the decode type is fixed at
+//! construction.
 
-use std::time::Instant;
+use std::{marker::PhantomData, time::Instant};
 
 use inferadb_ledger_consensus::committed::CommittedBatch;
 use inferadb_ledger_types::OrganizationId;
@@ -32,52 +27,35 @@ use tokio::sync::mpsc;
 
 use crate::{
     consensus_handle::{ResponseMap, SpilloverMap},
-    log_storage::RaftLogStore,
+    log_storage::{RaftLogStore, operations::ApplyableRequest},
     metrics,
 };
 
-/// Cluster control-plane apply worker (singleton). Applies
-/// [`SystemRequest`](crate::types::SystemRequest) committed entries against
-/// the [`SystemGroup`](crate::raft_manager::SystemGroup).
-///
-/// **B.1.5 status:** skeleton — fields and `run` loop land in B.1.6
-/// alongside the migration of system-tier variants out of [`LedgerRequest`].
-/// Until then, system-tier work is hosted on the existing
-/// [`OrganizationApplyWorker`] for `(Region::GLOBAL, OrganizationId::new(0))` —
-/// the same shape Phase A used.
-#[allow(dead_code)]
-pub struct SystemApplyWorker {
-    // Skeleton — fields land in B.1.6.
-}
+/// Cluster control-plane apply worker, typed to `SystemRequest`.
+pub type SystemApplyWorker = ApplyWorker<crate::types::SystemRequest>;
 
-/// Regional control-plane apply worker (one per data region). Applies
-/// [`RegionRequest`](crate::types::RegionRequest) committed entries
-/// against a per-region [`RegionGroup`](crate::raft_manager::RegionGroup).
-///
-/// Owns the apply path for `PlaceOrganization`, `HibernateOrganization`
-/// (B.2), `WakeOrganization` (B.2), region-quota updates, etc. Drives the
-/// `RegionLeaderState` watch that organization Shards subscribe to under
-/// `LeadershipMode::Delegated` (B.1.7).
-///
-/// **B.1.5 status:** skeleton — fields and `run` loop land in B.1.6.
-#[allow(dead_code)]
-pub struct RegionApplyWorker {
-    // Skeleton — fields land in B.1.6.
-}
+/// Regional control-plane apply worker (one per data region), typed to
+/// `RegionRequest`.
+pub type RegionApplyWorker = ApplyWorker<crate::types::RegionRequest>;
 
-/// Organization data-plane apply worker (one per organization, per region).
+/// Organization data-plane apply worker (one per organization, per region),
+/// typed to `OrganizationRequest`.
+pub type OrganizationApplyWorker = ApplyWorker<crate::types::OrganizationRequest>;
+
+/// Generic apply worker parameterised by the tier-specific request type `R`.
 ///
 /// Receives committed entry batches from the consensus reactor and applies
-/// them to the per-organization state machine via
-/// [`RaftLogStore::apply_committed_entries`]. Owns the throughput path —
-/// per-organization parallelism is what unlocks the per-node write
-/// scaling target.
+/// them to the tier-specific state machine via
+/// [`RaftLogStore::apply_committed_entries::<R>`]. The `R` type parameter
+/// enforces compile-time tier discipline: the wire decoder, the apply
+/// dispatch, and the response fan-out all share the same `R` — there is
+/// no runtime branching on a shared wrapper enum.
 ///
-/// One worker per `OrganizationGroup` in the current B.1 layout; B.1.6
-/// rewires startup so each organization's group spawns its own worker on
-/// `CreateOrganization` apply (which itself flows through
-/// [`SystemApplyWorker`] → [`RegionApplyWorker`] orchestration).
-pub struct OrganizationApplyWorker {
+/// Construction picks the right `R`: `(GLOBAL, 0)` gets
+/// `ApplyWorker::<SystemRequest>`; `(region, 0)` gets
+/// `ApplyWorker::<RegionRequest>`; `(region, org_id > 0)` gets
+/// `ApplyWorker::<OrganizationRequest>`.
+pub struct ApplyWorker<R: ApplyableRequest> {
     store: RaftLogStore<FileBackend>,
     response_map: ResponseMap,
     spillover: SpilloverMap,
@@ -89,17 +67,13 @@ pub struct OrganizationApplyWorker {
     /// Region label for apply-batch metrics.
     region: String,
     /// ConsensusState label for apply-batch metrics, pre-stringified from a
-    /// [`OrganizationId`]. Phase A always emits `"0"`; Task 5 fans workers out.
+    /// [`OrganizationId`].
     shard: String,
+    _marker: PhantomData<R>,
 }
 
-impl OrganizationApplyWorker {
-    /// Creates a new apply worker.
-    ///
-    /// - `store` — the Raft log store containing state layer, block archive, etc.
-    /// - `response_map` — shared map for delivering responses back to proposers.
-    /// - `spillover` — buffer for responses when no waiter is registered yet.
-    /// - `region` / `organization_id` — labels stamped on every [`metrics::record_apply_batch`] emission.
+impl<R: ApplyableRequest> ApplyWorker<R> {
+    /// Creates a new apply worker typed to `R`.
     pub fn new(
         store: RaftLogStore<FileBackend>,
         response_map: ResponseMap,
@@ -114,6 +88,7 @@ impl OrganizationApplyWorker {
             dr_event_tx: None,
             region: region.into(),
             shard: organization_id.value().to_string(),
+            _marker: PhantomData,
         }
     }
 
@@ -143,7 +118,7 @@ impl OrganizationApplyWorker {
             let apply_start = Instant::now();
             let apply_result = self
                 .store
-                .apply_committed_entries(&batch.entries, batch.leader_node)
+                .apply_committed_entries::<R>(&batch.entries, batch.leader_node)
                 .instrument(span)
                 .await;
             let apply_latency = apply_start.elapsed().as_secs_f64();

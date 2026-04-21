@@ -56,6 +56,118 @@ use crate::{
     types::{EmailCodeVerifiedResult, LedgerResponse, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
 };
 
+/// A request type that can be applied through [`RaftLogStore`]'s apply
+/// pipeline. Implemented by each tier-specific request enum so the apply
+/// worker can be generic over `R` without pattern-matching on a shared
+/// wrapper type — the compile-time dispatch replaces runtime discrimination
+/// through the transitional [`LedgerRequest`] sum type.
+pub trait ApplyableRequest: Sized + serde::Serialize + for<'de> serde::Deserialize<'de> + Send + Sync + 'static {
+    /// Dispatches this request to the tier-specific apply method on `store`.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_on(
+        store: &RaftLogStore<inferadb_ledger_store::FileBackend>,
+        req: &Self,
+        state: &mut AppliedState,
+        block_timestamp: chrono::DateTime<chrono::Utc>,
+        op_index: &mut u32,
+        events: &mut Vec<inferadb_ledger_types::events::EventEntry>,
+        ttl_days: u32,
+        pending: &mut PendingExternalWrites,
+        log_id_bytes: Option<&[u8]>,
+        skip_state_writes: bool,
+        caller: u64,
+        defer_state_root: bool,
+    ) -> (LedgerResponse, Option<inferadb_ledger_types::VaultEntry>);
+}
+
+impl ApplyableRequest for SystemRequest {
+    fn apply_on(
+        store: &RaftLogStore<inferadb_ledger_store::FileBackend>,
+        req: &Self,
+        state: &mut AppliedState,
+        block_timestamp: chrono::DateTime<chrono::Utc>,
+        op_index: &mut u32,
+        events: &mut Vec<inferadb_ledger_types::events::EventEntry>,
+        ttl_days: u32,
+        pending: &mut PendingExternalWrites,
+        log_id_bytes: Option<&[u8]>,
+        skip_state_writes: bool,
+        caller: u64,
+        defer_state_root: bool,
+    ) -> (LedgerResponse, Option<inferadb_ledger_types::VaultEntry>) {
+        store.apply_system_request_with_events(
+            req, state, block_timestamp, op_index, events, ttl_days, pending,
+            log_id_bytes, skip_state_writes, caller, defer_state_root,
+        )
+    }
+}
+
+impl ApplyableRequest for RegionRequest {
+    fn apply_on(
+        store: &RaftLogStore<inferadb_ledger_store::FileBackend>,
+        req: &Self,
+        state: &mut AppliedState,
+        block_timestamp: chrono::DateTime<chrono::Utc>,
+        op_index: &mut u32,
+        events: &mut Vec<inferadb_ledger_types::events::EventEntry>,
+        ttl_days: u32,
+        pending: &mut PendingExternalWrites,
+        log_id_bytes: Option<&[u8]>,
+        skip_state_writes: bool,
+        caller: u64,
+        defer_state_root: bool,
+    ) -> (LedgerResponse, Option<inferadb_ledger_types::VaultEntry>) {
+        store.apply_region_request_with_events(
+            req, state, block_timestamp, op_index, events, ttl_days, pending,
+            log_id_bytes, skip_state_writes, caller, defer_state_root,
+        )
+    }
+}
+
+impl ApplyableRequest for OrganizationRequest {
+    fn apply_on(
+        store: &RaftLogStore<inferadb_ledger_store::FileBackend>,
+        req: &Self,
+        state: &mut AppliedState,
+        block_timestamp: chrono::DateTime<chrono::Utc>,
+        op_index: &mut u32,
+        events: &mut Vec<inferadb_ledger_types::events::EventEntry>,
+        ttl_days: u32,
+        pending: &mut PendingExternalWrites,
+        log_id_bytes: Option<&[u8]>,
+        skip_state_writes: bool,
+        caller: u64,
+        defer_state_root: bool,
+    ) -> (LedgerResponse, Option<inferadb_ledger_types::VaultEntry>) {
+        store.apply_organization_request_with_events(
+            req, state, block_timestamp, op_index, events, ttl_days, pending,
+            log_id_bytes, skip_state_writes, caller, defer_state_root,
+        )
+    }
+}
+
+impl ApplyableRequest for LedgerRequest {
+    fn apply_on(
+        store: &RaftLogStore<inferadb_ledger_store::FileBackend>,
+        req: &Self,
+        state: &mut AppliedState,
+        block_timestamp: chrono::DateTime<chrono::Utc>,
+        op_index: &mut u32,
+        events: &mut Vec<inferadb_ledger_types::events::EventEntry>,
+        ttl_days: u32,
+        pending: &mut PendingExternalWrites,
+        log_id_bytes: Option<&[u8]>,
+        skip_state_writes: bool,
+        caller: u64,
+        defer_state_root: bool,
+    ) -> (LedgerResponse, Option<inferadb_ledger_types::VaultEntry>) {
+        store.apply_request_with_events(
+            req, state, block_timestamp, op_index, events, ttl_days, pending,
+            log_id_bytes, skip_state_writes, caller, defer_state_root,
+        )
+    }
+}
+
 #[allow(clippy::result_large_err)]
 impl<B: StorageBackend> RaftLogStore<B> {
     /// Applies a single request and returns the response plus optional vault entry.

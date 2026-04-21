@@ -391,16 +391,26 @@ pub struct RecoveryStats {
 impl RaftLogStore {
     /// Applies a batch of committed entries from the consensus engine.
     ///
-    /// This is the core state machine apply path. For each entry:
-    /// - Normal entries: deserialize as `RaftPayload`, apply via `apply_request_with_events`
-    /// - Membership entries: update `state.membership`
+    /// Generic over the tier-specific request type `R`: the apply pipeline
+    /// decodes each entry as `RaftPayload<R>` and dispatches to the
+    /// tier-specific apply method via [`ApplyableRequest::apply_on`].
+    /// Callers specify `R` at construction time (one `ApplyWorker<R>` per
+    /// Raft group); misrouting between tiers is a compile error.
+    ///
+    /// For each entry:
+    /// - Normal entries: deserialize as `RaftPayload<R>`, apply via the
+    ///   tier-specific `apply_*_request_with_events` method.
+    /// - Membership entries: update `state.membership`.
     ///
     /// Returns a response for each entry in the batch.
-    pub async fn apply_committed_entries(
+    pub async fn apply_committed_entries<R>(
         &mut self,
         entries: &[CommittedEntry],
         leader_node: Option<u64>,
-    ) -> Result<Vec<crate::types::LedgerResponse>, StoreError> {
+    ) -> Result<Vec<crate::types::LedgerResponse>, StoreError>
+    where
+        R: crate::log_storage::operations::ApplyableRequest,
+    {
         let _span = tracing::info_span!(
             "apply_committed_entries",
             entry_count = entries.len(),
@@ -417,7 +427,7 @@ impl RaftLogStore {
         // This avoids redundant deserialization — the same payload was previously
         // decoded up to 3 times (timestamp extraction, commitment verification,
         // and the main apply loop).
-        let decoded_payloads: Vec<Option<crate::types::RaftPayload>> = entries
+        let decoded_payloads: Vec<Option<crate::types::RaftPayload<R>>> = entries
             .iter()
             .map(|e| match &e.kind {
                 // Empty data = Raft no-op entry (§5.4.2) or barrier — skip decode.
@@ -491,7 +501,8 @@ impl RaftLogStore {
                             "Skipping state layer writes for already-applied entry"
                         );
                     }
-                    self.apply_request_with_events(
+                    R::apply_on(
+                        self,
                         &payload.request,
                         &mut state,
                         block_timestamp,
@@ -947,7 +958,7 @@ impl RaftLogStore {
                 // uses `leader_node` only to decide whether to renew the
                 // leader lease (which is meaningless for a node that hasn't
                 // started serving yet).
-                self.apply_committed_entries(chunk, None).await?;
+                self.apply_committed_entries::<crate::types::LedgerRequest>(chunk, None).await?;
                 total_replayed = total_replayed.saturating_add(chunk.len() as u64);
             }
         }
