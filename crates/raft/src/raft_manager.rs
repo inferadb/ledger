@@ -1002,7 +1002,7 @@ impl RaftManager {
     /// service, resolves the shard via [`ShardRouter`], and returns the
     /// per-`(region, shard)` `OrganizationGroup`. This is the single entry point
     /// every service-layer write/read path uses to find the right shard's
-    /// BatchWriter, ApplyWorker, and StateLayer.
+    /// BatchWriter, OrganizationApplyWorker, and StateLayer.
     ///
     /// Returns `None` if:
     /// - System region not started
@@ -1625,7 +1625,7 @@ impl RaftManager {
         // Spawn the apply worker — bridges consensus commits to state machine.
         // The GLOBAL region's worker gets the DR event sender so the
         // PlacementController wakes when GLOBAL membership changes are applied.
-        let mut apply_worker = crate::apply_worker::ApplyWorker::new(
+        let mut apply_worker = crate::apply_worker::OrganizationApplyWorker::new(
             log_store,
             handle.response_map().clone(),
             handle.spillover().clone(),
