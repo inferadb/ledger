@@ -77,6 +77,8 @@ Each crate has its own `CLAUDE.md` (symlinked to `AGENTS.md`) with crate-specifi
 
 14. **A task is complete only when `/just-ci-gate` passes** (`fmt-check` + `clippy` + `doc-check` + `test`). No "pre-existing issue" exceptions. Write the test before the implementation; target 90%+ line coverage.
 
+15. **Tier discipline.** The three Raft tiers — `SystemGroup` (cluster control plane), `RegionGroup` (regional control plane and unified leader), `OrganizationGroup` (data plane) — own disjoint operation sets and route through disjoint request enums. Entity writes apply through `OrganizationGroup` only via `OrganizationRequest`; placement / hibernation / wake / region quota / region audit apply through `RegionGroup` only via `RegionRequest`; cluster membership / region directory / organization directory / cluster signing keys apply through `SystemGroup` only via `SystemRequest`. The three enums are disjoint — no shared base type, no `Vec<u8>` opaque payload that could "decode inside the wrong apply pipeline". `RaftManager::route_request` and `route_organization` resolve an incoming payload to the group that owns its tier; the typed `LedgerRequest::{System, Region, Organization}` discriminant is the tier key, not a hint. Per-organization Raft groups default to `LeadershipMode::Delegated` and follow their `RegionGroup`'s leader via `Shard::adopt_leader` — no independent elections. Audited by `consensus-reviewer`.
+
 ---
 
 ## Conventions
