@@ -84,15 +84,20 @@ pub struct StateRootDivergence {
 // Raft Payload Wrapper
 // ============================================================================
 
-/// Wraps a [`LedgerRequest`] with a leader-assigned wall-clock timestamp.
+/// Wraps a Raft-log request with leader-assigned metadata.
 ///
 /// The leader stamps `proposed_at` at proposal time (`client_write`), and all
 /// replicas use this value during apply — guaranteeing byte-identical event
 /// timestamps, B+ tree keys, and pagination cursors across the cluster.
+///
+/// Generic over the tier-specific request enum `R`. The default exists only
+/// as a bridge while the last call sites migrate from the transitional
+/// `LedgerRequest` wrapper to typed `SystemRequest` / `RegionRequest` /
+/// `OrganizationRequest`. Once migration completes, the default is dropped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RaftPayload {
+pub struct RaftPayload<R = LedgerRequest> {
     /// The application-level request.
-    pub request: LedgerRequest,
+    pub request: R,
     /// Leader-assigned wall-clock timestamp at proposal time.
     pub proposed_at: DateTime<Utc>,
     /// Leader's state root commitments from the previous apply batch.
@@ -111,12 +116,12 @@ pub struct RaftPayload {
     pub caller: u64,
 }
 
-impl RaftPayload {
+impl<R> RaftPayload<R> {
     /// Creates a payload for system-initiated operations (no caller).
     ///
     /// Used by background jobs, sagas, and internal operations where
     /// there is no gRPC caller.
-    pub fn system(request: LedgerRequest) -> Self {
+    pub fn system(request: R) -> Self {
         Self { request, proposed_at: chrono::Utc::now(), state_root_commitments: vec![], caller: 0 }
     }
 
@@ -124,7 +129,7 @@ impl RaftPayload {
     ///
     /// Used by all proposal sites except the leader's write path, which
     /// drains the commitment buffer via [`Self::with_commitments`].
-    pub fn new(request: LedgerRequest, caller: u64) -> Self {
+    pub fn new(request: R, caller: u64) -> Self {
         Self { request, proposed_at: chrono::Utc::now(), state_root_commitments: vec![], caller }
     }
 
@@ -134,7 +139,7 @@ impl RaftPayload {
     /// to the next `RaftPayload` so followers can verify state roots
     /// without extra RPCs.
     pub fn with_commitments(
-        request: LedgerRequest,
+        request: R,
         state_root_commitments: Vec<StateRootCommitment>,
         caller: u64,
     ) -> Self {

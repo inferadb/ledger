@@ -105,16 +105,21 @@ impl ConsensusHandle {
     }
 
     /// Proposes a payload to the shard and returns the commit index.
-    pub async fn propose(&self, payload: RaftPayload) -> Result<u64, HandleError> {
+    ///
+    /// Generic over the tier-specific request type `R`, so call sites can
+    /// construct typed `RaftPayload<SystemRequest>` / `RaftPayload<RegionRequest>` /
+    /// `RaftPayload<OrganizationRequest>` and the handle serializes each on the
+    /// wire without collapsing through a shared enum.
+    pub async fn propose<R: serde::Serialize>(&self, payload: RaftPayload<R>) -> Result<u64, HandleError> {
         let bytes = postcard::to_allocvec(&payload)
             .map_err(|e| HandleError::Serialization { message: e.to_string() })?;
         self.engine.propose(self.shard, bytes).await.context(ConsensusSnafu)
     }
 
     /// Proposes a payload and waits for the apply result.
-    pub async fn propose_and_wait(
+    pub async fn propose_and_wait<R: serde::Serialize>(
         &self,
-        payload: RaftPayload,
+        payload: RaftPayload<R>,
         timeout: Duration,
     ) -> Result<LedgerResponse, HandleError> {
         let bytes = postcard::to_allocvec(&payload)
