@@ -222,12 +222,8 @@ async fn test_delegated_leadership_follows_region() {
     assert!(cluster.wait_for_leaders(Duration::from_secs(10)).await, "leaders elected");
     let leader = cluster.leader().expect("has leader");
 
-    let org_a = create_organization(&leader.addr, "delegated-a", leader)
-        .await
-        .expect("create A");
-    let org_b = create_organization(&leader.addr, "delegated-b", leader)
-        .await
-        .expect("create B");
+    let org_a = create_organization(&leader.addr, "delegated-a", leader).await.expect("create A");
+    let org_b = create_organization(&leader.addr, "delegated-b", leader).await.expect("create B");
 
     // The `Delegated` watcher runs asynchronously after bootstrap, so poll
     // every node until all per-org groups agree with the region's leader.
@@ -245,8 +241,7 @@ async fn test_delegated_leadership_follows_region() {
             }
             for slug in [org_a, org_b] {
                 let org_id = resolve_org_id(node, slug);
-                let org_group =
-                    node.manager.route_organization(org_id).expect("per-org group");
+                let org_group = node.manager.route_organization(org_id).expect("per-org group");
                 if org_group.handle().current_leader() != region_leader {
                     ok = false;
                     break 'outer;
@@ -434,13 +429,8 @@ async fn test_region_leader_transfer_cascades_to_per_org_groups() {
     let target_id = target_node.id;
 
     // Transfer leadership of the region's data-region group.
-    let region_group =
-        leader.manager.get_region_group(Region::US_EAST_VA).expect("region group");
-    region_group
-        .handle()
-        .transfer_leader(target_id)
-        .await
-        .expect("leader transfer should succeed");
+    let region_group = leader.manager.get_region_group(Region::US_EAST_VA).expect("region group");
+    region_group.handle().transfer_leader(target_id).await.expect("leader transfer should succeed");
 
     // Poll until every node observes both the region group AND both per-org
     // groups reporting the new leader.
@@ -473,8 +463,5 @@ async fn test_region_leader_transfer_cascades_to_per_org_groups() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(
-        cascaded,
-        "region leader transfer must cascade to every per-organization group"
-    );
+    assert!(cascaded, "region leader transfer must cascade to every per-organization group");
 }

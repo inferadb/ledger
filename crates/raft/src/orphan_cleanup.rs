@@ -38,7 +38,7 @@ use crate::{
     consensus_handle::ConsensusHandle,
     error::OrphanCleanupError,
     log_storage::AppliedStateAccessor,
-    types::{RaftPayload, LedgerRequest, OrganizationRequest},
+    types::{OrganizationRequest, RaftPayload},
 };
 
 /// Default interval between cleanup cycles (1 hour).
@@ -248,18 +248,18 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
             timestamp: chrono::Utc::now(),
         };
 
-        let request = LedgerRequest::Organization(OrganizationRequest::Write {            vault: SYSTEM_VAULT_ID,
-            transactions: vec![transaction],
-            idempotency_key: [0; 16],
-            request_hash: 0,
-        });
-
-        self.handle.propose(RaftPayload::system(request)).await.map_err(|e| {
-            OrphanCleanupError::OrphanRaftWrite {
+        self.handle
+            .propose(RaftPayload::system(OrganizationRequest::Write {
+                vault: SYSTEM_VAULT_ID,
+                transactions: vec![transaction],
+                idempotency_key: [0; 16],
+                request_hash: 0,
+            }))
+            .await
+            .map_err(|e| OrphanCleanupError::OrphanRaftWrite {
                 message: format!("{:?}", e),
                 backtrace: snafu::Backtrace::generate(),
-            }
-        })?;
+            })?;
 
         info!(organization = organization.value(), count, "Removed orphaned memberships");
 

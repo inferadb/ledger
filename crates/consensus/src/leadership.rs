@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::types::{NodeId, NodeState, ConsensusStateId};
+use crate::types::{ConsensusStateId, NodeId, NodeState};
 
 /// Observable shard state snapshot.
 ///
@@ -64,7 +64,7 @@ impl Default for ShardState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{NodeId, NodeState, ConsensusStateId};
+    use crate::types::{ConsensusStateId, NodeId, NodeState};
 
     #[test]
     fn default_starts_as_follower_with_zeroed_fields() {

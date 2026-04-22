@@ -6,13 +6,13 @@ use std::{sync::Arc, time::Duration};
 use inferadb_ledger_consensus::{
     clock::SimulatedClock,
     config::ShardConfig,
+    consensus_state::ConsensusState,
     engine::ConsensusEngine,
     error::ConsensusError,
     leadership::ShardState,
     rng::SimulatedRng,
-    consensus_state::ConsensusState,
     transport::InMemoryTransport,
-    types::{Membership, NodeId, NodeState, ConsensusStateId},
+    types::{ConsensusStateId, Membership, NodeId, NodeState},
     wal::InMemoryWalBackend,
 };
 use tokio::sync::{mpsc, watch};

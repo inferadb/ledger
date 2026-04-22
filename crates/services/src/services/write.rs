@@ -22,7 +22,7 @@ use inferadb_ledger_raft::{
     proof::{self, ProofError},
     raft_manager::RaftManager,
     rate_limit::RateLimiter,
-    types::{LedgerResponse, RaftPayload, LedgerRequest, OrganizationRequest},
+    types::{LedgerResponse, OrganizationRequest},
 };
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{OrganizationId, SetCondition, VaultId, config::ValidationConfig};
@@ -394,7 +394,7 @@ impl WriteService {
         }
     }
 
-    /// Converts proto operations to LedgerRequest.
+    /// Converts proto operations to `OrganizationRequest`.
     ///
     /// Server-assigned sequences: The transaction's sequence is set to 0 here;
     /// the actual sequence will be assigned by the Raft state machine at apply time.
@@ -406,7 +406,7 @@ impl WriteService {
         client_id: &str,
         idempotency_key: [u8; 16],
         request_hash: u64,
-    ) -> Result<LedgerRequest, Status> {
+    ) -> Result<OrganizationRequest, Status> {
         // Convert proto operations to internal Operations
         let internal_ops: Vec<inferadb_ledger_types::Operation> = operations
             .iter()
@@ -424,11 +424,12 @@ impl WriteService {
             timestamp: chrono::Utc::now(),
         };
 
-        Ok(LedgerRequest::Organization(OrganizationRequest::Write {            vault: vault.unwrap_or(VaultId::new(0)),
+        Ok(OrganizationRequest::Write {
+            vault: vault.unwrap_or(VaultId::new(0)),
             transactions: vec![transaction],
             idempotency_key,
             request_hash,
-        }))
+        })
     }
 }
 
@@ -931,7 +932,6 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         ctx.start_raft_timer();
         let response = if let Some(ref batch_handle) = region.batch_handle {
             ctx.set_batch_info(true, 1);
-            // Submit through batch writer for coalesced proposals
             let rx = batch_handle.submit(ledger_request);
             match tokio::time::timeout(timeout, rx).await {
                 Ok(Ok(Ok(resp))) => resp,
@@ -969,13 +969,13 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             }
         } else {
             ctx.set_batch_info(false, 1);
-            // Direct Raft proposal (OpenRaft serializes internally)
+            // Direct Raft proposal
             let commitments = region
                 .commitment_buffer
                 .as_ref()
                 .map(|buf| std::mem::take(&mut *buf.lock().unwrap_or_else(|e| e.into_inner())))
                 .unwrap_or_default();
-            let payload = RaftPayload {
+            let payload = inferadb_ledger_raft::types::RaftPayload {
                 request: ledger_request,
                 proposed_at: chrono::Utc::now(),
                 caller: ctx.caller_or_zero(),
@@ -1657,7 +1657,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             .as_ref()
             .map(|buf| std::mem::take(&mut *buf.lock().unwrap_or_else(|e| e.into_inner())))
             .unwrap_or_default();
-        let payload = RaftPayload {
+        let payload = inferadb_ledger_raft::types::RaftPayload {
             request: ledger_request,
             proposed_at: chrono::Utc::now(),
             caller: ctx.caller_or_zero(),

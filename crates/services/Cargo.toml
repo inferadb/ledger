@@ -62,9 +62,10 @@ tracing.workspace = true
 uuid.workspace = true
 tempfile.workspace = true
 
-# Serialization (used by proto_compat, runtime_config, jwt)
+# Serialization (used by proto_compat, runtime_config, jwt, typed proposal helpers)
 serde.workspace = true
 serde_json.workspace = true
+postcard.workspace = true
 
 # Error handling
 snafu.workspace = true

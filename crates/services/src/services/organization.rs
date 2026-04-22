@@ -28,7 +28,7 @@ use inferadb_ledger_raft::{
     error::ServiceError,
     logging::RequestContext,
     metrics,
-    types::{LedgerResponse, LedgerRequest, OrganizationRequest, SystemRequest},
+    types::{LedgerResponse, OrganizationRequest, SystemRequest},
 };
 use inferadb_ledger_state::system::{
     Organization, OrganizationMember as DomainOrganizationMember,
@@ -593,15 +593,22 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
                         continue;
                     }
                     // GLOBAL resolve
-                    let global_req = LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
-                        invite: inv.id,
-                        organization: organization_id,
-                        status: inferadb_ledger_types::InvitationStatus::Revoked,
-                        invitee_email_hmac: inv.invitee_email_hmac.clone(),
-                        token_hash: inv.token_hash,
-                    });
-                    if let Err(e) =
-                        self.ctx.propose_request(global_req, &grpc_metadata, &mut ctx).await
+                    if let Err(e) = self
+                        .ctx
+                        .propose_organization_request(
+                            org_meta.region,
+                            organization_id,
+                            OrganizationRequest::ResolveOrganizationInvite {
+                                invite: inv.id,
+                                organization: organization_id,
+                                status: inferadb_ledger_types::InvitationStatus::Revoked,
+                                invitee_email_hmac: inv.invitee_email_hmac.clone(),
+                                token_hash: inv.token_hash,
+                            },
+                            &grpc_metadata,
+                            &mut ctx,
+                        )
+                        .await
                     {
                         tracing::warn!(
                             invite_id = inv.id.value(),
@@ -634,9 +641,14 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         }
 
         // Submit delete organization through Raft
-        let ledger_request = LedgerRequest::System(SystemRequest::DeleteOrganization { organization: organization_id });
-
-        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let response = self
+            .ctx
+            .propose_system_request(
+                SystemRequest::DeleteOrganization { organization: organization_id },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         match response {
             LedgerResponse::OrganizationDeleted {
@@ -937,75 +949,75 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             timestamp: chrono::Utc::now(),
         };
 
-        let saga_write = LedgerRequest::Organization(OrganizationRequest::Write {// _system
+        let saga_write = OrganizationRequest::Write {
+            // _system vault
             vault: inferadb_ledger_types::VaultId::new(0),
             transactions: vec![saga_txn],
             idempotency_key: [0; 16],
             request_hash: 0,
-        });
+        };
 
-        // Submit both StartMigration and saga write as a single atomic Raft
-        // entry via BatchWrite. This ensures the organization status change
-        // and saga persistence are committed together — if one fails, neither
-        // takes effect.
-        let batch_request = LedgerRequest::Organization(OrganizationRequest::BatchWrite {
-            requests: vec![
-                LedgerRequest::System(SystemRequest::StartMigration {
+        // Propose StartMigration to the GLOBAL system tier to transition the
+        // organization status to Migrating.
+        let start_migration_response = self
+            .ctx
+            .propose_system_request(
+                SystemRequest::StartMigration {
                     organization: organization_id,
                     target_region_group: target_region,
-                }),
+                },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
+
+        let (migration_organization, migration_target) = match start_migration_response {
+            LedgerResponse::MigrationStarted { organization, target_region_group } => {
+                (organization, target_region_group)
+            },
+            LedgerResponse::Error { code, message } => {
+                ctx.set_error(code.grpc_code_name(), &message);
+                return Err(super::helpers::error_code_to_status(code, message));
+            },
+            _ => {
+                ctx.set_error("UnexpectedResponse", "Unexpected response type from StartMigration");
+                return Err(Status::internal("Unexpected response type from StartMigration"));
+            },
+        };
+
+        // Persist the saga record in the source region so the orchestrator
+        // can drive the migration to completion.
+        let saga_response = self
+            .ctx
+            .propose_organization_request(
+                source_region,
+                organization_id,
                 saga_write,
-            ],
-        });
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
-        let response = self.ctx.propose_request(batch_request, &grpc_metadata, &mut ctx).await?;
-
-        match response {
-            LedgerResponse::BatchWrite { responses } => {
-                // BatchWrite processes all inner requests in a single Raft log
-                // entry — if any request fails, the entire entry is rejected.
-                // We still check both responses defensively.
-                if let Some(LedgerResponse::Error { code, message }) = responses.get(1) {
-                    ctx.set_error(code.grpc_code_name(), message);
-                    return Err(super::helpers::error_code_to_status(
-                        *code,
-                        format!("Saga persistence failed: {message}"),
-                    ));
-                }
-
-                match responses.first() {
-                    Some(LedgerResponse::MigrationStarted {
-                        organization,
-                        target_region_group,
-                    }) => {
-                        ctx.set_success();
-                        metrics::record_organization_operation(*organization, "migrate");
-                        let proto_source: ProtoRegion = source_region.into();
-                        let proto_target: ProtoRegion = (*target_region_group).into();
-                        Ok(Response::new(MigrateOrganizationResponse {
-                            slug: Some(OrganizationSlug { slug: organization_slug_val }),
-                            source_region: proto_source.into(),
-                            target_region: proto_target.into(),
-                            status: ProtoOrganizationStatus::Migrating.into(),
-                        }))
-                    },
-                    Some(LedgerResponse::Error { code, message }) => {
-                        ctx.set_error(code.grpc_code_name(), message);
-                        Err(super::helpers::error_code_to_status(*code, message.clone()))
-                    },
-                    _ => {
-                        ctx.set_error("UnexpectedResponse", "Unexpected batch response");
-                        Err(Status::internal("Unexpected batch response"))
-                    },
-                }
+        match saga_response {
+            LedgerResponse::Write { .. } => {
+                ctx.set_success();
+                metrics::record_organization_operation(migration_organization, "migrate");
+                let proto_source: ProtoRegion = source_region.into();
+                let proto_target: ProtoRegion = migration_target.into();
+                Ok(Response::new(MigrateOrganizationResponse {
+                    slug: Some(OrganizationSlug { slug: organization_slug_val }),
+                    source_region: proto_source.into(),
+                    target_region: proto_target.into(),
+                    status: ProtoOrganizationStatus::Migrating.into(),
+                }))
             },
             LedgerResponse::Error { code, message } => {
                 ctx.set_error(code.grpc_code_name(), &message);
                 Err(super::helpers::error_code_to_status(code, message))
             },
             _ => {
-                ctx.set_error("UnexpectedResponse", "Unexpected response type");
-                Err(Status::internal("Unexpected response type"))
+                ctx.set_error("UnexpectedResponse", "Unexpected response from saga write");
+                Err(Status::internal("Unexpected response from saga write"))
             },
         }
     }
@@ -1258,11 +1270,24 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             }
         }
 
-        let ledger_request = LedgerRequest::Organization(OrganizationRequest::RemoveOrganizationMember {
-            organization: organization_id,
-            target: target_id,
-        });
-        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(organization_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
+        let response = self
+            .ctx
+            .propose_organization_request(
+                org_meta.region,
+                organization_id,
+                OrganizationRequest::RemoveOrganizationMember {
+                    organization: organization_id,
+                    target: target_id,
+                },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         match response {
             LedgerResponse::OrganizationMemberRemoved { .. } => {
@@ -1351,12 +1376,25 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             ));
         }
 
-        let ledger_request = LedgerRequest::Organization(OrganizationRequest::UpdateOrganizationMemberRole {
-            organization: organization_id,
-            target: target_id,
-            role: new_role,
-        });
-        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(organization_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
+        let response = self
+            .ctx
+            .propose_organization_request(
+                org_meta.region,
+                organization_id,
+                OrganizationRequest::UpdateOrganizationMemberRole {
+                    organization: organization_id,
+                    target: target_id,
+                    role: new_role,
+                },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         match response {
             LedgerResponse::OrganizationMemberRoleUpdated { .. } => {
@@ -1553,12 +1591,27 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             error_classify::internal_error("id-generation", &e)
         })?;
 
+        // Resolve org region before the Raft proposal so Step 2 can use it.
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(organization_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
+
         // Step 1 (GLOBAL): Create team directory entry (ID + slug only, no PII).
-        let ledger_request = LedgerRequest::Organization(OrganizationRequest::CreateOrganizationTeam {
-            organization: organization_id,
-            slug: team_slug,
-        });
-        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let response = self
+            .ctx
+            .propose_organization_request(
+                org_meta.region,
+                organization_id,
+                OrganizationRequest::CreateOrganizationTeam {
+                    organization: organization_id,
+                    slug: team_slug,
+                },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         let team_id = match response {
             LedgerResponse::OrganizationTeamCreated { team_id, .. } => team_id,
@@ -1574,11 +1627,6 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
 
         // Step 2 (REGIONAL): Write team name to the org's regional store.
         // Encrypted with OrgShredKey for crypto-shredding on organization purge.
-        let org_meta = self
-            .ctx
-            .applied_state
-            .get_organization(organization_id)
-            .ok_or_else(|| Status::not_found("Organization not found"))?;
         let system_request = inferadb_ledger_raft::types::SystemRequest::WriteTeam {
             organization: organization_id,
             team: team_id,
@@ -1683,9 +1731,19 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         }
 
         // Step 2 (GLOBAL): Clean up slug index and in-memory maps.
-        let ledger_request =
-            LedgerRequest::Organization(OrganizationRequest::DeleteOrganizationTeam { organization: organization_id, team: team_id });
-        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let response = self
+            .ctx
+            .propose_organization_request(
+                org_meta.region,
+                organization_id,
+                OrganizationRequest::DeleteOrganizationTeam {
+                    organization: organization_id,
+                    team: team_id,
+                },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         match response {
             LedgerResponse::OrganizationTeamDeleted { .. } => {

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::{
     committed::{CommittedBatch, CommittedEntry},
-    types::{EntryKind, ConsensusStateId},
+    types::{ConsensusStateId, EntryKind},
     wal_backend::{CHECKPOINT_SHARD_ID, WalBackend, WalError},
 };
 

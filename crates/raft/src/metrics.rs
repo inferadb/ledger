@@ -221,7 +221,11 @@ pub fn record_apply_batch(
 ) {
     gated!(
         APPLY_BATCHES_TOTAL,
-        &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id), (fields::STATUS, status),],
+        &[
+            (fields::REGION, region),
+            (fields::ORGANIZATION_ID, organization_id),
+            (fields::STATUS, status),
+        ],
         {
             counter!(
                 APPLY_BATCHES_TOTAL,
@@ -421,20 +425,24 @@ pub fn record_grpc_request(service: &str, method: &str, status: &str, latency_se
 /// organization's id.
 #[inline]
 pub fn record_batch_coalesce(size: usize, region: &str, organization_id: &str) {
-    gated!(BATCH_COALESCE_TOTAL, &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id)], {
-        counter!(
-            BATCH_COALESCE_TOTAL,
-            fields::REGION => region.to_string(),
-            fields::ORGANIZATION_ID => organization_id.to_string(),
-        )
-        .increment(1);
-        histogram!(
-            BATCH_COALESCE_SIZE,
-            fields::REGION => region.to_string(),
-            fields::ORGANIZATION_ID => organization_id.to_string(),
-        )
-        .record(size as f64);
-    });
+    gated!(
+        BATCH_COALESCE_TOTAL,
+        &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id)],
+        {
+            counter!(
+                BATCH_COALESCE_TOTAL,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+            )
+            .increment(1);
+            histogram!(
+                BATCH_COALESCE_SIZE,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+            )
+            .record(size as f64);
+        }
+    );
 }
 
 /// Records batch flush latency.
@@ -443,14 +451,18 @@ pub fn record_batch_coalesce(size: usize, region: &str, organization_id: &str) {
 /// `organization_id`.
 #[inline]
 pub fn record_batch_flush(latency_secs: f64, region: &str, organization_id: &str) {
-    gated!(BATCH_FLUSH_LATENCY, &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id)], {
-        histogram!(
-            BATCH_FLUSH_LATENCY,
-            fields::REGION => region.to_string(),
-            fields::ORGANIZATION_ID => organization_id.to_string(),
-        )
-        .record(latency_secs);
-    });
+    gated!(
+        BATCH_FLUSH_LATENCY,
+        &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id)],
+        {
+            histogram!(
+                BATCH_FLUSH_LATENCY,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+            )
+            .record(latency_secs);
+        }
+    );
 }
 
 // =============================================================================
@@ -690,14 +702,18 @@ const LEADER_ELECTIONS_TOTAL: &str = "ledger_leader_elections_total";
 /// The `region` label identifies which region's batch writer is being measured.
 #[inline]
 pub fn set_batch_queue_depth(depth: usize, region: &str, organization_id: &str) {
-    gated!(BATCH_QUEUE_DEPTH, &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id)], {
-        gauge!(
-            BATCH_QUEUE_DEPTH,
-            fields::REGION => region.to_string(),
-            fields::ORGANIZATION_ID => organization_id.to_string(),
-        )
-        .set(depth as f64);
-    });
+    gated!(
+        BATCH_QUEUE_DEPTH,
+        &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id)],
+        {
+            gauge!(
+                BATCH_QUEUE_DEPTH,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+            )
+            .set(depth as f64);
+        }
+    );
 }
 
 /// Sets the current rate limiter queue depth.
@@ -918,7 +934,11 @@ pub fn record_state_checkpoint(
     );
     gated!(
         LEDGER_STATE_CHECKPOINT_DURATION_SECONDS,
-        &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id), (fields::TRIGGER, trigger),],
+        &[
+            (fields::REGION, region),
+            (fields::ORGANIZATION_ID, organization_id),
+            (fields::TRIGGER, trigger),
+        ],
         {
             histogram!(
                 LEDGER_STATE_CHECKPOINT_DURATION_SECONDS,
@@ -955,14 +975,18 @@ pub fn set_state_applies_since_checkpoint(region: &str, organization_id: &str, a
 /// See [`record_state_checkpoint`] for the role of `organization_id`.
 #[inline]
 pub fn set_state_dirty_pages(region: &str, organization_id: &str, dirty_pages: u64) {
-    gated!(LEDGER_STATE_DIRTY_PAGES, &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id)], {
-        gauge!(
-            LEDGER_STATE_DIRTY_PAGES,
-            fields::REGION => region.to_string(),
-            fields::ORGANIZATION_ID => organization_id.to_string(),
-        )
-        .set(dirty_pages as f64);
-    });
+    gated!(
+        LEDGER_STATE_DIRTY_PAGES,
+        &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id)],
+        {
+            gauge!(
+                LEDGER_STATE_DIRTY_PAGES,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+            )
+            .set(dirty_pages as f64);
+        }
+    );
 }
 
 /// Updates the total page-cache-size gauge.
@@ -970,14 +994,18 @@ pub fn set_state_dirty_pages(region: &str, organization_id: &str, dirty_pages: u
 /// See [`record_state_checkpoint`] for the role of `organization_id`.
 #[inline]
 pub fn set_state_page_cache_len(region: &str, organization_id: &str, cache_len: u64) {
-    gated!(LEDGER_STATE_PAGE_CACHE_LEN, &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id)], {
-        gauge!(
-            LEDGER_STATE_PAGE_CACHE_LEN,
-            fields::REGION => region.to_string(),
-            fields::ORGANIZATION_ID => organization_id.to_string(),
-        )
-        .set(cache_len as f64);
-    });
+    gated!(
+        LEDGER_STATE_PAGE_CACHE_LEN,
+        &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id)],
+        {
+            gauge!(
+                LEDGER_STATE_PAGE_CACHE_LEN,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+            )
+            .set(cache_len as f64);
+        }
+    );
 }
 
 /// Updates the last-synced-snapshot-id gauge.
@@ -1045,7 +1073,11 @@ pub fn record_state_recovery_replay(region: &str, organization_id: &str, count: 
 /// (reading the last-applied sentinel + coalescing a no-op sync). Samples
 /// land in `SLI_HISTOGRAM_BUCKETS`; pathological long recoveries alert on p99.
 #[inline]
-pub fn record_state_recovery_duration(region: &str, organization_id: &str, duration: std::time::Duration) {
+pub fn record_state_recovery_duration(
+    region: &str,
+    organization_id: &str,
+    duration: std::time::Duration,
+) {
     gated!(
         LEDGER_STATE_RECOVERY_DURATION_SECONDS,
         &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id)],
@@ -1097,7 +1129,11 @@ pub fn record_event_flush(
 ) {
     gated!(
         LEDGER_EVENT_FLUSH_TRIGGERS_TOTAL,
-        &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id), (fields::TRIGGER, trigger),],
+        &[
+            (fields::REGION, region),
+            (fields::ORGANIZATION_ID, organization_id),
+            (fields::TRIGGER, trigger),
+        ],
         {
             counter!(
                 LEDGER_EVENT_FLUSH_TRIGGERS_TOTAL,
@@ -1154,14 +1190,18 @@ pub fn record_event_flush_failure(region: &str, organization_id: &str) {
 /// Updates the pre-drain queue-depth gauge sampled at flush entry.
 #[inline]
 pub fn set_event_flush_queue_depth(region: &str, organization_id: &str, depth: u64) {
-    gated!(LEDGER_EVENT_FLUSH_QUEUE_DEPTH, &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id)], {
-        gauge!(
-            LEDGER_EVENT_FLUSH_QUEUE_DEPTH,
-            fields::REGION => region.to_string(),
-            fields::ORGANIZATION_ID => organization_id.to_string(),
-        )
-        .set(depth as f64);
-    });
+    gated!(
+        LEDGER_EVENT_FLUSH_QUEUE_DEPTH,
+        &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id)],
+        {
+            gauge!(
+                LEDGER_EVENT_FLUSH_QUEUE_DEPTH,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+            )
+            .set(depth as f64);
+        }
+    );
 }
 
 /// Records a handler-phase event overflow.
@@ -1177,7 +1217,11 @@ pub fn record_event_overflow(region: &str, organization_id: &str, cause: &str, c
     }
     gated!(
         LEDGER_EVENT_OVERFLOW_TOTAL,
-        &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id), (fields::CAUSE, cause),],
+        &[
+            (fields::REGION, region),
+            (fields::ORGANIZATION_ID, organization_id),
+            (fields::CAUSE, cause),
+        ],
         {
             counter!(
                 LEDGER_EVENT_OVERFLOW_TOTAL,

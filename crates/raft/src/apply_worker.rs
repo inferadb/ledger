@@ -2,11 +2,12 @@
 //!
 //! Each tier in the B.1 three-tier model has its own typed apply pipeline:
 //!
-//! - [`SystemApplyWorker`] applies [`SystemRequest`](crate::types::SystemRequest)
-//!   committed entries against the cluster's [`SystemGroup`](crate::raft_manager::SystemGroup).
-//! - [`RegionApplyWorker`] applies [`RegionRequest`](crate::types::RegionRequest)
-//!   committed entries against a per-region
-//!   [`RegionGroup`](crate::raft_manager::RegionGroup).
+//! - [`SystemApplyWorker`] applies [`SystemRequest`](crate::types::SystemRequest) committed entries
+//!   against the `(GLOBAL, 0)` [`OrganizationGroup`](crate::raft_manager::OrganizationGroup)
+//!   (the cluster control-plane group until B.1.6 ships a distinct SystemGroup storage path).
+//! - [`RegionApplyWorker`] applies [`RegionRequest`](crate::types::RegionRequest) committed entries
+//!   against per-region `(region, 0)` [`OrganizationGroup`](crate::raft_manager::OrganizationGroup)s
+//!   (the regional control-plane group until B.1.6 ships a distinct RegionGroup storage path).
 //! - [`OrganizationApplyWorker`] applies [`OrganizationRequest`](crate::types::OrganizationRequest)
 //!   committed entries against a per-organization
 //!   [`OrganizationGroup`](crate::raft_manager::OrganizationGroup) via
@@ -21,9 +22,9 @@
 use std::{marker::PhantomData, time::Instant};
 
 use inferadb_ledger_consensus::committed::CommittedBatch;
-use inferadb_ledger_types::OrganizationId;
 use inferadb_ledger_store::FileBackend;
-use tokio::sync::mpsc;
+use inferadb_ledger_types::OrganizationId;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     consensus_handle::{ResponseMap, SpilloverMap},
@@ -52,8 +53,9 @@ pub type OrganizationApplyWorker = ApplyWorker<crate::types::OrganizationRequest
 /// no runtime branching on a shared wrapper enum.
 ///
 /// Construction picks the right `R`: `(GLOBAL, 0)` gets
-/// `ApplyWorker::<SystemRequest>`; `(region, 0)` gets
-/// `ApplyWorker::<RegionRequest>`; `(region, org_id > 0)` gets
+/// `ApplyWorker::<SystemRequest>`; `(region, 0)` for region != GLOBAL gets
+/// `ApplyWorker::<SystemRequest>` (B.1 transitional — RegionRequest routing
+/// pending B.1.6); `(region, org_id > 0)` gets
 /// `ApplyWorker::<OrganizationRequest>`.
 pub struct ApplyWorker<R: ApplyableRequest> {
     store: RaftLogStore<FileBackend>,
@@ -122,56 +124,66 @@ impl<R: ApplyableRequest> ApplyWorker<R> {
                 .instrument(span)
                 .await;
             let apply_latency = apply_start.elapsed().as_secs_f64();
-            match apply_result {
-                Ok(responses) => {
-                    metrics::record_apply_batch(
-                        &self.region,
-                        &self.shard,
-                        "ok",
-                        batch_size,
-                        apply_latency,
-                    );
-                    let mut map = self.response_map.lock();
-                    for (entry, response) in batch.entries.iter().zip(responses.into_iter()) {
-                        if let Some(tx) = map.remove(&entry.index) {
-                            let _ = tx.send(response);
-                        } else {
-                            // No waiter registered yet — store for late pickup.
-                            self.spillover.lock().insert(entry.index, response);
-                        }
-                    }
-                },
+            // Response fan-out: partition (entry, response) pairs into
+            // waiter-registered (send now) and unregistered (spillover
+            // insert). Both locks are acquired briefly: `response_map`
+            // only for the take phase, `spillover` only for the insert
+            // phase. Channel sends happen lock-free between the two
+            // phases so a blocked proposer racing to register a waiter
+            // never contends with the apply loop.
+            let status_label = if apply_result.is_ok() { "ok" } else { "error" };
+            metrics::record_apply_batch(
+                &self.region,
+                &self.shard,
+                status_label,
+                batch_size,
+                apply_latency,
+            );
+
+            let responses: Vec<crate::types::LedgerResponse> = match apply_result {
+                Ok(responses) => responses,
                 Err(e) => {
-                    metrics::record_apply_batch(
-                        &self.region,
-                        &self.shard,
-                        "error",
-                        batch_size,
-                        apply_latency,
-                    );
                     tracing::error!(
                         error = %e,
                         shard = batch.shard.0,
                         "Apply worker error"
                     );
-                    let mut map = self.response_map.lock();
-                    for entry in &batch.entries {
-                        if let Some(tx) = map.remove(&entry.index) {
-                            let _ = tx.send(crate::types::LedgerResponse::Error {
-                                code: inferadb_ledger_types::ErrorCode::Internal,
-                                message: format!("Apply failed: {e}"),
-                            });
-                        } else {
-                            self.spillover.lock().insert(
-                                entry.index,
-                                crate::types::LedgerResponse::Error {
-                                    code: inferadb_ledger_types::ErrorCode::Internal,
-                                    message: format!("Apply failed: {e}"),
-                                },
-                            );
-                        }
-                    }
+                    let err = crate::types::LedgerResponse::Error {
+                        code: inferadb_ledger_types::ErrorCode::Internal,
+                        message: format!("Apply failed: {e}"),
+                    };
+                    batch.entries.iter().map(|_| err.clone()).collect()
                 },
+            };
+
+            // Phase 1: remove waiters under a short `response_map` lock.
+            let mut to_send: Vec<(oneshot::Sender<crate::types::LedgerResponse>, crate::types::LedgerResponse)> =
+                Vec::with_capacity(batch_size);
+            let mut to_spillover: Vec<(u64, crate::types::LedgerResponse)> =
+                Vec::with_capacity(batch_size);
+            {
+                let mut map = self.response_map.lock();
+                for (entry, response) in batch.entries.iter().zip(responses.into_iter()) {
+                    match map.remove(&entry.index) {
+                        Some(tx) => to_send.push((tx, response)),
+                        None => to_spillover.push((entry.index, response)),
+                    }
+                }
+            }
+
+            // Phase 2: lock-free delivery. Channel sends don't need any
+            // crate-internal lock, so proposers racing to register can
+            // acquire `response_map` here without contention.
+            for (tx, response) in to_send {
+                let _ = tx.send(response);
+            }
+
+            // Phase 3: batch-insert spillover under a single `spillover` lock.
+            if !to_spillover.is_empty() {
+                let mut spillover = self.spillover.lock();
+                for (index, response) in to_spillover {
+                    spillover.insert(index, response);
+                }
             }
             // Wake the PlacementController so data region membership is reconciled
             // promptly after GLOBAL state changes (new voter, decommission, etc.).

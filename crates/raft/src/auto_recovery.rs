@@ -30,7 +30,7 @@ use crate::{
         RecoveryError, StateRootComputationSnafu,
     },
     log_storage::{AppliedStateAccessor, MAX_RECOVERY_ATTEMPTS, VaultHealthStatus},
-    types::{LedgerNodeId, LedgerResponse, RaftPayload, LedgerRequest, OrganizationRequest},
+    types::{LedgerNodeId, LedgerResponse, OrganizationRequest, RaftPayload},
 };
 
 /// Default interval between recovery scans.
@@ -442,20 +442,21 @@ impl<B: StorageBackend + 'static> AutoRecoveryJob<B> {
         recovery_attempt: Option<u8>,
         recovery_started_at: Option<i64>,
     ) -> Result<(), RecoveryError> {
-        let request = LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
-            organization,
-            vault,
-            healthy,
-            expected_root,
-            computed_root,
-            diverged_at_height,
-            recovery_attempt,
-            recovery_started_at,
-        });
-
         let response = self
             .handle
-            .propose_and_wait(RaftPayload::system(request), Duration::from_secs(10))
+            .propose_and_wait(
+                RaftPayload::system(OrganizationRequest::UpdateVaultHealth {
+                    organization,
+                    vault,
+                    healthy,
+                    expected_root,
+                    computed_root,
+                    diverged_at_height,
+                    recovery_attempt,
+                    recovery_started_at,
+                }),
+                Duration::from_secs(10),
+            )
             .await
             .map_err(|e| RecoveryError::RaftConsensus {
                 message: format!("{:?}", e),

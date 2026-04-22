@@ -42,15 +42,13 @@
 //! ```
 //!
 //! Notes on the path scheme:
-//! - The data-region parent directory is `{data_dir}/{region}/` directly —
-//!   no intermediate `regions/` directory. Operators reading `ls` of the
-//!   data dir see one directory per region (plus `global/`, `snapshots/`,
-//!   `keys/`). Cleaner mental model than the Phase A `regions/{region}/`
-//!   nesting.
-//! - GLOBAL keeps the top-level `global/` name (rather than collapsing
-//!   into the data-region scheme) because the system org is structurally
-//!   special: it is the cluster control plane and is bootstrapped before
-//!   any data regions exist.
+//! - The data-region parent directory is `{data_dir}/{region}/` directly — no intermediate
+//!   `regions/` directory. Operators reading `ls` of the data dir see one directory per region
+//!   (plus `global/`, `snapshots/`, `keys/`). Cleaner mental model than the Phase A
+//!   `regions/{region}/` nesting.
+//! - GLOBAL keeps the top-level `global/` name (rather than collapsing into the data-region scheme)
+//!   because the system org is structurally special: it is the cluster control plane and is
+//!   bootstrapped before any data regions exist.
 
 use std::{
     collections::HashMap,
@@ -106,7 +104,9 @@ pub enum RegionStorageError {
     },
 
     /// Storage I/O or database error.
-    #[snafu(display("Storage error for organization {organization_id} in region {region}: {message}"))]
+    #[snafu(display(
+        "Storage error for organization {organization_id} in region {region}: {message}"
+    ))]
     Storage {
         /// The region the error pertains to.
         region: Region,
@@ -232,11 +232,7 @@ impl RegionStorageManager {
     ///
     /// Layout: `{region_dir}/{organization_id}/`. Contains `state.db`,
     /// `blocks.db`, `raft.db`, `events.db`, and `wal/` for that organization.
-    pub fn organization_dir(
-        &self,
-        region: Region,
-        organization_id: OrganizationId,
-    ) -> PathBuf {
+    pub fn organization_dir(&self, region: Region, organization_id: OrganizationId) -> PathBuf {
         self.region_dir(region).join(organization_id.value().to_string())
     }
 
@@ -244,11 +240,7 @@ impl RegionStorageManager {
     ///
     /// - `GLOBAL` → `{data_dir}/snapshots/global/{organization_id}/`
     /// - Others → `{data_dir}/snapshots/{region_name}/{organization_id}/`
-    pub fn snapshot_dir(
-        &self,
-        region: Region,
-        organization_id: OrganizationId,
-    ) -> PathBuf {
+    pub fn snapshot_dir(&self, region: Region, organization_id: OrganizationId) -> PathBuf {
         let base = if region == Region::GLOBAL {
             self.data_dir.join("snapshots").join("global")
         } else {
@@ -336,13 +328,8 @@ impl RegionStorageManager {
         })?;
         let events_db = Arc::new(events_db);
 
-        let storage = Arc::new(RegionStorage {
-            region,
-            organization_id,
-            state_db,
-            blocks_db,
-            events_db,
-        });
+        let storage =
+            Arc::new(RegionStorage { region, organization_id, state_db, blocks_db, events_db });
 
         organizations.insert((region, organization_id), storage.clone());
 
@@ -468,7 +455,7 @@ fn open_or_create_db(
 // ============================================================================
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
     use inferadb_ledger_test_utils::TestDir;
 
@@ -544,8 +531,7 @@ mod tests {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        let storage =
-            mgr.open_organization(Region::GLOBAL, SYSTEM_ORG).expect("open system org");
+        let storage = mgr.open_organization(Region::GLOBAL, SYSTEM_ORG).expect("open system org");
         assert_eq!(storage.region(), Region::GLOBAL);
         assert_eq!(storage.organization_id(), SYSTEM_ORG);
 
@@ -705,8 +691,7 @@ mod tests {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        let storage_a =
-            mgr.open_organization(Region::GLOBAL, SYSTEM_ORG).expect("open system org");
+        let storage_a = mgr.open_organization(Region::GLOBAL, SYSTEM_ORG).expect("open system org");
         let storage_b = mgr
             .open_organization(Region::US_EAST_VA, OrganizationId::new(42))
             .expect("open us-east-va org");

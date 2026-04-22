@@ -14,7 +14,7 @@ use inferadb_ledger_proto::proto::{
 };
 use inferadb_ledger_raft::{
     metrics,
-    types::{BlockRetentionMode, BlockRetentionPolicy, LedgerResponse, LedgerRequest, OrganizationRequest},
+    types::{BlockRetentionMode, BlockRetentionPolicy, LedgerResponse, OrganizationRequest},
 };
 use inferadb_ledger_types::{
     VaultEntry, ZERO_HASH,
@@ -87,14 +87,26 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         let vault = inferadb_ledger_types::snowflake::generate_vault_slug()
             .map_err(|e| error_classify::internal_error("id-generation", &e))?;
 
-        let ledger_request = LedgerRequest::Organization(OrganizationRequest::CreateVault {
-            organization: organization_id,
-            slug: vault,
-            name: None,
-            retention_policy,
-        });
-
-        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(organization_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
+        let response = self
+            .ctx
+            .propose_organization_request(
+                org_meta.region,
+                organization_id,
+                OrganizationRequest::CreateVault {
+                    organization: organization_id,
+                    slug: vault,
+                    name: None,
+                    retention_policy,
+                },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         match response {
             LedgerResponse::VaultCreated { vault: vault_id, slug } => {
@@ -211,10 +223,21 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         ctx.set_target(organization_slug_val, vault_val);
 
         // Submit delete vault through Raft
-        let ledger_request =
-            LedgerRequest::Organization(OrganizationRequest::DeleteVault { organization: organization_id, vault: vault_id });
-
-        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(organization_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
+        let response = self
+            .ctx
+            .propose_organization_request(
+                org_meta.region,
+                organization_id,
+                OrganizationRequest::DeleteVault { organization: organization_id, vault: vault_id },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         match response {
             LedgerResponse::VaultDeleted { success } => {
@@ -408,13 +431,25 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
                 ctx.set_error("InvalidArgument", status.message());
             })?;
 
-        let ledger_request = LedgerRequest::Organization(OrganizationRequest::UpdateVault {
-            organization: organization_id,
-            vault: vault_id,
-            retention_policy,
-        });
-
-        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(organization_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
+        let response = self
+            .ctx
+            .propose_organization_request(
+                org_meta.region,
+                organization_id,
+                OrganizationRequest::UpdateVault {
+                    organization: organization_id,
+                    vault: vault_id,
+                    retention_policy,
+                },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         match response {
             LedgerResponse::VaultUpdated { success } => {

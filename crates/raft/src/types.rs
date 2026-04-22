@@ -90,12 +90,9 @@ pub struct StateRootDivergence {
 /// replicas use this value during apply — guaranteeing byte-identical event
 /// timestamps, B+ tree keys, and pagination cursors across the cluster.
 ///
-/// Generic over the tier-specific request enum `R`. The default exists only
-/// as a bridge while the last call sites migrate from the transitional
-/// `LedgerRequest` wrapper to typed `SystemRequest` / `RegionRequest` /
-/// `OrganizationRequest`. Once migration completes, the default is dropped.
+/// Generic over the tier-specific request enum `R`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RaftPayload<R = LedgerRequest> {
+pub struct RaftPayload<R> {
     /// The application-level request.
     pub request: R,
     /// Leader-assigned wall-clock timestamp at proposal time.
@@ -153,77 +150,6 @@ impl<R> RaftPayload<R> {
 // Request/Response Types
 // ============================================================================
 
-/// Request to the Raft state machine.
-///
-/// This is the "D" (data) type in OpenRaft's type configuration.
-/// Each request targets a specific organization and vault.
-///
-/// Contains no plaintext PII — see [`SystemRequest`] for the data residency
-/// invariant. All variants use numeric IDs, hashes, and enums only.
-///
-/// # Three-tier split status (B.1.4 stub)
-///
-/// The B.1 design partitions this mega-enum into three peer enums:
-/// [`SystemRequest`], [`RegionRequest`], [`OrganizationRequest`] —
-/// enforced by separate apply pipelines so cross-tier misrouting is a
-/// compile error.
-///
-/// **B.1.4 scope (this commit):** declare the three peer enums + their
-/// re-exports. The skeleton enums currently have no variants; the existing
-/// `LedgerRequest` variants stay where they are. The apply pipelines and
-/// services still construct `LedgerRequest::*` directly.
-///
-/// **B.1.5 + B.1.6 scope (subsequent commits):** migrate variants out of
-/// `LedgerRequest` into the right peer enum, wire the three apply
-/// pipelines, and update construction sites. After B.1.6, `LedgerRequest`
-/// either disappears entirely or becomes a thin wrapper —
-/// `enum LedgerRequest { System(SystemRequest), Region(RegionRequest),
-/// Organization(OrganizationRequest) }` — TBD during B.1.6 implementation.
-///
-/// **Categorization plan** (where each variant lands):
-///
-/// - `OrganizationRequest` (data plane, per-organization Raft):
-///   `Write`, `BatchWrite`, `CreateVault`, `UpdateVault`, `DeleteVault`,
-///   `UpdateVaultHealth`, `CreateApp`, `DeleteApp`, `SetAppEnabled`,
-///   `RotateAppClientSecret`, `CreateAppClientAssertion`,
-///   `DeleteAppClientAssertion`, `SetAppClientAssertionEnabled`,
-///   `SetAppCredentialEnabled`, `AddAppVault`, `UpdateAppVault`,
-///   `RemoveAppVault`, `AddOrganizationMember`,
-///   `RemoveOrganizationMember`, `UpdateOrganizationMemberRole`,
-///   `CreateOrganizationInvite`, `ResolveOrganizationInvite`,
-///   `PurgeOrganizationInviteIndexes`, `RehashInviteEmailIndex`,
-///   `CreateOrganizationTeam`, `DeleteOrganizationTeam`,
-///   `IngestExternalEvents`, plus saga-PII writes for the organization.
-///
-/// - `RegionRequest` (regional control plane, per-region Raft —
-///   B.1.6 fields):
-///   `PlaceOrganization`, `UnplaceOrganization`, `UpdateOrganizationVoters`
-///   (for B.3 reconciliation), `HibernateOrganization` (B.2),
-///   `WakeOrganization` (B.2), `UpdateRegionQuota`,
-///   `SaveRegionalSagaPii`, `DeleteRegionalSagaPii`, `AddRegionVoter`,
-///   `RemoveRegionVoter`, plus today's `RegionMembershipReport` and
-///   `RegisterPeerAddress` if they belong at this tier.
-///
-/// - `SystemRequest` (cluster control plane, single Raft):
-///   The existing nested `SystemRequest` enum stays at the system tier.
-///   `CreateOrganization`, `DeleteOrganization`, `SuspendOrganization`,
-///   `ResumeOrganization`, `PurgeOrganization`, `StartMigration`,
-///   `CompleteMigration`, `CreateSigningKey`, `RotateSigningKey`,
-///   `RevokeSigningKey`, `TransitionSigningKeyRevoked`,
-///   `CreateRefreshToken`, `UseRefreshToken`, `RevokeTokenFamily`,
-///   `RevokeAllUserSessions`, `RevokeAllAppSessions` move from the top
-///   level into `SystemRequest` (or stay in the existing nested one).
-///   `CreateDataRegion` is system-tier.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LedgerRequest {
-    /// Cluster control-plane request.
-    System(SystemRequest),
-    /// Regional control-plane request.
-    Region(RegionRequest),
-    /// Organization data-plane request.
-    Organization(OrganizationRequest),
-}
-
 /// System-level requests that modify the `_system` organization.
 ///
 /// # Data residency invariant
@@ -252,10 +178,9 @@ pub enum LedgerRequest {
 /// All other variants are proposed to GLOBAL and contain no PII.
 ///
 /// **Three-tier split status (B.1.4 stub):** this enum is the cluster
-/// control plane's request type. The B.1.6 commit moves variants like
-/// `CreateOrganization`, `CreateSigningKey`, `CreateRefreshToken` from the
-/// top-level [`LedgerRequest`] into this enum so the system tier owns its
-/// full surface. See [`LedgerRequest`] for the categorization plan.
+/// control plane's request type. Owns all cluster-level operations —
+/// `CreateOrganization`, `CreateSigningKey`, `CreateRefreshToken`, and
+/// related variants — at the system tier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SystemRequest {
     /// Creates a new user (global control-plane entry only).
@@ -616,8 +541,8 @@ pub enum SystemRequest {
     /// Writes a team record to the regional store (REGIONAL-only, Pattern 1).
     ///
     /// Proposed to the REGIONAL Raft group via `propose_regional()`.
-    /// The team directory entry (ID, slug) is created separately via the
-    /// GLOBAL `LedgerRequest::CreateOrganizationTeam`. This separation
+    /// The team directory entry (ID, slug) is created separately via
+    /// `OrganizationRequest::CreateOrganizationTeam`. This separation
     /// ensures plaintext team names never enter the GLOBAL Raft log.
     WriteTeam {
         /// Organization containing the team.
@@ -634,8 +559,8 @@ pub enum SystemRequest {
     /// Writes an app's display name and description to the regional store (PII).
     ///
     /// Proposed to the REGIONAL Raft group via `propose_regional()`.
-    /// The app directory entry (ID, slug) is created separately via the
-    /// GLOBAL `LedgerRequest::CreateApp`. This separation ensures plaintext
+    /// The app directory entry (ID, slug) is created separately via
+    /// `OrganizationRequest::CreateApp`. This separation ensures plaintext
     /// app names and descriptions never enter the GLOBAL Raft log.
     WriteAppProfile {
         /// Organization containing the app.
@@ -809,7 +734,7 @@ pub enum SystemRequest {
     // ── TOTP Challenge Management ──
     /// Creates a pending TOTP challenge after primary authentication.
     ///
-    /// Proposed as plain `LedgerRequest::System` (no PII — only IDs and
+    /// Proposed as a system-tier request (no PII — only IDs and
     /// nonces). Rate-limited to 3 active challenges per user.
     CreateTotpChallenge {
         /// User who must complete TOTP.
@@ -885,7 +810,7 @@ pub enum SystemRequest {
     ///
     /// Proposed to the REGIONAL Raft group via `propose_regional_org_encrypted()`.
     /// Contains the plaintext email (PII) and role/team fields that are not
-    /// in the GLOBAL `LedgerRequest::CreateOrganizationInvite`.
+    /// in `OrganizationRequest::CreateOrganizationInvite`.
     WriteOrganizationInvite {
         /// Organization issuing the invitation.
         organization: OrganizationId,
@@ -985,8 +910,7 @@ pub enum SystemRequest {
         conf_epoch: u64,
     },
 
-    // ── Moved from top-level `LedgerRequest` in B.1.6 ──
-
+    // ── System-tier operations ──
     /// Deletes an organization.
     DeleteOrganization {
         /// Organization to delete.
@@ -1133,24 +1057,54 @@ pub enum SystemRequest {
 
     /// Organization-scoped encrypted form of a `SystemRequest`.
     EncryptedOrgSystem(crate::entry_crypto::EncryptedOrgSystemRequest),
+
+    /// Writes arbitrary key-value transactions to a GLOBAL system vault.
+    ///
+    /// Used for saga-coordination writes (`_meta:saga:*`) where the saga
+    /// record must land in GLOBAL state before the orchestrator can drive it.
+    /// The target vault is always `VaultId::new(0)` (the system vault).
+    ///
+    /// Unlike [`OrganizationRequest::Write`](OrganizationRequest::Write),
+    /// this variant is handled by the `SystemApplyWorker` at
+    /// `(GLOBAL, 0)` and writes directly to the GLOBAL `StateLayer`.
+    /// It must NOT carry PII — saga records at `_meta:saga:*` contain
+    /// only saga identifiers, region pointers, and state-machine data.
+    Write {
+        /// Target vault within the system group (always 0 in production).
+        vault: VaultId,
+        /// Transactions to apply atomically.
+        transactions: Vec<Transaction>,
+        /// Idempotency key (16-byte UUID) for cross-failover deduplication.
+        #[serde(default)]
+        idempotency_key: [u8; 16],
+        /// Hash of the request payload (seahash).
+        #[serde(default)]
+        request_hash: u64,
+    },
+
+    /// Org-tier metadata operation applied to the GLOBAL group's `AppliedState`.
+    ///
+    /// A transition shim for B.1 — all `OrganizationRequest` variants that
+    /// modify control-plane metadata (vault lifecycle, app management, member
+    /// management, invitations, teams, etc.) must land in GLOBAL state so that
+    /// services reading from `system.applied_state` (e.g. `write.rs`, `read.rs`,
+    /// `SlugResolver`) can find the data.
+    ///
+    /// The GLOBAL apply worker (`ApplyWorker<SystemRequest>`) receives these bytes
+    /// and delegates to `apply_organization_request_with_events`. This avoids
+    /// expanding `SystemRequest` with dozens of duplicate variants while keeping
+    /// the typed-apply-worker tier discipline intact.
+    ///
+    /// Only `OrganizationRequest::Write` (data-plane writes) is excluded — those
+    /// route to the per-org `ApplyWorker<OrganizationRequest>` via
+    /// `propose_to_organization_bytes`.
+    OrganizationMetadata(Box<OrganizationRequest>),
 }
 
 // =============================================================================
-// B.1.4 skeleton: peer request enums for the regional and organization tiers.
-//
-// The B.1 design partitions the request space across three peer Raft tiers:
-// SystemGroup ↔ SystemRequest, RegionGroup ↔ RegionRequest,
-// OrganizationGroup ↔ OrganizationRequest. The compiler enforces tier
-// discipline via the type signatures of each tier's apply pipeline.
-//
-// This commit (B.1.4) declares the type vocabulary. The variants land in
-// B.1.6 (bootstrap rewrite + multi-tier orchestration), interleaved with
-// the apply-pipeline split (B.1.5) and the migration of construction sites
-// across the workspace's ~700 LedgerRequest call sites. Until then, both
-// enums are empty placeholders — they exist so subsequent commits can
-// reference them without an additional type-introduction churn.
-//
-// See `LedgerRequest`'s doc comment for the full categorization plan.
+// Three-tier request model: SystemGroup ↔ SystemRequest, RegionGroup ↔ RegionRequest,
+// OrganizationGroup ↔ OrganizationRequest. The compiler enforces tier discipline via
+// the type signatures of each tier's apply pipeline.
 // =============================================================================
 
 /// Regional control-plane request applied via the per-region Raft group.
@@ -1262,7 +1216,7 @@ pub enum OrganizationRequest {
     /// Batches of requests applied atomically in a single Raft entry.
     BatchWrite {
         /// The requests to process.
-        requests: Vec<LedgerRequest>,
+        requests: Vec<OrganizationRequest>,
     },
     /// Creates a new vault within the organization.
     CreateVault {
@@ -1783,7 +1737,7 @@ pub enum LedgerResponse {
     /// Batches of responses from a BatchWrite request.
     ///
     /// Responses are in the same order as the requests in the corresponding
-    /// `LedgerRequest::BatchWrite`.
+    /// `OrganizationRequest::BatchWrite`.
     BatchWrite {
         /// Responses for each request in the batch.
         responses: Vec<LedgerResponse>,
@@ -2418,18 +2372,18 @@ mod tests {
 
     #[test]
     fn test_ledger_request_serialization() {
-        let request = LedgerRequest::System(SystemRequest::CreateOrganization {
+        let request = SystemRequest::CreateOrganization {
             slug: OrganizationSlug::new(12345),
             region: Region::US_EAST_VA,
             tier: Default::default(),
             admin: UserId::new(1),
-        });
+        };
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
-        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized = postcard::from_bytes::<SystemRequest>(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::System(SystemRequest::CreateOrganization { slug, region, .. }) => {
+            SystemRequest::CreateOrganization { slug, region, .. } => {
                 assert_eq!(slug, OrganizationSlug::new(12345));
                 assert_eq!(region, Region::US_EAST_VA);
             },
@@ -2439,16 +2393,17 @@ mod tests {
 
     #[test]
     fn test_add_organization_member_request_serialization_roundtrip() {
-        let request = LedgerRequest::Organization(OrganizationRequest::AddOrganizationMember {
+        let request = OrganizationRequest::AddOrganizationMember {
             organization: OrganizationId::new(5),
             user: UserId::new(42),
             user_slug: UserSlug::new(4200),
             role: inferadb_ledger_state::system::OrganizationMemberRole::Member,
-        });
+        };
         let bytes = postcard::to_allocvec(&request).expect("serialize");
-        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized =
+            postcard::from_bytes::<OrganizationRequest>(&bytes).expect("deserialize");
         match deserialized {
-            LedgerRequest::Organization(OrganizationRequest::AddOrganizationMember { organization, user, user_slug, role }) => {
+            OrganizationRequest::AddOrganizationMember { organization, user, user_slug, role } => {
                 assert_eq!(organization, OrganizationId::new(5));
                 assert_eq!(user, UserId::new(42));
                 assert_eq!(user_slug, UserSlug::new(4200));
@@ -2627,24 +2582,25 @@ mod tests {
         use chrono::TimeZone;
 
         let payload = RaftPayload {
-            request: LedgerRequest::System(SystemRequest::CreateOrganization {
+            request: SystemRequest::CreateOrganization {
                 slug: OrganizationSlug::new(999),
                 region: Region::US_EAST_VA,
                 tier: Default::default(),
                 admin: UserId::new(1),
-            }),
+            },
             proposed_at: Utc.with_ymd_and_hms(2099, 6, 15, 12, 30, 0).unwrap(),
             state_root_commitments: vec![],
             caller: 0,
         };
 
         let bytes = postcard::to_allocvec(&payload).expect("serialize");
-        let deserialized: RaftPayload = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized: RaftPayload<SystemRequest> =
+            postcard::from_bytes(&bytes).expect("deserialize");
 
         assert_eq!(payload, deserialized);
         assert_eq!(deserialized.proposed_at, Utc.with_ymd_and_hms(2099, 6, 15, 12, 30, 0).unwrap());
         match &deserialized.request {
-            LedgerRequest::System(SystemRequest::CreateOrganization { slug, .. }) => {
+            SystemRequest::CreateOrganization { slug, .. } => {
                 assert_eq!(*slug, OrganizationSlug::new(999));
             },
             _ => panic!("unexpected variant"),
@@ -2657,18 +2613,20 @@ mod tests {
 
         let ts = Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap();
         let payload = RaftPayload {
-            request: LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(1),
+            request: OrganizationRequest::Write {
+                vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0; 16],
                 request_hash: 0,
-            }),
+            },
             proposed_at: ts,
             state_root_commitments: vec![],
             caller: 0,
         };
 
         let bytes1 = postcard::to_allocvec(&payload).expect("serialize");
-        let decoded: RaftPayload = postcard::from_bytes(&bytes1).expect("deserialize");
+        let decoded: RaftPayload<OrganizationRequest> =
+            postcard::from_bytes(&bytes1).expect("deserialize");
         let bytes2 = postcard::to_allocvec(&decoded).expect("re-serialize");
 
         assert_eq!(bytes1, bytes2, "re-serialization should produce identical bytes");
@@ -2733,18 +2691,20 @@ mod tests {
         ];
 
         let payload = RaftPayload {
-            request: LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(1),
+            request: OrganizationRequest::Write {
+                vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0; 16],
                 request_hash: 0,
-            }),
+            },
             proposed_at: Utc.with_ymd_and_hms(2099, 6, 15, 12, 0, 0).unwrap(),
             state_root_commitments: commitments.clone(),
             caller: 0,
         };
 
         let bytes = postcard::to_allocvec(&payload).expect("serialize");
-        let deserialized: RaftPayload = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized: RaftPayload<OrganizationRequest> =
+            postcard::from_bytes(&bytes).expect("deserialize");
 
         assert_eq!(deserialized.state_root_commitments.len(), 2);
         assert_eq!(deserialized.state_root_commitments[0].organization, OrganizationId::new(1));
@@ -2762,19 +2722,20 @@ mod tests {
         use chrono::TimeZone;
 
         let payload_without = RaftPayload {
-            request: LedgerRequest::System(SystemRequest::CreateOrganization {
+            request: SystemRequest::CreateOrganization {
                 slug: OrganizationSlug::new(1),
                 region: Region::US_EAST_VA,
                 tier: Default::default(),
                 admin: UserId::new(1),
-            }),
+            },
             proposed_at: Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap(),
             state_root_commitments: vec![],
             caller: 0,
         };
 
         let bytes = postcard::to_allocvec(&payload_without).expect("serialize");
-        let deserialized: RaftPayload = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized: RaftPayload<SystemRequest> =
+            postcard::from_bytes(&bytes).expect("deserialize");
 
         assert!(deserialized.state_root_commitments.is_empty());
     }
@@ -2784,11 +2745,12 @@ mod tests {
         use chrono::TimeZone;
 
         let payload = RaftPayload {
-            request: LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(3),
+            request: OrganizationRequest::Write {
+                vault: VaultId::new(3),
                 transactions: vec![],
                 idempotency_key: [42; 16],
                 request_hash: 12345,
-            }),
+            },
             proposed_at: Utc.with_ymd_and_hms(2099, 3, 1, 0, 0, 0).unwrap(),
             state_root_commitments: vec![StateRootCommitment {
                 organization: OrganizationId::new(5),
@@ -2800,7 +2762,8 @@ mod tests {
         };
 
         let bytes1 = postcard::to_allocvec(&payload).expect("serialize");
-        let decoded: RaftPayload = postcard::from_bytes(&bytes1).expect("deserialize");
+        let decoded: RaftPayload<OrganizationRequest> =
+            postcard::from_bytes(&bytes1).expect("deserialize");
         let bytes2 = postcard::to_allocvec(&decoded).expect("re-serialize");
 
         assert_eq!(bytes1, bytes2, "re-serialization with commitments should be stable");
@@ -2812,21 +2775,21 @@ mod tests {
 
     #[test]
     fn test_create_signing_key_serialization() {
-        let request = LedgerRequest::System(SystemRequest::CreateSigningKey {
+        let request = SystemRequest::CreateSigningKey {
             scope: inferadb_ledger_state::system::SigningKeyScope::Global,
             kid: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             public_key_bytes: vec![0xAA; 32],
             encrypted_private_key: vec![0xBB; 100],
             rmk_version: 1,
-        });
+        };
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
-        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized = postcard::from_bytes::<SystemRequest>(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::System(SystemRequest::CreateSigningKey {
+            SystemRequest::CreateSigningKey {
                 scope, kid, public_key_bytes, rmk_version, ..
-            }) => {
+            } => {
                 assert_eq!(scope, inferadb_ledger_state::system::SigningKeyScope::Global);
                 assert_eq!(kid, "550e8400-e29b-41d4-a716-446655440000");
                 assert_eq!(public_key_bytes.len(), 32);
@@ -2838,7 +2801,7 @@ mod tests {
 
     #[test]
     fn test_create_signing_key_org_scope_serialization() {
-        let request = LedgerRequest::System(SystemRequest::CreateSigningKey {
+        let request = SystemRequest::CreateSigningKey {
             scope: inferadb_ledger_state::system::SigningKeyScope::Organization(
                 OrganizationId::new(42),
             ),
@@ -2846,13 +2809,13 @@ mod tests {
             public_key_bytes: vec![0xCC; 32],
             encrypted_private_key: vec![0xDD; 100],
             rmk_version: 2,
-        });
+        };
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
-        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized = postcard::from_bytes::<SystemRequest>(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::System(SystemRequest::CreateSigningKey { scope, rmk_version, .. }) => {
+            SystemRequest::CreateSigningKey { scope, rmk_version, .. } => {
                 assert_eq!(
                     scope,
                     inferadb_ledger_state::system::SigningKeyScope::Organization(
@@ -2867,26 +2830,26 @@ mod tests {
 
     #[test]
     fn test_rotate_signing_key_serialization() {
-        let request = LedgerRequest::System(SystemRequest::RotateSigningKey {
+        let request = SystemRequest::RotateSigningKey {
             old_kid: "old-kid".to_string(),
             new_kid: "new-kid".to_string(),
             new_public_key_bytes: vec![0xAA; 32],
             new_encrypted_private_key: vec![0xBB; 100],
             rmk_version: 3,
             grace_period_secs: 14400,
-        });
+        };
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
-        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized = postcard::from_bytes::<SystemRequest>(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::System(SystemRequest::RotateSigningKey {
+            SystemRequest::RotateSigningKey {
                 old_kid,
                 new_kid,
                 grace_period_secs,
                 rmk_version,
                 ..
-            }) => {
+            } => {
                 assert_eq!(old_kid, "old-kid");
                 assert_eq!(new_kid, "new-kid");
                 assert_eq!(grace_period_secs, 14400);
@@ -2898,13 +2861,13 @@ mod tests {
 
     #[test]
     fn test_revoke_signing_key_serialization() {
-        let request = LedgerRequest::System(SystemRequest::RevokeSigningKey { kid: "kid-to-revoke".to_string() });
+        let request = SystemRequest::RevokeSigningKey { kid: "kid-to-revoke".to_string() };
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
-        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized = postcard::from_bytes::<SystemRequest>(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::System(SystemRequest::RevokeSigningKey { kid }) => {
+            SystemRequest::RevokeSigningKey { kid } => {
                 assert_eq!(kid, "kid-to-revoke");
             },
             _ => panic!("unexpected variant"),
@@ -2913,13 +2876,13 @@ mod tests {
 
     #[test]
     fn test_transition_signing_key_revoked_serialization() {
-        let request = LedgerRequest::System(SystemRequest::TransitionSigningKeyRevoked { kid: "rotated-kid".to_string() });
+        let request = SystemRequest::TransitionSigningKeyRevoked { kid: "rotated-kid".to_string() };
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
-        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized = postcard::from_bytes::<SystemRequest>(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::System(SystemRequest::TransitionSigningKeyRevoked { kid }) => {
+            SystemRequest::TransitionSigningKeyRevoked { kid } => {
                 assert_eq!(kid, "rotated-kid");
             },
             _ => panic!("unexpected variant"),
@@ -2928,7 +2891,7 @@ mod tests {
 
     #[test]
     fn test_create_refresh_token_serialization() {
-        let request = LedgerRequest::System(SystemRequest::CreateRefreshToken {
+        let request = SystemRequest::CreateRefreshToken {
             token_hash: [0x11; 32],
             family: [0x22; 16],
             token_type: TokenType::UserSession,
@@ -2937,13 +2900,13 @@ mod tests {
             vault: None,
             kid: "signing-kid".to_string(),
             ttl_secs: 1_209_600,
-        });
+        };
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
-        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized = postcard::from_bytes::<SystemRequest>(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::System(SystemRequest::CreateRefreshToken {
+            SystemRequest::CreateRefreshToken {
                 token_hash,
                 family,
                 token_type,
@@ -2952,7 +2915,7 @@ mod tests {
                 vault,
                 kid,
                 ttl_secs,
-            }) => {
+            } => {
                 assert_eq!(token_hash, [0x11; 32]);
                 assert_eq!(family, [0x22; 16]);
                 assert_eq!(token_type, TokenType::UserSession);
@@ -2968,7 +2931,7 @@ mod tests {
 
     #[test]
     fn test_create_refresh_token_vault_serialization() {
-        let request = LedgerRequest::System(SystemRequest::CreateRefreshToken {
+        let request = SystemRequest::CreateRefreshToken {
             token_hash: [0xAA; 32],
             family: [0xBB; 16],
             token_type: TokenType::VaultAccess,
@@ -2977,15 +2940,15 @@ mod tests {
             vault: Some(VaultId::new(3)),
             kid: "org-kid".to_string(),
             ttl_secs: 3600,
-        });
+        };
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
-        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized = postcard::from_bytes::<SystemRequest>(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::System(SystemRequest::CreateRefreshToken {
+            SystemRequest::CreateRefreshToken {
                 token_type, subject, organization, vault, ..
-            }) => {
+            } => {
                 assert_eq!(token_type, TokenType::VaultAccess);
                 assert_eq!(subject, TokenSubject::App(AppSlug::new(55)));
                 assert_eq!(organization, Some(OrganizationId::new(7)));
@@ -2997,27 +2960,27 @@ mod tests {
 
     #[test]
     fn test_use_refresh_token_serialization() {
-        let request = LedgerRequest::System(SystemRequest::UseRefreshToken {
+        let request = SystemRequest::UseRefreshToken {
             old_token_hash: [0x33; 32],
             new_token_hash: [0x44; 32],
             new_kid: "active-kid".to_string(),
             ttl_secs: 1_209_600,
             expected_version: Some(TokenVersion::new(5)),
             max_family_lifetime_secs: 2_592_000,
-        });
+        };
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
-        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized = postcard::from_bytes::<SystemRequest>(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::System(SystemRequest::UseRefreshToken {
+            SystemRequest::UseRefreshToken {
                 old_token_hash,
                 new_token_hash,
                 new_kid,
                 ttl_secs,
                 expected_version,
                 max_family_lifetime_secs,
-            }) => {
+            } => {
                 assert_eq!(old_token_hash, [0x33; 32]);
                 assert_eq!(new_token_hash, [0x44; 32]);
                 assert_eq!(new_kid, "active-kid");
@@ -3031,20 +2994,20 @@ mod tests {
 
     #[test]
     fn test_use_refresh_token_no_version_serialization() {
-        let request = LedgerRequest::System(SystemRequest::UseRefreshToken {
+        let request = SystemRequest::UseRefreshToken {
             old_token_hash: [0x55; 32],
             new_token_hash: [0x66; 32],
             new_kid: "vault-kid".to_string(),
             ttl_secs: 3600,
             expected_version: None,
             max_family_lifetime_secs: 2_592_000,
-        });
+        };
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
-        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized = postcard::from_bytes::<SystemRequest>(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::System(SystemRequest::UseRefreshToken { expected_version, .. }) => {
+            SystemRequest::UseRefreshToken { expected_version, .. } => {
                 assert!(expected_version.is_none());
             },
             _ => panic!("unexpected variant"),
@@ -3053,13 +3016,13 @@ mod tests {
 
     #[test]
     fn test_revoke_token_family_serialization() {
-        let request = LedgerRequest::System(SystemRequest::RevokeTokenFamily { family: [0xAB; 16] });
+        let request = SystemRequest::RevokeTokenFamily { family: [0xAB; 16] };
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
-        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized = postcard::from_bytes::<SystemRequest>(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::System(SystemRequest::RevokeTokenFamily { family }) => {
+            SystemRequest::RevokeTokenFamily { family } => {
                 assert_eq!(family, [0xAB; 16]);
             },
             _ => panic!("unexpected variant"),
@@ -3068,13 +3031,13 @@ mod tests {
 
     #[test]
     fn test_revoke_all_user_sessions_serialization() {
-        let request = LedgerRequest::System(SystemRequest::RevokeAllUserSessions { user: UserId::new(42) });
+        let request = SystemRequest::RevokeAllUserSessions { user: UserId::new(42) };
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
-        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized = postcard::from_bytes::<SystemRequest>(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::System(SystemRequest::RevokeAllUserSessions { user }) => {
+            SystemRequest::RevokeAllUserSessions { user } => {
                 assert_eq!(user, UserId::new(42));
             },
             _ => panic!("unexpected variant"),
@@ -3083,16 +3046,16 @@ mod tests {
 
     #[test]
     fn test_revoke_all_app_sessions_serialization() {
-        let request = LedgerRequest::System(SystemRequest::RevokeAllAppSessions {
+        let request = SystemRequest::RevokeAllAppSessions {
             organization: OrganizationId::new(1),
             app: AppId::new(42),
-        });
+        };
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
-        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized = postcard::from_bytes::<SystemRequest>(&bytes).expect("deserialize");
 
         match deserialized {
-            LedgerRequest::System(SystemRequest::RevokeAllAppSessions { organization, app }) => {
+            SystemRequest::RevokeAllAppSessions { organization, app } => {
                 assert_eq!(organization, OrganizationId::new(1));
                 assert_eq!(app, AppId::new(42));
             },
@@ -3102,10 +3065,10 @@ mod tests {
 
     #[test]
     fn test_delete_expired_refresh_tokens_serialization() {
-        let request = LedgerRequest::System(SystemRequest::DeleteExpiredRefreshTokens);
+        let request = SystemRequest::DeleteExpiredRefreshTokens;
 
         let bytes = postcard::to_allocvec(&request).expect("serialize");
-        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized = postcard::from_bytes::<SystemRequest>(&bytes).expect("deserialize");
 
         assert_eq!(request, deserialized);
     }
@@ -3588,7 +3551,7 @@ mod tests {
 
         use crate::{
             log_storage::LogId,
-            types::{LedgerRequest, OrganizationRequest, SystemRequest},
+            types::{OrganizationRequest, SystemRequest},
         };
 
         /// Helper to create a LogId from term and index.
@@ -3719,35 +3682,54 @@ mod tests {
                 }
             }
 
-            /// LedgerRequest serialization roundtrip preserves all variants.
+            /// SystemRequest serialization roundtrip preserves all variants.
             #[test]
-            fn prop_ledger_request_roundtrip(
-                variant_idx in 0u8..4,
-                name in "[a-z]{1,16}",
+            fn prop_system_request_roundtrip(
+                variant_idx in 0u8..2,
                 organization in (1i64..10_000).prop_map(OrganizationId::new),
-                vault in (1i64..10_000).prop_map(VaultId::new),
                 region_idx in 0usize..inferadb_ledger_types::ALL_REGIONS.len(),
             ) {
                 let region = inferadb_ledger_types::ALL_REGIONS[region_idx];
                 let request = match variant_idx {
-                    0 => LedgerRequest::System(SystemRequest::CreateOrganization {
+                    0 => SystemRequest::CreateOrganization {
                         slug: inferadb_ledger_types::OrganizationSlug::new(42),
                         region,
                         tier: Default::default(),
                         admin: UserId::new(1),
-                    }),
-                    1 => LedgerRequest::Organization(OrganizationRequest::CreateVault {
+                    },
+                    _ => SystemRequest::DeleteOrganization { organization },
+                };
+
+                let bytes = postcard::to_allocvec(&request).expect("serialize");
+                let decoded: SystemRequest =
+                    postcard::from_bytes(&bytes).expect("deserialize");
+                prop_assert_eq!(
+                    postcard::to_allocvec(&decoded).expect("re-serialize"),
+                    bytes,
+                    "roundtrip changed encoding"
+                );
+            }
+
+            /// OrganizationRequest serialization roundtrip preserves all variants.
+            #[test]
+            fn prop_organization_request_roundtrip(
+                variant_idx in 0u8..2,
+                name in "[a-z]{1,16}",
+                organization in (1i64..10_000).prop_map(OrganizationId::new),
+                vault in (1i64..10_000).prop_map(VaultId::new),
+            ) {
+                let request = match variant_idx {
+                    0 => OrganizationRequest::CreateVault {
                         organization,
                         slug: VaultSlug::new(42),
                         name: Some(name.clone()),
                         retention_policy: None,
-                    }),
-                    2 => LedgerRequest::System(SystemRequest::DeleteOrganization { organization }),
-                    _ => LedgerRequest::Organization(OrganizationRequest::DeleteVault { organization, vault }),
+                    },
+                    _ => OrganizationRequest::DeleteVault { organization, vault },
                 };
 
                 let bytes = postcard::to_allocvec(&request).expect("serialize");
-                let decoded: super::LedgerRequest =
+                let decoded: OrganizationRequest =
                     postcard::from_bytes(&bytes).expect("deserialize");
                 prop_assert_eq!(
                     postcard::to_allocvec(&decoded).expect("re-serialize"),
@@ -3831,7 +3813,7 @@ mod tests {
             SystemRequest::DeleteOrganizationInvite { .. } => RaftScope::Regional,
             SystemRequest::RehashInvitationEmailHmac { .. } => RaftScope::Regional,
 
-            // ── Moved from top-level `LedgerRequest` in B.1.6 ──
+            // ── System-tier operations ──
             // Organization lifecycle (GLOBAL — directory state, no PII).
             SystemRequest::DeleteOrganization { .. } => RaftScope::Global,
             SystemRequest::SuspendOrganization { .. } => RaftScope::Global,
@@ -3857,6 +3839,15 @@ mod tests {
             // Encrypted wrappers route to REGIONAL (their inner payload is PII).
             SystemRequest::EncryptedUserSystem(_) => RaftScope::Regional,
             SystemRequest::EncryptedOrgSystem(_) => RaftScope::Regional,
+
+            // GLOBAL system vault writes (saga records, sequence counters).
+            // No PII — saga records contain only identifiers and state-machine data.
+            SystemRequest::Write { .. } => RaftScope::Global,
+
+            // Org-tier metadata ops wrapped for GLOBAL dispatch.
+            // The inner OrganizationRequest may or may not carry PII; use Global
+            // here since the wrapper routes to GLOBAL's AppliedState.
+            SystemRequest::OrganizationMetadata(_) => RaftScope::Global,
         }
     }
 
@@ -4039,147 +4030,28 @@ mod tests {
         assert_eq!(classify_system_request(&purge_regional), RaftScope::Regional);
     }
 
-    /// Classifies whether a `LedgerRequest` contains plaintext PII.
-    ///
-    /// All `LedgerRequest` variants are "global" — they contain only numeric
-    /// IDs, slugs, hashes, and enums. Plaintext PII (names, descriptions)
-    /// has been moved to [`SystemRequest`] regional variants:
-    /// - Team names → [`SystemRequest::WriteTeam`]
-    /// - App names/descriptions → [`SystemRequest::WriteAppProfile`]
-    ///
-    /// This exhaustive match ensures new variants are reviewed for PII before
-    /// they can be added without a compile error.
-    fn classify_ledger_request(req: &LedgerRequest) -> RaftScope {
-        match req {
-            LedgerRequest::Organization(OrganizationRequest::Write { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::CreateVault { .. }) => RaftScope::Global,
-            LedgerRequest::System(SystemRequest::DeleteOrganization { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::DeleteVault { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::UpdateVault { .. }) => RaftScope::Global,
-            LedgerRequest::System(SystemRequest::SuspendOrganization { .. }) => RaftScope::Global,
-            LedgerRequest::System(SystemRequest::ResumeOrganization { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::RemoveOrganizationMember { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::UpdateOrganizationMemberRole { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::AddOrganizationMember { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::CreateOrganizationInvite { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::PurgeOrganizationInviteIndexes { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::RehashInviteEmailIndex { .. }) => RaftScope::Global,
-            LedgerRequest::System(SystemRequest::PurgeOrganization { .. }) => RaftScope::Global,
-            LedgerRequest::System(SystemRequest::StartMigration { .. }) => RaftScope::Global,
-            LedgerRequest::System(SystemRequest::CompleteMigration { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::BatchWrite { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::CreateOrganizationTeam { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::DeleteOrganizationTeam { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::CreateApp { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::DeleteApp { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::SetAppEnabled { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::SetAppCredentialEnabled { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::RotateAppClientSecret { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::CreateAppClientAssertion { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::DeleteAppClientAssertion { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::SetAppClientAssertionEnabled { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::AddAppVault { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::UpdateAppVault { .. }) => RaftScope::Global,
-            LedgerRequest::Organization(OrganizationRequest::RemoveAppVault { .. }) => RaftScope::Global,
-            LedgerRequest::System(SystemRequest::CreateSigningKey { .. }) => RaftScope::Global,
-            LedgerRequest::System(SystemRequest::RotateSigningKey { .. }) => RaftScope::Global,
-            LedgerRequest::System(SystemRequest::RevokeSigningKey { .. }) => RaftScope::Global,
-            LedgerRequest::System(SystemRequest::TransitionSigningKeyRevoked { .. }) => RaftScope::Global,
-            LedgerRequest::System(SystemRequest::CreateRefreshToken { .. }) => RaftScope::Global,
-            LedgerRequest::System(SystemRequest::UseRefreshToken { .. }) => RaftScope::Global,
-            LedgerRequest::System(SystemRequest::RevokeTokenFamily { .. }) => RaftScope::Global,
-            LedgerRequest::System(SystemRequest::RevokeAllUserSessions { .. }) => RaftScope::Global,
-            LedgerRequest::System(SystemRequest::RevokeAllAppSessions { .. }) => RaftScope::Global,
-            LedgerRequest::System(SystemRequest::DeleteExpiredRefreshTokens) => RaftScope::Global,
-            LedgerRequest::System(SystemRequest::EncryptedUserSystem(_)) => RaftScope::Regional,
-            LedgerRequest::System(SystemRequest::EncryptedOrgSystem(_)) => RaftScope::Regional,
-            // Catch-all for remaining `SystemRequest` variants (pre-existing
-            // system-tier traffic — users, teams, tokens, onboarding, etc.).
-            LedgerRequest::System(_) => RaftScope::Global,
-            // Region control-plane variants carry no plaintext PII; saga
-            // PII variants carry encrypted payloads. Placement / quota /
-            // voter-set changes are cluster metadata.
-            LedgerRequest::Region(RegionRequest::PlaceOrganization { .. }) => RaftScope::Global,
-            LedgerRequest::Region(RegionRequest::UnplaceOrganization { .. }) => RaftScope::Global,
-            LedgerRequest::Region(RegionRequest::UpdateRegionQuota { .. }) => RaftScope::Global,
-            LedgerRequest::Region(RegionRequest::SaveRegionalSagaPii { .. }) => RaftScope::Regional,
-            LedgerRequest::Region(RegionRequest::DeleteRegionalSagaPii { .. }) => RaftScope::Regional,
-            LedgerRequest::Region(RegionRequest::AddRegionVoter { .. }) => RaftScope::Global,
-            LedgerRequest::Region(RegionRequest::RemoveRegionVoter { .. }) => RaftScope::Global,
-            // IngestExternalEvents carries user-controlled strings
-            // (principal, event_type, details) and MUST ride the
-            // REGIONAL Raft group owning the organization. Classified
-            // Regional so the PII-classification test fails loudly if the
-            // routing ever regresses.
-            LedgerRequest::Organization(OrganizationRequest::IngestExternalEvents { .. }) => RaftScope::Regional,
-        }
-    }
-
-    /// Verifies that `classify_ledger_request` is exhaustive — adding a new
-    /// `LedgerRequest` variant will cause a compile error until classified.
-    #[test]
-    fn test_ledger_request_pii_classification_exhaustive() {
-        let write = LedgerRequest::Organization(OrganizationRequest::Write {            vault: VaultId::new(1),
-            transactions: vec![],
-            idempotency_key: [0; 16],
-            request_hash: 0,
-        });
-        assert_eq!(classify_ledger_request(&write), RaftScope::Global);
-
-        let create_team = LedgerRequest::Organization(OrganizationRequest::CreateOrganizationTeam {
-            organization: OrganizationId::new(1),
-            slug: TeamSlug::new(100),
-        });
-        assert_eq!(classify_ledger_request(&create_team), RaftScope::Global);
-
-        let create_app = LedgerRequest::Organization(OrganizationRequest::CreateApp {
-            organization: OrganizationId::new(1),
-            slug: AppSlug::new(200),
-        });
-        assert_eq!(classify_ledger_request(&create_app), RaftScope::Global);
-
-        // EncryptedUserSystem — REGIONAL (contains encrypted user PII)
-        let encrypted =
-            LedgerRequest::System(SystemRequest::EncryptedUserSystem(crate::entry_crypto::EncryptedUserSystemRequest {
-                sealed: vec![0; 48],
-                nonce: [0; 12],
-                user_id: UserId::new(1),
-            }));
-        assert_eq!(classify_ledger_request(&encrypted), RaftScope::Regional);
-
-        // EncryptedOrgSystem — REGIONAL (contains encrypted org PII)
-        let encrypted_org =
-            LedgerRequest::System(SystemRequest::EncryptedOrgSystem(crate::entry_crypto::EncryptedOrgSystemRequest {
-                sealed: vec![0; 48],
-                nonce: [0; 12],
-                organization: OrganizationId::new(1),
-            }));
-        assert_eq!(classify_ledger_request(&encrypted_org), RaftScope::Regional);
-    }
-
     // ── Invitation Request/Response Serialization Tests ──
 
     #[test]
     fn test_create_organization_invite_serialization_roundtrip() {
-        let request = LedgerRequest::Organization(OrganizationRequest::CreateOrganizationInvite {
+        let request = OrganizationRequest::CreateOrganizationInvite {
             organization: OrganizationId::new(5),
             slug: InviteSlug::new(9999),
             token_hash: [0xAB; 32],
             invitee_email_hmac: "deadbeef".to_string(),
             ttl_hours: 168,
-        });
+        };
         let bytes = postcard::to_allocvec(&request).expect("serialize");
-        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized =
+            postcard::from_bytes::<OrganizationRequest>(&bytes).expect("deserialize");
         match deserialized {
-            LedgerRequest::Organization(OrganizationRequest::CreateOrganizationInvite {
+            OrganizationRequest::CreateOrganizationInvite {
                 organization,
                 slug,
                 token_hash,
                 invitee_email_hmac,
                 ttl_hours,
-            }) => {
+            } => {
                 assert_eq!(organization, OrganizationId::new(5));
                 assert_eq!(slug, InviteSlug::new(9999));
                 assert_eq!(token_hash, [0xAB; 32]);
@@ -4192,23 +4064,24 @@ mod tests {
 
     #[test]
     fn test_resolve_organization_invite_serialization_roundtrip() {
-        let request = LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
+        let request = OrganizationRequest::ResolveOrganizationInvite {
             invite: InviteId::new(42),
             organization: OrganizationId::new(5),
             status: InvitationStatus::Accepted,
             invitee_email_hmac: "cafe0123".to_string(),
             token_hash: [0xCD; 32],
-        });
+        };
         let bytes = postcard::to_allocvec(&request).expect("serialize");
-        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized =
+            postcard::from_bytes::<OrganizationRequest>(&bytes).expect("deserialize");
         match deserialized {
-            LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
+            OrganizationRequest::ResolveOrganizationInvite {
                 invite,
                 organization,
                 status,
                 invitee_email_hmac,
                 token_hash,
-            }) => {
+            } => {
                 assert_eq!(invite, InviteId::new(42));
                 assert_eq!(organization, OrganizationId::new(5));
                 assert_eq!(status, InvitationStatus::Accepted);
@@ -4330,67 +4203,26 @@ mod tests {
     }
 
     #[test]
-    fn test_invitation_ledger_request_pii_classification() {
-        // CreateOrganizationInvite — GLOBAL (no PII, only IDs and HMAC)
-        let create = LedgerRequest::Organization(OrganizationRequest::CreateOrganizationInvite {
-            organization: OrganizationId::new(1),
-            slug: InviteSlug::new(100),
-            token_hash: [0; 32],
-            invitee_email_hmac: "hmac".to_string(),
-            ttl_hours: 168,
-        });
-        assert_eq!(classify_ledger_request(&create), RaftScope::Global);
-
-        // ResolveOrganizationInvite — GLOBAL (no PII)
-        let resolve = LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
-            invite: InviteId::new(1),
-            organization: OrganizationId::new(1),
-            status: InvitationStatus::Accepted,
-            invitee_email_hmac: "hmac".to_string(),
-            token_hash: [0; 32],
-        });
-        assert_eq!(classify_ledger_request(&resolve), RaftScope::Global);
-
-        // PurgeOrganizationInviteIndexes — GLOBAL (no PII, only IDs and HMAC)
-        let purge = LedgerRequest::Organization(OrganizationRequest::PurgeOrganizationInviteIndexes {
-            invite: InviteId::new(1),
-            slug: InviteSlug::new(100),
-            invitee_email_hmac: "hmac".to_string(),
-            token_hash: [0; 32],
-        });
-        assert_eq!(classify_ledger_request(&purge), RaftScope::Global);
-
-        // RehashInviteEmailIndex — GLOBAL (no PII, only IDs and HMACs)
-        let rehash = LedgerRequest::Organization(OrganizationRequest::RehashInviteEmailIndex {
-            invite: InviteId::new(1),
-            old_hmac: "old_hmac".to_string(),
-            new_hmac: "new_hmac".to_string(),
-            organization: OrganizationId::new(1),
-            status: InvitationStatus::Pending,
-        });
-        assert_eq!(classify_ledger_request(&rehash), RaftScope::Global);
-    }
-
-    #[test]
     fn test_purge_organization_invite_indexes_serialization_roundtrip() {
         let mut test_hash = [0u8; 32];
         test_hash[0] = 0xAB;
         test_hash[31] = 0xCD;
-        let request = LedgerRequest::Organization(OrganizationRequest::PurgeOrganizationInviteIndexes {
+        let request = OrganizationRequest::PurgeOrganizationInviteIndexes {
             invite: InviteId::new(42),
             slug: InviteSlug::new(9999),
             invitee_email_hmac: "deadbeef".to_string(),
             token_hash: test_hash,
-        });
+        };
         let bytes = postcard::to_allocvec(&request).expect("serialize");
-        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized =
+            postcard::from_bytes::<OrganizationRequest>(&bytes).expect("deserialize");
         match deserialized {
-            LedgerRequest::Organization(OrganizationRequest::PurgeOrganizationInviteIndexes {
+            OrganizationRequest::PurgeOrganizationInviteIndexes {
                 invite,
                 slug,
                 invitee_email_hmac,
                 token_hash,
-            }) => {
+            } => {
                 assert_eq!(invite, InviteId::new(42));
                 assert_eq!(slug, InviteSlug::new(9999));
                 assert_eq!(invitee_email_hmac, "deadbeef");
@@ -4402,23 +4234,24 @@ mod tests {
 
     #[test]
     fn test_rehash_invite_email_index_serialization_roundtrip() {
-        let request = LedgerRequest::Organization(OrganizationRequest::RehashInviteEmailIndex {
+        let request = OrganizationRequest::RehashInviteEmailIndex {
             invite: InviteId::new(7),
             old_hmac: "oldhmac123".to_string(),
             new_hmac: "newhmac456".to_string(),
             organization: OrganizationId::new(5),
             status: InvitationStatus::Pending,
-        });
+        };
         let bytes = postcard::to_allocvec(&request).expect("serialize");
-        let deserialized: LedgerRequest = postcard::from_bytes(&bytes).expect("deserialize");
+        let deserialized =
+            postcard::from_bytes::<OrganizationRequest>(&bytes).expect("deserialize");
         match deserialized {
-            LedgerRequest::Organization(OrganizationRequest::RehashInviteEmailIndex {
+            OrganizationRequest::RehashInviteEmailIndex {
                 invite,
                 old_hmac,
                 new_hmac,
                 organization,
                 status,
-            }) => {
+            } => {
                 assert_eq!(invite, InviteId::new(7));
                 assert_eq!(old_hmac, "oldhmac123");
                 assert_eq!(new_hmac, "newhmac456");
@@ -4859,11 +4692,11 @@ mod tests {
 
     #[test]
     fn test_raft_payload_system_constructor() {
-        let payload = RaftPayload::system(LedgerRequest::System(SystemRequest::DeleteExpiredRefreshTokens));
+        let payload = RaftPayload::system(SystemRequest::DeleteExpiredRefreshTokens);
         assert_eq!(payload.caller, 0);
         assert!(payload.state_root_commitments.is_empty());
         match payload.request {
-            LedgerRequest::System(SystemRequest::DeleteExpiredRefreshTokens) => {},
+            SystemRequest::DeleteExpiredRefreshTokens => {},
             _ => panic!("unexpected variant"),
         }
     }
@@ -4871,7 +4704,7 @@ mod tests {
     #[test]
     fn test_raft_payload_new_constructor() {
         let payload = RaftPayload::new(
-            LedgerRequest::System(SystemRequest::DeleteOrganization { organization: OrganizationId::new(1) }),
+            SystemRequest::DeleteOrganization { organization: OrganizationId::new(1) },
             42,
         );
         assert_eq!(payload.caller, 42);
@@ -4887,7 +4720,7 @@ mod tests {
             state_root: [0xAA; 32],
         }];
         let payload = RaftPayload::with_commitments(
-            LedgerRequest::System(SystemRequest::DeleteExpiredRefreshTokens),
+            SystemRequest::DeleteExpiredRefreshTokens,
             commitments.clone(),
             99,
         );

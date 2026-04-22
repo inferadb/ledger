@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use crate::{
     message::Message,
-    types::{Entry, Membership, NodeId, ConsensusStateId, TimerKind},
+    types::{ConsensusStateId, Entry, Membership, NodeId, TimerKind},
 };
 
 /// An action the reactor should execute on behalf of a shard.

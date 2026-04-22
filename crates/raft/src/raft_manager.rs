@@ -89,7 +89,7 @@ use crate::{
     runtime_config::RuntimeConfigHandle,
     state_checkpointer::StateCheckpointer,
     ttl_gc::TtlGarbageCollector,
-    types::{LedgerNodeId, LedgerResponse, RaftPayload, LedgerRequest, OrganizationRequest},
+    types::{LedgerNodeId, LedgerResponse, OrganizationRequest, RaftPayload},
 };
 
 // ============================================================================
@@ -321,329 +321,6 @@ impl RegionBackgroundJobs {
 impl Drop for RegionBackgroundJobs {
     fn drop(&mut self) {
         self.cancel();
-    }
-}
-
-/// Cluster control-plane Raft group (singleton). Hosts the organization
-/// directory, region directory, signing keys, refresh tokens, cross-region
-/// saga records, cluster membership.
-///
-/// **B.1.3 status:** skeleton type only. The fields and apply pipeline are
-/// added in B.1.6 (bootstrap rewrite + multi-tier orchestration). Until
-/// then, the cluster control plane is hosted on the
-/// [`OrganizationGroup`] for `(Region::GLOBAL, OrganizationId::new(0))` —
-/// the same shape Phase A used.
-///
-/// **Why a separate type even as a skeleton:** the spec's tier-discipline
-/// invariants (root `CLAUDE.md`) require system-tier operations to be
-/// unable to apply at any other tier. Reserving the type now lets B.1.4
-/// add a typed `SystemRequest` and B.1.6 wire it without a second renaming
-/// pass.
-pub struct SystemGroup {
-    /// Underlying region-group primitives (state layer, raft.db, blocks.db,
-    /// events.db, handle, lease, transport, background jobs, creation
-    /// channels). The distinct `SystemGroup` type encodes tier discipline
-    /// at the type level — a `SystemRequest`-bearing apply worker can
-    /// only be attached to a `SystemGroup`, never to an
-    /// [`OrganizationGroup`] or [`RegionGroup`]. Structurally the fields
-    /// mirror `OrganizationGroup` (region pinned to `GLOBAL`, organization
-    /// pinned to `0`); sharing them avoids duplicating 500+ lines of
-    /// durability / checkpoint / bootstrap wiring.
-    pub(crate) inner: OrganizationGroup,
-}
-
-impl SystemGroup {
-    /// Wraps an existing `OrganizationGroup` as the system group. The
-    /// wrapped group must have `region = Region::GLOBAL` and
-    /// `organization_id = OrganizationId::new(0)`.
-    pub(crate) fn from_organization_group(inner: OrganizationGroup) -> Self {
-        debug_assert_eq!(inner.region(), Region::GLOBAL);
-        debug_assert_eq!(inner.organization_id(), OrganizationId::new(0));
-        Self { inner }
-    }
-
-    /// Region this group belongs to. Always [`Region::GLOBAL`].
-    pub fn region(&self) -> Region {
-        Region::GLOBAL
-    }
-
-    /// Organization id this group owns. Always `OrganizationId::new(0)`.
-    pub fn organization_id(&self) -> OrganizationId {
-        OrganizationId::new(0)
-    }
-
-    /// Consensus handle for background jobs and services.
-    #[must_use]
-    pub fn handle(&self) -> &Arc<ConsensusHandle> {
-        self.inner.handle()
-    }
-
-    /// State layer for entity / relationship / signing-key storage.
-    #[must_use]
-    pub fn state(&self) -> &Arc<StateLayer<FileBackend>> {
-        self.inner.state()
-    }
-
-    /// `raft.db` handle.
-    #[must_use]
-    pub fn raft_db(&self) -> &Arc<Database<FileBackend>> {
-        self.inner.raft_db()
-    }
-
-    /// `blocks.db` handle.
-    #[must_use]
-    pub fn blocks_db(&self) -> &Arc<Database<FileBackend>> {
-        self.inner.blocks_db()
-    }
-
-    /// Events database, if available.
-    #[must_use]
-    pub fn events_db(&self) -> Option<&Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>> {
-        self.inner.events_db()
-    }
-
-    /// Events `Database` handle for durability sync.
-    #[must_use]
-    pub fn events_state_db(&self) -> Option<Arc<Database<FileBackend>>> {
-        self.inner.events_state_db()
-    }
-
-    /// Block archive for historical blocks.
-    #[must_use]
-    pub fn block_archive(&self) -> &Arc<BlockArchive<FileBackend>> {
-        self.inner.block_archive()
-    }
-
-    /// Applied-state accessor.
-    #[must_use]
-    pub fn applied_state(&self) -> &AppliedStateAccessor {
-        self.inner.applied_state()
-    }
-
-    /// Block announcements broadcast channel.
-    #[must_use]
-    pub fn block_announcements(&self) -> &broadcast::Sender<BlockAnnouncement> {
-        self.inner.block_announcements()
-    }
-
-    /// Consensus transport for dynamic peer channel management.
-    #[must_use]
-    pub fn consensus_transport(
-        &self,
-    ) -> Option<&crate::consensus_transport::GrpcConsensusTransport> {
-        self.inner.consensus_transport()
-    }
-
-    /// Leader lease.
-    #[must_use]
-    pub fn leader_lease(&self) -> &Arc<crate::leader_lease::LeaderLease> {
-        self.inner.leader_lease()
-    }
-
-    /// Applied-index watch receiver.
-    pub fn applied_index_watch(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.inner.applied_index_watch()
-    }
-
-    /// Batch writer handle, if batch writing is enabled.
-    #[must_use]
-    pub fn batch_handle(&self) -> Option<&BatchWriterHandle> {
-        self.inner.batch_handle()
-    }
-
-    /// Commitment buffer handle.
-    pub fn commitment_buffer(
-        &self,
-    ) -> std::sync::Arc<std::sync::Mutex<Vec<crate::types::StateRootCommitment>>> {
-        self.inner.commitment_buffer()
-    }
-
-    /// Drains state root commitments for piggybacking on the next payload.
-    pub fn drain_state_root_commitments(&self) -> Vec<crate::types::StateRootCommitment> {
-        self.inner.drain_state_root_commitments()
-    }
-
-    /// Records activity on this group, resetting the idle timer.
-    pub fn touch(&self) {
-        self.inner.touch();
-    }
-
-    /// Seconds since the last recorded activity.
-    pub fn idle_secs(&self) -> u64 {
-        self.inner.idle_secs()
-    }
-
-    /// Background-jobs-active flag.
-    pub fn is_jobs_active(&self) -> bool {
-        self.inner.is_jobs_active()
-    }
-
-    /// True when this node is the system-group leader.
-    pub fn is_leader(&self, node_id: LedgerNodeId) -> bool {
-        self.inner.is_leader(node_id)
-    }
-
-    /// Current leader's node id, if known.
-    pub fn current_leader(&self) -> Option<LedgerNodeId> {
-        self.inner.current_leader()
-    }
-
-    /// Takes the region-creation receiver exactly once during bootstrap.
-    pub fn take_region_creation_rx(
-        &self,
-    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<RegionCreationRequest>> {
-        self.inner.take_region_creation_rx()
-    }
-
-    /// Takes the organization-creation receiver exactly once during bootstrap.
-    pub fn take_organization_creation_rx(
-        &self,
-    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<OrganizationCreationRequest>> {
-        self.inner.take_organization_creation_rx()
-    }
-
-    /// Surfaces the underlying `OrganizationGroup` for code paths that
-    /// haven't yet been migrated to tier-typed handles (notably the
-    /// durability sync sweep). Prefer the typed accessors above for new
-    /// call sites.
-    pub(crate) fn as_organization_group(&self) -> &OrganizationGroup {
-        &self.inner
-    }
-}
-
-/// Regional control-plane Raft group (one per data region). Owns the
-/// region's organization placement, hibernation status (B.2),
-/// last-known-leader hint (B.2), region quotas, region audit log,
-/// region-scoped saga PII. Acts as the unified leader source for every
-/// `OrganizationGroup` in the region (B.1 unified leadership model;
-/// `LeadershipMode::Delegated`).
-///
-/// **B.1.3 status:** skeleton type only. The fields and apply pipeline are
-/// added in B.1.6 alongside the bootstrap rewrite. Until then, no region
-/// group exists — every region's Raft work is hosted on the
-/// [`OrganizationGroup`] for `(region, OrganizationId::new(0))`.
-///
-/// **Distinct from Phase A's `RegionGroup`:** that type has been renamed
-/// to [`OrganizationGroup`] (the data-plane Raft, one per organization).
-/// This new `RegionGroup` is the regional control plane — different role,
-/// reused name only because the new role is what "RegionGroup" naturally
-/// describes in the three-tier model.
-pub struct RegionGroup {
-    /// Underlying region-group primitives. Region-tier spec says this
-    /// group has no `blocks.db` (no Merkle chain on the regional control
-    /// plane); during the B.1.6 cutover it still shares the
-    /// `OrganizationGroup` storage shape, so `blocks_db` is present but
-    /// unused by `RegionRequest` apply logic. The `RegionGroup` type
-    /// exists so a `RegionRequest`-bearing apply worker can only attach
-    /// to region groups, never to organization or system groups.
-    pub(crate) inner: OrganizationGroup,
-}
-
-impl RegionGroup {
-    /// Wraps an existing `OrganizationGroup` as the region group for its
-    /// region. The wrapped group must have `organization_id = OrganizationId::new(0)`
-    /// and a non-GLOBAL region.
-    pub(crate) fn from_organization_group(inner: OrganizationGroup) -> Self {
-        debug_assert_ne!(inner.region(), Region::GLOBAL);
-        debug_assert_eq!(inner.organization_id(), OrganizationId::new(0));
-        Self { inner }
-    }
-
-    /// Region this group controls.
-    pub fn region(&self) -> Region {
-        self.inner.region()
-    }
-
-    /// Organization id this group owns. Always `OrganizationId::new(0)`.
-    pub fn organization_id(&self) -> OrganizationId {
-        OrganizationId::new(0)
-    }
-
-    /// Consensus handle for background jobs and services.
-    #[must_use]
-    pub fn handle(&self) -> &Arc<ConsensusHandle> {
-        self.inner.handle()
-    }
-
-    /// State layer.
-    #[must_use]
-    pub fn state(&self) -> &Arc<StateLayer<FileBackend>> {
-        self.inner.state()
-    }
-
-    /// `raft.db` handle.
-    #[must_use]
-    pub fn raft_db(&self) -> &Arc<Database<FileBackend>> {
-        self.inner.raft_db()
-    }
-
-    /// Events database, if available.
-    #[must_use]
-    pub fn events_db(&self) -> Option<&Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>> {
-        self.inner.events_db()
-    }
-
-    /// Events `Database` handle for durability sync.
-    #[must_use]
-    pub fn events_state_db(&self) -> Option<Arc<Database<FileBackend>>> {
-        self.inner.events_state_db()
-    }
-
-    /// Applied-state accessor.
-    #[must_use]
-    pub fn applied_state(&self) -> &AppliedStateAccessor {
-        self.inner.applied_state()
-    }
-
-    /// Consensus transport for dynamic peer channel management.
-    #[must_use]
-    pub fn consensus_transport(
-        &self,
-    ) -> Option<&crate::consensus_transport::GrpcConsensusTransport> {
-        self.inner.consensus_transport()
-    }
-
-    /// Leader lease.
-    #[must_use]
-    pub fn leader_lease(&self) -> &Arc<crate::leader_lease::LeaderLease> {
-        self.inner.leader_lease()
-    }
-
-    /// Applied-index watch receiver.
-    pub fn applied_index_watch(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.inner.applied_index_watch()
-    }
-
-    /// Records activity on this group, resetting the idle timer.
-    pub fn touch(&self) {
-        self.inner.touch();
-    }
-
-    /// Seconds since the last recorded activity.
-    pub fn idle_secs(&self) -> u64 {
-        self.inner.idle_secs()
-    }
-
-    /// Background-jobs-active flag.
-    pub fn is_jobs_active(&self) -> bool {
-        self.inner.is_jobs_active()
-    }
-
-    /// True when this node is the region-group leader.
-    pub fn is_leader(&self, node_id: LedgerNodeId) -> bool {
-        self.inner.is_leader(node_id)
-    }
-
-    /// Current leader's node id, if known.
-    pub fn current_leader(&self) -> Option<LedgerNodeId> {
-        self.inner.current_leader()
-    }
-
-    /// Surfaces the underlying `OrganizationGroup` for code paths that
-    /// haven't yet been migrated to tier-typed handles (notably the
-    /// durability sync sweep).
-    pub(crate) fn as_organization_group(&self) -> &OrganizationGroup {
-        &self.inner
     }
 }
 
@@ -1014,58 +691,6 @@ impl RaftManager {
         }
     }
 
-    /// Resolves the `(region, organization_id)` Raft group that should own a
-    /// [`LedgerRequest`] under saga / `RegionalProposal` forwarding.
-    ///
-    /// Routing rules:
-    ///
-    /// - `Write { organization, .. }` and `BatchWrite { requests: [Write,
-    ///   ..] }` route to the per-organization delegated-leadership group.
-    ///   User-domain saga writes land on the same group the user's
-    ///   normal traffic does — preserving read-after-write consistency.
-    /// - Cross-organization / org-less traffic (saga records, `SystemRequest`,
-    ///   `RegionRequest`, and `OrganizationRequest::Write` targeting
-    ///   [`OrganizationId::new(0)`](inferadb_ledger_types::OrganizationId) —
-    ///   the system org) routes to the data-region group at
-    ///   [`OrganizationId::new(0)`]. This is the same group that hosts the
-    ///   regional control plane (B.1 compat shim until `RegionGroup` gets
-    ///   its own storage path), so cross-org saga PII writes and reads
-    ///   land in the same place.
-    /// - Per-org routing falls back to the data-region group while the
-    ///   per-organization group is bootstrapping (race between
-    ///   `CreateOrganization` apply on this node and
-    ///   `start_organization_group` registering locally).
-    ///
-    /// Used by:
-    /// - `RaftService::regional_proposal` on the receiver side, after
-    ///   decoding the saga-forwarded payload, to find the right group's
-    ///   Raft handle.
-    /// - `SagaOrchestrator::propose_to_region` on the local-fast-path side
-    ///   so a saga running on the same node as a region's leader still
-    ///   lands on the correct group.
-    pub fn route_request(
-        &self,
-        region: Region,
-        request: &crate::types::LedgerRequest,
-    ) -> Result<Arc<OrganizationGroup>> {
-        // Under B.1.8, `OrganizationRequest::Write` no longer carries an
-        // `organization:` field — the owning organization is implicit in
-        // the Raft group the entry lands in. Callers that already know
-        // the organization route directly via `route_organization`;
-        // callers reaching this helper (saga forwarding with a
-        // region-only handle, `SystemRequest`/`RegionRequest` traffic)
-        // land on the data-region group at `OrganizationId::new(0)`,
-        // which is where the regional control plane + cross-org traffic
-        // live under the B.1 compat shim.
-        //
-        // `request` is retained in the signature so future routing
-        // extensions (e.g. a `RegionalProposalRequest.organization` wire
-        // field that sets an explicit per-org target) can switch on it
-        // without changing the call sites.
-        let _ = request;
-        self.get_organization_group(region, OrganizationId::new(0))
-    }
-
     /// Returns the last crash-recovery replay stats captured for `region`, if any.
     ///
     /// Populated by `start_region` immediately after
@@ -1179,14 +804,14 @@ impl RaftManager {
         &self,
         shard_id: inferadb_ledger_consensus::types::ConsensusStateId,
     ) -> Option<Arc<OrganizationGroup>> {
-        self.regions
-            .read()
-            .values()
-            .find(|group| group.handle().shard_id() == shard_id)
-            .cloned()
+        self.regions.read().values().find(|group| group.handle().shard_id() == shard_id).cloned()
     }
 
-    pub fn get_organization_group(&self, region: Region, shard: OrganizationId) -> Result<Arc<OrganizationGroup>> {
+    pub fn get_organization_group(
+        &self,
+        region: Region,
+        shard: OrganizationId,
+    ) -> Result<Arc<OrganizationGroup>> {
         self.regions
             .read()
             .get(&(region, shard))
@@ -1223,6 +848,25 @@ impl RaftManager {
     /// Lists all active (region, shard) pairs.
     pub fn list_organization_groups(&self) -> Vec<(Region, OrganizationId)> {
         self.regions.read().keys().copied().collect()
+    }
+
+    /// Returns the maximum `region_height` across all org groups.
+    ///
+    /// In B.1, each per-org group `(region, org_id)` tracks its own
+    /// `region_height` in its own `AppliedState`. The GLOBAL group's
+    /// `applied_state.region_height()` stays at 0 (data writes flow through
+    /// per-org groups, not GLOBAL). Callers that need an aggregate measure
+    /// of "how much data has been committed across all orgs" use this method.
+    ///
+    /// Used by `AdminService::create_backup` for backup metadata versioning.
+    /// Returns 0 if no org groups are active.
+    pub fn max_region_height(&self) -> u64 {
+        self.regions
+            .read()
+            .values()
+            .map(|g| g.applied_state().region_height())
+            .max()
+            .unwrap_or(0)
     }
 
     /// Takes the DR event receiver. Called once by bootstrap to pass to the
@@ -1331,11 +975,14 @@ impl RaftManager {
     /// Returns `None` if:
     /// - System region not started
     /// - Organization not found in `_system`
-    /// - Target region/shard is on a different node (requires forwarding —
-    ///   caller falls through to the redirect path)
+    /// - Target region/shard is on a different node (requires forwarding — caller falls through to
+    ///   the redirect path)
     ///
     /// * `organization` - Internal organization identifier (`OrganizationId`).
-    pub fn route_organization(&self, organization: OrganizationId) -> Option<Arc<OrganizationGroup>> {
+    pub fn route_organization(
+        &self,
+        organization: OrganizationId,
+    ) -> Option<Arc<OrganizationGroup>> {
         let region = self.get_organization_region(organization)?;
         // B.1.8 + B.1.7: organization_id IS the routing key. The
         // per-organization Raft group is in `LeadershipMode::Delegated`,
@@ -1439,17 +1086,23 @@ impl RaftManager {
         organization_id: OrganizationId,
         voter_set: Vec<(LedgerNodeId, String)>,
         bootstrap: bool,
+        events_config: Option<inferadb_ledger_types::events::EventConfig>,
+        batch_writer_config: Option<BatchWriterConfig>,
     ) -> Result<Arc<OrganizationGroup>> {
         // Idempotent: skip if already running.
         if let Ok(group) = self.get_organization_group(region, organization_id) {
             return Ok(group);
         }
-        let region_config = RegionConfig::builder()
-            .region(region)
-            .initial_members(voter_set)
-            .bootstrap(bootstrap)
-            .delegated_leadership(true)
-            .build();
+        let region_config = RegionConfig {
+            region,
+            initial_members: voter_set,
+            bootstrap,
+            enable_background_jobs: true,
+            batch_writer_config,
+            event_writer: None,
+            events_config,
+            delegated_leadership: true,
+        };
         let org_group = self.start_region(region_config, organization_id).await?;
 
         // Activate delegated leadership: the new org ConsensusState does not run
@@ -1483,7 +1136,10 @@ impl RaftManager {
         Ok(org_group)
     }
 
-    pub async fn start_data_region(&self, region_config: RegionConfig) -> Result<Arc<OrganizationGroup>> {
+    pub async fn start_data_region(
+        &self,
+        region_config: RegionConfig,
+    ) -> Result<Arc<OrganizationGroup>> {
         // Verify system region is running
         if !self.has_region(Region::GLOBAL) {
             return Err(RaftManagerError::SystemRegionRequired);
@@ -1726,8 +1382,7 @@ impl RaftManager {
             inferadb_ledger_consensus::types::Membership::new(voter_ids)
         };
 
-        let wal_dir =
-            self.storage_manager.organization_dir(region, organization_id).join("wal");
+        let wal_dir = self.storage_manager.organization_dir(region, organization_id).join("wal");
         let wal =
             inferadb_ledger_consensus::wal::SegmentedWalBackend::open(&wal_dir).map_err(|e| {
                 RaftManagerError::Storage { region, message: format!("failed to open WAL: {e}") }
@@ -1777,7 +1432,17 @@ impl RaftManager {
         // we serve traffic. MUST run BEFORE `ConsensusEngine::start` consumes
         // the WAL AND BEFORE the apply worker is spawned, so there's no
         // concurrent modifier of `applied_state`.
-        match log_store.replay_crash_gap(&wal, shard_id).await {
+        //
+        // The replay type matches the apply worker type for this (region, organization_id):
+        //   - organization_id == 0 → ApplyWorker<SystemRequest> → replay as SystemRequest
+        //   - organization_id != 0 → ApplyWorker<OrganizationRequest> → replay as
+        //     OrganizationRequest
+        let replay_result = if organization_id == OrganizationId::new(0) {
+            log_store.replay_crash_gap::<_, crate::types::SystemRequest>(&wal, shard_id).await
+        } else {
+            log_store.replay_crash_gap::<_, crate::types::OrganizationRequest>(&wal, shard_id).await
+        };
+        match replay_result {
             Ok(stats) => {
                 let shard_label = organization_id.value().to_string();
                 metrics::record_state_recovery_replay(
@@ -1824,9 +1489,8 @@ impl RaftManager {
             initial_committed_index,
         );
         if delegated_leadership {
-            consensus_shard.set_leadership_mode(
-                inferadb_ledger_consensus::LeadershipMode::Delegated,
-            );
+            consensus_shard
+                .set_leadership_mode(inferadb_ledger_consensus::LeadershipMode::Delegated);
         }
 
         let consensus_transport = crate::consensus_transport::GrpcConsensusTransport::new(
@@ -1881,14 +1545,24 @@ impl RaftManager {
         ));
 
         // Create batch writer using ConsensusHandle for proposals.
+        //
+        // The batch writer closure constructs `OrganizationRequest::BatchWrite`
+        // payloads. Per B.1 tier typing, only per-org groups
+        // (`(region, org_id > 0)`) have `ApplyWorker<OrganizationRequest>` and
+        // can decode those bytes; org-0 groups (GLOBAL system and data-region
+        // control plane) are typed `ApplyWorker<SystemRequest>` and would
+        // fail to decode batch submissions. The org-0 batch handle is left
+        // wired for test-expected invariants but is not reached by any
+        // production call path — service handlers route org-tier writes to
+        // per-org groups via `propose_to_organization_bytes`.
         let batch_handle = if let Some(batch_config) = batch_writer_config {
             let handle_clone = handle.clone();
             let buffer_clone = commitment_buffer.clone();
-            let submit_fn = move |requests: Vec<LedgerRequest>| {
+            let submit_fn = move |requests: Vec<OrganizationRequest>| {
                 let h = handle_clone.clone();
                 let buffer = buffer_clone.clone();
                 Box::pin(async move {
-                    let batch_request = LedgerRequest::Organization(OrganizationRequest::BatchWrite { requests });
+                    let batch_request = OrganizationRequest::BatchWrite { requests };
                     let commitments =
                         std::mem::take(&mut *buffer.lock().unwrap_or_else(|e| e.into_inner()));
                     let payload = RaftPayload::with_commitments(batch_request, commitments, 0);
@@ -1904,7 +1578,8 @@ impl RaftManager {
                     >
             };
 
-            let writer = BatchWriter::new(batch_config, submit_fn, region.to_string(), organization_id);
+            let writer =
+                BatchWriter::new(batch_config, submit_fn, region.to_string(), organization_id);
             let bw_handle = writer.handle();
             tokio::spawn(writer.run());
             Some(bw_handle)
@@ -1940,31 +1615,44 @@ impl RaftManager {
         tokio::spawn(divergence_handler.run());
 
         // Spawn the apply worker — bridges consensus commits to state machine.
-        // The GLOBAL region's worker gets the DR event sender so the
-        // PlacementController wakes when GLOBAL membership changes are applied.
         //
-        // During the B.1.6 cutover the wire format is still
-        // `postcard(RaftPayload<LedgerRequest>)` for every group: propose
-        // sites construct `LedgerRequest::{System,Region,Organization}(...)`
-        // and the apply worker decodes the wrapper before dispatching to
-        // the tier-specific `apply_*_request_with_events` method. The
-        // tier-typed aliases (`SystemApplyWorker` /
-        // `RegionApplyWorker` / `OrganizationApplyWorker` =
-        // `ApplyWorker<R>` for each `R`) exist for the follow-up commit
-        // that atomically flips propose sites and apply workers to typed
-        // `R` per group, after which `LedgerRequest` deletes and the
-        // wire format becomes tier-native.
-        let mut apply_worker = crate::apply_worker::ApplyWorker::<crate::types::LedgerRequest>::new(
-            log_store,
-            handle.response_map().clone(),
-            handle.spillover().clone(),
-            region.as_str().to_string(),
-            organization_id,
-        );
-        if region == inferadb_ledger_types::Region::GLOBAL {
-            apply_worker = apply_worker.with_dr_event_tx(self.dr_event_tx.clone());
+        // Phase D wire-format flip: the apply worker type is dispatched per
+        // (region, organization_id) to match the propose-site serialization:
+        //
+        // - (GLOBAL, 0)      = SystemGroup  → `ApplyWorker<SystemRequest>`
+        // - (region, 0)      = data-region  → `ApplyWorker<SystemRequest>` (B.1 compat shim;
+        //   regional control plane uses SystemRequest until RegionGroup gets its own storage path
+        //   in B.1.6)
+        // - (region, org!=0) = per-org      → `ApplyWorker<OrganizationRequest>`
+        //
+        // Propose sites serialize the matching `RaftPayload<R>` directly, so
+        // the bytes decode correctly on the apply side.
+        if organization_id == OrganizationId::new(0) {
+            // System group (GLOBAL) or data-region group — both use SystemRequest.
+            let mut apply_worker =
+                crate::apply_worker::ApplyWorker::<crate::types::SystemRequest>::new(
+                    log_store,
+                    handle.response_map().clone(),
+                    handle.spillover().clone(),
+                    region.as_str().to_string(),
+                    organization_id,
+                );
+            if region == inferadb_ledger_types::Region::GLOBAL {
+                apply_worker = apply_worker.with_dr_event_tx(self.dr_event_tx.clone());
+            }
+            tokio::spawn(apply_worker.run(commit_rx));
+        } else {
+            // Per-organization group — uses OrganizationRequest.
+            let apply_worker =
+                crate::apply_worker::ApplyWorker::<crate::types::OrganizationRequest>::new(
+                    log_store,
+                    handle.response_map().clone(),
+                    handle.spillover().clone(),
+                    region.as_str().to_string(),
+                    organization_id,
+                );
+            tokio::spawn(apply_worker.run(commit_rx));
         }
-        tokio::spawn(apply_worker.run(commit_rx));
 
         // Create region group.
         //
@@ -2152,13 +1840,14 @@ impl RaftManager {
         // gets its own state.db / blocks.db / events.db / raft.db under the
         // shard-{N}/ subdirectory laid out by Task 3 — independent IO paths so
         // shard A's fsync stream does not block shard B's commit.
-        let storage = self.storage_manager.open_organization(region, organization_id).map_err(|e| {
-            if matches!(e, crate::region_storage::RegionStorageError::AlreadyOpen { .. }) {
-                RaftManagerError::RegionAlreadyOpen { region }
-            } else {
-                RaftManagerError::Storage { region, message: format!("{e}") }
-            }
-        })?;
+        let storage =
+            self.storage_manager.open_organization(region, organization_id).map_err(|e| {
+                if matches!(e, crate::region_storage::RegionStorageError::AlreadyOpen { .. }) {
+                    RaftManagerError::RegionAlreadyOpen { region }
+                } else {
+                    RaftManagerError::Storage { region, message: format!("{e}") }
+                }
+            })?;
 
         // Wrap raw databases in domain-specific types
         let state = Arc::new(StateLayer::new(storage.state_db().clone()));
@@ -2274,9 +1963,8 @@ impl RaftManager {
         // B.1 transitional: closes the (region, organization_id) pair the
         // legacy `start_region` opened. Subsequent commits will iterate
         // every active organization in the region.
-        if let Err(e) = self
-            .storage_manager
-            .close_organization(region, region_group.organization_id())
+        if let Err(e) =
+            self.storage_manager.close_organization(region, region_group.organization_id())
         {
             warn!(
                 region = region.as_str(),

@@ -751,9 +751,6 @@ pub struct CheckRelationshipRequest {
     /// Auth identity of the caller
     #[prost(message, optional, tag = "7")]
     pub caller: ::core::option::Option<UserSlug>,
-    /// Historical check; 0 or omit = current height
-    #[prost(uint64, optional, tag = "8")]
-    pub at_height: ::core::option::Option<u64>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CheckRelationshipResponse {
@@ -3966,7 +3963,7 @@ pub struct CommittedIndexResponse {
 /// the Replicate bidirectional RPC.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ConsensusEnvelope {
-    /// Shard (consensus group) this message targets.
+    /// ConsensusState (consensus group) this message targets.
     #[prost(uint64, tag = "1")]
     pub shard_id: u64,
     /// Node ID of the sender.
@@ -3999,7 +3996,9 @@ pub struct RegionalProposalRequest {
     /// Target data region.
     #[prost(enumeration = "Region", optional, tag = "1")]
     pub region: ::core::option::Option<i32>,
-    /// Postcard-serialized LedgerRequest.
+    /// Postcard-serialized `RaftPayload<R>` where `R` is the tier-specific
+    /// request type (`SystemRequest` / `RegionRequest` / `OrganizationRequest`).
+    /// The receiving node decodes based on the target group's tier.
     #[prost(bytes = "vec", tag = "2")]
     pub request_payload: ::prost::alloc::vec::Vec<u8>,
     /// Caller identity (user slug or 0 for system).

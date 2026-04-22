@@ -53,15 +53,18 @@ use super::{
 };
 use crate::{
     event_writer::ApplyPhaseEmitter,
-    types::{EmailCodeVerifiedResult, LedgerResponse, LedgerRequest, OrganizationRequest, RegionRequest, SystemRequest},
+    types::{
+        EmailCodeVerifiedResult, LedgerResponse, OrganizationRequest, RegionRequest, SystemRequest,
+    },
 };
 
 /// A request type that can be applied through [`RaftLogStore`]'s apply
 /// pipeline. Implemented by each tier-specific request enum so the apply
 /// worker can be generic over `R` without pattern-matching on a shared
-/// wrapper type — the compile-time dispatch replaces runtime discrimination
-/// through the transitional [`LedgerRequest`] sum type.
-pub trait ApplyableRequest: Sized + serde::Serialize + for<'de> serde::Deserialize<'de> + Send + Sync + 'static {
+/// wrapper type — compile-time dispatch per tier.
+pub trait ApplyableRequest:
+    Sized + serde::Serialize + for<'de> serde::Deserialize<'de> + Send + Sync + 'static
+{
     /// Dispatches this request to the tier-specific apply method on `store`.
     #[allow(clippy::too_many_arguments)]
     fn apply_on(
@@ -96,8 +99,17 @@ impl ApplyableRequest for SystemRequest {
         defer_state_root: bool,
     ) -> (LedgerResponse, Option<inferadb_ledger_types::VaultEntry>) {
         store.apply_system_request_with_events(
-            req, state, block_timestamp, op_index, events, ttl_days, pending,
-            log_id_bytes, skip_state_writes, caller, defer_state_root,
+            req,
+            state,
+            block_timestamp,
+            op_index,
+            events,
+            ttl_days,
+            pending,
+            log_id_bytes,
+            skip_state_writes,
+            caller,
+            defer_state_root,
         )
     }
 }
@@ -118,8 +130,17 @@ impl ApplyableRequest for RegionRequest {
         defer_state_root: bool,
     ) -> (LedgerResponse, Option<inferadb_ledger_types::VaultEntry>) {
         store.apply_region_request_with_events(
-            req, state, block_timestamp, op_index, events, ttl_days, pending,
-            log_id_bytes, skip_state_writes, caller, defer_state_root,
+            req,
+            state,
+            block_timestamp,
+            op_index,
+            events,
+            ttl_days,
+            pending,
+            log_id_bytes,
+            skip_state_writes,
+            caller,
+            defer_state_root,
         )
     }
 }
@@ -140,68 +161,23 @@ impl ApplyableRequest for OrganizationRequest {
         defer_state_root: bool,
     ) -> (LedgerResponse, Option<inferadb_ledger_types::VaultEntry>) {
         store.apply_organization_request_with_events(
-            req, state, block_timestamp, op_index, events, ttl_days, pending,
-            log_id_bytes, skip_state_writes, caller, defer_state_root,
-        )
-    }
-}
-
-impl ApplyableRequest for LedgerRequest {
-    fn apply_on(
-        store: &RaftLogStore<inferadb_ledger_store::FileBackend>,
-        req: &Self,
-        state: &mut AppliedState,
-        block_timestamp: chrono::DateTime<chrono::Utc>,
-        op_index: &mut u32,
-        events: &mut Vec<inferadb_ledger_types::events::EventEntry>,
-        ttl_days: u32,
-        pending: &mut PendingExternalWrites,
-        log_id_bytes: Option<&[u8]>,
-        skip_state_writes: bool,
-        caller: u64,
-        defer_state_root: bool,
-    ) -> (LedgerResponse, Option<inferadb_ledger_types::VaultEntry>) {
-        store.apply_request_with_events(
-            req, state, block_timestamp, op_index, events, ttl_days, pending,
-            log_id_bytes, skip_state_writes, caller, defer_state_root,
+            req,
+            state,
+            block_timestamp,
+            op_index,
+            events,
+            ttl_days,
+            pending,
+            log_id_bytes,
+            skip_state_writes,
+            caller,
+            defer_state_root,
         )
     }
 }
 
 #[allow(clippy::result_large_err)]
 impl<B: StorageBackend> RaftLogStore<B> {
-    /// Applies a single request and returns the response plus optional vault entry.
-    ///
-    /// For Write requests, this also returns a VaultEntry that should be included
-    /// in the RegionBlock. The caller is responsible for collecting these entries
-    /// and creating the RegionBlock.
-    ///
-    /// This is the backward-compatible entry point used by tests. Events are
-    /// discarded. For event-aware apply, use [`apply_request_with_events`].
-    #[cfg(test)]
-    pub(super) fn apply_request(
-        &self,
-        request: &LedgerRequest,
-        state: &mut AppliedState,
-    ) -> (LedgerResponse, Option<VaultEntry>) {
-        let mut events = Vec::new();
-        let mut op_index = 0u32;
-        let mut pending = PendingExternalWrites::default();
-        self.apply_request_with_events(
-            request,
-            state,
-            Utc::now(),
-            &mut op_index,
-            &mut events,
-            0,
-            &mut pending,
-            None,
-            false,
-            0,
-            false,
-        )
-    }
-
     /// Writes an audit record to the state layer if available.
     ///
     /// Encodes the `AuditRecord`, creates a `SetEntity` operation, and applies
@@ -218,64 +194,6 @@ impl<B: StorageBackend> RaftLogStore<B> {
             {
                 tracing::warn!(error = %e, action = %record.action, "Failed to write audit record");
             }
-        }
-    }
-
-    /// Applies a single request with event emission support.
-    ///
-    /// Like [`apply_request`], but additionally accumulates deterministic
-    /// apply-phase events into `events` and external table writes into
-    /// `pending`. The `op_index` counter is incremented for each event
-    /// emitted, ensuring unique UUID v5 event IDs across a batch.
-    ///
-    /// `ttl_days` controls event expiry (from [`EventConfig::default_ttl_days`]).
-    ///
-    /// `log_id_bytes`, when `Some`, causes the serialized Raft log ID to be
-    /// persisted as an atomicity sentinel in the state layer's write
-    /// transaction (crash-recovery protocol).
-    ///
-    /// `skip_state_writes`, when `true`, skips state layer entity writes
-    /// for crash-recovery of already-applied entries. In-memory state
-    /// updates still execute so subsequent entries see correct state.
-    #[allow(clippy::too_many_arguments)]
-    #[tracing::instrument(
-        level = "debug",
-        skip_all,
-        fields(skip_state_writes = skip_state_writes)
-    )]
-    pub(super) fn apply_request_with_events(
-        &self,
-        request: &LedgerRequest,
-        state: &mut AppliedState,
-        block_timestamp: DateTime<Utc>,
-        op_index: &mut u32,
-        events: &mut Vec<EventEntry>,
-        ttl_days: u32,
-        pending: &mut PendingExternalWrites,
-        log_id_bytes: Option<&[u8]>,
-        skip_state_writes: bool,
-        caller: u64,
-        // When true, skip the per-entity `compute_state_root` call and leave
-        // `state_root` in the returned `VaultEntry` as `EMPTY_HASH`. The
-        // caller must patch the final state_root (and recompute block_hash
-        // in the response) after all entries in the batch apply. Setting
-        // this to true amortizes state-root work from O(entries) to
-        // O(unique-vaults-in-batch).
-        defer_state_root: bool,
-    ) -> (LedgerResponse, Option<VaultEntry>) {
-        match request {
-            LedgerRequest::System(r) => self.apply_system_request_with_events(
-                r, state, block_timestamp, op_index, events, ttl_days, pending,
-                log_id_bytes, skip_state_writes, caller, defer_state_root,
-            ),
-            LedgerRequest::Region(r) => self.apply_region_request_with_events(
-                r, state, block_timestamp, op_index, events, ttl_days, pending,
-                log_id_bytes, skip_state_writes, caller, defer_state_root,
-            ),
-            LedgerRequest::Organization(r) => self.apply_organization_request_with_events(
-                r, state, block_timestamp, op_index, events, ttl_days, pending,
-                log_id_bytes, skip_state_writes, caller, defer_state_root,
-            ),
         }
     }
 
@@ -1733,7 +1651,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 // Apply the decrypted SystemRequest directly against the
                 // system-tier dispatcher — decryption yields a SystemRequest,
-                // not the LedgerRequest wrapper.
+
                 let decrypted_request = sys_request;
                 self.apply_system_request_with_events(
                     &decrypted_request,
@@ -1837,7 +1755,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 // Apply the decrypted SystemRequest directly against the
                 // system-tier dispatcher — decryption yields a SystemRequest,
-                // not the LedgerRequest wrapper.
+
                 let decrypted_request = sys_request;
                 self.apply_system_request_with_events(
                     &decrypted_request,
@@ -4515,12 +4433,201 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         LedgerResponse::Empty
                     },
 
-                    // ── B.1.6 migration stubs ──
+                    SystemRequest::Write { vault, transactions, .. } => {
+                        // GLOBAL-tier key-value writes handled by the system
+                        // apply worker. Carries saga-coordination records
+                        // (`_meta:saga:*`), user/org directory index entries
+                        // (`_idx:user:slug:*`, `user:*`, `org:*`, etc.), and
+                        // other cluster-wide metadata. No PII (plaintext
+                        // names / emails / addresses) — those go through the
+                        // regional path via `SystemRequest::Encrypted*`
+                        // variants or `OrganizationRequest::Write` on the
+                        // per-org apply worker.
+                        //
+                        // Vault must be `SYSTEM_VAULT_ID`; per-organization
+                        // vault writes must route to the per-org group.
+                        if *vault != SYSTEM_VAULT_ID {
+                            return error_result(
+                                ErrorCode::InvalidArgument,
+                                format!(
+                                    "SystemRequest::Write rejected: vault {} is not \
+                                     SYSTEM_VAULT_ID",
+                                    vault.value()
+                                ),
+                            );
+                        }
+
+                        if let Some(state_layer) = &self.state_layer {
+                            if skip_state_writes {
+                                state_layer.mark_all_dirty(*vault);
+                            } else {
+                                let mut write_txn = match state_layer.begin_write() {
+                                    Ok(txn) => txn,
+                                    Err(e) => {
+                                        return (
+                                            LedgerResponse::Error {
+                                                code: ErrorCode::Internal,
+                                                message: format!(
+                                                    "SystemRequest::Write: failed to begin write txn: {e}"
+                                                ),
+                                            },
+                                            None,
+                                        );
+                                    },
+                                };
+                                let mut all_dirty_keys = Vec::new();
+                                let mut dict = match state_layer.take_dictionary(*vault) {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        return (
+                                            LedgerResponse::Error {
+                                                code: ErrorCode::Internal,
+                                                message: format!(
+                                                    "SystemRequest::Write: failed to load dictionary: {e}"
+                                                ),
+                                            },
+                                            None,
+                                        );
+                                    },
+                                };
+                                let new_height = block_height;
+                                for tx in transactions.iter() {
+                                    match state_layer.apply_operations_in_txn(
+                                        &mut write_txn,
+                                        &mut dict,
+                                        *vault,
+                                        &tx.operations,
+                                        new_height,
+                                    ) {
+                                        Ok((_statuses, dirty_keys)) => {
+                                            all_dirty_keys.extend(dirty_keys);
+                                        },
+                                        Err(StateError::PreconditionFailed {
+                                            key,
+                                            current_version,
+                                            current_value,
+                                            failed_condition,
+                                        }) => {
+                                            return (
+                                                LedgerResponse::PreconditionFailed {
+                                                    key,
+                                                    current_version,
+                                                    current_value,
+                                                    failed_condition,
+                                                },
+                                                None,
+                                            );
+                                        },
+                                        Err(e) => {
+                                            return (
+                                                LedgerResponse::Error {
+                                                    code: ErrorCode::Internal,
+                                                    message: format!(
+                                                        "SystemRequest::Write: failed to apply operations: {e}"
+                                                    ),
+                                                },
+                                                None,
+                                            );
+                                        },
+                                    }
+                                }
+                                if let Some(lid_bytes) = log_id_bytes
+                                    && let Err(e) =
+                                        inferadb_ledger_state::StateLayer::persist_last_applied(
+                                            &mut write_txn,
+                                            lid_bytes,
+                                        )
+                                {
+                                    return (
+                                        LedgerResponse::Error {
+                                            code: ErrorCode::Internal,
+                                            message: format!(
+                                                "SystemRequest::Write: failed to persist last_applied sentinel: {e}"
+                                            ),
+                                        },
+                                        None,
+                                    );
+                                }
+                                state_layer.mark_dirty_keys(*vault, &all_dirty_keys);
+                                if let Err(e) = write_txn.commit_in_memory() {
+                                    return (
+                                        LedgerResponse::Error {
+                                            code: ErrorCode::Internal,
+                                            message: format!(
+                                                "SystemRequest::Write: failed to commit write txn: {e}"
+                                            ),
+                                        },
+                                        None,
+                                    );
+                                }
+                                state_layer.return_dictionary(*vault, dict);
+                            }
+                        }
+                        LedgerResponse::Empty
+                    },
+
+                    // Org-tier metadata wrapper: delegates to the OrganizationRequest
+                    // apply handler so that vault/app/member/team/invite metadata lands
+                    // in GLOBAL's `AppliedState` — where services like `write.rs`
+                    // and `SlugResolver` can read it.
                     //
-                    // These `SystemRequest` variants are NEW in B.1.6; they
-                    // were moved from top-level `LedgerRequest` variants.
-                    // Apply logic still lives on the top-level arms; these
-                    // arms are unreachable until call sites migrate.
+                    // Only metadata-only variants are permitted here. Data-plane
+                    // variants (Write, BatchWrite, IngestExternalEvents) must route
+                    // through the per-org group's `ApplyWorker<OrganizationRequest>`,
+                    // not through this transitional shim. Routing them here is a tier
+                    // violation: the VaultEntry produced by Write is silently dropped,
+                    // and the write bypasses the per-org state machine entirely.
+                    SystemRequest::OrganizationMetadata(org_req) => {
+                        match org_req.as_ref() {
+                            OrganizationRequest::Write { .. } => LedgerResponse::Error {
+                                code: ErrorCode::InvalidArgument,
+                                message: "OrganizationRequest::Write sent through \
+                                          SystemRequest::OrganizationMetadata — tier \
+                                          violation. Route data-plane writes through the \
+                                          per-org group via propose_to_organization_bytes."
+                                    .to_string(),
+                            },
+                            OrganizationRequest::BatchWrite { .. } => LedgerResponse::Error {
+                                code: ErrorCode::InvalidArgument,
+                                message: "OrganizationRequest::BatchWrite sent through \
+                                          SystemRequest::OrganizationMetadata — tier \
+                                          violation. Route data-plane writes through the \
+                                          per-org group via propose_to_organization_bytes."
+                                    .to_string(),
+                            },
+                            OrganizationRequest::IngestExternalEvents { .. } => {
+                                LedgerResponse::Error {
+                                    code: ErrorCode::InvalidArgument,
+                                    message: "OrganizationRequest::IngestExternalEvents sent \
+                                              through SystemRequest::OrganizationMetadata — \
+                                              tier violation. Route data-plane writes through \
+                                              the per-org group via \
+                                              propose_to_organization_bytes."
+                                        .to_string(),
+                                }
+                            },
+                            _ => {
+                                let (resp, _entry) = self.apply_organization_request_with_events(
+                                    org_req,
+                                    state,
+                                    block_timestamp,
+                                    op_index,
+                                    events,
+                                    ttl_days,
+                                    pending,
+                                    log_id_bytes,
+                                    skip_state_writes,
+                                    caller,
+                                    defer_state_root,
+                                );
+                                resp
+                            },
+                        }
+                    },
+
+                    // These SystemRequest variants have full apply logic in the
+                    // system-tier apply path (apply_system_request_with_events).
+                    // They are routed here correctly by the typed apply worker.
                     SystemRequest::DeleteOrganization { .. }
                     | SystemRequest::SuspendOrganization { .. }
                     | SystemRequest::ResumeOrganization { .. }
@@ -4540,8 +4647,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     | SystemRequest::EncryptedUserSystem(_)
                     | SystemRequest::EncryptedOrgSystem(_) => LedgerResponse::Error {
                         code: ErrorCode::Internal,
-                        message: "B.1.6 migration: SystemRequest variant apply logic not yet moved from top-level LedgerRequest arm"
-                            .to_string(),
+                        message: "SystemRequest variant not implemented in this arm".to_string(),
                     },
                 };
 
@@ -4788,8 +4894,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 (
                     LedgerResponse::Error {
                         code: inferadb_ledger_types::ErrorCode::Internal,
-                        message: "AddRegionVoter must not be proposed to the Raft log"
-                            .to_string(),
+                        message: "AddRegionVoter must not be proposed to the Raft log".to_string(),
                     },
                     None,
                 )
@@ -4811,7 +4916,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 let vault = inferadb_ledger_types::VaultId::new(0);
                 if !skip_state_writes
                     && let Some(ref state_layer) = self.state_layer
-                    && let Err(e) = state_layer.apply_operations(vault, &[op], block_height)
+                    && let Err(e) = state_layer.apply_operations_lazy(vault, &[op], block_height)
                 {
                     tracing::warn!(
                         saga_id = %saga_id,
@@ -4838,7 +4943,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 let vault = inferadb_ledger_types::VaultId::new(0);
                 if !skip_state_writes
                     && let Some(ref state_layer) = self.state_layer
-                    && let Err(e) = state_layer.apply_operations(vault, &[op], block_height)
+                    && let Err(e) = state_layer.apply_operations_lazy(vault, &[op], block_height)
                 {
                     tracing::warn!(
                         saga_id = %saga_id,
@@ -4867,12 +4972,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
             | RegionRequest::RemoveRegionVoter { .. } => (
                 LedgerResponse::Error {
                     code: inferadb_ledger_types::ErrorCode::Internal,
-                    message: "RegionRequest variant apply logic not yet implemented"
-                        .to_string(),
+                    message: "RegionRequest variant apply logic not yet implemented".to_string(),
                 },
                 None,
             ),
-
         }
     }
 
@@ -4900,12 +5003,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
         let block_height = self.region_chain.read().height + 1;
 
         match request {
-            OrganizationRequest::Write {
-                vault,
-                transactions,
-                idempotency_key,
-                request_hash,
-            } => {
+            OrganizationRequest::Write { vault, transactions, idempotency_key, request_hash } => {
                 // Owning organization is implied by the Raft group this
                 // entry lands in; read from the log store field instead
                 // of a payload-carried `organization:` duplicate.
@@ -5197,7 +5295,6 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 }
 
                 // Server-assigned sequences: assign monotonic sequence to each transaction.
-                // Clones each transaction because `request` is borrowed (&LedgerRequest).
                 let mut assigned_sequence = 0u64;
                 let sequenced_transactions: Vec<_> = transactions
                     .iter()
@@ -5638,7 +5735,12 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 (response, None)
             },
 
-            OrganizationRequest::AddOrganizationMember { organization, user, user_slug: _, role } => {
+            OrganizationRequest::AddOrganizationMember {
+                organization,
+                user,
+                user_slug: _,
+                role,
+            } => {
                 let response = match require_active_org_with_state(
                     organization,
                     state,
@@ -6714,7 +6816,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 (response, None)
             },
 
-            OrganizationRequest::AddAppVault { organization, app, vault, vault_slug, allowed_scopes } => {
+            OrganizationRequest::AddAppVault {
+                organization,
+                app,
+                vault,
+                vault_slug,
+                allowed_scopes,
+            } => {
                 let response = match require_active_org_with_state(
                     organization,
                     state,
@@ -7017,7 +7125,6 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 (LedgerResponse::VaultHealthUpdated { success: true }, None)
             },
 
-
             // ── Signing Key Operations ──
             OrganizationRequest::BatchWrite { requests } => {
                 // Process each request in the batch sequentially, collecting responses.
@@ -7027,7 +7134,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 let mut last_vault_entry = None;
 
                 for inner_request in requests {
-                    let (response, vault_entry) = self.apply_request_with_events(
+                    let (response, vault_entry) = self.apply_organization_request_with_events(
                         inner_request,
                         state,
                         block_timestamp,

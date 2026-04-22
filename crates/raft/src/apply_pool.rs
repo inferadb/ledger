@@ -77,12 +77,24 @@ mod tests {
         let (pool, mut rxs) = ApplyPool::new(3);
 
         // ConsensusState 0 → worker 0, ConsensusState 1 → worker 1, ConsensusState 3 → worker 0
-        pool.dispatch(CommittedBatch { shard: ConsensusStateId(0), entries: vec![], leader_node: None })
-            .await;
-        pool.dispatch(CommittedBatch { shard: ConsensusStateId(1), entries: vec![], leader_node: None })
-            .await;
-        pool.dispatch(CommittedBatch { shard: ConsensusStateId(3), entries: vec![], leader_node: None })
-            .await;
+        pool.dispatch(CommittedBatch {
+            shard: ConsensusStateId(0),
+            entries: vec![],
+            leader_node: None,
+        })
+        .await;
+        pool.dispatch(CommittedBatch {
+            shard: ConsensusStateId(1),
+            entries: vec![],
+            leader_node: None,
+        })
+        .await;
+        pool.dispatch(CommittedBatch {
+            shard: ConsensusStateId(3),
+            entries: vec![],
+            leader_node: None,
+        })
+        .await;
 
         // Worker 0 got 2 batches (shard 0 and 3)
         assert!(rxs[0].try_recv().is_ok());

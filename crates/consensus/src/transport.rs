@@ -6,7 +6,7 @@
 
 use crate::{
     message::Message,
-    types::{NodeId, ConsensusStateId},
+    types::{ConsensusStateId, NodeId},
 };
 
 /// A message destined for a remote node.

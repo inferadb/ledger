@@ -21,7 +21,7 @@ use inferadb_ledger_proto::proto::{
 };
 use inferadb_ledger_raft::{
     rate_limit::RateLimiter,
-    types::{LedgerResponse, LedgerRequest, SystemRequest},
+    types::{LedgerResponse, SystemRequest},
 };
 use inferadb_ledger_state::system::{
     App, AppVaultConnection, ClientAssertionEntry, SYSTEM_VAULT_ID, SigningKey, SigningKeyScope,
@@ -292,18 +292,22 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let family = generate_family_id();
 
         // Propose CreateRefreshToken through Raft
-        let ledger_request = LedgerRequest::System(SystemRequest::CreateRefreshToken {
-            token_hash: refresh_token_hash,
-            family,
-            token_type: TokenType::UserSession,
-            subject: TokenSubject::User(user_slug),
-            organization: None,
-            vault: None,
-            kid: signing_key.kid.clone(),
-            ttl_secs: self.jwt_config.session_refresh_ttl_secs,
-        });
-
-        self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        self.ctx
+            .propose_system_request(
+                SystemRequest::CreateRefreshToken {
+                    token_hash: refresh_token_hash,
+                    family,
+                    token_type: TokenType::UserSession,
+                    subject: TokenSubject::User(user_slug),
+                    organization: None,
+                    vault: None,
+                    kid: signing_key.kid.clone(),
+                    ttl_secs: self.jwt_config.session_refresh_ttl_secs,
+                },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         // Compute refresh expiry
         let refresh_expires_at =
@@ -488,18 +492,22 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let family = generate_family_id();
 
         // Propose CreateRefreshToken through Raft
-        let ledger_request = LedgerRequest::System(SystemRequest::CreateRefreshToken {
-            token_hash: refresh_token_hash,
-            family,
-            token_type: TokenType::VaultAccess,
-            subject: TokenSubject::App(app_slug),
-            organization: Some(org_id),
-            vault: Some(vault_id),
-            kid: signing_key.kid.clone(),
-            ttl_secs: self.jwt_config.vault_refresh_ttl_secs,
-        });
-
-        self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        self.ctx
+            .propose_system_request(
+                SystemRequest::CreateRefreshToken {
+                    token_hash: refresh_token_hash,
+                    family,
+                    token_type: TokenType::VaultAccess,
+                    subject: TokenSubject::App(app_slug),
+                    organization: Some(org_id),
+                    vault: Some(vault_id),
+                    kid: signing_key.kid.clone(),
+                    ttl_secs: self.jwt_config.vault_refresh_ttl_secs,
+                },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         let refresh_expires_at =
             Utc::now() + chrono::Duration::seconds(self.jwt_config.vault_refresh_ttl_secs as i64);
@@ -592,16 +600,21 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         };
 
         // Propose UseRefreshToken through Raft
-        let ledger_request = LedgerRequest::System(SystemRequest::UseRefreshToken {
-            old_token_hash: old_hash,
-            new_token_hash: new_hash,
-            new_kid: signing_key.kid.clone(),
-            ttl_secs,
-            expected_version,
-            max_family_lifetime_secs: self.jwt_config.max_family_lifetime_secs,
-        });
-
-        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let response = self
+            .ctx
+            .propose_system_request(
+                SystemRequest::UseRefreshToken {
+                    old_token_hash: old_hash,
+                    new_token_hash: new_hash,
+                    new_kid: signing_key.kid.clone(),
+                    ttl_secs,
+                    expected_version,
+                    max_family_lifetime_secs: self.jwt_config.max_family_lifetime_secs,
+                },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         // Extract authoritative data from the Raft response
         let (raft_token_version, raft_allowed_scopes) = match response {
@@ -728,8 +741,13 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
             })?;
 
         // Propose RevokeTokenFamily through Raft
-        let ledger_request = LedgerRequest::System(SystemRequest::RevokeTokenFamily { family: token.family });
-        self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        self.ctx
+            .propose_system_request(
+                SystemRequest::RevokeTokenFamily { family: token.family },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         ctx.record_event(EventAction::TokenRevoked, EventOutcomeType::Success, &[]);
         ctx.set_success();
@@ -761,8 +779,14 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let user_slug = SlugResolver::extract_user_slug(&req.user)?;
         let user_id = resolver.resolve_user(user_slug)?;
 
-        let ledger_request = LedgerRequest::System(SystemRequest::RevokeAllUserSessions { user: user_id });
-        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let response = self
+            .ctx
+            .propose_system_request(
+                SystemRequest::RevokeAllUserSessions { user: user_id },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         let revoked_count = match response {
             LedgerResponse::AllUserSessionsRevoked { count, .. } => count,
@@ -799,9 +823,14 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let app_slug = SlugResolver::extract_app_slug(&req.app)?;
         let (org_id, app_id) = resolver.resolve_app(app_slug)?;
 
-        let ledger_request =
-            LedgerRequest::System(SystemRequest::RevokeAllAppSessions { organization: org_id, app: app_id });
-        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let response = self
+            .ctx
+            .propose_system_request(
+                SystemRequest::RevokeAllAppSessions { organization: org_id, app: app_id },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         let revoked_count = match response {
             LedgerResponse::AllAppSessionsRevoked { count, .. } => count,
@@ -855,15 +884,20 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
             self.generate_encrypted_keypair(&scope)?;
 
         // Propose CreateSigningKey through Raft
-        let ledger_request = LedgerRequest::System(SystemRequest::CreateSigningKey {
-            scope,
-            kid: kid.clone(),
-            public_key_bytes,
-            encrypted_private_key,
-            rmk_version,
-        });
-
-        let response = self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let response = self
+            .ctx
+            .propose_system_request(
+                SystemRequest::CreateSigningKey {
+                    scope,
+                    kid: kid.clone(),
+                    public_key_bytes,
+                    encrypted_private_key,
+                    rmk_version,
+                },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         // Check for apply-level errors (e.g., active key already exists for scope)
         if let LedgerResponse::Error { code, message } = response {
@@ -931,16 +965,20 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
             req.grace_period_secs
         };
 
-        let ledger_request = LedgerRequest::System(SystemRequest::RotateSigningKey {
-            old_kid: req.kid.clone(),
-            new_kid: new_kid.clone(),
-            new_public_key_bytes,
-            new_encrypted_private_key,
-            rmk_version,
-            grace_period_secs,
-        });
-
-        self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        self.ctx
+            .propose_system_request(
+                SystemRequest::RotateSigningKey {
+                    old_kid: req.kid.clone(),
+                    new_kid: new_kid.clone(),
+                    new_public_key_bytes,
+                    new_encrypted_private_key,
+                    rmk_version,
+                    grace_period_secs,
+                },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         // Load new key from state for cache and response (authoritative timestamps)
         let sys = self.system_service();
@@ -984,8 +1022,13 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
             return Err(Status::invalid_argument("kid is required"));
         }
 
-        let ledger_request = LedgerRequest::System(SystemRequest::RevokeSigningKey { kid: req.kid.clone() });
-        self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        self.ctx
+            .propose_system_request(
+                SystemRequest::RevokeSigningKey { kid: req.kid.clone() },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         // Evict from cache
         self.jwt_engine.evict_key(&req.kid);
@@ -1142,18 +1185,22 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
         let family = generate_family_id();
 
         // Propose CreateRefreshToken through Raft
-        let ledger_request = LedgerRequest::System(SystemRequest::CreateRefreshToken {
-            token_hash: refresh_token_hash,
-            family,
-            token_type: TokenType::VaultAccess,
-            subject: TokenSubject::App(app_slug),
-            organization: Some(org_id),
-            vault: Some(vault_id),
-            kid: signing_key.kid.clone(),
-            ttl_secs: self.jwt_config.vault_refresh_ttl_secs,
-        });
-
-        self.ctx.propose_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        self.ctx
+            .propose_system_request(
+                SystemRequest::CreateRefreshToken {
+                    token_hash: refresh_token_hash,
+                    family,
+                    token_type: TokenType::VaultAccess,
+                    subject: TokenSubject::App(app_slug),
+                    organization: Some(org_id),
+                    vault: Some(vault_id),
+                    kid: signing_key.kid.clone(),
+                    ttl_secs: self.jwt_config.vault_refresh_ttl_secs,
+                },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         let refresh_expires_at =
             Utc::now() + chrono::Duration::seconds(self.jwt_config.vault_refresh_ttl_secs as i64);

@@ -28,7 +28,7 @@ use inferadb_ledger_raft::{
     log_storage::{AppliedStateAccessor, VaultHealthStatus},
     logging::{OperationType, RequestContext, Sampler},
     metrics,
-    types::{LedgerResponse, RaftPayload, LedgerRequest, OrganizationRequest, SystemRequest},
+    types::{LedgerResponse, OrganizationRequest, RaftPayload, SystemRequest},
 };
 use inferadb_ledger_state::{BlockArchive, StateLayer, system::SystemOrganizationService};
 use inferadb_ledger_store::FileBackend;
@@ -286,13 +286,13 @@ impl AdminService {
         ctx
     }
 
-    /// Proposes a `LedgerRequest` through Raft with deadline handling.
+    /// Proposes a `SystemRequest` through Raft with deadline handling.
     ///
     /// Handles timeout computation, Raft proposal submission, and error
     /// classification (leadership errors → UNAVAILABLE, others → INTERNAL).
     async fn propose_raft_request(
         &self,
-        request: LedgerRequest,
+        request: SystemRequest,
         grpc_metadata: &tonic::metadata::MetadataMap,
         ctx: &mut RequestContext,
     ) -> Result<LedgerResponse, Status> {
@@ -663,7 +663,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             }));
         }
 
-        // Check existing membership via the RaftManager's openraft handle
+        // Check existing membership via the RaftManager's consensus state
         // (ConsensusHandle doesn't expose full membership with node addresses).
         let already_voter = self
             .raft_manager
@@ -715,16 +715,15 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         // controller wakes on the AddVoter event but the peer address is
         // unknown, causing AddLearner to be skipped until the next event.
         {
-            let register_request = inferadb_ledger_raft::types::LedgerRequest::System(
-                inferadb_ledger_raft::types::SystemRequest::RegisterPeerAddress {
-                    node_id: req.node_id,
-                    address: req.address.clone(),
-                },
-            );
             if let Err(e) = self
                 .handle
                 .propose_and_wait(
-                    inferadb_ledger_raft::types::RaftPayload::system(register_request),
+                    inferadb_ledger_raft::types::RaftPayload::system(
+                        inferadb_ledger_raft::types::SystemRequest::RegisterPeerAddress {
+                            node_id: req.node_id,
+                            address: req.address.clone(),
+                        },
+                    ),
                     std::time::Duration::from_secs(5),
                 )
                 .await
@@ -874,13 +873,15 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         // The DR scheduler (B3) reads this status to derive desired DR
         // membership and generates RemoveVoter operators. The drain
         // monitor (B4) removes the node from GLOBAL once fully drained.
-        let set_status = LedgerRequest::System(SystemRequest::SetNodeStatus {
-            node_id: req.node_id,
-            status: NodeStatus::Decommissioning,
-        });
         match self
             .handle
-            .propose_and_wait(RaftPayload::system(set_status), std::time::Duration::from_secs(5))
+            .propose_and_wait(
+                RaftPayload::system(SystemRequest::SetNodeStatus {
+                    node_id: req.node_id,
+                    status: NodeStatus::Decommissioning,
+                }),
+                std::time::Duration::from_secs(5),
+            )
             .await
         {
             Ok(_) => {
@@ -1564,18 +1565,20 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             );
 
             // Update vault health to Diverged via Raft for cluster-wide consistency
-            let health_request = LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
-                organization: organization_id,
-                vault: vault_id,
-                healthy: false,
-                expected_root: None, // Already diverged during recovery
-                computed_root: Some(final_state_root),
-                diverged_at_height: Some(expected_height),
-                recovery_attempt: None,
-                recovery_started_at: None,
-            });
-
-            if let Err(e) = self.handle.propose(RaftPayload::system(health_request)).await {
+            if let Err(e) = self
+                .handle
+                .propose(RaftPayload::system(OrganizationRequest::UpdateVaultHealth {
+                    organization: organization_id,
+                    vault: vault_id,
+                    healthy: false,
+                    expected_root: None, // Already diverged during recovery
+                    computed_root: Some(final_state_root),
+                    diverged_at_height: Some(expected_height),
+                    recovery_attempt: None,
+                    recovery_started_at: None,
+                }))
+                .await
+            {
                 tracing::error!("Failed to update vault health via Raft: {}", e);
                 // Continue with response - the local state will be inconsistent but
                 // the next recovery attempt can retry
@@ -1604,18 +1607,20 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             }))
         } else {
             // Update vault health to Healthy via Raft for cluster-wide consistency
-            let health_request = LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
-                organization: organization_id,
-                vault: vault_id,
-                healthy: true,
-                expected_root: None,
-                computed_root: None,
-                diverged_at_height: None,
-                recovery_attempt: None,
-                recovery_started_at: None,
-            });
-
-            if let Err(e) = self.handle.propose(RaftPayload::system(health_request)).await {
+            if let Err(e) = self
+                .handle
+                .propose(RaftPayload::system(OrganizationRequest::UpdateVaultHealth {
+                    organization: organization_id,
+                    vault: vault_id,
+                    healthy: true,
+                    expected_root: None,
+                    computed_root: None,
+                    diverged_at_height: None,
+                    recovery_attempt: None,
+                    recovery_started_at: None,
+                }))
+                .await
+            {
                 tracing::error!("Failed to update vault health via Raft: {}", e);
                 // The vault was successfully recovered locally - log error but return success
             }
@@ -1695,8 +1700,14 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             "Simulating vault divergence for testing"
         );
 
-        // Update vault health to Diverged via Raft
-        let health_request = LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
+        // Write to BOTH the GLOBAL and the ORGANIZATION'S Raft group.
+        // - GLOBAL: HealthService reads vault health from GLOBAL applied state (cluster-wide view).
+        // - ORGANIZATION group: WriteService / ReadService check vault health at request time from
+        //   the per-organization applied state — that's where routing lands under B.1's per-org
+        //   Raft groups with delegated leadership.
+        ctx.start_raft_timer();
+
+        let make_health_request = || OrganizationRequest::UpdateVaultHealth {
             organization: organization_id,
             vault: vault_id,
             healthy: false,
@@ -1705,19 +1716,10 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             diverged_at_height: Some(at_height),
             recovery_attempt: None,
             recovery_started_at: None,
-        });
-
-        // Write to BOTH the GLOBAL and the ORGANIZATION'S Raft group.
-        // - GLOBAL: HealthService reads vault health from GLOBAL applied
-        //   state (cluster-wide view).
-        // - ORGANIZATION group: WriteService / ReadService check vault
-        //   health at request time from the per-organization applied
-        //   state — that's where routing lands under B.1's per-org
-        //   Raft groups with delegated leadership.
-        ctx.start_raft_timer();
+        };
 
         // GLOBAL write (for HealthService)
-        if let Err(e) = self.handle.propose(RaftPayload::system(health_request.clone())).await {
+        if let Err(e) = self.handle.propose(RaftPayload::system(make_health_request())).await {
             ctx.end_raft_timer();
             ctx.set_error("RaftError", &e.to_string());
             return Err(error_classify::storage_error(&e));
@@ -1733,7 +1735,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         if let Some(ref manager) = self.raft_manager
             && let Some(org_group) = manager.route_organization(organization_id)
         {
-            let _ = org_group.handle().propose(RaftPayload::system(health_request)).await;
+            let _ = org_group.handle().propose(RaftPayload::system(make_health_request())).await;
         }
 
         ctx.end_raft_timer();
@@ -1866,15 +1868,17 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 timestamp: chrono::Utc::now(),
             };
 
-            let gc_request = LedgerRequest::Organization(OrganizationRequest::Write {                vault: vault_id,
-                transactions: vec![transaction],
-                idempotency_key: [0; 16],
-                request_hash: 0,
-            });
-
             // Propose to REGIONAL handle (where entity data lives), or fall back to GLOBAL
             let handle_target = regional_handle.as_ref().unwrap_or(&self.handle);
-            match handle_target.propose(RaftPayload::system(gc_request)).await {
+            match handle_target
+                .propose(RaftPayload::system(OrganizationRequest::Write {
+                    vault: vault_id,
+                    transactions: vec![transaction],
+                    idempotency_key: [0; 16],
+                    request_hash: 0,
+                }))
+                .await
+            {
                 Ok(_) => {
                     total_expired += count as u64;
                 },
@@ -2012,7 +2016,13 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 Status::not_found(format!("Base backup not found: {e}"))
             })?;
 
-            let region_height = self.applied_state.region_height();
+            // B.1: per-org groups track their own region_height; GLOBAL's
+            // applied_state.region_height() stays at 0. Use the manager's
+            // aggregate max for backup versioning when available.
+            let region_height = self
+                .raft_manager
+                .as_ref()
+                .map_or_else(|| self.applied_state.region_height(), |m| m.max_region_height());
             let db = self.state.database();
 
             let meta = backup_manager
@@ -2054,7 +2064,13 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 error_classify::storage_error(&e)
             })?;
 
-            let region_height = self.applied_state.region_height();
+            // B.1: per-org groups track their own region_height; GLOBAL's
+            // applied_state.region_height() stays at 0. Use the manager's
+            // aggregate max for backup versioning when available.
+            let region_height = self
+                .raft_manager
+                .as_ref()
+                .map_or_else(|| self.applied_state.region_height(), |m| m.max_region_height());
             let all_vaults = self.applied_state.all_vaults();
 
             let mut vault_states = Vec::new();
@@ -2398,10 +2414,13 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         }
 
         // Propose the version change through Raft
-        let ledger_request = LedgerRequest::System(SystemRequest::SetBlindingKeyVersion {
-            version: req.new_key_version,
-        });
-        let response = self.propose_raft_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let response = self
+            .propose_raft_request(
+                SystemRequest::SetBlindingKeyVersion { version: req.new_key_version },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         match response {
             LedgerResponse::Empty => {
@@ -2691,8 +2710,13 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         }
 
         // Propose migration through Raft.
-        let ledger_request = LedgerRequest::System(SystemRequest::MigrateExistingUsers { entries });
-        let response = self.propose_raft_request(ledger_request, &grpc_metadata, &mut ctx).await?;
+        let response = self
+            .propose_raft_request(
+                SystemRequest::MigrateExistingUsers { entries },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         match response {
             LedgerResponse::UsersMigrated { users, migrated, skipped, errors } => {

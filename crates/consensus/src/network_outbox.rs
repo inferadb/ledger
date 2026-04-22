@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::{
     message::Message,
     transport::{NetworkTransport, OutboundMessage},
-    types::{NodeId, ConsensusStateId},
+    types::{ConsensusStateId, NodeId},
 };
 
 /// Groups outbound messages by destination node for batch sending.

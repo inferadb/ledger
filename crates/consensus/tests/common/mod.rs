@@ -4,11 +4,11 @@ use inferadb_ledger_consensus::{
     action::Action,
     clock::SimulatedClock,
     config::ShardConfig,
+    consensus_state::ConsensusState,
     error::ConsensusError,
     message::Message,
     rng::SimulatedRng,
-    consensus_state::ConsensusState,
-    types::{Membership, MembershipChange, NodeId, NodeState, ConsensusStateId},
+    types::{ConsensusStateId, Membership, MembershipChange, NodeId, NodeState},
 };
 
 #[allow(dead_code)]

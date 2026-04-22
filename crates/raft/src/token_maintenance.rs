@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 use crate::{
     consensus_handle::ConsensusHandle,
     raft_manager::RaftManager,
-    types::{RaftPayload, LedgerRequest, SystemRequest},
+    types::{RaftPayload, SystemRequest},
 };
 
 /// Default interval between token maintenance cycles (5 minutes).
@@ -100,7 +100,7 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
         match self
             .handle
             .propose_and_wait(
-                RaftPayload::system(LedgerRequest::System(SystemRequest::DeleteExpiredRefreshTokens)),
+                RaftPayload::system(SystemRequest::DeleteExpiredRefreshTokens),
                 Duration::from_secs(10),
             )
             .await
@@ -140,9 +140,9 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
                     match self
                         .handle
                         .propose_and_wait(
-                            RaftPayload::system(LedgerRequest::System(SystemRequest::TransitionSigningKeyRevoked {
+                            RaftPayload::system(SystemRequest::TransitionSigningKeyRevoked {
                                 kid: kid.clone(),
-                            })),
+                            }),
                             Duration::from_secs(10),
                         )
                         .await
@@ -185,12 +185,10 @@ impl<B: StorageBackend + 'static> TokenMaintenanceJob<B> {
                 }
                 match manager.get_region_group(region) {
                     Ok(group) => {
-                        let request =
-                            LedgerRequest::System(SystemRequest::CleanupExpiredOnboarding);
                         match group
                             .handle()
                             .propose_and_wait(
-                                RaftPayload::system(request),
+                                RaftPayload::system(SystemRequest::CleanupExpiredOnboarding),
                                 std::time::Duration::from_secs(30),
                             )
                             .await

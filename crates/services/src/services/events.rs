@@ -22,7 +22,7 @@ use inferadb_ledger_raft::{
     metrics,
     pagination::{EventPageToken, PageTokenCodec},
     raft_manager::RaftManager,
-    types::{LedgerResponse, LedgerRequest, OrganizationRequest},
+    types::{LedgerResponse, OrganizationRequest},
 };
 use inferadb_ledger_state::{EventStore, EventsDatabase};
 use inferadb_ledger_store::StorageBackend;
@@ -80,7 +80,7 @@ pub struct EventsService<B: StorageBackend> {
     /// Proposal service for routing `IngestExternalEvents` through Raft.
     ///
     /// When set, `ingest_events` proposes the accepted
-    /// batch as [`LedgerRequest::IngestExternalEvents`] against the REGIONAL
+    /// batch as [`OrganizationRequest::IngestExternalEvents`] against the REGIONAL
     /// Raft group owning the organization, instead of writing directly to
     /// `events.db`. When `None`, ingestion is disabled (the RPC returns
     /// `UNAVAILABLE`).
@@ -718,14 +718,21 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
                 None => inferadb_ledger_types::Region::GLOBAL,
             };
 
-            let proposal = LedgerRequest::Organization(OrganizationRequest::IngestExternalEvents {
-                source: source.clone(),
-                events: accepted_entries,
-            });
+            let payload =
+                crate::proposal::serialize_payload(inferadb_ledger_raft::types::RaftPayload::new(
+                    OrganizationRequest::IngestExternalEvents {
+                        source: source.clone(),
+                        events: accepted_entries,
+                    },
+                    caller,
+                ))
+                .map_err(|status| {
+                    status_with_correlation(status, &correlation_request_id, &correlation_trace_id)
+                })?;
 
             let timeout = self.proposal_timeout;
             let response = proposer
-                .propose_to_region(region, proposal, caller, timeout)
+                .propose_to_organization_bytes(region, org_id, payload, timeout)
                 .await
                 .map_err(|status| {
                     status_with_correlation(status, &correlation_request_id, &correlation_trace_id)
@@ -828,15 +835,16 @@ mod tests {
     /// Test double that stands in for the apply-handler side of the
     /// `IngestExternalEvents` flow.
     ///
-    /// - Captures every `propose_to_region` call for assertion.
-    /// - Simulates the apply handler's write-through-and-ack by writing the proposed `EventEntry`
-    ///   batch into the shared `events_db` handle and returning `Ok(LedgerResponse::Empty)` — so
-    ///   tests that follow the ingest with a `ListEvents` call still observe the events.
+    /// - Captures every `propose_to_region_bytes` call for assertion.
+    /// - Simulates the apply handler's write-through-and-ack by deserializing the proposed bytes
+    ///   back to `OrganizationRequest`, writing the `EventEntry` batch into the shared `events_db`
+    ///   handle, and returning `Ok(LedgerResponse::Empty)`.
     /// - Optionally returns a canned error response (`set_next_error`) so tests can exercise the
     ///   apply-error → gRPC-error propagation path.
     struct TestIngestProposer {
         events_db: EventsDatabase<InMemoryBackend>,
-        proposals: Mutex<Vec<(Region, LedgerRequest, u64)>>,
+        /// Captured `(region, request_bytes)` tuples for post-call assertions.
+        proposals: Mutex<Vec<(Region, Vec<u8>)>>,
         next_error: Mutex<VecDeque<Status>>,
     }
 
@@ -849,11 +857,24 @@ mod tests {
             }
         }
 
-        fn proposals(&self) -> Vec<(Region, LedgerRequest, u64)> {
+        fn proposals(&self) -> Vec<(Region, Vec<u8>)> {
             self.proposals.lock().clone()
         }
 
-        /// Enqueues a `tonic::Status` that the next `propose_to_region` call
+        /// Deserializes captured proposal bytes to `OrganizationRequest` for assertion.
+        fn decode_proposals(&self) -> Vec<(Region, OrganizationRequest)> {
+            self.proposals
+                .lock()
+                .iter()
+                .map(|(region, bytes)| {
+                    let payload: inferadb_ledger_raft::types::RaftPayload<OrganizationRequest> =
+                        postcard::from_bytes(bytes).expect("decode proposal bytes");
+                    (*region, payload.request)
+                })
+                .collect()
+        }
+
+        /// Enqueues a `tonic::Status` that the next `propose_to_region_bytes` call
         /// will return instead of simulating a successful apply.
         fn set_next_error(&self, status: Status) {
             self.next_error.lock().push_back(status);
@@ -862,37 +883,48 @@ mod tests {
 
     #[tonic::async_trait]
     impl ProposalService for TestIngestProposer {
-        async fn propose(
+        async fn propose_bytes(
             &self,
-            _request: LedgerRequest,
-            _caller: u64,
+            _bytes: Vec<u8>,
             _timeout: Duration,
         ) -> Result<LedgerResponse, Status> {
-            Err(Status::unimplemented("TestIngestProposer only supports propose_to_region"))
+            Err(Status::unimplemented("TestIngestProposer only supports propose_to_region_bytes"))
         }
 
-        async fn propose_to_region(
+        async fn propose_to_region_bytes(
+            &self,
+            _region: Region,
+            _bytes: Vec<u8>,
+            _timeout: Duration,
+        ) -> Result<LedgerResponse, Status> {
+            Err(Status::unimplemented(
+                "TestIngestProposer only supports propose_to_organization_bytes",
+            ))
+        }
+
+        async fn propose_to_organization_bytes(
             &self,
             region: Region,
-            request: LedgerRequest,
-            caller: u64,
+            _organization: OrganizationId,
+            bytes: Vec<u8>,
             _timeout: Duration,
         ) -> Result<LedgerResponse, Status> {
             if let Some(err) = self.next_error.lock().pop_front() {
-                self.proposals.lock().push((region, request, caller));
+                self.proposals.lock().push((region, bytes));
                 return Err(err);
             }
 
-            // Simulate the apply-handler side: write events to events.db via
-            // the same EventStore::write path the real apply handler uses.
-            if let LedgerRequest::Organization(OrganizationRequest::IngestExternalEvents { ref events, .. }) = request {
+            // Simulate the apply-handler side: decode and write events to events.db.
+            let payload: inferadb_ledger_raft::types::RaftPayload<OrganizationRequest> =
+                postcard::from_bytes(&bytes).expect("decode proposal bytes in test mock");
+            if let OrganizationRequest::IngestExternalEvents { ref events, .. } = payload.request {
                 let mut txn = self.events_db.write().expect("test write txn");
                 for entry in events.iter() {
                     EventStore::write(&mut txn, entry).expect("test write event");
                 }
                 txn.commit().expect("test commit");
             }
-            self.proposals.lock().push((region, request, caller));
+            self.proposals.lock().push((region, bytes));
             Ok(LedgerResponse::Empty)
         }
 
@@ -2010,8 +2042,8 @@ mod tests {
 
     // ── IngestExternalEvents Raft-routing tests ──
 
-    /// A valid batch must produce exactly one `LedgerRequest::IngestExternalEvents`
-    /// proposal via `propose_to_region`. The captured proposal's event list
+    /// A valid batch must produce exactly one `OrganizationRequest::IngestExternalEvents`
+    /// proposal via `propose_to_region_bytes`. The captured proposal's event list
     /// must match the RPC's accepted entries so WAL replay is byte-identical.
     #[tokio::test]
     async fn ingest_events_proposes_to_regional_raft() {
@@ -2030,11 +2062,11 @@ mod tests {
         assert_eq!(resp.get_ref().rejected_count, 0);
 
         // Exactly one proposal submitted; it is IngestExternalEvents with 2 events.
-        let proposals = proposer.proposals();
-        assert_eq!(proposals.len(), 1, "expected exactly one Raft proposal");
-        let (_region, request, _caller) = &proposals[0];
+        let decoded = proposer.decode_proposals();
+        assert_eq!(decoded.len(), 1, "expected exactly one Raft proposal");
+        let (_region, request) = &decoded[0];
         match request {
-            LedgerRequest::Organization(OrganizationRequest::IngestExternalEvents { source, events }) => {
+            OrganizationRequest::IngestExternalEvents { source, events } => {
                 assert_eq!(source, "engine");
                 assert_eq!(events.len(), 2);
                 // Pre-proposal validation assigns UUID v4 event_ids + source service.

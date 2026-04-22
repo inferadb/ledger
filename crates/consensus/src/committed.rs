@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::types::{EntryKind, ConsensusStateId};
+use crate::types::{ConsensusStateId, EntryKind};
 
 /// A single committed log entry carried to the apply worker.
 #[derive(Debug, Clone)]
@@ -63,7 +63,8 @@ mod tests {
 
     #[test]
     fn empty_batch_has_no_last_index() {
-        let batch = CommittedBatch { shard: ConsensusStateId(1), entries: vec![], leader_node: None };
+        let batch =
+            CommittedBatch { shard: ConsensusStateId(1), entries: vec![], leader_node: None };
         assert!(batch.is_empty());
         assert_eq!(batch.last_index(), None);
     }
@@ -122,7 +123,8 @@ mod tests {
 
     #[test]
     fn batch_leader_node_none() {
-        let batch = CommittedBatch { shard: ConsensusStateId(1), entries: vec![], leader_node: None };
+        let batch =
+            CommittedBatch { shard: ConsensusStateId(1), entries: vec![], leader_node: None };
         assert!(batch.leader_node.is_none());
     }
 

@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     consensus_handle::ConsensusHandle,
-    types::{RaftPayload, LedgerRequest, SystemRequest},
+    types::{RaftPayload, SystemRequest},
 };
 
 /// Background job that erases users whose soft-delete retention period has expired.
@@ -98,12 +98,14 @@ impl<B: StorageBackend + 'static> UserRetentionReaper<B> {
             }
 
             // Retention period has elapsed — submit erasure proposal
-            let request = LedgerRequest::System(SystemRequest::EraseUser {
-                user_id: user.id,
-                region: user.region,
-            });
-
-            match self.handle.propose(RaftPayload::system(request)).await {
+            match self
+                .handle
+                .propose(RaftPayload::system(SystemRequest::EraseUser {
+                    user_id: user.id,
+                    region: user.region,
+                }))
+                .await
+            {
                 Ok(_) => {
                     info!(
                         trace_id = %trace_ctx.trace_id,

@@ -139,7 +139,7 @@ pub struct SnapshotMeta {
 
 /// Error type for Raft log store operations.
 ///
-/// Replaces `openraft::StorageError<LedgerNodeId>` with a simple IO-based error.
+/// Simple IO-based error for Raft log store operations.
 #[derive(Debug)]
 pub struct StoreError {
     /// What went wrong.

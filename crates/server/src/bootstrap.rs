@@ -352,9 +352,13 @@ pub async fn bootstrap_node(
     // set under uniform replication).
     if let Some(mut org_rx) = system_region.take_organization_creation_rx() {
         let mgr = manager.clone();
+        let org_events_config = config.events.clone();
+        let org_batch_config = config.batching.clone();
         tokio::spawn(async move {
             while let Some((region, organization_id)) = org_rx.recv().await {
                 let mgr_clone = mgr.clone();
+                let events_cfg = org_events_config.clone();
+                let batch_cfg = org_batch_config.clone();
                 let result = tokio::spawn(async move {
                     // Voter set under B.1 uniform replication: all known cluster
                     // voters (matches the system region's voter set, which is
@@ -375,13 +379,20 @@ pub async fn bootstrap_node(
                     }
                     // First voter (lexically smallest node id) bootstraps;
                     // others join via AppendEntries from the leader.
-                    let bootstrap_node_id =
-                        voters.iter().map(|(id, _)| *id).min().unwrap_or(0);
-                    let self_id =
-                        mgr_clone.peer_addresses().iter_peers().into_iter().next().map(|(id, _)| id);
-                    let bootstrap = self_id == Some(bootstrap_node_id);
+                    let bootstrap_node_id = voters.iter().map(|(id, _)| *id).min().unwrap_or(0);
+                    let self_id = mgr_clone.config().node_id;
+                    let bootstrap = self_id == bootstrap_node_id;
                     if let Err(e) = mgr_clone
-                        .start_organization_group(region, organization_id, voters, bootstrap)
+                        .start_organization_group(
+                            region,
+                            organization_id,
+                            voters,
+                            bootstrap,
+                            Some(events_cfg),
+                            Some(inferadb_ledger_raft::batching::BatchWriterConfig::from(
+                                &batch_cfg,
+                            )),
+                        )
                         .await
                     {
                         tracing::error!(
@@ -1592,16 +1603,15 @@ async fn check_peer_liveness_quorum(
                 reachable_votes,
                 "Quorum confirms node unreachable — marking Dead"
             );
-            let set_dead = inferadb_ledger_raft::types::LedgerRequest::System(
-                inferadb_ledger_raft::types::SystemRequest::SetNodeStatus {
-                    node_id,
-                    status: inferadb_ledger_raft::types::NodeStatus::Dead,
-                },
-            );
             let _ = global
                 .handle()
                 .propose_and_wait(
-                    inferadb_ledger_raft::types::RaftPayload::system(set_dead),
+                    inferadb_ledger_raft::types::RaftPayload::system(
+                        inferadb_ledger_raft::types::SystemRequest::SetNodeStatus {
+                            node_id,
+                            status: inferadb_ledger_raft::types::NodeStatus::Dead,
+                        },
+                    ),
                     std::time::Duration::from_secs(5),
                 )
                 .await;

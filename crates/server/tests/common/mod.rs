@@ -71,7 +71,7 @@ pub fn connect_channel(addr: &str) -> tonic::transport::Channel {
 }
 
 use inferadb_ledger_proto::proto::{JoinClusterRequest, admin_service_client::AdminServiceClient};
-use inferadb_ledger_raft::{ConsensusHandle, RaftManager, RegionConfig, OrganizationGroup};
+use inferadb_ledger_raft::{ConsensusHandle, OrganizationGroup, RaftManager, RegionConfig};
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::{FileBackend, crypto::InMemoryKeyManager};
 use inferadb_ledger_test_utils::TestDir;
@@ -129,7 +129,10 @@ impl TestNode {
     }
 
     /// Returns a region group by region.
-    pub fn region_group(&self, region: inferadb_ledger_types::Region) -> Option<Arc<OrganizationGroup>> {
+    pub fn region_group(
+        &self,
+        region: inferadb_ledger_types::Region,
+    ) -> Option<Arc<OrganizationGroup>> {
         self.manager.get_region_group(region).ok()
     }
 
@@ -419,10 +422,8 @@ impl TestCluster {
         'data_wait: while data_region_wait_start.elapsed() < Duration::from_secs(30) {
             let mut all_ready = true;
             for &dr in data_regions.iter().take(num_data_regions) {
-                let shards = manager_clone
-                    .list_organization_groups()
-                    .into_iter()
-                    .filter(|(r, _)| *r == dr);
+                let shards =
+                    manager_clone.list_organization_groups().into_iter().filter(|(r, _)| *r == dr);
                 let mut any_shard = false;
                 for (r, shard) in shards {
                     any_shard = true;
@@ -668,13 +669,12 @@ impl TestCluster {
                 // every `(region, shard)` pair the bootstrap node has
                 // registered.
                 let bootstrap_manager = &nodes[0].manager;
-                let shards: Vec<inferadb_ledger_types::OrganizationId> =
-                    bootstrap_manager
-                        .list_organization_groups()
-                        .into_iter()
-                        .filter(|(r, _)| *r == data_region)
-                        .map(|(_, s)| s)
-                        .collect();
+                let shards: Vec<inferadb_ledger_types::OrganizationId> = bootstrap_manager
+                    .list_organization_groups()
+                    .into_iter()
+                    .filter(|(r, _)| *r == data_region)
+                    .map(|(_, s)| s)
+                    .collect();
 
                 // Register transport once per node pair — channels are
                 // multiplexed across shards by the consensus engine.
@@ -702,9 +702,8 @@ impl TestCluster {
                         // Per-shard transport registration — each shard's
                         // consensus engine owns its own peer routing table.
                         if let Some(bt) = bootstrap_rg.consensus_transport() {
-                            let _ = bt
-                                .set_peer_via_registry(joining_node_id, &joining_addr_str)
-                                .await;
+                            let _ =
+                                bt.set_peer_via_registry(joining_node_id, &joining_addr_str).await;
                         }
                         if let Ok(joining_rg) =
                             joining_manager.get_organization_group(data_region, shard)
@@ -917,10 +916,7 @@ impl TestCluster {
                 let organization_id = shard_group.organization_id();
                 let mut indices = Vec::new();
                 for node in &self.nodes {
-                    if let Some(rg) = node
-                        .manager
-                        .get_organization_group(dr, organization_id)
-                        .ok()
+                    if let Some(rg) = node.manager.get_organization_group(dr, organization_id).ok()
                     {
                         indices.push(*rg.applied_index_watch().borrow());
                     }
@@ -1452,7 +1448,7 @@ fn test_blinding_key() -> inferadb_ledger_types::EmailBlindingKey {
 /// Returns the user's external slug.
 #[allow(dead_code)]
 pub async fn setup_user(_addr: &str, _name: &str, email: &str, node: &TestNode) -> u64 {
-    use inferadb_ledger_raft::types::{RaftPayload, LedgerRequest, OrganizationRequest, SystemRequest};
+    use inferadb_ledger_raft::types::{RaftPayload, SystemRequest};
 
     let blinding_key = test_blinding_key();
     let email_hmac = inferadb_ledger_types::compute_email_hmac(&blinding_key, email);
@@ -1460,23 +1456,23 @@ pub async fn setup_user(_addr: &str, _name: &str, email: &str, node: &TestNode) 
         inferadb_ledger_types::snowflake::generate_user_slug().expect("generate user slug");
 
     // Step 0: Register email HMAC (reserves uniqueness in GLOBAL)
-    let register_req = LedgerRequest::System(SystemRequest::RegisterEmailHash {
+    let register_req = SystemRequest::RegisterEmailHash {
         hmac_hex: email_hmac,
         user_id: inferadb_ledger_types::UserId::new(0), /* placeholder — CreateUser allocates
                                                          * real ID */
-    });
+    };
     let _ = node
         .handle
         .propose_and_wait(RaftPayload::system(register_req), Duration::from_secs(5))
         .await;
 
     // Step 1: Create user directory entry (allocates UserId, registers slug)
-    let create_req = LedgerRequest::System(SystemRequest::CreateUser {
+    let create_req = SystemRequest::CreateUser {
         user: inferadb_ledger_types::UserId::new(0), // 0 = auto-allocate from sequence
         admin: false,
         slug: user_slug,
         region: inferadb_ledger_types::Region::US_EAST_VA,
-    });
+    };
     let result =
         node.handle.propose_and_wait(RaftPayload::system(create_req), Duration::from_secs(5)).await;
 
@@ -1484,12 +1480,11 @@ pub async fn setup_user(_addr: &str, _name: &str, email: &str, node: &TestNode) 
         Ok(resp) => match resp {
             inferadb_ledger_raft::types::LedgerResponse::UserCreated { user_id, slug } => {
                 // Step 2: Activate the user directory entry
-                let activate_req =
-                    LedgerRequest::System(SystemRequest::UpdateUserDirectoryStatus {
-                        user_id,
-                        status: inferadb_ledger_state::system::UserDirectoryStatus::Active,
-                        region: Some(inferadb_ledger_types::Region::US_EAST_VA),
-                    });
+                let activate_req = SystemRequest::UpdateUserDirectoryStatus {
+                    user_id,
+                    status: inferadb_ledger_state::system::UserDirectoryStatus::Active,
+                    region: Some(inferadb_ledger_types::Region::US_EAST_VA),
+                };
                 let _ = node
                     .handle
                     .propose_and_wait(RaftPayload::system(activate_req), Duration::from_secs(5))
@@ -1512,11 +1507,12 @@ pub async fn setup_user(_addr: &str, _name: &str, email: &str, node: &TestNode) 
                     operations: vec![slug_op],
                     timestamp: std::time::SystemTime::now().into(),
                 };
-                let slug_write = LedgerRequest::Organization(OrganizationRequest::Write {                    vault: inferadb_ledger_types::VaultId::new(0),
+                let slug_write = SystemRequest::Write {
+                    vault: inferadb_ledger_types::VaultId::new(0),
                     transactions: vec![slug_txn],
                     idempotency_key: [0; 16],
                     request_hash: 0,
-                });
+                };
                 let _ = node
                     .handle
                     .propose_and_wait(RaftPayload::system(slug_write), Duration::from_secs(5))
@@ -1555,11 +1551,12 @@ pub async fn setup_user(_addr: &str, _name: &str, email: &str, node: &TestNode) 
                     operations: vec![user_op],
                     timestamp: std::time::SystemTime::now().into(),
                 };
-                let user_write = LedgerRequest::Organization(OrganizationRequest::Write {                    vault: inferadb_ledger_types::VaultId::new(0),
+                let user_write = SystemRequest::Write {
+                    vault: inferadb_ledger_types::VaultId::new(0),
                     transactions: vec![user_txn],
                     idempotency_key: [0; 16],
                     request_hash: 0,
-                });
+                };
                 let _ = node
                     .handle
                     .propose_and_wait(RaftPayload::system(user_write), Duration::from_secs(5))

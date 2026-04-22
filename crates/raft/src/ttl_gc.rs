@@ -24,7 +24,7 @@ use tracing::{debug, info, warn};
 use crate::{
     consensus_handle::ConsensusHandle,
     log_storage::AppliedStateAccessor,
-    types::{RaftPayload, LedgerRequest, OrganizationRequest},
+    types::{OrganizationRequest, RaftPayload},
 };
 
 /// Default interval between GC cycles.
@@ -126,14 +126,13 @@ impl<B: StorageBackend + 'static> TtlGarbageCollector<B> {
             timestamp: chrono::Utc::now(),
         };
 
-        let request = LedgerRequest::Organization(OrganizationRequest::Write {            vault,
-            transactions: vec![transaction],
-            idempotency_key: [0; 16],
-            request_hash: 0,
-        });
-
         self.handle
-            .propose(RaftPayload::system(request))
+            .propose(RaftPayload::system(OrganizationRequest::Write {
+                vault,
+                transactions: vec![transaction],
+                idempotency_key: [0; 16],
+                request_hash: 0,
+            }))
             .await
             .map_err(|e| format!("Raft write failed: {}", e))?;
 

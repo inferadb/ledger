@@ -134,13 +134,7 @@ pub(crate) fn not_leader_remote_region(
     // (each `(region, shard)` is its own Raft group). The SDK's
     // `RegionLeaderCache` falls back to `ResolveRegionLeader` /
     // `WatchLeader` against an in-region node to learn shard leaders.
-    status_with_not_leader_hint(
-        message,
-        None,
-        redirect.routing.leader_hint.as_deref(),
-        None,
-        None,
-    )
+    status_with_not_leader_hint(message, None, redirect.routing.leader_hint.as_deref(), None, None)
 }
 
 /// Prepends `http://` if the address has no URI scheme.

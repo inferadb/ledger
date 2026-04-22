@@ -1442,7 +1442,7 @@ mod tests {
     /// Replay-idempotency invariant covered as a proptest.
     ///
     /// `EventStore::write` lands on the apply path for
-    /// `LedgerRequest::IngestExternalEvents` — and on crash recovery the
+    /// `OrganizationRequest::IngestExternalEvents` — and on crash recovery the
     /// apply pipeline can re-drive the same proposal against events.db.
     /// [`apply_ingest_external_events_replay_idempotency`] covers the
     /// scalar property on a 2-entry batch; this proptest sweeps arbitrary

@@ -18,8 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use inferadb_ledger_types::OrganizationId;
-use inferadb_ledger_types::config::BatchConfig;
+use inferadb_ledger_types::{OrganizationId, config::BatchConfig};
 use parking_lot::Mutex;
 use tokio::{
     sync::{Semaphore, oneshot},
@@ -29,7 +28,7 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::{
     metrics,
-    types::{LedgerRequest, LedgerResponse, OrganizationRequest},
+    types::{LedgerResponse, OrganizationRequest},
 };
 
 /// Configuration for the batch writer.
@@ -133,7 +132,7 @@ impl From<&BatchConfig> for BatchWriterConfig {
 /// A pending write waiting to be batched.
 struct PendingWrite {
     /// The write request.
-    request: LedgerRequest,
+    request: OrganizationRequest,
     /// Channel to send the result.
     response_tx: oneshot::Sender<Result<LedgerResponse, BatchError>>,
     /// When this write was queued.
@@ -240,7 +239,7 @@ impl BatchWriterHandle {
     /// Returns a receiver that will receive the result when the write is committed.
     pub fn submit(
         &self,
-        request: LedgerRequest,
+        request: OrganizationRequest,
     ) -> oneshot::Receiver<Result<LedgerResponse, BatchError>> {
         let (tx, rx) = oneshot::channel();
 
@@ -269,7 +268,7 @@ impl BatchWriterHandle {
 pub struct BatchWriter<F>
 where
     F: Fn(
-            Vec<LedgerRequest>,
+            Vec<OrganizationRequest>,
         ) -> futures::future::BoxFuture<'static, Result<Vec<LedgerResponse>, String>>
         + Send
         + Sync
@@ -292,7 +291,7 @@ where
 impl<F> BatchWriter<F>
 where
     F: Fn(
-            Vec<LedgerRequest>,
+            Vec<OrganizationRequest>,
         ) -> futures::future::BoxFuture<'static, Result<Vec<LedgerResponse>, String>>
         + Send
         + Sync
@@ -402,7 +401,7 @@ where
         metrics::record_batch_coalesce(batch_size, &self.region, &self.shard);
 
         // Destructure batch into requests and response senders (zero clones).
-        let (requests, senders): (Vec<LedgerRequest>, Vec<_>) =
+        let (requests, senders): (Vec<OrganizationRequest>, Vec<_>) =
             batch.into_iter().map(|w| (w.request, w.response_tx)).unzip();
 
         // Submit to Raft.
@@ -441,6 +440,7 @@ mod tests {
     use inferadb_ledger_types::{OrganizationId, VaultId};
 
     use super::*;
+    use crate::types::OrganizationRequest;
 
     fn org(n: i64) -> OrganizationId {
         OrganizationId::new(n)
@@ -450,12 +450,13 @@ mod tests {
         VaultId::new(n)
     }
 
-    fn make_request(organization: OrganizationId, vault: VaultId) -> LedgerRequest {
-        LedgerRequest::Organization(OrganizationRequest::Write {            vault,
+    fn make_request(_organization: OrganizationId, vault: VaultId) -> OrganizationRequest {
+        OrganizationRequest::Write {
+            vault,
             transactions: vec![],
             idempotency_key: [0; 16],
             request_hash: 0,
-        })
+        }
     }
 
     fn make_response(block_height: u64) -> LedgerResponse {
@@ -788,17 +789,15 @@ mod tests {
 
         use super::*;
 
-        fn make_indexed_request(idx: u64) -> LedgerRequest {
-            // `organization:` was dropped from `OrganizationRequest::Write`
-            // in the B.1.13 field-drop; we now tag each submission via
-            // `request_hash` instead so the proptest's `observed` vector
-            // still reconstructs submission order.
-            LedgerRequest::Organization(OrganizationRequest::Write {
+        fn make_indexed_request(idx: u64) -> OrganizationRequest {
+            // Tag each submission via `request_hash` so the proptest's
+            // `observed` vector reconstructs submission order.
+            OrganizationRequest::Write {
                 vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: idx,
-            })
+            }
         }
 
         // Static counter so each proptest case uses distinct organization ids
@@ -844,7 +843,7 @@ mod tests {
                         Arc::new(Mutex::new(Vec::new()));
                     let observed_clone = Arc::clone(&observed);
 
-                    let submit_fn = move |requests: Vec<LedgerRequest>| {
+                    let submit_fn = move |requests: Vec<OrganizationRequest>| {
                         let observed = Arc::clone(&observed_clone);
                         let responses: Vec<LedgerResponse> = requests
                             .iter()
@@ -857,10 +856,7 @@ mod tests {
                             .collect();
 
                         for req in &requests {
-                            if let LedgerRequest::Organization(
-                                OrganizationRequest::Write { request_hash, .. },
-                            ) = req
-                            {
+                            if let OrganizationRequest::Write { request_hash, .. } = req {
                                 observed.lock().push(*request_hash);
                             }
                         }

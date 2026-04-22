@@ -155,6 +155,8 @@ pub mod user_retention;
 // convenience re-exports.
 // ---------------------------------------------------------------------------
 #[doc(hidden)]
+pub use apply_worker::{OrganizationApplyWorker, RegionApplyWorker, SystemApplyWorker};
+#[doc(hidden)]
 pub use auto_recovery::AutoRecoveryJob;
 #[doc(hidden)]
 pub use backup::{BackupJob, BackupManager};
@@ -195,8 +197,7 @@ pub use peer_address_map::PeerAddressMap;
 pub use post_erasure_compaction::PostErasureCompactionJob;
 #[doc(hidden)]
 pub use raft_manager::{
-    OrganizationGroup, RaftManager, RaftManagerConfig, RegionConfig, RegionGroup, SystemGroup,
-    SystemStateReader,
+    OrganizationGroup, RaftManager, RaftManagerConfig, RegionConfig, SystemStateReader,
 };
 #[doc(hidden)]
 pub use rate_limit::RateLimiter;
@@ -226,7 +227,5 @@ pub use types::LivenessConfig;
 pub use types::NodeStatus;
 #[doc(hidden)]
 pub use types::{OrganizationRequest, RegionRequest};
-#[doc(hidden)]
-pub use apply_worker::{OrganizationApplyWorker, RegionApplyWorker, SystemApplyWorker};
 #[doc(hidden)]
 pub use user_retention::UserRetentionReaper;

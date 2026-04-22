@@ -1,7 +1,7 @@
 //! State root divergence handler.
 //!
 //! Receives [`StateRootDivergence`] events from the apply path and proposes
-//! [`LedgerRequest::UpdateVaultHealth`] via Raft to halt diverged vaults
+//! [`OrganizationRequest::UpdateVaultHealth`] via Raft to halt diverged vaults
 //! cluster-wide.
 //!
 //! ## Architecture
@@ -23,7 +23,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     consensus_handle::ConsensusHandle,
-    types::{RaftPayload, StateRootDivergence, LedgerRequest, OrganizationRequest},
+    types::{OrganizationRequest, RaftPayload, StateRootDivergence},
 };
 
 /// Async task that receives divergence events and halts diverged vaults.
@@ -67,7 +67,7 @@ impl StateRootDivergenceHandler {
                 "Proposing vault halt due to state root divergence"
             );
 
-            let request = LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
+            let payload = RaftPayload::system(OrganizationRequest::UpdateVaultHealth {
                 organization: divergence.organization,
                 vault: divergence.vault,
                 healthy: false,
@@ -77,13 +77,6 @@ impl StateRootDivergenceHandler {
                 recovery_attempt: None,
                 recovery_started_at: None,
             });
-
-            let payload = RaftPayload {
-                request,
-                proposed_at: chrono::Utc::now(),
-                state_root_commitments: vec![],
-                caller: 0,
-            };
 
             match self.handle.propose(payload).await {
                 Ok(_) => {
@@ -116,22 +109,17 @@ impl StateRootDivergenceHandler {
     /// Extracted for testability — the `run()` loop cannot be unit-tested
     /// without a live Raft handle.
     #[cfg(test)]
-    fn build_halt_payload(divergence: &StateRootDivergence) -> RaftPayload {
-        RaftPayload {
-            request: LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
-                organization: divergence.organization,
-                vault: divergence.vault,
-                healthy: false,
-                expected_root: Some(divergence.leader_state_root),
-                computed_root: Some(divergence.local_state_root),
-                diverged_at_height: Some(divergence.vault_height),
-                recovery_attempt: None,
-                recovery_started_at: None,
-            }),
-            proposed_at: chrono::Utc::now(),
-            state_root_commitments: vec![],
-            caller: 0,
-        }
+    fn build_halt_payload(divergence: &StateRootDivergence) -> RaftPayload<OrganizationRequest> {
+        RaftPayload::system(OrganizationRequest::UpdateVaultHealth {
+            organization: divergence.organization,
+            vault: divergence.vault,
+            healthy: false,
+            expected_root: Some(divergence.leader_state_root),
+            computed_root: Some(divergence.local_state_root),
+            diverged_at_height: Some(divergence.vault_height),
+            recovery_attempt: None,
+            recovery_started_at: None,
+        })
     }
 }
 
@@ -159,7 +147,7 @@ mod tests {
         let payload = StateRootDivergenceHandler::build_halt_payload(&divergence);
 
         match &payload.request {
-            LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
+            OrganizationRequest::UpdateVaultHealth {
                 organization,
                 vault,
                 healthy,
@@ -168,7 +156,7 @@ mod tests {
                 diverged_at_height,
                 recovery_attempt,
                 recovery_started_at,
-            }) => {
+            } => {
                 assert_eq!(*organization, OrganizationId::new(42));
                 assert_eq!(*vault, VaultId::new(7));
                 assert!(!healthy, "should mark vault as unhealthy");
@@ -197,7 +185,7 @@ mod tests {
         let payload = StateRootDivergenceHandler::build_halt_payload(&divergence);
 
         match &payload.request {
-            LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth { diverged_at_height, .. }) => {
+            OrganizationRequest::UpdateVaultHealth { diverged_at_height, .. } => {
                 assert_eq!(*diverged_at_height, Some(0));
             },
             _ => panic!("expected UpdateVaultHealth"),

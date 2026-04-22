@@ -29,7 +29,7 @@ use tracing::{debug, info, warn};
 use crate::{
     consensus_handle::ConsensusHandle,
     raft_manager::RaftManager,
-    types::{RaftPayload, LedgerRequest, OrganizationRequest, SystemRequest},
+    types::{OrganizationRequest, RaftPayload, SystemRequest},
 };
 
 /// Default interval between maintenance cycles (5 minutes).
@@ -220,15 +220,17 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
             }
 
             // Propose GLOBAL resolve: Pending → Expired
-            let global_request = LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
-                invite: scanned.invite_id,
-                organization: scanned.entry.organization,
-                status: InvitationStatus::Expired,
-                invitee_email_hmac: scanned.email_hmac.clone(),
-                token_hash: invitation.token_hash,
-            });
-
-            match self.handle.propose(RaftPayload::system(global_request)).await {
+            match self
+                .handle
+                .propose(RaftPayload::system(OrganizationRequest::ResolveOrganizationInvite {
+                    invite: scanned.invite_id,
+                    organization: scanned.entry.organization,
+                    status: InvitationStatus::Expired,
+                    invitee_email_hmac: scanned.email_hmac.clone(),
+                    token_hash: invitation.token_hash,
+                }))
+                .await
+            {
                 Ok(_) => {},
                 Err(e) => {
                     warn!(
@@ -243,17 +245,14 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
             }
 
             // Propose REGIONAL status update
-            let regional_request =
-                LedgerRequest::System(SystemRequest::UpdateOrganizationInviteStatus {
-                    organization: scanned.entry.organization,
-                    invite: scanned.invite_id,
-                    status: InvitationStatus::Expired,
-                });
-
             if let Err(e) = group
                 .handle()
                 .propose_and_wait(
-                    RaftPayload::system(regional_request),
+                    RaftPayload::system(SystemRequest::UpdateOrganizationInviteStatus {
+                        organization: scanned.entry.organization,
+                        invite: scanned.invite_id,
+                        status: InvitationStatus::Expired,
+                    }),
                     std::time::Duration::from_secs(30),
                 )
                 .await
@@ -314,44 +313,48 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
 
             // Read REGIONAL record for created_at and slug
             let sys_svc = SystemOrganizationService::new(group.state().clone());
-            let invitation = match sys_svc
-                .read_invitation(scanned.entry.organization, scanned.invite_id)
-            {
-                Ok(Some(inv)) => inv,
-                Ok(None) => {
-                    // REGIONAL record already gone — still clean up GLOBAL indexes.
-                    // Use dummy slug and zeroed token hash; the delete operations
-                    // are idempotent (no-op if already gone).
-                    let global_request = LedgerRequest::Organization(OrganizationRequest::PurgeOrganizationInviteIndexes {
-                        invite: scanned.invite_id,
-                        slug: inferadb_ledger_types::InviteSlug::new(0),
-                        invitee_email_hmac: scanned.email_hmac.clone(),
-                        token_hash: [0; 32],
-                    });
-                    if let Err(e) = self.handle.propose(RaftPayload::system(global_request)).await {
+            let invitation =
+                match sys_svc.read_invitation(scanned.entry.organization, scanned.invite_id) {
+                    Ok(Some(inv)) => inv,
+                    Ok(None) => {
+                        // REGIONAL record already gone — still clean up GLOBAL indexes.
+                        // Use dummy slug and zeroed token hash; the delete operations
+                        // are idempotent (no-op if already gone).
+                        if let Err(e) = self
+                            .handle
+                            .propose(RaftPayload::system(
+                                OrganizationRequest::PurgeOrganizationInviteIndexes {
+                                    invite: scanned.invite_id,
+                                    slug: inferadb_ledger_types::InviteSlug::new(0),
+                                    invitee_email_hmac: scanned.email_hmac.clone(),
+                                    token_hash: [0; 32],
+                                },
+                            ))
+                            .await
+                        {
+                            warn!(
+                                trace_id = %trace_id,
+                                invite_id = scanned.invite_id.value(),
+                                error = %e,
+                                "Failed to purge orphaned GLOBAL invite indexes"
+                            );
+                            had_errors = true;
+                        } else {
+                            reaped_count += 1;
+                        }
+                        continue;
+                    },
+                    Err(e) => {
                         warn!(
                             trace_id = %trace_id,
                             invite_id = scanned.invite_id.value(),
                             error = %e,
-                            "Failed to purge orphaned GLOBAL invite indexes"
+                            "Failed to read REGIONAL invitation for reaping"
                         );
                         had_errors = true;
-                    } else {
-                        reaped_count += 1;
-                    }
-                    continue;
-                },
-                Err(e) => {
-                    warn!(
-                        trace_id = %trace_id,
-                        invite_id = scanned.invite_id.value(),
-                        error = %e,
-                        "Failed to read REGIONAL invitation for reaping"
-                    );
-                    had_errors = true;
-                    continue;
-                },
-            };
+                        continue;
+                    },
+                };
 
             // Check retention window
             if now < invitation.created_at + retention {
@@ -360,15 +363,13 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
 
             // Propose REGIONAL record deletion first — if this fails, GLOBAL
             // indexes still point to the record so the next cycle can retry.
-            let regional_request = LedgerRequest::System(SystemRequest::DeleteOrganizationInvite {
-                organization: scanned.entry.organization,
-                invite: scanned.invite_id,
-            });
-
             if let Err(e) = group
                 .handle()
                 .propose_and_wait(
-                    RaftPayload::system(regional_request),
+                    RaftPayload::system(SystemRequest::DeleteOrganizationInvite {
+                        organization: scanned.entry.organization,
+                        invite: scanned.invite_id,
+                    }),
                     std::time::Duration::from_secs(30),
                 )
                 .await
@@ -387,14 +388,16 @@ impl<B: StorageBackend + 'static> InviteMaintenanceJob<B> {
             // If this fails, the orphaned GLOBAL indexes are harmless (they
             // point to a deleted REGIONAL record, resolved as "not found")
             // and will be retried next cycle.
-            let global_request = LedgerRequest::Organization(OrganizationRequest::PurgeOrganizationInviteIndexes {
-                invite: scanned.invite_id,
-                slug: invitation.slug,
-                invitee_email_hmac: scanned.email_hmac.clone(),
-                token_hash: invitation.token_hash,
-            });
-
-            if let Err(e) = self.handle.propose(RaftPayload::system(global_request)).await {
+            if let Err(e) = self
+                .handle
+                .propose(RaftPayload::system(OrganizationRequest::PurgeOrganizationInviteIndexes {
+                    invite: scanned.invite_id,
+                    slug: invitation.slug,
+                    invitee_email_hmac: scanned.email_hmac.clone(),
+                    token_hash: invitation.token_hash,
+                }))
+                .await
+            {
                 warn!(
                     trace_id = %trace_id,
                     invite_id = scanned.invite_id.value(),

@@ -174,16 +174,15 @@ impl PlacementController {
                 tracing::info!(node_id, ?status, "Drain complete — removing from GLOBAL");
                 match global.handle().remove_node(node_id).await {
                     Ok(()) => {
-                        let set_removed = inferadb_ledger_raft::types::LedgerRequest::System(
-                            inferadb_ledger_raft::types::SystemRequest::SetNodeStatus {
-                                node_id,
-                                status: NodeStatus::Removed,
-                            },
-                        );
                         let _ = global
                             .handle()
                             .propose_and_wait(
-                                RaftPayload::system(set_removed),
+                                RaftPayload::system(
+                                    inferadb_ledger_raft::types::SystemRequest::SetNodeStatus {
+                                        node_id,
+                                        status: NodeStatus::Removed,
+                                    },
+                                ),
                                 Duration::from_secs(5),
                             )
                             .await;

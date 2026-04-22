@@ -599,8 +599,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut wal = SegmentedWalBackend::open(dir.path()).unwrap();
 
-        let f =
-            WalFrame { shard_id: ConsensusStateId(5), index: 42, term: 7, data: Arc::from(b"x".as_slice()) };
+        let f = WalFrame {
+            shard_id: ConsensusStateId(5),
+            index: 42,
+            term: 7,
+            data: Arc::from(b"x".as_slice()),
+        };
         wal.append(&[f]).unwrap();
         wal.sync().unwrap();
 

@@ -19,7 +19,7 @@ use inferadb_ledger_proto::proto::{
 use inferadb_ledger_raft::{
     logging::RequestContext,
     metrics,
-    types::{LedgerResponse, LedgerRequest, OrganizationRequest, SystemRequest},
+    types::{LedgerResponse, OrganizationRequest, SystemRequest},
 };
 use inferadb_ledger_state::system::{
     Organization, OrganizationMemberRole as DomainMemberRole, OrganizationProfile, SYSTEM_VAULT_ID,
@@ -388,17 +388,21 @@ impl InvitationService {
         grpc_metadata: &tonic::metadata::MetadataMap,
         ctx: &mut RequestContext,
     ) -> Result<(), Status> {
+        let region = self.org_region(org_id)?;
+
         // GLOBAL proposal: CAS on Pending → terminal status
         let global_resp = self
             .ctx
-            .propose_request(
-                LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
+            .propose_organization_request(
+                region,
+                org_id,
+                OrganizationRequest::ResolveOrganizationInvite {
                     invite: invite_id,
                     organization: org_id,
                     status,
                     invitee_email_hmac: invitee_email_hmac.to_owned(),
                     token_hash,
-                }),
+                },
                 grpc_metadata,
                 ctx,
             )
@@ -412,7 +416,6 @@ impl InvitationService {
         // REGIONAL proposal: update status. Failure is logged but not returned —
         // the GLOBAL state is authoritative and the background maintenance job
         // reconciles REGIONAL records.
-        let region = self.org_region(org_id)?;
         if let Err(e) = self
             .ctx
             .propose_regional_org_encrypted(
@@ -454,22 +457,24 @@ impl InvitationService {
         grpc_metadata: &tonic::metadata::MetadataMap,
         ctx: &mut RequestContext,
     ) -> Result<(), Status> {
+        let region = self.org_region(org_id)?;
         let _ = self
             .ctx
-            .propose_request(
-                LedgerRequest::Organization(OrganizationRequest::AddOrganizationMember {
+            .propose_organization_request(
+                region,
+                org_id,
+                OrganizationRequest::AddOrganizationMember {
                     organization: org_id,
                     user: user_id,
                     user_slug,
                     role,
-                }),
+                },
                 grpc_metadata,
                 ctx,
             )
             .await?;
 
         if let Some(team_id) = team_id {
-            let region = self.org_region(org_id)?;
             let _ = self
                 .ctx
                 .propose_regional_org_encrypted(
@@ -663,16 +668,19 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
         let (raw_token, token_hash) = Self::generate_token();
 
         // 11. GLOBAL proposal
+        let region = self.org_region(org_id)?;
         let global_resp = self
             .ctx
-            .propose_request(
-                LedgerRequest::Organization(OrganizationRequest::CreateOrganizationInvite {
+            .propose_organization_request(
+                region,
+                org_id,
+                OrganizationRequest::CreateOrganizationInvite {
                     organization: org_id,
                     slug: invite_slug,
                     token_hash,
                     invitee_email_hmac: invitee_email_hmac.clone(),
                     ttl_hours,
-                }),
+                },
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -690,7 +698,6 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
         };
 
         // 12. REGIONAL proposal (encrypted with OrgShredKey)
-        let region = self.org_region(org_id)?;
         let regional_result = self
             .ctx
             .propose_regional_org_encrypted(
@@ -723,14 +730,16 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
             // Attempt cleanup by resolving as Revoked
             let _ = self
                 .ctx
-                .propose_request(
-                    LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
+                .propose_organization_request(
+                    region,
+                    org_id,
+                    OrganizationRequest::ResolveOrganizationInvite {
                         invite: invite_id,
                         organization: org_id,
                         status: DomainInvitationStatus::Revoked,
                         invitee_email_hmac,
                         token_hash,
-                    }),
+                    },
                     &grpc_metadata,
                     &mut ctx,
                 )

@@ -11,10 +11,7 @@ use inferadb_ledger_proto::proto::{
     CommittedIndexRequest, CommittedIndexResponse, ConsensusAck, ConsensusEnvelope,
     RegionalProposalRequest, RegionalProposalResult,
 };
-use inferadb_ledger_raft::{
-    raft_manager::RaftManager,
-    types::{RaftPayload, LedgerRequest, RegionRequest},
-};
+use inferadb_ledger_raft::raft_manager::RaftManager;
 use inferadb_ledger_types::{decode, encode};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
@@ -83,126 +80,6 @@ impl RaftService {
                 .to_owned();
             host == caller_ip
         })
-    }
-
-    /// Handles a `RegionRequest::AddRegionVoter` request by calling
-    /// `add_learner` and `promote_voter` directly on the data-region group's
-    /// consensus handle.
-    ///
-    /// This is a membership change, not a Raft log proposal, so it bypasses
-    /// `propose_and_wait`. The caller (GLOBAL leader) sends this when it is
-    /// not the DR leader and needs the DR leader to add the new node.
-    async fn handle_add_region_voter(
-        &self,
-        group: &inferadb_ledger_raft::raft_manager::OrganizationGroup,
-        region: inferadb_ledger_types::Region,
-        node_id: u64,
-        address: &str,
-    ) -> Result<Response<RegionalProposalResult>, Status> {
-        // Register the node's transport channel so the DR leader can
-        // replicate to it.
-        if let Some(transport) = group.consensus_transport()
-            && let Err(e) = transport.set_peer_via_registry(node_id, address).await
-        {
-            tracing::warn!(
-                region = region.as_str(),
-                node_id,
-                address,
-                error = %e,
-                "Failed to register node transport for AddRegionVoter",
-            );
-        }
-
-        // Add learner with retries (membership changes can conflict with
-        // in-progress changes).
-        let mut add_err = None;
-        for attempt in 0..5u32 {
-            match group.handle().add_learner(node_id, false).await {
-                Ok(()) => {
-                    add_err = None;
-                    break;
-                },
-                Err(e) if e.to_string().contains("already undergoing") => {
-                    add_err = Some(e);
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        100 * u64::from(attempt + 1),
-                    ))
-                    .await;
-                },
-                Err(e) => {
-                    return Ok(Response::new(RegionalProposalResult {
-                        response_payload: Vec::new(),
-                        status_code: tonic::Code::Internal as i32,
-                        error_message: format!("add_learner failed: {e}"),
-                        committed_index: 0,
-                    }));
-                },
-            }
-        }
-        if let Some(e) = add_err {
-            return Ok(Response::new(RegionalProposalResult {
-                response_payload: Vec::new(),
-                status_code: tonic::Code::Internal as i32,
-                error_message: format!("add_learner retries exhausted: {e}"),
-                committed_index: 0,
-            }));
-        }
-
-        // Brief delay for membership commit before promotion.
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        // Promote to voter with retries.
-        for attempt in 0..5u32 {
-            match group.handle().promote_voter(node_id).await {
-                Ok(()) => {
-                    tracing::info!(
-                        region = region.as_str(),
-                        node_id,
-                        "AddRegionVoter: node added and promoted to voter"
-                    );
-                    return Ok(Response::new(RegionalProposalResult {
-                        response_payload: Vec::new(),
-                        status_code: 0,
-                        error_message: String::new(),
-                        committed_index: group.handle().commit_index(),
-                    }));
-                },
-                Err(e) if e.to_string().contains("already undergoing") => {
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        100 * u64::from(attempt + 1),
-                    ))
-                    .await;
-                },
-                Err(e) => {
-                    tracing::warn!(
-                        region = region.as_str(),
-                        node_id,
-                        error = %e,
-                        "AddRegionVoter: learner added but promote_voter failed"
-                    );
-                    // Learner was added; DR scheduler will reconcile promotion.
-                    return Ok(Response::new(RegionalProposalResult {
-                        response_payload: Vec::new(),
-                        status_code: 0,
-                        error_message: format!("learner added but promotion failed: {e}"),
-                        committed_index: group.handle().commit_index(),
-                    }));
-                },
-            }
-        }
-
-        // Retries exhausted on promote_voter — learner was added.
-        tracing::warn!(
-            region = region.as_str(),
-            node_id,
-            "AddRegionVoter: learner added but promote_voter retries exhausted"
-        );
-        Ok(Response::new(RegionalProposalResult {
-            response_payload: Vec::new(),
-            status_code: 0,
-            error_message: "learner added but promotion retries exhausted".to_string(),
-            committed_index: group.handle().commit_index(),
-        }))
     }
 }
 
@@ -304,8 +181,7 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
         // Verify the caller is a known cluster peer. `RegionalProposal`
         // is an internal server-to-server RPC used by saga orchestration;
         // allowing unauthenticated external callers would let them forge
-        // arbitrary LedgerRequest payloads and bypass JWT / org scoping /
-        // rate limiting.
+        // arbitrary payloads and bypass JWT / org scoping / rate limiting.
         let Some(remote_addr) = request.remote_addr() else {
             return Err(Status::unauthenticated(
                 "RegionalProposal requires a known peer source address",
@@ -330,38 +206,17 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
             },
         };
 
-        // Deserialize the proposal payload before resolving the target
-        // shard so we can route org-bearing variants to the correct Raft
-        // group via `route_request`. Decoding twice would be wasteful and
-        // adds a risk of routing-vs-apply skew if the payload mutated.
-        let ledger_request: LedgerRequest = decode(&req.request_payload)
-            .map_err(|e| Status::invalid_argument(format!("deserialize request: {e}")))?;
-
-        // AddRegionVoter is a membership change — handle it directly via
-        // the consensus handle instead of proposing through the Raft log.
-        // Membership changes are not org-scoped, so they always operate on
-        // the region's data-region group (`OrganizationId(0)`), which holds
-        // the membership log.
-        if let LedgerRequest::Region(RegionRequest::AddRegionVoter { node_id, ref address }) = ledger_request {
-            let group = self
-                .manager
-                .get_region_group(region)
-                .map_err(|_| Status::not_found("region group not found"))?;
-            return self.handle_add_region_voter(&group, region, node_id, address).await;
-        }
-
-        // For all other requests, route to the owning shard via
-        // `route_request`: org-bearing variants land on the user's shard;
-        // org-less variants fall back to shard 0.
+        // Saga sends pre-serialized `postcard(RaftPayload<R>)` bytes.
+        // Forward them directly to the data-region group at OrganizationId(0) —
+        // no decode/re-encode, no routing based on payload content.
         let group = self
             .manager
-            .route_request(region, &ledger_request)
+            .get_organization_group(region, inferadb_ledger_types::OrganizationId::new(0))
             .map_err(|_| Status::not_found("region group not found"))?;
 
-        let payload = RaftPayload::new(ledger_request, req.caller);
         let timeout = std::time::Duration::from_millis(u64::from(req.timeout_ms));
 
-        match group.handle().propose_and_wait(payload, timeout).await {
+        match group.handle().propose_bytes_and_wait(req.request_payload, timeout).await {
             Ok(response) => {
                 let response_bytes = encode(&response)
                     .map_err(|e| Status::internal(format!("serialize response: {e}")))?;

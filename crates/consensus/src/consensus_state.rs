@@ -16,8 +16,8 @@ use crate::{
     message::Message,
     rng::RngSource,
     types::{
-        Entry, EntryKind, Membership, MembershipChange, NodeId, NodeState, PeerState, ConsensusStateId,
-        TimerKind,
+        ConsensusStateId, Entry, EntryKind, Membership, MembershipChange, NodeId, NodeState,
+        PeerState, TimerKind,
     },
 };
 
@@ -203,13 +203,11 @@ impl<C: Clock + Clone, R: RngSource> ConsensusState<C, R> {
     /// Raft elections have already established quorum.
     ///
     /// Behavior:
-    /// - If `term < self.current_term`: rejected (stale assertion).
-    ///   Returns no actions.
-    /// - If `term > self.current_term`: term is advanced. State
-    ///   transitions to Leader if `leader == self.node_id`, otherwise
-    ///   Follower. Voted_for is cleared. Election timer is reset.
-    /// - If `term == self.current_term`: leader_id is updated (or
-    ///   confirmed). State adjusts as above. Election timer is reset.
+    /// - If `term < self.current_term`: rejected (stale assertion). Returns no actions.
+    /// - If `term > self.current_term`: term is advanced. State transitions to Leader if `leader ==
+    ///   self.node_id`, otherwise Follower. Voted_for is cleared. Election timer is reset.
+    /// - If `term == self.current_term`: leader_id is updated (or confirmed). State adjusts as
+    ///   above. Election timer is reset.
     ///
     /// Calling this in [`LeadershipMode::SelfElect`] is permitted but
     /// not recommended — it pre-empts the normal Raft election flow and
@@ -254,10 +252,7 @@ impl<C: Clock + Clone, R: RngSource> ConsensusState<C, R> {
                 .filter(|&&id| id != self.node_id)
                 .map(|&id| PeerState::voter(id, next))
                 .chain(
-                    self.membership
-                        .learners
-                        .iter()
-                        .map(|&id| PeerState::learner(id, next, false)),
+                    self.membership.learners.iter().map(|&id| PeerState::learner(id, next, false)),
                 )
                 .collect();
             self.self_match_index = self.log.len() as u64;
@@ -1622,7 +1617,17 @@ mod tests {
         rng: SimulatedRng,
         membership: Membership,
     ) -> ConsensusState<Arc<SimulatedClock>, SimulatedRng> {
-        ConsensusState::new(ConsensusStateId(1), node_id, membership, ShardConfig::default(), clock, rng, 0, None, 0)
+        ConsensusState::new(
+            ConsensusStateId(1),
+            node_id,
+            membership,
+            ShardConfig::default(),
+            clock,
+            rng,
+            0,
+            None,
+            0,
+        )
     }
 
     fn make_3node_shard(
@@ -1661,7 +1666,10 @@ mod tests {
     }
 
     /// Elect a node as leader by simulating pre-vote + vote rounds.
-    fn elect_leader(shard: &mut ConsensusState<Arc<SimulatedClock>, SimulatedRng>, clock: &SimulatedClock) {
+    fn elect_leader(
+        shard: &mut ConsensusState<Arc<SimulatedClock>, SimulatedRng>,
+        clock: &SimulatedClock,
+    ) {
         // Advance past election deadline.
         clock.advance(std::time::Duration::from_secs(1));
         let _actions = shard.handle_election_timeout();

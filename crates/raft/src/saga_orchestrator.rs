@@ -104,8 +104,21 @@ use crate::{
     error::{SagaError, SerializationSnafu, StateReadSnafu},
     event_writer::{EventHandle, HandlerPhaseEmitter},
     raft_manager::RaftManager,
-    types::{LedgerNodeId, RaftPayload, LedgerRequest, OrganizationRequest, SystemRequest},
+    types::{LedgerNodeId, OrganizationRequest, RaftPayload, SystemRequest},
 };
+
+/// Serializes a `RaftPayload<R>` into postcard bytes for saga proposals.
+///
+/// Separates serialization from the routing logic so callers can construct
+/// typed `RaftPayload<SystemRequest>` / `RaftPayload<OrganizationRequest>`
+/// directly.
+fn serialize_saga_payload<R: serde::Serialize>(request: R) -> Result<Vec<u8>, SagaError> {
+    let payload = RaftPayload::system(request);
+    postcard::to_allocvec(&payload).map_err(|e| SagaError::SagaRaftWrite {
+        message: format!("serialize saga payload: {e}"),
+        backtrace: snafu::Backtrace::generate(),
+    })
+}
 
 /// Key prefix for saga records in _system organization.
 const SAGA_KEY_PREFIX: &str = "_meta:saga:";
@@ -390,11 +403,16 @@ pub struct SagaOrchestrator<B: StorageBackend + 'static> {
 }
 
 impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
-    /// Proposes a request to the appropriate Raft group for a given region.
+    /// Proposes pre-serialized bytes to the appropriate Raft group for a
+    /// given region.
     ///
-    /// When `self.manager` is configured (multi-Raft), routes the request to
+    /// When `self.manager` is configured (multi-Raft), routes the bytes to
     /// the region's Raft group. Falls back to `self.handle` (GLOBAL) when no
     /// manager is present (single-node test setups).
+    ///
+    /// **Phase D wire format**: callers serialize `RaftPayload<R>` via
+    /// [`serialize_saga_payload`] before calling this method. The bytes are
+    /// forwarded as-is — no decode/re-encode on the remote side.
     ///
     /// `traceparent`, when `Some`, is injected as a `traceparent` gRPC metadata
     /// header on cross-node `RegionalProposal` RPCs so the downstream span
@@ -402,26 +420,28 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     async fn propose_to_region(
         &self,
         region: Region,
-        request: LedgerRequest,
+        request_bytes: Vec<u8>,
         traceparent: Option<&str>,
     ) -> std::result::Result<crate::types::LedgerResponse, SagaError> {
-        let payload = RaftPayload::system(request.clone());
         match &self.manager {
             Some(manager) => {
-                // Multi-shard routing: org-bearing requests land on the
-                // user's shard via `route_request`. Saga records (writes
-                // under SYSTEM_ORGANIZATION_ID) and non-org variants fall
-                // back to shard 0 deterministically.
-                let region_group =
-                    manager.route_request(region, &request).map_err(|e| SagaError::SagaRaftWrite {
+                // Multi-shard routing: all saga proposals land on the
+                // data-region group at OrganizationId(0) — `route_request`
+                // ignores the payload and always returns (region, 0).
+                let region_group = manager
+                    .get_organization_group(region, inferadb_ledger_types::OrganizationId::new(0))
+                    .map_err(|e| SagaError::SagaRaftWrite {
                         message: format!("Region {region} not active: {e}"),
                         backtrace: snafu::Backtrace::generate(),
                     })?;
 
-                // Try local proposal first.
+                // Try local proposal first using pre-serialized bytes.
                 match region_group
                     .handle()
-                    .propose_and_wait(payload, std::time::Duration::from_secs(30))
+                    .propose_bytes_and_wait(
+                        request_bytes.clone(),
+                        std::time::Duration::from_secs(30),
+                    )
                     .await
                 {
                     Ok(response) => Ok(response),
@@ -444,13 +464,8 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                                 }
                             })?;
 
-                        let request_payload =
-                            inferadb_ledger_types::encode(&request).map_err(|e| {
-                                SagaError::SagaRaftWrite {
-                                    message: format!("serialize request: {e}"),
-                                    backtrace: snafu::Backtrace::generate(),
-                                }
-                            })?;
+                        // Forward the pre-serialized bytes directly to the remote leader.
+                        let request_payload = request_bytes.clone();
                         let proto_region: inferadb_ledger_proto::proto::Region = region.into();
 
                         // Obtain the leader's peer connection from the shared
@@ -589,7 +604,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             },
             None => self
                 .handle
-                .propose_and_wait(payload, std::time::Duration::from_secs(30))
+                .propose_bytes_and_wait(request_bytes, std::time::Duration::from_secs(30))
                 .await
                 .map_err(|e| SagaError::SagaRaftWrite {
                     message: format!("{e:?}"),
@@ -672,35 +687,75 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     ) -> Result<(), SagaError> {
         let transaction = Self::build_transaction(operations);
 
-        let request = LedgerRequest::Organization(OrganizationRequest::Write {            vault,
-            transactions: vec![transaction],
-            idempotency_key: [0; 16],
-            request_hash: 0,
-        });
-
-        let region = if organization == SYSTEM_ORGANIZATION_ID {
-            Region::GLOBAL
+        if organization == SYSTEM_ORGANIZATION_ID {
+            // System-org writes (saga records, sequences) must target the GLOBAL
+            // `(GLOBAL, 0)` group whose apply worker is `ApplyWorker<SystemRequest>`.
+            // Use `SystemRequest::Write` so the bytes decode correctly.
+            let request = SystemRequest::Write {
+                vault,
+                transactions: vec![transaction],
+                idempotency_key: [0; 16],
+                request_hash: 0,
+            };
+            let request_bytes = serialize_saga_payload(request)?;
+            self.propose_to_region(Region::GLOBAL, request_bytes, traceparent).await?;
         } else {
-            match self.system_service().get_organization(organization) {
-                Ok(Some(registry)) => registry.region,
-                Ok(None) => {
-                    return Err(SagaError::EntityNotFound {
-                        entity_type: "Organization".into(),
-                        identifier: organization.value().to_string(),
-                    });
-                },
-                Err(e) => {
-                    warn!(
-                        organization = organization.value(),
-                        error = %e,
-                        "Failed to look up organization region, falling back to GLOBAL"
-                    );
-                    Region::GLOBAL
-                },
-            }
-        };
+            // Per-org writes target `(region, organization_id)` whose apply worker
+            // is `ApplyWorker<OrganizationRequest>`. Route via `route_organization`
+            // which resolves `organization_id` → `(region, org_id)` group directly.
+            let request = OrganizationRequest::Write {
+                vault,
+                transactions: vec![transaction],
+                idempotency_key: [0; 16],
+                request_hash: 0,
+            };
+            let request_bytes = serialize_saga_payload(request)?;
 
-        self.propose_to_region(region, request, traceparent).await?;
+            if let Some(manager) = &self.manager {
+                // Multi-shard: route directly to the per-org group so bytes land
+                // on `ApplyWorker<OrganizationRequest>`, not on the region group's
+                // `ApplyWorker<SystemRequest>`.
+                let org_group = manager.route_organization(organization).ok_or_else(|| {
+                    SagaError::SagaRaftWrite {
+                        message: format!(
+                            "Organization {organization} is not active on this node"
+                        ),
+                        backtrace: snafu::Backtrace::generate(),
+                    }
+                })?;
+                org_group
+                    .handle()
+                    .propose_bytes_and_wait(
+                        request_bytes,
+                        std::time::Duration::from_secs(30),
+                    )
+                    .await
+                    .map_err(|e| SagaError::SagaRaftWrite {
+                        message: format!("{e:?}"),
+                        backtrace: snafu::Backtrace::generate(),
+                    })?;
+            } else {
+                // Single-shard / test path: fall through to the region's handle.
+                let region = match self.system_service().get_organization(organization) {
+                    Ok(Some(registry)) => registry.region,
+                    Ok(None) => {
+                        return Err(SagaError::EntityNotFound {
+                            entity_type: "Organization".into(),
+                            identifier: organization.value().to_string(),
+                        });
+                    },
+                    Err(e) => {
+                        warn!(
+                            organization = organization.value(),
+                            error = %e,
+                            "Failed to look up organization region, falling back to GLOBAL"
+                        );
+                        Region::GLOBAL
+                    },
+                };
+                self.propose_to_region(region, request_bytes, traceparent).await?;
+            }
+        }
 
         Ok(())
     }
@@ -723,12 +778,16 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         .await
     }
 
-    /// Persists saga PII to REGIONAL scratch storage via the typed
-    /// `RegionRequest::SaveRegionalSagaPii` variant.
+    /// Persists saga PII to REGIONAL scratch storage.
     ///
-    /// Apply handler writes to `_tmp:saga_pii:{saga_id}` in the regional
-    /// SYSTEM vault with a 24-hour TTL. The PII survives leader crashes
-    /// and is consumed by the saga step that needs it.
+    /// Writes to `_tmp:saga_pii:{saga_id}` in the `(region, 0)` group's
+    /// SYSTEM vault with a 24-hour TTL via `SystemRequest::Write`. The
+    /// `(region, 0)` group has `ApplyWorker<SystemRequest>`, so
+    /// `SystemRequest::Write` bytes decode correctly there.
+    ///
+    /// The PII survives leader crashes and is consumed by the saga step
+    /// that needs it. `load_saga_pii` reads back from the same group's
+    /// state layer.
     async fn persist_saga_pii(
         &self,
         saga_id: &SagaId,
@@ -737,22 +796,33 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         traceparent: Option<&str>,
     ) -> Result<(), SagaError> {
         let payload = serde_json::to_vec(pii).context(SerializationSnafu)?;
-        let expires_at = (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp() as u64;
-        let request = LedgerRequest::Region(crate::types::RegionRequest::SaveRegionalSagaPii {
-            saga_id: saga_id.value().to_string(),
-            payload,
-            expires_at,
-        });
-        self.propose_to_region(region, request, traceparent).await?;
+        let key = SystemKeys::saga_pii_key(saga_id.value());
+        let expires_at =
+            (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp() as u64;
+        let operation = Operation::SetEntity {
+            key,
+            value: payload,
+            expires_at: Some(expires_at),
+            condition: None,
+        };
+        let transaction = Self::build_transaction(vec![operation]);
+        let request = SystemRequest::Write {
+            vault: SYSTEM_VAULT_ID,
+            transactions: vec![transaction],
+            idempotency_key: [0; 16],
+            request_hash: 0,
+        };
+        let request_bytes = serialize_saga_payload(request)?;
+        self.propose_to_region(region, request_bytes, traceparent).await?;
         Ok(())
     }
 
     /// Loads saga PII from REGIONAL scratch storage.
     ///
-    /// Reads `_tmp:saga_pii:{saga_id}` from the region group's applied
-    /// state — the same group `SaveRegionalSagaPii` applies against.
-    /// Falls back to GLOBAL state when no `RaftManager` is configured
-    /// (single-node test setups).
+    /// Reads `_tmp:saga_pii:{saga_id}` from the `(region, 0)` group's
+    /// applied state — the same group `persist_saga_pii` writes to via
+    /// `SystemRequest::Write`. Falls back to GLOBAL state when no
+    /// `RaftManager` is configured (single-node test setups).
     fn load_saga_pii(&self, saga_id: &SagaId, region: Region) -> Option<SagaPii> {
         let key = SystemKeys::saga_pii_key(saga_id.value());
         let entity = if let Some(ref mgr) = self.manager {
@@ -768,14 +838,30 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         serde_json::from_slice(&entity.value).ok()
     }
 
-    /// Deletes saga PII from REGIONAL scratch storage after consumption
-    /// via the typed `RegionRequest::DeleteRegionalSagaPii` variant.
+    /// Deletes saga PII from REGIONAL scratch storage after consumption.
+    ///
+    /// Issues a `SystemRequest::Write` with `DeleteEntity` to the
+    /// `(region, 0)` group so the scratch key is removed from the same
+    /// state layer that `persist_saga_pii` wrote to.
     async fn delete_saga_pii(&self, saga_id: &SagaId, region: Region, traceparent: Option<&str>) {
-        let request = LedgerRequest::Region(crate::types::RegionRequest::DeleteRegionalSagaPii {
-            saga_id: saga_id.value().to_string(),
-        });
-        if let Err(e) = self.propose_to_region(region, request, traceparent).await {
-            warn!(saga_id = %saga_id, error = %e, "Failed to delete saga PII scratch key");
+        let key = SystemKeys::saga_pii_key(saga_id.value());
+        let operation = Operation::DeleteEntity { key };
+        let transaction = Self::build_transaction(vec![operation]);
+        let request = SystemRequest::Write {
+            vault: SYSTEM_VAULT_ID,
+            transactions: vec![transaction],
+            idempotency_key: [0; 16],
+            request_hash: 0,
+        };
+        match serialize_saga_payload(request) {
+            Ok(bytes) => {
+                if let Err(e) = self.propose_to_region(region, bytes, traceparent).await {
+                    warn!(saga_id = %saga_id, error = %e, "Failed to delete saga PII scratch key");
+                }
+            },
+            Err(e) => {
+                warn!(saga_id = %saga_id, error = %e, "Failed to serialize saga PII delete request");
+            },
         }
     }
 
@@ -786,13 +872,11 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     async fn execute_delete_user_step(&self, saga: &mut DeleteUserSaga) -> Result<(), SagaError> {
         match &saga.state.clone() {
             DeleteUserSagaState::Pending => {
-                // Step 1: Soft-delete user via SystemRequest (proper postcard encoding).
-                let request =
-                    LedgerRequest::System(SystemRequest::DeleteUser { user_id: saga.input.user });
+                // Step 1: Soft-delete user via SystemRequest.
                 let result = self
                     .handle
                     .propose_and_wait(
-                        RaftPayload::system(request),
+                        RaftPayload::system(SystemRequest::DeleteUser { user_id: saga.input.user }),
                         std::time::Duration::from_secs(10),
                     )
                     .await;
@@ -948,11 +1032,15 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
         let transaction = Self::build_transaction(vec![operation]);
 
-        let request = LedgerRequest::Organization(OrganizationRequest::Write {            vault: SYSTEM_VAULT_ID,
+        // Sequence counters live at `(GLOBAL, 0)` whose apply worker is
+        // `ApplyWorker<SystemRequest>`. Use `SystemRequest::Write` so the
+        // bytes decode correctly at the system-tier apply handler.
+        let request = SystemRequest::Write {
+            vault: SYSTEM_VAULT_ID,
             transactions: vec![transaction],
             idempotency_key: [0; 16],
             request_hash: 0,
-        });
+        };
 
         self.handle
             .propose_and_wait(RaftPayload::system(request), std::time::Duration::from_secs(10))
@@ -992,9 +1080,12 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
             // Propose CompleteMigration will fail because the org is still
             // Migrating — instead, propose a ResumeOrganization to revert status
-            let request =
-                LedgerRequest::System(SystemRequest::ResumeOrganization { organization: saga.input.organization_id });
-            let _ = self.handle.propose(RaftPayload::system(request)).await;
+            let _ = self
+                .handle
+                .propose(RaftPayload::system(SystemRequest::ResumeOrganization {
+                    organization: saga.input.organization_id,
+                }))
+                .await;
 
             saga.transition(MigrateOrgSagaState::TimedOut);
             return Ok(());
@@ -1003,14 +1094,12 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         match saga.state.clone() {
             MigrateOrgSagaState::Pending => {
                 // Step 0: Propose StartMigration to set status to Migrating
-                let request = LedgerRequest::System(SystemRequest::StartMigration {
-                    organization: saga.input.organization_id,
-                    target_region_group: saga.input.target_region,
-                });
-
                 self.handle
                     .propose_and_wait(
-                        RaftPayload::system(request),
+                        RaftPayload::system(SystemRequest::StartMigration {
+                            organization: saga.input.organization_id,
+                            target_region_group: saga.input.target_region,
+                        }),
                         std::time::Duration::from_secs(10),
                     )
                     .await
@@ -1082,12 +1171,11 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
             MigrateOrgSagaState::IntegrityVerified => {
                 // Step 4: Complete migration (updates region, sets Active)
-                let request =
-                    LedgerRequest::System(SystemRequest::CompleteMigration { organization: saga.input.organization_id });
-
                 self.handle
                     .propose_and_wait(
-                        RaftPayload::system(request),
+                        RaftPayload::system(SystemRequest::CompleteMigration {
+                            organization: saga.input.organization_id,
+                        }),
                         std::time::Duration::from_secs(10),
                     )
                     .await
@@ -1154,12 +1242,14 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             );
 
             // Compensation: revert directory entry to Active with source region
-            let request = LedgerRequest::System(SystemRequest::UpdateUserDirectoryStatus {
-                user_id: saga.input.user,
-                status: inferadb_ledger_state::system::UserDirectoryStatus::Active,
-                region: Some(saga.input.source_region),
-            });
-            let _ = self.handle.propose(RaftPayload::system(request)).await;
+            let _ = self
+                .handle
+                .propose(RaftPayload::system(SystemRequest::UpdateUserDirectoryStatus {
+                    user_id: saga.input.user,
+                    status: inferadb_ledger_state::system::UserDirectoryStatus::Active,
+                    region: Some(saga.input.source_region),
+                }))
+                .await;
 
             saga.transition(MigrateUserSagaState::TimedOut);
             return Ok(());
@@ -1168,14 +1258,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         match &saga.state {
             MigrateUserSagaState::Pending => {
                 // Step 1: Mark directory entry as Migrating in GLOBAL
-                let request = LedgerRequest::System(SystemRequest::UpdateUserDirectoryStatus {
-                    user_id: saga.input.user,
-                    status: inferadb_ledger_state::system::UserDirectoryStatus::Migrating,
-                    region: None, // keep current region
-                });
                 self.handle
                     .propose_and_wait(
-                        RaftPayload::system(request),
+                        RaftPayload::system(SystemRequest::UpdateUserDirectoryStatus {
+                            user_id: saga.input.user,
+                            status: inferadb_ledger_state::system::UserDirectoryStatus::Migrating,
+                            region: None, // keep current region
+                        }),
                         std::time::Duration::from_secs(10),
                     )
                     .await
@@ -1202,14 +1291,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             },
             MigrateUserSagaState::UserDataWritten => {
                 // Step 4: Update directory entry: region = target, status = Active
-                let request = LedgerRequest::System(SystemRequest::UpdateUserDirectoryStatus {
-                    user_id: saga.input.user,
-                    status: inferadb_ledger_state::system::UserDirectoryStatus::Active,
-                    region: Some(saga.input.target_region),
-                });
                 self.handle
                     .propose_and_wait(
-                        RaftPayload::system(request),
+                        RaftPayload::system(SystemRequest::UpdateUserDirectoryStatus {
+                            user_id: saga.input.user,
+                            status: inferadb_ledger_state::system::UserDirectoryStatus::Active,
+                            region: Some(saga.input.target_region),
+                        }),
                         std::time::Duration::from_secs(10),
                     )
                     .await
@@ -1261,9 +1349,10 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             | CreateUserSagaState::RegionalDataWritten { ref hmac_hex, .. } = saga.state
             {
                 let hmac = hmac_hex.clone();
-                let request =
-                    LedgerRequest::System(SystemRequest::RemoveEmailHash { hmac_hex: hmac });
-                let _ = self.handle.propose(RaftPayload::system(request)).await;
+                let _ = self
+                    .handle
+                    .propose(RaftPayload::system(SystemRequest::RemoveEmailHash { hmac_hex: hmac }))
+                    .await;
             }
             saga.transition(CreateUserSagaState::TimedOut);
             return Ok(());
@@ -1282,13 +1371,12 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 })?;
 
                 // CAS email HMAC in GLOBAL (reserves uniqueness)
-                let request = LedgerRequest::System(SystemRequest::RegisterEmailHash {
-                    hmac_hex: saga.input.hmac.clone(),
-                    user_id,
-                });
                 self.handle
                     .propose_and_wait(
-                        RaftPayload::system(request),
+                        RaftPayload::system(SystemRequest::RegisterEmailHash {
+                            hmac_hex: saga.input.hmac.clone(),
+                            user_id,
+                        }),
                         std::time::Duration::from_secs(10),
                     )
                     .await
@@ -1312,15 +1400,14 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
             CreateUserSagaState::EmailReserved { user_id, user_slug, ref hmac_hex } => {
                 // Step 1 (GLOBAL): Create User directory entry (no PII — IDs, slug, region).
-                let request = LedgerRequest::System(SystemRequest::CreateUser {
-                    user: user_id,
-                    admin: saga.input.admin,
-                    slug: user_slug,
-                    region: saga.input.region,
-                });
                 self.handle
                     .propose_and_wait(
-                        RaftPayload::system(request),
+                        RaftPayload::system(SystemRequest::CreateUser {
+                            user: user_id,
+                            admin: saga.input.admin,
+                            slug: user_slug,
+                            region: saga.input.region,
+                        }),
                         std::time::Duration::from_secs(10),
                     )
                     .await
@@ -1345,14 +1432,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
             CreateUserSagaState::RegionalDataWritten { user_id, user_slug, .. } => {
                 // Step 2 (GLOBAL): Create UserDirectoryEntry + slug index
-                let request = LedgerRequest::System(SystemRequest::UpdateUserDirectoryStatus {
-                    user_id,
-                    status: inferadb_ledger_state::system::UserDirectoryStatus::Active,
-                    region: Some(saga.input.region),
-                });
                 self.handle
                     .propose_and_wait(
-                        RaftPayload::system(request),
+                        RaftPayload::system(SystemRequest::UpdateUserDirectoryStatus {
+                            user_id,
+                            status: inferadb_ledger_state::system::UserDirectoryStatus::Active,
+                            region: Some(saga.input.region),
+                        }),
                         std::time::Duration::from_secs(10),
                     )
                     .await
@@ -1456,11 +1542,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
             if let CreateOrganizationSagaState::DirectoryCreated { organization_id, .. }
             | CreateOrganizationSagaState::ProfileWritten { organization_id, .. } = &saga.state
             {
-                let request = LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
-                    organization: *organization_id,
-                    status: OrganizationStatus::Deleted,
-                });
-                let _ = self.handle.propose(RaftPayload::system(request)).await;
+                let _ = self
+                    .handle
+                    .propose(RaftPayload::system(SystemRequest::UpdateOrganizationStatus {
+                        organization: *organization_id,
+                        status: OrganizationStatus::Deleted,
+                    }))
+                    .await;
             }
             saga.transition(CreateOrganizationSagaState::TimedOut);
             return Ok(());
@@ -1469,16 +1557,15 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         match saga.state.clone() {
             CreateOrganizationSagaState::Pending => {
                 // Step 0 (GLOBAL): Create directory entry with pre-generated slug
-                let request = LedgerRequest::System(SystemRequest::CreateOrganization {
-                    slug: saga.input.slug,
-                    region: saga.input.region,
-                    tier: saga.input.tier,
-                    admin: saga.input.admin,
-                });
                 let response = self
                     .handle
                     .propose_and_wait(
-                        RaftPayload::system(request),
+                        RaftPayload::system(SystemRequest::CreateOrganization {
+                            slug: saga.input.slug,
+                            region: saga.input.region,
+                            tier: saga.input.tier,
+                            admin: saga.input.admin,
+                        }),
                         std::time::Duration::from_secs(30),
                     )
                     .await
@@ -1543,14 +1630,17 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                         },
                     )?;
 
-                let request = LedgerRequest::System(SystemRequest::WriteOrganizationProfile {
-                    organization: organization_id,
-                    sealed_name,
-                    name_nonce,
-                    shred_key_bytes,
-                });
-                self.propose_to_region(saga.input.region, request, saga.traceparent.as_deref())
-                    .await?;
+                self.propose_to_region(
+                    saga.input.region,
+                    serialize_saga_payload(SystemRequest::WriteOrganizationProfile {
+                        organization: organization_id,
+                        sealed_name,
+                        name_nonce,
+                        shred_key_bytes,
+                    })?,
+                    saga.traceparent.as_deref(),
+                )
+                .await?;
 
                 // REGIONAL write succeeded — delete PII scratch key
                 self.delete_saga_pii(&saga.id, saga.input.region, saga.traceparent.as_deref())
@@ -1571,13 +1661,12 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
             CreateOrganizationSagaState::ProfileWritten { organization_id, organization_slug } => {
                 // Step 2 (GLOBAL): Update directory status to Active
-                let request = LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
-                    organization: organization_id,
-                    status: OrganizationStatus::Active,
-                });
                 self.handle
                     .propose_and_wait(
-                        RaftPayload::system(request),
+                        RaftPayload::system(SystemRequest::UpdateOrganizationStatus {
+                            organization: organization_id,
+                            status: OrganizationStatus::Active,
+                        }),
                         std::time::Duration::from_secs(10),
                     )
                     .await
@@ -1651,10 +1740,12 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
                     if *step > 0 {
                         // Remove email HMAC reservation since step 0 (email CAS) completed
-                        let request = LedgerRequest::System(SystemRequest::RemoveEmailHash {
-                            hmac_hex: s.input.hmac.clone(),
-                        });
-                        let _ = self.handle.propose(RaftPayload::system(request)).await;
+                        let _ = self
+                            .handle
+                            .propose(RaftPayload::system(SystemRequest::RemoveEmailHash {
+                                hmac_hex: s.input.hmac.clone(),
+                            }))
+                            .await;
                         cleanup.push("email_hmac_removed");
                     }
 
@@ -1675,12 +1766,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
                     // Mark directory entry as Deleted if step 0 completed
                     if let Some(organization_id) = org_id_for_compensation {
-                        let request =
-                            LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
+                        let _ = self
+                            .handle
+                            .propose(RaftPayload::system(SystemRequest::UpdateOrganizationStatus {
                                 organization: organization_id,
                                 status: OrganizationStatus::Deleted,
-                            });
-                        let _ = self.handle.propose(RaftPayload::system(request)).await;
+                            }))
+                            .await;
                         cleanup.push("directory_marked_deleted");
                     }
 
@@ -1704,29 +1796,36 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
                     // Step 0 reserves the HMAC (Provisioning entry) — always clean up
                     // since the saga cannot reach IdsAllocated without reserving.
-                    let request = LedgerRequest::System(SystemRequest::RemoveEmailHash {
-                        hmac_hex: s.input.email_hmac.clone(),
-                    });
-                    let _ = self.handle.propose(RaftPayload::system(request)).await;
+                    let _ = self
+                        .handle
+                        .propose(RaftPayload::system(SystemRequest::RemoveEmailHash {
+                            hmac_hex: s.input.email_hmac.clone(),
+                        }))
+                        .await;
                     cleanup.push("email_hmac_removed");
 
                     // If IDs were allocated (step 0 completed), mark directories as Deleted
                     if let Some((user_id, organization_id)) = onboarding_ids {
-                        let user_dir_request =
-                            LedgerRequest::System(SystemRequest::UpdateUserDirectoryStatus {
-                                user_id,
-                                status: inferadb_ledger_state::system::UserDirectoryStatus::Deleted,
-                                region: None,
-                            });
-                        let _ = self.handle.propose(RaftPayload::system(user_dir_request)).await;
+                        let _ = self
+                            .handle
+                            .propose(RaftPayload::system(
+                                SystemRequest::UpdateUserDirectoryStatus {
+                                    user_id,
+                                    status:
+                                        inferadb_ledger_state::system::UserDirectoryStatus::Deleted,
+                                    region: None,
+                                },
+                            ))
+                            .await;
                         cleanup.push("user_directory_marked_deleted");
 
-                        let org_dir_request =
-                            LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
+                        let _ = self
+                            .handle
+                            .propose(RaftPayload::system(SystemRequest::UpdateOrganizationStatus {
                                 organization: organization_id,
                                 status: OrganizationStatus::Deleted,
-                            });
-                        let _ = self.handle.propose(RaftPayload::system(org_dir_request)).await;
+                            }))
+                            .await;
                         cleanup.push("org_directory_marked_deleted");
                     }
 
@@ -1945,18 +2044,16 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 rmk_version,
             } => {
                 // Propose CreateSigningKey through Raft
-                let request = LedgerRequest::System(SystemRequest::CreateSigningKey {
-                    scope: saga.input.scope,
-                    kid: kid.clone(),
-                    public_key_bytes,
-                    encrypted_private_key,
-                    rmk_version,
-                });
-
                 let response = self
                     .handle
                     .propose_and_wait(
-                        RaftPayload::system(request),
+                        RaftPayload::system(SystemRequest::CreateSigningKey {
+                            scope: saga.input.scope,
+                            kid: kid.clone(),
+                            public_key_bytes,
+                            encrypted_private_key,
+                            rmk_version,
+                        }),
                         std::time::Duration::from_secs(30),
                     )
                     .await
@@ -2020,16 +2117,15 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
         match saga.state.clone() {
             CreateOnboardingUserSagaState::Pending => {
                 // Step 0 (GLOBAL): Reserve HMAC, allocate IDs, create directories
-                let request = LedgerRequest::System(SystemRequest::CreateOnboardingUser {
-                    email_hmac: saga.input.email_hmac.clone(),
-                    user_slug: saga.input.user_slug,
-                    organization_slug: saga.input.organization_slug,
-                    region: saga.input.region,
-                });
                 let response = self
                     .handle
                     .propose_and_wait(
-                        RaftPayload::system(request),
+                        RaftPayload::system(SystemRequest::CreateOnboardingUser {
+                            email_hmac: saga.input.email_hmac.clone(),
+                            user_slug: saga.input.user_slug,
+                            organization_slug: saga.input.organization_slug,
+                            region: saga.input.region,
+                        }),
                         std::time::Duration::from_secs(30),
                     )
                     .await
@@ -2122,23 +2218,26 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                         },
                     )?;
 
-                let request = LedgerRequest::System(SystemRequest::WriteOnboardingUserProfile {
-                    user_id,
-                    user_slug: saga.input.user_slug,
-                    organization_id,
-                    organization_slug: saga.input.organization_slug,
-                    email_hmac: saga.input.email_hmac.clone(),
-                    sealed_pii,
-                    pii_nonce,
-                    shred_key_bytes,
-                    refresh_token_hash,
-                    refresh_family_id,
-                    refresh_expires_at,
-                    kid: kid.clone(),
-                    region: saga.input.region,
-                });
                 let response = self
-                    .propose_to_region(saga.input.region, request, saga.traceparent.as_deref())
+                    .propose_to_region(
+                        saga.input.region,
+                        serialize_saga_payload(SystemRequest::WriteOnboardingUserProfile {
+                            user_id,
+                            user_slug: saga.input.user_slug,
+                            organization_id,
+                            organization_slug: saga.input.organization_slug,
+                            email_hmac: saga.input.email_hmac.clone(),
+                            sealed_pii,
+                            pii_nonce,
+                            shred_key_bytes,
+                            refresh_token_hash,
+                            refresh_family_id,
+                            refresh_expires_at,
+                            kid: kid.clone(),
+                            region: saga.input.region,
+                        })?,
+                        saga.traceparent.as_deref(),
+                    )
                     .await?;
                 match response {
                     crate::types::LedgerResponse::OnboardingUserProfileWritten {
@@ -2195,16 +2294,15 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 refresh_token_id: _,
             } => {
                 // Step 2 (GLOBAL): Activate directories, HMAC → Active
-                let request = LedgerRequest::System(SystemRequest::ActivateOnboardingUser {
-                    user_id,
-                    user_slug: saga.input.user_slug,
-                    organization_id,
-                    organization_slug: saga.input.organization_slug,
-                    email_hmac: saga.input.email_hmac.clone(),
-                });
                 self.handle
                     .propose_and_wait(
-                        RaftPayload::system(request),
+                        RaftPayload::system(SystemRequest::ActivateOnboardingUser {
+                            user_id,
+                            user_slug: saga.input.user_slug,
+                            organization_id,
+                            organization_slug: saga.input.organization_slug,
+                            email_hmac: saga.input.email_hmac.clone(),
+                        }),
                         std::time::Duration::from_secs(10),
                     )
                     .await

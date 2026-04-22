@@ -332,8 +332,12 @@ mod tests {
 
         // Manually insert a frame with data shorter than MIN_PAYLOAD_SIZE.
         let short_payload = vec![0u8; 5];
-        let bad_frame =
-            WalFrame { shard_id: ConsensusStateId(1), index: 0, term: 0, data: short_payload.into() };
+        let bad_frame = WalFrame {
+            shard_id: ConsensusStateId(1),
+            index: 0,
+            term: 0,
+            data: short_payload.into(),
+        };
         inner.append(&[bad_frame]).unwrap();
         inner.sync().unwrap();
 

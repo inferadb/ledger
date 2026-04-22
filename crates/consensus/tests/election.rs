@@ -454,8 +454,8 @@ fn election_membership_change_rejected_before_noop_commits() {
     use std::sync::Arc;
 
     use inferadb_ledger_consensus::{
-        clock::SimulatedClock, config::ShardConfig, error::ConsensusError, message::Message,
-        rng::SimulatedRng, consensus_state::ConsensusState, types::Membership,
+        clock::SimulatedClock, config::ShardConfig, consensus_state::ConsensusState,
+        error::ConsensusError, message::Message, rng::SimulatedRng, types::Membership,
     };
 
     // Build a 3-node shard directly so we can control message delivery precisely.
@@ -589,9 +589,9 @@ fn election_auto_promote_disabled_does_not_promote_caught_up_learner() {
 
         use inferadb_ledger_consensus::{
             clock::SimulatedClock,
-            rng::SimulatedRng,
             consensus_state::ConsensusState,
-            types::{Membership, ConsensusStateId},
+            rng::SimulatedRng,
+            types::{ConsensusStateId, Membership},
         };
 
         let clock = Arc::new(SimulatedClock::new());

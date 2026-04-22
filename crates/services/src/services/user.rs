@@ -26,7 +26,7 @@ use inferadb_ledger_proto::proto::{
 };
 use inferadb_ledger_raft::{
     error::ServiceError,
-    types::{LedgerResponse, LedgerRequest, OrganizationRequest, SystemRequest},
+    types::{LedgerResponse, SystemRequest},
 };
 use inferadb_ledger_state::system::{
     CreateUserInput, CreateUserSaga, EmailHashEntry, MigrateUserInput, MigrateUserSaga, Saga,
@@ -133,18 +133,22 @@ impl UserService {
         let (refresh_token_str, refresh_token_hash) = crate::jwt::generate_refresh_token();
         let family = crate::jwt::generate_family_id();
 
-        let refresh_request = LedgerRequest::System(SystemRequest::CreateRefreshToken {
-            token_hash: refresh_token_hash,
-            family,
-            token_type: TokenType::UserSession,
-            subject: TokenSubject::User(user_slug),
-            organization: None,
-            vault: None,
-            kid: signing_key.kid.clone(),
-            ttl_secs: jwt_config.session_refresh_ttl_secs,
-        });
         self.ctx
-            .propose_regional_ledger_request(region, refresh_request, grpc_metadata, ctx)
+            .propose_regional(
+                region,
+                SystemRequest::CreateRefreshToken {
+                    token_hash: refresh_token_hash,
+                    family,
+                    token_type: TokenType::UserSession,
+                    subject: TokenSubject::User(user_slug),
+                    organization: None,
+                    vault: None,
+                    kid: signing_key.kid.clone(),
+                    ttl_secs: jwt_config.session_refresh_ttl_secs,
+                },
+                grpc_metadata,
+                ctx,
+            )
             .await?;
 
         let refresh_expires_at =
@@ -455,13 +459,18 @@ impl proto::user_service_server::UserService for UserService {
             operations: vec![saga_op],
             timestamp: Utc::now(),
         };
-        let saga_request = LedgerRequest::Organization(OrganizationRequest::Write {            vault: DomainVaultId::new(0),
-            transactions: vec![saga_txn],
-            idempotency_key: [0; 16],
-            request_hash: 0,
-        });
-
-        self.ctx.propose_request(saga_request, &grpc_metadata, &mut ctx).await?;
+        self.ctx
+            .propose_system_request(
+                SystemRequest::Write {
+                    vault: DomainVaultId::new(0),
+                    transactions: vec![saga_txn],
+                    idempotency_key: [0; 16],
+                    request_hash: 0,
+                },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         // Saga is now persisted. The orchestrator will drive it to completion.
         // We return a response with the saga ID; the user/slug will be
@@ -1291,13 +1300,18 @@ impl proto::user_service_server::UserService for UserService {
             operations: vec![saga_op],
             timestamp: Utc::now(),
         };
-        let saga_request = LedgerRequest::Organization(OrganizationRequest::Write {            vault: DomainVaultId::new(0),
-            transactions: vec![saga_txn],
-            idempotency_key: [0; 16],
-            request_hash: 0,
-        });
-
-        self.ctx.propose_request(saga_request, &grpc_metadata, &mut ctx).await?;
+        self.ctx
+            .propose_system_request(
+                SystemRequest::Write {
+                    vault: DomainVaultId::new(0),
+                    transactions: vec![saga_txn],
+                    idempotency_key: [0; 16],
+                    request_hash: 0,
+                },
+                &grpc_metadata,
+                &mut ctx,
+            )
+            .await?;
 
         ctx.set_success();
         let proto_source: ProtoRegion = source_region.into();
@@ -2594,7 +2608,7 @@ mod tests {
     use inferadb_ledger_proto::proto::{
         self, user_service_server::UserService as UserServiceTrait,
     };
-    use inferadb_ledger_raft::log_storage::AppliedState;
+    use inferadb_ledger_raft::{log_storage::AppliedState, types::SystemRequest};
     use inferadb_ledger_test_utils::TestDir;
     use tonic::Request;
 
@@ -2773,12 +2787,13 @@ mod tests {
         // the proposal path reached the mock.
         let _ = UserServiceTrait::update_user(&service, request).await;
 
-        let proposals = mock.proposals();
-        assert_eq!(proposals.len(), 1);
-        match &proposals[0].0 {
-            LedgerRequest::System(SystemRequest::UpdateUser { .. }) => {},
-            other => panic!("Expected UpdateUser proposal, got: {other:?}"),
-        }
+        let decoded = mock.decode_proposals::<SystemRequest>();
+        assert_eq!(decoded.len(), 1);
+        assert!(
+            matches!(decoded[0].request, SystemRequest::UpdateUser { .. }),
+            "Expected UpdateUser proposal, got: {:?}",
+            decoded[0].request
+        );
     }
 
     // =========================================================================
@@ -2859,12 +2874,13 @@ mod tests {
         assert!(inner.slug.is_some());
         assert_eq!(inner.retention_days, 30);
 
-        let proposals = mock.proposals();
-        assert_eq!(proposals.len(), 1);
-        match &proposals[0].0 {
-            LedgerRequest::System(SystemRequest::DeleteUser { .. }) => {},
-            other => panic!("Expected DeleteUser proposal, got: {other:?}"),
-        }
+        let decoded = mock.decode_proposals::<SystemRequest>();
+        assert_eq!(decoded.len(), 1);
+        assert!(
+            matches!(decoded[0].request, SystemRequest::DeleteUser { .. }),
+            "Expected DeleteUser proposal, got: {:?}",
+            decoded[0].request
+        );
     }
 
     #[tokio::test]

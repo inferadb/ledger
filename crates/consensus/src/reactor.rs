@@ -13,15 +13,15 @@ use crate::{
     action::Action,
     clock::Clock,
     committed::{CommittedBatch, CommittedEntry},
+    consensus_state::ConsensusState,
     error::ConsensusError,
     leadership::ShardState,
     message::Message,
     network_outbox::NetworkOutbox,
     rng::RngSource,
-    consensus_state::ConsensusState,
     timer::TimerWheel,
     transport::{NetworkTransport, OutboundMessage},
-    types::{MembershipChange, NodeId, ConsensusStateId, TimerKind},
+    types::{ConsensusStateId, MembershipChange, NodeId, TimerKind},
     wal_backend::{CheckpointFrame, FsyncPhase, WalBackend, WalFrame},
 };
 
@@ -1235,7 +1235,10 @@ mod tests {
             self.inner.truncate_before(offset)
         }
 
-        fn shred_frames(&mut self, shard_id: ConsensusStateId) -> Result<u64, crate::wal_backend::WalError> {
+        fn shred_frames(
+            &mut self,
+            shard_id: ConsensusStateId,
+        ) -> Result<u64, crate::wal_backend::WalError> {
             self.inner.shred_frames(shard_id)
         }
 
@@ -1349,8 +1352,11 @@ mod tests {
     fn test_process_actions_non_vote_send_enqueues_to_outbox() {
         let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
-        let actions =
-            vec![Action::Send { to: NodeId(2), shard: ConsensusStateId(1), msg: Message::TimeoutNow }];
+        let actions = vec![Action::Send {
+            to: NodeId(2),
+            shard: ConsensusStateId(1),
+            msg: Message::TimeoutNow,
+        }];
 
         reactor.process_actions(actions);
 
@@ -1662,7 +1668,10 @@ mod tests {
         });
 
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })));
+        assert!(matches!(
+            result,
+            Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })
+        ));
     }
 
     #[test]
@@ -1677,7 +1686,10 @@ mod tests {
         });
 
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })));
+        assert!(matches!(
+            result,
+            Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })
+        ));
     }
 
     #[test]
@@ -1696,7 +1708,10 @@ mod tests {
         });
 
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })));
+        assert!(matches!(
+            result,
+            Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })
+        ));
     }
 
     #[test]
@@ -1711,7 +1726,10 @@ mod tests {
         });
 
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })));
+        assert!(matches!(
+            result,
+            Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })
+        ));
     }
 
     #[test]
@@ -1719,11 +1737,16 @@ mod tests {
         let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
-        reactor
-            .handle_event(ReactorEvent::TriggerSnapshot { shard: ConsensusStateId(99), response: resp_tx });
+        reactor.handle_event(ReactorEvent::TriggerSnapshot {
+            shard: ConsensusStateId(99),
+            response: resp_tx,
+        });
 
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })));
+        assert!(matches!(
+            result,
+            Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })
+        ));
     }
 
     // ── handle_event: read_index ───────────────────────────────────
@@ -1737,7 +1760,10 @@ mod tests {
         reactor.add_shard(ConsensusStateId(1), shard);
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
-        reactor.handle_event(ReactorEvent::ReadIndex { shard: ConsensusStateId(1), response: resp_tx });
+        reactor.handle_event(ReactorEvent::ReadIndex {
+            shard: ConsensusStateId(1),
+            response: resp_tx,
+        });
 
         let result = resp_rx.try_recv().expect("response should be available");
         assert_eq!(result.unwrap(), 0);
@@ -1748,10 +1774,16 @@ mod tests {
         let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
 
         let (resp_tx, mut resp_rx) = oneshot::channel();
-        reactor.handle_event(ReactorEvent::ReadIndex { shard: ConsensusStateId(99), response: resp_tx });
+        reactor.handle_event(ReactorEvent::ReadIndex {
+            shard: ConsensusStateId(99),
+            response: resp_tx,
+        });
 
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })));
+        assert!(matches!(
+            result,
+            Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })
+        ));
     }
 
     // ── handle_event: failed shard ─────────────────────────────────
@@ -1773,7 +1805,10 @@ mod tests {
         });
 
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(1) })));
+        assert!(matches!(
+            result,
+            Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(1) })
+        ));
     }
 
     #[test]
@@ -1793,7 +1828,10 @@ mod tests {
         });
 
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(1) })));
+        assert!(matches!(
+            result,
+            Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(1) })
+        ));
     }
 
     #[test]
@@ -1817,7 +1855,10 @@ mod tests {
         });
 
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(1) })));
+        assert!(matches!(
+            result,
+            Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(1) })
+        ));
     }
 
     #[test]
@@ -1837,7 +1878,10 @@ mod tests {
         });
 
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(1) })));
+        assert!(matches!(
+            result,
+            Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(1) })
+        ));
     }
 
     #[test]
@@ -1863,7 +1907,10 @@ mod tests {
         });
 
         assert!(affected.is_empty(), "failed shard peer message should return no affected shards");
-        assert!(reactor.shards.get(&ConsensusStateId(1)).unwrap().is_failed(), "shard should remain failed");
+        assert!(
+            reactor.shards.get(&ConsensusStateId(1)).unwrap().is_failed(),
+            "shard should remain failed"
+        );
     }
 
     // ── ConsensusState isolation ────────────────────────────────────────────
@@ -1889,7 +1936,10 @@ mod tests {
             response: resp_tx,
         });
         let result = resp_rx.try_recv().expect("response should be available");
-        assert!(matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(1) })));
+        assert!(matches!(
+            result,
+            Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(1) })
+        ));
 
         assert_eq!(reactor.shards.get(&ConsensusStateId(2)).unwrap().state(), NodeState::Follower);
     }
@@ -2230,7 +2280,17 @@ mod tests {
         let rng = SimulatedRng::new(42);
 
         // Create shard with initial_committed_index = 10.
-        let shard = ConsensusState::new(ConsensusStateId(1), NodeId(1), membership, config, clock, rng, 1, None, 10);
+        let shard = ConsensusState::new(
+            ConsensusStateId(1),
+            NodeId(1),
+            membership,
+            config,
+            clock,
+            rng,
+            1,
+            None,
+            10,
+        );
 
         reactor.add_shard(ConsensusStateId(1), shard);
 
@@ -2328,8 +2388,17 @@ mod tests {
         let membership = Membership::new([NodeId(1), NodeId(2), NodeId(3)]);
         let config = ShardConfig::default();
         let rng = SimulatedRng::new(42);
-        let mut shard =
-            ConsensusState::new(ConsensusStateId(1), NodeId(1), membership, config, clock, rng, 0, None, 0);
+        let mut shard = ConsensusState::new(
+            ConsensusStateId(1),
+            NodeId(1),
+            membership,
+            config,
+            clock,
+            rng,
+            0,
+            None,
+            0,
+        );
 
         // Force the shard to become leader by simulating the election process.
         // Step 1: Pre-vote (term 0 -> PreCandidate).

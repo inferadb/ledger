@@ -61,6 +61,58 @@ pub struct RegionChainState {
     pub previous_hash: Hash,
 }
 
+/// Test-only helpers for synchronously applying requests without the full apply pipeline.
+#[cfg(test)]
+impl<B: inferadb_ledger_store::StorageBackend> store::RaftLogStore<B> {
+    /// Apply a `SystemRequest` synchronously with default aux parameters.
+    ///
+    /// Convenience shim for unit tests — avoids spelling out all the boilerplate
+    /// parameters that the production apply pipeline fills in.
+    pub(crate) fn apply_system(
+        &self,
+        request: &crate::types::SystemRequest,
+        state: &mut types::AppliedState,
+    ) -> (crate::types::LedgerResponse, Option<inferadb_ledger_types::VaultEntry>) {
+        self.apply_system_request_with_events(
+            request,
+            state,
+            chrono::Utc::now(),
+            &mut 0u32,
+            &mut vec![],
+            0,
+            &mut PendingExternalWrites::default(),
+            None,
+            false,
+            0,
+            false,
+        )
+    }
+
+    /// Apply an `OrganizationRequest` synchronously with default aux parameters.
+    ///
+    /// Convenience shim for unit tests — avoids spelling out all the boilerplate
+    /// parameters that the production apply pipeline fills in.
+    pub(crate) fn apply_org(
+        &self,
+        request: &crate::types::OrganizationRequest,
+        state: &mut types::AppliedState,
+    ) -> (crate::types::LedgerResponse, Option<inferadb_ledger_types::VaultEntry>) {
+        self.apply_organization_request_with_events(
+            request,
+            state,
+            chrono::Utc::now(),
+            &mut 0u32,
+            &mut vec![],
+            0,
+            &mut PendingExternalWrites::default(),
+            None,
+            false,
+            0,
+            false,
+        )
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
@@ -87,7 +139,9 @@ mod tests {
     use super::{types::estimate_write_storage_delta, *};
     use crate::{
         log_storage::types::{LogId, Vote},
-        types::{BlockRetentionPolicy, LedgerResponse, RaftPayload, LedgerRequest, OrganizationRequest, SystemRequest},
+        types::{
+            BlockRetentionPolicy, LedgerResponse, OrganizationRequest, RaftPayload, SystemRequest,
+        },
     };
 
     /// Helper to create log IDs for tests.
@@ -96,14 +150,23 @@ mod tests {
         LogId::new(term, 0, index)
     }
 
-    /// Converts a `RaftPayload` to a `CommittedEntry` for test use.
-    fn make_committed_entry(term: u64, index: u64, payload: RaftPayload) -> CommittedEntry {
+    /// Converts a `RaftPayload<R>` to a `CommittedEntry` for test use.
+    fn make_committed_entry<R: serde::Serialize>(
+        term: u64,
+        index: u64,
+        payload: RaftPayload<R>,
+    ) -> CommittedEntry {
         let data = inferadb_ledger_types::encode(&payload).expect("encode payload");
         CommittedEntry { index, term, data: data.into(), kind: EntryKind::Normal }
     }
 
-    /// Wraps a `LedgerRequest` into a `RaftPayload` with `Utc::now()` for test entries.
-    fn wrap_payload(request: LedgerRequest) -> RaftPayload {
+    /// Wraps a `SystemRequest` into a `RaftPayload` for test entries.
+    fn wrap_system_payload(request: SystemRequest) -> RaftPayload<SystemRequest> {
+        RaftPayload::system(request)
+    }
+
+    /// Wraps an `OrganizationRequest` into a `RaftPayload` for test entries.
+    fn wrap_org_payload(request: OrganizationRequest) -> RaftPayload<OrganizationRequest> {
         RaftPayload::system(request)
     }
 
@@ -118,24 +181,24 @@ mod tests {
         slug: inferadb_ledger_types::OrganizationSlug,
         region: Region,
     ) -> OrganizationId {
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateOrganization {
+        let (response, _) = store.apply_system(
+            &SystemRequest::CreateOrganization {
                 slug,
                 region,
                 tier: Default::default(),
                 admin: UserId::new(1),
-            }),
+            },
             state,
         );
         let org_id = match response {
             LedgerResponse::OrganizationCreated { organization_id, .. } => organization_id,
             _ => panic!("expected OrganizationCreated"),
         };
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
+        store.apply_system(
+            &SystemRequest::UpdateOrganizationStatus {
                 organization: org_id,
                 status: OrganizationStatus::Active,
-            }),
+            },
             state,
         );
         org_id
@@ -146,7 +209,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
 
         // Verify database can be read (tables exist in inferadb-ledger-store by default)
         let read_txn = store.db.read().expect("begin read");
@@ -160,7 +225,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
 
         let vote = Vote { term: 1, node_id: 42, committed: false };
         store.save_vote(&vote).await.expect("save vote");
@@ -190,17 +257,19 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let request = LedgerRequest::System(SystemRequest::CreateOrganization {
+        let request = SystemRequest::CreateOrganization {
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
             region: Region::US_EAST_VA,
             tier: Default::default(),
             admin: UserId::new(1),
-        });
+        };
 
-        let (response, _vault_entry) = store.apply_request(&request, &mut state);
+        let (response, _vault_entry) = store.apply_system(&request, &mut state);
 
         match response {
             LedgerResponse::OrganizationCreated { organization_id, .. } => {
@@ -221,7 +290,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         state.sequences.organization = OrganizationId::new(1);
@@ -229,14 +300,14 @@ mod tests {
         store.applied_state.store(Arc::new(state));
 
         let mut state = (*store.applied_state.load_full()).clone();
-        let request = LedgerRequest::System(SystemRequest::CreateOrganization {
+        let request = SystemRequest::CreateOrganization {
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
             region: Region::US_EAST_VA,
             tier: Default::default(),
             admin: UserId::new(1),
-        });
+        };
 
-        let (response, _vault_entry) = store.apply_request(&request, &mut state);
+        let (response, _vault_entry) = store.apply_system(&request, &mut state);
 
         match response {
             LedgerResponse::OrganizationCreated { organization_id, .. } => {
@@ -253,7 +324,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Pre-populate: region 0 has fewer organizations
@@ -272,14 +345,14 @@ mod tests {
         state.sequences.organization = OrganizationId::new(2);
 
         // Create organization with explicit IE_EAST_DUBLIN region
-        let request = LedgerRequest::System(SystemRequest::CreateOrganization {
+        let request = SystemRequest::CreateOrganization {
             slug: inferadb_ledger_types::OrganizationSlug::new(0),
             region: Region::IE_EAST_DUBLIN,
             tier: Default::default(),
             admin: UserId::new(1),
-        });
+        };
 
-        let (response, _vault_entry) = store.apply_request(&request, &mut state);
+        let (response, _vault_entry) = store.apply_system(&request, &mut state);
 
         match response {
             LedgerResponse::OrganizationCreated { organization_id, .. } => {
@@ -301,7 +374,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
@@ -311,14 +386,14 @@ mod tests {
             Region::US_EAST_VA,
         );
 
-        let request = LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let request = OrganizationRequest::CreateVault {
             organization: org_id,
             slug: VaultSlug::new(1),
             name: Some("test-vault".to_string()),
             retention_policy: None,
-        });
+        };
 
-        let (response, _vault_entry) = store.apply_request(&request, &mut state);
+        let (response, _vault_entry) = store.apply_org(&request, &mut state);
 
         match response {
             LedgerResponse::VaultCreated { vault: vault_id, .. } => {
@@ -334,7 +409,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
@@ -350,13 +427,14 @@ mod tests {
             VaultHealthStatus::Diverged { expected: [1u8; 32], computed: [2u8; 32], at_height: 10 },
         );
 
-        let request = LedgerRequest::Organization(OrganizationRequest::Write {            vault: VaultId::new(1),
+        let request = OrganizationRequest::Write {
+            vault: VaultId::new(1),
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
-        });
+        };
 
-        let (response, _vault_entry) = store.apply_request(&request, &mut state);
+        let (response, _vault_entry) = store.apply_org(&request, &mut state);
 
         match response {
             LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
@@ -371,7 +449,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Start with a diverged vault
@@ -381,7 +461,7 @@ mod tests {
         );
 
         // Update to healthy
-        let request = LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
+        let request = OrganizationRequest::UpdateVaultHealth {
             organization: OrganizationId::new(1),
             vault: VaultId::new(1),
             healthy: true,
@@ -390,9 +470,9 @@ mod tests {
             diverged_at_height: None,
             recovery_attempt: None,
             recovery_started_at: None,
-        });
+        };
 
-        let (response, _vault_entry) = store.apply_request(&request, &mut state);
+        let (response, _vault_entry) = store.apply_org(&request, &mut state);
 
         match response {
             LedgerResponse::VaultHealthUpdated { success } => {
@@ -413,7 +493,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Start healthy
@@ -422,7 +504,7 @@ mod tests {
             .insert((OrganizationId::new(1), VaultId::new(1)), VaultHealthStatus::Healthy);
 
         // Update to diverged
-        let request = LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
+        let request = OrganizationRequest::UpdateVaultHealth {
             organization: OrganizationId::new(1),
             vault: VaultId::new(1),
             healthy: false,
@@ -431,9 +513,9 @@ mod tests {
             diverged_at_height: Some(42),
             recovery_attempt: None,
             recovery_started_at: None,
-        });
+        };
 
-        let (response, _vault_entry) = store.apply_request(&request, &mut state);
+        let (response, _vault_entry) = store.apply_org(&request, &mut state);
 
         match response {
             LedgerResponse::VaultHealthUpdated { success } => {
@@ -458,7 +540,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Start with a diverged vault
@@ -468,7 +552,7 @@ mod tests {
         );
 
         // Update to recovering
-        let request = LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
+        let request = OrganizationRequest::UpdateVaultHealth {
             organization: OrganizationId::new(1),
             vault: VaultId::new(1),
             healthy: false,
@@ -477,9 +561,9 @@ mod tests {
             diverged_at_height: None,
             recovery_attempt: Some(1),
             recovery_started_at: Some(chrono::Utc::now().timestamp()),
-        });
+        };
 
-        let (response, _vault_entry) = store.apply_request(&request, &mut state);
+        let (response, _vault_entry) = store.apply_org(&request, &mut state);
 
         match response {
             LedgerResponse::VaultHealthUpdated { success } => {
@@ -502,7 +586,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Start with a vault already in recovery attempt 1
@@ -515,7 +601,7 @@ mod tests {
         );
 
         // Escalate to recovery attempt 2
-        let request = LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
+        let request = OrganizationRequest::UpdateVaultHealth {
             organization: OrganizationId::new(1),
             vault: VaultId::new(1),
             healthy: false,
@@ -524,9 +610,9 @@ mod tests {
             diverged_at_height: None,
             recovery_attempt: Some(2),
             recovery_started_at: Some(chrono::Utc::now().timestamp()),
-        });
+        };
 
-        let (response, _vault_entry) = store.apply_request(&request, &mut state);
+        let (response, _vault_entry) = store.apply_org(&request, &mut state);
 
         match response {
             LedgerResponse::VaultHealthUpdated { success } => {
@@ -556,7 +642,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization
@@ -568,33 +656,33 @@ mod tests {
         );
 
         // Create two vaults
-        let create_vault1 = LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let create_vault1 = OrganizationRequest::CreateVault {
             organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("vault1".to_string()),
             retention_policy: None,
-        });
-        let (response, _) = store.apply_request(&create_vault1, &mut state);
+        };
+        let (response, _) = store.apply_org(&create_vault1, &mut state);
         let vault1_id = match response {
             LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
-        let create_vault2 = LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let create_vault2 = OrganizationRequest::CreateVault {
             organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("vault2".to_string()),
             retention_policy: None,
-        });
-        let (response, _) = store.apply_request(&create_vault2, &mut state);
+        };
+        let (response, _) = store.apply_org(&create_vault2, &mut state);
         let vault2_id = match response {
             LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
         // Delete organization — should soft-delete regardless of active vaults
-        let delete_ns = LedgerRequest::System(SystemRequest::DeleteOrganization { organization: organization_id });
-        let (response, _) = store.apply_request(&delete_ns, &mut state);
+        let delete_ns = SystemRequest::DeleteOrganization { organization: organization_id };
+        let (response, _) = store.apply_system(&delete_ns, &mut state);
 
         match response {
             LedgerResponse::OrganizationDeleted {
@@ -623,7 +711,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization
@@ -635,13 +725,13 @@ mod tests {
         );
 
         // Create vault
-        let create_vault = LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let create_vault = OrganizationRequest::CreateVault {
             organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("vault".to_string()),
             retention_policy: None,
-        });
-        let (response, _) = store.apply_request(&create_vault, &mut state);
+        };
+        let (response, _) = store.apply_org(&create_vault, &mut state);
         let vault_id = match response {
             LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
@@ -649,16 +739,16 @@ mod tests {
 
         // Delete vault first
         let delete_vault =
-            LedgerRequest::Organization(OrganizationRequest::DeleteVault { organization: organization_id, vault: vault_id });
-        let (response, _) = store.apply_request(&delete_vault, &mut state);
+            OrganizationRequest::DeleteVault { organization: organization_id, vault: vault_id };
+        let (response, _) = store.apply_org(&delete_vault, &mut state);
         match response {
             LedgerResponse::VaultDeleted { success } => assert!(success),
             _ => panic!("expected VaultDeleted"),
         }
 
         // Now delete organization - should succeed (soft-delete)
-        let delete_ns = LedgerRequest::System(SystemRequest::DeleteOrganization { organization: organization_id });
-        let (response, _) = store.apply_request(&delete_ns, &mut state);
+        let delete_ns = SystemRequest::DeleteOrganization { organization: organization_id };
+        let (response, _) = store.apply_system(&delete_ns, &mut state);
 
         match response {
             LedgerResponse::OrganizationDeleted { organization_id: deleted_id, .. } => {
@@ -679,7 +769,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization with no vaults
@@ -691,8 +783,8 @@ mod tests {
         );
 
         // Delete organization immediately - should succeed (soft-delete, no vaults)
-        let delete_ns = LedgerRequest::System(SystemRequest::DeleteOrganization { organization: organization_id });
-        let (response, _) = store.apply_request(&delete_ns, &mut state);
+        let delete_ns = SystemRequest::DeleteOrganization { organization: organization_id };
+        let (response, _) = store.apply_system(&delete_ns, &mut state);
 
         match response {
             LedgerResponse::OrganizationDeleted { organization_id: deleted_id, .. } => {
@@ -707,13 +799,15 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Try to delete non-existent organization
         let delete_ns =
-            LedgerRequest::System(SystemRequest::DeleteOrganization { organization: OrganizationId::new(999) });
-        let (response, _) = store.apply_request(&delete_ns, &mut state);
+            SystemRequest::DeleteOrganization { organization: OrganizationId::new(999) };
+        let (response, _) = store.apply_system(&delete_ns, &mut state);
 
         match response {
             LedgerResponse::Error { code: ErrorCode::NotFound, message } => {
@@ -729,7 +823,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization
@@ -741,25 +837,25 @@ mod tests {
         );
 
         // Create two vaults
-        let create_vault1 = LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let create_vault1 = OrganizationRequest::CreateVault {
             organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("vault1".to_string()),
             retention_policy: None,
-        });
-        let (response, _) = store.apply_request(&create_vault1, &mut state);
+        };
+        let (response, _) = store.apply_org(&create_vault1, &mut state);
         let vault1_id = match response {
             LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
-        let create_vault2 = LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let create_vault2 = OrganizationRequest::CreateVault {
             organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("vault2".to_string()),
             retention_policy: None,
-        });
-        let (response, _) = store.apply_request(&create_vault2, &mut state);
+        };
+        let (response, _) = store.apply_org(&create_vault2, &mut state);
         let vault2_id = match response {
             LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
@@ -767,16 +863,16 @@ mod tests {
 
         // Delete vault1
         let delete_vault =
-            LedgerRequest::Organization(OrganizationRequest::DeleteVault { organization: organization_id, vault: vault1_id });
-        let (response, _) = store.apply_request(&delete_vault, &mut state);
+            OrganizationRequest::DeleteVault { organization: organization_id, vault: vault1_id };
+        let (response, _) = store.apply_org(&delete_vault, &mut state);
         match response {
             LedgerResponse::VaultDeleted { success } => assert!(success),
             _ => panic!("expected VaultDeleted"),
         }
 
         // Delete organization — should soft-delete regardless of active vaults
-        let delete_ns = LedgerRequest::System(SystemRequest::DeleteOrganization { organization: organization_id });
-        let (response, _) = store.apply_request(&delete_ns, &mut state);
+        let delete_ns = SystemRequest::DeleteOrganization { organization: organization_id };
+        let (response, _) = store.apply_system(&delete_ns, &mut state);
 
         match response {
             LedgerResponse::OrganizationDeleted { organization_id: deleted_id, .. } => {
@@ -806,7 +902,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization on US_EAST_VA
@@ -823,11 +921,11 @@ mod tests {
         assert_eq!(meta.status, OrganizationStatus::Active);
 
         // Migrate to IE_EAST_DUBLIN
-        let migrate = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
+        let migrate = SystemRequest::UpdateOrganizationRouting {
             organization: organization_id,
             region: Region::IE_EAST_DUBLIN,
-        });
-        let (response, _) = store.apply_request(&migrate, &mut state);
+        };
+        let (response, _) = store.apply_system(&migrate, &mut state);
 
         match response {
             LedgerResponse::OrganizationMigrated {
@@ -853,15 +951,17 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Try to migrate non-existent organization
-        let migrate = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
+        let migrate = SystemRequest::UpdateOrganizationRouting {
             organization: OrganizationId::new(999),
             region: Region::US_EAST_VA,
-        });
-        let (response, _) = store.apply_request(&migrate, &mut state);
+        };
+        let (response, _) = store.apply_system(&migrate, &mut state);
 
         match response {
             LedgerResponse::Error { code: ErrorCode::NotFound, message } => {
@@ -877,7 +977,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create and delete organization
@@ -889,8 +991,8 @@ mod tests {
         );
 
         // Delete the organization
-        let delete_ns = LedgerRequest::System(SystemRequest::DeleteOrganization { organization: organization_id });
-        let (response, _) = store.apply_request(&delete_ns, &mut state);
+        let delete_ns = SystemRequest::DeleteOrganization { organization: organization_id };
+        let (response, _) = store.apply_system(&delete_ns, &mut state);
         match response {
             LedgerResponse::OrganizationDeleted { .. } => {},
             _ => panic!("expected OrganizationDeleted, got {:?}", response),
@@ -901,11 +1003,11 @@ mod tests {
         assert_eq!(meta.status, OrganizationStatus::Deleted);
 
         // Try to migrate deleted organization
-        let migrate = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
+        let migrate = SystemRequest::UpdateOrganizationRouting {
             organization: organization_id,
             region: Region::US_EAST_VA,
-        });
-        let (response, _) = store.apply_request(&migrate, &mut state);
+        };
+        let (response, _) = store.apply_system(&migrate, &mut state);
 
         match response {
             LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
@@ -920,7 +1022,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization on US_EAST_VA
@@ -932,11 +1036,11 @@ mod tests {
         );
 
         // Migrate to same region (idempotent case)
-        let migrate = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
+        let migrate = SystemRequest::UpdateOrganizationRouting {
             organization: organization_id,
             region: Region::US_EAST_VA,
-        });
-        let (response, _) = store.apply_request(&migrate, &mut state);
+        };
+        let (response, _) = store.apply_system(&migrate, &mut state);
 
         match response {
             LedgerResponse::OrganizationMigrated {
@@ -962,7 +1066,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization
@@ -974,11 +1080,11 @@ mod tests {
         );
 
         // Migration 1: US_EAST_VA -> IE_EAST_DUBLIN
-        let migrate1 = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
+        let migrate1 = SystemRequest::UpdateOrganizationRouting {
             organization: organization_id,
             region: Region::IE_EAST_DUBLIN,
-        });
-        let (response, _) = store.apply_request(&migrate1, &mut state);
+        };
+        let (response, _) = store.apply_system(&migrate1, &mut state);
         match response {
             LedgerResponse::OrganizationMigrated { old_region, new_region, .. } => {
                 assert_eq!(old_region, Region::US_EAST_VA);
@@ -988,11 +1094,11 @@ mod tests {
         }
 
         // Migration 2: IE_EAST_DUBLIN -> US_WEST_OR
-        let migrate2 = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
+        let migrate2 = SystemRequest::UpdateOrganizationRouting {
             organization: organization_id,
             region: Region::US_WEST_OR,
-        });
-        let (response, _) = store.apply_request(&migrate2, &mut state);
+        };
+        let (response, _) = store.apply_system(&migrate2, &mut state);
         match response {
             LedgerResponse::OrganizationMigrated { old_region, new_region, .. } => {
                 assert_eq!(old_region, Region::IE_EAST_DUBLIN);
@@ -1002,11 +1108,11 @@ mod tests {
         }
 
         // Migration 3: US_WEST_OR -> US_EAST_VA (back to original)
-        let migrate3 = LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
+        let migrate3 = SystemRequest::UpdateOrganizationRouting {
             organization: organization_id,
             region: Region::US_EAST_VA,
-        });
-        let (response, _) = store.apply_request(&migrate3, &mut state);
+        };
+        let (response, _) = store.apply_system(&migrate3, &mut state);
         match response {
             LedgerResponse::OrganizationMigrated { old_region, new_region, .. } => {
                 assert_eq!(old_region, Region::US_WEST_OR);
@@ -1032,7 +1138,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization
@@ -1048,11 +1156,11 @@ mod tests {
         assert_eq!(meta.status, OrganizationStatus::Active);
 
         // Suspend the organization
-        let suspend = LedgerRequest::System(SystemRequest::SuspendOrganization {
+        let suspend = SystemRequest::SuspendOrganization {
             organization: organization_id,
             reason: Some("Payment overdue".to_string()),
-        });
-        let (response, _) = store.apply_request(&suspend, &mut state);
+        };
+        let (response, _) = store.apply_system(&suspend, &mut state);
 
         match response {
             LedgerResponse::OrganizationSuspended { organization: ns_id } => {
@@ -1071,7 +1179,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create and suspend organization
@@ -1083,16 +1193,16 @@ mod tests {
         );
 
         let suspend =
-            LedgerRequest::System(SystemRequest::SuspendOrganization { organization: organization_id, reason: None });
-        let (response, _) = store.apply_request(&suspend, &mut state);
+            SystemRequest::SuspendOrganization { organization: organization_id, reason: None };
+        let (response, _) = store.apply_system(&suspend, &mut state);
         match response {
             LedgerResponse::OrganizationSuspended { .. } => {},
             _ => panic!("expected OrganizationSuspended"),
         }
 
         // Resume the organization
-        let resume = LedgerRequest::System(SystemRequest::ResumeOrganization { organization: organization_id });
-        let (response, _) = store.apply_request(&resume, &mut state);
+        let resume = SystemRequest::ResumeOrganization { organization: organization_id };
+        let (response, _) = store.apply_system(&resume, &mut state);
 
         match response {
             LedgerResponse::OrganizationResumed { organization: ns_id } => {
@@ -1115,7 +1225,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization on region 0
@@ -1127,11 +1239,11 @@ mod tests {
         );
 
         // Start migration to IE_EAST_DUBLIN
-        let start_migration = LedgerRequest::System(SystemRequest::StartMigration {
+        let start_migration = SystemRequest::StartMigration {
             organization: organization_id,
             target_region_group: Region::IE_EAST_DUBLIN,
-        });
-        let (response, _) = store.apply_request(&start_migration, &mut state);
+        };
+        let (response, _) = store.apply_system(&start_migration, &mut state);
 
         match response {
             LedgerResponse::MigrationStarted { organization: ns_id, target_region_group } => {
@@ -1153,14 +1265,16 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let start_migration = LedgerRequest::System(SystemRequest::StartMigration {
+        let start_migration = SystemRequest::StartMigration {
             organization: OrganizationId::new(999),
             target_region_group: Region::US_EAST_VA,
-        });
-        let (response, _) = store.apply_request(&start_migration, &mut state);
+        };
+        let (response, _) = store.apply_system(&start_migration, &mut state);
 
         match response {
             LedgerResponse::Error { code: ErrorCode::NotFound, message } => {
@@ -1175,7 +1289,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization
@@ -1187,19 +1303,19 @@ mod tests {
         );
 
         // Start migration
-        let start_migration = LedgerRequest::System(SystemRequest::StartMigration {
+        let start_migration = SystemRequest::StartMigration {
             organization: organization_id,
             target_region_group: Region::IE_EAST_DUBLIN,
-        });
-        let (response, _) = store.apply_request(&start_migration, &mut state);
+        };
+        let (response, _) = store.apply_system(&start_migration, &mut state);
         assert!(matches!(response, LedgerResponse::MigrationStarted { .. }));
 
         // Try to start another migration - should fail
-        let start_migration2 = LedgerRequest::System(SystemRequest::StartMigration {
+        let start_migration2 = SystemRequest::StartMigration {
             organization: organization_id,
             target_region_group: Region::US_WEST_OR,
-        });
-        let (response, _) = store.apply_request(&start_migration2, &mut state);
+        };
+        let (response, _) = store.apply_system(&start_migration2, &mut state);
 
         match response {
             LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
@@ -1214,7 +1330,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create and suspend organization
@@ -1226,15 +1344,15 @@ mod tests {
         );
 
         let suspend =
-            LedgerRequest::System(SystemRequest::SuspendOrganization { organization: organization_id, reason: None });
-        store.apply_request(&suspend, &mut state);
+            SystemRequest::SuspendOrganization { organization: organization_id, reason: None };
+        store.apply_system(&suspend, &mut state);
 
         // Try to start migration - should fail
-        let start_migration = LedgerRequest::System(SystemRequest::StartMigration {
+        let start_migration = SystemRequest::StartMigration {
             organization: organization_id,
             target_region_group: Region::IE_EAST_DUBLIN,
-        });
-        let (response, _) = store.apply_request(&start_migration, &mut state);
+        };
+        let (response, _) = store.apply_system(&start_migration, &mut state);
 
         match response {
             LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
@@ -1249,7 +1367,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization on region 0
@@ -1261,15 +1381,15 @@ mod tests {
         );
 
         // Start migration to IE_EAST_DUBLIN
-        let start_migration = LedgerRequest::System(SystemRequest::StartMigration {
+        let start_migration = SystemRequest::StartMigration {
             organization: organization_id,
             target_region_group: Region::IE_EAST_DUBLIN,
-        });
-        store.apply_request(&start_migration, &mut state);
+        };
+        store.apply_system(&start_migration, &mut state);
 
         // Complete migration
-        let complete_migration = LedgerRequest::System(SystemRequest::CompleteMigration { organization: organization_id });
-        let (response, _) = store.apply_request(&complete_migration, &mut state);
+        let complete_migration = SystemRequest::CompleteMigration { organization: organization_id };
+        let (response, _) = store.apply_system(&complete_migration, &mut state);
 
         match response {
             LedgerResponse::MigrationCompleted { organization: ns_id, old_region, new_region } => {
@@ -1292,7 +1412,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization (Active state)
@@ -1304,8 +1426,8 @@ mod tests {
         );
 
         // Try to complete migration without starting - should fail
-        let complete_migration = LedgerRequest::System(SystemRequest::CompleteMigration { organization: organization_id });
-        let (response, _) = store.apply_request(&complete_migration, &mut state);
+        let complete_migration = SystemRequest::CompleteMigration { organization: organization_id };
+        let (response, _) = store.apply_system(&complete_migration, &mut state);
 
         match response {
             LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
@@ -1320,7 +1442,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization and vault
@@ -1331,32 +1455,33 @@ mod tests {
             Region::US_EAST_VA,
         );
 
-        let create_vault = LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let create_vault = OrganizationRequest::CreateVault {
             organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("vault".to_string()),
             retention_policy: None,
-        });
-        let (response, _) = store.apply_request(&create_vault, &mut state);
+        };
+        let (response, _) = store.apply_org(&create_vault, &mut state);
         let vault_id = match response {
             LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
         // Start migration
-        let start_migration = LedgerRequest::System(SystemRequest::StartMigration {
+        let start_migration = SystemRequest::StartMigration {
             organization: organization_id,
             target_region_group: Region::IE_EAST_DUBLIN,
-        });
-        store.apply_request(&start_migration, &mut state);
+        };
+        store.apply_system(&start_migration, &mut state);
 
         // Try to write - should be blocked
-        let write = LedgerRequest::Organization(OrganizationRequest::Write {            vault: vault_id,
+        let write = OrganizationRequest::Write {
+            vault: vault_id,
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
-        });
-        let (response, _) = store.apply_request(&write, &mut state);
+        };
+        let (response, _) = store.apply_org(&write, &mut state);
 
         match response {
             LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
@@ -1371,7 +1496,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization
@@ -1383,20 +1510,20 @@ mod tests {
         );
 
         // Start migration
-        let start_migration = LedgerRequest::System(SystemRequest::StartMigration {
+        let start_migration = SystemRequest::StartMigration {
             organization: organization_id,
             target_region_group: Region::IE_EAST_DUBLIN,
-        });
-        store.apply_request(&start_migration, &mut state);
+        };
+        store.apply_system(&start_migration, &mut state);
 
         // Try to create vault - should be blocked
-        let create_vault = LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let create_vault = OrganizationRequest::CreateVault {
             organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("vault".to_string()),
             retention_policy: None,
-        });
-        let (response, _) = store.apply_request(&create_vault, &mut state);
+        };
+        let (response, _) = store.apply_org(&create_vault, &mut state);
 
         match response {
             LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
@@ -1415,7 +1542,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization
@@ -1427,33 +1556,33 @@ mod tests {
         );
 
         // Create two vaults
-        let create_vault1 = LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let create_vault1 = OrganizationRequest::CreateVault {
             organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("vault1".to_string()),
             retention_policy: None,
-        });
-        let (response, _) = store.apply_request(&create_vault1, &mut state);
+        };
+        let (response, _) = store.apply_org(&create_vault1, &mut state);
         let vault1_id = match response {
             LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
-        let create_vault2 = LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let create_vault2 = OrganizationRequest::CreateVault {
             organization: organization_id,
             slug: VaultSlug::new(2),
             name: Some("vault2".to_string()),
             retention_policy: None,
-        });
-        let (response, _) = store.apply_request(&create_vault2, &mut state);
+        };
+        let (response, _) = store.apply_org(&create_vault2, &mut state);
         let vault2_id = match response {
             LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
         // Soft-delete the organization
-        let delete_ns = LedgerRequest::System(SystemRequest::DeleteOrganization { organization: organization_id });
-        let (response, _) = store.apply_request(&delete_ns, &mut state);
+        let delete_ns = SystemRequest::DeleteOrganization { organization: organization_id };
+        let (response, _) = store.apply_system(&delete_ns, &mut state);
         assert!(matches!(response, LedgerResponse::OrganizationDeleted { .. }));
         assert_eq!(
             state.organizations.get(&organization_id).unwrap().status,
@@ -1462,8 +1591,8 @@ mod tests {
 
         // Deleting vaults does NOT change the org status (no auto-cascade)
         let delete_vault1 =
-            LedgerRequest::Organization(OrganizationRequest::DeleteVault { organization: organization_id, vault: vault1_id });
-        let (response, _) = store.apply_request(&delete_vault1, &mut state);
+            OrganizationRequest::DeleteVault { organization: organization_id, vault: vault1_id };
+        let (response, _) = store.apply_org(&delete_vault1, &mut state);
         assert!(matches!(response, LedgerResponse::VaultDeleted { success: true }));
         assert_eq!(
             state.organizations.get(&organization_id).unwrap().status,
@@ -1471,8 +1600,8 @@ mod tests {
         );
 
         let delete_vault2 =
-            LedgerRequest::Organization(OrganizationRequest::DeleteVault { organization: organization_id, vault: vault2_id });
-        let (response, _) = store.apply_request(&delete_vault2, &mut state);
+            OrganizationRequest::DeleteVault { organization: organization_id, vault: vault2_id };
+        let (response, _) = store.apply_org(&delete_vault2, &mut state);
         assert!(matches!(response, LedgerResponse::VaultDeleted { success: true }));
         // Still Deleted — PurgeOrganization would remove the org entirely
         assert_eq!(
@@ -1486,7 +1615,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization and vault
@@ -1497,29 +1628,30 @@ mod tests {
             Region::US_EAST_VA,
         );
 
-        let create_vault = LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let create_vault = OrganizationRequest::CreateVault {
             organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("vault".to_string()),
             retention_policy: None,
-        });
-        let (response, _) = store.apply_request(&create_vault, &mut state);
+        };
+        let (response, _) = store.apply_org(&create_vault, &mut state);
         let vault_id = match response {
             LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
         };
 
         // Mark organization for deletion
-        let delete_ns = LedgerRequest::System(SystemRequest::DeleteOrganization { organization: organization_id });
-        store.apply_request(&delete_ns, &mut state);
+        let delete_ns = SystemRequest::DeleteOrganization { organization: organization_id };
+        store.apply_system(&delete_ns, &mut state);
 
         // Try to write - should be blocked
-        let write = LedgerRequest::Organization(OrganizationRequest::Write {            vault: vault_id,
+        let write = OrganizationRequest::Write {
+            vault: vault_id,
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
-        });
-        let (response, _) = store.apply_request(&write, &mut state);
+        };
+        let (response, _) = store.apply_org(&write, &mut state);
 
         match response {
             LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
@@ -1534,7 +1666,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization with a vault
@@ -1545,26 +1679,26 @@ mod tests {
             Region::US_EAST_VA,
         );
 
-        let create_vault = LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let create_vault = OrganizationRequest::CreateVault {
             organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("existing-vault".to_string()),
             retention_policy: None,
-        });
-        store.apply_request(&create_vault, &mut state);
+        };
+        store.apply_org(&create_vault, &mut state);
 
         // Mark organization for deletion
-        let delete_ns = LedgerRequest::System(SystemRequest::DeleteOrganization { organization: organization_id });
-        store.apply_request(&delete_ns, &mut state);
+        let delete_ns = SystemRequest::DeleteOrganization { organization: organization_id };
+        store.apply_system(&delete_ns, &mut state);
 
         // Try to create another vault - should be blocked
-        let create_vault2 = LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let create_vault2 = OrganizationRequest::CreateVault {
             organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("new-vault".to_string()),
             retention_policy: None,
-        });
-        let (response, _) = store.apply_request(&create_vault2, &mut state);
+        };
+        let (response, _) = store.apply_org(&create_vault2, &mut state);
 
         match response {
             LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
@@ -1579,7 +1713,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create and suspend organization with a vault
@@ -1591,13 +1727,13 @@ mod tests {
         );
 
         // Create vault before suspending
-        let create_vault = LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let create_vault = OrganizationRequest::CreateVault {
             organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("test-vault".to_string()),
             retention_policy: None,
-        });
-        let (response, _) = store.apply_request(&create_vault, &mut state);
+        };
+        let (response, _) = store.apply_org(&create_vault, &mut state);
         let vault_id = match response {
             LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
             _ => panic!("expected VaultCreated"),
@@ -1605,20 +1741,21 @@ mod tests {
 
         // Suspend the organization
         let suspend =
-            LedgerRequest::System(SystemRequest::SuspendOrganization { organization: organization_id, reason: None });
-        let (response, _) = store.apply_request(&suspend, &mut state);
+            SystemRequest::SuspendOrganization { organization: organization_id, reason: None };
+        let (response, _) = store.apply_system(&suspend, &mut state);
         match response {
             LedgerResponse::OrganizationSuspended { .. } => {},
             _ => panic!("expected OrganizationSuspended"),
         }
 
         // Try to write to suspended organization - should fail
-        let write = LedgerRequest::Organization(OrganizationRequest::Write {            vault: vault_id,
+        let write = OrganizationRequest::Write {
+            vault: vault_id,
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
-        });
-        let (response, _) = store.apply_request(&write, &mut state);
+        };
+        let (response, _) = store.apply_org(&write, &mut state);
 
         match response {
             LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
@@ -1633,7 +1770,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create and suspend organization
@@ -1645,21 +1784,21 @@ mod tests {
         );
 
         let suspend =
-            LedgerRequest::System(SystemRequest::SuspendOrganization { organization: organization_id, reason: None });
-        let (response, _) = store.apply_request(&suspend, &mut state);
+            SystemRequest::SuspendOrganization { organization: organization_id, reason: None };
+        let (response, _) = store.apply_system(&suspend, &mut state);
         match response {
             LedgerResponse::OrganizationSuspended { .. } => {},
             _ => panic!("expected OrganizationSuspended"),
         }
 
         // Try to create vault in suspended organization - should fail
-        let create_vault = LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let create_vault = OrganizationRequest::CreateVault {
             organization: organization_id,
             slug: VaultSlug::new(1),
             name: Some("test-vault".to_string()),
             retention_policy: None,
-        });
-        let (response, _) = store.apply_request(&create_vault, &mut state);
+        };
+        let (response, _) = store.apply_org(&create_vault, &mut state);
 
         match response {
             LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
@@ -1679,7 +1818,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create and suspend organization
@@ -1691,8 +1832,8 @@ mod tests {
         );
 
         let suspend =
-            LedgerRequest::System(SystemRequest::SuspendOrganization { organization: organization_id, reason: None });
-        let (response, _) = store.apply_request(&suspend, &mut state);
+            SystemRequest::SuspendOrganization { organization: organization_id, reason: None };
+        let (response, _) = store.apply_system(&suspend, &mut state);
         match response {
             LedgerResponse::OrganizationSuspended { .. } => {},
             _ => panic!("expected OrganizationSuspended"),
@@ -1700,8 +1841,8 @@ mod tests {
 
         // Try to suspend again - should fail
         let suspend2 =
-            LedgerRequest::System(SystemRequest::SuspendOrganization { organization: organization_id, reason: None });
-        let (response, _) = store.apply_request(&suspend2, &mut state);
+            SystemRequest::SuspendOrganization { organization: organization_id, reason: None };
+        let (response, _) = store.apply_system(&suspend2, &mut state);
 
         match response {
             LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
@@ -1722,7 +1863,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization (active after activation)
@@ -1734,8 +1877,8 @@ mod tests {
         );
 
         // Try to resume active organization - should fail
-        let resume = LedgerRequest::System(SystemRequest::ResumeOrganization { organization: organization_id });
-        let (response, _) = store.apply_request(&resume, &mut state);
+        let resume = SystemRequest::ResumeOrganization { organization: organization_id };
+        let (response, _) = store.apply_system(&resume, &mut state);
 
         match response {
             LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
@@ -1750,7 +1893,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create and delete organization
@@ -1761,8 +1906,8 @@ mod tests {
             Region::US_EAST_VA,
         );
 
-        let delete_ns = LedgerRequest::System(SystemRequest::DeleteOrganization { organization: organization_id });
-        let (response, _) = store.apply_request(&delete_ns, &mut state);
+        let delete_ns = SystemRequest::DeleteOrganization { organization: organization_id };
+        let (response, _) = store.apply_system(&delete_ns, &mut state);
         match response {
             LedgerResponse::OrganizationDeleted { .. } => {},
             _ => panic!("expected OrganizationDeleted, got {:?}", response),
@@ -1770,8 +1915,8 @@ mod tests {
 
         // Try to suspend deleted organization - should fail
         let suspend =
-            LedgerRequest::System(SystemRequest::SuspendOrganization { organization: organization_id, reason: None });
-        let (response, _) = store.apply_request(&suspend, &mut state);
+            SystemRequest::SuspendOrganization { organization: organization_id, reason: None };
+        let (response, _) = store.apply_system(&suspend, &mut state);
 
         match response {
             LedgerResponse::Error { code: ErrorCode::FailedPrecondition, message } => {
@@ -1786,15 +1931,17 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Try to suspend non-existent organization
-        let suspend = LedgerRequest::System(SystemRequest::SuspendOrganization {
+        let suspend = SystemRequest::SuspendOrganization {
             organization: OrganizationId::new(999),
             reason: None,
-        });
-        let (response, _) = store.apply_request(&suspend, &mut state);
+        };
+        let (response, _) = store.apply_system(&suspend, &mut state);
 
         match response {
             LedgerResponse::Error { code: ErrorCode::NotFound, message } => {
@@ -1813,12 +1960,14 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Try to resume non-existent organization
-        let resume = LedgerRequest::System(SystemRequest::ResumeOrganization { organization: OrganizationId::new(999) });
-        let (response, _) = store.apply_request(&resume, &mut state);
+        let resume = SystemRequest::ResumeOrganization { organization: OrganizationId::new(999) };
+        let (response, _) = store.apply_system(&resume, &mut state);
 
         match response {
             LedgerResponse::Error { code: ErrorCode::NotFound, message } => {
@@ -1836,7 +1985,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create and suspend organization (no vaults)
@@ -1848,16 +1999,16 @@ mod tests {
         );
 
         let suspend =
-            LedgerRequest::System(SystemRequest::SuspendOrganization { organization: organization_id, reason: None });
-        let (response, _) = store.apply_request(&suspend, &mut state);
+            SystemRequest::SuspendOrganization { organization: organization_id, reason: None };
+        let (response, _) = store.apply_system(&suspend, &mut state);
         match response {
             LedgerResponse::OrganizationSuspended { .. } => {},
             _ => panic!("expected OrganizationSuspended"),
         }
 
         // Delete suspended organization - should succeed
-        let delete_ns = LedgerRequest::System(SystemRequest::DeleteOrganization { organization: organization_id });
-        let (response, _) = store.apply_request(&delete_ns, &mut state);
+        let delete_ns = SystemRequest::DeleteOrganization { organization: organization_id };
+        let (response, _) = store.apply_system(&delete_ns, &mut state);
 
         match response {
             LedgerResponse::OrganizationDeleted { .. } => {},
@@ -1895,91 +2046,102 @@ mod tests {
         let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.db"))
             .expect("open store b");
 
-        // Same sequence of requests to apply
-        let requests = vec![
-            LedgerRequest::System(SystemRequest::CreateOrganization {
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                region: Region::US_EAST_VA,
-                tier: Default::default(),
-                admin: UserId::new(1),
-            }),
-            LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
-                organization: OrganizationId::new(1),
-                status: OrganizationStatus::Active,
-            }),
-            LedgerRequest::System(SystemRequest::CreateOrganization {
-                slug: inferadb_ledger_types::OrganizationSlug::new(0),
-                region: Region::US_EAST_VA,
-                tier: Default::default(),
-                admin: UserId::new(1),
-            }),
-            LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
-                organization: OrganizationId::new(2),
-                status: OrganizationStatus::Active,
-            }),
-            LedgerRequest::Organization(OrganizationRequest::CreateVault {
-                organization: OrganizationId::new(1),
-                slug: VaultSlug::new(1),
-                name: Some("production".to_string()),
-                retention_policy: None,
-            }),
-            LedgerRequest::Organization(OrganizationRequest::CreateVault {
-                organization: OrganizationId::new(1),
-                slug: VaultSlug::new(1),
-                name: Some("staging".to_string()),
-                retention_policy: None,
-            }),
-            LedgerRequest::Organization(OrganizationRequest::CreateVault {
-                organization: OrganizationId::new(2),
-                slug: VaultSlug::new(1),
-                name: Some("main".to_string()),
-                retention_policy: None,
-            }),
-            LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(1),
-                transactions: vec![],
-                idempotency_key: [0u8; 16],
-                request_hash: 0,
-            }),
-            LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(1),
-                transactions: vec![],
-                idempotency_key: [0u8; 16],
-                request_hash: 0,
-            }),
-            LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(3),
-                transactions: vec![],
-                idempotency_key: [0u8; 16],
-                request_hash: 0,
-            }),
-            LedgerRequest::System(SystemRequest::CreateUser {
-                user: UserId::new(1),
-                admin: false,
-                slug: UserSlug::new(111),
-                region: Region::US_EAST_VA,
-            }),
-            LedgerRequest::System(SystemRequest::CreateUser {
-                user: UserId::new(2),
-                admin: false,
-                slug: UserSlug::new(222),
-                region: Region::US_EAST_VA,
-            }),
-        ];
-
-        // Apply to node A
+        // Apply to both nodes A and B
         let mut state_a = (*store_a.applied_state.load_full()).clone();
-        let mut results_a = Vec::new();
-        for request in &requests {
-            let (response, _) = store_a.apply_request(request, &mut state_a);
-            results_a.push(response);
-        }
-        store_a.applied_state.store(Arc::new(state_a));
-
-        // Apply to node B
         let mut state_b = (*store_b.applied_state.load_full()).clone();
-        let mut results_b = Vec::new();
-        for request in &requests {
-            let (response, _) = store_b.apply_request(request, &mut state_b);
-            results_b.push(response);
+        let mut results_a: Vec<LedgerResponse> = Vec::new();
+        let mut results_b: Vec<LedgerResponse> = Vec::new();
+
+        // Helper: apply same sequence to two stores, collect responses
+        macro_rules! apply_both_system {
+            ($req:expr) => {{
+                let req = $req;
+                let ra = store_a.apply_system(&req, &mut state_a).0;
+                let rb = store_b.apply_system(&req, &mut state_b).0;
+                results_a.push(ra);
+                results_b.push(rb);
+            }};
         }
+        macro_rules! apply_both_org {
+            ($req:expr) => {{
+                let req = $req;
+                let ra = store_a.apply_org(&req, &mut state_a).0;
+                let rb = store_b.apply_org(&req, &mut state_b).0;
+                results_a.push(ra);
+                results_b.push(rb);
+            }};
+        }
+
+        apply_both_system!(SystemRequest::CreateOrganization {
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            region: Region::US_EAST_VA,
+            tier: Default::default(),
+            admin: UserId::new(1),
+        });
+        apply_both_system!(SystemRequest::UpdateOrganizationStatus {
+            organization: OrganizationId::new(1),
+            status: OrganizationStatus::Active,
+        });
+        apply_both_system!(SystemRequest::CreateOrganization {
+            slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            region: Region::US_EAST_VA,
+            tier: Default::default(),
+            admin: UserId::new(1),
+        });
+        apply_both_system!(SystemRequest::UpdateOrganizationStatus {
+            organization: OrganizationId::new(2),
+            status: OrganizationStatus::Active,
+        });
+        apply_both_org!(OrganizationRequest::CreateVault {
+            organization: OrganizationId::new(1),
+            slug: VaultSlug::new(1),
+            name: Some("production".to_string()),
+            retention_policy: None,
+        });
+        apply_both_org!(OrganizationRequest::CreateVault {
+            organization: OrganizationId::new(1),
+            slug: VaultSlug::new(1),
+            name: Some("staging".to_string()),
+            retention_policy: None,
+        });
+        apply_both_org!(OrganizationRequest::CreateVault {
+            organization: OrganizationId::new(2),
+            slug: VaultSlug::new(1),
+            name: Some("main".to_string()),
+            retention_policy: None,
+        });
+        apply_both_org!(OrganizationRequest::Write {
+            vault: VaultId::new(1),
+            transactions: vec![],
+            idempotency_key: [0u8; 16],
+            request_hash: 0,
+        });
+        apply_both_org!(OrganizationRequest::Write {
+            vault: VaultId::new(1),
+            transactions: vec![],
+            idempotency_key: [0u8; 16],
+            request_hash: 0,
+        });
+        apply_both_org!(OrganizationRequest::Write {
+            vault: VaultId::new(3),
+            transactions: vec![],
+            idempotency_key: [0u8; 16],
+            request_hash: 0,
+        });
+        apply_both_system!(SystemRequest::CreateUser {
+            user: UserId::new(1),
+            admin: false,
+            slug: UserSlug::new(111),
+            region: Region::US_EAST_VA,
+        });
+        apply_both_system!(SystemRequest::CreateUser {
+            user: UserId::new(2),
+            admin: false,
+            slug: UserSlug::new(222),
+            region: Region::US_EAST_VA,
+        });
+
+        store_a.applied_state.store(Arc::new(state_a));
         store_b.applied_state.store(Arc::new(state_b));
 
         // Results must be identical
@@ -2053,7 +2215,6 @@ mod tests {
     ///
     /// Writes to the same vault must increment height consistently across nodes.
     #[tokio::test]
-
     // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
     // carries an `organization:` field — a single `RaftLogStore`
     // owns writes for exactly one `OrganizationId`. Test rewrite
@@ -2081,24 +2242,25 @@ mod tests {
         assert_eq!(org_id_a, org_id_b, "Both stores should assign the same org ID");
 
         // Create vault on both nodes
-        let create_vault = LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let create_vault = OrganizationRequest::CreateVault {
             organization: org_id_a,
             slug: VaultSlug::new(1),
             name: Some("test".to_string()),
             retention_policy: None,
-        });
-        store_a.apply_request(&create_vault, &mut state_a);
-        store_b.apply_request(&create_vault, &mut state_b);
+        };
+        store_a.apply_org(&create_vault, &mut state_a);
+        store_b.apply_org(&create_vault, &mut state_b);
 
         // Apply multiple writes
         for _ in 0..5 {
-            let write = LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(1),
+            let write = OrganizationRequest::Write {
+                vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
-            });
-            store_a.apply_request(&write, &mut state_a);
-            store_b.apply_request(&write, &mut state_b);
+            };
+            store_a.apply_org(&write, &mut state_a);
+            store_b.apply_org(&write, &mut state_b);
         }
 
         // Heights must match
@@ -2119,7 +2281,6 @@ mod tests {
     /// Real workloads have writes to multiple vaults interleaved. The state
     /// machine must handle this deterministically.
     #[tokio::test]
-
     // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
     // carries an `organization:` field — a single `RaftLogStore`
     // owns writes for exactly one `OrganizationId`. Test rewrite
@@ -2138,72 +2299,80 @@ mod tests {
         let mut state_a = (*store_a.applied_state.load_full()).clone();
         let mut state_b = (*store_b.applied_state.load_full()).clone();
 
-        // Create organization and vaults
-        let requests: Vec<LedgerRequest> = vec![
-            LedgerRequest::System(SystemRequest::CreateOrganization {
+        // Create organization and vaults (applied to both stores)
+        for req in &[
+            SystemRequest::CreateOrganization {
                 slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 region: Region::US_EAST_VA,
                 tier: Default::default(),
                 admin: UserId::new(1),
-            }),
-            LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
+            },
+            SystemRequest::UpdateOrganizationStatus {
                 organization: OrganizationId::new(1),
                 status: OrganizationStatus::Active,
-            }),
-            LedgerRequest::Organization(OrganizationRequest::CreateVault {
+            },
+        ] {
+            store_a.apply_system(req, &mut state_a);
+            store_b.apply_system(req, &mut state_b);
+        }
+        for req in &[
+            OrganizationRequest::CreateVault {
                 organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("vault-a".to_string()),
                 retention_policy: None,
-            }),
-            LedgerRequest::Organization(OrganizationRequest::CreateVault {
+            },
+            OrganizationRequest::CreateVault {
                 organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("vault-b".to_string()),
                 retention_policy: None,
-            }),
-        ];
-
-        for req in &requests {
-            store_a.apply_request(req, &mut state_a);
-            store_b.apply_request(req, &mut state_b);
+            },
+        ] {
+            store_a.apply_org(req, &mut state_a);
+            store_b.apply_org(req, &mut state_b);
         }
 
         // Interleaved writes to different vaults
-        let interleaved: Vec<LedgerRequest> = vec![
-            LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(1),
+        let interleaved = vec![
+            OrganizationRequest::Write {
+                vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
-            }),
-            LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(2),
+            },
+            OrganizationRequest::Write {
+                vault: VaultId::new(2),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
-            }),
-            LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(1),
+            },
+            OrganizationRequest::Write {
+                vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
-            }),
-            LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(2),
+            },
+            OrganizationRequest::Write {
+                vault: VaultId::new(2),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
-            }),
-            LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(1),
+            },
+            OrganizationRequest::Write {
+                vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
-            }),
+            },
         ];
 
         let mut results_a = Vec::new();
         let mut results_b = Vec::new();
 
         for req in &interleaved {
-            let (response_a, _) = store_a.apply_request(req, &mut state_a);
-            let (response_b, _) = store_b.apply_request(req, &mut state_b);
+            let (response_a, _) = store_a.apply_org(req, &mut state_a);
+            let (response_b, _) = store_b.apply_org(req, &mut state_b);
             results_a.push(response_a);
             results_b.push(response_b);
         }
@@ -2292,7 +2461,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Setup: create organization and vault
@@ -2302,13 +2473,13 @@ mod tests {
             inferadb_ledger_types::OrganizationSlug::new(0),
             Region::US_EAST_VA,
         );
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        store.apply_org(
+            &OrganizationRequest::CreateVault {
                 organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("vault1".to_string()),
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
 
@@ -2326,13 +2497,14 @@ mod tests {
             timestamp: chrono::Utc::now(),
         };
 
-        let request = LedgerRequest::Organization(OrganizationRequest::Write {            vault: VaultId::new(1),
+        let request = OrganizationRequest::Write {
+            vault: VaultId::new(1),
             transactions: vec![tx],
             idempotency_key: [0u8; 16],
             request_hash: 0,
-        });
+        };
 
-        let (response, vault_entry) = store.apply_request(&request, &mut state);
+        let (response, vault_entry) = store.apply_org(&request, &mut state);
 
         // Verify response
         match response {
@@ -2358,7 +2530,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
 
         // Initial region height should be 0
         assert_eq!(store.current_region_height(), 0);
@@ -2445,7 +2619,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let accessor = store.accessor();
 
         // Setup some state
@@ -2493,13 +2669,16 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         // Open store without sender - should be None
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         assert!(store.block_announcements().is_none());
 
         // Create new store with sender
         let (sender, mut receiver) = broadcast::channel::<BlockAnnouncement>(16);
         let store = RaftLogStore::<FileBackend>::open(&path)
-            .expect("open store").with_organization_id(OrganizationId::new(1))
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1))
             .with_block_announcements(sender);
 
         // Verify sender is stored and accessible
@@ -2540,7 +2719,8 @@ mod tests {
         // Create store with broadcast sender
         let (sender, mut receiver) = broadcast::channel::<BlockAnnouncement>(16);
         let mut store = RaftLogStore::<FileBackend>::open(&path)
-            .expect("open store").with_organization_id(OrganizationId::new(1))
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1))
             .with_block_announcements(sender);
 
         // First, create organization and vault using apply_request (sets up state)
@@ -2555,13 +2735,13 @@ mod tests {
             );
             assert_eq!(organization_id, OrganizationId::new(1));
 
-            let create_vault = LedgerRequest::Organization(OrganizationRequest::CreateVault {
+            let create_vault = OrganizationRequest::CreateVault {
                 organization: organization_id,
                 slug: VaultSlug::new(1),
                 name: Some("test-vault".to_string()),
                 retention_policy: None,
-            });
-            let (response, _) = store.apply_request(&create_vault, &mut state);
+            };
+            let (response, _) = store.apply_org(&create_vault, &mut state);
             let vault_id = match response {
                 LedgerResponse::VaultCreated { vault: vault_id, .. } => vault_id,
                 _ => panic!("expected VaultCreated"),
@@ -2572,16 +2752,20 @@ mod tests {
 
         // Now call apply_to_state_machine with a Write entry
         // This should broadcast a BlockAnnouncement
-        let write_request = LedgerRequest::Organization(OrganizationRequest::Write {            vault: VaultId::new(1),
+        let write_request = OrganizationRequest::Write {
+            vault: VaultId::new(1),
             transactions: vec![], // Empty transactions still create a block
             idempotency_key: [0u8; 16],
             request_hash: 0,
-        });
+        };
 
-        let entry = make_committed_entry(1, 1, wrap_payload(write_request));
+        let entry = make_committed_entry(1, 1, wrap_org_payload(write_request));
 
         let _start = Instant::now();
-        let responses = store.apply_committed_entries::<crate::types::LedgerRequest>(&[entry], None).await.expect("apply");
+        let responses = store
+            .apply_committed_entries::<crate::types::OrganizationRequest>(&[entry], None)
+            .await
+            .expect("apply");
 
         // Verify response is WriteCompleted
         assert_eq!(responses.len(), 1);
@@ -2619,7 +2803,9 @@ mod tests {
         let path = dir.path().join("raft_log.db");
 
         // Store without broadcast sender
-        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let mut store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
 
         // Create organization and vault
         {
@@ -2632,26 +2818,30 @@ mod tests {
                 Region::US_EAST_VA,
             );
 
-            let create_vault = LedgerRequest::Organization(OrganizationRequest::CreateVault {
+            let create_vault = OrganizationRequest::CreateVault {
                 organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("test-vault".to_string()),
                 retention_policy: None,
-            });
-            store.apply_request(&create_vault, &mut state);
+            };
+            store.apply_org(&create_vault, &mut state);
             store.applied_state.store(Arc::new(state));
         }
 
         // Apply write - should not panic even without sender
-        let write_request = LedgerRequest::Organization(OrganizationRequest::Write {            vault: VaultId::new(1),
+        let write_request = OrganizationRequest::Write {
+            vault: VaultId::new(1),
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
-        });
+        };
 
-        let entry = make_committed_entry(1, 1, wrap_payload(write_request));
+        let entry = make_committed_entry(1, 1, wrap_org_payload(write_request));
 
-        let responses = store.apply_committed_entries::<crate::types::LedgerRequest>(&[entry], None).await.expect("apply");
+        let responses = store
+            .apply_committed_entries::<crate::types::OrganizationRequest>(&[entry], None)
+            .await
+            .expect("apply");
         assert_eq!(responses.len(), 1);
         match &responses[0] {
             LedgerResponse::Write { .. } => {},
@@ -2668,7 +2858,6 @@ mod tests {
     // timestamps from `RaftPayload.proposed_at` instead of local `Utc::now()`.
 
     #[tokio::test]
-
     // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
     // carries an `organization:` field — a single `RaftLogStore`
     // owns writes for exactly one `OrganizationId`. Test rewrite
@@ -2693,7 +2882,8 @@ mod tests {
 
         let far_future = Utc.with_ymd_and_hms(2099, 6, 15, 12, 0, 0).unwrap();
 
-        let write_request = LedgerRequest::Organization(OrganizationRequest::Write {            vault: VaultId::new(1),
+        let write_request = OrganizationRequest::Write {
+            vault: VaultId::new(1),
             transactions: vec![Transaction {
                 id: [42u8; 16],
                 client_id: ClientId::new("test"),
@@ -2708,7 +2898,7 @@ mod tests {
             }],
             idempotency_key: [0u8; 16],
             request_hash: 0,
-        });
+        };
 
         let payload = RaftPayload {
             request: write_request,
@@ -2719,7 +2909,10 @@ mod tests {
 
         let entry = make_committed_entry(1, 1, payload);
 
-        let responses = store.apply_committed_entries::<crate::types::LedgerRequest>(&[entry], None).await.expect("apply");
+        let responses = store
+            .apply_committed_entries::<crate::types::OrganizationRequest>(&[entry], None)
+            .await
+            .expect("apply");
         assert_eq!(responses.len(), 1);
 
         // Read events from the events DB
@@ -2754,7 +2947,8 @@ mod tests {
 
         let (sender, mut receiver) = broadcast::channel::<BlockAnnouncement>(16);
         let mut store = RaftLogStore::<FileBackend>::open(&path)
-            .expect("open store").with_organization_id(OrganizationId::new(1))
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1))
             .with_block_announcements(sender);
 
         // Create org + vault
@@ -2767,23 +2961,24 @@ mod tests {
                 Region::US_EAST_VA,
             );
 
-            let create_vault = LedgerRequest::Organization(OrganizationRequest::CreateVault {
+            let create_vault = OrganizationRequest::CreateVault {
                 organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("test-vault".to_string()),
                 retention_policy: None,
-            });
-            store.apply_request(&create_vault, &mut state);
+            };
+            store.apply_org(&create_vault, &mut state);
             store.applied_state.store(Arc::new(state));
         }
 
         let far_future = Utc.with_ymd_and_hms(2099, 12, 31, 23, 59, 59).unwrap();
 
-        let write_request = LedgerRequest::Organization(OrganizationRequest::Write {            vault: VaultId::new(1),
+        let write_request = OrganizationRequest::Write {
+            vault: VaultId::new(1),
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
-        });
+        };
 
         let payload = RaftPayload {
             request: write_request,
@@ -2793,7 +2988,10 @@ mod tests {
         };
         let entry = make_committed_entry(1, 1, payload);
 
-        store.apply_committed_entries::<crate::types::LedgerRequest>(&[entry], None).await.expect("apply");
+        store
+            .apply_committed_entries::<crate::types::OrganizationRequest>(&[entry], None)
+            .await
+            .expect("apply");
 
         // Check the broadcast announcement timestamp
         let announcement = receiver.try_recv().expect("should have received block announcement");
@@ -2807,7 +3005,6 @@ mod tests {
     }
 
     #[tokio::test]
-
     // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
     // carries an `organization:` field — a single `RaftLogStore`
     // owns writes for exactly one `OrganizationId`. Test rewrite
@@ -2815,7 +3012,7 @@ mod tests {
     // tests cover the new model end-to-end.
     #[ignore]
     async fn test_two_state_machines_produce_identical_events() {
-        // Apply the same LedgerRequest on two independent state machines.
+        // Apply the same request on two independent state machines.
         // With deterministic timestamps, resulting EventEntry records must be
         // byte-identical.
         use chrono::TimeZone;
@@ -2823,7 +3020,8 @@ mod tests {
 
         let far_future = Utc.with_ymd_and_hms(2099, 3, 14, 15, 9, 26).unwrap();
 
-        let write_request = LedgerRequest::Organization(OrganizationRequest::Write {            vault: VaultId::new(1),
+        let write_request = OrganizationRequest::Write {
+            vault: VaultId::new(1),
             transactions: vec![Transaction {
                 id: [7u8; 16],
                 client_id: ClientId::new("client"),
@@ -2838,7 +3036,7 @@ mod tests {
             }],
             idempotency_key: [0u8; 16],
             request_hash: 0,
-        });
+        };
 
         // Helper to create a store, set up state, and apply
         let apply_on_fresh_store = |dir: &std::path::Path| {
@@ -2864,8 +3062,14 @@ mod tests {
         let (mut store1, entry1) = apply_on_fresh_store(dir1.path());
         let (mut store2, entry2) = apply_on_fresh_store(dir2.path());
 
-        store1.apply_committed_entries::<crate::types::LedgerRequest>(&[entry1], None).await.expect("apply1");
-        store2.apply_committed_entries::<crate::types::LedgerRequest>(&[entry2], None).await.expect("apply2");
+        store1
+            .apply_committed_entries::<crate::types::OrganizationRequest>(&[entry1], None)
+            .await
+            .expect("apply1");
+        store2
+            .apply_committed_entries::<crate::types::OrganizationRequest>(&[entry2], None)
+            .await
+            .expect("apply2");
 
         // Read events from both stores
         let read_events = |store: &RaftLogStore<FileBackend>| {
@@ -2904,7 +3108,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // 1. Start healthy
@@ -2917,7 +3123,7 @@ mod tests {
         );
 
         // 2. Transition to Diverged (detected by auto-recovery scanner)
-        let diverge = LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
+        let diverge = OrganizationRequest::UpdateVaultHealth {
             organization: OrganizationId::new(1),
             vault: VaultId::new(1),
             healthy: false,
@@ -2926,8 +3132,8 @@ mod tests {
             diverged_at_height: Some(100),
             recovery_attempt: None,
             recovery_started_at: None,
-        });
-        let (response, _) = store.apply_request(&diverge, &mut state);
+        };
+        let (response, _) = store.apply_org(&diverge, &mut state);
         assert!(matches!(response, LedgerResponse::VaultHealthUpdated { success: true }));
         assert!(matches!(
             state.vault_health.get(&(OrganizationId::new(1), VaultId::new(1))),
@@ -2936,7 +3142,7 @@ mod tests {
 
         // 3. Transition to Recovering attempt 1
         let now = chrono::Utc::now().timestamp();
-        let recover1 = LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
+        let recover1 = OrganizationRequest::UpdateVaultHealth {
             organization: OrganizationId::new(1),
             vault: VaultId::new(1),
             healthy: false,
@@ -2945,8 +3151,8 @@ mod tests {
             diverged_at_height: None,
             recovery_attempt: Some(1),
             recovery_started_at: Some(now),
-        });
-        let (response, _) = store.apply_request(&recover1, &mut state);
+        };
+        let (response, _) = store.apply_org(&recover1, &mut state);
         assert!(matches!(response, LedgerResponse::VaultHealthUpdated { success: true }));
         assert!(matches!(
             state.vault_health.get(&(OrganizationId::new(1), VaultId::new(1))),
@@ -2957,7 +3163,7 @@ mod tests {
         // Recovery happens in the background via replay, not inline
 
         // 4. Recovery succeeds → Healthy
-        let healthy = LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
+        let healthy = OrganizationRequest::UpdateVaultHealth {
             organization: OrganizationId::new(1),
             vault: VaultId::new(1),
             healthy: true,
@@ -2966,8 +3172,8 @@ mod tests {
             diverged_at_height: None,
             recovery_attempt: None,
             recovery_started_at: None,
-        });
-        let (response, _) = store.apply_request(&healthy, &mut state);
+        };
+        let (response, _) = store.apply_org(&healthy, &mut state);
         assert!(matches!(response, LedgerResponse::VaultHealthUpdated { success: true }));
         assert_eq!(
             state.vault_health.get(&(OrganizationId::new(1), VaultId::new(1))),
@@ -2980,7 +3186,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Start diverged
@@ -2997,7 +3205,7 @@ mod tests {
 
         // Simulate escalating recovery attempts (1, 2, 3)
         for attempt in 1..=MAX_RECOVERY_ATTEMPTS {
-            let recover = LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
+            let recover = OrganizationRequest::UpdateVaultHealth {
                 organization: OrganizationId::new(1),
                 vault: VaultId::new(1),
                 healthy: false,
@@ -3006,8 +3214,8 @@ mod tests {
                 diverged_at_height: None,
                 recovery_attempt: Some(attempt),
                 recovery_started_at: Some(base_time + i64::from(attempt) * 10),
-            });
-            let (response, _) = store.apply_request(&recover, &mut state);
+            };
+            let (response, _) = store.apply_org(&recover, &mut state);
             assert!(matches!(response, LedgerResponse::VaultHealthUpdated { success: true }));
 
             match state.vault_health.get(&(OrganizationId::new(1), VaultId::new(1))) {
@@ -3024,7 +3232,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Start diverged
@@ -3040,7 +3250,7 @@ mod tests {
         // Exhaust all attempts
         let now = chrono::Utc::now().timestamp();
         for attempt in 1..=MAX_RECOVERY_ATTEMPTS {
-            let recover = LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
+            let recover = OrganizationRequest::UpdateVaultHealth {
                 organization: OrganizationId::new(1),
                 vault: VaultId::new(1),
                 healthy: false,
@@ -3049,8 +3259,8 @@ mod tests {
                 diverged_at_height: None,
                 recovery_attempt: Some(attempt),
                 recovery_started_at: Some(now),
-            });
-            let _ = store.apply_request(&recover, &mut state);
+            };
+            let _ = store.apply_org(&recover, &mut state);
         }
 
         // Verify vault is at max recovery attempt
@@ -3072,7 +3282,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization so writes don't fail for missing organization
@@ -3082,25 +3294,26 @@ mod tests {
             inferadb_ledger_types::OrganizationSlug::new(0),
             Region::US_EAST_VA,
         );
-        let create_vault = LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let create_vault = OrganizationRequest::CreateVault {
             organization: OrganizationId::new(1),
             slug: VaultSlug::new(1),
             name: Some("vault".to_string()),
             retention_policy: None,
-        });
-        store.apply_request(&create_vault, &mut state);
+        };
+        store.apply_org(&create_vault, &mut state);
 
         // Diverged blocks writes
         state.vault_health.insert(
             (OrganizationId::new(1), VaultId::new(1)),
             VaultHealthStatus::Diverged { expected: [1; 32], computed: [2; 32], at_height: 1 },
         );
-        let write = LedgerRequest::Organization(OrganizationRequest::Write {            vault: VaultId::new(1),
+        let write = OrganizationRequest::Write {
+            vault: VaultId::new(1),
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
-        });
-        let (response, _) = store.apply_request(&write, &mut state);
+        };
+        let (response, _) = store.apply_org(&write, &mut state);
         assert!(matches!(response, LedgerResponse::Error { .. }));
 
         // Recovering does NOT block writes (recovery is background replay)
@@ -3111,7 +3324,7 @@ mod tests {
                 attempt: 1,
             },
         );
-        let (response, _) = store.apply_request(&write, &mut state);
+        let (response, _) = store.apply_org(&write, &mut state);
         // Should succeed (Write response, not Error)
         assert!(
             matches!(response, LedgerResponse::Write { .. }),
@@ -3125,11 +3338,13 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Mark healthy twice
-        let healthy = LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
+        let healthy = OrganizationRequest::UpdateVaultHealth {
             organization: OrganizationId::new(1),
             vault: VaultId::new(1),
             healthy: true,
@@ -3138,9 +3353,9 @@ mod tests {
             diverged_at_height: None,
             recovery_attempt: None,
             recovery_started_at: None,
-        });
-        let (r1, _) = store.apply_request(&healthy, &mut state);
-        let (r2, _) = store.apply_request(&healthy, &mut state);
+        };
+        let (r1, _) = store.apply_org(&healthy, &mut state);
+        let (r2, _) = store.apply_org(&healthy, &mut state);
         assert!(matches!(r1, LedgerResponse::VaultHealthUpdated { success: true }));
         assert!(matches!(r2, LedgerResponse::VaultHealthUpdated { success: true }));
         assert_eq!(
@@ -3292,7 +3507,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Setup organization + vault
@@ -3302,13 +3519,13 @@ mod tests {
             inferadb_ledger_types::OrganizationSlug::new(0),
             Region::US_EAST_VA,
         );
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        store.apply_org(
+            &OrganizationRequest::CreateVault {
                 organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
 
@@ -3331,12 +3548,13 @@ mod tests {
             }],
             timestamp: chrono::Utc::now(),
         };
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(1),
+        store.apply_org(
+            &OrganizationRequest::Write {
+                vault: VaultId::new(1),
                 transactions: vec![tx1],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
-            }),
+            },
             &mut state,
         );
         assert_eq!(
@@ -3358,12 +3576,13 @@ mod tests {
             }],
             timestamp: chrono::Utc::now(),
         };
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(1),
+        store.apply_org(
+            &OrganizationRequest::Write {
+                vault: VaultId::new(1),
                 transactions: vec![tx2],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
-            }),
+            },
             &mut state,
         );
         assert_eq!(
@@ -3378,7 +3597,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Setup
@@ -3388,13 +3609,13 @@ mod tests {
             inferadb_ledger_types::OrganizationSlug::new(0),
             Region::US_EAST_VA,
         );
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        store.apply_org(
+            &OrganizationRequest::CreateVault {
                 organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
 
@@ -3411,12 +3632,13 @@ mod tests {
             }],
             timestamp: chrono::Utc::now(),
         };
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(1),
+        store.apply_org(
+            &OrganizationRequest::Write {
+                vault: VaultId::new(1),
                 transactions: vec![tx_set],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
-            }),
+            },
             &mut state,
         );
         assert_eq!(state.organization_storage_bytes[&OrganizationId::new(1)], 10);
@@ -3431,12 +3653,13 @@ mod tests {
             }],
             timestamp: chrono::Utc::now(),
         };
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(1),
+        store.apply_org(
+            &OrganizationRequest::Write {
+                vault: VaultId::new(1),
                 transactions: vec![tx_del],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
-            }),
+            },
             &mut state,
         );
         assert_eq!(
@@ -3451,7 +3674,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         create_active_organization(
@@ -3460,13 +3685,13 @@ mod tests {
             inferadb_ledger_types::OrganizationSlug::new(0),
             Region::US_EAST_VA,
         );
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        store.apply_org(
+            &OrganizationRequest::CreateVault {
                 organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
 
@@ -3480,12 +3705,13 @@ mod tests {
             }],
             timestamp: chrono::Utc::now(),
         };
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(1),
+        store.apply_org(
+            &OrganizationRequest::Write {
+                vault: VaultId::new(1),
                 transactions: vec![tx],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
-            }),
+            },
             &mut state,
         );
         assert_eq!(
@@ -3496,7 +3722,6 @@ mod tests {
     }
 
     #[tokio::test]
-
     // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
     // carries an `organization:` field — a single `RaftLogStore`
     // owns writes for exactly one `OrganizationId`. Test rewrite
@@ -3507,7 +3732,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create two organizations, each with a vault
@@ -3523,22 +3750,22 @@ mod tests {
             inferadb_ledger_types::OrganizationSlug::new(0),
             Region::US_EAST_VA,
         );
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        store.apply_org(
+            &OrganizationRequest::CreateVault {
                 organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        store.apply_org(
+            &OrganizationRequest::CreateVault {
                 organization: OrganizationId::new(2),
                 slug: VaultSlug::new(1),
                 name: Some("v2".to_string()),
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
 
@@ -3555,12 +3782,13 @@ mod tests {
             }],
             timestamp: chrono::Utc::now(),
         };
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(1),
+        store.apply_org(
+            &OrganizationRequest::Write {
+                vault: VaultId::new(1),
                 transactions: vec![tx1],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
-            }),
+            },
             &mut state,
         );
 
@@ -3577,12 +3805,13 @@ mod tests {
             }],
             timestamp: chrono::Utc::now(),
         };
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(2),
+        store.apply_org(
+            &OrganizationRequest::Write {
+                vault: VaultId::new(2),
                 transactions: vec![tx2],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
-            }),
+            },
             &mut state,
         );
 
@@ -3595,7 +3824,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
 
         // Before any writes, accessor returns 0
         assert_eq!(store.accessor().organization_storage_bytes(OrganizationId::new(1)), 0);
@@ -3618,7 +3849,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create organization with two vaults
@@ -3628,22 +3861,22 @@ mod tests {
             inferadb_ledger_types::OrganizationSlug::new(0),
             Region::US_EAST_VA,
         );
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        store.apply_org(
+            &OrganizationRequest::CreateVault {
                 organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        store.apply_org(
+            &OrganizationRequest::CreateVault {
                 organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("v2".to_string()),
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
 
@@ -3660,12 +3893,13 @@ mod tests {
             }],
             timestamp: chrono::Utc::now(),
         };
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(1),
+        store.apply_org(
+            &OrganizationRequest::Write {
+                vault: VaultId::new(1),
                 transactions: vec![tx],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
-            }),
+            },
             &mut state,
         );
         store.applied_state.store(Arc::new(state));
@@ -3685,7 +3919,9 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         create_active_organization(
@@ -3694,22 +3930,22 @@ mod tests {
             inferadb_ledger_types::OrganizationSlug::new(0),
             Region::US_EAST_VA,
         );
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        store.apply_org(
+            &OrganizationRequest::CreateVault {
                 organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        store.apply_org(
+            &OrganizationRequest::CreateVault {
                 organization: OrganizationId::new(1),
                 slug: VaultSlug::new(1),
                 name: Some("v2".to_string()),
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
 
@@ -3718,11 +3954,11 @@ mod tests {
 
         // Delete one vault
         let mut state = (*store.applied_state.load_full()).clone();
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::DeleteVault {
+        store.apply_org(
+            &OrganizationRequest::DeleteVault {
                 organization: OrganizationId::new(1),
                 vault: VaultId::new(1),
-            }),
+            },
             &mut state,
         );
         store.applied_state.store(Arc::new(state));
@@ -3741,7 +3977,11 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
 
-        let store = Arc::new(RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1)));
+        let store = Arc::new(
+            RaftLogStore::<FileBackend>::open(&path)
+                .expect("open store")
+                .with_organization_id(OrganizationId::new(1)),
+        );
 
         // Set up state with known storage bytes
         {
@@ -3752,13 +3992,13 @@ mod tests {
                 inferadb_ledger_types::OrganizationSlug::new(0),
                 Region::US_EAST_VA,
             );
-            store.apply_request(
-                &LedgerRequest::Organization(OrganizationRequest::CreateVault {
+            store.apply_org(
+                &OrganizationRequest::CreateVault {
                     organization: OrganizationId::new(1),
                     slug: VaultSlug::new(1),
                     name: Some("v1".to_string()),
                     retention_policy: None,
-                }),
+                },
                 &mut state,
             );
             // Write data: "hello" (5) + "world!" (6) = 11 bytes
@@ -3774,12 +4014,13 @@ mod tests {
                 }],
                 timestamp: chrono::Utc::now(),
             };
-            store.apply_request(
-                &LedgerRequest::Organization(OrganizationRequest::Write {                    vault: VaultId::new(1),
+            store.apply_org(
+                &OrganizationRequest::Write {
+                    vault: VaultId::new(1),
                     transactions: vec![tx],
                     idempotency_key: [0u8; 16],
                     request_hash: 0,
-                }),
+                },
                 &mut state,
             );
             store.applied_state.store(Arc::new(state));
@@ -3823,8 +4064,9 @@ mod tests {
     }
 
     /// Helper: creates a simple Write request with one set operation.
-    fn simple_write_request(organization: OrganizationId, vault: VaultId) -> LedgerRequest {
-        LedgerRequest::Organization(OrganizationRequest::Write {            vault,
+    fn simple_write_request(_organization: OrganizationId, vault: VaultId) -> OrganizationRequest {
+        OrganizationRequest::Write {
+            vault,
             transactions: vec![Transaction {
                 id: [1u8; 16],
                 client_id: ClientId::new("test-client"),
@@ -3839,7 +4081,7 @@ mod tests {
             }],
             idempotency_key: [0u8; 16],
             request_hash: 0,
-        })
+        }
     }
 
     /// Helper: sets up an organization and vault in applied state.
@@ -3886,7 +4128,6 @@ mod tests {
     }
 
     #[test]
-
     // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
     // carries an `organization:` field — a single `RaftLogStore`
     // owns writes for exactly one `OrganizationId`. Test rewrite
@@ -3904,7 +4145,7 @@ mod tests {
         let mut op_index = 0u32;
         let ts = fixed_timestamp();
 
-        let (response, _) = store.apply_request_with_events(
+        let (response, _) = store.apply_organization_request_with_events(
             &request,
             &mut state,
             ts,
@@ -3973,7 +4214,7 @@ mod tests {
         let mut idx_a = 0u32;
         let mut idx_b = 0u32;
 
-        store_a.apply_request_with_events(
+        store_a.apply_organization_request_with_events(
             &write_request,
             &mut state_a,
             ts,
@@ -3986,7 +4227,7 @@ mod tests {
             0,
             false,
         );
-        store_b.apply_request_with_events(
+        store_b.apply_organization_request_with_events(
             &write_request,
             &mut state_b,
             ts,
@@ -4021,7 +4262,8 @@ mod tests {
         let (org_id, vault_id) = setup_org_and_vault(&mut state);
 
         // Write request with two ExpireEntity operations
-        let request = LedgerRequest::Organization(OrganizationRequest::Write {            vault: vault_id,
+        let request = OrganizationRequest::Write {
+            vault: vault_id,
             transactions: vec![Transaction {
                 id: [2u8; 16],
                 client_id: ClientId::new("gc-client"),
@@ -4034,13 +4276,13 @@ mod tests {
             }],
             idempotency_key: [0u8; 16],
             request_hash: 0,
-        });
+        };
 
         let mut events: Vec<EventEntry> = Vec::new();
         let mut op_index = 0u32;
         let ts = fixed_timestamp();
 
-        store.apply_request_with_events(
+        store.apply_organization_request_with_events(
             &request,
             &mut state,
             ts,
@@ -4076,7 +4318,6 @@ mod tests {
     }
 
     #[test]
-
     // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
     // carries an `organization:` field — a single `RaftLogStore`
     // owns writes for exactly one `OrganizationId`. Test rewrite
@@ -4101,7 +4342,7 @@ mod tests {
         let mut op_index = 0u32;
         let ts = fixed_timestamp();
 
-        store.apply_request_with_events(
+        store.apply_organization_request_with_events(
             &request,
             &mut state,
             ts,
@@ -4195,15 +4436,15 @@ mod tests {
             make_external_event_entry(org_id, "engine", "engine.task_a", "alice", [1u8; 16]),
             make_external_event_entry(org_id, "engine", "engine.task_b", "bob", [2u8; 16]),
         ];
-        let request = LedgerRequest::Organization(OrganizationRequest::IngestExternalEvents {
+        let request = OrganizationRequest::IngestExternalEvents {
             source: "engine".to_string(),
             events: batch.clone(),
-        });
+        };
 
         let mut events: Vec<EventEntry> = Vec::new();
         let mut op_index = 0u32;
         let ts = fixed_timestamp();
-        let (response, vault_entry) = store.apply_request_with_events(
+        let (response, vault_entry) = store.apply_organization_request_with_events(
             &request,
             &mut state,
             ts,
@@ -4273,10 +4514,10 @@ mod tests {
             make_external_event_entry(org_id, "engine", "engine.x", "alice", [10u8; 16]),
             make_external_event_entry(org_id, "engine", "engine.y", "bob", [20u8; 16]),
         ];
-        let request = LedgerRequest::Organization(OrganizationRequest::IngestExternalEvents {
+        let request = OrganizationRequest::IngestExternalEvents {
             source: "engine".to_string(),
             events: batch.clone(),
-        });
+        };
 
         let mut events: Vec<EventEntry> = Vec::new();
         let mut op_index = 0u32;
@@ -4284,7 +4525,7 @@ mod tests {
 
         // Apply twice — simulating WAL replay re-driving the same proposal.
         for _ in 0..2 {
-            let (response, _) = store.apply_request_with_events(
+            let (response, _) = store.apply_organization_request_with_events(
                 &request,
                 &mut state,
                 ts,
@@ -4321,18 +4562,18 @@ mod tests {
         let store = store_with_events(dir.path());
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let request = LedgerRequest::System(SystemRequest::CreateOrganization {
+        let request = SystemRequest::CreateOrganization {
             slug: inferadb_ledger_types::OrganizationSlug::new(42_000),
             region: Region::US_EAST_VA,
             tier: Default::default(),
             admin: UserId::new(1),
-        });
+        };
 
         let mut events: Vec<EventEntry> = Vec::new();
         let mut op_index = 0u32;
         let ts = fixed_timestamp();
 
-        store.apply_request_with_events(
+        store.apply_system_request_with_events(
             &request,
             &mut state,
             ts,
@@ -4374,13 +4615,13 @@ mod tests {
             state.vaults.insert(key, vault);
         }
 
-        let request = LedgerRequest::System(SystemRequest::DeleteOrganization { organization: org_id });
+        let request = SystemRequest::DeleteOrganization { organization: org_id };
 
         let mut events: Vec<EventEntry> = Vec::new();
         let mut op_index = 0u32;
         let ts = fixed_timestamp();
 
-        store.apply_request_with_events(
+        store.apply_system_request_with_events(
             &request,
             &mut state,
             ts,
@@ -4418,18 +4659,18 @@ mod tests {
         let store = store_with_events(dir.path());
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let request = LedgerRequest::System(SystemRequest::CreateUser {
+        let request = SystemRequest::CreateUser {
             user: UserId::new(1),
             admin: true,
             slug: UserSlug::new(333),
             region: Region::US_EAST_VA,
-        });
+        };
 
         let mut events: Vec<EventEntry> = Vec::new();
         let mut op_index = 0u32;
         let ts = fixed_timestamp();
 
-        store.apply_request_with_events(
+        store.apply_system_request_with_events(
             &request,
             &mut state,
             ts,
@@ -4464,15 +4705,15 @@ mod tests {
         let (org_id, _vault_id) = setup_org_and_vault(&mut state);
 
         // Suspend with reason
-        let suspend = LedgerRequest::System(SystemRequest::SuspendOrganization {
+        let suspend = SystemRequest::SuspendOrganization {
             organization: org_id,
             reason: Some("billing overdue".to_string()),
-        });
+        };
         let mut events: Vec<EventEntry> = Vec::new();
         let mut op_index = 0u32;
         let ts = fixed_timestamp();
 
-        store.apply_request_with_events(
+        store.apply_system_request_with_events(
             &suspend,
             &mut state,
             ts,
@@ -4501,11 +4742,11 @@ mod tests {
         );
 
         // Resume
-        let resume = LedgerRequest::System(SystemRequest::ResumeOrganization { organization: org_id });
+        let resume = SystemRequest::ResumeOrganization { organization: org_id };
         let mut resume_events: Vec<EventEntry> = Vec::new();
         let mut resume_op_index = 0u32;
 
-        store.apply_request_with_events(
+        store.apply_system_request_with_events(
             &resume,
             &mut state,
             ts,
@@ -4542,17 +4783,17 @@ mod tests {
         let (org_id, vault_id) = setup_org_and_vault(&mut state);
 
         // Emit a system event (OrganizationCreated via CreateOrganization)
-        let create_org = LedgerRequest::System(SystemRequest::CreateOrganization {
+        let create_org = SystemRequest::CreateOrganization {
             slug: inferadb_ledger_types::OrganizationSlug::new(9999),
             region: Region::US_EAST_VA,
             tier: Default::default(),
             admin: UserId::new(1),
-        });
+        };
         let mut all_events: Vec<EventEntry> = Vec::new();
         let mut op_index = 0u32;
         let ts = fixed_timestamp();
 
-        store.apply_request_with_events(
+        store.apply_system_request_with_events(
             &create_org,
             &mut state,
             ts,
@@ -4568,7 +4809,7 @@ mod tests {
 
         // Emit an org-scoped event (WriteCommitted)
         let write_req = simple_write_request(org_id, vault_id);
-        store.apply_request_with_events(
+        store.apply_organization_request_with_events(
             &write_req,
             &mut state,
             ts,
@@ -4627,13 +4868,13 @@ mod tests {
         let mut op_index = 0u32;
 
         // Create a vault
-        let create_vault = LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let create_vault = OrganizationRequest::CreateVault {
             organization: org_id,
             slug: VaultSlug::new(6000),
             name: Some("audit-vault".to_string()),
             retention_policy: None,
-        });
-        let (resp, _) = store.apply_request_with_events(
+        };
+        let (resp, _) = store.apply_organization_request_with_events(
             &create_vault,
             &mut state,
             ts,
@@ -4669,12 +4910,13 @@ mod tests {
         let mut state = (*store.applied_state.load_full()).clone();
         let (org_id, vault_id) = setup_org_and_vault(&mut state);
 
-        let delete_vault = LedgerRequest::Organization(OrganizationRequest::DeleteVault { organization: org_id, vault: vault_id });
+        let delete_vault =
+            OrganizationRequest::DeleteVault { organization: org_id, vault: vault_id };
         let ts = fixed_timestamp();
         let mut events: Vec<EventEntry> = Vec::new();
         let mut op_index = 0u32;
 
-        let (resp, _) = store.apply_request_with_events(
+        let (resp, _) = store.apply_organization_request_with_events(
             &delete_vault,
             &mut state,
             ts,
@@ -4706,7 +4948,6 @@ mod tests {
     }
 
     #[test]
-
     // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
     // carries an `organization:` field — a single `RaftLogStore`
     // owns writes for exactly one `OrganizationId`. Test rewrite
@@ -4720,10 +4961,11 @@ mod tests {
         let (org_id, vault_id) = setup_org_and_vault(&mut state);
 
         // Create a batch of two writes
-        let batch = LedgerRequest::Organization(OrganizationRequest::BatchWrite {
+        let batch = OrganizationRequest::BatchWrite {
             requests: vec![
                 simple_write_request(org_id, vault_id),
-                LedgerRequest::Organization(OrganizationRequest::Write {                    vault: vault_id,
+                OrganizationRequest::Write {
+                    vault: vault_id,
                     transactions: vec![Transaction {
                         id: [2u8; 16],
                         client_id: ClientId::new("test-client"),
@@ -4738,15 +4980,15 @@ mod tests {
                     }],
                     idempotency_key: [0u8; 16],
                     request_hash: 0,
-                }),
+                },
             ],
-        });
+        };
 
         let ts = fixed_timestamp();
         let mut events: Vec<EventEntry> = Vec::new();
         let mut op_index = 0u32;
 
-        let (resp, _) = store.apply_request_with_events(
+        let (resp, _) = store.apply_organization_request_with_events(
             &batch,
             &mut state,
             ts,
@@ -4784,7 +5026,7 @@ mod tests {
         let (org_id, vault_id) = setup_org_and_vault(&mut state);
 
         // Mark vault as diverged
-        let health_request = LedgerRequest::Organization(OrganizationRequest::UpdateVaultHealth {
+        let health_request = OrganizationRequest::UpdateVaultHealth {
             organization: org_id,
             vault: vault_id,
             healthy: false,
@@ -4793,13 +5035,13 @@ mod tests {
             diverged_at_height: Some(5),
             recovery_attempt: None,
             recovery_started_at: None,
-        });
+        };
 
         let ts = fixed_timestamp();
         let mut events: Vec<EventEntry> = Vec::new();
         let mut op_index = 0u32;
 
-        store.apply_request_with_events(
+        store.apply_organization_request_with_events(
             &health_request,
             &mut state,
             ts,
@@ -4824,7 +5066,6 @@ mod tests {
     }
 
     #[test]
-
     // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
     // carries an `organization:` field — a single `RaftLogStore`
     // owns writes for exactly one `OrganizationId`. Test rewrite
@@ -4881,7 +5122,7 @@ mod tests {
         let mut op_index = 0u32;
 
         // Write to org A
-        store.apply_request_with_events(
+        store.apply_organization_request_with_events(
             &simple_write_request(org_a, vault_a),
             &mut state,
             ts,
@@ -4896,8 +5137,9 @@ mod tests {
         );
 
         // Write to org B
-        store.apply_request_with_events(
-            &LedgerRequest::Organization(OrganizationRequest::Write {                vault: vault_b,
+        store.apply_organization_request_with_events(
+            &OrganizationRequest::Write {
+                vault: vault_b,
                 transactions: vec![Transaction {
                     id: [9u8; 16],
                     client_id: ClientId::new("client-b"),
@@ -4912,7 +5154,7 @@ mod tests {
                 }],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
-            }),
+            },
             &mut state,
             ts,
             &mut op_index,
@@ -4966,7 +5208,7 @@ mod tests {
         let mut op_index = 0u32;
 
         // Write to vault — should produce WriteCommitted event in the accumulator
-        store.apply_request_with_events(
+        store.apply_organization_request_with_events(
             &simple_write_request(org_id, vault_id),
             &mut state,
             ts,
@@ -5014,7 +5256,7 @@ mod tests {
         let mut op_index = 0u32;
 
         // First write — block_height should reference the region chain height + 1
-        store.apply_request_with_events(
+        store.apply_organization_request_with_events(
             &simple_write_request(org_id, vault_id),
             &mut state,
             ts,
@@ -5042,8 +5284,9 @@ mod tests {
         // Second write to same vault
         events.clear();
         op_index = 0;
-        store.apply_request_with_events(
-            &LedgerRequest::Organization(OrganizationRequest::Write {                vault: vault_id,
+        store.apply_organization_request_with_events(
+            &OrganizationRequest::Write {
+                vault: vault_id,
                 transactions: vec![Transaction {
                     id: [3u8; 16],
                     client_id: ClientId::new("test-client"),
@@ -5058,7 +5301,7 @@ mod tests {
                 }],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
-            }),
+            },
             &mut state,
             ts,
             &mut op_index,
@@ -5660,7 +5903,6 @@ mod tests {
     /// (pure function of compressed bytes).
     #[tokio::test(flavor = "multi_thread")]
     async fn test_snapshot_determinism_build_and_get_current_produce_identical_files() {
-        // openraft traits removed
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
         let dir = tempdir().expect("create temp dir");
@@ -5669,92 +5911,97 @@ mod tests {
 
         // Apply a batch of Raft entries that create organizations, vaults, and writes.
         // apply_to_state_machine persists state via save_state_core + flush_external_writes.
-        let entries = vec![
-            // Entry 1: Create organization
-            make_committed_entry(
-                1,
-                1,
-                wrap_payload(LedgerRequest::System(SystemRequest::CreateOrganization {
+        //
+        // System-tier setup (org creation, activation) is applied directly via apply_system;
+        // the Raft-entry path is exercised for the org-tier entries (vault creation, writes).
+        {
+            let mut state = (*store.applied_state.load_full()).clone();
+            store.apply_system(
+                &SystemRequest::CreateOrganization {
                     slug: inferadb_ledger_types::OrganizationSlug::new(1000),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
                     admin: UserId::new(1),
-                })),
-            ),
-            // Entry 2: Activate org 1
-            make_committed_entry(
-                1,
-                2,
-                wrap_payload(LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
+                },
+                &mut state,
+            );
+            store.apply_system(
+                &SystemRequest::UpdateOrganizationStatus {
                     organization: OrganizationId::new(1),
                     status: OrganizationStatus::Active,
-                })),
-            ),
-            // Entry 3: Create vault in org 1
-            make_committed_entry(
-                1,
-                3,
-                wrap_payload(LedgerRequest::Organization(OrganizationRequest::CreateVault {
-                    organization: OrganizationId::new(1),
-                    slug: VaultSlug::new(100),
-                    name: Some("vault-1".to_string()),
-                    retention_policy: None,
-                })),
-            ),
-            // Entry 4: Write to vault (populates vault_heights, vault_hashes, client_sequences)
-            make_committed_entry(
-                1,
-                4,
-                wrap_payload(LedgerRequest::Organization(OrganizationRequest::Write {                    vault: VaultId::new(1),
-                    transactions: vec![],
-                    idempotency_key: [1u8; 16],
-                    request_hash: 42,
-                })),
-            ),
-            // Entry 5: Create second organization
-            make_committed_entry(
-                1,
-                5,
-                wrap_payload(LedgerRequest::System(SystemRequest::CreateOrganization {
+                },
+                &mut state,
+            );
+            store.apply_system(
+                &SystemRequest::CreateOrganization {
                     slug: inferadb_ledger_types::OrganizationSlug::new(2000),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
                     admin: UserId::new(1),
-                })),
-            ),
-            // Entry 6: Activate org 2
-            make_committed_entry(
-                1,
-                6,
-                wrap_payload(LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
+                },
+                &mut state,
+            );
+            store.apply_system(
+                &SystemRequest::UpdateOrganizationStatus {
                     organization: OrganizationId::new(2),
                     status: OrganizationStatus::Active,
-                })),
-            ),
-            // Entry 7: Create vault in org 2
+                },
+                &mut state,
+            );
+            store.applied_state.store(Arc::new(state));
+        }
+
+        let entries = vec![
+            // Entry 1: Create vault in org 1
             make_committed_entry(
                 1,
-                7,
-                wrap_payload(LedgerRequest::Organization(OrganizationRequest::CreateVault {
+                1,
+                wrap_org_payload(OrganizationRequest::CreateVault {
+                    organization: OrganizationId::new(1),
+                    slug: VaultSlug::new(100),
+                    name: Some("vault-1".to_string()),
+                    retention_policy: None,
+                }),
+            ),
+            // Entry 2: Write to vault (populates vault_heights, vault_hashes, client_sequences)
+            make_committed_entry(
+                1,
+                2,
+                wrap_org_payload(OrganizationRequest::Write {
+                    vault: VaultId::new(1),
+                    transactions: vec![],
+                    idempotency_key: [1u8; 16],
+                    request_hash: 42,
+                }),
+            ),
+            // Entry 3: Create vault in org 2
+            make_committed_entry(
+                1,
+                3,
+                wrap_org_payload(OrganizationRequest::CreateVault {
                     organization: OrganizationId::new(2),
                     slug: VaultSlug::new(200),
                     name: Some("vault-2".to_string()),
                     retention_policy: None,
-                })),
+                }),
             ),
-            // Entry 8: Write to second vault
+            // Entry 4: Write to second vault
             make_committed_entry(
                 1,
-                8,
-                wrap_payload(LedgerRequest::Organization(OrganizationRequest::Write {                    vault: VaultId::new(2),
+                4,
+                wrap_org_payload(OrganizationRequest::Write {
+                    vault: VaultId::new(2),
                     transactions: vec![],
                     idempotency_key: [2u8; 16],
                     request_hash: 99,
-                })),
+                }),
             ),
         ];
 
-        store.apply_committed_entries::<crate::types::LedgerRequest>(&entries, None).await.expect("apply batch");
+        store
+            .apply_committed_entries::<crate::types::OrganizationRequest>(&entries, None)
+            .await
+            .expect("apply batch");
 
         // Now take two snapshots via different code paths.
         // No events DB configured, so event section is deterministically empty.
@@ -5945,7 +6192,6 @@ mod tests {
     }
 
     #[tokio::test]
-
     // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
     // carries an `organization:` field — a single `RaftLogStore`
     // owns writes for exactly one `OrganizationId`. Test rewrite
@@ -5971,10 +6217,13 @@ mod tests {
         let entry = make_committed_entry(
             1,
             1,
-            wrap_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
+            wrap_org_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
         );
 
-        store.apply_committed_entries::<crate::types::LedgerRequest>(&[entry], None).await.expect("apply");
+        store
+            .apply_committed_entries::<crate::types::OrganizationRequest>(&[entry], None)
+            .await
+            .expect("apply");
 
         // Buffer should contain a commitment for this vault
         let commitments = store.drain_state_root_commitments();
@@ -5999,15 +6248,18 @@ mod tests {
         let entry = make_committed_entry(
             1,
             1,
-            wrap_payload(LedgerRequest::System(SystemRequest::CreateOrganization {
+            wrap_system_payload(SystemRequest::CreateOrganization {
                 slug: inferadb_ledger_types::OrganizationSlug::new(999),
                 region: Region::US_EAST_VA,
                 tier: Default::default(),
                 admin: UserId::new(1),
-            })),
+            }),
         );
 
-        store.apply_committed_entries::<crate::types::LedgerRequest>(&[entry], None).await.expect("apply");
+        store
+            .apply_committed_entries::<crate::types::SystemRequest>(&[entry], None)
+            .await
+            .expect("apply");
 
         let commitments = store.drain_state_root_commitments();
         assert!(commitments.is_empty(), "admin ops should not produce commitments");
@@ -6051,12 +6303,13 @@ mod tests {
             make_committed_entry(
                 1,
                 1,
-                wrap_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
+                wrap_org_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
             ),
             make_committed_entry(
                 1,
                 2,
-                wrap_payload(LedgerRequest::Organization(OrganizationRequest::Write {                    vault: VaultId::new(2),
+                wrap_org_payload(OrganizationRequest::Write {
+                    vault: VaultId::new(2),
                     transactions: vec![Transaction {
                         id: [2u8; 16],
                         client_id: ClientId::new("test-client"),
@@ -6071,11 +6324,14 @@ mod tests {
                     }],
                     idempotency_key: [0u8; 16],
                     request_hash: 0,
-                })),
+                }),
             ),
         ];
 
-        store.apply_committed_entries::<crate::types::LedgerRequest>(&entries, None).await.expect("apply");
+        store
+            .apply_committed_entries::<crate::types::OrganizationRequest>(&entries, None)
+            .await
+            .expect("apply");
 
         let commitments = store.drain_state_root_commitments();
         assert_eq!(commitments.len(), 2, "two writes → two commitments");
@@ -6106,9 +6362,12 @@ mod tests {
         let write_entry = make_committed_entry(
             1,
             1,
-            wrap_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
+            wrap_org_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
         );
-        store.apply_committed_entries::<crate::types::LedgerRequest>(&[write_entry], None).await.expect("apply write");
+        store
+            .apply_committed_entries::<crate::types::OrganizationRequest>(&[write_entry], None)
+            .await
+            .expect("apply write");
 
         // Drain the commitment (simulating leader draining for next payload)
         let commitments = store.drain_state_root_commitments();
@@ -6120,18 +6379,21 @@ mod tests {
             1,
             2,
             RaftPayload {
-                request: LedgerRequest::System(SystemRequest::CreateOrganization {
+                request: SystemRequest::CreateOrganization {
                     slug: inferadb_ledger_types::OrganizationSlug::new(9999),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
                     admin: UserId::new(1),
-                }),
+                },
                 proposed_at: Utc::now(),
                 state_root_commitments: commitments,
                 caller: 0,
             },
         );
-        store.apply_committed_entries::<crate::types::LedgerRequest>(&[second_entry], None).await.expect("apply verify");
+        store
+            .apply_committed_entries::<crate::types::SystemRequest>(&[second_entry], None)
+            .await
+            .expect("apply verify");
 
         // No divergence should have been sent
         assert!(
@@ -6141,7 +6403,6 @@ mod tests {
     }
 
     #[tokio::test]
-
     // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
     // carries an `organization:` field — a single `RaftLogStore`
     // owns writes for exactly one `OrganizationId`. Test rewrite
@@ -6167,9 +6428,12 @@ mod tests {
         let write_entry = make_committed_entry(
             1,
             1,
-            wrap_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
+            wrap_org_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
         );
-        store.apply_committed_entries::<crate::types::LedgerRequest>(&[write_entry], None).await.expect("apply write");
+        store
+            .apply_committed_entries::<crate::types::OrganizationRequest>(&[write_entry], None)
+            .await
+            .expect("apply write");
 
         // Drain and tamper with the state root
         let mut commitments = store.drain_state_root_commitments();
@@ -6181,18 +6445,21 @@ mod tests {
             1,
             2,
             RaftPayload {
-                request: LedgerRequest::System(SystemRequest::CreateOrganization {
+                request: SystemRequest::CreateOrganization {
                     slug: inferadb_ledger_types::OrganizationSlug::new(8888),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
                     admin: UserId::new(1),
-                }),
+                },
                 proposed_at: Utc::now(),
                 state_root_commitments: commitments,
                 caller: 0,
             },
         );
-        store.apply_committed_entries::<crate::types::LedgerRequest>(&[verify_entry], None).await.expect("apply verify");
+        store
+            .apply_committed_entries::<crate::types::SystemRequest>(&[verify_entry], None)
+            .await
+            .expect("apply verify");
 
         // Should have received a divergence event
         let divergence = divergence_rx.try_recv().expect("should receive divergence event");
@@ -6226,12 +6493,12 @@ mod tests {
             1,
             1,
             RaftPayload {
-                request: LedgerRequest::System(SystemRequest::CreateOrganization {
+                request: SystemRequest::CreateOrganization {
                     slug: inferadb_ledger_types::OrganizationSlug::new(7777),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
                     admin: UserId::new(1),
-                }),
+                },
                 proposed_at: Utc::now(),
                 state_root_commitments: vec![crate::types::StateRootCommitment {
                     organization: OrganizationId::new(1),
@@ -6242,7 +6509,10 @@ mod tests {
                 caller: 0,
             },
         );
-        store.apply_committed_entries::<crate::types::LedgerRequest>(&[entry], None).await.expect("apply");
+        store
+            .apply_committed_entries::<crate::types::SystemRequest>(&[entry], None)
+            .await
+            .expect("apply");
 
         // No divergence — just skipped
         assert!(
@@ -6271,12 +6541,12 @@ mod tests {
             1,
             1,
             RaftPayload {
-                request: LedgerRequest::System(SystemRequest::CreateOrganization {
+                request: SystemRequest::CreateOrganization {
                     slug: inferadb_ledger_types::OrganizationSlug::new(6666),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
                     admin: UserId::new(1),
-                }),
+                },
                 proposed_at: Utc::now(),
                 state_root_commitments: vec![crate::types::StateRootCommitment {
                     organization: OrganizationId::new(1),
@@ -6288,7 +6558,7 @@ mod tests {
             },
         );
         store
-            .apply_committed_entries::<crate::types::LedgerRequest>(&[entry], None)
+            .apply_committed_entries::<crate::types::SystemRequest>(&[entry], None)
             .await
             .expect("apply should succeed without archive");
     }
@@ -6324,9 +6594,12 @@ mod tests {
         let entry = make_committed_entry(
             1,
             1,
-            wrap_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
+            wrap_org_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
         );
-        store.apply_committed_entries::<crate::types::LedgerRequest>(&[entry], None).await.expect("apply");
+        store
+            .apply_committed_entries::<crate::types::OrganizationRequest>(&[entry], None)
+            .await
+            .expect("apply");
 
         let buf = store.state_root_commitments.lock().unwrap();
         assert!(buf.len() <= 10_000, "buffer should not exceed 10K cap, got {}", buf.len());
@@ -6352,9 +6625,12 @@ mod tests {
         let write_entry = make_committed_entry(
             1,
             1,
-            wrap_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
+            wrap_org_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
         );
-        store.apply_committed_entries::<crate::types::LedgerRequest>(&[write_entry], None).await.expect("apply");
+        store
+            .apply_committed_entries::<crate::types::OrganizationRequest>(&[write_entry], None)
+            .await
+            .expect("apply");
 
         // Drain and tamper
         let mut commitments = store.drain_state_root_commitments();
@@ -6365,19 +6641,19 @@ mod tests {
             1,
             2,
             RaftPayload {
-                request: LedgerRequest::System(SystemRequest::CreateOrganization {
+                request: SystemRequest::CreateOrganization {
                     slug: inferadb_ledger_types::OrganizationSlug::new(5555),
                     region: Region::US_EAST_VA,
                     tier: Default::default(),
                     admin: UserId::new(1),
-                }),
+                },
                 proposed_at: Utc::now(),
                 state_root_commitments: commitments,
                 caller: 0,
             },
         );
         store
-            .apply_committed_entries::<crate::types::LedgerRequest>(&[verify_entry], None)
+            .apply_committed_entries::<crate::types::SystemRequest>(&[verify_entry], None)
             .await
             .expect("should not panic without divergence sender");
     }
@@ -6402,9 +6678,12 @@ mod tests {
         let batch1 = vec![make_committed_entry(
             1,
             1,
-            wrap_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
+            wrap_org_payload(simple_write_request(OrganizationId::new(1), VaultId::new(1))),
         )];
-        store.apply_committed_entries::<crate::types::LedgerRequest>(&batch1, None).await.expect("apply batch 1");
+        store
+            .apply_committed_entries::<crate::types::OrganizationRequest>(&batch1, None)
+            .await
+            .expect("apply batch 1");
 
         let commitments_from_batch1 = store.drain_state_root_commitments();
         assert_eq!(commitments_from_batch1.len(), 1);
@@ -6420,7 +6699,10 @@ mod tests {
                 caller: 0,
             },
         )];
-        store.apply_committed_entries::<crate::types::LedgerRequest>(&batch2, None).await.expect("apply batch 2");
+        store
+            .apply_committed_entries::<crate::types::OrganizationRequest>(&batch2, None)
+            .await
+            .expect("apply batch 2");
 
         // Verification passed — no divergence
         assert!(
@@ -6454,13 +6736,13 @@ mod tests {
         let email_hmac = "test-hmac-activate".to_string();
 
         // Step 0: CreateOnboardingUser — allocates user+org in Provisioning
-        let create_request = LedgerRequest::System(SystemRequest::CreateOnboardingUser {
+        let create_request = SystemRequest::CreateOnboardingUser {
             email_hmac: email_hmac.clone(),
             user_slug,
             organization_slug: org_slug,
             region: Region::US_EAST_VA,
-        });
-        let (response, _) = store.apply_request(&create_request, &mut state);
+        };
+        let (response, _) = store.apply_system(&create_request, &mut state);
         let (user_id, organization_id) = match response {
             LedgerResponse::OnboardingUserCreated { user_id, organization_id } => {
                 (user_id, organization_id)
@@ -6475,17 +6757,17 @@ mod tests {
         );
 
         // Step 2: ActivateOnboardingUser — should persist Active to B+ tree
-        let activate_request = LedgerRequest::System(SystemRequest::ActivateOnboardingUser {
+        let activate_request = SystemRequest::ActivateOnboardingUser {
             user_id,
             user_slug,
             organization_id,
             organization_slug: org_slug,
             email_hmac,
-        });
+        };
         let mut pending = PendingExternalWrites::default();
         let mut events = Vec::new();
         let mut op_index = 0u32;
-        let (response, _) = store.apply_request_with_events(
+        let (response, _) = store.apply_system_request_with_events(
             &activate_request,
             &mut state,
             fixed_timestamp(),
@@ -6541,13 +6823,13 @@ mod tests {
         let org_slug = inferadb_ledger_types::OrganizationSlug::new(7000);
 
         // Create org — starts in Provisioning
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateOrganization {
+        let (response, _) = store.apply_system(
+            &SystemRequest::CreateOrganization {
                 slug: org_slug,
                 region: Region::GLOBAL,
                 tier: Default::default(),
                 admin: UserId::new(1),
-            }),
+            },
             &mut state,
         );
         let org_id = match response {
@@ -6564,11 +6846,11 @@ mod tests {
         let initial_config_version = registry.config_version;
 
         // UpdateOrganizationStatus(Active) — should sync registry
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
+        store.apply_system(
+            &SystemRequest::UpdateOrganizationStatus {
                 organization: org_id,
                 status: OrganizationStatus::Active,
-            }),
+            },
             &mut state,
         );
 
@@ -6587,11 +6869,11 @@ mod tests {
         assert!(registry.deleted_at.is_none(), "deleted_at should not be set for Active");
 
         // UpdateOrganizationStatus(Deleted) — should sync registry + set deleted_at
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
+        store.apply_system(
+            &SystemRequest::UpdateOrganizationStatus {
                 organization: org_id,
                 status: OrganizationStatus::Deleted,
-            }),
+            },
             &mut state,
         );
 
@@ -6627,13 +6909,13 @@ mod tests {
         let org_slug = inferadb_ledger_types::OrganizationSlug::new(8000);
 
         // Simulate saga step 0: CreateOrganization (org starts in Provisioning)
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateOrganization {
+        let (response, _) = store.apply_system(
+            &SystemRequest::CreateOrganization {
                 slug: org_slug,
                 region: Region::GLOBAL,
                 tier: Default::default(),
                 admin: UserId::new(1),
-            }),
+            },
             &mut state,
         );
         let org_id = match response {
@@ -6654,11 +6936,11 @@ mod tests {
 
         // Simulate saga compensation: UpdateOrganizationStatus(Deleted)
         // This is what the saga orchestrator sends on permanent failure.
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
+        store.apply_system(
+            &SystemRequest::UpdateOrganizationStatus {
                 organization: org_id,
                 status: OrganizationStatus::Deleted,
-            }),
+            },
             &mut state,
         );
 
@@ -6707,13 +6989,13 @@ mod tests {
         slug: UserSlug,
         region: Region,
     ) -> UserId {
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateUser {
+        let (response, _) = store.apply_system(
+            &SystemRequest::CreateUser {
                 user: UserId::new(0), // Ignored — state machine assigns
                 admin: false,
                 slug,
                 region,
-            }),
+            },
             state,
         );
         match response {
@@ -6732,8 +7014,8 @@ mod tests {
         user_id: UserId,
         seed: u8,
     ) -> UserCredentialId {
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateUserCredential {
+        let (response, _) = store.apply_system(
+            &SystemRequest::CreateUserCredential {
                 user_id,
                 credential_type: CredentialType::Passkey,
                 credential_data: CredentialData::Passkey(PasskeyCredential {
@@ -6747,7 +7029,7 @@ mod tests {
                     aaguid: None,
                 }),
                 name: format!("Passkey {seed}"),
-            }),
+            },
             state,
         );
         match response {
@@ -6773,8 +7055,8 @@ mod tests {
         code_hashes: Vec<[u8; 32]>,
     ) -> UserCredentialId {
         let total = code_hashes.len() as u8;
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateUserCredential {
+        let (response, _) = store.apply_system(
+            &SystemRequest::CreateUserCredential {
                 user_id,
                 credential_type: CredentialType::RecoveryCode,
                 credential_data: CredentialData::RecoveryCode(RecoveryCodeCredential {
@@ -6782,7 +7064,7 @@ mod tests {
                     total_generated: total,
                 }),
                 name: "Recovery codes".to_string(),
-            }),
+            },
             state,
         );
         match response {
@@ -6792,15 +7074,16 @@ mod tests {
     }
 
     /// Applies a request at `fixed_timestamp()`, discarding events and pending writes.
-    fn apply_at_fixed_time(
+    fn apply_at_fixed_time<R: ApplyableRequest>(
         store: &RaftLogStore<FileBackend>,
-        request: &LedgerRequest,
+        request: &R,
         state: &mut AppliedState,
     ) -> LedgerResponse {
         let mut events = Vec::new();
         let mut op_index = 0u32;
         let mut pending = PendingExternalWrites::default();
-        let (response, _) = store.apply_request_with_events(
+        let (response, _) = R::apply_on(
+            store,
             request,
             state,
             fixed_timestamp(),
@@ -6825,14 +7108,14 @@ mod tests {
         nonce: [u8; 32],
         expires_at: DateTime<Utc>,
     ) {
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateTotpChallenge {
+        let (response, _) = store.apply_system(
+            &SystemRequest::CreateTotpChallenge {
                 user_id,
                 user_slug,
                 nonce,
                 expires_at,
                 primary_method: PrimaryAuthMethod::EmailCode,
-            }),
+            },
             state,
         );
         match response {
@@ -6863,8 +7146,8 @@ mod tests {
 
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateUserCredential {
+        let (response, _) = store.apply_system(
+            &SystemRequest::CreateUserCredential {
                 user_id,
                 credential_type: CredentialType::Totp,
                 credential_data: CredentialData::Totp(TotpCredential {
@@ -6874,7 +7157,7 @@ mod tests {
                     period: 30,
                 }),
                 name: "Authenticator app".to_string(),
-            }),
+            },
             &mut state,
         );
 
@@ -6894,8 +7177,8 @@ mod tests {
 
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateUserCredential {
+        let (response, _) = store.apply_system(
+            &SystemRequest::CreateUserCredential {
                 user_id,
                 credential_type: CredentialType::RecoveryCode,
                 credential_data: CredentialData::RecoveryCode(RecoveryCodeCredential {
@@ -6903,7 +7186,7 @@ mod tests {
                     total_generated: 3,
                 }),
                 name: "Recovery codes".to_string(),
-            }),
+            },
             &mut state,
         );
 
@@ -6923,7 +7206,7 @@ mod tests {
 
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
 
-        let totp_request = LedgerRequest::System(SystemRequest::CreateUserCredential {
+        let totp_request = SystemRequest::CreateUserCredential {
             user_id,
             credential_type: CredentialType::Totp,
             credential_data: CredentialData::Totp(TotpCredential {
@@ -6933,14 +7216,14 @@ mod tests {
                 period: 30,
             }),
             name: "TOTP 1".to_string(),
-        });
+        };
 
         // First TOTP succeeds
-        let (r1, _) = store.apply_request(&totp_request, &mut state);
+        let (r1, _) = store.apply_system(&totp_request, &mut state);
         assert!(matches!(r1, LedgerResponse::UserCredentialCreated { .. }));
 
         // Second TOTP rejected (one TOTP per user invariant)
-        let totp_request_2 = LedgerRequest::System(SystemRequest::CreateUserCredential {
+        let totp_request_2 = SystemRequest::CreateUserCredential {
             user_id,
             credential_type: CredentialType::Totp,
             credential_data: CredentialData::Totp(TotpCredential {
@@ -6950,8 +7233,8 @@ mod tests {
                 period: 30,
             }),
             name: "TOTP 2".to_string(),
-        });
-        let (r2, _) = store.apply_request(&totp_request_2, &mut state);
+        };
+        let (r2, _) = store.apply_system(&totp_request_2, &mut state);
         match r2 {
             LedgerResponse::Error { code, .. } => {
                 assert_eq!(code, ErrorCode::AlreadyExists);
@@ -6969,14 +7252,14 @@ mod tests {
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
         let cred_id = create_passkey_credential(&store, &mut state, user_id);
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::UpdateUserCredential {
+        let (response, _) = store.apply_system(
+            &SystemRequest::UpdateUserCredential {
                 user_id,
                 credential_id: cred_id,
                 name: Some("Renamed Key".to_string()),
                 enabled: Some(false),
                 passkey_update: None,
-            }),
+            },
             &mut state,
         );
 
@@ -6996,14 +7279,14 @@ mod tests {
 
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::UpdateUserCredential {
+        let (response, _) = store.apply_system(
+            &SystemRequest::UpdateUserCredential {
                 user_id,
                 credential_id: UserCredentialId::new(999),
                 name: Some("Nonexistent".to_string()),
                 enabled: None,
                 passkey_update: None,
-            }),
+            },
             &mut state,
         );
 
@@ -7026,11 +7309,8 @@ mod tests {
         create_passkey_credential_with_seed(&store, &mut state, user_id, 7);
 
         // Delete first credential
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::DeleteUserCredential {
-                user_id,
-                credential_id: cred1,
-            }),
+        let (response, _) = store.apply_system(
+            &SystemRequest::DeleteUserCredential { user_id, credential_id: cred1 },
             &mut state,
         );
 
@@ -7052,11 +7332,8 @@ mod tests {
         let cred_id = create_passkey_credential(&store, &mut state, user_id);
 
         // Attempt to delete the only credential
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::DeleteUserCredential {
-                user_id,
-                credential_id: cred_id,
-            }),
+        let (response, _) = store.apply_system(
+            &SystemRequest::DeleteUserCredential { user_id, credential_id: cred_id },
             &mut state,
         );
 
@@ -7095,8 +7372,8 @@ mod tests {
         create_recovery_credential(&store, &mut state, user_id, vec![[0xAA; 32]]);
 
         // Second recovery code set rejected (one per user invariant)
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateUserCredential {
+        let (response, _) = store.apply_system(
+            &SystemRequest::CreateUserCredential {
                 user_id,
                 credential_type: CredentialType::RecoveryCode,
                 credential_data: CredentialData::RecoveryCode(RecoveryCodeCredential {
@@ -7104,7 +7381,7 @@ mod tests {
                     total_generated: 1,
                 }),
                 name: "Recovery codes 2".to_string(),
-            }),
+            },
             &mut state,
         );
 
@@ -7128,8 +7405,8 @@ mod tests {
         create_passkey_credential(&store, &mut state, user_id);
 
         // Second passkey with same credential_id bytes rejected
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateUserCredential {
+        let (response, _) = store.apply_system(
+            &SystemRequest::CreateUserCredential {
                 user_id,
                 credential_type: CredentialType::Passkey,
                 credential_data: CredentialData::Passkey(PasskeyCredential {
@@ -7143,7 +7420,7 @@ mod tests {
                     aaguid: None,
                 }),
                 name: "Duplicate passkey".to_string(),
-            }),
+            },
             &mut state,
         );
 
@@ -7205,14 +7482,14 @@ mod tests {
         // 4th challenge should be rate limited
         let mut nonce_4 = [0u8; 32];
         nonce_4[0] = 3;
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateTotpChallenge {
+        let (response, _) = store.apply_system(
+            &SystemRequest::CreateTotpChallenge {
                 user_id,
                 user_slug: UserSlug::new(100),
                 nonce: nonce_4,
                 expires_at,
                 primary_method: PrimaryAuthMethod::EmailCode,
-            }),
+            },
             &mut state,
         );
 
@@ -7239,14 +7516,14 @@ mod tests {
 
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::ConsumeTotpAndCreateSession {
+            &SystemRequest::ConsumeTotpAndCreateSession {
                 user_id,
                 nonce,
                 token_hash: [0xCC; 32],
                 family: [0xDD; 16],
                 kid: "key-001".to_string(),
                 ttl_secs: 3600,
-            }),
+            },
             &mut state,
         );
 
@@ -7275,14 +7552,14 @@ mod tests {
         // Apply at block_timestamp == expires_at (expired: uses <=)
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::ConsumeTotpAndCreateSession {
+            &SystemRequest::ConsumeTotpAndCreateSession {
                 user_id,
                 nonce,
                 token_hash: [0xCC; 32],
                 family: [0xDD; 16],
                 kid: "key-001".to_string(),
                 ttl_secs: 3600,
-            }),
+            },
             &mut state,
         );
 
@@ -7305,15 +7582,15 @@ mod tests {
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
 
         // Try to consume a non-existent challenge
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::ConsumeTotpAndCreateSession {
+        let (response, _) = store.apply_system(
+            &SystemRequest::ConsumeTotpAndCreateSession {
                 user_id,
                 nonce: [0xFF; 32],
                 token_hash: [0xCC; 32],
                 family: [0xDD; 16],
                 kid: "key-001".to_string(),
                 ttl_secs: 3600,
-            }),
+            },
             &mut state,
         );
 
@@ -7341,10 +7618,8 @@ mod tests {
         // Increment 3 times (0→1, 1→2, 2→3). Check >= 3 is BEFORE increment,
         // so all 3 succeed. The 4th would be rejected.
         for expected in 1..=3u8 {
-            let (response, _) = store.apply_request(
-                &LedgerRequest::System(SystemRequest::IncrementTotpAttempt { user_id, nonce }),
-                &mut state,
-            );
+            let (response, _) = store
+                .apply_system(&SystemRequest::IncrementTotpAttempt { user_id, nonce }, &mut state);
             match response {
                 LedgerResponse::TotpAttemptIncremented { attempts } => {
                     assert_eq!(attempts, expected);
@@ -7356,14 +7631,14 @@ mod tests {
         // Consumption should be rejected (defense-in-depth: attempts >= 3)
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::ConsumeTotpAndCreateSession {
+            &SystemRequest::ConsumeTotpAndCreateSession {
                 user_id,
                 nonce,
                 token_hash: [0xCC; 32],
                 family: [0xDD; 16],
                 kid: "key-001".to_string(),
                 ttl_secs: 3600,
-            }),
+            },
             &mut state,
         );
 
@@ -7389,10 +7664,8 @@ mod tests {
         create_test_totp_challenge(&store, &mut state, user_id, user_slug, nonce, expires_at);
 
         // First increment: 0 → 1
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::IncrementTotpAttempt { user_id, nonce }),
-            &mut state,
-        );
+        let (response, _) =
+            store.apply_system(&SystemRequest::IncrementTotpAttempt { user_id, nonce }, &mut state);
         match response {
             LedgerResponse::TotpAttemptIncremented { attempts } => {
                 assert_eq!(attempts, 1);
@@ -7401,10 +7674,8 @@ mod tests {
         }
 
         // Second increment: 1 → 2
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::IncrementTotpAttempt { user_id, nonce }),
-            &mut state,
-        );
+        let (response, _) =
+            store.apply_system(&SystemRequest::IncrementTotpAttempt { user_id, nonce }, &mut state);
         match response {
             LedgerResponse::TotpAttemptIncremented { attempts } => {
                 assert_eq!(attempts, 2);
@@ -7428,17 +7699,12 @@ mod tests {
 
         // Increment 3 times (0→1, 1→2, 2→3) — all succeed because check is >= 3 BEFORE increment
         for _ in 0..3 {
-            store.apply_request(
-                &LedgerRequest::System(SystemRequest::IncrementTotpAttempt { user_id, nonce }),
-                &mut state,
-            );
+            store.apply_system(&SystemRequest::IncrementTotpAttempt { user_id, nonce }, &mut state);
         }
 
         // 4th increment: attempts == 3 >= MAX_TOTP_ATTEMPTS → rejected
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::IncrementTotpAttempt { user_id, nonce }),
-            &mut state,
-        );
+        let (response, _) =
+            store.apply_system(&SystemRequest::IncrementTotpAttempt { user_id, nonce }, &mut state);
 
         match response {
             LedgerResponse::Error { code, .. } => {
@@ -7456,11 +7722,8 @@ mod tests {
 
         let user_id = create_test_user(&store, &mut state, UserSlug::new(100), Region::US_EAST_VA);
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::IncrementTotpAttempt {
-                user_id,
-                nonce: [0xFF; 32],
-            }),
+        let (response, _) = store.apply_system(
+            &SystemRequest::IncrementTotpAttempt { user_id, nonce: [0xFF; 32] },
             &mut state,
         );
 
@@ -7496,7 +7759,7 @@ mod tests {
 
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::ConsumeRecoveryAndCreateSession {
+            &SystemRequest::ConsumeRecoveryAndCreateSession {
                 user_id,
                 nonce,
                 code_hash,
@@ -7505,7 +7768,7 @@ mod tests {
                 family: [0xDD; 16],
                 kid: "key-001".to_string(),
                 ttl_secs: 3600,
-            }),
+            },
             &mut state,
         );
 
@@ -7537,7 +7800,7 @@ mod tests {
         // Try with wrong code hash
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::ConsumeRecoveryAndCreateSession {
+            &SystemRequest::ConsumeRecoveryAndCreateSession {
                 user_id,
                 nonce,
                 code_hash: [0x00; 32], // Wrong hash!
@@ -7546,7 +7809,7 @@ mod tests {
                 family: [0xDD; 16],
                 kid: "key-001".to_string(),
                 ttl_secs: 3600,
-            }),
+            },
             &mut state,
         );
 
@@ -7580,7 +7843,7 @@ mod tests {
         // Consume at fixed_timestamp == expires_at (expired: <=)
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::ConsumeRecoveryAndCreateSession {
+            &SystemRequest::ConsumeRecoveryAndCreateSession {
                 user_id,
                 nonce,
                 code_hash: [0xEE; 32],
@@ -7589,7 +7852,7 @@ mod tests {
                 family: [0xDD; 16],
                 kid: "key-001".to_string(),
                 ttl_secs: 3600,
-            }),
+            },
             &mut state,
         );
 
@@ -7617,14 +7880,14 @@ mod tests {
         // First consumption succeeds
         let r1 = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::ConsumeTotpAndCreateSession {
+            &SystemRequest::ConsumeTotpAndCreateSession {
                 user_id,
                 nonce,
                 token_hash: [0xCC; 32],
                 family: [0xDD; 16],
                 kid: "key-001".to_string(),
                 ttl_secs: 3600,
-            }),
+            },
             &mut state,
         );
         assert!(matches!(r1, LedgerResponse::TotpVerified { .. }));
@@ -7632,14 +7895,14 @@ mod tests {
         // Second consumption with same nonce fails (challenge deleted)
         let r2 = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::ConsumeTotpAndCreateSession {
+            &SystemRequest::ConsumeTotpAndCreateSession {
                 user_id,
                 nonce,
                 token_hash: [0xEE; 32],
                 family: [0xFF; 16],
                 kid: "key-002".to_string(),
                 ttl_secs: 3600,
-            }),
+            },
             &mut state,
         );
         match r2 {
@@ -7682,13 +7945,13 @@ mod tests {
         let new_user = UserId::new(42);
         let new_user_slug = UserSlug::new(4200);
 
-        let request = LedgerRequest::Organization(OrganizationRequest::AddOrganizationMember {
+        let request = OrganizationRequest::AddOrganizationMember {
             organization: org_id,
             user: new_user,
             user_slug: new_user_slug,
             role: OrganizationMemberRole::Member,
-        });
-        let (response, _) = store.apply_request(&request, &mut state);
+        };
+        let (response, _) = store.apply_org(&request, &mut state);
 
         match response {
             LedgerResponse::OrganizationMemberAdded { organization_id, already_member } => {
@@ -7718,22 +7981,22 @@ mod tests {
         let new_user = UserId::new(43);
         let new_user_slug = UserSlug::new(4300);
 
-        let request = LedgerRequest::Organization(OrganizationRequest::AddOrganizationMember {
+        let request = OrganizationRequest::AddOrganizationMember {
             organization: org_id,
             user: new_user,
             user_slug: new_user_slug,
             role: OrganizationMemberRole::Member,
-        });
+        };
 
         // First add
-        let (response, _) = store.apply_request(&request, &mut state);
+        let (response, _) = store.apply_org(&request, &mut state);
         assert!(matches!(
             response,
             LedgerResponse::OrganizationMemberAdded { already_member: false, .. }
         ));
 
         // Second add — idempotent, returns already_member=true
-        let (response, _) = store.apply_request(&request, &mut state);
+        let (response, _) = store.apply_org(&request, &mut state);
         match response {
             LedgerResponse::OrganizationMemberAdded { organization_id, already_member } => {
                 assert_eq!(organization_id, org_id);
@@ -7749,13 +8012,13 @@ mod tests {
         let store = create_store_with_state_layer(&dir);
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let request = LedgerRequest::Organization(OrganizationRequest::AddOrganizationMember {
+        let request = OrganizationRequest::AddOrganizationMember {
             organization: OrganizationId::new(9999),
             user: UserId::new(1),
             user_slug: UserSlug::new(100),
             role: OrganizationMemberRole::Member,
-        });
-        let (response, _) = store.apply_request(&request, &mut state);
+        };
+        let (response, _) = store.apply_org(&request, &mut state);
 
         match response {
             LedgerResponse::Error { code, .. } => {
@@ -7782,14 +8045,14 @@ mod tests {
             Region::US_EAST_VA,
         );
 
-        let request = LedgerRequest::Organization(OrganizationRequest::CreateOrganizationInvite {
+        let request = OrganizationRequest::CreateOrganizationInvite {
             organization: org_id,
             slug: InviteSlug::new(9999),
             token_hash: [0xAB; 32],
             invitee_email_hmac: "deadbeef".to_string(),
             ttl_hours: 168,
-        });
-        let (response, _) = store.apply_request(&request, &mut state);
+        };
+        let (response, _) = store.apply_org(&request, &mut state);
 
         match response {
             LedgerResponse::OrganizationInviteCreated { invite_id, invite_slug, expires_at } => {
@@ -7809,14 +8072,14 @@ mod tests {
         }
 
         // Second invite should get InviteId(2)
-        let request2 = LedgerRequest::Organization(OrganizationRequest::CreateOrganizationInvite {
+        let request2 = OrganizationRequest::CreateOrganizationInvite {
             organization: org_id,
             slug: InviteSlug::new(8888),
             token_hash: [0xCD; 32],
             invitee_email_hmac: "cafe0123".to_string(),
             ttl_hours: 24,
-        });
-        let (response2, _) = store.apply_request(&request2, &mut state);
+        };
+        let (response2, _) = store.apply_org(&request2, &mut state);
 
         match response2 {
             LedgerResponse::OrganizationInviteCreated { invite_id, .. } => {
@@ -7832,14 +8095,14 @@ mod tests {
         let store = create_store_with_state_layer(&dir);
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let request = LedgerRequest::Organization(OrganizationRequest::CreateOrganizationInvite {
+        let request = OrganizationRequest::CreateOrganizationInvite {
             organization: OrganizationId::new(9999),
             slug: InviteSlug::new(100),
             token_hash: [0; 32],
             invitee_email_hmac: "hmac".to_string(),
             ttl_hours: 168,
-        });
-        let (response, _) = store.apply_request(&request, &mut state);
+        };
+        let (response, _) = store.apply_org(&request, &mut state);
 
         match response {
             LedgerResponse::Error { code, .. } => {
@@ -7863,28 +8126,28 @@ mod tests {
         );
 
         // Create an invitation first
-        let create_req = LedgerRequest::Organization(OrganizationRequest::CreateOrganizationInvite {
+        let create_req = OrganizationRequest::CreateOrganizationInvite {
             organization: org_id,
             slug: InviteSlug::new(9999),
             token_hash: [0xAB; 32],
             invitee_email_hmac: "deadbeef".to_string(),
             ttl_hours: 168,
-        });
-        let (create_resp, _) = store.apply_request(&create_req, &mut state);
+        };
+        let (create_resp, _) = store.apply_org(&create_req, &mut state);
         let invite_id = match create_resp {
             LedgerResponse::OrganizationInviteCreated { invite_id, .. } => invite_id,
             other => panic!("expected OrganizationInviteCreated, got {other}"),
         };
 
         // Resolve it as Accepted
-        let resolve_req = LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
+        let resolve_req = OrganizationRequest::ResolveOrganizationInvite {
             invite: invite_id,
             organization: org_id,
             status: InvitationStatus::Accepted,
             invitee_email_hmac: "deadbeef".to_string(),
             token_hash: [0xAB; 32],
-        });
-        let (response, _) = store.apply_request(&resolve_req, &mut state);
+        };
+        let (response, _) = store.apply_org(&resolve_req, &mut state);
 
         match response {
             LedgerResponse::OrganizationInviteResolved { invite_id: resolved_id } => {
@@ -7908,39 +8171,39 @@ mod tests {
         );
 
         // Create an invitation
-        let create_req = LedgerRequest::Organization(OrganizationRequest::CreateOrganizationInvite {
+        let create_req = OrganizationRequest::CreateOrganizationInvite {
             organization: org_id,
             slug: InviteSlug::new(9999),
             token_hash: [0xAB; 32],
             invitee_email_hmac: "deadbeef".to_string(),
             ttl_hours: 168,
-        });
-        let (create_resp, _) = store.apply_request(&create_req, &mut state);
+        };
+        let (create_resp, _) = store.apply_org(&create_req, &mut state);
         let invite_id = match create_resp {
             LedgerResponse::OrganizationInviteCreated { invite_id, .. } => invite_id,
             other => panic!("expected OrganizationInviteCreated, got {other}"),
         };
 
         // Resolve as Accepted (first time — succeeds)
-        let resolve_req = LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
+        let resolve_req = OrganizationRequest::ResolveOrganizationInvite {
             invite: invite_id,
             organization: org_id,
             status: InvitationStatus::Accepted,
             invitee_email_hmac: "deadbeef".to_string(),
             token_hash: [0xAB; 32],
-        });
-        let (resp1, _) = store.apply_request(&resolve_req, &mut state);
+        };
+        let (resp1, _) = store.apply_org(&resolve_req, &mut state);
         assert!(matches!(resp1, LedgerResponse::OrganizationInviteResolved { .. }));
 
         // Try to resolve again (CAS failure — already resolved)
-        let resolve_again = LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
+        let resolve_again = OrganizationRequest::ResolveOrganizationInvite {
             invite: invite_id,
             organization: org_id,
             status: InvitationStatus::Revoked,
             invitee_email_hmac: "deadbeef".to_string(),
             token_hash: [0xAB; 32],
-        });
-        let (resp2, _) = store.apply_request(&resolve_again, &mut state);
+        };
+        let (resp2, _) = store.apply_org(&resolve_again, &mut state);
 
         match resp2 {
             LedgerResponse::Error { code, .. } => {
@@ -7964,39 +8227,39 @@ mod tests {
         );
 
         // Create invitation
-        let create_req = LedgerRequest::Organization(OrganizationRequest::CreateOrganizationInvite {
+        let create_req = OrganizationRequest::CreateOrganizationInvite {
             organization: org_id,
             slug: InviteSlug::new(9999),
             token_hash: [0xAB; 32],
             invitee_email_hmac: "deadbeef".to_string(),
             ttl_hours: 168,
-        });
-        let (create_resp, _) = store.apply_request(&create_req, &mut state);
+        };
+        let (create_resp, _) = store.apply_org(&create_req, &mut state);
         let invite_id = match create_resp {
             LedgerResponse::OrganizationInviteCreated { invite_id, .. } => invite_id,
             other => panic!("expected OrganizationInviteCreated, got {other}"),
         };
 
         // Revoke first
-        let revoke_req = LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
+        let revoke_req = OrganizationRequest::ResolveOrganizationInvite {
             invite: invite_id,
             organization: org_id,
             status: InvitationStatus::Revoked,
             invitee_email_hmac: "deadbeef".to_string(),
             token_hash: [0xAB; 32],
-        });
-        let (resp1, _) = store.apply_request(&revoke_req, &mut state);
+        };
+        let (resp1, _) = store.apply_org(&revoke_req, &mut state);
         assert!(matches!(resp1, LedgerResponse::OrganizationInviteResolved { .. }));
 
         // Try to accept after revoke — should fail
-        let accept_req = LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
+        let accept_req = OrganizationRequest::ResolveOrganizationInvite {
             invite: invite_id,
             organization: org_id,
             status: InvitationStatus::Accepted,
             invitee_email_hmac: "deadbeef".to_string(),
             token_hash: [0xAB; 32],
-        });
-        let (resp2, _) = store.apply_request(&accept_req, &mut state);
+        };
+        let (resp2, _) = store.apply_org(&accept_req, &mut state);
 
         match resp2 {
             LedgerResponse::Error { code, .. } => {
@@ -8020,39 +8283,39 @@ mod tests {
         );
 
         // Create invitation
-        let create_req = LedgerRequest::Organization(OrganizationRequest::CreateOrganizationInvite {
+        let create_req = OrganizationRequest::CreateOrganizationInvite {
             organization: org_id,
             slug: InviteSlug::new(9999),
             token_hash: [0xAB; 32],
             invitee_email_hmac: "deadbeef".to_string(),
             ttl_hours: 168,
-        });
-        let (create_resp, _) = store.apply_request(&create_req, &mut state);
+        };
+        let (create_resp, _) = store.apply_org(&create_req, &mut state);
         let invite_id = match create_resp {
             LedgerResponse::OrganizationInviteCreated { invite_id, .. } => invite_id,
             other => panic!("expected OrganizationInviteCreated, got {other}"),
         };
 
         // Accept first
-        let accept_req = LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
+        let accept_req = OrganizationRequest::ResolveOrganizationInvite {
             invite: invite_id,
             organization: org_id,
             status: InvitationStatus::Accepted,
             invitee_email_hmac: "deadbeef".to_string(),
             token_hash: [0xAB; 32],
-        });
-        let (resp1, _) = store.apply_request(&accept_req, &mut state);
+        };
+        let (resp1, _) = store.apply_org(&accept_req, &mut state);
         assert!(matches!(resp1, LedgerResponse::OrganizationInviteResolved { .. }));
 
         // Try to expire after accept — should fail (CAS rejects non-Pending)
-        let expire_req = LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
+        let expire_req = OrganizationRequest::ResolveOrganizationInvite {
             invite: invite_id,
             organization: org_id,
             status: InvitationStatus::Expired,
             invitee_email_hmac: "deadbeef".to_string(),
             token_hash: [0xAB; 32],
-        });
-        let (resp2, _) = store.apply_request(&expire_req, &mut state);
+        };
+        let (resp2, _) = store.apply_org(&expire_req, &mut state);
 
         match resp2 {
             LedgerResponse::Error { code, .. } => {
@@ -8076,39 +8339,39 @@ mod tests {
         );
 
         // Create invitation
-        let create_req = LedgerRequest::Organization(OrganizationRequest::CreateOrganizationInvite {
+        let create_req = OrganizationRequest::CreateOrganizationInvite {
             organization: org_id,
             slug: InviteSlug::new(9999),
             token_hash: [0xAB; 32],
             invitee_email_hmac: "deadbeef".to_string(),
             ttl_hours: 168,
-        });
-        let (create_resp, _) = store.apply_request(&create_req, &mut state);
+        };
+        let (create_resp, _) = store.apply_org(&create_req, &mut state);
         let invite_id = match create_resp {
             LedgerResponse::OrganizationInviteCreated { invite_id, .. } => invite_id,
             other => panic!("expected OrganizationInviteCreated, got {other}"),
         };
 
         // Expire first
-        let expire_req = LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
+        let expire_req = OrganizationRequest::ResolveOrganizationInvite {
             invite: invite_id,
             organization: org_id,
             status: InvitationStatus::Expired,
             invitee_email_hmac: "deadbeef".to_string(),
             token_hash: [0xAB; 32],
-        });
-        let (resp1, _) = store.apply_request(&expire_req, &mut state);
+        };
+        let (resp1, _) = store.apply_org(&expire_req, &mut state);
         assert!(matches!(resp1, LedgerResponse::OrganizationInviteResolved { .. }));
 
         // Try to decline after expire — should fail
-        let decline_req = LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
+        let decline_req = OrganizationRequest::ResolveOrganizationInvite {
             invite: invite_id,
             organization: org_id,
             status: InvitationStatus::Declined,
             invitee_email_hmac: "deadbeef".to_string(),
             token_hash: [0xAB; 32],
-        });
-        let (resp2, _) = store.apply_request(&decline_req, &mut state);
+        };
+        let (resp2, _) = store.apply_org(&decline_req, &mut state);
 
         match resp2 {
             LedgerResponse::Error { code, .. } => {
@@ -8132,14 +8395,14 @@ mod tests {
         );
 
         // Create an invitation (writes email hash index with "deadbeef" HMAC)
-        let create_req = LedgerRequest::Organization(OrganizationRequest::CreateOrganizationInvite {
+        let create_req = OrganizationRequest::CreateOrganizationInvite {
             organization: org_id,
             slug: InviteSlug::new(9999),
             token_hash: [0xAB; 32],
             invitee_email_hmac: "deadbeef".to_string(),
             ttl_hours: 168,
-        });
-        let (create_resp, _) = store.apply_request(&create_req, &mut state);
+        };
+        let (create_resp, _) = store.apply_org(&create_req, &mut state);
         let invite_id = match create_resp {
             LedgerResponse::OrganizationInviteCreated { invite_id, .. } => invite_id,
             other => panic!("expected OrganizationInviteCreated, got {other}"),
@@ -8154,14 +8417,14 @@ mod tests {
         assert!(old_entry.is_some(), "old HMAC index entry should exist");
 
         // Rehash: old_hmac="deadbeef" → new_hmac="cafebabe"
-        let rehash_req = LedgerRequest::Organization(OrganizationRequest::RehashInviteEmailIndex {
+        let rehash_req = OrganizationRequest::RehashInviteEmailIndex {
             invite: invite_id,
             old_hmac: "deadbeef".to_string(),
             new_hmac: "cafebabe".to_string(),
             organization: org_id,
             status: InvitationStatus::Pending,
-        });
-        let (rehash_resp, _) = store.apply_request(&rehash_req, &mut state);
+        };
+        let (rehash_resp, _) = store.apply_org(&rehash_req, &mut state);
         assert!(
             matches!(rehash_resp, LedgerResponse::InviteEmailIndexRehashed { .. }),
             "expected InviteEmailIndexRehashed, got {rehash_resp}"
@@ -8202,45 +8465,45 @@ mod tests {
         );
 
         // Create invitation
-        let create_req = LedgerRequest::Organization(OrganizationRequest::CreateOrganizationInvite {
+        let create_req = OrganizationRequest::CreateOrganizationInvite {
             organization: org_id,
             slug: InviteSlug::new(9999),
             token_hash: [0xAB; 32],
             invitee_email_hmac: "deadbeef".to_string(),
             ttl_hours: 168,
-        });
-        let (create_resp, _) = store.apply_request(&create_req, &mut state);
+        };
+        let (create_resp, _) = store.apply_org(&create_req, &mut state);
         let invite_id = match create_resp {
             LedgerResponse::OrganizationInviteCreated { invite_id, .. } => invite_id,
             other => panic!("expected OrganizationInviteCreated, got {other}"),
         };
 
         // Resolve as Accepted (simulates step 7 in accept flow succeeding)
-        let resolve_req = LedgerRequest::Organization(OrganizationRequest::ResolveOrganizationInvite {
+        let resolve_req = OrganizationRequest::ResolveOrganizationInvite {
             invite: invite_id,
             organization: org_id,
             status: InvitationStatus::Accepted,
             invitee_email_hmac: "deadbeef".to_string(),
             token_hash: [0xAB; 32],
-        });
-        let (resolve_resp, _) = store.apply_request(&resolve_req, &mut state);
+        };
+        let (resolve_resp, _) = store.apply_org(&resolve_req, &mut state);
         assert!(matches!(resolve_resp, LedgerResponse::OrganizationInviteResolved { .. }));
 
         // Retry resolve — CAS rejects (already Accepted), simulating duplicate call
-        let (retry_resolve, _) = store.apply_request(&resolve_req, &mut state);
+        let (retry_resolve, _) = store.apply_org(&resolve_req, &mut state);
         assert!(matches!(
             retry_resolve,
             LedgerResponse::Error { code: ErrorCode::InvitationAlreadyResolved, .. }
         ));
 
         // AddOrganizationMember — first time
-        let add_req = LedgerRequest::Organization(OrganizationRequest::AddOrganizationMember {
+        let add_req = OrganizationRequest::AddOrganizationMember {
             organization: org_id,
             user: UserId::new(42),
             user_slug: UserSlug::new(4200),
             role: inferadb_ledger_state::system::OrganizationMemberRole::Member,
-        });
-        let (add_resp, _) = store.apply_request(&add_req, &mut state);
+        };
+        let (add_resp, _) = store.apply_org(&add_req, &mut state);
         match &add_resp {
             LedgerResponse::OrganizationMemberAdded { already_member, .. } => {
                 assert!(!already_member);
@@ -8249,7 +8512,7 @@ mod tests {
         }
 
         // Retry AddOrganizationMember — idempotent (simulating partial failure recovery)
-        let (add_retry, _) = store.apply_request(&add_req, &mut state);
+        let (add_retry, _) = store.apply_org(&add_req, &mut state);
         match &add_retry {
             LedgerResponse::OrganizationMemberAdded { already_member, .. } => {
                 assert!(already_member, "retry should report already_member");
@@ -8273,14 +8536,14 @@ mod tests {
 
         // Test with different TTL values
         for ttl in [1, 24, 168, 720] {
-            let request = LedgerRequest::Organization(OrganizationRequest::CreateOrganizationInvite {
+            let request = OrganizationRequest::CreateOrganizationInvite {
                 organization: org_id,
                 slug: InviteSlug::new(1000 + u64::from(ttl)),
                 token_hash: [ttl as u8; 32],
                 invitee_email_hmac: format!("hmac_{ttl}"),
                 ttl_hours: ttl,
-            });
-            let (response, _) = store.apply_request(&request, &mut state);
+            };
+            let (response, _) = store.apply_org(&request, &mut state);
 
             match response {
                 LedgerResponse::OrganizationInviteCreated { expires_at, .. } => {
@@ -8319,13 +8582,13 @@ mod tests {
         );
 
         // Create a vault first
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateVault {
                 organization: org_id,
                 slug: VaultSlug::new(1),
                 name: Some("doomed-vault".to_string()),
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
         let vault_id = match response {
@@ -8334,8 +8597,8 @@ mod tests {
         };
 
         // Delete it
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::DeleteVault { organization: org_id, vault: vault_id }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::DeleteVault { organization: org_id, vault: vault_id },
             &mut state,
         );
 
@@ -8357,11 +8620,11 @@ mod tests {
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::DeleteVault {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::DeleteVault {
                 organization: OrganizationId::new(999),
                 vault: VaultId::new(999),
-            }),
+            },
             &mut state,
         );
 
@@ -8386,13 +8649,13 @@ mod tests {
         );
 
         // Create vault
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateVault {
                 organization: org_id,
                 slug: VaultSlug::new(1),
                 name: Some("test-vault".to_string()),
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
         let vault_id = match response {
@@ -8405,12 +8668,12 @@ mod tests {
             mode: inferadb_ledger_types::BlockRetentionMode::Compacted,
             retention_blocks: 100,
         };
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::UpdateVault {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::UpdateVault {
                 organization: org_id,
                 vault: vault_id,
                 retention_policy: Some(new_policy),
-            }),
+            },
             &mut state,
         );
 
@@ -8442,13 +8705,13 @@ mod tests {
             Region::US_EAST_VA,
         );
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateVault {
                 organization: org_id,
                 slug: VaultSlug::new(1),
                 name: Some("test-vault".to_string()),
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
         let vault_id = match response {
@@ -8457,12 +8720,12 @@ mod tests {
         };
 
         // Update with no fields
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::UpdateVault {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::UpdateVault {
                 organization: org_id,
                 vault: vault_id,
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
 
@@ -8479,12 +8742,12 @@ mod tests {
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::UpdateVault {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::UpdateVault {
                 organization: OrganizationId::new(999),
                 vault: VaultId::new(999),
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
 
@@ -8509,13 +8772,13 @@ mod tests {
         );
 
         // Create and delete a vault
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateVault {
                 organization: org_id,
                 slug: VaultSlug::new(1),
                 name: Some("test-vault".to_string()),
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
         let vault_id = match response {
@@ -8523,18 +8786,18 @@ mod tests {
             other => panic!("expected VaultCreated, got {other}"),
         };
 
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::DeleteVault { organization: org_id, vault: vault_id }),
+        store.apply_org(
+            &OrganizationRequest::DeleteVault { organization: org_id, vault: vault_id },
             &mut state,
         );
 
         // Try to update deleted vault
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::UpdateVault {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::UpdateVault {
                 organization: org_id,
                 vault: vault_id,
                 retention_policy: Some(BlockRetentionPolicy::default()),
-            }),
+            },
             &mut state,
         );
 
@@ -8564,8 +8827,8 @@ mod tests {
         );
 
         let team_slug = TeamSlug::new(500);
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateOrganizationTeam { organization: org_id, slug: team_slug }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateOrganizationTeam { organization: org_id, slug: team_slug },
             &mut state,
         );
 
@@ -8597,14 +8860,14 @@ mod tests {
         let team_slug = TeamSlug::new(500);
 
         // Create first team
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateOrganizationTeam { organization: org_id, slug: team_slug }),
+        store.apply_org(
+            &OrganizationRequest::CreateOrganizationTeam { organization: org_id, slug: team_slug },
             &mut state,
         );
 
         // Try duplicate slug
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateOrganizationTeam { organization: org_id, slug: team_slug }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateOrganizationTeam { organization: org_id, slug: team_slug },
             &mut state,
         );
 
@@ -8630,8 +8893,8 @@ mod tests {
         );
 
         let team_slug = TeamSlug::new(500);
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateOrganizationTeam { organization: org_id, slug: team_slug }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateOrganizationTeam { organization: org_id, slug: team_slug },
             &mut state,
         );
         let team_id = match response {
@@ -8640,8 +8903,8 @@ mod tests {
         };
 
         // Delete the team
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::DeleteOrganizationTeam { organization: org_id, team: team_id }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::DeleteOrganizationTeam { organization: org_id, team: team_id },
             &mut state,
         );
 
@@ -8670,8 +8933,11 @@ mod tests {
             Region::US_EAST_VA,
         );
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::DeleteOrganizationTeam { organization: org_id, team: TeamId::new(999) }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::DeleteOrganizationTeam {
+                organization: org_id,
+                team: TeamId::new(999),
+            },
             &mut state,
         );
 
@@ -8699,8 +8965,8 @@ mod tests {
         );
 
         let app_slug = inferadb_ledger_types::AppSlug::new(600);
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateApp { organization: org_id, slug: app_slug }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateApp { organization: org_id, slug: app_slug },
             &mut state,
         );
 
@@ -8732,14 +8998,14 @@ mod tests {
         let app_slug = inferadb_ledger_types::AppSlug::new(600);
 
         // Create first app
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateApp { organization: org_id, slug: app_slug }),
+        store.apply_org(
+            &OrganizationRequest::CreateApp { organization: org_id, slug: app_slug },
             &mut state,
         );
 
         // Try duplicate slug
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateApp { organization: org_id, slug: app_slug }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateApp { organization: org_id, slug: app_slug },
             &mut state,
         );
 
@@ -8765,8 +9031,8 @@ mod tests {
         );
 
         let app_slug = inferadb_ledger_types::AppSlug::new(600);
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateApp { organization: org_id, slug: app_slug }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateApp { organization: org_id, slug: app_slug },
             &mut state,
         );
         let app_id = match response {
@@ -8775,8 +9041,8 @@ mod tests {
         };
 
         // Delete the app
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::DeleteApp { organization: org_id, app: app_id }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::DeleteApp { organization: org_id, app: app_id },
             &mut state,
         );
 
@@ -8805,11 +9071,11 @@ mod tests {
             Region::US_EAST_VA,
         );
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::DeleteApp {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::DeleteApp {
                 organization: org_id,
                 app: inferadb_ledger_types::AppId::new(999),
-            }),
+            },
             &mut state,
         );
 
@@ -8833,8 +9099,8 @@ mod tests {
         );
 
         let app_slug = inferadb_ledger_types::AppSlug::new(600);
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateApp { organization: org_id, slug: app_slug }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateApp { organization: org_id, slug: app_slug },
             &mut state,
         );
         let app_id = match response {
@@ -8843,8 +9109,12 @@ mod tests {
         };
 
         // Enable the app
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::SetAppEnabled { organization: org_id, app: app_id, enabled: true }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::SetAppEnabled {
+                organization: org_id,
+                app: app_id,
+                enabled: true,
+            },
             &mut state,
         );
 
@@ -8872,8 +9142,8 @@ mod tests {
         );
 
         let app_slug = inferadb_ledger_types::AppSlug::new(600);
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateApp { organization: org_id, slug: app_slug }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateApp { organization: org_id, slug: app_slug },
             &mut state,
         );
         let app_id = match response {
@@ -8882,13 +9152,13 @@ mod tests {
         };
 
         // Enable client_secret credential
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::SetAppCredentialEnabled {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::SetAppCredentialEnabled {
                 organization: org_id,
                 app: app_id,
                 credential_type: AppCredentialType::ClientSecret,
                 enabled: true,
-            }),
+            },
             &mut state,
         );
 
@@ -8914,8 +9184,8 @@ mod tests {
         );
 
         let app_slug = inferadb_ledger_types::AppSlug::new(600);
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateApp { organization: org_id, slug: app_slug }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateApp { organization: org_id, slug: app_slug },
             &mut state,
         );
         let app_id = match response {
@@ -8923,12 +9193,12 @@ mod tests {
             other => panic!("expected AppCreated, got {other}"),
         };
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::RotateAppClientSecret {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::RotateAppClientSecret {
                 organization: org_id,
                 app: app_id,
                 new_secret_hash: "$2b$12$test_hash".to_string(),
-            }),
+            },
             &mut state,
         );
 
@@ -8954,8 +9224,8 @@ mod tests {
         );
 
         let app_slug = inferadb_ledger_types::AppSlug::new(600);
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateApp { organization: org_id, slug: app_slug }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateApp { organization: org_id, slug: app_slug },
             &mut state,
         );
         let app_id = match response {
@@ -8963,13 +9233,13 @@ mod tests {
             other => panic!("expected AppCreated, got {other}"),
         };
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateAppClientAssertion {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateAppClientAssertion {
                 organization: org_id,
                 app: app_id,
                 expires_at: Utc::now() + chrono::Duration::days(365),
                 public_key_bytes: vec![1u8; 32],
-            }),
+            },
             &mut state,
         );
 
@@ -8995,8 +9265,8 @@ mod tests {
         );
 
         let app_slug = inferadb_ledger_types::AppSlug::new(600);
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateApp { organization: org_id, slug: app_slug }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateApp { organization: org_id, slug: app_slug },
             &mut state,
         );
         let app_id = match response {
@@ -9005,13 +9275,13 @@ mod tests {
         };
 
         // Create an assertion
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateAppClientAssertion {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateAppClientAssertion {
                 organization: org_id,
                 app: app_id,
                 expires_at: Utc::now() + chrono::Duration::days(365),
                 public_key_bytes: vec![1u8; 32],
-            }),
+            },
             &mut state,
         );
         let assertion_id = match response {
@@ -9020,12 +9290,12 @@ mod tests {
         };
 
         // Delete it
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::DeleteAppClientAssertion {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::DeleteAppClientAssertion {
                 organization: org_id,
                 app: app_id,
                 assertion: assertion_id,
-            }),
+            },
             &mut state,
         );
 
@@ -9051,8 +9321,8 @@ mod tests {
         );
 
         let app_slug = inferadb_ledger_types::AppSlug::new(600);
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateApp { organization: org_id, slug: app_slug }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateApp { organization: org_id, slug: app_slug },
             &mut state,
         );
         let app_id = match response {
@@ -9061,13 +9331,13 @@ mod tests {
         };
 
         // Create an assertion
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateAppClientAssertion {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateAppClientAssertion {
                 organization: org_id,
                 app: app_id,
                 expires_at: Utc::now() + chrono::Duration::days(365),
                 public_key_bytes: vec![1u8; 32],
-            }),
+            },
             &mut state,
         );
         let assertion_id = match response {
@@ -9076,13 +9346,13 @@ mod tests {
         };
 
         // Toggle enabled
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::SetAppClientAssertionEnabled {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::SetAppClientAssertionEnabled {
                 organization: org_id,
                 app: app_id,
                 assertion: assertion_id,
                 enabled: true,
-            }),
+            },
             &mut state,
         );
 
@@ -9108,13 +9378,13 @@ mod tests {
         );
 
         // Create vault
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateVault {
                 organization: org_id,
                 slug: VaultSlug::new(1),
                 name: Some("test-vault".to_string()),
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
         let vault_id = match response {
@@ -9124,8 +9394,8 @@ mod tests {
 
         // Create app
         let app_slug = inferadb_ledger_types::AppSlug::new(600);
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateApp { organization: org_id, slug: app_slug }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateApp { organization: org_id, slug: app_slug },
             &mut state,
         );
         let app_id = match response {
@@ -9134,14 +9404,14 @@ mod tests {
         };
 
         // Add vault connection
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::AddAppVault {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::AddAppVault {
                 organization: org_id,
                 app: app_id,
                 vault: vault_id,
                 vault_slug: VaultSlug::new(1),
                 allowed_scopes: vec!["read".to_string(), "write".to_string()],
-            }),
+            },
             &mut state,
         );
 
@@ -9167,13 +9437,13 @@ mod tests {
         );
 
         // Create vault
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateVault {
                 organization: org_id,
                 slug: VaultSlug::new(1),
                 name: Some("test-vault".to_string()),
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
         let vault_id = match response {
@@ -9183,8 +9453,8 @@ mod tests {
 
         // Create app
         let app_slug = inferadb_ledger_types::AppSlug::new(600);
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateApp { organization: org_id, slug: app_slug }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateApp { organization: org_id, slug: app_slug },
             &mut state,
         );
         let app_id = match response {
@@ -9193,26 +9463,26 @@ mod tests {
         };
 
         // Add vault connection
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::AddAppVault {
+        store.apply_org(
+            &OrganizationRequest::AddAppVault {
                 organization: org_id,
                 app: app_id,
                 vault: vault_id,
                 vault_slug: VaultSlug::new(1),
                 allowed_scopes: vec!["read".to_string()],
-            }),
+            },
             &mut state,
         );
 
         // Try duplicate connection
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::AddAppVault {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::AddAppVault {
                 organization: org_id,
                 app: app_id,
                 vault: vault_id,
                 vault_slug: VaultSlug::new(1),
                 allowed_scopes: vec!["read".to_string()],
-            }),
+            },
             &mut state,
         );
 
@@ -9236,13 +9506,13 @@ mod tests {
         );
 
         // Create vault
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateVault {
                 organization: org_id,
                 slug: VaultSlug::new(1),
                 name: Some("test-vault".to_string()),
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
         let vault_id = match response {
@@ -9252,8 +9522,8 @@ mod tests {
 
         // Create app
         let app_slug = inferadb_ledger_types::AppSlug::new(600);
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateApp { organization: org_id, slug: app_slug }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateApp { organization: org_id, slug: app_slug },
             &mut state,
         );
         let app_id = match response {
@@ -9262,20 +9532,24 @@ mod tests {
         };
 
         // Add vault connection
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::AddAppVault {
+        store.apply_org(
+            &OrganizationRequest::AddAppVault {
                 organization: org_id,
                 app: app_id,
                 vault: vault_id,
                 vault_slug: VaultSlug::new(1),
                 allowed_scopes: vec!["read".to_string()],
-            }),
+            },
             &mut state,
         );
 
         // Remove it
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::RemoveAppVault { organization: org_id, app: app_id, vault: vault_id }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::RemoveAppVault {
+                organization: org_id,
+                app: app_id,
+                vault: vault_id,
+            },
             &mut state,
         );
 
@@ -9301,13 +9575,13 @@ mod tests {
         );
 
         // Create vault
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateVault {
                 organization: org_id,
                 slug: VaultSlug::new(1),
                 name: Some("test-vault".to_string()),
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
         let vault_id = match response {
@@ -9317,8 +9591,8 @@ mod tests {
 
         // Create app
         let app_slug = inferadb_ledger_types::AppSlug::new(600);
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateApp { organization: org_id, slug: app_slug }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateApp { organization: org_id, slug: app_slug },
             &mut state,
         );
         let app_id = match response {
@@ -9327,25 +9601,25 @@ mod tests {
         };
 
         // Add vault connection
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::AddAppVault {
+        store.apply_org(
+            &OrganizationRequest::AddAppVault {
                 organization: org_id,
                 app: app_id,
                 vault: vault_id,
                 vault_slug: VaultSlug::new(1),
                 allowed_scopes: vec!["read".to_string()],
-            }),
+            },
             &mut state,
         );
 
         // Update scopes
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::UpdateAppVault {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::UpdateAppVault {
                 organization: org_id,
                 app: app_id,
                 vault: vault_id,
                 allowed_scopes: vec!["read".to_string(), "write".to_string(), "admin".to_string()],
-            }),
+            },
             &mut state,
         );
 
@@ -9367,14 +9641,14 @@ mod tests {
         let store = create_store_with_state_layer(&dir);
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateSigningKey {
+        let (response, _) = store.apply_system(
+            &SystemRequest::CreateSigningKey {
                 scope: SigningKeyScope::Global,
                 kid: "test-kid-1".to_string(),
                 public_key_bytes: vec![1u8; 32],
                 encrypted_private_key: vec![2u8; 100],
                 rmk_version: 1,
-            }),
+            },
             &mut state,
         );
 
@@ -9394,26 +9668,26 @@ mod tests {
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create initial key
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateSigningKey {
+        store.apply_system(
+            &SystemRequest::CreateSigningKey {
                 scope: SigningKeyScope::Global,
                 kid: "test-kid-1".to_string(),
                 public_key_bytes: vec![1u8; 32],
                 encrypted_private_key: vec![2u8; 100],
                 rmk_version: 1,
-            }),
+            },
             &mut state,
         );
 
         // Same kid => idempotent return
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateSigningKey {
+        let (response, _) = store.apply_system(
+            &SystemRequest::CreateSigningKey {
                 scope: SigningKeyScope::Global,
                 kid: "test-kid-1".to_string(),
                 public_key_bytes: vec![1u8; 32],
                 encrypted_private_key: vec![2u8; 100],
                 rmk_version: 1,
-            }),
+            },
             &mut state,
         );
 
@@ -9432,26 +9706,26 @@ mod tests {
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create initial key
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateSigningKey {
+        store.apply_system(
+            &SystemRequest::CreateSigningKey {
                 scope: SigningKeyScope::Global,
                 kid: "test-kid-1".to_string(),
                 public_key_bytes: vec![1u8; 32],
                 encrypted_private_key: vec![2u8; 100],
                 rmk_version: 1,
-            }),
+            },
             &mut state,
         );
 
         // Different kid, same scope => fails (active key exists)
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateSigningKey {
+        let (response, _) = store.apply_system(
+            &SystemRequest::CreateSigningKey {
                 scope: SigningKeyScope::Global,
                 kid: "test-kid-2".to_string(),
                 public_key_bytes: vec![3u8; 32],
                 encrypted_private_key: vec![4u8; 100],
                 rmk_version: 1,
-            }),
+            },
             &mut state,
         );
 
@@ -9470,27 +9744,27 @@ mod tests {
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create initial key
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateSigningKey {
+        store.apply_system(
+            &SystemRequest::CreateSigningKey {
                 scope: SigningKeyScope::Global,
                 kid: "old-kid".to_string(),
                 public_key_bytes: vec![1u8; 32],
                 encrypted_private_key: vec![2u8; 100],
                 rmk_version: 1,
-            }),
+            },
             &mut state,
         );
 
         // Rotate
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::RotateSigningKey {
+        let (response, _) = store.apply_system(
+            &SystemRequest::RotateSigningKey {
                 old_kid: "old-kid".to_string(),
                 new_kid: "new-kid".to_string(),
                 new_public_key_bytes: vec![3u8; 32],
                 new_encrypted_private_key: vec![4u8; 100],
                 rmk_version: 1,
                 grace_period_secs: 3600,
-            }),
+            },
             &mut state,
         );
 
@@ -9509,27 +9783,27 @@ mod tests {
         let store = create_store_with_state_layer(&dir);
         let mut state = (*store.applied_state.load_full()).clone();
 
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateSigningKey {
+        store.apply_system(
+            &SystemRequest::CreateSigningKey {
                 scope: SigningKeyScope::Global,
                 kid: "old-kid".to_string(),
                 public_key_bytes: vec![1u8; 32],
                 encrypted_private_key: vec![2u8; 100],
                 rmk_version: 1,
-            }),
+            },
             &mut state,
         );
 
         // Rotate with grace_period_secs = 0 (immediate revocation)
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::RotateSigningKey {
+        let (response, _) = store.apply_system(
+            &SystemRequest::RotateSigningKey {
                 old_kid: "old-kid".to_string(),
                 new_kid: "new-kid".to_string(),
                 new_public_key_bytes: vec![3u8; 32],
                 new_encrypted_private_key: vec![4u8; 100],
                 rmk_version: 1,
                 grace_period_secs: 0,
-            }),
+            },
             &mut state,
         );
 
@@ -9548,19 +9822,19 @@ mod tests {
         let store = create_store_with_state_layer(&dir);
         let mut state = (*store.applied_state.load_full()).clone();
 
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateSigningKey {
+        store.apply_system(
+            &SystemRequest::CreateSigningKey {
                 scope: SigningKeyScope::Global,
                 kid: "test-kid".to_string(),
                 public_key_bytes: vec![1u8; 32],
                 encrypted_private_key: vec![2u8; 100],
                 rmk_version: 1,
-            }),
+            },
             &mut state,
         );
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::RevokeSigningKey { kid: "test-kid".to_string() }),
+        let (response, _) = store.apply_system(
+            &SystemRequest::RevokeSigningKey { kid: "test-kid".to_string() },
             &mut state,
         );
 
@@ -9578,8 +9852,8 @@ mod tests {
         let store = create_store_with_state_layer(&dir);
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::RevokeSigningKey { kid: "nonexistent".to_string() }),
+        let (response, _) = store.apply_system(
+            &SystemRequest::RevokeSigningKey { kid: "nonexistent".to_string() },
             &mut state,
         );
 
@@ -9596,31 +9870,31 @@ mod tests {
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create and rotate (with grace period) to get a Rotated key
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateSigningKey {
+        store.apply_system(
+            &SystemRequest::CreateSigningKey {
                 scope: SigningKeyScope::Global,
                 kid: "old-kid".to_string(),
                 public_key_bytes: vec![1u8; 32],
                 encrypted_private_key: vec![2u8; 100],
                 rmk_version: 1,
-            }),
+            },
             &mut state,
         );
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::RotateSigningKey {
+        store.apply_system(
+            &SystemRequest::RotateSigningKey {
                 old_kid: "old-kid".to_string(),
                 new_kid: "new-kid".to_string(),
                 new_public_key_bytes: vec![3u8; 32],
                 new_encrypted_private_key: vec![4u8; 100],
                 rmk_version: 1,
                 grace_period_secs: 3600,
-            }),
+            },
             &mut state,
         );
 
         // Transition rotated key to revoked
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::TransitionSigningKeyRevoked { kid: "old-kid".to_string() }),
+        let (response, _) = store.apply_system(
+            &SystemRequest::TransitionSigningKeyRevoked { kid: "old-kid".to_string() },
             &mut state,
         );
 
@@ -9643,19 +9917,19 @@ mod tests {
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Need a signing key for token creation
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateSigningKey {
+        store.apply_system(
+            &SystemRequest::CreateSigningKey {
                 scope: SigningKeyScope::Global,
                 kid: "signing-kid".to_string(),
                 public_key_bytes: vec![1u8; 32],
                 encrypted_private_key: vec![2u8; 100],
                 rmk_version: 1,
-            }),
+            },
             &mut state,
         );
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateRefreshToken {
+        let (response, _) = store.apply_system(
+            &SystemRequest::CreateRefreshToken {
                 token_hash: [0xAA; 32],
                 family: [0xBB; 16],
                 token_type: inferadb_ledger_types::TokenType::UserSession,
@@ -9664,7 +9938,7 @@ mod tests {
                 vault: None,
                 kid: "signing-kid".to_string(),
                 ttl_secs: 86400,
-            }),
+            },
             &mut state,
         );
 
@@ -9684,8 +9958,8 @@ mod tests {
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::RevokeAllUserSessions { user: UserId::new(42) }),
+        let (response, _) = store.apply_system(
+            &SystemRequest::RevokeAllUserSessions { user: UserId::new(42) },
             &mut state,
         );
 
@@ -9712,8 +9986,8 @@ mod tests {
 
         // Create app
         let app_slug = inferadb_ledger_types::AppSlug::new(600);
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateApp { organization: org_id, slug: app_slug }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateApp { organization: org_id, slug: app_slug },
             &mut state,
         );
         let app_id = match response {
@@ -9721,8 +9995,8 @@ mod tests {
             other => panic!("expected AppCreated, got {other}"),
         };
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::RevokeAllAppSessions { organization: org_id, app: app_id }),
+        let (response, _) = store.apply_system(
+            &SystemRequest::RevokeAllAppSessions { organization: org_id, app: app_id },
             &mut state,
         );
 
@@ -9742,7 +10016,7 @@ mod tests {
         let mut state = (*store.applied_state.load_full()).clone();
 
         let (response, _) = store
-            .apply_request(&LedgerRequest::System(SystemRequest::RevokeTokenFamily { family: [0xBB; 16] }), &mut state);
+            .apply_system(&SystemRequest::RevokeTokenFamily { family: [0xBB; 16] }, &mut state);
 
         match response {
             LedgerResponse::TokenFamilyRevoked { count } => {
@@ -9760,7 +10034,7 @@ mod tests {
         let mut state = (*store.applied_state.load_full()).clone();
 
         let (response, _) =
-            store.apply_request(&LedgerRequest::System(SystemRequest::DeleteExpiredRefreshTokens), &mut state);
+            store.apply_system(&SystemRequest::DeleteExpiredRefreshTokens, &mut state);
 
         match response {
             LedgerResponse::ExpiredRefreshTokensDeleted { count } => {
@@ -9782,13 +10056,13 @@ mod tests {
 
         let user_id = UserId::new(42);
         let user_slug = UserSlug::new(4200);
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateUser {
+        let (response, _) = store.apply_system(
+            &SystemRequest::CreateUser {
                 user: user_id,
                 slug: user_slug,
                 admin: false,
                 region: Region::US_EAST_VA,
-            }),
+            },
             &mut state,
         );
 
@@ -9809,13 +10083,13 @@ mod tests {
 
         let user_id = UserId::new(42);
         let user_slug = UserSlug::new(4200);
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateUser {
+        store.apply_system(
+            &SystemRequest::CreateUser {
                 user: user_id,
                 slug: user_slug,
                 admin: false,
                 region: Region::US_EAST_VA,
-            }),
+            },
             &mut state,
         );
 
@@ -9832,12 +10106,12 @@ mod tests {
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::UpdateUser {
+        let (response, _) = store.apply_system(
+            &SystemRequest::UpdateUser {
                 user_id: UserId::new(42),
                 role: Some(inferadb_ledger_types::UserRole::Admin),
                 primary_email: None,
-            }),
+            },
             &mut state,
         );
 
@@ -9854,10 +10128,8 @@ mod tests {
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::DeleteUser { user_id: UserId::new(42) }),
-            &mut state,
-        );
+        let (response, _) =
+            store.apply_system(&SystemRequest::DeleteUser { user_id: UserId::new(42) }, &mut state);
 
         match response {
             LedgerResponse::Empty => {},
@@ -9876,21 +10148,18 @@ mod tests {
         let mut state = (*store.applied_state.load_full()).clone();
 
         let user_id = UserId::new(42);
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateUser {
+        store.apply_system(
+            &SystemRequest::CreateUser {
                 user: user_id,
                 slug: UserSlug::new(4200),
                 admin: false,
                 region: Region::US_EAST_VA,
-            }),
+            },
             &mut state,
         );
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::RegisterEmailHash {
-                hmac_hex: "abcdef0123456789".to_string(),
-                user_id,
-            }),
+        let (response, _) = store.apply_system(
+            &SystemRequest::RegisterEmailHash { hmac_hex: "abcdef0123456789".to_string(), user_id },
             &mut state,
         );
 
@@ -9911,30 +10180,25 @@ mod tests {
         let mut state = (*store.applied_state.load_full()).clone();
 
         let user_id = UserId::new(42);
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateUser {
+        store.apply_system(
+            &SystemRequest::CreateUser {
                 user: user_id,
                 slug: UserSlug::new(4200),
                 admin: false,
                 region: Region::US_EAST_VA,
-            }),
+            },
             &mut state,
         );
 
         // Register first
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::RegisterEmailHash {
-                hmac_hex: "abcdef0123456789".to_string(),
-                user_id,
-            }),
+        store.apply_system(
+            &SystemRequest::RegisterEmailHash { hmac_hex: "abcdef0123456789".to_string(), user_id },
             &mut state,
         );
 
         // Remove
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::RemoveEmailHash {
-                hmac_hex: "abcdef0123456789".to_string(),
-            }),
+        let (response, _) = store.apply_system(
+            &SystemRequest::RemoveEmailHash { hmac_hex: "abcdef0123456789".to_string() },
             &mut state,
         );
 
@@ -9950,10 +10214,8 @@ mod tests {
         let store = create_store_with_state_layer(&dir);
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::SetBlindingKeyVersion { version: 2 }),
-            &mut state,
-        );
+        let (response, _) =
+            store.apply_system(&SystemRequest::SetBlindingKeyVersion { version: 2 }, &mut state);
 
         // State is stored in the state layer (sys_service), not in AppliedState
         match response {
@@ -9968,11 +10230,11 @@ mod tests {
         let store = create_store_with_state_layer(&dir);
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::UpdateRehashProgress {
+        let (response, _) = store.apply_system(
+            &SystemRequest::UpdateRehashProgress {
                 region: Region::US_EAST_VA,
                 entries_rehashed: 500,
-            }),
+            },
             &mut state,
         );
 
@@ -9989,19 +10251,17 @@ mod tests {
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Set progress first
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::UpdateRehashProgress {
+        store.apply_system(
+            &SystemRequest::UpdateRehashProgress {
                 region: Region::US_EAST_VA,
                 entries_rehashed: 500,
-            }),
+            },
             &mut state,
         );
 
         // Clear it
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::ClearRehashProgress {
-                region: Region::US_EAST_VA,
-            }),
+        let (response, _) = store.apply_system(
+            &SystemRequest::ClearRehashProgress { region: Region::US_EAST_VA },
             &mut state,
         );
 
@@ -10024,11 +10284,11 @@ mod tests {
             Region::US_EAST_VA,
         );
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
+        let (response, _) = store.apply_system(
+            &SystemRequest::UpdateOrganizationRouting {
                 organization: org_id,
                 region: Region::IE_EAST_DUBLIN,
-            }),
+            },
             &mut state,
         );
 
@@ -10064,11 +10324,11 @@ mod tests {
         assert_eq!(org_meta.status, OrganizationStatus::Active);
 
         // Transition to Suspended via status update
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
+        let (response, _) = store.apply_system(
+            &SystemRequest::UpdateOrganizationStatus {
                 organization: org_id,
                 status: OrganizationStatus::Suspended,
-            }),
+            },
             &mut state,
         );
 
@@ -10102,22 +10362,22 @@ mod tests {
 
         // Batch: create two vaults
         let requests = vec![
-            LedgerRequest::Organization(OrganizationRequest::CreateVault {
+            OrganizationRequest::CreateVault {
                 organization: org_id,
                 slug: VaultSlug::new(1),
                 name: Some("vault-1".to_string()),
                 retention_policy: None,
-            }),
-            LedgerRequest::Organization(OrganizationRequest::CreateVault {
+            },
+            OrganizationRequest::CreateVault {
                 organization: org_id,
                 slug: VaultSlug::new(2),
                 name: Some("vault-2".to_string()),
                 retention_policy: None,
-            }),
+            },
         ];
 
         let (response, _) =
-            store.apply_request(&LedgerRequest::Organization(OrganizationRequest::BatchWrite { requests }), &mut state);
+            store.apply_org(&OrganizationRequest::BatchWrite { requests }, &mut state);
 
         match response {
             LedgerResponse::BatchWrite { responses } => {
@@ -10143,7 +10403,7 @@ mod tests {
         let mut state = (*store.applied_state.load_full()).clone();
 
         let (response, vault_entry) =
-            store.apply_request(&LedgerRequest::Organization(OrganizationRequest::BatchWrite { requests: vec![] }), &mut state);
+            store.apply_org(&OrganizationRequest::BatchWrite { requests: vec![] }, &mut state);
 
         match response {
             LedgerResponse::BatchWrite { responses } => {
@@ -10159,7 +10419,6 @@ mod tests {
     // ========================================================================
 
     #[tokio::test]
-
     // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
     // carries an `organization:` field — a single `RaftLogStore`
     // owns writes for exactly one `OrganizationId`. Test rewrite
@@ -10180,16 +10439,16 @@ mod tests {
         );
 
         // Delete the org
-        store
-            .apply_request(&LedgerRequest::System(SystemRequest::DeleteOrganization { organization: org_id }), &mut state);
+        store.apply_system(&SystemRequest::DeleteOrganization { organization: org_id }, &mut state);
 
         // Try to write to deleted org
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::Write {                vault: VaultId::new(1),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::Write {
+                vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
-            }),
+            },
             &mut state,
         );
 
@@ -10216,13 +10475,13 @@ mod tests {
         );
 
         // Create a vault
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateVault {
                 organization: org_id,
                 slug: VaultSlug::new(1),
                 name: Some("test-vault".to_string()),
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
         let vault_id = match response {
@@ -10231,12 +10490,13 @@ mod tests {
         };
 
         // Write with empty transactions
-        let (response, vault_entry) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::Write {                vault: vault_id,
+        let (response, vault_entry) = store.apply_org(
+            &OrganizationRequest::Write {
+                vault: vault_id,
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
-            }),
+            },
             &mut state,
         );
 
@@ -10268,23 +10528,23 @@ mod tests {
 
         // Add a member as Member
         let new_user = UserId::new(42);
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::AddOrganizationMember {
+        store.apply_org(
+            &OrganizationRequest::AddOrganizationMember {
                 organization: org_id,
                 user: new_user,
                 user_slug: UserSlug::new(4200),
                 role: OrganizationMemberRole::Member,
-            }),
+            },
             &mut state,
         );
 
         // Promote to Admin
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::UpdateOrganizationMemberRole {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::UpdateOrganizationMemberRole {
                 organization: org_id,
                 target: new_user,
                 role: OrganizationMemberRole::Admin,
-            }),
+            },
             &mut state,
         );
 
@@ -10311,19 +10571,22 @@ mod tests {
 
         // Add a second admin so we can remove one
         let second_admin = UserId::new(42);
-        store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::AddOrganizationMember {
+        store.apply_org(
+            &OrganizationRequest::AddOrganizationMember {
                 organization: org_id,
                 user: second_admin,
                 user_slug: UserSlug::new(4200),
                 role: OrganizationMemberRole::Admin,
-            }),
+            },
             &mut state,
         );
 
         // Remove the second admin
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::RemoveOrganizationMember { organization: org_id, target: second_admin }),
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::RemoveOrganizationMember {
+                organization: org_id,
+                target: second_admin,
+            },
             &mut state,
         );
 
@@ -10349,11 +10612,11 @@ mod tests {
         );
 
         // The admin user (UserId::new(1)) from create_active_organization
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::RemoveOrganizationMember {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::RemoveOrganizationMember {
                 organization: org_id,
                 target: UserId::new(1),
-            }),
+            },
             &mut state,
         );
 
@@ -10383,12 +10646,11 @@ mod tests {
         );
 
         // Delete the org first (purge requires Deleted/Deleting status)
-        store
-            .apply_request(&LedgerRequest::System(SystemRequest::DeleteOrganization { organization: org_id }), &mut state);
+        store.apply_system(&SystemRequest::DeleteOrganization { organization: org_id }, &mut state);
 
         // Purge
         let (response, _) = store
-            .apply_request(&LedgerRequest::System(SystemRequest::PurgeOrganization { organization: org_id }), &mut state);
+            .apply_system(&SystemRequest::PurgeOrganization { organization: org_id }, &mut state);
 
         match response {
             LedgerResponse::OrganizationPurged { organization_id } => {
@@ -10410,12 +10672,12 @@ mod tests {
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::UpdateUserDirectoryStatus {
+        let (response, _) = store.apply_system(
+            &SystemRequest::UpdateUserDirectoryStatus {
                 user_id: UserId::new(42),
                 status: inferadb_ledger_state::system::UserDirectoryStatus::Migrating,
                 region: Some(Region::IE_EAST_DUBLIN),
-            }),
+            },
             &mut state,
         );
 
@@ -10437,13 +10699,13 @@ mod tests {
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create org but DON'T activate it (stays in Provisioning)
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateOrganization {
+        let (response, _) = store.apply_system(
+            &SystemRequest::CreateOrganization {
                 slug: inferadb_ledger_types::OrganizationSlug::new(100),
                 region: Region::US_EAST_VA,
                 tier: Default::default(),
                 admin: UserId::new(1),
-            }),
+            },
             &mut state,
         );
         let org_id = match response {
@@ -10452,13 +10714,13 @@ mod tests {
         };
 
         // Try to create vault in Provisioning org
-        let (response, _) = store.apply_request(
-            &LedgerRequest::Organization(OrganizationRequest::CreateVault {
+        let (response, _) = store.apply_org(
+            &OrganizationRequest::CreateVault {
                 organization: org_id,
                 slug: VaultSlug::new(1),
                 name: Some("test".to_string()),
                 retention_policy: None,
-            }),
+            },
             &mut state,
         );
 
@@ -10484,14 +10746,14 @@ mod tests {
         let mut state = (*store.applied_state.load_full()).clone();
 
         // Create a signing key (required for token operations)
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateSigningKey {
+        store.apply_system(
+            &SystemRequest::CreateSigningKey {
                 scope: SigningKeyScope::Global,
                 kid: "sk-1".to_string(),
                 public_key_bytes: vec![1u8; 32],
                 encrypted_private_key: vec![2u8; 100],
                 rmk_version: 1,
-            }),
+            },
             &mut state,
         );
 
@@ -10500,8 +10762,8 @@ mod tests {
         let user_id = create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
 
         // Create a refresh token via the state layer
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateRefreshToken {
+        let (response, _) = store.apply_system(
+            &SystemRequest::CreateRefreshToken {
                 token_hash: [0xAA; 32],
                 family: [0xBB; 16],
                 token_type: inferadb_ledger_types::TokenType::UserSession,
@@ -10510,7 +10772,7 @@ mod tests {
                 vault: None,
                 kid: "sk-1".to_string(),
                 ttl_secs: 86400,
-            }),
+            },
             &mut state,
         );
         match &response {
@@ -10547,14 +10809,14 @@ mod tests {
         // Use the refresh token (rotate it)
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::UseRefreshToken {
+            &SystemRequest::UseRefreshToken {
                 old_token_hash: [0xAA; 32],
                 new_token_hash: [0xCC; 32],
                 new_kid: "sk-1".to_string(),
                 ttl_secs: 86400,
                 expected_version: Some(inferadb_ledger_types::TokenVersion::new(0)),
                 max_family_lifetime_secs: 604800,
-            }),
+            },
             &mut state,
         );
 
@@ -10573,14 +10835,14 @@ mod tests {
         let store = create_store_with_state_layer(&dir);
         let mut state = (*store.applied_state.load_full()).clone();
 
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateSigningKey {
+        store.apply_system(
+            &SystemRequest::CreateSigningKey {
                 scope: SigningKeyScope::Global,
                 kid: "sk-1".to_string(),
                 public_key_bytes: vec![1u8; 32],
                 encrypted_private_key: vec![2u8; 100],
                 rmk_version: 1,
-            }),
+            },
             &mut state,
         );
 
@@ -10588,8 +10850,8 @@ mod tests {
         create_test_user(&store, &mut state, user_slug, Region::US_EAST_VA);
 
         // Create token
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateRefreshToken {
+        store.apply_system(
+            &SystemRequest::CreateRefreshToken {
                 token_hash: [0xAA; 32],
                 family: [0xBB; 16],
                 token_type: inferadb_ledger_types::TokenType::UserSession,
@@ -10598,21 +10860,21 @@ mod tests {
                 vault: None,
                 kid: "sk-1".to_string(),
                 ttl_secs: 86400,
-            }),
+            },
             &mut state,
         );
 
         // Use it once (no version check)
         let r1 = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::UseRefreshToken {
+            &SystemRequest::UseRefreshToken {
                 old_token_hash: [0xAA; 32],
                 new_token_hash: [0xCC; 32],
                 new_kid: "sk-1".to_string(),
                 ttl_secs: 86400,
                 expected_version: None,
                 max_family_lifetime_secs: 604800,
-            }),
+            },
             &mut state,
         );
         assert!(
@@ -10623,14 +10885,14 @@ mod tests {
         // Try to reuse the old token hash (already used)
         let r2 = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::UseRefreshToken {
+            &SystemRequest::UseRefreshToken {
                 old_token_hash: [0xAA; 32],
                 new_token_hash: [0xDD; 32],
                 new_kid: "sk-1".to_string(),
                 ttl_secs: 86400,
                 expected_version: None,
                 max_family_lifetime_secs: 604800,
-            }),
+            },
             &mut state,
         );
 
@@ -10651,14 +10913,14 @@ mod tests {
 
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::UseRefreshToken {
+            &SystemRequest::UseRefreshToken {
                 old_token_hash: [0xFF; 32],
                 new_token_hash: [0xCC; 32],
                 new_kid: "sk-1".to_string(),
                 ttl_secs: 86400,
                 expected_version: None,
                 max_family_lifetime_secs: 604800,
-            }),
+            },
             &mut state,
         );
 
@@ -10680,22 +10942,22 @@ mod tests {
         let store = create_store_with_state_layer(&dir);
         let mut state = (*store.applied_state.load_full()).clone();
 
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateSigningKey {
+        store.apply_system(
+            &SystemRequest::CreateSigningKey {
                 scope: SigningKeyScope::Global,
                 kid: "sk-1".to_string(),
                 public_key_bytes: vec![1u8; 32],
                 encrypted_private_key: vec![2u8; 100],
                 rmk_version: 1,
-            }),
+            },
             &mut state,
         );
 
         let family = [0xBB; 16];
 
         // Create a token in that family
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateRefreshToken {
+        store.apply_system(
+            &SystemRequest::CreateRefreshToken {
                 token_hash: [0xAA; 32],
                 family,
                 token_type: inferadb_ledger_types::TokenType::UserSession,
@@ -10704,13 +10966,13 @@ mod tests {
                 vault: None,
                 kid: "sk-1".to_string(),
                 ttl_secs: 86400,
-            }),
+            },
             &mut state,
         );
 
         // Revoke the family
         let (response, _) =
-            store.apply_request(&LedgerRequest::System(SystemRequest::RevokeTokenFamily { family }), &mut state);
+            store.apply_system(&SystemRequest::RevokeTokenFamily { family }, &mut state);
 
         match response {
             LedgerResponse::TokenFamilyRevoked { count } => {
@@ -10756,8 +11018,8 @@ mod tests {
                 .expect("write user");
         }
 
-        let (response, _) = store
-            .apply_request(&LedgerRequest::System(SystemRequest::RevokeAllUserSessions { user: user_id }), &mut state);
+        let (response, _) =
+            store.apply_system(&SystemRequest::RevokeAllUserSessions { user: user_id }, &mut state);
 
         match response {
             LedgerResponse::AllUserSessionsRevoked { count, version } => {
@@ -10775,8 +11037,8 @@ mod tests {
         let mut state = (*store.applied_state.load_full()).clone();
 
         // User slug not in the index
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::RevokeAllUserSessions { user: UserId::new(9999) }),
+        let (response, _) = store.apply_system(
+            &SystemRequest::RevokeAllUserSessions { user: UserId::new(9999) },
             &mut state,
         );
 
@@ -10798,26 +11060,26 @@ mod tests {
         let store = create_store_with_state_layer(&dir);
         let mut state = (*store.applied_state.load_full()).clone();
 
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateSigningKey {
+        store.apply_system(
+            &SystemRequest::CreateSigningKey {
                 scope: SigningKeyScope::Global,
                 kid: "test-kid".to_string(),
                 public_key_bytes: vec![1u8; 32],
                 encrypted_private_key: vec![2u8; 100],
                 rmk_version: 1,
-            }),
+            },
             &mut state,
         );
 
         // First revoke
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::RevokeSigningKey { kid: "test-kid".to_string() }),
+        store.apply_system(
+            &SystemRequest::RevokeSigningKey { kid: "test-kid".to_string() },
             &mut state,
         );
 
         // Second revoke (idempotent)
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::RevokeSigningKey { kid: "test-kid".to_string() }),
+        let (response, _) = store.apply_system(
+            &SystemRequest::RevokeSigningKey { kid: "test-kid".to_string() },
             &mut state,
         );
 
@@ -10839,20 +11101,20 @@ mod tests {
         let store = create_store_with_state_layer(&dir);
         let mut state = (*store.applied_state.load_full()).clone();
 
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateSigningKey {
+        store.apply_system(
+            &SystemRequest::CreateSigningKey {
                 scope: SigningKeyScope::Global,
                 kid: "active-kid".to_string(),
                 public_key_bytes: vec![1u8; 32],
                 encrypted_private_key: vec![2u8; 100],
                 rmk_version: 1,
-            }),
+            },
             &mut state,
         );
 
         // Transition an Active key -> no-op
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::TransitionSigningKeyRevoked { kid: "active-kid".to_string() }),
+        let (response, _) = store.apply_system(
+            &SystemRequest::TransitionSigningKeyRevoked { kid: "active-kid".to_string() },
             &mut state,
         );
 
@@ -10870,8 +11132,8 @@ mod tests {
         let store = create_store_with_state_layer(&dir);
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::TransitionSigningKeyRevoked { kid: "nonexistent".to_string() }),
+        let (response, _) = store.apply_system(
+            &SystemRequest::TransitionSigningKeyRevoked { kid: "nonexistent".to_string() },
             &mut state,
         );
 
@@ -10893,13 +11155,13 @@ mod tests {
         let store = create_store_with_state_layer(&dir);
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateEmailVerification {
+        let (response, _) = store.apply_system(
+            &SystemRequest::CreateEmailVerification {
                 email_hmac: "hmac-test-001".to_string(),
                 code_hash: [0xAA; 32],
                 region: Region::US_EAST_VA,
                 expires_at: Utc::now() + Duration::minutes(10),
-            }),
+            },
             &mut state,
         );
 
@@ -10920,20 +11182,20 @@ mod tests {
         let expires_at = fixed_timestamp() + Duration::minutes(10);
 
         // Create verification
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateEmailVerification {
+        store.apply_system(
+            &SystemRequest::CreateEmailVerification {
                 email_hmac: email_hmac.clone(),
                 code_hash,
                 region: Region::US_EAST_VA,
                 expires_at,
-            }),
+            },
             &mut state,
         );
 
         // Verify with correct code
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::VerifyEmailCode {
+            &SystemRequest::VerifyEmailCode {
                 email_hmac: email_hmac.clone(),
                 code_hash,
                 region: Region::US_EAST_VA,
@@ -10941,7 +11203,7 @@ mod tests {
                 onboarding_token_hash: [0xCC; 32],
                 onboarding_expires_at: expires_at + Duration::hours(24),
                 totp: None,
-            }),
+            },
             &mut state,
         );
 
@@ -10966,20 +11228,20 @@ mod tests {
         let code_hash = [0xBB; 32];
         let expires_at = fixed_timestamp() + Duration::minutes(10);
 
-        store.apply_request(
-            &LedgerRequest::System(SystemRequest::CreateEmailVerification {
+        store.apply_system(
+            &SystemRequest::CreateEmailVerification {
                 email_hmac: email_hmac.clone(),
                 code_hash,
                 region: Region::US_EAST_VA,
                 expires_at,
-            }),
+            },
             &mut state,
         );
 
         // Verify with wrong code
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::VerifyEmailCode {
+            &SystemRequest::VerifyEmailCode {
                 email_hmac: email_hmac.clone(),
                 code_hash: [0xFF; 32], // wrong!
                 region: Region::US_EAST_VA,
@@ -10987,7 +11249,7 @@ mod tests {
                 onboarding_token_hash: [0xCC; 32],
                 onboarding_expires_at: expires_at + Duration::hours(24),
                 totp: None,
-            }),
+            },
             &mut state,
         );
 
@@ -11007,7 +11269,7 @@ mod tests {
 
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::VerifyEmailCode {
+            &SystemRequest::VerifyEmailCode {
                 email_hmac: "nonexistent".to_string(),
                 code_hash: [0xAA; 32],
                 region: Region::US_EAST_VA,
@@ -11015,7 +11277,7 @@ mod tests {
                 onboarding_token_hash: [0xCC; 32],
                 onboarding_expires_at: fixed_timestamp() + Duration::hours(24),
                 totp: None,
-            }),
+            },
             &mut state,
         );
 
@@ -11037,11 +11299,8 @@ mod tests {
         let store = create_store_with_state_layer(&dir);
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let response = apply_at_fixed_time(
-            &store,
-            &LedgerRequest::System(SystemRequest::CleanupExpiredOnboarding),
-            &mut state,
-        );
+        let response =
+            apply_at_fixed_time(&store, &SystemRequest::CleanupExpiredOnboarding, &mut state);
 
         match response {
             LedgerResponse::OnboardingCleanedUp {
@@ -11064,10 +11323,8 @@ mod tests {
             RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::CleanupExpiredOnboarding),
-            &mut state,
-        );
+        let (response, _) =
+            store.apply_system(&SystemRequest::CleanupExpiredOnboarding, &mut state);
 
         match response {
             LedgerResponse::Error { code, .. } => {
@@ -11087,11 +11344,11 @@ mod tests {
         let store = create_store_with_state_layer(&dir);
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
+        let (response, _) = store.apply_system(
+            &SystemRequest::UpdateOrganizationRouting {
                 organization: OrganizationId::new(9999),
                 region: Region::US_WEST_OR,
-            }),
+            },
             &mut state,
         );
 
@@ -11117,15 +11374,14 @@ mod tests {
         );
 
         // Delete the org
-        store
-            .apply_request(&LedgerRequest::System(SystemRequest::DeleteOrganization { organization: org_id }), &mut state);
+        store.apply_system(&SystemRequest::DeleteOrganization { organization: org_id }, &mut state);
 
         // Try to route a deleted org
-        let (response, _) = store.apply_request(
-            &LedgerRequest::System(SystemRequest::UpdateOrganizationRouting {
+        let (response, _) = store.apply_system(
+            &SystemRequest::UpdateOrganizationRouting {
                 organization: org_id,
                 region: Region::US_WEST_OR,
-            }),
+            },
             &mut state,
         );
 
@@ -11158,12 +11414,12 @@ mod tests {
 
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteTeam {
+            &SystemRequest::WriteTeam {
                 organization: org_id,
                 team: team_id,
                 slug: team_slug,
                 name: "Engineering".to_string(),
-            }),
+            },
             &mut state,
         );
 
@@ -11196,24 +11452,24 @@ mod tests {
         // Create team
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteTeam {
+            &SystemRequest::WriteTeam {
                 organization: org_id,
                 team: team_id,
                 slug: team_slug,
                 name: "Old Name".to_string(),
-            }),
+            },
             &mut state,
         );
 
         // Rename team
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteTeam {
+            &SystemRequest::WriteTeam {
                 organization: org_id,
                 team: team_id,
                 slug: team_slug,
                 name: "New Name".to_string(),
-            }),
+            },
             &mut state,
         );
 
@@ -11238,24 +11494,24 @@ mod tests {
         // Create first team
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteTeam {
+            &SystemRequest::WriteTeam {
                 organization: org_id,
                 team: TeamId::new(1),
                 slug: TeamSlug::new(5003),
                 name: "Duplicate".to_string(),
-            }),
+            },
             &mut state,
         );
 
         // Second team with same name
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteTeam {
+            &SystemRequest::WriteTeam {
                 organization: org_id,
                 team: TeamId::new(2),
                 slug: TeamSlug::new(5004),
                 name: "Duplicate".to_string(),
-            }),
+            },
             &mut state,
         );
 
@@ -11288,24 +11544,24 @@ mod tests {
         // Create team first
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteTeam {
+            &SystemRequest::WriteTeam {
                 organization: org_id,
                 team: team_id,
                 slug: TeamSlug::new(5010),
                 name: "Dev Team".to_string(),
-            }),
+            },
             &mut state,
         );
 
         // Add member
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::AddTeamMember {
+            &SystemRequest::AddTeamMember {
                 organization: org_id,
                 team: team_id,
                 user_id: UserId::new(42),
                 role: inferadb_ledger_state::system::TeamMemberRole::Member,
-            }),
+            },
             &mut state,
         );
 
@@ -11333,35 +11589,35 @@ mod tests {
 
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteTeam {
+            &SystemRequest::WriteTeam {
                 organization: org_id,
                 team: team_id,
                 slug: TeamSlug::new(5011),
                 name: "Dev Team".to_string(),
-            }),
+            },
             &mut state,
         );
 
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::AddTeamMember {
+            &SystemRequest::AddTeamMember {
                 organization: org_id,
                 team: team_id,
                 user_id: UserId::new(42),
                 role: inferadb_ledger_state::system::TeamMemberRole::Member,
-            }),
+            },
             &mut state,
         );
 
         // Duplicate add
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::AddTeamMember {
+            &SystemRequest::AddTeamMember {
                 organization: org_id,
                 team: team_id,
                 user_id: UserId::new(42),
                 role: inferadb_ledger_state::system::TeamMemberRole::Member,
-            }),
+            },
             &mut state,
         );
 
@@ -11389,45 +11645,45 @@ mod tests {
 
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteTeam {
+            &SystemRequest::WriteTeam {
                 organization: org_id,
                 team: team_id,
                 slug: TeamSlug::new(5012),
                 name: "Dev Team".to_string(),
-            }),
+            },
             &mut state,
         );
 
         // Add two members: one Manager, one Member
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::AddTeamMember {
+            &SystemRequest::AddTeamMember {
                 organization: org_id,
                 team: team_id,
                 user_id: UserId::new(10),
                 role: inferadb_ledger_state::system::TeamMemberRole::Manager,
-            }),
+            },
             &mut state,
         );
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::AddTeamMember {
+            &SystemRequest::AddTeamMember {
                 organization: org_id,
                 team: team_id,
                 user_id: UserId::new(11),
                 role: inferadb_ledger_state::system::TeamMemberRole::Member,
-            }),
+            },
             &mut state,
         );
 
         // Remove the regular member
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::RemoveTeamMember {
+            &SystemRequest::RemoveTeamMember {
                 organization: org_id,
                 team: team_id,
                 user_id: UserId::new(11),
-            }),
+            },
             &mut state,
         );
 
@@ -11455,35 +11711,35 @@ mod tests {
 
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteTeam {
+            &SystemRequest::WriteTeam {
                 organization: org_id,
                 team: team_id,
                 slug: TeamSlug::new(5013),
                 name: "Dev Team".to_string(),
-            }),
+            },
             &mut state,
         );
 
         // Add single manager
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::AddTeamMember {
+            &SystemRequest::AddTeamMember {
                 organization: org_id,
                 team: team_id,
                 user_id: UserId::new(10),
                 role: inferadb_ledger_state::system::TeamMemberRole::Manager,
-            }),
+            },
             &mut state,
         );
 
         // Try to remove the only manager
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::RemoveTeamMember {
+            &SystemRequest::RemoveTeamMember {
                 organization: org_id,
                 team: team_id,
                 user_id: UserId::new(10),
-            }),
+            },
             &mut state,
         );
 
@@ -11511,22 +11767,22 @@ mod tests {
 
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteTeam {
+            &SystemRequest::WriteTeam {
                 organization: org_id,
                 team: team_id,
                 slug: TeamSlug::new(5014),
                 name: "Dev Team".to_string(),
-            }),
+            },
             &mut state,
         );
 
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::RemoveTeamMember {
+            &SystemRequest::RemoveTeamMember {
                 organization: org_id,
                 team: team_id,
                 user_id: UserId::new(999),
-            }),
+            },
             &mut state,
         );
 
@@ -11554,34 +11810,34 @@ mod tests {
 
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteTeam {
+            &SystemRequest::WriteTeam {
                 organization: org_id,
                 team: team_id,
                 slug: TeamSlug::new(5015),
                 name: "Dev Team".to_string(),
-            }),
+            },
             &mut state,
         );
 
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::AddTeamMember {
+            &SystemRequest::AddTeamMember {
                 organization: org_id,
                 team: team_id,
                 user_id: UserId::new(42),
                 role: inferadb_ledger_state::system::TeamMemberRole::Member,
-            }),
+            },
             &mut state,
         );
 
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::UpdateTeamMemberRole {
+            &SystemRequest::UpdateTeamMemberRole {
                 organization: org_id,
                 team: team_id,
                 user_id: UserId::new(42),
                 role: inferadb_ledger_state::system::TeamMemberRole::Manager,
-            }),
+            },
             &mut state,
         );
 
@@ -11609,23 +11865,23 @@ mod tests {
 
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteTeam {
+            &SystemRequest::WriteTeam {
                 organization: org_id,
                 team: team_id,
                 slug: TeamSlug::new(5016),
                 name: "Dev Team".to_string(),
-            }),
+            },
             &mut state,
         );
 
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::UpdateTeamMemberRole {
+            &SystemRequest::UpdateTeamMemberRole {
                 organization: org_id,
                 team: team_id,
                 user_id: UserId::new(999),
                 role: inferadb_ledger_state::system::TeamMemberRole::Manager,
-            }),
+            },
             &mut state,
         );
 
@@ -11656,12 +11912,12 @@ mod tests {
 
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteAppProfile {
+            &SystemRequest::WriteAppProfile {
                 organization: org_id,
                 app: inferadb_ledger_types::AppId::new(1),
                 name: "My App".to_string(),
                 description: Some("A test app".to_string()),
-            }),
+            },
             &mut state,
         );
 
@@ -11693,23 +11949,23 @@ mod tests {
 
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteAppProfile {
+            &SystemRequest::WriteAppProfile {
                 organization: org_id,
                 app: inferadb_ledger_types::AppId::new(1),
                 name: "Same Name".to_string(),
                 description: Some(String::new()),
-            }),
+            },
             &mut state,
         );
 
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteAppProfile {
+            &SystemRequest::WriteAppProfile {
                 organization: org_id,
                 app: inferadb_ledger_types::AppId::new(2),
                 name: "Same Name".to_string(),
                 description: Some(String::new()),
-            }),
+            },
             &mut state,
         );
 
@@ -11738,22 +11994,19 @@ mod tests {
         // Create profile first
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteAppProfile {
+            &SystemRequest::WriteAppProfile {
                 organization: org_id,
                 app: app_id,
                 name: "Deletable App".to_string(),
                 description: Some(String::new()),
-            }),
+            },
             &mut state,
         );
 
         // Delete it
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::DeleteAppProfile {
-                organization: org_id,
-                app: app_id,
-            }),
+            &SystemRequest::DeleteAppProfile { organization: org_id, app: app_id },
             &mut state,
         );
 
@@ -11780,12 +12033,12 @@ mod tests {
 
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteClientAssertionName {
+            &SystemRequest::WriteClientAssertionName {
                 organization: OrganizationId::new(1),
                 app: inferadb_ledger_types::AppId::new(1),
                 assertion: inferadb_ledger_types::ClientAssertionId::new(1),
                 name: "My Assertion".to_string(),
-            }),
+            },
             &mut state,
         );
 
@@ -11801,23 +12054,23 @@ mod tests {
         // Write first
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteClientAssertionName {
+            &SystemRequest::WriteClientAssertionName {
                 organization: OrganizationId::new(1),
                 app: inferadb_ledger_types::AppId::new(1),
                 assertion: inferadb_ledger_types::ClientAssertionId::new(1),
                 name: "My Assertion".to_string(),
-            }),
+            },
             &mut state,
         );
 
         // Delete
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::DeleteClientAssertionName {
+            &SystemRequest::DeleteClientAssertionName {
                 organization: OrganizationId::new(1),
                 app: inferadb_ledger_types::AppId::new(1),
                 assertion: inferadb_ledger_types::ClientAssertionId::new(1),
-            }),
+            },
             &mut state,
         );
 
@@ -11844,22 +12097,22 @@ mod tests {
 
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteTeam {
+            &SystemRequest::WriteTeam {
                 organization: org_id,
                 team: team_id,
                 slug: TeamSlug::new(5030),
                 name: "Deletable Team".to_string(),
-            }),
+            },
             &mut state,
         );
 
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::DeleteTeam {
+            &SystemRequest::DeleteTeam {
                 organization: org_id,
                 team: team_id,
                 move_members_to: None,
-            }),
+            },
             &mut state,
         );
 
@@ -11890,11 +12143,11 @@ mod tests {
         // Delete nonexistent team should succeed idempotently
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::DeleteTeam {
+            &SystemRequest::DeleteTeam {
                 organization: org_id,
                 team: TeamId::new(999),
                 move_members_to: None,
-            }),
+            },
             &mut state,
         );
 
@@ -11922,22 +12175,22 @@ mod tests {
 
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteTeam {
+            &SystemRequest::WriteTeam {
                 organization: org_id,
                 team: team_id,
                 slug: TeamSlug::new(5032),
                 name: "Self Move".to_string(),
-            }),
+            },
             &mut state,
         );
 
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::DeleteTeam {
+            &SystemRequest::DeleteTeam {
                 organization: org_id,
                 team: team_id,
                 move_members_to: Some(team_id),
-            }),
+            },
             &mut state,
         );
 
@@ -11969,22 +12222,22 @@ mod tests {
         // Create team + app profile to be purged
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteTeam {
+            &SystemRequest::WriteTeam {
                 organization: org_id,
                 team: TeamId::new(1),
                 slug: TeamSlug::new(5040),
                 name: "Team To Purge".to_string(),
-            }),
+            },
             &mut state,
         );
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteAppProfile {
+            &SystemRequest::WriteAppProfile {
                 organization: org_id,
                 app: inferadb_ledger_types::AppId::new(1),
                 name: "App To Purge".to_string(),
                 description: Some(String::new()),
-            }),
+            },
             &mut state,
         );
 
@@ -11994,9 +12247,7 @@ mod tests {
         // Purge
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::PurgeOrganizationRegional {
-                organization: org_id,
-            }),
+            &SystemRequest::PurgeOrganizationRegional { organization: org_id },
             &mut state,
         );
 
@@ -12038,7 +12289,7 @@ mod tests {
 
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteOrganizationInvite {
+            &SystemRequest::WriteOrganizationInvite {
                 organization: org_id,
                 invite: InviteId::new(1),
                 slug: InviteSlug::new(9001),
@@ -12049,7 +12300,7 @@ mod tests {
                 role: inferadb_ledger_state::system::OrganizationMemberRole::Member,
                 team: None,
                 expires_at: fixed_timestamp() + Duration::days(7),
-            }),
+            },
             &mut state,
         );
 
@@ -12073,7 +12324,7 @@ mod tests {
         // Write invite first
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteOrganizationInvite {
+            &SystemRequest::WriteOrganizationInvite {
                 organization: org_id,
                 invite: invite_id,
                 slug: InviteSlug::new(9002),
@@ -12084,18 +12335,18 @@ mod tests {
                 role: inferadb_ledger_state::system::OrganizationMemberRole::Member,
                 team: None,
                 expires_at: fixed_timestamp() + Duration::days(7),
-            }),
+            },
             &mut state,
         );
 
         // Accept invite
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::UpdateOrganizationInviteStatus {
+            &SystemRequest::UpdateOrganizationInviteStatus {
                 organization: org_id,
                 invite: invite_id,
                 status: InvitationStatus::Accepted,
-            }),
+            },
             &mut state,
         );
 
@@ -12119,7 +12370,7 @@ mod tests {
         // Write invite first
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteOrganizationInvite {
+            &SystemRequest::WriteOrganizationInvite {
                 organization: org_id,
                 invite: invite_id,
                 slug: InviteSlug::new(9003),
@@ -12130,17 +12381,14 @@ mod tests {
                 role: inferadb_ledger_state::system::OrganizationMemberRole::Member,
                 team: None,
                 expires_at: fixed_timestamp() + Duration::days(7),
-            }),
+            },
             &mut state,
         );
 
         // Delete
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::DeleteOrganizationInvite {
-                organization: org_id,
-                invite: invite_id,
-            }),
+            &SystemRequest::DeleteOrganizationInvite { organization: org_id, invite: invite_id },
             &mut state,
         );
 
@@ -12164,7 +12412,7 @@ mod tests {
         // Write invite first
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::WriteOrganizationInvite {
+            &SystemRequest::WriteOrganizationInvite {
                 organization: org_id,
                 invite: invite_id,
                 slug: InviteSlug::new(9004),
@@ -12175,18 +12423,18 @@ mod tests {
                 role: inferadb_ledger_state::system::OrganizationMemberRole::Member,
                 team: None,
                 expires_at: fixed_timestamp() + Duration::days(7),
-            }),
+            },
             &mut state,
         );
 
         // Rehash
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::RehashInvitationEmailHmac {
+            &SystemRequest::RehashInvitationEmailHmac {
                 organization: org_id,
                 invite: invite_id,
                 new_hmac: "new-hmac".to_string(),
-            }),
+            },
             &mut state,
         );
 
@@ -12212,10 +12460,10 @@ mod tests {
 
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::UpdateOrganizationProfile {
+            &SystemRequest::UpdateOrganizationProfile {
                 organization: org_id,
                 name: "Updated Org Name".to_string(),
-            }),
+            },
             &mut state,
         );
 
@@ -12240,10 +12488,7 @@ mod tests {
 
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::EraseUser {
-                user_id: UserId::new(1),
-                region: Region::US_EAST_VA,
-            }),
+            &SystemRequest::EraseUser { user_id: UserId::new(1), region: Region::US_EAST_VA },
             &mut state,
         );
 
@@ -12263,7 +12508,7 @@ mod tests {
 
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::MigrateExistingUsers { entries: vec![] }),
+            &SystemRequest::MigrateExistingUsers { entries: vec![] },
             &mut state,
         );
 
@@ -12283,12 +12528,12 @@ mod tests {
 
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::CreateOnboardingUser {
+            &SystemRequest::CreateOnboardingUser {
                 email_hmac: "test-hmac".to_string(),
                 user_slug: UserSlug::new(1),
                 organization_slug: inferadb_ledger_types::OrganizationSlug::new(1),
                 region: Region::US_EAST_VA,
-            }),
+            },
             &mut state,
         );
 
@@ -12309,22 +12554,22 @@ mod tests {
         // Register an active email hash
         apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::RegisterEmailHash {
+            &SystemRequest::RegisterEmailHash {
                 hmac_hex: "occupied-hmac".to_string(),
                 user_id: UserId::new(42),
-            }),
+            },
             &mut state,
         );
 
         // Try to onboard with same HMAC
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::CreateOnboardingUser {
+            &SystemRequest::CreateOnboardingUser {
                 email_hmac: "occupied-hmac".to_string(),
                 user_slug: UserSlug::new(1),
                 organization_slug: inferadb_ledger_types::OrganizationSlug::new(1),
                 region: Region::US_EAST_VA,
-            }),
+            },
             &mut state,
         );
 
@@ -12348,12 +12593,12 @@ mod tests {
         // First call
         let response1 = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::CreateOnboardingUser {
+            &SystemRequest::CreateOnboardingUser {
                 email_hmac: "idempotent-hmac".to_string(),
                 user_slug,
                 organization_slug: org_slug,
                 region: Region::US_EAST_VA,
-            }),
+            },
             &mut state,
         );
 
@@ -12367,12 +12612,12 @@ mod tests {
         // Retry with same parameters (idempotent)
         let response2 = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::CreateOnboardingUser {
+            &SystemRequest::CreateOnboardingUser {
                 email_hmac: "idempotent-hmac".to_string(),
                 user_slug,
                 organization_slug: org_slug,
                 region: Region::US_EAST_VA,
-            }),
+            },
             &mut state,
         );
 
@@ -12398,13 +12643,13 @@ mod tests {
 
         let response = apply_at_fixed_time(
             &store,
-            &LedgerRequest::System(SystemRequest::ActivateOnboardingUser {
+            &SystemRequest::ActivateOnboardingUser {
                 user_id: UserId::new(1),
                 user_slug: UserSlug::new(1),
                 organization_id: OrganizationId::new(1),
                 organization_slug: inferadb_ledger_types::OrganizationSlug::new(1),
                 email_hmac: "hmac".to_string(),
-            }),
+            },
             &mut state,
         );
 
@@ -12421,39 +12666,48 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_batch_write_with_system_requests() {
+    fn test_batch_write_with_org_requests() {
         let dir = tempdir().expect("create temp dir");
-        let store = create_store_with_state(dir.path());
+        let store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
         let mut state = (*store.applied_state.load_full()).clone();
 
+        // Set up org and vault for the batch write
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(5000),
+            Region::US_EAST_VA,
+        );
+
         let requests = vec![
-            LedgerRequest::System(SystemRequest::CreateUser {
-                user: UserId::new(0),
-                admin: false,
-                slug: UserSlug::new(8001),
-                region: Region::US_EAST_VA,
-            }),
-            LedgerRequest::System(SystemRequest::CreateUser {
-                user: UserId::new(0),
-                admin: false,
-                slug: UserSlug::new(8002),
-                region: Region::US_EAST_VA,
-            }),
+            OrganizationRequest::CreateVault {
+                organization: org_id,
+                slug: VaultSlug::new(8001),
+                name: Some("vault-batch-1".to_string()),
+                retention_policy: None,
+            },
+            OrganizationRequest::CreateVault {
+                organization: org_id,
+                slug: VaultSlug::new(8002),
+                name: Some("vault-batch-2".to_string()),
+                retention_policy: None,
+            },
         ];
 
         let response =
-            apply_at_fixed_time(&store, &LedgerRequest::Organization(OrganizationRequest::BatchWrite { requests }), &mut state);
+            apply_at_fixed_time(&store, &OrganizationRequest::BatchWrite { requests }, &mut state);
 
         match response {
             LedgerResponse::BatchWrite { responses } => {
                 assert_eq!(responses.len(), 2);
                 assert!(
-                    matches!(responses[0], LedgerResponse::UserCreated { .. }),
-                    "first should be UserCreated",
+                    matches!(responses[0], LedgerResponse::VaultCreated { .. }),
+                    "first should be VaultCreated",
                 );
                 assert!(
-                    matches!(responses[1], LedgerResponse::UserCreated { .. }),
-                    "second should be UserCreated",
+                    matches!(responses[1], LedgerResponse::VaultCreated { .. }),
+                    "second should be VaultCreated",
                 );
             },
             other => panic!("expected BatchWrite, got {other:?}"),
@@ -12468,7 +12722,9 @@ mod tests {
     async fn test_last_applied_state_initial() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
 
         let (last_applied, _membership) = store.last_applied_state().await.expect("last applied");
         assert!(last_applied.is_none());
@@ -12478,7 +12734,9 @@ mod tests {
     async fn test_get_current_snapshot_empty_returns_none() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
-        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let mut store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
 
         let snapshot = store.get_current_snapshot().await.expect("get snapshot");
         assert!(snapshot.is_none());
@@ -12488,7 +12746,9 @@ mod tests {
     async fn test_vote_round_trip_overwrites() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
-        let store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
 
         let vote1 = Vote { term: 1, node_id: 42, committed: false };
         store.save_vote(&vote1).await.expect("save vote1");
@@ -12518,7 +12778,9 @@ mod tests {
     async fn build_snapshot_forces_sync_state() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
-        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let mut store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
 
         // Directly commit_in_memory a single write against the state DB so
         // `committed_state` is ahead of the durable dual-slot. Bypasses the
@@ -12577,14 +12839,16 @@ mod tests {
     async fn replay_crash_gap_empty_log_is_noop() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
-        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let mut store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
 
         // Fresh WAL with no checkpoint and no frames.
         let wal = inferadb_ledger_consensus::wal::InMemoryWalBackend::new();
         let shard_id = inferadb_ledger_consensus::types::ConsensusStateId(42);
 
         let synced_before = store.db.last_synced_snapshot_id();
-        let stats = store.replay_crash_gap(&wal, shard_id).await.expect("replay");
+        let stats = store.replay_crash_gap::<inferadb_ledger_consensus::wal::InMemoryWalBackend, OrganizationRequest>(&wal, shard_id).await.expect("replay");
 
         assert_eq!(stats.replayed_entries, 0, "empty WAL must replay zero entries");
         assert_eq!(stats.applied_durable, 0, "fresh store has applied_durable = 0");
@@ -12601,7 +12865,9 @@ mod tests {
     async fn replay_crash_gap_caught_up_is_noop() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
-        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let mut store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
 
         let shard_id = inferadb_ledger_consensus::types::ConsensusStateId(7);
 
@@ -12634,7 +12900,7 @@ mod tests {
             store.applied_state.store(Arc::new(new_state));
         }
 
-        let stats = store.replay_crash_gap(&wal, shard_id).await.expect("replay");
+        let stats = store.replay_crash_gap::<inferadb_ledger_consensus::wal::InMemoryWalBackend, OrganizationRequest>(&wal, shard_id).await.expect("replay");
 
         assert_eq!(
             stats.replayed_entries, 0,
@@ -12648,7 +12914,9 @@ mod tests {
     async fn replay_crash_gap_replays_tail_and_syncs() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
-        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let mut store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
 
         let shard_id = inferadb_ledger_consensus::types::ConsensusStateId(11);
 
@@ -12681,7 +12949,7 @@ mod tests {
         }
 
         let synced_before = store.db.last_synced_snapshot_id();
-        let stats = store.replay_crash_gap(&wal, shard_id).await.expect("replay");
+        let stats = store.replay_crash_gap::<inferadb_ledger_consensus::wal::InMemoryWalBackend, OrganizationRequest>(&wal, shard_id).await.expect("replay");
 
         assert_eq!(stats.replayed_entries, 3, "must replay 3..=5");
         assert_eq!(stats.applied_durable, 2);
@@ -12802,7 +13070,7 @@ mod tests {
         let blocks_synced_before = blocks_db.last_synced_snapshot_id();
         let events_synced_before = events_db.db().last_synced_snapshot_id();
 
-        let stats = store.replay_crash_gap(&wal, shard_id).await.expect("replay");
+        let stats = store.replay_crash_gap::<inferadb_ledger_consensus::wal::InMemoryWalBackend, OrganizationRequest>(&wal, shard_id).await.expect("replay");
 
         assert_eq!(stats.replayed_entries, 2, "expected to replay indexes 2..=3");
 
@@ -12829,7 +13097,9 @@ mod tests {
     async fn replay_crash_gap_is_idempotent_across_double_call() {
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("raft_log.db");
-        let mut store = RaftLogStore::<FileBackend>::open(&path).expect("open store").with_organization_id(OrganizationId::new(1));
+        let mut store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
 
         let shard_id = inferadb_ledger_consensus::types::ConsensusStateId(99);
 
@@ -12846,11 +13116,11 @@ mod tests {
         wal.sync().expect("sync");
 
         // First call replays everything.
-        let stats1 = store.replay_crash_gap(&wal, shard_id).await.expect("replay #1");
+        let stats1 = store.replay_crash_gap::<inferadb_ledger_consensus::wal::InMemoryWalBackend, OrganizationRequest>(&wal, shard_id).await.expect("replay #1");
         assert_eq!(stats1.replayed_entries, 2, "first call replays both entries");
 
         // Second call: applied_durable is now 2, so nothing to replay.
-        let stats2 = store.replay_crash_gap(&wal, shard_id).await.expect("replay #2");
+        let stats2 = store.replay_crash_gap::<inferadb_ledger_consensus::wal::InMemoryWalBackend, OrganizationRequest>(&wal, shard_id).await.expect("replay #2");
         assert_eq!(stats2.replayed_entries, 0, "idempotent: second call must replay zero entries",);
         assert_eq!(stats2.applied_durable, 2);
         assert_eq!(stats2.last_committed, 2);
@@ -12972,13 +13242,13 @@ mod tests {
 
                 // Phase 1: apply every proposal once.
                 for (source, batch) in &proposals {
-                    let request = LedgerRequest::Organization(OrganizationRequest::IngestExternalEvents {
+                    let request = OrganizationRequest::IngestExternalEvents {
                         source: source.clone(),
                         events: batch.clone(),
-                    });
+                    };
                     let mut events: Vec<EventEntry> = Vec::new();
                     let mut op_index = 0u32;
-                    let (response, vault_entry) = store.apply_request_with_events(
+                    let (response, vault_entry) = store.apply_organization_request_with_events(
                         &request,
                         &mut state,
                         ts,
@@ -13011,13 +13281,13 @@ mod tests {
                 // semantics make this a logical no-op — the b-tree layout
                 // must be byte-identical after the replay pass.
                 for (source, batch) in &proposals {
-                    let request = LedgerRequest::Organization(OrganizationRequest::IngestExternalEvents {
+                    let request = OrganizationRequest::IngestExternalEvents {
                         source: source.clone(),
                         events: batch.clone(),
-                    });
+                    };
                     let mut events: Vec<EventEntry> = Vec::new();
                     let mut op_index = 0u32;
-                    let (response, _vault_entry) = store.apply_request_with_events(
+                    let (response, _vault_entry) = store.apply_organization_request_with_events(
                         &request,
                         &mut state,
                         ts,

@@ -34,12 +34,12 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::{
     clock::Clock,
     committed::CommittedBatch,
+    consensus_state::ConsensusState,
     error::ConsensusError,
     leadership::ShardState,
     message::Message,
     reactor::{Reactor, ReactorEvent},
     rng::RngSource,
-    consensus_state::ConsensusState,
     transport::NetworkTransport,
     types::*,
     wal_backend::WalBackend,
@@ -92,7 +92,11 @@ impl ConsensusEngine {
         clock: C,
         transport: T,
         flush_interval: Duration,
-    ) -> (Self, mpsc::Receiver<CommittedBatch>, HashMap<ConsensusStateId, watch::Receiver<ShardState>>)
+    ) -> (
+        Self,
+        mpsc::Receiver<CommittedBatch>,
+        HashMap<ConsensusStateId, watch::Receiver<ShardState>>,
+    )
     where
         C: Clock + Clone + Send + 'static,
         R: RngSource + Send + 'static,
@@ -178,7 +182,11 @@ impl ConsensusEngine {
     /// Duplicate proposals (same content within the 60-second idempotency
     /// window) are short-circuited before reaching the reactor, returning the
     /// cached commit index immediately.
-    pub async fn propose(&self, shard: ConsensusStateId, data: Vec<u8>) -> Result<u64, ConsensusError> {
+    pub async fn propose(
+        &self,
+        shard: ConsensusStateId,
+        data: Vec<u8>,
+    ) -> Result<u64, ConsensusError> {
         // Pre-proposal access control.
         if let Some(validator) = &self.validator {
             validator(&data).map_err(|_reason| ConsensusError::ShardUnavailable { shard })?;
@@ -307,7 +315,11 @@ impl ConsensusEngine {
     }
 
     /// Promotes a learner to voter.
-    pub async fn promote_voter(&self, shard: ConsensusStateId, node: NodeId) -> Result<(), ConsensusError> {
+    pub async fn promote_voter(
+        &self,
+        shard: ConsensusStateId,
+        node: NodeId,
+    ) -> Result<(), ConsensusError> {
         let (tx, rx) = oneshot::channel();
         self.control_inbox
             .send(ReactorEvent::MembershipChange {
@@ -321,7 +333,11 @@ impl ConsensusEngine {
     }
 
     /// Removes a node from a shard.
-    pub async fn remove_node(&self, shard: ConsensusStateId, node: NodeId) -> Result<(), ConsensusError> {
+    pub async fn remove_node(
+        &self,
+        shard: ConsensusStateId,
+        node: NodeId,
+    ) -> Result<(), ConsensusError> {
         let (tx, rx) = oneshot::channel();
         self.control_inbox
             .send(ReactorEvent::MembershipChange {
@@ -370,7 +386,10 @@ impl ConsensusEngine {
     /// Returns [`ConsensusError::ShardUnavailable`] if the shard is not
     /// registered, or [`ConsensusError::InboxFull`] if the reactor
     /// inbox is full.
-    pub async fn trigger_snapshot(&self, shard: ConsensusStateId) -> Result<(u64, u64), ConsensusError> {
+    pub async fn trigger_snapshot(
+        &self,
+        shard: ConsensusStateId,
+    ) -> Result<(u64, u64), ConsensusError> {
         let (tx, rx) = oneshot::channel();
         self.control_inbox
             .send(ReactorEvent::TriggerSnapshot { shard, response: tx })
@@ -501,8 +520,8 @@ mod tests {
     use crate::{
         clock::SimulatedClock,
         config::ShardConfig,
-        rng::SimulatedRng,
         consensus_state::ConsensusState,
+        rng::SimulatedRng,
         transport::InMemoryTransport,
         types::{Membership, NodeId},
         wal::InMemoryWalBackend,

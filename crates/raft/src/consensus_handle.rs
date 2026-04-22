@@ -8,7 +8,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use inferadb_ledger_consensus::{
     ConsensusEngine, ConsensusError,
     leadership::ShardState,
-    types::{NodeId, ConsensusStateId},
+    types::{ConsensusStateId, NodeId},
 };
 use inferadb_ledger_types::OrganizationId;
 use parking_lot::Mutex;
@@ -113,10 +113,51 @@ impl ConsensusHandle {
     /// construct typed `RaftPayload<SystemRequest>` / `RaftPayload<RegionRequest>` /
     /// `RaftPayload<OrganizationRequest>` and the handle serializes each on the
     /// wire without collapsing through a shared enum.
-    pub async fn propose<R: serde::Serialize>(&self, payload: RaftPayload<R>) -> Result<u64, HandleError> {
+    pub async fn propose<R: serde::Serialize>(
+        &self,
+        payload: RaftPayload<R>,
+    ) -> Result<u64, HandleError> {
         let bytes = postcard::to_allocvec(&payload)
             .map_err(|e| HandleError::Serialization { message: e.to_string() })?;
         self.engine.propose(self.shard, bytes).await.context(ConsensusSnafu)
+    }
+
+    /// Proposes pre-serialized bytes and waits for the apply result.
+    ///
+    /// Accepts already-serialized `postcard(RaftPayload<R>)` bytes, skipping
+    /// the generic `postcard::to_allocvec` step. Used by the bytes-oriented
+    /// [`ProposalService`](crate::ProposalService) trait so typed helpers in
+    /// the services crate can serialize `RaftPayload<SystemRequest>` /
+    /// `RaftPayload<OrganizationRequest>` directly.
+    pub async fn propose_bytes_and_wait(
+        &self,
+        bytes: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<LedgerResponse, HandleError> {
+        let start = tokio::time::Instant::now();
+
+        let commit_index = tokio::time::timeout(timeout, self.engine.propose(self.shard, bytes))
+            .await
+            .map_err(|_| HandleError::Timeout { timeout })?
+            .context(ConsensusSnafu)?;
+
+        let (tx, rx) = oneshot::channel();
+        self.response_map.lock().insert(commit_index, tx);
+
+        if let Some(response) = self.spillover.lock().remove(&commit_index) {
+            self.response_map.lock().remove(&commit_index);
+            return Ok(response);
+        }
+
+        let remaining = timeout.saturating_sub(start.elapsed());
+
+        tokio::time::timeout(remaining, rx)
+            .await
+            .map_err(|_| {
+                self.response_map.lock().remove(&commit_index);
+                HandleError::Timeout { timeout }
+            })?
+            .map_err(|_| HandleError::ApplyDropped)
     }
 
     /// Proposes a payload and waits for the apply result.
@@ -344,11 +385,11 @@ impl ConsensusHandle {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
     use inferadb_ledger_consensus::{
-        InMemoryTransport, ConsensusState,
+        ConsensusState, InMemoryTransport,
         clock::SystemClock,
         config::ShardConfig,
         rng::SystemRng,
-        types::{Membership, NodeId, NodeState, ConsensusStateId},
+        types::{ConsensusStateId, Membership, NodeId, NodeState},
         wal::InMemoryWalBackend,
     };
 

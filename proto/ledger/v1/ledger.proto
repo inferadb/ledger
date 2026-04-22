@@ -3590,7 +3590,9 @@ message ConsensusAck {}
 message RegionalProposalRequest {
   // Target data region.
   optional Region region = 1;
-  // Postcard-serialized LedgerRequest.
+  // Postcard-serialized `RaftPayload<R>` where `R` is the tier-specific
+  // request type (`SystemRequest` / `RegionRequest` / `OrganizationRequest`).
+  // The receiving node decodes based on the target group's tier.
   bytes request_payload = 2;
   // Caller identity (user slug or 0 for system).
   uint64 caller = 3;

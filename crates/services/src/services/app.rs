@@ -24,7 +24,7 @@ use inferadb_ledger_proto::proto::{
     SetAppCredentialEnabledResponse, SetAppEnabledRequest, SetAppEnabledResponse, UpdateAppRequest,
     UpdateAppResponse, UpdateAppVaultRequest, UpdateAppVaultResponse,
 };
-use inferadb_ledger_raft::types::{LedgerResponse, LedgerRequest, OrganizationRequest};
+use inferadb_ledger_raft::types::{LedgerResponse, OrganizationRequest};
 use inferadb_ledger_state::system::{
     App, AppCredentialType as DomainAppCredentialType, AppVaultConnection, ClientAssertionEntry,
     SYSTEM_VAULT_ID, SystemKeys,
@@ -339,11 +339,20 @@ impl proto::app_service_server::AppService for AppService {
             return Err(Status::invalid_argument("App name must not be empty"));
         }
 
+        // Resolve org region before the Raft proposal so Step 2 can use it.
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(org_id)
+            .ok_or_else(|| tonic::Status::not_found("Organization not found"))?;
+
         // Step 1 (GLOBAL): Create app directory entry (ID + slug only, no PII).
         let response = self
             .ctx
-            .propose_request(
-                LedgerRequest::Organization(OrganizationRequest::CreateApp { organization: org_id, slug }),
+            .propose_organization_request(
+                org_meta.region,
+                org_id,
+                OrganizationRequest::CreateApp { organization: org_id, slug },
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -362,11 +371,6 @@ impl proto::app_service_server::AppService for AppService {
 
         // Step 2 (REGIONAL): Write app name and description to the org's regional store.
         // Encrypted with OrgShredKey for crypto-shredding on organization purge.
-        let org_meta = self
-            .ctx
-            .applied_state
-            .get_organization(org_id)
-            .ok_or_else(|| tonic::Status::not_found("Organization not found"))?;
         let system_request = inferadb_ledger_raft::types::SystemRequest::WriteAppProfile {
             organization: org_id,
             app: app_id,
@@ -546,8 +550,10 @@ impl proto::app_service_server::AppService for AppService {
         // Step 2 (GLOBAL): Delete App record, slug index, vault connections, assertions.
         let response = self
             .ctx
-            .propose_request(
-                LedgerRequest::Organization(OrganizationRequest::DeleteApp { organization: org_id, app: app_id }),
+            .propose_organization_request(
+                org_meta.region,
+                org_id,
+                OrganizationRequest::DeleteApp { organization: org_id, app: app_id },
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -583,14 +589,21 @@ impl proto::app_service_server::AppService for AppService {
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
         let (_, app_id) = resolver.extract_and_resolve_app(&inner.app)?;
 
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(org_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
         let response = self
             .ctx
-            .propose_request(
-                LedgerRequest::Organization(OrganizationRequest::SetAppEnabled {
+            .propose_organization_request(
+                org_meta.region,
+                org_id,
+                OrganizationRequest::SetAppEnabled {
                     organization: org_id,
                     app: app_id,
                     enabled: inner.enabled,
-                }),
+                },
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -633,15 +646,22 @@ impl proto::app_service_server::AppService for AppService {
         let (_, app_id) = resolver.extract_and_resolve_app(&inner.app)?;
         let credential_type = map_credential_type(inner.credential_type)?;
 
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(org_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
         let response = self
             .ctx
-            .propose_request(
-                LedgerRequest::Organization(OrganizationRequest::SetAppCredentialEnabled {
+            .propose_organization_request(
+                org_meta.region,
+                org_id,
+                OrganizationRequest::SetAppCredentialEnabled {
                     organization: org_id,
                     app: app_id,
                     credential_type,
                     enabled: inner.enabled,
-                }),
+                },
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -728,14 +748,21 @@ impl proto::app_service_server::AppService for AppService {
                 .map_err(|e| error_classify::crypto_error(&e))?
                 .map_err(|e| error_classify::crypto_error(&e))?;
 
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(org_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
         let response = self
             .ctx
-            .propose_request(
-                LedgerRequest::Organization(OrganizationRequest::RotateAppClientSecret {
+            .propose_organization_request(
+                org_meta.region,
+                org_id,
+                OrganizationRequest::RotateAppClientSecret {
                     organization: org_id,
                     app: app_id,
                     new_secret_hash: secret_hash,
-                }),
+                },
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -849,16 +876,25 @@ impl proto::app_service_server::AppService for AppService {
             (pk, pem)
         };
 
+        // Resolve org region before the Raft proposal so Phase 2 can use it.
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(org_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
+
         // Phase 1: Propose structural entry to GLOBAL Raft (no PII).
         let response = self
             .ctx
-            .propose_request(
-                LedgerRequest::Organization(OrganizationRequest::CreateAppClientAssertion {
+            .propose_organization_request(
+                org_meta.region,
+                org_id,
+                OrganizationRequest::CreateAppClientAssertion {
                     organization: org_id,
                     app: app_id,
                     expires_at,
                     public_key_bytes,
-                }),
+                },
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -868,11 +904,6 @@ impl proto::app_service_server::AppService for AppService {
             LedgerResponse::AppClientAssertionCreated { assertion_id } => {
                 // Phase 2: Write assertion name to REGIONAL Raft (PII isolation).
                 // Encrypted with OrgShredKey for crypto-shredding on organization purge.
-                let org_meta = self
-                    .ctx
-                    .applied_state
-                    .get_organization(org_id)
-                    .ok_or_else(|| Status::not_found("Organization not found"))?;
                 let name_request =
                     inferadb_ledger_raft::types::SystemRequest::WriteClientAssertionName {
                         organization: org_id,
@@ -954,8 +985,14 @@ impl proto::app_service_server::AppService for AppService {
             .ok_or_else(|| Status::invalid_argument("Missing assertion ID"))?;
         let assertion = DomainClientAssertionId::new(assertion_id.id);
 
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(org_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
+
         // Phase 1: Delete assertion name from REGIONAL Raft (best-effort).
-        if let Some(org_meta) = self.ctx.applied_state.get_organization(org_id) {
+        {
             let name_request =
                 inferadb_ledger_raft::types::SystemRequest::DeleteClientAssertionName {
                     organization: org_id,
@@ -983,12 +1020,14 @@ impl proto::app_service_server::AppService for AppService {
         // Phase 2: Delete structural entry from GLOBAL Raft.
         let response = self
             .ctx
-            .propose_request(
-                LedgerRequest::Organization(OrganizationRequest::DeleteAppClientAssertion {
+            .propose_organization_request(
+                org_meta.region,
+                org_id,
+                OrganizationRequest::DeleteAppClientAssertion {
                     organization: org_id,
                     app: app_id,
                     assertion,
-                }),
+                },
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -1033,15 +1072,22 @@ impl proto::app_service_server::AppService for AppService {
             .ok_or_else(|| Status::invalid_argument("Missing assertion ID"))?;
         let assertion = DomainClientAssertionId::new(assertion_id.id);
 
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(org_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
         let response = self
             .ctx
-            .propose_request(
-                LedgerRequest::Organization(OrganizationRequest::SetAppClientAssertionEnabled {
+            .propose_organization_request(
+                org_meta.region,
+                org_id,
+                OrganizationRequest::SetAppClientAssertionEnabled {
                     organization: org_id,
                     app: app_id,
                     assertion,
                     enabled: inner.enabled,
-                }),
+                },
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -1101,16 +1147,23 @@ impl proto::app_service_server::AppService for AppService {
         let vault_slug = SlugResolver::extract_vault_slug(&inner.vault)?;
         let vault_id = resolver.resolve_vault(vault_slug)?;
 
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(org_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
         let response = self
             .ctx
-            .propose_request(
-                LedgerRequest::Organization(OrganizationRequest::AddAppVault {
+            .propose_organization_request(
+                org_meta.region,
+                org_id,
+                OrganizationRequest::AddAppVault {
                     organization: org_id,
                     app: app_id,
                     vault: vault_id,
                     vault_slug,
                     allowed_scopes: inner.allowed_scopes,
-                }),
+                },
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -1152,15 +1205,22 @@ impl proto::app_service_server::AppService for AppService {
         let vault_slug = SlugResolver::extract_vault_slug(&inner.vault)?;
         let vault_id = resolver.resolve_vault(vault_slug)?;
 
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(org_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
         let response = self
             .ctx
-            .propose_request(
-                LedgerRequest::Organization(OrganizationRequest::UpdateAppVault {
+            .propose_organization_request(
+                org_meta.region,
+                org_id,
+                OrganizationRequest::UpdateAppVault {
                     organization: org_id,
                     app: app_id,
                     vault: vault_id,
                     allowed_scopes: inner.allowed_scopes,
-                }),
+                },
                 &grpc_metadata,
                 &mut ctx,
             )
@@ -1202,14 +1262,21 @@ impl proto::app_service_server::AppService for AppService {
         let vault_slug = SlugResolver::extract_vault_slug(&inner.vault)?;
         let vault_id = resolver.resolve_vault(vault_slug)?;
 
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(org_id)
+            .ok_or_else(|| Status::not_found("Organization not found"))?;
         let response = self
             .ctx
-            .propose_request(
-                LedgerRequest::Organization(OrganizationRequest::RemoveAppVault {
+            .propose_organization_request(
+                org_meta.region,
+                org_id,
+                OrganizationRequest::RemoveAppVault {
                     organization: org_id,
                     app: app_id,
                     vault: vault_id,
-                }),
+                },
                 &grpc_metadata,
                 &mut ctx,
             )

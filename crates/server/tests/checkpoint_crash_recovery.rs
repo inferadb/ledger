@@ -38,7 +38,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use inferadb_ledger_raft::{
     HealthState, RaftManager, RecoveryStats, RegionConfig, RuntimeConfigHandle,
     event_writer::{EventHandle, HandlerPhaseEmitter},
-    types::{RaftPayload, LedgerRequest, OrganizationRequest, SystemRequest},
+    types::{OrganizationRequest, RaftPayload, SystemRequest},
 };
 use inferadb_ledger_server::{bootstrap::bootstrap_node, config::Config};
 use inferadb_ledger_store::{
@@ -246,8 +246,8 @@ impl CrashableNode {
         );
 
         // Start the US_EAST_VA data region. These tests need a REGIONAL
-        // Raft group so that `LedgerRequest::Write` can produce blocks
-        // in `blocks.db` and `LedgerRequest::IngestExternalEvents` has a target
+        // Raft group so that `OrganizationRequest::Write` can produce blocks
+        // in `blocks.db` and `OrganizationRequest::IngestExternalEvents` has a target
         // for its REGIONAL-only proposal. Skipped on restart: bootstrap_node's
         // `discover_existing_regions` path auto-re-opens regions whose on-disk
         // directories exist, so a second `start_data_region` call would return
@@ -323,10 +323,10 @@ impl CrashableNode {
         let mut keys = Vec::with_capacity(n);
         for i in 0..n {
             let hmac_hex = format!("{prefix}{i:064x}");
-            let req = LedgerRequest::System(SystemRequest::RegisterEmailHash {
+            let req = SystemRequest::RegisterEmailHash {
                 hmac_hex: hmac_hex.clone(),
                 user_id: UserId::new((i + 1) as i64),
-            });
+            };
             let resp = self
                 .handle
                 .propose_and_wait(RaftPayload::system(req), Duration::from_secs(5))
@@ -704,10 +704,10 @@ async fn test_crash_mid_batch_apply() {
     let mut futures = Vec::with_capacity(500);
     for i in 0..500 {
         let hmac_hex = format!("mbatch{i:064x}");
-        let req = LedgerRequest::System(SystemRequest::RegisterEmailHash {
+        let req = SystemRequest::RegisterEmailHash {
             hmac_hex: hmac_hex.clone(),
             user_id: UserId::new((i + 1) as i64),
-        });
+        };
         let handle = node.handle.clone();
         futures.push((
             hmac_hex,
@@ -799,7 +799,7 @@ async fn test_snapshot_forces_sync() {
 /// Per the design doc, writes that produce `RegionBlock`s must have
 /// idempotent `append_block` so replay after a crash doesn't
 /// duplicate blocks. The block-producing path is
-/// `LedgerRequest::Organization(OrganizationRequest::Write {vault, transactions, ... })`,
+/// `OrganizationRequest::Write { vault, transactions, ... }`,
 /// which requires the org and vault to exist and be active in
 /// GLOBAL state.
 ///
@@ -893,7 +893,7 @@ async fn test_shutdown_forces_sync() {
 //
 // `BlockArchive::append_block` and the apply-path `EventWriter::write_events`
 // use `commit_in_memory`, and the external `IngestEvents` RPC is routed
-// through Raft via `LedgerRequest::IngestExternalEvents`. Durability for all
+// through Raft via `OrganizationRequest::IngestExternalEvents`. Durability for all
 // three is realized via the `StateCheckpointer` tick — periodic, or at
 // snapshot/backup/shutdown. The three tests below prove that with the
 // checkpointer disabled, a WAL-committed proposal still survives an unclean
@@ -902,7 +902,7 @@ async fn test_shutdown_forces_sync() {
 // semantics for events).
 //
 // Scope extension to `CrashableNode`: each node now also starts the
-// `US_EAST_VA` data region during `start()` so `LedgerRequest::Write` and
+// `US_EAST_VA` data region during `start()` so `OrganizationRequest::Write` and
 // `IngestExternalEvents` have a REGIONAL target. Restart auto-rediscovers the
 // region dir via `bootstrap_node`'s `discover_existing_regions` path.
 
@@ -931,12 +931,12 @@ async fn bootstrap_org_and_vault(
     //         admin slug required by `CreateOrganization.admin`.
     let user_slug =
         inferadb_ledger_types::snowflake::generate_user_slug().expect("generate user slug");
-    let create_user = LedgerRequest::System(SystemRequest::CreateUser {
+    let create_user = SystemRequest::CreateUser {
         user: UserId::new(0), // 0 = auto-allocate
         admin: false,
         slug: user_slug,
         region: Region::US_EAST_VA,
-    });
+    };
     let user_id = match node
         .handle
         .propose_and_wait(RaftPayload::system(create_user), Duration::from_secs(5))
@@ -950,12 +950,12 @@ async fn bootstrap_org_and_vault(
     // Step 2: CreateOrganization on GLOBAL — status=Provisioning.
     let org_slug =
         inferadb_ledger_types::snowflake::generate_organization_slug().expect("generate org slug");
-    let create_org = LedgerRequest::System(SystemRequest::CreateOrganization {
+    let create_org = SystemRequest::CreateOrganization {
         slug: org_slug,
         region: Region::US_EAST_VA,
         tier: OrganizationTier::Free,
         admin: user_id,
-    });
+    };
     let org_id = match node
         .handle
         .propose_and_wait(RaftPayload::system(create_org), Duration::from_secs(5))
@@ -969,11 +969,36 @@ async fn bootstrap_org_and_vault(
         other => panic!("CreateOrganization expected OrganizationCreated, got {other}"),
     };
 
+    // Wait for the per-org group to start before activating.
+    //
+    // `CreateOrganization` apply triggers `organization_creation_sender`,
+    // which the bootstrap handler processes to call `start_organization_group`.
+    // That call is async and fire-and-forget from apply's perspective.
+    // gRPC writes routed via `route_organization` fall back to `(region, 0)`
+    // until the per-org group `(region, org_id)` is registered — but that
+    // group has `ApplyWorker<SystemRequest>`, which can't decode
+    // `OrganizationRequest::Write`. Wait here so subsequent writes route
+    // to the correct per-org group.
+    {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if node.manager.has_organization_group(Region::US_EAST_VA, org_id) {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "per-org group (US_EAST_VA, {org_id:?}) did not start within 5s"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     // Step 3: Activate the organization — `CreateVault` requires Active status.
-    let activate = LedgerRequest::System(SystemRequest::UpdateOrganizationStatus {
+    let activate = SystemRequest::UpdateOrganizationStatus {
         organization: org_id,
         status: OrganizationStatus::Active,
-    });
+    };
     let _ = node
         .handle
         .propose_and_wait(RaftPayload::system(activate), Duration::from_secs(5))
@@ -982,17 +1007,25 @@ async fn bootstrap_org_and_vault(
 
     // Step 4: CreateVault on GLOBAL — registers the vault slug index so
     //         the service layer can resolve external slugs to internal IDs.
+    //
+    // Post-Phase D: GLOBAL has `ApplyWorker<SystemRequest>`. To land vault
+    // metadata in GLOBAL's `AppliedState`, wrap the org-tier request in
+    // `SystemRequest::OrganizationMetadata` — the same path `propose_organization_request`
+    // in `service_infra.rs` uses. Sending raw `RaftPayload<OrganizationRequest>` bytes
+    // to a `SystemRequest` worker silently fails deserialization and returns `Empty`.
     let vault_slug =
         inferadb_ledger_types::snowflake::generate_vault_slug().expect("generate vault slug");
-    let create_vault = LedgerRequest::Organization(OrganizationRequest::CreateVault {
-        organization: org_id,
-        slug: vault_slug,
-        name: Some("sprint-1b3-vault".to_string()),
-        retention_policy: None,
-    });
+    let create_vault = SystemRequest::OrganizationMetadata(Box::new(
+        OrganizationRequest::CreateVault {
+            organization: org_id,
+            slug: vault_slug,
+            name: Some("sprint-1b3-vault".to_string()),
+            retention_policy: None,
+        },
+    ));
     let vault_id = match node
         .handle
-        .propose_and_wait(RaftPayload::new(create_vault, 0), Duration::from_secs(5))
+        .propose_and_wait(RaftPayload::system(create_vault), Duration::from_secs(5))
         .await
         .expect("CreateVault propose")
     {
@@ -1004,7 +1037,7 @@ async fn bootstrap_org_and_vault(
 }
 
 /// Proposes `count` single-entity writes against the REGIONAL Raft group,
-/// producing `count` region blocks (each `LedgerRequest::Write` that touches a
+/// producing `count` region blocks (each `OrganizationRequest::Write` that touches a
 /// vault produces one region block via `BlockArchive::append_block`). Returns
 /// the unique client-ID prefix used by each write so callers can verify they
 /// all survived post-recovery.
@@ -1021,10 +1054,8 @@ async fn propose_regional_writes(
     // must propose against the per-org group (routed via
     // `route_organization`), not the data-region group at
     // `OrganizationId(0)`.
-    let region_group = node
-        .manager
-        .route_organization(organization)
-        .expect("per-organization group registered");
+    let region_group =
+        node.manager.route_organization(organization).expect("per-organization group registered");
     let mut keys = Vec::with_capacity(count);
     for i in 0..count {
         let key = format!("{prefix}-{i:04}");
@@ -1041,11 +1072,12 @@ async fn propose_regional_writes(
             operations: vec![op],
             timestamp: std::time::SystemTime::now().into(),
         };
-        let req = LedgerRequest::Organization(OrganizationRequest::Write {            vault,
+        let req = OrganizationRequest::Write {
+            vault,
             transactions: vec![txn],
             idempotency_key: *uuid::Uuid::new_v4().as_bytes(),
             request_hash: i as u64,
-        });
+        };
         let resp = region_group
             .handle()
             .propose_and_wait(RaftPayload::new(req, 0), Duration::from_secs(10))
@@ -1106,19 +1138,25 @@ fn build_ingest_batch(
         .collect()
 }
 
-/// Scans the REGIONAL `events.db` for all events belonging to `organization`,
+/// Scans the per-org `events.db` for all events belonging to `organization`,
 /// returning the full list in primary-key (time-ordered) order. Uses
 /// `EventStore::list` with an open time window and a large cap so every
 /// surviving event appears in the result regardless of emission phase.
+///
+/// In B.1 each `(region, org_id)` group maintains its own `events.db`.
+/// `IngestEvents` routes to the per-org group, so reading `(region, 0)`
+/// would see zero events. We look up the org-specific group instead.
 fn scan_all_events(
     node: &CrashableNode,
     organization: OrganizationId,
 ) -> Vec<inferadb_ledger_types::events::EventEntry> {
     use inferadb_ledger_state::EventStore;
 
-    let region =
-        node.manager.get_region_group(Region::US_EAST_VA).expect("US_EAST_VA region running");
-    let events_db = region.events_db().expect("events_db available on data region");
+    let group = node
+        .manager
+        .get_organization_group(Region::US_EAST_VA, organization)
+        .expect("per-org group (US_EAST_VA, org_id) running");
+    let events_db = group.events_db().expect("events_db available on org group");
     let txn = events_db.read().expect("events_db read txn");
     let (entries, _cursor) = EventStore::list(&txn, organization, 0, u64::MAX, 100_000, None)
         .expect("EventStore::list succeeds");
@@ -1145,7 +1183,7 @@ fn read_region_block(
 
 /// `IngestEvents` routes through Raft: the RPC
 /// handler builds a `Vec<EventEntry>` with pre-generated UUID v4 event IDs
-/// and proposes `LedgerRequest::IngestExternalEvents` to the organization's
+/// and proposes `OrganizationRequest::IngestExternalEvents` to the organization's
 /// REGIONAL Raft group. The apply handler writes each event to `events.db`
 /// via `commit_in_memory`. With the checkpointer disabled, a crash leaves the
 /// events.db state behind the WAL, but the batch — including the frozen
@@ -1267,7 +1305,7 @@ async fn test_blocks_db_idempotent_on_replay() {
     let (_admin_user, _org_slug, org_id, _vault_slug, vault_id) =
         bootstrap_org_and_vault(&node).await;
 
-    // Produce 30 vault entries. Each `LedgerRequest::Write` (proposed
+    // Produce 30 vault entries. Each `OrganizationRequest::Write` (proposed
     // sequentially — the next does not start until the prior returns) lands
     // in its own apply batch and produces its own region block pre-crash.
     let written_keys = propose_regional_writes(&node, org_id, vault_id, 30, "blk").await;
@@ -1362,10 +1400,8 @@ fn collect_vault_heights(
     // Post-B.1.13: each per-organization group owns its own
     // `blocks.db`; the vault-block index we expect to see lives on the
     // per-org group, not the data-region group.
-    let region = node
-        .manager
-        .route_organization(organization)
-        .expect("per-organization group registered");
+    let region =
+        node.manager.route_organization(organization).expect("per-organization group registered");
     let archive = region.block_archive();
     let mut map = std::collections::BTreeMap::new();
     for vh in 1..=max_height {
@@ -1386,10 +1422,8 @@ fn collect_region_heights(
 ) -> std::collections::BTreeSet<u64> {
     // Post-B.1.13: blocks live in the per-organization group's
     // `blocks.db`, not the data-region group's.
-    let region = node
-        .manager
-        .route_organization(organization)
-        .expect("per-organization group registered");
+    let region =
+        node.manager.route_organization(organization).expect("per-organization group registered");
     let archive = region.block_archive();
     (1..=max_height).filter(|h| archive.read_block(*h).is_ok()).collect()
 }
@@ -1408,9 +1442,9 @@ fn collect_region_heights(
 /// Distinct guarantees per emission path:
 ///
 /// * **External ingest events** are WAL-frozen pre-proposal. The UUID v4 bytes are part of the
-///   serialized `LedgerRequest::IngestExternalEvents` payload; replay deserializes the identical
-///   bytes and re-writes them via `EventStore::write`'s B-tree upsert. The test asserts every
-///   ingested `event_id` survives post-recovery with byte-identical contents.
+///   serialized `OrganizationRequest::IngestExternalEvents` payload; replay deserializes the
+///   identical bytes and re-writes them via `EventStore::write`'s B-tree upsert. The test asserts
+///   every ingested `event_id` survives post-recovery with byte-identical contents.
 ///
 /// * **Apply-phase events** use UUID v5 derived from `(block_height, op_index, action)`. The IDs
 ///   are deterministic for a given apply batch but the *batch boundaries* themselves depend on the
@@ -2018,10 +2052,10 @@ async fn test_batch_writer_throughput_under_concurrent_load() {
             for i in 0..PROPOSALS_PER_TASK {
                 // Unique hmac per (worker, i) so no two proposals collide.
                 let hmac_hex = format!("thput{worker:032x}{i:032x}");
-                let req = LedgerRequest::System(SystemRequest::RegisterEmailHash {
+                let req = SystemRequest::RegisterEmailHash {
                     hmac_hex,
                     user_id: UserId::new((worker * PROPOSALS_PER_TASK + i + 1) as i64),
-                });
+                };
                 if handle
                     .propose_and_wait(RaftPayload::system(req), Duration::from_secs(10))
                     .await
@@ -2079,7 +2113,7 @@ async fn test_batch_writer_throughput_under_concurrent_load() {
 /// `BatchWriter::submit` layer only sees traffic that comes through
 /// `WriteService::write` (`crates/services/src/services/write.rs` — the
 /// `batch_handle.submit(ledger_request)` branch). Without this test,
-/// LedgerRequest-level coalescing has no integration-layer regression guard.
+/// request-level coalescing has no integration-layer regression guard.
 ///
 /// Shape: 8 concurrent workers × 10 writes each = 80 total, submitted through
 /// `WriteServiceClient::write` against the node's UDS socket. Org + vault

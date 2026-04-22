@@ -7,7 +7,7 @@
 use inferadb_ledger_consensus::{
     action::Action,
     simulation::Simulation,
-    types::{NodeId, ConsensusStateId},
+    types::{ConsensusStateId, NodeId},
 };
 
 // ── Election across seeds ─────────────────────────────────────────
@@ -237,7 +237,8 @@ fn multiple_partition_heal_cycles() {
     for cycle in 0..3 {
         // Partition.
         sim.partition(&[leader_id], &followers);
-        let raft_shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ConsensusStateId(1)).unwrap();
+        let raft_shard =
+            sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ConsensusStateId(1)).unwrap();
         let actions = raft_shard.handle_propose(format!("blocked-{cycle}").into_bytes()).unwrap();
         for action in actions {
             if let Action::Send { to, shard: shard_id, msg } = action {
@@ -249,7 +250,8 @@ fn multiple_partition_heal_cycles() {
 
         // Heal.
         sim.heal();
-        let raft_shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ConsensusStateId(1)).unwrap();
+        let raft_shard =
+            sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ConsensusStateId(1)).unwrap();
         let hb = raft_shard.handle_heartbeat_timeout();
         for action in hb {
             if let Action::Send { to, shard: shard_id, msg } = action {

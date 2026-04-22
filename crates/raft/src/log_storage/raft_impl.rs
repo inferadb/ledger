@@ -398,8 +398,8 @@ impl RaftLogStore {
     /// Raft group); misrouting between tiers is a compile error.
     ///
     /// For each entry:
-    /// - Normal entries: deserialize as `RaftPayload<R>`, apply via the
-    ///   tier-specific `apply_*_request_with_events` method.
+    /// - Normal entries: deserialize as `RaftPayload<R>`, apply via the tier-specific
+    ///   `apply_*_request_with_events` method.
     /// - Membership entries: update `state.membership`.
     ///
     /// Returns a response for each entry in the batch.
@@ -886,13 +886,14 @@ impl RaftLogStore {
     /// Returns [`StoreError`] if the WAL scan, any replayed apply, or the
     /// post-replay `sync_state` fails. A failure here should abort region
     /// startup — a region that can't recover must not start serving reads.
-    pub async fn replay_crash_gap<W>(
+    pub async fn replay_crash_gap<W, R>(
         &mut self,
         wal: &W,
         shard_id: inferadb_ledger_consensus::types::ConsensusStateId,
     ) -> Result<RecoveryStats, StoreError>
     where
         W: inferadb_ledger_consensus::WalBackend,
+        R: crate::log_storage::operations::ApplyableRequest,
     {
         use inferadb_ledger_consensus::recovery::recover_from_wal;
 
@@ -958,7 +959,7 @@ impl RaftLogStore {
                 // uses `leader_node` only to decide whether to renew the
                 // leader lease (which is meaningless for a node that hasn't
                 // started serving yet).
-                self.apply_committed_entries::<crate::types::LedgerRequest>(chunk, None).await?;
+                self.apply_committed_entries::<R>(chunk, None).await?;
                 total_replayed = total_replayed.saturating_add(chunk.len() as u64);
             }
         }

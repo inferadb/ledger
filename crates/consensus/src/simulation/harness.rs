@@ -7,9 +7,9 @@ use crate::{
     action::Action,
     clock::SimulatedClock,
     config::ShardConfig,
-    rng::SimulatedRng,
     consensus_state::ConsensusState,
-    types::{Membership, NodeId, NodeState, ConsensusStateId},
+    rng::SimulatedRng,
+    types::{ConsensusStateId, Membership, NodeId, NodeState},
 };
 
 /// Default shard configuration for simulation nodes.
@@ -31,7 +31,10 @@ fn default_shard_config() -> ShardConfig {
 /// produce identical execution traces.
 pub struct Simulation {
     /// Per-node, per-shard mapping: `node -> shard_id -> ConsensusState`.
-    pub nodes: HashMap<NodeId, HashMap<ConsensusStateId, ConsensusState<Arc<SimulatedClock>, SimulatedRng>>>,
+    pub nodes: HashMap<
+        NodeId,
+        HashMap<ConsensusStateId, ConsensusState<Arc<SimulatedClock>, SimulatedRng>>,
+    >,
     /// The simulated network connecting all nodes.
     pub network: SimulatedNetwork,
     clock: Arc<SimulatedClock>,
@@ -56,8 +59,10 @@ impl Simulation {
         let node_ids: Vec<NodeId> = (1..=node_count).map(NodeId).collect();
         let membership = Membership::new(node_ids.clone());
 
-        let mut nodes: HashMap<NodeId, HashMap<ConsensusStateId, ConsensusState<Arc<SimulatedClock>, SimulatedRng>>> =
-            HashMap::new();
+        let mut nodes: HashMap<
+            NodeId,
+            HashMap<ConsensusStateId, ConsensusState<Arc<SimulatedClock>, SimulatedRng>>,
+        > = HashMap::new();
         for (i, &node_id) in node_ids.iter().enumerate() {
             let rng = SimulatedRng::new(seed + i as u64);
             let config = default_shard_config();
@@ -466,7 +471,8 @@ mod tests {
 
         sim.partition(&[leader_id], &[NodeId(2), NodeId(3)]);
 
-        let raft_shard = sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ConsensusStateId(1)).unwrap();
+        let raft_shard =
+            sim.nodes.get_mut(&leader_id).unwrap().get_mut(&ConsensusStateId(1)).unwrap();
         let actions = raft_shard.handle_propose(b"partitioned".to_vec()).unwrap();
         for action in actions {
             if let Action::Send { to, shard: shard_id, msg } = action {
@@ -561,8 +567,14 @@ mod tests {
 
         for nid in [NodeId(1), NodeId(2), NodeId(3)] {
             let shard_map = sim.nodes.get(&nid).unwrap();
-            assert!(shard_map.contains_key(&ConsensusStateId(1)), "node {nid:?} missing default shard");
-            assert!(shard_map.contains_key(&ConsensusStateId(2)), "node {nid:?} missing added shard");
+            assert!(
+                shard_map.contains_key(&ConsensusStateId(1)),
+                "node {nid:?} missing default shard"
+            );
+            assert!(
+                shard_map.contains_key(&ConsensusStateId(2)),
+                "node {nid:?} missing added shard"
+            );
         }
     }
 
@@ -678,7 +690,10 @@ mod tests {
         sim.add_shard_group(ConsensusStateId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
         sim.add_shard_group(ConsensusStateId(3), &[NodeId(1), NodeId(2), NodeId(3)]);
 
-        assert_eq!(sim.shard_ids(), &[ConsensusStateId(1), ConsensusStateId(2), ConsensusStateId(3)]);
+        assert_eq!(
+            sim.shard_ids(),
+            &[ConsensusStateId(1), ConsensusStateId(2), ConsensusStateId(3)]
+        );
     }
 
     #[test]

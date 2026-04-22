@@ -428,7 +428,7 @@ async fn run_drain_loop(
 mod tests {
     use inferadb_ledger_consensus::{
         Message,
-        types::{NodeId, ConsensusStateId},
+        types::{ConsensusStateId, NodeId},
     };
 
     use super::*;

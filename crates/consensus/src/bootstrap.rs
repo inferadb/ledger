@@ -5,7 +5,7 @@
 //! explicit cluster init command. This prevents accidental split-brain
 //! by requiring operator intent before forming a cluster.
 
-use crate::types::{NodeId, ConsensusStateId};
+use crate::types::{ConsensusStateId, NodeId};
 
 /// Initializes a new cluster.
 ///

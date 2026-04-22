@@ -15,7 +15,7 @@ mod tests {
     use crate::{
         action::Action,
         simulation::Simulation,
-        types::{MembershipChange, NodeId, NodeState, ConsensusStateId},
+        types::{ConsensusStateId, MembershipChange, NodeId, NodeState},
     };
 
     /// GLOBAL shard ID used across all multi-Raft tests.

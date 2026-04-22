@@ -49,9 +49,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use inferadb_ledger_types::OrganizationId;
 use inferadb_ledger_store::{Database, FileBackend};
-use inferadb_ledger_types::config::CheckpointConfig;
+use inferadb_ledger_types::{OrganizationId, config::CheckpointConfig};
 use parking_lot::Mutex;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;

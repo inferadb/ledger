@@ -143,7 +143,7 @@ impl NetworkTransport for GrpcConsensusTransport {
 mod tests {
     use inferadb_ledger_consensus::{
         Message,
-        types::{NodeId, ConsensusStateId},
+        types::{ConsensusStateId, NodeId},
     };
 
     use super::*;
@@ -164,16 +164,22 @@ mod tests {
     fn self_sends_are_skipped() {
         let transport = make_transport();
         // Fire-and-forget with no channel for self — should not panic
-        let messages =
-            vec![OutboundMessage { to: NodeId(1), shard: ConsensusStateId(1), msg: Message::TimeoutNow }];
+        let messages = vec![OutboundMessage {
+            to: NodeId(1),
+            shard: ConsensusStateId(1),
+            msg: Message::TimeoutNow,
+        }];
         transport.send_batch(messages);
     }
 
     #[test]
     fn unknown_peer_is_silently_skipped() {
         let transport = make_transport();
-        let messages =
-            vec![OutboundMessage { to: NodeId(99), shard: ConsensusStateId(1), msg: Message::TimeoutNow }];
+        let messages = vec![OutboundMessage {
+            to: NodeId(99),
+            shard: ConsensusStateId(1),
+            msg: Message::TimeoutNow,
+        }];
         transport.send_batch(messages);
     }
 
@@ -220,7 +226,11 @@ mod tests {
 
         // Push 10 messages.
         let messages: Vec<_> = (0..10)
-            .map(|i| OutboundMessage { to: NodeId(2), shard: ConsensusStateId(i), msg: Message::TimeoutNow })
+            .map(|i| OutboundMessage {
+                to: NodeId(2),
+                shard: ConsensusStateId(i),
+                msg: Message::TimeoutNow,
+            })
             .collect();
         transport.send_batch(messages);
 

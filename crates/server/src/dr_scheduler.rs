@@ -10,7 +10,7 @@ use std::{
 };
 
 use inferadb_ledger_raft::{
-    RaftManager, OrganizationGroup, raft_manager::SystemStateReader, types::NodeStatus,
+    OrganizationGroup, RaftManager, raft_manager::SystemStateReader, types::NodeStatus,
 };
 
 /// Priority for DR membership operators.
@@ -458,16 +458,15 @@ pub async fn execute_operator(
             if !still_in_any_dr {
                 tracing::info!(node_id, "DR scheduler: node fully drained — removing from GLOBAL");
                 let _ = global.handle().remove_node(*node_id).await;
-                let set_removed = inferadb_ledger_raft::types::LedgerRequest::System(
-                    inferadb_ledger_raft::types::SystemRequest::SetNodeStatus {
-                        node_id: *node_id,
-                        status: inferadb_ledger_raft::types::NodeStatus::Removed,
-                    },
-                );
                 let _ = global
                     .handle()
                     .propose_and_wait(
-                        inferadb_ledger_raft::types::RaftPayload::system(set_removed),
+                        inferadb_ledger_raft::types::RaftPayload::system(
+                            inferadb_ledger_raft::types::SystemRequest::SetNodeStatus {
+                                node_id: *node_id,
+                                status: inferadb_ledger_raft::types::NodeStatus::Removed,
+                            },
+                        ),
                         Duration::from_secs(5),
                     )
                     .await;
@@ -489,18 +488,17 @@ async fn report_membership_to_global(
 ) {
     let Ok(global) = manager.system_region() else { return };
     let state = group.handle().shard_state();
-    let report = inferadb_ledger_raft::types::LedgerRequest::System(
-        inferadb_ledger_raft::types::SystemRequest::RegionMembershipReport {
-            region,
-            voters: state.voters.iter().map(|n| n.0).collect(),
-            learners: state.learners.iter().map(|n| n.0).collect(),
-            conf_epoch: state.conf_epoch,
-        },
-    );
     let _ = global
         .handle()
         .propose_and_wait(
-            inferadb_ledger_raft::types::RaftPayload::system(report),
+            inferadb_ledger_raft::types::RaftPayload::system(
+                inferadb_ledger_raft::types::SystemRequest::RegionMembershipReport {
+                    region,
+                    voters: state.voters.iter().map(|n| n.0).collect(),
+                    learners: state.learners.iter().map(|n| n.0).collect(),
+                    conf_epoch: state.conf_epoch,
+                },
+            ),
             Duration::from_secs(5),
         )
         .await;

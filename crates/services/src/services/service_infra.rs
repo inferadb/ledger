@@ -10,15 +10,15 @@ use std::{sync::Arc, time::Duration};
 use inferadb_ledger_raft::{
     log_storage::AppliedStateAccessor,
     logging::{OperationType, RequestContext, Sampler},
-    types::{LedgerResponse, LedgerRequest, SystemRequest},
+    types::{LedgerResponse, OrganizationRequest, RaftPayload, RegionRequest, SystemRequest},
 };
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
-use inferadb_ledger_types::{EmailBlindingKey, Region, config::ValidationConfig};
+use inferadb_ledger_types::{EmailBlindingKey, OrganizationId, Region, config::ValidationConfig};
 use tonic::Status;
 
-use super::error_classify;
-use crate::proposal::ProposalService;
+use super::{error_classify, metadata::status_with_correlation};
+use crate::proposal::{ProposalService, serialize_payload};
 
 /// Shared infrastructure for gRPC services that propose writes through Raft.
 ///
@@ -31,7 +31,7 @@ use crate::proposal::ProposalService;
 pub(crate) struct ServiceContext {
     /// Proposal service for submitting writes through Raft consensus.
     ///
-    /// Abstracts over `openraft::Raft` and `RaftManager` so handlers can be
+    /// Abstracts over `ConsensusHandle` and `RaftManager` so handlers can be
     /// unit-tested with a mock implementation.
     pub(crate) proposer: Arc<dyn ProposalService>,
     /// State layer for direct entity/relationship reads.
@@ -85,6 +85,18 @@ pub(crate) struct ServiceContext {
         Arc<tokio::sync::OnceCell<inferadb_ledger_raft::SagaOrchestratorHandle>>,
 }
 
+/// Routing target for [`ServiceContext::propose_serialized`].
+///
+/// Selects which Raft group receives the serialized payload. `Global` routes
+/// to the GLOBAL `(GLOBAL, 0)` group (cluster control plane); `Region` routes
+/// to the target region's regional control-plane group (`(region, 0)`).
+enum ProposalRoute {
+    /// GLOBAL Raft group (cluster control plane).
+    Global,
+    /// A specific region's Raft group (regional control plane).
+    Region(Region),
+}
+
 impl ServiceContext {
     /// Creates a unified `RequestContext` using the `from_request` constructor.
     ///
@@ -115,23 +127,35 @@ impl ServiceContext {
         ctx
     }
 
-    /// Proposes a `LedgerRequest` through Raft with deadline handling.
+    /// Shared proposal path: serialize `request` as `RaftPayload<R>`, drive
+    /// the timer, submit through `route`, stamp correlation on errors.
     ///
-    /// Delegates to the [`ProposalService`] and records timing on the
-    /// `RequestContext`. Error classification (leadership → `UNAVAILABLE`,
-    /// timeout → `DEADLINE_EXCEEDED`) is handled by the proposer.
-    pub(crate) async fn propose_request(
+    /// All tier-typed propose helpers funnel through here so the timer +
+    /// error-correlation wrapping stays identical across `SystemRequest`,
+    /// `OrganizationRequest`-as-metadata, and region-scoped `SystemRequest`
+    /// paths.
+    async fn propose_serialized<R: serde::Serialize>(
         &self,
-        request: LedgerRequest,
+        request: R,
+        route: ProposalRoute,
         grpc_metadata: &tonic::metadata::MetadataMap,
         ctx: &mut RequestContext,
     ) -> Result<LedgerResponse, Status> {
         let timeout = self.effective_timeout(grpc_metadata);
+        let payload = RaftPayload::new(request, ctx.caller_or_zero());
+        let bytes = serialize_payload(payload)?;
 
         ctx.start_raft_timer();
-        let result = self.proposer.propose(request, ctx.caller_or_zero(), timeout).await;
+        let result = match route {
+            ProposalRoute::Global => self.proposer.propose_bytes(bytes, timeout).await,
+            ProposalRoute::Region(region) => {
+                self.proposer.propose_to_region_bytes(region, bytes, timeout).await
+            },
+        };
         ctx.end_raft_timer();
 
+        let result = result
+            .map_err(|e| status_with_correlation(e, &ctx.request_id(), ctx.trace_id()));
         if let Err(ref e) = result {
             ctx.set_error("ProposalError", e.message());
         }
@@ -140,8 +164,8 @@ impl ServiceContext {
 
     /// Proposes a system request through Raft with deadline handling.
     ///
-    /// Wraps the `SystemRequest` as `LedgerRequest::System` and delegates
-    /// to `propose_request`. Proposals go to the GLOBAL Raft group.
+    /// Serializes `SystemRequest` directly as `postcard(RaftPayload<SystemRequest>)`
+    /// and proposes to the GLOBAL Raft group.
     ///
     /// The request must not contain plaintext PII (names, emails, addresses).
     /// Use [`propose_regional`](Self::propose_regional) for PII-bearing requests.
@@ -151,14 +175,62 @@ impl ServiceContext {
         grpc_metadata: &tonic::metadata::MetadataMap,
         ctx: &mut RequestContext,
     ) -> Result<LedgerResponse, Status> {
-        self.propose_request(LedgerRequest::System(system_request), grpc_metadata, ctx).await
+        self.propose_serialized(system_request, ProposalRoute::Global, grpc_metadata, ctx).await
+    }
+
+    /// Proposes an [`OrganizationRequest`] as org-tier metadata to the GLOBAL
+    /// Raft group.
+    ///
+    /// Wraps `organization_request` in [`SystemRequest::OrganizationMetadata`]
+    /// and routes to the GLOBAL group (`(GLOBAL, 0)`), whose
+    /// `ApplyWorker<SystemRequest>` decodes the outer wrapper and delegates to
+    /// `apply_organization_request_with_events`. This ensures that all org-tier
+    /// metadata (vault lifecycle, app management, member/team/invite management)
+    /// lands in GLOBAL `AppliedState` — the state that `write.rs`, `read.rs`,
+    /// and `SlugResolver` read from.
+    ///
+    /// The `region` and `organization` parameters are retained in the signature
+    /// for future per-org group routing of data-plane ops. They are not used
+    /// for the metadata path routed here.
+    pub(crate) async fn propose_organization_request(
+        &self,
+        _region: Region,
+        _organization: OrganizationId,
+        organization_request: OrganizationRequest,
+        grpc_metadata: &tonic::metadata::MetadataMap,
+        ctx: &mut RequestContext,
+    ) -> Result<LedgerResponse, Status> {
+        let wrapped = SystemRequest::OrganizationMetadata(Box::new(organization_request));
+        self.propose_serialized(wrapped, ProposalRoute::Global, grpc_metadata, ctx).await
+    }
+
+    /// Proposes a [`RegionRequest`] to the target region's Raft group
+    /// (regional control plane tier).
+    ///
+    /// **Not yet active in B.1.** The `(region, 0)` apply worker is
+    /// `ApplyWorker<SystemRequest>` until the B.1.6 RegionGroup storage
+    /// split ships. Calling this method today returns a
+    /// `FAILED_PRECONDITION` error; future work will wire the region's
+    /// `ApplyWorker<RegionRequest>` and remove this guard.
+    #[allow(dead_code)]
+    pub(crate) async fn propose_region_request(
+        &self,
+        _region: Region,
+        _region_request: RegionRequest,
+        _grpc_metadata: &tonic::metadata::MetadataMap,
+        _ctx: &mut RequestContext,
+    ) -> Result<LedgerResponse, Status> {
+        Err(Status::failed_precondition(
+            "RegionRequest routing is not yet active (pending B.1.6 RegionGroup split)",
+        ))
     }
 
     /// Proposes a system request to a specific region's Raft group.
     ///
-    /// Wraps the `SystemRequest` as `LedgerRequest::System` and delegates to
-    /// the [`ProposalService`]. Used by onboarding handlers for PII-carrying
-    /// requests that must stay in-region and for cross-region session creation.
+    /// Serializes `SystemRequest` directly as `postcard(RaftPayload<SystemRequest>)`
+    /// and proposes to the given region's Raft group. Used by onboarding handlers
+    /// for PII-carrying requests that must stay in-region and for cross-region
+    /// session creation.
     ///
     /// # Errors
     ///
@@ -173,18 +245,7 @@ impl ServiceContext {
         grpc_metadata: &tonic::metadata::MetadataMap,
         ctx: &mut RequestContext,
     ) -> Result<LedgerResponse, Status> {
-        let timeout = self.effective_timeout(grpc_metadata);
-        let request = LedgerRequest::System(system_request);
-
-        ctx.start_raft_timer();
-        let result =
-            self.proposer.propose_to_region(region, request, ctx.caller_or_zero(), timeout).await;
-        ctx.end_raft_timer();
-
-        if let Err(ref e) = result {
-            ctx.set_error("ProposalError", e.message());
-        }
-        result
+        self.propose_serialized(system_request, ProposalRoute::Region(region), grpc_metadata, ctx).await
     }
 
     /// Returns the state layer for a specific region's Raft group.
@@ -201,33 +262,6 @@ impl ServiceContext {
         region: Region,
     ) -> Result<Arc<StateLayer<FileBackend>>, Status> {
         self.proposer.regional_state(region)
-    }
-
-    /// Proposes a top-level `LedgerRequest` to a specific region's Raft group.
-    ///
-    /// Unlike [`propose_regional`](Self::propose_regional) which wraps a
-    /// `SystemRequest` into `LedgerRequest::System`, this method accepts any
-    /// `LedgerRequest` variant directly. Used for `CreateRefreshToken` proposals
-    /// during cross-region session creation (e.g., existing user login via onboarding).
-    #[allow(dead_code)]
-    pub(crate) async fn propose_regional_ledger_request(
-        &self,
-        region: Region,
-        request: LedgerRequest,
-        grpc_metadata: &tonic::metadata::MetadataMap,
-        ctx: &mut RequestContext,
-    ) -> Result<LedgerResponse, Status> {
-        let timeout = self.effective_timeout(grpc_metadata);
-
-        ctx.start_raft_timer();
-        let result =
-            self.proposer.propose_to_region(region, request, ctx.caller_or_zero(), timeout).await;
-        ctx.end_raft_timer();
-
-        if let Err(ref e) = result {
-            ctx.set_error("ProposalError", e.message());
-        }
-        result
     }
 
     /// Proposes a user-scoped `SystemRequest` to a region with PII encryption.
@@ -268,9 +302,9 @@ impl ServiceContext {
         )
         .map_err(|e| error_classify::crypto_error(&e))?;
 
-        self.propose_regional_ledger_request(
+        self.propose_regional(
             region,
-            LedgerRequest::System(SystemRequest::EncryptedUserSystem(encrypted)),
+            SystemRequest::EncryptedUserSystem(encrypted),
             grpc_metadata,
             ctx,
         )
@@ -316,9 +350,9 @@ impl ServiceContext {
         )
         .map_err(|e| error_classify::crypto_error(&e))?;
 
-        self.propose_regional_ledger_request(
+        self.propose_regional(
             region,
-            LedgerRequest::System(SystemRequest::EncryptedOrgSystem(encrypted)),
+            SystemRequest::EncryptedOrgSystem(encrypted),
             grpc_metadata,
             ctx,
         )

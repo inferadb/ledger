@@ -180,7 +180,11 @@ mod tests {
 
         // ConsensusState 1 gets both timer kinds.
         wheel.schedule(ConsensusStateId(1), TimerKind::Election, base + Duration::from_millis(100));
-        wheel.schedule(ConsensusStateId(1), TimerKind::Heartbeat, base + Duration::from_millis(150));
+        wheel.schedule(
+            ConsensusStateId(1),
+            TimerKind::Heartbeat,
+            base + Duration::from_millis(150),
+        );
 
         // ConsensusState 2 gets an election timer.
         wheel.schedule(ConsensusStateId(2), TimerKind::Election, base + Duration::from_millis(200));
@@ -253,7 +257,11 @@ mod tests {
         let base = Instant::now();
 
         wheel.schedule(ConsensusStateId(1), TimerKind::Election, base + Duration::from_millis(100));
-        wheel.schedule(ConsensusStateId(1), TimerKind::Heartbeat, base + Duration::from_millis(200));
+        wheel.schedule(
+            ConsensusStateId(1),
+            TimerKind::Heartbeat,
+            base + Duration::from_millis(200),
+        );
         assert_eq!(wheel.len(), 2);
 
         // Cancel only election; heartbeat remains.
