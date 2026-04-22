@@ -243,16 +243,41 @@ impl AppliedStateAccessor {
 
     /// Resolves an external vault slug to its internal ID.
     ///
-    /// Returns `None` if the slug is not registered in the vault slug index.
+    /// Returns `None` if the slug is not registered. `VaultSlug` is
+    /// globally unique via Snowflake, so a slug-only lookup is
+    /// unambiguous; the owning `OrganizationId` is discarded from the
+    /// tuple-keyed index — callers that need the org pair should use
+    /// [`resolve_vault_slug_to_pair`](Self::resolve_vault_slug_to_pair).
     pub fn resolve_vault_slug_to_id(&self, slug: VaultSlug) -> Option<VaultId> {
+        self.state.load().vault_slug_index.get(&slug).map(|(_, v)| *v)
+    }
+
+    /// Resolves an external vault slug to its owning `(OrganizationId, VaultId)` pair.
+    ///
+    /// Post-γ, vault IDs are allocated from per-organization sequence
+    /// counters, so slug resolution yields the owning organization
+    /// alongside the vault id. Prefer this over
+    /// [`resolve_vault_slug_to_id`](Self::resolve_vault_slug_to_id) when
+    /// the caller does not already have the organization in scope.
+    pub fn resolve_vault_slug_to_pair(
+        &self,
+        slug: VaultSlug,
+    ) -> Option<(OrganizationId, VaultId)> {
         self.state.load().vault_slug_index.get(&slug).copied()
     }
 
-    /// Resolves an internal vault ID to its external slug.
+    /// Resolves a `(OrganizationId, VaultId)` pair to its external slug.
     ///
-    /// Returns `None` if the ID is not registered in the vault reverse index.
-    pub fn resolve_vault_id_to_slug(&self, id: VaultId) -> Option<VaultSlug> {
-        self.state.load().vault_id_to_slug.get(&id).copied()
+    /// Returns `None` if the pair is not registered in the vault reverse
+    /// index. The tuple key is required because `VaultId` alone does not
+    /// uniquely identify a vault across organizations under per-org
+    /// allocation.
+    pub fn resolve_vault_id_to_slug(
+        &self,
+        organization: OrganizationId,
+        id: VaultId,
+    ) -> Option<VaultSlug> {
+        self.state.load().vault_id_to_slug.get(&(organization, id)).copied()
     }
 
     /// Resolves an external user slug to the internal user ID.
@@ -760,11 +785,19 @@ mod tests {
     #[test]
     fn resolve_vault_slug_to_id_and_back() {
         let mut state = AppliedState::default();
-        state.vault_slug_index.insert(VaultSlug::new(200), VaultId::new(2));
-        state.vault_id_to_slug.insert(VaultId::new(2), VaultSlug::new(200));
+        let org = OrganizationId::new(1);
+        state.vault_slug_index.insert(VaultSlug::new(200), (org, VaultId::new(2)));
+        state.vault_id_to_slug.insert((org, VaultId::new(2)), VaultSlug::new(200));
         let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         assert_eq!(accessor.resolve_vault_slug_to_id(VaultSlug::new(200)), Some(VaultId::new(2)));
-        assert_eq!(accessor.resolve_vault_id_to_slug(VaultId::new(2)), Some(VaultSlug::new(200)));
+        assert_eq!(
+            accessor.resolve_vault_slug_to_pair(VaultSlug::new(200)),
+            Some((org, VaultId::new(2)))
+        );
+        assert_eq!(
+            accessor.resolve_vault_id_to_slug(org, VaultId::new(2)),
+            Some(VaultSlug::new(200))
+        );
     }
 
     #[test]

@@ -383,8 +383,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 }
                                 state.vaults.insert(*key, vault_meta);
                             }
-                            // Clean up vault slug index
-                            if let Some(slug) = state.vault_id_to_slug.remove(&key.1) {
+                            // Clean up vault slug index (tuple-keyed post-γ).
+                            if let Some(slug) = state.vault_id_to_slug.remove(key) {
                                 state.vault_slug_index.remove(&slug);
                                 pending.vault_slug_index_deleted.push(slug);
                             }
@@ -5139,7 +5139,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         // the entity writes.
                         let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
                         let audit_key = AuditKeys::vault(
-                            state.vault_id_to_slug.get(vault).map_or(0, |s| s.value()),
+                            state
+                                .vault_id_to_slug
+                                .get(&(organization, *vault))
+                                .map_or(0, |s| s.value()),
                             "write",
                             ts_ns,
                         );
@@ -5353,7 +5356,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
                 // Emit WriteCommitted event
                 let org_slug = state.id_to_slug.get(&organization).copied();
-                let vault_slug = state.vault_id_to_slug.get(vault).copied();
+                let vault_slug = state.vault_id_to_slug.get(&(organization, *vault)).copied();
                 let mut emitter = ApplyPhaseEmitter::for_organization(
                     EventAction::WriteCommitted,
                     organization,
@@ -5427,10 +5430,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 }
                 state.vaults.insert(key, vault_meta);
 
-                // Insert into bidirectional vault slug index
-                state.vault_slug_index.insert(*slug, vault_id);
-                state.vault_id_to_slug.insert(vault_id, *slug);
-                pending.vault_slug_index.push((*slug, vault_id));
+                // Insert into bidirectional vault slug index (tuple-keyed
+                // post-γ: vault ids are per-organization).
+                state.vault_slug_index.insert(*slug, (*organization, vault_id));
+                state.vault_id_to_slug.insert((*organization, vault_id), *slug);
+                pending.vault_slug_index.push((*slug, (*organization, vault_id)));
 
                 // Emit VaultCreated event
                 let org_slug = state.id_to_slug.get(organization).copied();
@@ -5467,7 +5471,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             OrganizationRequest::DeleteVault { organization, vault } => {
                 let key = (*organization, *vault);
                 // Capture vault slug before state mutation removes it
-                let vault_slug_for_audit = state.vault_id_to_slug.get(vault).copied();
+                let vault_slug_for_audit = state.vault_id_to_slug.get(&key).copied();
                 // Mark vault as deleted (keep heights for historical queries)
                 let response = if let Some(vault_meta) = state.vaults.get(&key) {
                     let mut vault_meta = vault_meta.clone();
@@ -5478,8 +5482,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                     state.vaults.insert(key, vault_meta);
 
-                    // Clean up vault slug index
-                    if let Some(slug) = state.vault_id_to_slug.remove(vault) {
+                    // Clean up vault slug index (tuple-keyed post-γ).
+                    if let Some(slug) = state.vault_id_to_slug.remove(&key) {
                         state.vault_slug_index.remove(&slug);
                         pending.vault_slug_index_deleted.push(slug);
                     }
@@ -7106,7 +7110,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 }
                 // Emit VaultHealthUpdated event
                 let org_slug = state.id_to_slug.get(organization).copied();
-                let vault_slug = state.vault_id_to_slug.get(vault).copied();
+                let vault_slug = state.vault_id_to_slug.get(&key).copied();
                 let health_label =
                     state.vault_health.get(&key).map_or("healthy", VaultHealthStatus::as_str);
                 let mut emitter = ApplyPhaseEmitter::for_organization(
@@ -7156,7 +7160,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 // Emit BatchWriteCommitted event for the batch itself
                 if let Some(ref ve) = last_vault_entry {
                     let org_slug = state.id_to_slug.get(&ve.organization).copied();
-                    let vault_slug = state.vault_id_to_slug.get(&ve.vault).copied();
+                    let vault_slug =
+                        state.vault_id_to_slug.get(&(ve.organization, ve.vault)).copied();
                     let mut emitter = ApplyPhaseEmitter::for_organization(
                         EventAction::BatchWriteCommitted,
                         ve.organization,

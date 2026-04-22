@@ -949,8 +949,15 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             timestamp: chrono::Utc::now(),
         };
 
-        let saga_write = OrganizationRequest::Write {
-            // _system vault
+        // Saga records live at `_meta:saga:{id}` in GLOBAL state — that is
+        // the single source the `SagaOrchestrator::load_pending_sagas` poll
+        // reads from (via `self.state.list_entities` on GLOBAL). Persist
+        // through `SystemRequest::Write` so the bytes decode correctly on
+        // the `(GLOBAL, 0)` group's `ApplyWorker<SystemRequest>`. Matches
+        // the `SagaOrchestrator::save_saga` pattern — any regional-write
+        // shape here would land in regional state that the orchestrator
+        // does not poll.
+        let saga_write = SystemRequest::Write {
             vault: inferadb_ledger_types::VaultId::new(0),
             transactions: vec![saga_txn],
             idempotency_key: [0; 16],
@@ -985,17 +992,11 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             },
         };
 
-        // Persist the saga record in the source region so the orchestrator
-        // can drive the migration to completion.
+        // Persist the saga record in GLOBAL so the orchestrator can drive
+        // the migration to completion (`load_pending_sagas` polls GLOBAL).
         let saga_response = self
             .ctx
-            .propose_organization_request(
-                source_region,
-                organization_id,
-                saga_write,
-                &grpc_metadata,
-                &mut ctx,
-            )
+            .propose_system_request(saga_write, &grpc_metadata, &mut ctx)
             .await?;
 
         match saga_response {

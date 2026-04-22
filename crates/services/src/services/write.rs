@@ -341,7 +341,7 @@ impl WriteService {
 
         // Resolve internal IDs to slugs for response construction
         let org_slug = ctx.applied_state.resolve_id_to_slug(organization);
-        let vault_slug = ctx.applied_state.resolve_vault_id_to_slug(vault);
+        let vault_slug = ctx.applied_state.resolve_vault_id_to_slug(organization, vault);
 
         // Use the proof module's SNAFU-based implementation
         match proof::generate_write_proof(

@@ -4120,8 +4120,8 @@ mod tests {
                 retention_policy: BlockRetentionPolicy::default(),
             },
         );
-        state.vault_slug_index.insert(vault_slug, vault_id);
-        state.vault_id_to_slug.insert(vault_id, vault_slug);
+        state.vault_slug_index.insert(vault_slug, (org_id, vault_id));
+        state.vault_id_to_slug.insert((org_id, vault_id), vault_slug);
         state.vault_health.insert(key, VaultHealthStatus::Healthy);
 
         (org_id, vault_id)
@@ -5113,8 +5113,8 @@ mod tests {
                 retention_policy: BlockRetentionPolicy::default(),
             },
         );
-        state.vault_slug_index.insert(vault_b_slug, vault_b);
-        state.vault_id_to_slug.insert(vault_b, vault_b_slug);
+        state.vault_slug_index.insert(vault_b_slug, (org_b, vault_b));
+        state.vault_id_to_slug.insert((org_b, vault_b), vault_b_slug);
         state.vault_health.insert(key_b, VaultHealthStatus::Healthy);
 
         let ts = fixed_timestamp();
@@ -6294,8 +6294,8 @@ mod tests {
                     retention_policy: BlockRetentionPolicy::default(),
                 },
             );
-            state.vault_slug_index.insert(vault2_slug, vault2);
-            state.vault_id_to_slug.insert(vault2, vault2_slug);
+            state.vault_slug_index.insert(vault2_slug, (org_id, vault2));
+            state.vault_id_to_slug.insert((org_id, vault2), vault2_slug);
             state.vault_health.insert((org_id, vault2), VaultHealthStatus::Healthy);
         }
 

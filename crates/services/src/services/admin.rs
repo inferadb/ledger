@@ -1341,8 +1341,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             slug_resolver.extract_and_resolve(&req.organization).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
             })?;
-        let vault_id =
-            slug_resolver.extract_and_resolve_vault(&req.vault).inspect_err(|status| {
+        let vault_id = slug_resolver.extract_and_resolve_vault(&req.vault).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
             })?;
 
@@ -1663,8 +1662,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 ctx.set_error("InvalidArgument", status.message());
             })?;
 
-        let vault_id =
-            slug_resolver.extract_and_resolve_vault(&req.vault).inspect_err(|status| {
+        let vault_id = slug_resolver.extract_and_resolve_vault(&req.vault).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
             })?;
 

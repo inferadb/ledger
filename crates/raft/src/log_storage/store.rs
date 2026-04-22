@@ -1093,8 +1093,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
 
             let meta: VaultMeta = decode(&value_bytes).map_err(|e| to_serde_error(&e))?;
 
-            // Derived: vault_id_to_slug reverse mapping
-            state.vault_id_to_slug.insert(vault_id, meta.slug);
+            // Derived: vault_id_to_slug reverse mapping — keyed by
+            // (organization, vault_id) tuple post-γ since vault ids are
+            // per-organization-unique, not cluster-unique.
+            state.vault_id_to_slug.insert((meta.organization, vault_id), meta.slug);
 
             // Key uses organization from the deserialized blob and vault_id from the table key
             state.vaults.insert((meta.organization, vault_id), meta);
@@ -1233,8 +1235,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
             let slug_raw = <u64 as Key>::decode(&key_bytes)
                 .ok_or_else(|| corrupted_error("invalid u64 key in VaultSlugIndex table"))?;
             let slug = VaultSlug::new(slug_raw);
-            let vault_id: VaultId = decode(&value_bytes).map_err(|e| to_serde_error(&e))?;
-            state.vault_slug_index.insert(slug, vault_id);
+            // Values are (OrganizationId, VaultId) tuples post-γ.
+            let pair: (OrganizationId, VaultId) =
+                decode(&value_bytes).map_err(|e| to_serde_error(&e))?;
+            state.vault_slug_index.insert(slug, pair);
         }
 
         Ok(())
@@ -1456,8 +1460,8 @@ mod tests {
                     retention_policy: BlockRetentionPolicy::default(),
                 };
                 state.vaults.insert((org_id, vault_id), meta);
-                state.vault_slug_index.insert(slug, vault_id);
-                state.vault_id_to_slug.insert(vault_id, slug);
+                state.vault_slug_index.insert(slug, (org_id, vault_id));
+                state.vault_id_to_slug.insert((org_id, vault_id), slug);
 
                 state.vault_heights.insert((org_id, vault_id), vault_id.value() as u64 * 10);
                 state
@@ -1555,8 +1559,8 @@ mod tests {
             pending.slug_index.push((*slug, *org_id));
         }
 
-        for (slug, vault_id) in &state.vault_slug_index {
-            pending.vault_slug_index.push((*slug, *vault_id));
+        for (slug, pair) in &state.vault_slug_index {
+            pending.vault_slug_index.push((*slug, *pair));
         }
 
         for (slug, ids) in &state.team_slug_index {
@@ -1962,7 +1966,7 @@ mod tests {
         updated.id_to_slug.insert(new_org_id, new_slug);
         updated.vaults.remove(&(OrganizationId::new(1), VaultId::new(11)));
         updated.vault_slug_index.remove(&VaultSlug::new(2011));
-        updated.vault_id_to_slug.remove(&VaultId::new(11));
+        updated.vault_id_to_slug.remove(&(OrganizationId::new(1), VaultId::new(11)));
         updated.client_sequences.remove(&(
             OrganizationId::new(1),
             VaultId::new(11),
@@ -2119,8 +2123,8 @@ mod tests {
                         retention_policy: BlockRetentionPolicy::default(),
                     },
                 );
-                state.vault_slug_index.insert(slug, vault_id);
-                state.vault_id_to_slug.insert(vault_id, slug);
+                state.vault_slug_index.insert(slug, (org_id, vault_id));
+                state.vault_id_to_slug.insert((org_id, vault_id), slug);
                 state.vault_heights.insert((org_id, vault_id), v as u64 * 10);
                 state.previous_vault_hashes.insert((org_id, vault_id), [v as u8; 32]);
             }

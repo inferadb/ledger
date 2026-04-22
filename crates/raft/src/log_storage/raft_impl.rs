@@ -675,7 +675,7 @@ impl RaftLogStore {
                         vault: Some(inferadb_ledger_proto::proto::VaultSlug {
                             slug: state
                                 .vault_id_to_slug
-                                .get(&entry.vault)
+                                .get(&(entry.organization, entry.vault))
                                 .map_or(entry.vault.value() as u64, |s| s.value()),
                         }),
                         height: entry.vault_height,
@@ -1384,8 +1384,12 @@ impl RaftLogStore {
                 let vault_id = inferadb_ledger_types::VaultId::new(vault_id_val);
                 match decode::<super::types::VaultMeta>(&value_bytes) {
                     Ok(meta) => {
-                        state.vault_id_to_slug.insert(vault_id, meta.slug);
-                        state.vault_slug_index.insert(meta.slug, vault_id);
+                        state
+                            .vault_id_to_slug
+                            .insert((meta.organization, vault_id), meta.slug);
+                        state
+                            .vault_slug_index
+                            .insert(meta.slug, (meta.organization, vault_id));
                         state.vaults.insert((meta.organization, vault_id), meta);
                     },
                     Err(e) => {
@@ -1538,14 +1542,18 @@ impl RaftLogStore {
         let vault_slug_iter =
             read_txn.iter::<tables::VaultSlugIndex>().map_err(|e| to_storage_error(&e))?;
         for (key_bytes, value_bytes) in vault_slug_iter {
-            if let (Some(slug_val), Some(vault_id_val)) = (
+            // Values are `(OrganizationId, VaultId)` tuples post-γ.
+            if let (Some(slug_val), Some(pair)) = (
                 <u64 as inferadb_ledger_store::Key>::decode(&key_bytes),
-                decode::<i64>(&value_bytes).ok(),
+                decode::<(
+                    inferadb_ledger_types::OrganizationId,
+                    inferadb_ledger_types::VaultId,
+                )>(&value_bytes)
+                .ok(),
             ) {
                 let slug = inferadb_ledger_types::VaultSlug::new(slug_val);
-                let vault_id = inferadb_ledger_types::VaultId::new(vault_id_val);
-                state.vault_slug_index.insert(slug, vault_id);
-                state.vault_id_to_slug.insert(vault_id, slug);
+                state.vault_slug_index.insert(slug, pair);
+                state.vault_id_to_slug.insert(pair, slug);
             }
         }
 

@@ -225,12 +225,19 @@ pub struct AppliedState {
     /// Internal organization ID → slug reverse mapping for response construction.
     #[serde(default)]
     pub id_to_slug: im::HashMap<OrganizationId, OrganizationSlug>,
-    /// Vault slug → internal vault ID mapping for fast resolution.
+    /// Vault slug → `(OrganizationId, VaultId)` mapping for fast resolution.
+    ///
+    /// Vault IDs are unique only within an organization (per-org
+    /// sequence allocation under γ), so the slug-indexed lookup returns
+    /// the owning organization alongside the vault id. `VaultSlug`
+    /// itself remains globally unique via Snowflake.
     #[serde(default)]
-    pub vault_slug_index: im::HashMap<VaultSlug, VaultId>,
-    /// Internal vault ID → slug reverse mapping for response construction.
+    pub vault_slug_index: im::HashMap<VaultSlug, (OrganizationId, VaultId)>,
+    /// `(OrganizationId, VaultId)` → slug reverse mapping for response
+    /// construction. Keyed by tuple since `VaultId` alone does not
+    /// uniquely identify a vault after per-org allocation.
     #[serde(default)]
-    pub vault_id_to_slug: im::HashMap<VaultId, VaultSlug>,
+    pub vault_id_to_slug: im::HashMap<(OrganizationId, VaultId), VaultSlug>,
     /// User slug → internal user ID mapping for fast resolution.
     #[serde(default)]
     pub user_slug_index: im::HashMap<UserSlug, UserId>,
@@ -550,8 +557,9 @@ pub struct PendingExternalWrites {
     pub slug_index: Vec<(OrganizationSlug, OrganizationId)>,
     /// `OrganizationSlugIndex` table deletes (on org deletion).
     pub slug_index_deleted: Vec<OrganizationSlug>,
-    /// `VaultSlugIndex` table inserts/updates.
-    pub vault_slug_index: Vec<(VaultSlug, VaultId)>,
+    /// `VaultSlugIndex` table inserts/updates. Values are tuples post-γ
+    /// migration — vault ids are per-organization, not cluster-unique.
+    pub vault_slug_index: Vec<(VaultSlug, (OrganizationId, VaultId))>,
     /// `VaultSlugIndex` table deletes (on vault deletion).
     pub vault_slug_index_deleted: Vec<VaultSlug>,
     /// `UserSlugIndex` table inserts/updates.
@@ -977,7 +985,7 @@ mod tests {
     #[test]
     fn test_pending_external_writes_not_empty_after_push_vault_slug_index() {
         let mut writes = PendingExternalWrites::new();
-        writes.vault_slug_index.push((VaultSlug::new(200), VaultId::new(1)));
+        writes.vault_slug_index.push((VaultSlug::new(200), (OrganizationId::new(1), VaultId::new(1))));
         assert!(!writes.is_empty());
     }
 

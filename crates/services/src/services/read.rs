@@ -457,7 +457,9 @@ impl ReadService {
                     .map_or(entry.organization.value() as u64, |s| s.value()),
             }),
             vault: Some(inferadb_ledger_proto::proto::VaultSlug {
-                slug: applied_state.resolve_vault_id_to_slug(entry.vault).map_or(0, |s| s.value()),
+                slug: applied_state
+                    .resolve_vault_id_to_slug(entry.organization, entry.vault)
+                    .map_or(0, |s| s.value()),
             }),
             previous_hash: Some(inferadb_ledger_proto::proto::Hash {
                 value: entry.previous_vault_hash.to_vec(),
@@ -687,7 +689,7 @@ impl ReadService {
                     }),
                     vault: Some(inferadb_ledger_proto::proto::VaultSlug {
                         slug: applied_state
-                            .resolve_vault_id_to_slug(entry.vault)
+                            .resolve_vault_id_to_slug(entry.organization, entry.vault)
                             .map_or(0, |s| s.value()),
                     }),
                     height: entry.vault_height,
@@ -1585,8 +1587,10 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             e.organization == organization_id && e.vault == vault_id && e.vault_height == height
         });
 
-        let vault =
-            region.applied_state.resolve_vault_id_to_slug(vault_id).unwrap_or(VaultSlug::new(0));
+        let vault = region
+            .applied_state
+            .resolve_vault_id_to_slug(organization_id, vault_id)
+            .unwrap_or(VaultSlug::new(0));
         let block =
             vault_entry.map(|entry| vault_entry_to_proto_block(entry, &region_block, vault));
 
@@ -1656,7 +1660,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             }) {
                 let vault = region
                     .applied_state
-                    .resolve_vault_id_to_slug(vault_id)
+                    .resolve_vault_id_to_slug(organization_id, vault_id)
                     .unwrap_or(VaultSlug::new(0));
                 blocks.push(vault_entry_to_proto_block(entry, &region_block, vault));
             }
@@ -1993,8 +1997,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             status_with_correlation(e, &ctx.request_id(), ctx.trace_id())
         })?;
         // Vault slug indexes are in GLOBAL applied state, not the data region's.
-        let vault_id =
-            SlugResolver::new(system.applied_state).resolve_vault(domain.vault).map_err(|e| {
+        let vault_id = SlugResolver::new(system.applied_state).resolve_vault(domain.vault).map_err(|e| {
                 ctx.set_error("slug_resolve_vault", e.message());
                 status_with_correlation(e, &ctx.request_id(), ctx.trace_id())
             })?;

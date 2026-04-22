@@ -152,6 +152,11 @@ impl SlugResolver {
 
     /// Resolves a vault slug to its internal ID.
     ///
+    /// `VaultSlug` is globally unique (Snowflake), so a slug-only
+    /// lookup is unambiguous — the tuple-keyed index returns a single
+    /// `VaultId`. Callers that need the owning organization alongside
+    /// the vault id should use
+    /// [`resolve_vault_pair`](Self::resolve_vault_pair).
     /// Returns `NOT_FOUND` if the slug is not registered.
     pub fn resolve_vault(&self, slug: VaultSlug) -> Result<VaultId, Status> {
         self.state
@@ -159,20 +164,43 @@ impl SlugResolver {
             .ok_or_else(|| Status::not_found(format!("Vault with slug {} not found", slug.value())))
     }
 
-    /// Reverse lookup: internal vault ID to external slug.
+    /// Resolves a vault slug to its owning `(OrganizationId, VaultId)` pair.
     ///
-    /// Returns `NOT_FOUND` if the ID has no associated slug.
-    pub fn resolve_vault_slug(&self, id: VaultId) -> Result<VaultSlug, Status> {
+    /// Preferred over [`resolve_vault`](Self::resolve_vault) when the
+    /// caller does not already have the organization in scope — e.g.
+    /// the `HealthService` probe path that accepts a vault slug
+    /// without a required organization slug in the request.
+    pub fn resolve_vault_pair(
+        &self,
+        slug: VaultSlug,
+    ) -> Result<(OrganizationId, VaultId), Status> {
         self.state
-            .resolve_vault_id_to_slug(id)
-            .ok_or_else(|| Status::not_found(format!("Vault {} not found", id)))
+            .resolve_vault_slug_to_pair(slug)
+            .ok_or_else(|| Status::not_found(format!("Vault with slug {} not found", slug.value())))
     }
 
-    /// Extracts a vault slug from a proto message and resolves it to an internal ID.
+    /// Reverse lookup: `(OrganizationId, VaultId)` to external slug.
+    ///
+    /// Returns `NOT_FOUND` if the pair has no associated slug. The tuple
+    /// is required because `VaultId` alone does not uniquely identify a
+    /// vault across organizations under per-org allocation.
+    pub fn resolve_vault_slug(
+        &self,
+        organization: OrganizationId,
+        id: VaultId,
+    ) -> Result<VaultSlug, Status> {
+        self.state
+            .resolve_vault_id_to_slug(organization, id)
+            .ok_or_else(|| Status::not_found(format!("Vault {}:{} not found", organization, id)))
+    }
+
+    /// Extracts a vault slug from a proto message and resolves it to an
+    /// internal `VaultId`.
     ///
     /// Combines [`extract_vault_slug`](Self::extract_vault_slug) and
     /// [`resolve_vault`](Self::resolve_vault) for the common case where a
-    /// request carries a required vault slug.
+    /// request carries a required vault slug and the caller has already
+    /// resolved the organization independently.
     pub fn extract_and_resolve_vault(
         &self,
         proto_slug: &Option<proto::VaultSlug>,
@@ -400,8 +428,13 @@ mod tests {
         for &(slug_val, vault_id_val) in vault_entries {
             let slug = VaultSlug::new(slug_val);
             let vault_id = VaultId::new(vault_id_val);
-            state.vault_slug_index.insert(slug, vault_id);
-            state.vault_id_to_slug.insert(vault_id, slug);
+            // Tests that only supply a vault without an owning org use
+            // `OrganizationId::new(0)` (the system org) — the tuple
+            // requirement post-γ means every fixture entry needs an
+            // owner, but arbitrary test slugs default to system org.
+            let org_id = OrganizationId::new(0);
+            state.vault_slug_index.insert(slug, (org_id, vault_id));
+            state.vault_id_to_slug.insert((org_id, vault_id), slug);
         }
         let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
         SlugResolver::new(accessor)
@@ -639,14 +672,16 @@ mod tests {
     #[test]
     fn resolve_vault_slug_reverse_lookup() {
         let resolver = make_resolver_with_vaults(&[], &[(100, 1)]);
-        let slug = resolver.resolve_vault_slug(VaultId::new(1)).unwrap();
+        let slug = resolver
+            .resolve_vault_slug(OrganizationId::new(0), VaultId::new(1))
+            .unwrap();
         assert_eq!(slug.value(), 100);
     }
 
     #[test]
     fn resolve_vault_slug_reverse_unknown_returns_not_found() {
         let resolver = make_resolver_with_vaults(&[], &[(100, 1)]);
-        let result = resolver.resolve_vault_slug(VaultId::new(42));
+        let result = resolver.resolve_vault_slug(OrganizationId::new(0), VaultId::new(42));
         assert!(result.is_err());
         let status = result.unwrap_err();
         assert_eq!(status.code(), tonic::Code::NotFound);
@@ -726,7 +761,9 @@ mod tests {
     fn vault_bidirectional_resolution() {
         let resolver = make_resolver_with_vaults(&[], &[(42, 7)]);
         let vault_id = resolver.resolve_vault(VaultSlug::new(42)).unwrap();
-        let slug = resolver.resolve_vault_slug(vault_id).unwrap();
+        // Test fixtures use OrganizationId(0) as the owning org; the
+        // reverse lookup requires the tuple post-γ.
+        let slug = resolver.resolve_vault_slug(OrganizationId::new(0), vault_id).unwrap();
         assert_eq!(slug.value(), 42);
     }
 
@@ -886,8 +923,9 @@ mod tests {
         let mut state = AppliedState::default();
         state.slug_index.insert(OrganizationSlug::new(100), OrganizationId::new(1));
         state.id_to_slug.insert(OrganizationId::new(1), OrganizationSlug::new(100));
-        state.vault_slug_index.insert(VaultSlug::new(200), VaultId::new(2));
-        state.vault_id_to_slug.insert(VaultId::new(2), VaultSlug::new(200));
+        let vault_org = OrganizationId::new(1);
+        state.vault_slug_index.insert(VaultSlug::new(200), (vault_org, VaultId::new(2)));
+        state.vault_id_to_slug.insert((vault_org, VaultId::new(2)), VaultSlug::new(200));
         state.user_slug_index.insert(UserSlug::new(300), UserId::new(3));
         state.user_id_to_slug.insert(UserId::new(3), UserSlug::new(300));
         let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));

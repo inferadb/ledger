@@ -687,7 +687,7 @@ impl proto::token_service_server::TokenService for TokenServiceImpl {
                     .resolve_slug(org_id)
                     .map_err(|_| Status::internal("Failed to resolve org slug"))?;
                 // Resolve vault slug
-                let vault_slug = resolver.resolve_vault_slug(vault_id)?;
+                let vault_slug = resolver.resolve_vault_slug(org_id, vault_id)?;
                 self.jwt_engine
                     .sign_vault_token(org_slug, app_slug, vault_slug, &scopes, &signing_key.kid)
                     .map_err(Self::jwt_error_to_status)?
