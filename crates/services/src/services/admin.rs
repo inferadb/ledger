@@ -394,14 +394,27 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             ctx.set_vault(v.slug);
         }
 
-        // Get all vault heights to check
+        // Get all vault heights to check.
+        //
+        // Post-γ, vault heights live in each per-organization group's
+        // `AppliedState`, not GLOBAL. Cross-cutting "all vaults" scans
+        // aggregate across per-org groups via the raft manager; single-
+        // vault scans look up the owning per-org group directly.
         let vault_heights: Vec<(DomainOrganizationId, DomainVaultId, u64)> =
             if let (Some(org), Some(v)) = (organization_id, vault_id) {
-                // Specific vault
-                let height = self.applied_state.vault_height(org, v);
+                let height = self
+                    .raft_manager
+                    .as_ref()
+                    .and_then(|m| m.route_organization(org))
+                    .map(|g| g.applied_state().vault_height(org, v))
+                    .unwrap_or_else(|| self.applied_state.vault_height(org, v));
                 if height > 0 { vec![(org, v, height)] } else { vec![] }
+            } else if let Some(ref manager) = self.raft_manager {
+                let mut heights = Vec::new();
+                manager
+                    .for_each_vault_across_groups(|org, vault, h| heights.push((org, vault, h)));
+                heights
             } else {
-                // All vaults
                 let mut heights = Vec::new();
                 self.applied_state
                     .for_each_vault_height(|org, vault, h| heights.push((org, vault, h)));
@@ -1796,11 +1809,22 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 let v_id = slug_resolver
                     .resolve_vault(inferadb_ledger_types::VaultSlug::new(vault_proto.slug))?;
                 ctx.set_target(organization_proto.slug, vault_proto.slug);
-                // Single vault
-                let height = self.applied_state.vault_height(org_id, v_id);
+                // Single vault — post-γ, vault heights live in the
+                // per-organization group's applied state.
+                let height = self
+                    .raft_manager
+                    .as_ref()
+                    .and_then(|m| m.route_organization(org_id))
+                    .map(|g| g.applied_state().vault_height(org_id, v_id))
+                    .unwrap_or_else(|| self.applied_state.vault_height(org_id, v_id));
                 vec![((org_id, v_id), height)]
+            } else if let Some(ref manager) = self.raft_manager {
+                // All vaults — aggregate across per-organization groups.
+                let mut heights = Vec::new();
+                manager
+                    .for_each_vault_across_groups(|org, vault, h| heights.push(((org, vault), h)));
+                heights
             } else {
-                // All vaults
                 let mut heights = Vec::new();
                 self.applied_state
                     .for_each_vault_height(|org, vault, h| heights.push(((org, vault), h)));

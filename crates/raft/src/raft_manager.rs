@@ -850,6 +850,33 @@ impl RaftManager {
         self.regions.read().keys().copied().collect()
     }
 
+    /// Iterates every `(organization_id, vault_id, vault_height)` tuple across
+    /// all per-organization groups registered on this node.
+    ///
+    /// Post-γ Phase 3, vault record bodies (including
+    /// `AppliedState::vault_heights`) live in the per-organization
+    /// group's applied state, not GLOBAL. Cross-cutting scans —
+    /// force-GC, TTL GC aggregation, list-all-vaults, etc. — must
+    /// iterate every per-org group's `AppliedState` rather than
+    /// reading from a single GLOBAL accessor.
+    ///
+    /// The closure is invoked with `(organization_id, vault_id,
+    /// height)` — the region is already implied by the owning group
+    /// but not passed to the closure because the downstream scan work
+    /// (routing the propose-side back via `route_organization`)
+    /// already re-resolves the region internally. Callers that need
+    /// the region can look it up via
+    /// [`get_organization_region`](Self::get_organization_region).
+    pub fn for_each_vault_across_groups<F>(&self, mut f: F)
+    where
+        F: FnMut(OrganizationId, inferadb_ledger_types::VaultId, u64),
+    {
+        let regions = self.regions.read();
+        for group in regions.values() {
+            group.applied_state().for_each_vault_height(&mut f);
+        }
+    }
+
     /// Returns the maximum `region_height` across all org groups.
     ///
     /// In B.1, each per-org group `(region, org_id)` tracks its own

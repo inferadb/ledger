@@ -1099,6 +1099,42 @@ pub enum SystemRequest {
     /// route to the per-org `ApplyWorker<OrganizationRequest>` via
     /// `propose_to_organization_bytes`.
     OrganizationMetadata(Box<OrganizationRequest>),
+
+    /// Registers a vault's slug-index entry in GLOBAL state (γ Phase 3).
+    ///
+    /// Under per-organization vault-id allocation, vault record bodies
+    /// (`VaultMeta`, heights, health) live in the per-org group's
+    /// `AppliedState`. GLOBAL retains only the slug-index entries
+    /// (`vault_slug_index` + `vault_id_to_slug`) so `SlugResolver` can
+    /// resolve a `VaultSlug` to its owning `(OrganizationId, VaultId)`
+    /// pair before the caller knows which org owns the vault.
+    ///
+    /// The vault service proposes this variant to GLOBAL after the
+    /// per-org `CreateVault` apply succeeds and returns the allocated
+    /// `vault_id`. Re-apply is idempotent: overwriting the same
+    /// `(slug, org, vault_id)` tuple is a no-op.
+    RegisterVaultDirectoryEntry {
+        /// Owning organization.
+        organization: OrganizationId,
+        /// Vault id allocated by the per-organization sequence counter.
+        vault: VaultId,
+        /// External Snowflake slug (globally unique).
+        slug: VaultSlug,
+    },
+
+    /// Removes a vault's slug-index entry from GLOBAL state (γ Phase 3).
+    ///
+    /// Paired with the per-org `DeleteVault` apply — after the per-org
+    /// group soft-deletes the vault record, this variant removes the
+    /// slug-resolver entry so `SlugResolver::resolve_vault` returns
+    /// `NotFound`. Idempotent: removing a non-existent entry is a
+    /// no-op.
+    UnregisterVaultDirectoryEntry {
+        /// Owning organization.
+        organization: OrganizationId,
+        /// Vault id to remove.
+        vault: VaultId,
+    },
 }
 
 // =============================================================================
@@ -3848,6 +3884,8 @@ mod tests {
             // The inner OrganizationRequest may or may not carry PII; use Global
             // here since the wrapper routes to GLOBAL's AppliedState.
             SystemRequest::OrganizationMetadata(_) => RaftScope::Global,
+            SystemRequest::RegisterVaultDirectoryEntry { .. } => RaftScope::Global,
+            SystemRequest::UnregisterVaultDirectoryEntry { .. } => RaftScope::Global,
         }
     }
 

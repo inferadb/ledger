@@ -92,6 +92,7 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
             .applied_state
             .get_organization(organization_id)
             .ok_or_else(|| Status::not_found("Organization not found"))?;
+
         let response = self
             .ctx
             .propose_organization_request(
@@ -227,6 +228,7 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
             .applied_state
             .get_organization(organization_id)
             .ok_or_else(|| Status::not_found("Organization not found"))?;
+
         let response = self
             .ctx
             .propose_organization_request(
@@ -298,9 +300,21 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         let vault_val = req.vault.as_ref().map_or(0, |v| v.slug);
         ctx.set_target(organization_slug_val, vault_val);
 
-        // Get vault metadata and height
-        let vault_meta = self.ctx.applied_state.get_vault(organization_id, vault_id);
-        let height = self.ctx.applied_state.vault_height(organization_id, vault_id);
+        // Get vault metadata and height.
+        //
+        // Post-γ, vault record bodies live in the per-organization
+        // group's `AppliedState`. Route through the manager to read
+        // from the owning org's state; fall back to GLOBAL for
+        // single-Raft test setups without a manager.
+        let per_org_state = self
+            .ctx
+            .manager
+            .as_ref()
+            .and_then(|m| m.route_organization(organization_id))
+            .map(|g| g.applied_state().clone());
+        let read_state = per_org_state.as_ref().unwrap_or(&self.ctx.applied_state);
+        let vault_meta = read_state.get_vault(organization_id, vault_id);
+        let height = read_state.vault_height(organization_id, vault_id);
 
         match vault_meta {
             Some(vault) => {
@@ -341,19 +355,38 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         let page_size = crate::proto_compat::normalize_page_size(req.page_size);
         let start_after = crate::proto_compat::decode_page_token(&req.page_token);
 
-        // Build (vault_slug, response) pairs for pagination
+        // Build (vault_slug, response) pairs for pagination.
+        //
+        // Post-γ, vault heights + record bodies live in each
+        // per-organization group's `AppliedState`. Aggregate across per-
+        // org groups via the raft manager; for each (org, vault) pair
+        // read `VaultMeta` from that group's applied state. Fall back
+        // to GLOBAL for single-Raft test setups where no manager is
+        // configured.
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let org_filter = req.organization.as_ref().map(|o| o.slug);
-        // Collect vault identifiers without cloning the entire heights map
         let mut vault_keys = Vec::new();
-        self.ctx.applied_state.for_each_vault_height(|org, vault, _| vault_keys.push((org, vault)));
+        if let Some(ref manager) = self.ctx.manager {
+            manager.for_each_vault_across_groups(|org, vault, _| vault_keys.push((org, vault)));
+        } else {
+            self.ctx
+                .applied_state
+                .for_each_vault_height(|org, vault, _| vault_keys.push((org, vault)));
+        }
 
         let vaults_with_slugs: Vec<(u64, inferadb_ledger_proto::proto::GetVaultResponse)> =
             vault_keys
                 .iter()
                 .filter_map(|(org_id, vault_id)| {
-                    self.ctx.applied_state.get_vault(*org_id, *vault_id).map(|v| {
-                        let height = self.ctx.applied_state.vault_height(v.organization, v.vault);
+                    let per_org_state = self
+                        .ctx
+                        .manager
+                        .as_ref()
+                        .and_then(|m| m.route_organization(*org_id))
+                        .map(|g| g.applied_state().clone());
+                    let state = per_org_state.as_ref().unwrap_or(&self.ctx.applied_state);
+                    state.get_vault(*org_id, *vault_id).map(|v| {
+                        let height = state.vault_height(v.organization, v.vault);
                         let organization = slug_resolver.resolve_slug(v.organization)?;
                         // Skip if org filter is set and doesn't match
                         if let Some(filter_slug) = org_filter
@@ -433,6 +466,7 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
             .applied_state
             .get_organization(organization_id)
             .ok_or_else(|| Status::not_found("Organization not found"))?;
+
         let response = self
             .ctx
             .propose_organization_request(
