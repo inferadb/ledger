@@ -1676,6 +1676,11 @@ pub async fn create_test_vault(
     let start = tokio::time::Instant::now();
     let timeout_dur = Duration::from_secs(15);
 
+    // Slug generated once — retries reuse it so per-org CreateVault
+    // idempotency returns the same VaultId on network retry, matching
+    // production SDK behaviour.
+    let vault_slug = inferadb_ledger_types::snowflake::generate_vault_slug()?;
+
     loop {
         let mut client = create_vault_client(addr).await?;
         let result = client
@@ -1687,6 +1692,9 @@ pub async fn create_test_vault(
                 initial_nodes: vec![],
                 retention_policy: None,
                 caller: None,
+                slug: Some(inferadb_ledger_proto::proto::VaultSlug {
+                    slug: vault_slug.value(),
+                }),
             })
             .await;
 
@@ -1935,6 +1943,9 @@ pub async fn create_vault_with_retry(
     organization: inferadb_ledger_types::OrganizationSlug,
     caller_slug: u64,
 ) -> inferadb_ledger_types::VaultSlug {
+    // Single client-generated slug reused across retries (matches SDK).
+    let vault_slug = inferadb_ledger_types::snowflake::generate_vault_slug()
+        .expect("generate vault slug");
     for attempt in 0..60 {
         let request = inferadb_ledger_proto::proto::CreateVaultRequest {
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
@@ -1944,6 +1955,7 @@ pub async fn create_vault_with_retry(
             initial_nodes: vec![],
             retention_policy: None,
             caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: caller_slug }),
+            slug: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug.value() }),
         };
         match vault_client.create_vault(request).await {
             Ok(response) => {

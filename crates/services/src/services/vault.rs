@@ -25,7 +25,7 @@ use inferadb_ledger_types::{
 };
 use tonic::{Request, Response, Status};
 
-use super::{error_classify, service_infra::ServiceContext, slug_resolver::SlugResolver};
+use super::{service_infra::ServiceContext, slug_resolver::SlugResolver};
 
 /// gRPC handler for vault lifecycle operations.
 pub struct VaultService {
@@ -86,9 +86,20 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
             }
         }
 
-        // Generate vault slug via Snowflake before Raft proposal
-        let vault = inferadb_ledger_types::snowflake::generate_vault_slug()
-            .map_err(|e| error_classify::internal_error("id-generation", &e))?;
+        // Client-supplied Snowflake slug — required. Retries across lost
+        // responses MUST reuse the same slug so the per-org CreateVault
+        // idempotency path returns the existing `VaultId` instead of
+        // creating an orphan body. See
+        // `per_org_create_vault_is_idempotent_by_slug`.
+        let vault_proto = req.slug.as_ref().ok_or_else(|| {
+            Status::invalid_argument("CreateVaultRequest.slug is required")
+        })?;
+        if vault_proto.slug == 0 {
+            return Err(Status::invalid_argument(
+                "CreateVaultRequest.slug must be a non-zero Snowflake",
+            ));
+        }
+        let vault = inferadb_ledger_types::VaultSlug::new(vault_proto.slug);
 
         let org_meta = self
             .ctx

@@ -47,6 +47,14 @@ impl LedgerClient {
         caller: UserSlug,
         organization: OrganizationSlug,
     ) -> Result<VaultInfo> {
+        // Generate the vault slug once, outside the retry loop. Every
+        // retry for this logical call reuses it so the server's
+        // per-org CreateVault idempotency (keyed on slug) returns the
+        // same VaultId instead of creating a duplicate body on
+        // response-lost-in-flight.
+        let vault_slug = inferadb_ledger_types::snowflake::generate_vault_slug().map_err(|e| {
+            crate::error::SdkError::Config { message: format!("generate vault slug: {e}") }
+        })?;
         let pool = self.pool.clone();
         self.call_with_retry("create_vault", || {
             let pool = pool.clone();
@@ -59,6 +67,7 @@ impl LedgerClient {
                     initial_nodes: vec![],  // Auto-assigned
                     retention_policy: None, // Default: FULL
                     caller: Some(proto::UserSlug { slug: caller.value() }),
+                    slug: Some(proto::VaultSlug { slug: vault_slug.value() }),
                 };
 
                 let response =

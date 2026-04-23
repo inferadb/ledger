@@ -1491,6 +1491,15 @@ message CreateVaultRequest {
   optional BlockRetentionPolicy retention_policy = 4; // Default: FULL
   // Identity of the user performing this operation.
   UserSlug caller = 5;
+  // Client-generated Snowflake slug for the new vault. Required.
+  //
+  // The server uses this slug as-is. Retries with the same slug within a
+  // logical call are idempotent — per-organization CreateVault returns
+  // the existing `VaultId` instead of allocating a new one. Clients MUST
+  // generate the slug once per logical call and reuse it across network
+  // retries; generating fresh slugs on retry creates orphan vaults on
+  // response-lost-in-flight.
+  VaultSlug slug = 6;
 }
 
 // Block retention modes for storage/compliance trade-off.

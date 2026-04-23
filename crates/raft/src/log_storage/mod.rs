@@ -3934,7 +3934,7 @@ mod tests {
         store.apply_org(
             &OrganizationRequest::CreateVault {
                 organization: OrganizationId::new(1),
-                slug: VaultSlug::new(1),
+                slug: VaultSlug::new(2),
                 name: Some("v2".to_string()),
                 retention_policy: None,
             },
@@ -4005,7 +4005,7 @@ mod tests {
         store.apply_org(
             &OrganizationRequest::CreateVault {
                 organization: OrganizationId::new(1),
-                slug: VaultSlug::new(1),
+                slug: VaultSlug::new(2),
                 name: Some("v2".to_string()),
                 retention_policy: None,
             },

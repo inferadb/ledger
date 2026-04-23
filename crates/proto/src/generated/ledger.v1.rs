@@ -1648,6 +1648,16 @@ pub struct CreateVaultRequest {
     /// Identity of the user performing this operation.
     #[prost(message, optional, tag = "5")]
     pub caller: ::core::option::Option<UserSlug>,
+    /// Client-generated Snowflake slug for the new vault. Required.
+    ///
+    /// The server uses this slug as-is. Retries with the same slug within a
+    /// logical call are idempotent — per-organization CreateVault returns
+    /// the existing `VaultId` instead of allocating a new one. Clients MUST
+    /// generate the slug once per logical call and reuse it across network
+    /// retries; generating fresh slugs on retry creates orphan vaults on
+    /// response-lost-in-flight.
+    #[prost(message, optional, tag = "6")]
+    pub slug: ::core::option::Option<VaultSlug>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct BlockRetentionPolicy {
