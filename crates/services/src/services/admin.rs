@@ -2048,11 +2048,14 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 .raft_manager
                 .as_ref()
                 .map_or_else(|| self.applied_state.region_height(), |m| m.max_region_height());
+            // Slice 2b compatibility: `state.database()` returns the
+            // system-vault DB (see `StateLayer::database` docs). Slice
+            // 2c threads per-vault backup routing through AdminService.
             let db = self.state.database();
 
             let meta = backup_manager
                 .create_incremental_backup(
-                    db,
+                    &db,
                     &base_backup_id,
                     base_meta.region,
                     region_height,
@@ -2083,8 +2086,13 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             // `create_backup` takes a pre-built `Snapshot`; per its contract,
             // the caller must sync the state DB
             // first so the `StateLayer` reads below observe durable state.
+            //
+            // Slice 2b compatibility: `state.database()` now returns the
+            // system-vault DB only. Slice 2c threads per-vault sync
+            // through the backup path so every vault's DB is synced
+            // before the snapshot reads from it.
             let db = self.state.database();
-            Arc::clone(db).sync_state().await.map_err(|e| {
+            db.sync_state().await.map_err(|e| {
                 ctx.set_error("SyncStateError", &e.to_string());
                 error_classify::storage_error(&e)
             })?;

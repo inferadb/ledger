@@ -6816,7 +6816,10 @@ mod tests {
             inferadb_ledger_store::Database::create(dir.path().join("_meta.db"))
                 .expect("create meta db"),
         );
-        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(state_db, meta_db));
+        let state_layer = Arc::new(
+            inferadb_ledger_state::new_state_layer_shared(state_db, meta_db)
+                .expect("build shared StateLayer for raft test"),
+        );
         let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
             .expect("open store")
             .with_state_layer(state_layer);
@@ -6909,7 +6912,10 @@ mod tests {
             inferadb_ledger_store::Database::create(dir.path().join("_meta.db"))
                 .expect("create meta db"),
         );
-        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(state_db, meta_db));
+        let state_layer = Arc::new(
+            inferadb_ledger_state::new_state_layer_shared(state_db, meta_db)
+                .expect("build shared StateLayer for raft test"),
+        );
         let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
             .expect("open store")
             .with_state_layer(state_layer.clone());
@@ -6999,7 +7005,10 @@ mod tests {
             inferadb_ledger_store::Database::create(dir.path().join("_meta.db"))
                 .expect("create meta db"),
         );
-        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(state_db, meta_db));
+        let state_layer = Arc::new(
+            inferadb_ledger_state::new_state_layer_shared(state_db, meta_db)
+                .expect("build shared StateLayer for raft test"),
+        );
         let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
             .expect("open store")
             .with_state_layer(state_layer.clone());
@@ -7076,10 +7085,12 @@ mod tests {
             inferadb_ledger_store::Database::create(dir.join("state.db")).expect("create state db"),
         );
         let meta_db = Arc::new(
-            inferadb_ledger_store::Database::create(dir.join("_meta.db"))
-                .expect("create meta db"),
+            inferadb_ledger_store::Database::create(dir.join("_meta.db")).expect("create meta db"),
         );
-        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(state_db, meta_db));
+        let state_layer = Arc::new(
+            inferadb_ledger_state::new_state_layer_shared(state_db, meta_db)
+                .expect("build shared StateLayer for raft test"),
+        );
         RaftLogStore::<FileBackend>::open(dir.join("raft_log.db"))
             .expect("open store")
             .with_state_layer(state_layer)
@@ -8030,7 +8041,10 @@ mod tests {
             inferadb_ledger_store::Database::create(dir.path().join("_meta.db"))
                 .expect("create meta db"),
         );
-        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(state_db, meta_db));
+        let state_layer = Arc::new(
+            inferadb_ledger_state::new_state_layer_shared(state_db, meta_db)
+                .expect("build shared StateLayer for raft test"),
+        );
         RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
             .expect("open store")
             .with_state_layer(state_layer)
@@ -8227,11 +8241,7 @@ mod tests {
         };
         let (response, _) = store.apply_org(&request, &mut state);
         let (first_invite_id, first_expires_at) = match response {
-            LedgerResponse::OrganizationInviteCreated {
-                invite_id,
-                invite_slug,
-                expires_at,
-            } => {
+            LedgerResponse::OrganizationInviteCreated { invite_id, invite_slug, expires_at } => {
                 assert_eq!(invite_slug, slug);
                 (invite_id, expires_at)
             },
@@ -8251,11 +8261,7 @@ mod tests {
         };
         let (retry_response, _) = store.apply_org(&retry, &mut state);
         match retry_response {
-            LedgerResponse::OrganizationInviteCreated {
-                invite_id,
-                invite_slug,
-                expires_at,
-            } => {
+            LedgerResponse::OrganizationInviteCreated { invite_id, invite_slug, expires_at } => {
                 assert_eq!(
                     invite_id, first_invite_id,
                     "retry must return the same invite_id (idempotent by slug)"
@@ -13212,10 +13218,13 @@ mod tests {
             inferadb_ledger_store::Database::create(dir.path().join("_meta.db"))
                 .expect("create meta db"),
         );
-        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(
-            Arc::clone(&state_db),
-            Arc::clone(&meta_db),
-        ));
+        let state_layer = Arc::new(
+            inferadb_ledger_state::new_state_layer_shared(
+                Arc::clone(&state_db),
+                Arc::clone(&meta_db),
+            )
+            .expect("build shared StateLayer for raft test"),
+        );
         let block_archive =
             Arc::new(inferadb_ledger_state::BlockArchive::new(Arc::clone(&blocks_db)));
         let event_writer =

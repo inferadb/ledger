@@ -37,12 +37,9 @@ impl LedgerClient {
         // Generate the invite slug once, outside the retry loop, so every
         // retry hits the server's apply-side idempotency path instead of
         // creating duplicate invitations on response-lost-in-flight.
-        let invite_slug =
-            inferadb_ledger_types::snowflake::generate().map_err(|e| {
-                crate::error::SdkError::Config {
-                    message: format!("generate invite slug: {e}"),
-                }
-            })?;
+        let invite_slug = inferadb_ledger_types::snowflake::generate().map_err(|e| {
+            crate::error::SdkError::Config { message: format!("generate invite slug: {e}") }
+        })?;
         let pool = self.pool.clone();
         self.call_with_retry("create_organization_invite", || {
             let pool = pool.clone();

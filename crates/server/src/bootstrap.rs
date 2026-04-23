@@ -1692,10 +1692,19 @@ mod tests {
 
         // Per-organization databases land under `global/{organization_id}/`
         // in the B.1 layout. The system organization (id 0) is the only
-        // inhabitant of GLOBAL.
+        // inhabitant of GLOBAL. Under the Slice 2b per-vault-consensus
+        // layout, `state.db` is replaced by a `state/` directory holding
+        // one `vault-{id}.db` per materialised vault.
         let org_dir = data_dir.join("global").join("0");
         assert!(org_dir.join("events.db").exists(), "events.db should be in global/0/");
-        assert!(org_dir.join("state.db").exists(), "state.db should be in global/0/");
+        assert!(
+            org_dir.join("state").is_dir(),
+            "state/ directory should be in global/0/ under Slice 2b per-vault layout"
+        );
+        assert!(
+            !org_dir.join("state.db").exists(),
+            "pre-Slice-2b state.db singleton should not be present"
+        );
         assert!(org_dir.join("blocks.db").exists(), "blocks.db should be in global/0/");
         assert!(org_dir.join("raft.db").exists(), "raft.db should be in global/0/");
 

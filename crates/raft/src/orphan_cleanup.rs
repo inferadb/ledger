@@ -393,7 +393,8 @@ mod tests {
         let db = inferadb_ledger_store::Database::open_in_memory().expect("open in-memory db");
         let meta_db =
             inferadb_ledger_store::Database::open_in_memory().expect("open in-memory meta db");
-        StateLayer::new(Arc::new(db), Arc::new(meta_db))
+        inferadb_ledger_state::new_state_layer_shared(Arc::new(db), Arc::new(meta_db))
+            .expect("build shared StateLayer for test")
     }
 
     /// Creates an AppliedStateAccessor with org and vault metadata populated.

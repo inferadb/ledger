@@ -142,24 +142,48 @@ impl<B: StorageBackend> ShardManager<B> {
     /// `meta_db` is the per-organization `_meta.db` coordinator. Slice 1 of
     /// per-vault consensus introduced this as a separate database alongside
     /// state.db; callers constructing a `ShardManager` must supply both.
+    /// Slice 2b note: pre-Slice-2b this constructor accepted a singleton
+    /// `Arc<Database<B>>` shared between `StateLayer`, `BlockArchive`,
+    /// and `ShardManager`. With per-vault `StateLayer`, this transitional
+    /// shard-manager helper (used by the in-crate test suite only) routes
+    /// the shared `db` into `BlockArchive` and `ShardManager` itself, and
+    /// hands an in-memory-per-vault factory to `StateLayer`. Production
+    /// wiring flows through `RegionStorageManager::open_organization` +
+    /// `RaftManager::open_region_storage`, not this helper.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::state::StateError::Store`] if the `StateLayer`'s
+    /// factory fails to materialise the system vault DB.
     pub fn new(
         region: Region,
         db: Arc<Database<B>>,
         meta_db: Arc<Database<B>>,
         snapshot_dir: PathBuf,
         max_snapshots: usize,
-    ) -> Self {
-        Self {
+    ) -> crate::state::Result<Self>
+    where
+        B: 'static,
+    {
+        // Transitional-only factory: route every vault to the same shared
+        // `Arc<Database<B>>`. This preserves the legacy test semantics
+        // where `ShardManager` + `StateLayer` + `BlockArchive` all point
+        // at one DB. Slice 2c removes this shim entirely.
+        let shared_db = Arc::clone(&db);
+        let factory = move |_vault: VaultId| -> crate::state::Result<Arc<Database<B>>> {
+            Ok(Arc::clone(&shared_db))
+        };
+        Ok(Self {
             region,
             db: Arc::clone(&db),
-            state: StateLayer::new(Arc::clone(&db), meta_db),
+            state: StateLayer::new(factory, meta_db)?,
             blocks: BlockArchive::new(Arc::clone(&db)),
             snapshots: SnapshotManager::new(snapshot_dir, max_snapshots),
             vault_meta: RwLock::new(HashMap::new()),
             region_height: RwLock::new(0),
             genesis_hash: RwLock::new(None),
             erased_users: RwLock::new(HashSet::new()),
-        }
+        })
     }
 
     /// Returns the region this shard manager belongs to.
@@ -519,7 +543,8 @@ mod tests {
             meta_engine.db(),
             temp.join("snapshots"),
             3,
-        );
+        )
+        .expect("build ShardManager");
 
         (manager, temp)
     }
@@ -571,7 +596,8 @@ mod tests {
             meta_engine.db(),
             temp.join("snapshots"),
             3,
-        );
+        )
+        .expect("build ShardManager");
         manager.register_vault(OrganizationId::new(1), VaultId::new(1));
 
         let block = RegionBlock {
@@ -663,7 +689,8 @@ mod tests {
             meta_engine.db(),
             temp.join("snapshots"),
             3,
-        );
+        )
+        .expect("build ShardManager");
 
         manager.register_vault(OrganizationId::new(1), VaultId::new(1));
 
@@ -698,7 +725,8 @@ mod tests {
             meta_engine2.db(),
             temp.path().join("snapshots"),
             3,
-        );
+        )
+        .expect("build ShardManager");
 
         let snapshot = Snapshot::read_from_file(&snapshot_path).expect("read snapshot");
         manager2.restore_from_snapshot(&snapshot).expect("restore");

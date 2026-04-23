@@ -4483,12 +4483,32 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             if skip_state_writes {
                                 state_layer.mark_all_dirty(*vault);
                             } else {
-                                // Step 1: entity data → state.db. Slice 1 of
-                                // per-vault consensus cleaved the
-                                // _meta:last_applied sentinel out of this
-                                // transaction; it now lands in meta.db in a
-                                // strictly-later commit (step 2 below).
-                                let mut write_txn = match state_layer.begin_write() {
+                                // Step 1: entity data → the vault's own
+                                // state.db. Slice 1 of per-vault consensus
+                                // cleaved the _meta:last_applied sentinel
+                                // out of this transaction; it now lands in
+                                // meta.db in a strictly-later commit (step 2
+                                // below). Slice 2b routes the txn onto the
+                                // per-vault `Database` via `db_for(vault)`
+                                // (the factory materialises SYSTEM_VAULT_ID
+                                // eagerly). `_db` binds the owned Arc so
+                                // the write txn's '_ lifetime stays valid
+                                // across the whole block.
+                                let _db = match state_layer.db_for(*vault) {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        return (
+                                            LedgerResponse::Error {
+                                                code: ErrorCode::Internal,
+                                                message: format!(
+                                                    "SystemRequest::Write: failed to open per-vault DB: {e}"
+                                                ),
+                                            },
+                                            None,
+                                        );
+                                    },
+                                };
+                                let mut write_txn = match _db.write() {
                                     Ok(txn) => txn,
                                     Err(e) => {
                                         return (
@@ -4579,8 +4599,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 // re-drives the idempotent apply on next
                                 // boot.
                                 if let Some(lid_bytes) = log_id_bytes
-                                    && let Err(e) =
-                                        state_layer.persist_last_applied_meta(lid_bytes)
+                                    && let Err(e) = state_layer.persist_last_applied_meta(lid_bytes)
                                 {
                                     return (
                                         LedgerResponse::Error {
@@ -5171,8 +5190,25 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         state_layer.mark_all_dirty(*vault);
                     } else {
                         // Normal path: apply all transactions' operations in a
-                        // single storage transaction for atomicity.
-                        let mut write_txn = match state_layer.begin_write() {
+                        // single storage transaction for atomicity. Slice 2b of
+                        // per-vault consensus routes through `db_for(vault)`
+                        // so entity writes AND the audit record land in the
+                        // vault's OWN state.db — natural per-vault audit
+                        // partitioning. `_db` binds the owned Arc for the
+                        // lifetime of the write transaction below.
+                        let _db = match state_layer.db_for(*vault) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                return (
+                                    LedgerResponse::Error {
+                                        code: ErrorCode::Internal,
+                                        message: format!("Failed to open per-vault state DB: {e}"),
+                                    },
+                                    None,
+                                );
+                            },
+                        };
+                        let mut write_txn = match _db.write() {
                             Ok(txn) => txn,
                             Err(e) => {
                                 return (
@@ -5240,13 +5276,24 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 },
                             }
                         }
-                        // Atomic audit: include the audit record in the same
-                        // write transaction so it commits or rolls back with
-                        // the entity writes. Slice 1 cleaved the
-                        // `_meta:last_applied` sentinel out of this
-                        // transaction — it lands in meta.db in a strictly-
-                        // later commit after state.db's commit_in_memory
-                        // below succeeds.
+                        // Slice 2b audit cleave: the audit record lands in
+                        // vault V's own state.db, in the SAME write txn as
+                        // the entity writes. Pre-Slice-2b, this went to
+                        // SYSTEM_VAULT_ID's state.db — but the singleton
+                        // layout meant it was the same physical file as
+                        // the entity data anyway. With per-vault state
+                        // DBs, keeping the audit in vault V's DB is the
+                        // only way to preserve the txn's atomicity (a
+                        // SYSTEM_VAULT_ID audit would require a second
+                        // transaction on a DIFFERENT DB — a partial-write
+                        // hazard). As a bonus, "show me every write to
+                        // vault X" becomes a per-vault scan, which is
+                        // natural partitioning for compliance queries.
+                        //
+                        // Slice 1 cleaved the `_meta:last_applied`
+                        // sentinel out — it lands in meta.db in a
+                        // strictly-later commit after the vault-DB
+                        // commit_in_memory below succeeds.
                         let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
                         let audit_key = AuditKeys::vault(
                             state
@@ -5278,24 +5325,26 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 ],
                             },
                         );
-                        let mut audit_dict_to_return = None;
                         if !audit_ops.is_empty() {
-                            let mut audit_dict =
-                                state_layer.take_dictionary(SYSTEM_VAULT_ID).unwrap_or_else(|_| {
-                                    inferadb_ledger_state::dictionary::VaultDictionary::new(
-                                        SYSTEM_VAULT_ID,
-                                    )
-                                });
+                            // Under Slice 2b the audit ops land in vault
+                            // V's own state.db, reusing the vault's
+                            // dictionary. `apply_operations_in_txn`
+                            // interns audit key strings into `dict`
+                            // alongside the entity-op strings; a single
+                            // dictionary suffices for the whole txn.
                             match state_layer.apply_operations_in_txn(
                                 &mut write_txn,
-                                &mut audit_dict,
-                                SYSTEM_VAULT_ID,
+                                &mut dict,
+                                *vault,
                                 &audit_ops,
                                 new_height,
                             ) {
                                 Ok((_statuses, audit_dirty)) => {
-                                    state_layer.mark_dirty_keys(SYSTEM_VAULT_ID, &audit_dirty);
-                                    audit_dict_to_return = Some(audit_dict);
+                                    // Audit keys participate in the vault's
+                                    // dirty tracking the same way entity
+                                    // writes do — the bucket-root
+                                    // computation already covers them.
+                                    all_dirty_keys.extend(audit_dirty);
                                 },
                                 Err(e) => {
                                     tracing::warn!(
@@ -5326,13 +5375,10 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             );
                         }
 
-                        // Return dictionaries to cache after successful commit.
-                        // On failure paths above, dictionaries are dropped so the
-                        // next call reloads fresh from storage.
+                        // Return dictionary to cache after successful commit.
+                        // On failure paths above, the dictionary is dropped so
+                        // the next call reloads fresh from storage.
                         state_layer.return_dictionary(*vault, dict);
-                        if let Some(audit_dict) = audit_dict_to_return {
-                            state_layer.return_dictionary(SYSTEM_VAULT_ID, audit_dict);
-                        }
 
                         // Step 2 (Slice 1 two-step apply): sentinel →
                         // meta.db. Runs AFTER state.db's commit_in_memory
@@ -6042,8 +6088,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         let slug_key = SystemKeys::invite_slug_index_key(*slug);
                         if let Ok(Some(existing_entity)) =
                             state_layer.get_entity(SYSTEM_VAULT_ID, slug_key.as_bytes())
-                            && let Ok(existing) =
-                                decode::<InviteIndexEntry>(&existing_entity.value)
+                            && let Ok(existing) = decode::<InviteIndexEntry>(&existing_entity.value)
                         {
                             let expires_at =
                                 DateTime::<Utc>::from_timestamp_micros(existing.expires_at_micros)

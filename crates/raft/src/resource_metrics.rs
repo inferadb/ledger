@@ -233,7 +233,10 @@ mod tests {
         // Verify collection doesn't panic with in-memory database
         let db = inferadb_ledger_store::Database::open_in_memory().unwrap();
         let meta_db = inferadb_ledger_store::Database::open_in_memory().unwrap();
-        let state = Arc::new(StateLayer::new(Arc::new(db), Arc::new(meta_db)));
+        let state = Arc::new(
+            inferadb_ledger_state::new_state_layer_shared(Arc::new(db), Arc::new(meta_db))
+                .expect("build shared StateLayer for test"),
+        );
         let dir = tempfile::tempdir().unwrap();
 
         let collector = ResourceMetricsCollector::builder()

@@ -65,7 +65,7 @@ use snafu::Snafu;
 /// Page size for all per-organization databases (16KB).
 ///
 /// Matches `RAFT_PAGE_SIZE` in `RaftLogStore` to support larger batch sizes.
-const ORGANIZATION_PAGE_SIZE: usize = 16 * 1024;
+pub(crate) const ORGANIZATION_PAGE_SIZE: usize = 16 * 1024;
 
 // ============================================================================
 // Error Types
@@ -116,48 +116,26 @@ pub enum RegionStorageError {
         message: String,
     },
 
-    /// Legacy pre–Slice 1 layout detected: the `_meta:last_applied`
-    /// sentinel lives in state.db (old layout) but the `_meta.db`
-    /// coordinator database is empty or missing. This build moves the
-    /// sentinel to `_meta.db`; migration is not supported.
+    /// Slice 2b legacy detection: the pre-Slice-2b per-organization
+    /// layout held a singleton `state.db` file alongside `blocks.db` /
+    /// `_meta.db` / `raft.db`. Slice 2b of per-vault consensus replaces
+    /// that file with a `state/` directory holding one
+    /// `vault-{vault_id}.db` per vault. A data_dir carrying the old
+    /// `state.db` file at this path is rejected — migration is not
+    /// supported.
     #[snafu(display(
-        "Legacy state-layer layout detected for organization {organization_id} in region \
-         {region}: _meta:last_applied found in state.db at {state_db_path} but no sentinel \
-         in meta.db at {meta_db_path}. This build requires the _meta.db coordinator \
-         introduced by spec 2026-04-23-per-vault-consensus.md (Slice 1). Wipe the data \
-         directory and restart."
+        "Legacy per-org state.db layout detected at {state_db_path} for organization \
+         {organization_id} in region {region}. This build requires the per-vault state.db \
+         layout introduced by spec 2026-04-23-per-vault-consensus.md (Slice 2b). Wipe the \
+         data directory and restart."
     ))]
-    LegacyStateLayout {
+    LegacyPerOrgStateDb {
         /// The region the organization belongs to.
         region: Region,
         /// The organization whose data directory carries the legacy artefact.
         organization_id: OrganizationId,
-        /// Path of the state.db that carries the legacy sentinel.
+        /// Path of the legacy state.db file.
         state_db_path: String,
-        /// Expected path of the meta.db coordinator.
-        meta_db_path: String,
-    },
-
-    /// Inconsistent layout: the legacy sentinel is present in state.db AND
-    /// a sentinel has been written to meta.db. This can happen only if a
-    /// previous boot crashed mid-migration or someone hand-edited the data
-    /// directory. Operator investigates; automatic recovery is unsafe.
-    #[snafu(display(
-        "Inconsistent state-layer layout for organization {organization_id} in region \
-         {region}: legacy sentinel present in state.db at {state_db_path} AND a sentinel \
-         is already recorded in meta.db at {meta_db_path}. This indicates a mid-migration \
-         crash or manual tampering; automatic recovery is unsafe. Operator must \
-         investigate."
-    ))]
-    InconsistentStateLayout {
-        /// The region the organization belongs to.
-        region: Region,
-        /// The organization whose data directory is inconsistent.
-        organization_id: OrganizationId,
-        /// Path of the state.db carrying the stale legacy sentinel.
-        state_db_path: String,
-        /// Path of the meta.db with its own sentinel.
-        meta_db_path: String,
     },
 }
 
@@ -187,14 +165,19 @@ pub struct RegionStorage {
     region: Region,
     /// Organization this storage belongs to.
     organization_id: OrganizationId,
-    /// State database (entity / relationship stores, indexes; for the system
-    /// org this also holds the cluster + organization directory).
-    state_db: Arc<Database<FileBackend>>,
+    /// The `state/` directory holding per-vault state databases
+    /// (`vault-{vault_id}.db`). Slice 2b of per-vault consensus replaces
+    /// the singleton `state.db` file with one file per vault under this
+    /// directory; the per-org `StateLayer`'s factory composes
+    /// `state_dir.join(format!("vault-{id}.db"))` to open each vault's
+    /// DB on first reference.
+    state_dir: PathBuf,
     /// Per-organization coordination database (`_meta.db`) introduced by
     /// Slice 1 of per-vault consensus. Owns the `_meta:last_applied`
-    /// crash-recovery sentinel; syncs **after** state.db / raft.db /
-    /// blocks.db / events.db in the checkpointer + shutdown fsync order so
-    /// the sentinel on disk never outruns the entity data it references.
+    /// crash-recovery sentinel; syncs **after** every per-vault state
+    /// DB / raft.db / blocks.db / events.db in the checkpointer +
+    /// shutdown fsync order so the sentinel on disk never outruns the
+    /// entity data it references.
     meta_db: Arc<Database<FileBackend>>,
     /// Blocks database (historical blockchain data for this organization).
     blocks_db: Arc<Database<FileBackend>>,
@@ -213,16 +196,19 @@ impl RegionStorage {
         self.organization_id
     }
 
-    /// Returns the state database handle.
-    pub fn state_db(&self) -> &Arc<Database<FileBackend>> {
-        &self.state_db
+    /// Returns the per-organization `state/` directory — the parent of
+    /// the per-vault `vault-{id}.db` files. The directory is created by
+    /// [`RegionStorageManager::open_organization`] before this value is
+    /// returned.
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
     }
 
     /// Returns the per-organization meta database handle (`_meta.db`).
     ///
     /// Owns the `_meta:last_applied` crash-recovery sentinel; the
-    /// checkpointer must sync this handle **after** state.db / raft.db /
-    /// blocks.db / events.db on every tick.
+    /// checkpointer must sync this handle **after** every per-vault
+    /// state DB / raft.db / blocks.db / events.db on every tick.
     pub fn meta_db(&self) -> &Arc<Database<FileBackend>> {
         &self.meta_db
     }
@@ -235,6 +221,14 @@ impl RegionStorage {
     /// Returns the events database handle.
     pub fn events_db(&self) -> &Arc<EventsDatabase<FileBackend>> {
         &self.events_db
+    }
+
+    /// Composes the on-disk path of a vault's state database
+    /// (`{state_dir}/vault-{vault_id}.db`). Used by the factory closure
+    /// passed to [`StateLayer::new`] — the factory calls this helper to
+    /// derive the file path, then opens (or creates) the DB.
+    pub fn vault_db_path(&self, vault_id: inferadb_ledger_types::VaultId) -> PathBuf {
+        self.state_dir.join(format!("vault-{}.db", vault_id.value()))
     }
 }
 
@@ -367,10 +361,37 @@ impl RegionStorageManager {
             ),
         })?;
 
-        // Open or create state database
-        let state_db_path = organization_dir.join("state.db");
-        let state_db = open_or_create_db(&state_db_path, region, organization_id)?;
-        let state_db = Arc::new(state_db);
+        // Slice 2b legacy detection: the per-vault consensus layout
+        // replaces the pre-Slice-2b per-org `state.db` **file** with a
+        // `state/` **directory** holding one `vault-{id}.db` per vault.
+        // If we find `state.db` as a file at the old path, the data_dir
+        // was written by a pre-Slice-2b build — refuse to boot before
+        // opening any DB so the apply pipeline never observes the
+        // conflicting layout.
+        //
+        // Runs BEFORE anything touches state.db on disk: opening a legacy
+        // file would need to be unwound on detection, and opening the
+        // directory path as a Database would fail with a less specific
+        // error.
+        let legacy_state_db = organization_dir.join("state.db");
+        if legacy_state_db.is_file() {
+            return Err(RegionStorageError::LegacyPerOrgStateDb {
+                region,
+                organization_id,
+                state_db_path: legacy_state_db.display().to_string(),
+            });
+        }
+
+        // Slice 2b: the per-vault state DBs live under
+        // `{organization_dir}/state/vault-{id}.db`. Create the `state/`
+        // directory eagerly so the per-vault factory (closure supplied
+        // to `StateLayer::new`) can assume it exists.
+        let state_dir = organization_dir.join("state");
+        std::fs::create_dir_all(&state_dir).map_err(|e| RegionStorageError::Storage {
+            region,
+            organization_id,
+            message: format!("failed to create state directory {}: {e}", state_dir.display()),
+        })?;
 
         // Open or create blocks database
         let blocks_db_path = organization_dir.join("blocks.db");
@@ -382,33 +403,18 @@ impl RegionStorageManager {
         // `_meta.db` was introduced by Slice 1 of per-vault consensus — it
         // owns the `_meta:last_applied` crash-recovery sentinel (previously
         // bundled into state.db's Entities table). Opening this DB here
-        // ensures every call path that consumes `state_db()` also has
+        // ensures every call path that consumes `state_dir()` also has
         // `meta_db()` available without a second discovery step.
+        //
+        // Slice 2b retires the pre-Slice-1 in-state.db legacy detector:
+        // under the new layout `state.db` as a file is caught by
+        // `LegacyPerOrgStateDb` above, and there is no singleton
+        // `state.db` left to probe for the old sentinel. A freshly-
+        // created `_meta.db` stays pristine until the apply path
+        // records its first sentinel.
         let meta_db_path = organization_dir.join("_meta.db");
         let meta_db = open_or_create_db(&meta_db_path, region, organization_id)?;
         let meta_db = Arc::new(meta_db);
-
-        // Legacy-layout detection, run exactly here (post-open, pre-apply).
-        //
-        // Pre–Slice 1 builds persisted `_meta:last_applied` inside
-        // `state.db`'s Entities table. Now the sentinel lives in
-        // `_meta.db`. On startup, a data_dir written by an older build
-        // will carry the sentinel in state.db and the freshly-created
-        // `_meta.db` will have no sentinel — that signal alone is
-        // sufficient to refuse to boot.
-        //
-        // If BOTH databases carry a sentinel, the data_dir is in an
-        // inconsistent state — a prior crash between migration steps or
-        // manual tampering. Refuse to boot with a different error so the
-        // operator investigates.
-        detect_legacy_layout(
-            region,
-            organization_id,
-            &state_db_path,
-            &meta_db_path,
-            &state_db,
-            &meta_db,
-        )?;
 
         // Open or create events database
         let events_db = EventsDatabase::<FileBackend>::open(&organization_dir).map_err(|e| {
@@ -423,7 +429,7 @@ impl RegionStorageManager {
         let storage = Arc::new(RegionStorage {
             region,
             organization_id,
-            state_db,
+            state_dir,
             meta_db,
             blocks_db,
             events_db,
@@ -548,84 +554,13 @@ fn open_or_create_db(
     })
 }
 
-/// Boot-time detector for the pre–Slice 1 state-layer layout.
-///
-/// Slice 1 of per-vault consensus moved the `_meta:last_applied` sentinel
-/// from state.db's Entities table into a dedicated `_meta.db`. Two cases
-/// to catch:
-///
-/// 1. Legacy sentinel in state.db + no sentinel in meta.db (typical
-///    upgrade scenario from an older build) → refuse to boot; operator
-///    must wipe the data directory.
-/// 2. Legacy sentinel in state.db + sentinel in meta.db (inconsistent;
-///    previous boot crashed mid-migration or the data_dir was tampered
-///    with) → refuse to boot with a distinct error.
-///
-/// The detector runs after the databases are opened but before any apply /
-/// replay activity so the apply pipeline never observes a mid-migration
-/// state.
-fn detect_legacy_layout(
-    region: Region,
-    organization_id: OrganizationId,
-    state_db_path: &Path,
-    meta_db_path: &Path,
-    state_db: &Database<FileBackend>,
-    meta_db: &Database<FileBackend>,
-) -> Result<(), RegionStorageError> {
-    use inferadb_ledger_store::tables::Entities;
-
-    let legacy_key = inferadb_ledger_state::StateLayer::<FileBackend>::LAST_APPLIED_KEY.to_vec();
-
-    // Inspect state.db for the legacy sentinel.
-    let state_txn = state_db.read().map_err(|e| RegionStorageError::Storage {
-        region,
-        organization_id,
-        message: format!("failed to open state.db read txn for legacy detection: {e}"),
-    })?;
-    let legacy_sentinel =
-        state_txn.get::<Entities>(&legacy_key).map_err(|e| RegionStorageError::Storage {
-            region,
-            organization_id,
-            message: format!("failed to read legacy sentinel from state.db: {e}"),
-        })?;
-    drop(state_txn);
-
-    if legacy_sentinel.is_none() {
-        // Clean layout (or brand-new data_dir). Nothing to do.
-        return Ok(());
-    }
-
-    // Legacy artefact present — inspect meta.db to distinguish the two
-    // cases.
-    let meta_txn = meta_db.read().map_err(|e| RegionStorageError::Storage {
-        region,
-        organization_id,
-        message: format!("failed to open meta.db read txn for legacy detection: {e}"),
-    })?;
-    let meta_sentinel =
-        meta_txn.get::<Entities>(&legacy_key).map_err(|e| RegionStorageError::Storage {
-            region,
-            organization_id,
-            message: format!("failed to read sentinel from meta.db: {e}"),
-        })?;
-    drop(meta_txn);
-
-    if meta_sentinel.is_some() {
-        return Err(RegionStorageError::InconsistentStateLayout {
-            region,
-            organization_id,
-            state_db_path: state_db_path.display().to_string(),
-            meta_db_path: meta_db_path.display().to_string(),
-        });
-    }
-
-    Err(RegionStorageError::LegacyStateLayout {
-        region,
-        organization_id,
-        state_db_path: state_db_path.display().to_string(),
-        meta_db_path: meta_db_path.display().to_string(),
-    })
-}
+// Slice 2b retires `detect_legacy_layout` (the Slice 1 detector for an
+// old `_meta:last_applied` sentinel buried inside state.db's Entities
+// table). The new per-vault layout removes the singleton `state.db`
+// file; the Slice 2b legacy detector inlined above (`LegacyPerOrgStateDb`)
+// catches the pre-Slice-2b layout before any Database is opened. With
+// no singleton `state.db`, there is no artefact left to probe for the
+// old sentinel, so the Slice 1 detector is moot.
 
 // ============================================================================
 // Tests
@@ -712,10 +647,19 @@ mod tests {
         assert_eq!(storage.region(), Region::GLOBAL);
         assert_eq!(storage.organization_id(), SYSTEM_ORG);
 
-        // Verify directory structure under the new layout.
+        // Verify directory structure under the Slice 2b layout: `state/`
+        // is a directory (per-vault files land inside via the factory on
+        // first open), blocks.db / events.db are files at the org root.
         let org_dir = temp.path().join("global").join("0");
         assert!(org_dir.exists());
-        assert!(org_dir.join("state.db").exists());
+        assert!(
+            org_dir.join("state").is_dir(),
+            "state/ must be a directory under Slice 2b per-vault layout"
+        );
+        assert!(
+            !org_dir.join("state.db").exists(),
+            "pre-Slice-2b state.db singleton must not be created"
+        );
         assert!(org_dir.join("blocks.db").exists());
         assert!(org_dir.join("events.db").exists());
     }
@@ -730,7 +674,8 @@ mod tests {
 
         let org_dir = temp.path().join("us-east-va").join("304789");
         assert!(org_dir.exists());
-        assert!(org_dir.join("state.db").exists());
+        assert!(org_dir.join("state").is_dir());
+        assert!(!org_dir.join("state.db").exists());
         assert!(org_dir.join("blocks.db").exists());
         assert!(org_dir.join("events.db").exists());
     }
@@ -749,7 +694,8 @@ mod tests {
         for org in orgs {
             let dir = temp.path().join("us-east-va").join(org.value().to_string());
             assert!(dir.exists(), "org-{} dir missing", org.value());
-            assert!(dir.join("state.db").exists());
+            assert!(dir.join("state").is_dir());
+            assert!(!dir.join("state.db").exists());
             assert!(dir.join("blocks.db").exists());
             assert!(dir.join("events.db").exists());
         }
@@ -873,13 +819,19 @@ mod tests {
             .open_organization(Region::US_EAST_VA, OrganizationId::new(42))
             .expect("open us-east-va org");
 
-        // Each organization has its own database files — no shared write lock.
-        // Verify by starting write transactions on both simultaneously.
-        let write_a = storage_a.state_db().write();
-        let write_b = storage_b.state_db().write();
+        // Slice 2b: each org's state lives under its own `state/`
+        // directory; the per-vault DB is opened lazily by the StateLayer
+        // factory, not by `RegionStorage`. This test only needs to
+        // confirm the two orgs have disjoint on-disk homes, which the
+        // existing blocks.db write lock can prove.
+        let write_a = storage_a.blocks_db().write();
+        let write_b = storage_b.blocks_db().write();
 
-        assert!(write_a.is_ok(), "write transaction on system state should succeed");
-        assert!(write_b.is_ok(), "write transaction on us-east-va org state should succeed");
+        assert!(write_a.is_ok(), "write transaction on system blocks should succeed");
+        assert!(write_b.is_ok(), "write transaction on us-east-va org blocks should succeed");
+        // And the `state/` directories are independent under each org dir.
+        assert!(storage_a.state_dir().ends_with("global/0/state"));
+        assert!(storage_b.state_dir().ends_with("us-east-va/42/state"));
     }
 
     #[test]
@@ -937,15 +889,16 @@ mod tests {
     }
 
     // ========================================================================
-    // Slice 1 legacy-layout detection
+    // Slice 2b legacy-layout detection
     // ========================================================================
 
-    /// Simulates a pre–Slice 1 data_dir by writing the legacy
-    /// `_meta:last_applied` sentinel into state.db before open_organization
-    /// runs. open_organization must refuse to boot with LegacyStateLayout.
+    /// Under the Slice 2b per-vault layout, the pre-Slice-2b singleton
+    /// `state.db` file is illegal. If `open_organization` finds such a
+    /// file at the old path, it must refuse to boot with
+    /// `LegacyPerOrgStateDb` — before creating `state/` or opening
+    /// blocks.db / _meta.db / events.db.
     #[test]
-    fn test_open_organization_refuses_legacy_sentinel_in_state_db() {
-        use inferadb_ledger_store::tables::Entities;
+    fn test_open_organization_refuses_pre_slice_2b_state_db_file() {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
@@ -953,96 +906,50 @@ mod tests {
         let org_dir = mgr.organization_dir(Region::US_EAST_VA, org);
         std::fs::create_dir_all(&org_dir).expect("create org dir");
 
-        // Pre-seed state.db with the legacy sentinel key (mirrors what a
-        // pre–Slice 1 apply arm wrote into the Entities table).
-        let state_db_path = org_dir.join("state.db");
-        {
-            let db = Database::<FileBackend>::create(&state_db_path).expect("create state.db");
-            let mut txn = db.write().expect("open write txn");
-            let key =
-                inferadb_ledger_state::StateLayer::<FileBackend>::LAST_APPLIED_KEY.to_vec();
-            txn.insert_raw(
-                inferadb_ledger_store::tables::TableId::Entities,
-                &key,
-                b"legacy_sentinel",
-            )
-            .expect("insert legacy sentinel");
-            txn.commit().expect("commit legacy sentinel");
-            // Sanity: the legacy sentinel is visible before we close.
-            let rtxn = db.read().expect("read txn");
-            assert!(rtxn.get::<Entities>(&key).expect("get").is_some());
-        }
+        // Simulate a pre-Slice-2b data_dir: a `state.db` file alongside
+        // the other per-org DBs.
+        std::fs::write(org_dir.join("state.db"), b"legacy-state-db-bytes")
+            .expect("create legacy state.db file");
 
         let result = mgr.open_organization(Region::US_EAST_VA, org);
         match result {
-            Err(RegionStorageError::LegacyStateLayout {
+            Err(RegionStorageError::LegacyPerOrgStateDb {
                 region,
                 organization_id,
-                state_db_path: reported_state_db_path,
-                meta_db_path,
+                state_db_path,
             }) => {
                 assert_eq!(region, Region::US_EAST_VA);
                 assert_eq!(organization_id, org);
                 assert!(
-                    reported_state_db_path.contains("state.db"),
-                    "state.db path reported: {reported_state_db_path}"
-                );
-                assert!(
-                    meta_db_path.contains("_meta.db"),
-                    "meta.db path reported: {meta_db_path}"
+                    state_db_path.ends_with("state.db"),
+                    "state.db path reported: {state_db_path}"
                 );
             },
-            Ok(_) => panic!("expected LegacyStateLayout, got Ok"),
-            Err(other) => panic!("expected LegacyStateLayout, got: {other:?}"),
+            Ok(_) => panic!("expected LegacyPerOrgStateDb, got Ok"),
+            Err(other) => panic!("expected LegacyPerOrgStateDb, got: {other:?}"),
         }
     }
 
-    /// Both the legacy sentinel in state.db AND a sentinel in meta.db
-    /// indicate mid-migration state. open_organization must refuse with
-    /// InconsistentStateLayout so an operator intervenes.
+    /// A `state/` subdirectory (the new layout marker) must not be
+    /// mistaken for the legacy `state.db` file — `open_organization`
+    /// should succeed.
     #[test]
-    fn test_open_organization_refuses_inconsistent_layout() {
+    fn test_open_organization_state_directory_is_not_legacy() {
         let temp = TestDir::new();
         let mgr = RegionStorageManager::new(temp.path().to_path_buf());
 
-        let org = OrganizationId::new(43);
+        let org = OrganizationId::new(44);
         let org_dir = mgr.organization_dir(Region::US_EAST_VA, org);
         std::fs::create_dir_all(&org_dir).expect("create org dir");
+        // Pre-create `state/` as a directory (what Slice 2b wants).
+        std::fs::create_dir_all(org_dir.join("state")).expect("pre-create state/ dir");
+        // And pre-create the `state.db` path **as a directory**, not a
+        // file, to confirm the detector is strictly file-based.
+        // (Intentionally skipped — the detector uses `is_file()`, so a
+        // directory at that path would be treated as absent.)
 
-        let key = inferadb_ledger_state::StateLayer::<FileBackend>::LAST_APPLIED_KEY.to_vec();
-
-        // Legacy sentinel in state.db.
-        {
-            let db = Database::<FileBackend>::create(org_dir.join("state.db"))
-                .expect("create state.db");
-            let mut txn = db.write().expect("open write txn");
-            txn.insert_raw(
-                inferadb_ledger_store::tables::TableId::Entities,
-                &key,
-                b"legacy_sentinel",
-            )
-            .expect("insert legacy sentinel");
-            txn.commit().expect("commit");
-        }
-        // Sentinel also in meta.db — inconsistent state.
-        {
-            let db = Database::<FileBackend>::create(org_dir.join("_meta.db"))
-                .expect("create meta.db");
-            let mut txn = db.write().expect("open write txn");
-            txn.insert_raw(inferadb_ledger_store::tables::TableId::Entities, &key, b"new_sentinel")
-                .expect("insert meta sentinel");
-            txn.commit().expect("commit");
-        }
-
-        let result = mgr.open_organization(Region::US_EAST_VA, org);
-        match result {
-            Err(RegionStorageError::InconsistentStateLayout { region, organization_id, .. }) => {
-                assert_eq!(region, Region::US_EAST_VA);
-                assert_eq!(organization_id, org);
-            },
-            Ok(_) => panic!("expected InconsistentStateLayout, got Ok"),
-            Err(other) => panic!("expected InconsistentStateLayout, got: {other:?}"),
-        }
+        mgr.open_organization(Region::US_EAST_VA, org)
+            .expect("open with pre-existing state/ directory");
     }
 
     /// A brand-new data_dir must open cleanly — no legacy artefacts.
@@ -1057,9 +964,15 @@ mod tests {
 
         // meta.db must exist under the org dir.
         let meta_db_path = temp.path().join("us-east-va").join("99").join("_meta.db");
-        assert!(meta_db_path.exists(), "meta.db must be created alongside state.db");
+        assert!(meta_db_path.exists(), "meta.db must be created alongside the state/ dir");
+
+        // And `state/` must be a directory (Slice 2b layout marker).
+        let state_dir = temp.path().join("us-east-va").join("99").join("state");
+        assert!(state_dir.is_dir(), "state/ must be a directory under Slice 2b");
 
         // Round-trip: meta_db() returns a usable handle.
         assert!(storage.meta_db().read().is_ok());
+        // And `state_dir()` surfaces the on-disk path for the factory.
+        assert_eq!(storage.state_dir(), state_dir);
     }
 }

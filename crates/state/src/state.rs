@@ -93,6 +93,50 @@ pub enum StateError {
 /// Result type for state operations.
 pub type Result<T> = std::result::Result<T, StateError>;
 
+/// Convenience constructor for tests and transitional callers that still
+/// want a singleton-backed [`StateLayer`].
+///
+/// Slice 2b of per-vault consensus flipped [`StateLayer::new`] to take a
+/// [`VaultDbFactory`] closure. This helper wraps a single shared
+/// [`Arc<Database<B>>`] into a factory that resolves every vault to the
+/// same DB — preserving legacy test semantics without repeating the
+/// closure at every call site.
+///
+/// Production code uses a per-vault factory
+/// (`{org_dir}/state/vault-{id}.db`) assembled in
+/// `RaftManager::open_region_storage` and must not call this helper.
+///
+/// # Errors
+///
+/// Returns [`StateError::Store`] if `StateLayer::new`'s eager
+/// materialisation of the `SYSTEM_VAULT_ID` database fails. The shared
+/// factory cannot fail by construction (it simply clones an already-
+/// open `Arc`), but the signature stays fallible to match
+/// [`StateLayer::new`].
+pub fn new_state_layer_shared<B>(
+    db: Arc<Database<B>>,
+    meta_db: Arc<Database<B>>,
+) -> Result<StateLayer<B>>
+where
+    B: StorageBackend + 'static,
+{
+    let shared = Arc::clone(&db);
+    StateLayer::new(move |_vault| Ok(Arc::clone(&shared)), meta_db)
+}
+
+/// Factory closure that opens (or creates) the [`Database`] backing a
+/// specific vault's state.
+///
+/// Introduced by Slice 2b of per-vault consensus. The production factory
+/// captures the per-organization path components and composes
+/// `{data_dir}/{region}/{organization_id}/state/vault-{vault_id}.db`.
+/// Test factories capture an in-memory backend and open a fresh
+/// [`Database::open_in_memory`] per vault. The factory is invoked exactly
+/// once per vault — the per-vault HashMap caches the resulting [`Arc`] for
+/// the lifetime of the [`StateLayer`].
+pub type VaultDbFactory<B> =
+    Arc<dyn Fn(VaultId) -> Result<Arc<Database<B>>> + Send + Sync + 'static>;
+
 /// State layer managing per-vault materialized state.
 ///
 /// Provides entity/relationship CRUD and incremental state root computation
@@ -100,31 +144,49 @@ pub type Result<T> = std::result::Result<T, StateError>;
 /// tracked with its own [`VaultCommitment`] — only buckets modified since
 /// the last commit are rehashed.
 ///
+/// # Per-vault databases (Slice 2b of per-vault consensus)
+///
+/// As of Slice 2b, each vault owns its own [`Database`]; [`StateLayer`]
+/// caches open handles in the `dbs` map and lazily materialises new vaults
+/// via the [`VaultDbFactory`] supplied to [`StateLayer::new`]. Callers
+/// acquire the per-vault handle through [`StateLayer::db_for`], which
+/// returns an owned [`Arc`] — they then open read/write transactions
+/// against the local `Arc`. Transactions borrow from the `Arc`, not from
+/// the [`StateLayer`], so the two-liner pattern
+///
+/// ```ignore
+/// let db = state.db_for(vault)?;
+/// let mut txn = db.write()?;
+/// ```
+///
+/// keeps the transaction's borrow lifetime tied to the caller's local
+/// `Arc` rather than to any `RwLock` guard — no self-referential trick
+/// required.
+///
 /// Generic over [`StorageBackend`] to support both file-based (production)
 /// and in-memory (testing) storage.
-///
-/// # Usage
-///
-/// ```no_run
-/// use std::sync::Arc;
-/// use inferadb_ledger_store::Database;
-/// use inferadb_ledger_state::StateLayer;
-///
-/// let db = Arc::new(Database::open_in_memory()?);
-/// let meta_db = Arc::new(Database::open_in_memory()?);
-/// let state = StateLayer::new(db, meta_db);
-/// # Ok::<(), Box<dyn std::error::Error>>(())
-/// ```
 pub struct StateLayer<B: StorageBackend> {
-    /// Shared state database handle (entity / relationship tables).
-    db: Arc<Database<B>>,
+    /// Lazily-materialised per-vault state databases.
+    ///
+    /// Keyed by [`VaultId`]; each value is an [`Arc`] clone of the
+    /// `Database` returned by [`VaultDbFactory`]. The Arc is never removed
+    /// from the map — vault databases live for the lifetime of the
+    /// [`StateLayer`] (hibernation will evict in Phase 4, out of scope for
+    /// Slice 2b). Open via [`Self::db_for`] (double-checked locking);
+    /// enumerate via [`Self::live_vault_dbs`].
+    dbs: RwLock<HashMap<VaultId, Arc<Database<B>>>>,
+    /// Factory that opens a vault's [`Database`] on first reference.
+    /// Invoked exactly once per [`VaultId`]; the resulting [`Arc`] is
+    /// cached in `dbs` for the lifetime of the state layer.
+    db_factory: VaultDbFactory<B>,
     /// Per-organization coordination database handle (`_meta.db`).
     ///
     /// Owns the `_meta:last_applied` crash-recovery sentinel as of the
     /// per-vault consensus Slice 1 cleave. Must always be synced **after**
-    /// `db` (and `raft.db` / `blocks.db` / `events.db`) so the sentinel on
-    /// disk never advances past entity data that has not yet reached the
-    /// page cache's dual-slot on-disk pointer.
+    /// every per-vault state database (and `raft.db` / `blocks.db` /
+    /// `events.db`) so the sentinel on disk never advances past entity
+    /// data that has not yet reached the page cache's dual-slot on-disk
+    /// pointer.
     meta_db: Arc<Database<B>>,
     /// Per-vault commitment tracking.
     vault_commitments: RwLock<HashMap<VaultId, VaultCommitment>>,
@@ -136,44 +198,124 @@ pub struct StateLayer<B: StorageBackend> {
 
 #[allow(clippy::result_large_err)]
 impl<B: StorageBackend> StateLayer<B> {
-    /// Creates a new state layer backed by the given state and meta databases.
+    /// Creates a new state layer backed by a per-vault database factory and
+    /// the per-organization meta database.
     ///
-    /// `meta_db` is the per-organization `_meta.db` coordinator introduced by
-    /// Slice 1 of per-vault consensus. It owns the
-    /// `_meta:last_applied` sentinel; entity data continues to live in `db`.
-    /// The apply path commits entity data to `db` first, then records the
-    /// sentinel in `meta_db` in a second transaction so any crash between the
-    /// two commits merely re-drives idempotent replay instead of advancing
-    /// the sentinel past work that never reached the state DB.
-    pub fn new(db: Arc<Database<B>>, meta_db: Arc<Database<B>>) -> Self {
-        Self {
-            db,
+    /// Slice 2b of per-vault consensus flips `StateLayer` from a singleton
+    /// `Arc<Database<B>>` to a lazy per-vault [`HashMap`]. The `db_factory`
+    /// closure is invoked the first time [`Self::db_for`] is asked for a
+    /// given [`VaultId`]; the resulting [`Arc`] is cached for the lifetime
+    /// of the layer.
+    ///
+    /// `meta_db` is the per-organization `_meta.db` coordinator introduced
+    /// by Slice 1 of per-vault consensus. It owns the `_meta:last_applied`
+    /// sentinel; entity data lives in the per-vault databases. The apply
+    /// path commits entity data to the vault's DB first, then records the
+    /// sentinel in `meta_db` in a second transaction so any crash between
+    /// the two commits merely re-drives idempotent replay instead of
+    /// advancing the sentinel past work that never reached the state DB.
+    ///
+    /// This constructor eagerly materialises the
+    /// [`crate::system::SYSTEM_VAULT_ID`] database via the factory. That
+    /// guarantees [`Self::database`], [`Self::table_depths`], and
+    /// [`Self::database_stats`] — the Slice 2b compatibility shims for
+    /// `AdminService` / `IntegrityScrubber` / `compact_tables` /
+    /// `rewrap_pages` / `sidecar_page_count` — always have a concrete DB
+    /// to delegate to without taking a [`VaultId`] argument. Slice 2c
+    /// threads `VaultId` through those callers and drops the eager
+    /// materialisation.
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever error the factory produces while opening the
+    /// system vault DB. A fresh on-disk layout cannot fail here because
+    /// the factory's `create_dir_all + Database::create_with_config` path
+    /// is the same one that succeeded during
+    /// `RegionStorageManager::open_organization`. Tests using an
+    /// in-memory factory should construct an always-Ok closure.
+    pub fn new<F>(db_factory: F, meta_db: Arc<Database<B>>) -> Result<Self>
+    where
+        F: Fn(VaultId) -> Result<Arc<Database<B>>> + Send + Sync + 'static,
+    {
+        let factory: VaultDbFactory<B> = Arc::new(db_factory);
+        // Eagerly materialise SYSTEM_VAULT_ID so the Slice 2b
+        // compatibility shims (`database()`, `table_depths()`,
+        // `database_stats()`, `compact_tables()`, `rewrap_pages()`,
+        // `sidecar_page_count()`) always have a concrete DB to delegate
+        // to without a `VaultId` argument. This mirrors the pre-Slice-2b
+        // invariant where a single shared state DB was always present.
+        let system_db = (factory)(crate::system::SYSTEM_VAULT_ID)?;
+        let mut dbs = HashMap::new();
+        dbs.insert(crate::system::SYSTEM_VAULT_ID, system_db);
+        Ok(Self {
+            dbs: RwLock::new(dbs),
+            db_factory: factory,
             meta_db,
             vault_commitments: RwLock::new(HashMap::new()),
             vault_dictionaries: RwLock::new(HashMap::new()),
             relationship_index: Arc::new(RelationshipIndex::new()),
-        }
+        })
     }
 
-    /// Returns database-level statistics for metrics collection.
+    /// Returns aggregate database-level statistics for metrics collection.
+    ///
+    /// Slice 2b compatibility shim: pre-Slice-2b this method returned
+    /// stats from the single shared state DB. With per-vault DBs, there
+    /// is no single "state DB" — this implementation delegates to the
+    /// `SYSTEM_VAULT_ID` database, which is always materialised by
+    /// [`Self::new`]. Slice 2c reworks this into an aggregate across all
+    /// live vault DBs.
     pub fn database_stats(&self) -> DatabaseStats {
-        self.db.stats()
+        self.any_db().stats()
     }
 
-    /// Returns a reference to the underlying database for integrity scrubbing and diagnostics.
-    pub fn database(&self) -> &Arc<Database<B>> {
-        &self.db
+    /// Returns a reference to the underlying database for integrity
+    /// scrubbing and diagnostics.
+    ///
+    /// Slice 2b compatibility shim: returns a handle to the
+    /// `SYSTEM_VAULT_ID` database for `AdminService` backup/restore and
+    /// `IntegrityScrubber`. Slice 2c threads `VaultId` through those
+    /// callers and replaces this accessor with per-vault routing.
+    pub fn database(&self) -> Arc<Database<B>> {
+        self.any_db()
     }
 
     /// Returns B-tree depths for all non-empty tables.
     ///
     /// Opens a read transaction internally to walk each table's B-tree.
     ///
+    /// Slice 2b compatibility shim: delegates to the `SYSTEM_VAULT_ID`
+    /// database; Slice 2c aggregates across all vault DBs.
+    ///
     /// # Errors
     ///
     /// Returns [`StateError::Store`] if the database read fails.
     pub fn table_depths(&self) -> Result<Vec<(&'static str, u32)>> {
-        self.db.table_depths().context(StoreSnafu)
+        self.any_db().table_depths().context(StoreSnafu)
+    }
+
+    /// Returns the `SYSTEM_VAULT_ID` database — the Slice 2b
+    /// compatibility backing for APIs that have not yet been threaded
+    /// with a [`VaultId`] routing key (backup/restore, integrity scrub,
+    /// compaction, rewrap). Always succeeds because [`Self::new`]
+    /// eagerly materialises the system vault DB.
+    ///
+    /// Slice 2c reworks every caller of this shim to pass a vault id; at
+    /// that point this helper is deleted.
+    fn any_db(&self) -> Arc<Database<B>> {
+        let dbs = self.dbs.read();
+        // SAFETY (root rule 8): `new` inserts SYSTEM_VAULT_ID before
+        // returning, and nothing in the API removes from `dbs`, so the
+        // lookup is infallible. A future Phase-4 hibernation feature
+        // that evicts vault DBs would need to guard SYSTEM_VAULT_ID or
+        // rework this helper — at that point this accessor is also
+        // gone (Slice 2c replaces every caller with per-vault
+        // routing).
+        #[allow(clippy::expect_used)]
+        let db = dbs
+            .get(&crate::system::SYSTEM_VAULT_ID)
+            .expect("StateLayer::new materialises SYSTEM_VAULT_ID");
+        Arc::clone(db)
     }
 
     /// Execute a function with mutable access to a vault's commitment.
@@ -202,7 +344,8 @@ impl<B: StorageBackend> StateLayer<B> {
         if let Some(dict) = self.vault_dictionaries.write().remove(&vault) {
             return Ok(dict);
         }
-        let txn = self.db.read().context(StoreSnafu)?;
+        let db = self.db_for(vault)?;
+        let txn = db.read().context(StoreSnafu)?;
         crate::dictionary::VaultDictionary::load(&txn, vault).map_err(|e| match e {
             crate::dictionary::DictionaryError::Storage { source, .. } => {
                 StateError::Store { source, location: snafu::location!() }
@@ -237,7 +380,8 @@ impl<B: StorageBackend> StateLayer<B> {
             }
         }
         // Slow path: load from storage and insert into cache.
-        let txn = self.db.read().context(StoreSnafu)?;
+        let db = self.db_for(vault)?;
+        let txn = db.read().context(StoreSnafu)?;
         let dict = crate::dictionary::VaultDictionary::load(&txn, vault).map_err(|e| match e {
             crate::dictionary::DictionaryError::Storage { source, .. } => {
                 StateError::Store { source, location: snafu::location!() }
@@ -256,17 +400,82 @@ impl<B: StorageBackend> StateLayer<B> {
         Ok(RwLockReadGuard::map(map, |m| &m[&vault]))
     }
 
-    /// Opens a write transaction on the underlying database.
+    /// Returns the [`Database`] handle that owns the given vault's entity
+    /// data.
     ///
-    /// Use with [`apply_operations_in_txn`](Self::apply_operations_in_txn)
-    /// for caller-controlled transaction lifecycle.
+    /// Slice 2b of per-vault consensus: the first call for a given
+    /// [`VaultId`] invokes the factory closure supplied to
+    /// [`Self::new`] and caches the resulting [`Arc`]. Subsequent calls
+    /// return a clone of the cached handle. Lookup uses double-checked
+    /// locking — the common path takes a read lock only.
+    ///
+    /// The returned value is an **owned** [`Arc`] (not a reference into
+    /// the `HashMap`); callers open transactions against it locally so
+    /// the transaction's `'_` lifetime is tied to the caller's `Arc`,
+    /// not to any `RwLock` guard:
+    ///
+    /// ```ignore
+    /// let db = state.db_for(vault)?;
+    /// let mut txn = db.write()?;
+    /// // ... use txn ...
+    /// txn.commit_in_memory()?;
+    /// // `db` drops here, strictly after the transaction.
+    /// ```
     ///
     /// # Errors
     ///
-    /// Returns [`StateError::Store`] if the database write lock cannot be acquired.
-    pub fn begin_write(&self) -> Result<WriteTransaction<'_, B>> {
-        self.db.write().context(StoreSnafu)
+    /// Returns [`StateError::Store`] (wrapping whatever the factory
+    /// closure produced) if opening the per-vault DB fails.
+    pub fn db_for(&self, vault: VaultId) -> Result<Arc<Database<B>>> {
+        // Fast path: the vault's DB is already materialised.
+        if let Some(db) = self.dbs.read().get(&vault) {
+            return Ok(Arc::clone(db));
+        }
+        // Slow path: acquire the write lock and re-check (double-checked
+        // locking). Another thread may have materialised the DB between
+        // the read-lock drop and the write-lock acquire.
+        let mut dbs = self.dbs.write();
+        if let Some(db) = dbs.get(&vault) {
+            return Ok(Arc::clone(db));
+        }
+        let db = (self.db_factory)(vault)?;
+        dbs.insert(vault, Arc::clone(&db));
+        Ok(db)
     }
+
+    /// Returns every vault DB that has been materialised for this
+    /// organization.
+    ///
+    /// Used by [`crate::super::StateCheckpointer`] and
+    /// `RaftManager::sync_all_state_dbs` to fan out strict-ordered fsync
+    /// Phase A (vault state DBs + raft.db + blocks.db + events.db
+    /// concurrent) across every live vault before Phase B syncs meta.db.
+    ///
+    /// Slice 2b returns a snapshot vector rather than an iterator
+    /// borrowing from the lock, so callers can drop the read lock before
+    /// awaiting per-DB sync futures.
+    pub fn live_vault_dbs(&self) -> Vec<(VaultId, Arc<Database<B>>)> {
+        self.dbs.read().iter().map(|(v, db)| (*v, Arc::clone(db))).collect()
+    }
+
+    // Slice 2b note: the pre-Slice-2b `begin_write(vault)` / `begin_read(vault)`
+    // convenience wrappers are deleted. With a per-vault HashMap, the Arc
+    // cannot be clone-on-demand inside `StateLayer` and still return a
+    // transaction that outlives the clone — transactions borrow from
+    // `&Database`, so the Arc must live in the caller's scope. Call sites
+    // now take the two-liner:
+    //
+    // ```ignore
+    // let db = state.db_for(vault)?;          // owned Arc
+    // let mut txn = db.write().context(StoreSnafu)?;
+    // // ... use txn ...
+    // txn.commit_in_memory().context(StoreSnafu)?;
+    // // `db` drops strictly after `txn`.
+    // ```
+    //
+    // This keeps the lifetime chain explicit, avoids self-referential
+    // gymnastics, and is trivially safe — the caller's local Arc outlives
+    // the txn by construction.
 
     /// Sentinel key for crash-recovery atomicity.
     ///
@@ -332,11 +541,21 @@ impl<B: StorageBackend> StateLayer<B> {
     /// detected. Slice 1 moves the sentinel to meta.db; any hit here on
     /// startup means the data directory was written by an older build.
     ///
+    /// Slice 2b: under the per-vault state DB layout the pre-Slice-1
+    /// layout is anyway refused at `RegionStorageManager::open_organization`
+    /// — a legacy flat `state.db` file (not directory) on disk fails the
+    /// legacy detector before this layer is ever constructed. This helper
+    /// is retained for `RaftLogStore`'s recovery-assertion path; it now
+    /// probes the system vault's DB (materialised eagerly by
+    /// [`Self::new`]). Any hit is treated as a "should have been caught
+    /// earlier" signal by the caller.
+    ///
     /// # Errors
     ///
     /// Returns [`StateError::Store`] if the read transaction fails.
     pub fn read_legacy_last_applied_from_state_db(&self) -> Result<Option<Vec<u8>>> {
-        let txn = self.db.read().context(StoreSnafu)?;
+        let db = self.any_db();
+        let txn = db.read().context(StoreSnafu)?;
         let key = Self::LAST_APPLIED_KEY.to_vec();
         txn.get::<inferadb_ledger_store::tables::Entities>(&key).context(StoreSnafu)
     }
@@ -579,9 +798,11 @@ impl<B: StorageBackend> StateLayer<B> {
     /// # use inferadb_ledger_state::StateLayer;
     /// use inferadb_ledger_types::types::{Operation, VaultId};
     ///
-    /// # let db = Arc::new(Database::open_in_memory()?);
     /// # let meta_db = Arc::new(Database::open_in_memory()?);
-    /// # let state = StateLayer::new(db, meta_db);
+    /// # let factory = |_vault| -> Result<_, inferadb_ledger_state::StateError> {
+    /// #     Ok(Arc::new(Database::open_in_memory().unwrap()))
+    /// # };
+    /// # let state = StateLayer::new(factory, meta_db)?;
     /// let ops = vec![Operation::SetEntity {
     ///     key: "user:alice".into(),
     ///     value: b"data".to_vec(),
@@ -606,7 +827,8 @@ impl<B: StorageBackend> StateLayer<B> {
         block_height: u64,
     ) -> Result<Vec<WriteStatus>> {
         let mut dict = self.take_dictionary(vault)?;
-        let mut txn = self.begin_write()?;
+        let db = self.db_for(vault)?;
+        let mut txn = db.write().context(StoreSnafu)?;
         match self.apply_operations_in_txn(&mut txn, &mut dict, vault, operations, block_height) {
             Ok((statuses, dirty_keys)) => {
                 // Mark dirty before commit: dirty marks are conservative (trigger
@@ -658,7 +880,8 @@ impl<B: StorageBackend> StateLayer<B> {
         block_height: u64,
     ) -> Result<Vec<WriteStatus>> {
         let mut dict = self.take_dictionary(vault)?;
-        let mut txn = self.begin_write()?;
+        let db = self.db_for(vault)?;
+        let mut txn = db.write().context(StoreSnafu)?;
         match self.apply_operations_in_txn(&mut txn, &mut dict, vault, operations, block_height) {
             Ok((statuses, dirty_keys)) => {
                 // Mark dirty before commit: dirty marks are conservative (trigger
@@ -687,7 +910,8 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Returns [`StateError::Store`] if any storage operation (iteration, delete,
     /// or commit) fails.
     pub fn clear_vault(&self, vault: VaultId) -> Result<()> {
-        let mut txn = self.db.write().context(StoreSnafu)?;
+        let db = self.db_for(vault)?;
+        let mut txn = db.write().context(StoreSnafu)?;
 
         delete_vault_keys::<B, tables::Entities>(&mut txn, vault)?;
         delete_vault_keys::<B, tables::Relationships>(&mut txn, vault)?;
@@ -714,7 +938,8 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Returns [`StateError::Codec`] if deserialization of the stored entity fails.
     pub fn get_entity(&self, vault: VaultId, key: &[u8]) -> Result<Option<Entity>> {
         let storage_key = encode_storage_key(vault, key);
-        let txn = self.db.read().context(StoreSnafu)?;
+        let db = self.db_for(vault)?;
+        let txn = db.read().context(StoreSnafu)?;
 
         match txn.get_raw(TableId::Entities, &storage_key).context(StoreSnafu)? {
             Some(data) => {
@@ -765,7 +990,8 @@ impl<B: StorageBackend> StateLayer<B> {
         }
         // Fallback to B+ tree (dictionary strings unknown or load failed to index).
         let dict = self.get_dictionary(vault)?;
-        let txn = self.db.read().context(StoreSnafu)?;
+        let db = self.db_for(vault)?;
+        let txn = db.read().context(StoreSnafu)?;
         crate::relationship::RelationshipStore::exists(
             &txn, &dict, vault, resource, relation, subject,
         )
@@ -804,7 +1030,8 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Iterates the Relationships table for the given vault prefix and
     /// inserts the seahash of each local key into the index.
     fn load_vault_relationship_index(&self, vault: VaultId) -> Result<()> {
-        let txn = self.db.read().context(StoreSnafu)?;
+        let db = self.db_for(vault)?;
+        let txn = db.read().context(StoreSnafu)?;
         let vault_start = crate::keys::vault_prefix(vault);
         let next_vault = VaultId::from(vault.value() + 1);
         let vault_end = crate::keys::vault_prefix(next_vault);
@@ -928,6 +1155,13 @@ impl<B: StorageBackend> StateLayer<B> {
         // assuming `vault.value() + 1` does not overflow i64 for live vaults.
         let vault_end = crate::keys::vault_prefix(VaultId::new(vault.value() + 1)).to_vec();
 
+        // Resolve the vault's per-vault DB once before the rayon fan-out —
+        // each worker opens its own MVCC read transaction against this
+        // shared `Arc`. Under Slice 2b, `db_for` returns a cheap clone of
+        // the HashMap's `Arc`; there is no lock held across the rayon
+        // join.
+        let db = self.db_for(vault)?;
+
         // Use the bounded apply-path pool (see `apply_pool`) rather than
         // rayon's default global pool. The global pool sizes itself to
         // `num_cpus`, competing 1:1 with tokio's runtime workers and
@@ -938,7 +1172,7 @@ impl<B: StorageBackend> StateLayer<B> {
             dirty_buckets
                 .par_iter()
                 .map(|&bucket| -> Result<(u8, Hash)> {
-                    let txn = self.db.read().context(StoreSnafu)?;
+                    let txn = db.read().context(StoreSnafu)?;
                     let start = crate::keys::bucket_prefix(vault, bucket).to_vec();
                     let end_owned: Vec<u8> = if bucket < 255 {
                         crate::keys::bucket_prefix(vault, bucket + 1).to_vec()
@@ -988,11 +1222,17 @@ impl<B: StorageBackend> StateLayer<B> {
     ///
     /// Returns aggregate compaction statistics across all tables.
     ///
+    /// Slice 2b compatibility shim: compacts only the `SYSTEM_VAULT_ID`
+    /// database (via [`Self::any_db`]). Slice 2c threads `VaultId`
+    /// through the compaction caller and fans out across every live
+    /// vault DB.
+    ///
     /// # Errors
     ///
     /// Returns [`StateError::Store`] if the compaction operation or commit fails.
     pub fn compact_tables(&self, min_fill_factor: f64) -> Result<CompactionStats> {
-        let mut txn = self.db.write().context(StoreSnafu)?;
+        let db = self.any_db();
+        let mut txn = db.write().context(StoreSnafu)?;
         let stats = txn.compact_all_tables(min_fill_factor).context(StoreSnafu)?;
         txn.commit().context(StoreSnafu)?;
         Ok(stats)
@@ -1001,6 +1241,10 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Re-wraps a batch of pages' crypto sidecar metadata to a target RMK version.
     ///
     /// Delegates to [`Database::rewrap_pages`]. Non-encrypted backends are a no-op.
+    ///
+    /// Slice 2b compatibility shim: rewraps only the `SYSTEM_VAULT_ID`
+    /// database. Slice 2c threads `VaultId` through `dek_rewrap` and
+    /// iterates across every live vault DB.
     ///
     /// # Errors
     ///
@@ -1011,18 +1255,22 @@ impl<B: StorageBackend> StateLayer<B> {
         batch_size: usize,
         target_version: Option<u32>,
     ) -> Result<(usize, Option<u64>)> {
-        self.db.rewrap_pages(start_page_id, batch_size, target_version).context(StoreSnafu)
+        self.any_db().rewrap_pages(start_page_id, batch_size, target_version).context(StoreSnafu)
     }
 
     /// Returns the total page count in the crypto sidecar.
     ///
     /// Non-encrypted backends return 0.
     ///
+    /// Slice 2b compatibility shim: returns the sidecar page count for
+    /// the `SYSTEM_VAULT_ID` database only. Slice 2c sums across every
+    /// live vault DB.
+    ///
     /// # Errors
     ///
     /// Returns [`StateError::Store`] if the sidecar metadata cannot be read.
     pub fn sidecar_page_count(&self) -> Result<u64> {
-        self.db.sidecar_page_count().context(StoreSnafu)
+        self.any_db().sidecar_page_count().context(StoreSnafu)
     }
 
     /// Lists subjects for a given resource and relation.
@@ -1038,7 +1286,8 @@ impl<B: StorageBackend> StateLayer<B> {
         relation: &str,
     ) -> Result<Vec<String>> {
         let dict = self.get_dictionary(vault)?;
-        let txn = self.db.read().context(StoreSnafu)?;
+        let db = self.db_for(vault)?;
+        let txn = db.read().context(StoreSnafu)?;
         IndexManager::get_subjects(&txn, &dict, vault, resource, relation).context(IndexSnafu)
     }
 
@@ -1054,7 +1303,8 @@ impl<B: StorageBackend> StateLayer<B> {
         subject: &str,
     ) -> Result<Vec<(String, String)>> {
         let dict = self.get_dictionary(vault)?;
-        let txn = self.db.read().context(StoreSnafu)?;
+        let db = self.db_for(vault)?;
+        let txn = db.read().context(StoreSnafu)?;
         IndexManager::get_resources(&txn, &dict, vault, subject).context(IndexSnafu)
     }
 
@@ -1075,7 +1325,8 @@ impl<B: StorageBackend> StateLayer<B> {
     ) -> Result<Vec<Entity>> {
         use crate::keys::vault_prefix;
 
-        let txn = self.db.read().context(StoreSnafu)?;
+        let db = self.db_for(vault)?;
+        let txn = db.read().context(StoreSnafu)?;
 
         let mut entities = Vec::with_capacity(limit.min(1000));
 
@@ -1147,7 +1398,8 @@ impl<B: StorageBackend> StateLayer<B> {
         limit: usize,
     ) -> Result<Vec<Relationship>> {
         let dict = self.get_dictionary(vault)?;
-        let txn = self.db.read().context(StoreSnafu)?;
+        let db = self.db_for(vault)?;
+        let txn = db.read().context(StoreSnafu)?;
 
         // Build start key for pagination. If start_after is provided, resolve
         // its components through the dictionary to build a binary storage key.
@@ -1227,8 +1479,16 @@ impl<B: StorageBackend> StateLayer<B> {
 
 impl<B: StorageBackend> Clone for StateLayer<B> {
     fn clone(&self) -> Self {
+        // Snapshot the currently-materialised vault DBs; the clone shares
+        // the same `Arc<Database<B>>` handles so writes remain visible
+        // across clones. The factory is reference-counted and re-shared
+        // so a clone can still lazily materialise a vault that was not
+        // yet opened at clone time.
+        let dbs_snapshot: HashMap<VaultId, Arc<Database<B>>> =
+            self.dbs.read().iter().map(|(v, db)| (*v, Arc::clone(db))).collect();
         Self {
-            db: Arc::clone(&self.db),
+            dbs: RwLock::new(dbs_snapshot),
+            db_factory: Arc::clone(&self.db_factory),
             meta_db: Arc::clone(&self.meta_db),
             vault_commitments: RwLock::new(HashMap::new()), // Each clone starts fresh
             vault_dictionaries: RwLock::new(HashMap::new()), // Each clone starts fresh
@@ -1276,12 +1536,22 @@ mod tests {
     use inferadb_ledger_types::VaultId;
 
     use super::*;
-    use crate::engine::InMemoryStorageEngine;
+    use crate::{engine::InMemoryStorageEngine, system::SYSTEM_VAULT_ID};
 
     fn create_test_state() -> StateLayer<InMemoryBackend> {
-        let engine = InMemoryStorageEngine::open().expect("open engine");
         let meta_engine = InMemoryStorageEngine::open().expect("open meta engine");
-        StateLayer::new(engine.db(), meta_engine.db())
+        // Slice 2b: each vault gets its own `Database`. The test factory
+        // opens a fresh in-memory database per vault — tests exercise
+        // the per-vault branch, not the Slice 2a singleton shim.
+        StateLayer::new(
+            |_vault| {
+                inferadb_ledger_store::Database::<InMemoryBackend>::open_in_memory()
+                    .map(Arc::new)
+                    .map_err(|e| StateError::Store { source: e, location: snafu::location!() })
+            },
+            meta_engine.db(),
+        )
+        .expect("open test StateLayer")
     }
 
     #[test]
@@ -2152,7 +2422,8 @@ mod tests {
         let vault = VaultId::new(1);
 
         // Step 1: entity data → state.db.
-        let mut txn = state.begin_write().unwrap();
+        let db = state.db_for(vault).unwrap();
+        let mut txn = db.write().unwrap();
         let mut dict = crate::dictionary::VaultDictionary::new(vault);
         state
             .apply_operations_in_txn(
@@ -2169,6 +2440,7 @@ mod tests {
             )
             .unwrap();
         txn.commit().unwrap();
+        drop(db);
 
         // Step 2: sentinel → meta.db.
         state.persist_last_applied_meta(b"log_id_100").unwrap();
@@ -2188,7 +2460,8 @@ mod tests {
         let state = create_test_state();
         let vault = VaultId::new(1);
 
-        let mut txn = state.begin_write().unwrap();
+        let db = state.db_for(vault).unwrap();
+        let mut txn = db.write().unwrap();
         let mut dict = crate::dictionary::VaultDictionary::new(vault);
         state
             .apply_operations_in_txn(
@@ -2205,6 +2478,7 @@ mod tests {
             )
             .unwrap();
         txn.commit().unwrap();
+        drop(db);
         // Simulate crash before step 2: we never call
         // persist_last_applied_meta.
 
@@ -2260,8 +2534,11 @@ mod tests {
         let state = create_test_state();
 
         // Simulate a pre–Slice 1 artefact: sentinel bytes written under
-        // the legacy key into state.db's Entities table.
-        let mut txn = state.begin_write().unwrap();
+        // the legacy key into the system vault's state.db Entities table.
+        // Under Slice 2b, `read_legacy_last_applied_from_state_db` probes
+        // the system-vault DB (the same handle surfaced by `any_db`).
+        let db = state.db_for(SYSTEM_VAULT_ID).unwrap();
+        let mut txn = db.write().unwrap();
         txn.insert_raw(
             inferadb_ledger_store::tables::TableId::Entities,
             StateLayer::<InMemoryBackend>::LAST_APPLIED_KEY,
@@ -2269,6 +2546,7 @@ mod tests {
         )
         .unwrap();
         txn.commit().unwrap();
+        drop(db);
 
         let legacy = state.read_legacy_last_applied_from_state_db().unwrap();
         assert_eq!(legacy.as_deref(), Some(b"legacy_sentinel".as_slice()));
@@ -2959,22 +3237,44 @@ mod tests {
     /// sides of the classification.
     #[test]
     fn apply_operations_lazy_skips_durable_commit_but_apply_operations_does_not() {
-        use std::sync::Arc;
+        use std::{path::PathBuf, sync::Arc};
 
         use inferadb_ledger_store::{Database, FileBackend};
         use tempfile::tempdir;
 
+        // Slice 2b: the factory shape mirrors production —
+        // `state/vault-{vault_id}.db` under a per-case directory.
+        fn make_factory(
+            root: PathBuf,
+        ) -> impl Fn(VaultId) -> Result<Arc<Database<FileBackend>>> + Send + Sync + 'static
+        {
+            move |vault: VaultId| {
+                let state_dir = root.join("state");
+                std::fs::create_dir_all(&state_dir).map_err(|e| StateError::Store {
+                    source: inferadb_ledger_store::Error::Io { source: e },
+                    location: snafu::location!(),
+                })?;
+                let path = state_dir.join(format!("vault-{}.db", vault.value()));
+                let db = if path.exists() {
+                    Database::<FileBackend>::open(&path)
+                } else {
+                    Database::<FileBackend>::create(&path)
+                }
+                .map_err(|e| StateError::Store { source: e, location: snafu::location!() })?;
+                Ok(Arc::new(db))
+            }
+        }
+
         let tmp = tempdir().unwrap();
-        let lazy_path = tmp.path().join("lazy.ink");
+        let lazy_root = tmp.path().join("lazy");
         let lazy_meta_path = tmp.path().join("lazy_meta.ink");
-        let durable_path = tmp.path().join("durable.ink");
+        let durable_root = tmp.path().join("durable");
         let durable_meta_path = tmp.path().join("durable_meta.ink");
 
         // Lazy side: apply_operations_lazy → reopen → write is GONE.
         {
-            let db = Arc::new(Database::<FileBackend>::create(&lazy_path).unwrap());
             let meta_db = Arc::new(Database::<FileBackend>::create(&lazy_meta_path).unwrap());
-            let state = StateLayer::new(db, meta_db);
+            let state = StateLayer::new(make_factory(lazy_root.clone()), meta_db).unwrap();
             state
                 .apply_operations_lazy(
                     VaultId::new(1),
@@ -2991,9 +3291,9 @@ mod tests {
             assert!(state.get_entity(VaultId::new(1), b"lazy_key").unwrap().is_some());
         }
 
-        let reopened_lazy = Arc::new(Database::<FileBackend>::open(&lazy_path).unwrap());
         let reopened_lazy_meta = Arc::new(Database::<FileBackend>::open(&lazy_meta_path).unwrap());
-        let state_reopened_lazy = StateLayer::new(reopened_lazy, reopened_lazy_meta);
+        let state_reopened_lazy =
+            StateLayer::new(make_factory(lazy_root.clone()), reopened_lazy_meta).unwrap();
         assert!(
             state_reopened_lazy.get_entity(VaultId::new(1), b"lazy_key").unwrap().is_none(),
             "apply_operations_lazy must NOT persist the dual-slot state pointer — \
@@ -3002,9 +3302,8 @@ mod tests {
 
         // Durable side: apply_operations → reopen → write IS there.
         {
-            let db = Arc::new(Database::<FileBackend>::create(&durable_path).unwrap());
             let meta_db = Arc::new(Database::<FileBackend>::create(&durable_meta_path).unwrap());
-            let state = StateLayer::new(db, meta_db);
+            let state = StateLayer::new(make_factory(durable_root.clone()), meta_db).unwrap();
             state
                 .apply_operations(
                     VaultId::new(1),
@@ -3019,10 +3318,10 @@ mod tests {
                 .unwrap();
         }
 
-        let reopened_durable = Arc::new(Database::<FileBackend>::open(&durable_path).unwrap());
         let reopened_durable_meta =
             Arc::new(Database::<FileBackend>::open(&durable_meta_path).unwrap());
-        let state_reopened_durable = StateLayer::new(reopened_durable, reopened_durable_meta);
+        let state_reopened_durable =
+            StateLayer::new(make_factory(durable_root), reopened_durable_meta).unwrap();
         let entity = state_reopened_durable
             .get_entity(VaultId::new(1), b"durable_key")
             .unwrap()

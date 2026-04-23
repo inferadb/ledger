@@ -293,15 +293,33 @@ pub(crate) fn hash_operations(operations: &[proto::Operation]) -> Vec<u8> {
 /// Returns `tonic::Status::internal` if temp dir or database creation fails.
 pub(crate) fn create_replay_context() -> Result<(TempDir, StateLayer<FileBackend>), Status> {
     let temp_dir = TempDir::new().map_err(|e| error_classify::storage_error(&e))?;
-    let temp_db = Arc::new(
-        Database::<FileBackend>::create(temp_dir.path().join("replay.db"))
-            .map_err(|e| error_classify::storage_error(&e))?,
-    );
     let temp_meta_db = Arc::new(
         Database::<FileBackend>::create(temp_dir.path().join("replay_meta.db"))
             .map_err(|e| error_classify::storage_error(&e))?,
     );
-    let temp_state = StateLayer::new(temp_db, temp_meta_db);
+    // Slice 2b: the replay context owns no persistent state across calls,
+    // so the factory returns a per-vault file under a `replay-state/`
+    // directory inside `temp_dir`. Every replay gets a fresh temp dir,
+    // so opening by create vs. open doesn't matter — the path never
+    // exists when the factory first fires.
+    let state_dir = temp_dir.path().join("replay-state");
+    std::fs::create_dir_all(&state_dir).map_err(|e| error_classify::storage_error(&e))?;
+    let state_dir_for_factory = state_dir.clone();
+    let factory = move |vault: inferadb_ledger_types::VaultId| {
+        let path = state_dir_for_factory.join(format!("vault-{}.db", vault.value()));
+        let db = if path.exists() {
+            Database::<FileBackend>::open(&path)
+        } else {
+            Database::<FileBackend>::create(&path)
+        }
+        .map_err(|e| inferadb_ledger_state::StateError::Store {
+            source: e,
+            location: snafu::location!(),
+        })?;
+        Ok(Arc::new(db))
+    };
+    let temp_state =
+        StateLayer::new(factory, temp_meta_db).map_err(|e| error_classify::storage_error(&e))?;
     Ok((temp_dir, temp_state))
 }
 

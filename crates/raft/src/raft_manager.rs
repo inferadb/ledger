@@ -2276,8 +2276,12 @@ impl RaftManager {
         // `set_runtime_config` was never called (test harnesses). The
         // checkpointer then uses `CheckpointConfig::default()` thresholds.
         let runtime_config = self.runtime_config.lock().clone().unwrap_or_default();
+        // Slice 2b: pass the `StateLayer` itself so the checkpointer
+        // can enumerate per-vault DBs on every tick via
+        // `live_vault_dbs()`. Phase A of `do_checkpoint` fans out across
+        // the live vault set; Phase B syncs meta.db strictly after.
         let state_checkpointer = StateCheckpointer::from_config(
-            state.database().clone(),
+            Arc::clone(&state),
             raft_db,
             blocks_db,
             events_db,
@@ -2349,12 +2353,46 @@ impl RaftManager {
             })?;
 
         // Wrap raw databases in domain-specific types. `meta.db` is the
-        // Slice 1 per-organization coordinator — it sits alongside
-        // state.db and owns the `_meta:last_applied` sentinel.
-        let state = Arc::new(StateLayer::new(
-            storage.state_db().clone(),
-            storage.meta_db().clone(),
-        ));
+        // Slice 1 per-organization coordinator — it sits alongside the
+        // per-vault state DBs and owns the `_meta:last_applied`
+        // sentinel.
+        //
+        // Slice 2b: `StateLayer` no longer holds a singleton state DB.
+        // It materialises per-vault DBs lazily via this factory closure,
+        // which composes `{organization_dir}/state/vault-{id}.db` per
+        // vault. `RegionStorageManager::open_organization` already
+        // created the `state/` directory; the factory only needs to
+        // open (or create) the per-vault file.
+        let region_storage_for_factory = Arc::clone(&storage);
+        let state = Arc::new(
+            StateLayer::new(
+                move |vault| {
+                    let path = region_storage_for_factory.vault_db_path(vault);
+                    let db = if path.exists() {
+                        Database::<FileBackend>::open(&path)
+                    } else {
+                        // Match the page size used for every other
+                        // per-org DB so vault DBs share the same
+                        // Raft-batch-sized pages.
+                        let config = inferadb_ledger_store::DatabaseConfig {
+                            page_size: crate::region_storage::ORGANIZATION_PAGE_SIZE,
+                            ..Default::default()
+                        };
+                        Database::<FileBackend>::create_with_config(&path, config)
+                    }
+                    .map_err(|e| inferadb_ledger_state::StateError::Store {
+                        source: e,
+                        location: snafu::location!(),
+                    })?;
+                    Ok(Arc::new(db))
+                },
+                storage.meta_db().clone(),
+            )
+            .map_err(|e| RaftManagerError::Storage {
+                region,
+                message: format!("Failed to open StateLayer (Slice 2b factory): {e}"),
+            })?,
+        );
         let block_archive = Arc::new(BlockArchive::new(storage.blocks_db().clone()));
 
         // Create block announcements broadcast channel for real-time notifications.
@@ -2549,7 +2587,11 @@ impl RaftManager {
                 );
                 continue;
             };
-            let state_db = group.state().database().clone();
+            // Slice 2b: there is no longer a singleton state DB — the
+            // per-vault state handles live inside the `StateLayer`.
+            // Snapshot the live vault set and fan out Phase A across
+            // every vault concurrently alongside raft/blocks/events.
+            let vault_dbs = group.state().live_vault_dbs();
             let raft_db = Arc::clone(group.raft_db());
             let blocks_db = Arc::clone(group.blocks_db());
             let events_db_opt = group.events_state_db();
@@ -2558,10 +2600,10 @@ impl RaftManager {
             // Sync every configured DB under a strict two-phase ordering
             // inside the per-region timeout:
             //
-            // Phase A — state.db / raft.db / blocks.db / events.db
-            // concurrently via `tokio::join!`. These are the entity-data
-            // DBs; they must reach disk before the sentinel in meta.db
-            // that references them.
+            // Phase A — every live vault state.db / raft.db / blocks.db /
+            // events.db concurrently via `tokio::join!`. These are the
+            // entity-data DBs; they must reach disk before the sentinel
+            // in meta.db that references them.
             //
             // Phase B — meta.db, synced AFTER Phase A completes. This is
             // the Slice 1 strict-ordering invariant. Never invert.
@@ -2569,47 +2611,49 @@ impl RaftManager {
             // `sync_state` consumes an `Arc<Self>`, so clone for the await
             // and reuse the originals to read `last_synced_snapshot_id`
             // after the join.
-            let state_fut = Arc::clone(&state_db).sync_state();
+            let vault_futs = futures::future::join_all(
+                vault_dbs.iter().map(|(_, db)| Arc::clone(db).sync_state()),
+            );
             let raft_fut = Arc::clone(&raft_db).sync_state();
             let blocks_fut = Arc::clone(&blocks_db).sync_state();
             let events_db_for_sync = events_db_opt.clone();
             let meta_db_for_sync = Arc::clone(&meta_db);
-            let timeout_outcome = tokio::time::timeout(per_region_timeout, async {
-                // Phase A.
-                let (s, r, b, e) = match events_db_for_sync {
-                    Some(events_db) => {
-                        let events_fut = Arc::clone(&events_db).sync_state();
-                        let (s, r, b, e) =
-                            tokio::join!(state_fut, raft_fut, blocks_fut, events_fut);
-                        (s, r, b, Some(e))
-                    },
-                    None => {
-                        let (s, r, b) = tokio::join!(state_fut, raft_fut, blocks_fut);
-                        (s, r, b, None)
-                    },
+            let timeout_outcome = tokio::time::timeout(per_region_timeout, async move {
+                // Phase A — fan out every vault state DB + raft + blocks
+                // + events (if configured). Independent futures, one
+                // single join point.
+                let events_fut_opt = events_db_for_sync.as_ref().map(Arc::clone);
+                let events_fut_async = async move {
+                    if let Some(ev) = events_fut_opt { Some(ev.sync_state().await) } else { None }
                 };
+                let (vault_results, r, b, e) =
+                    tokio::join!(vault_futs, raft_fut, blocks_fut, events_fut_async);
                 // Phase B — strict ordering: meta.db always after the
                 // entity DBs it's a sentinel for.
                 let m = meta_db_for_sync.sync_state().await;
-                (s, r, b, e, m)
+                (vault_results, r, b, e, m)
             })
             .await;
 
             match timeout_outcome {
-                Ok((state_result, raft_result, blocks_result, events_result, meta_result)) => {
-                    match state_result {
-                        Ok(()) => info!(
-                            region = region.as_str(),
-                            db = "state",
-                            last_synced_snapshot_id = state_db.last_synced_snapshot_id(),
-                            "sync_all_state_dbs: final state-DB sync complete"
-                        ),
-                        Err(e) => warn!(
-                            region = region.as_str(),
-                            db = "state",
-                            error = %e,
-                            "sync_all_state_dbs: final state-DB sync failed; crash gap narrowed but not zero"
-                        ),
+                Ok((vault_results, raft_result, blocks_result, events_result, meta_result)) => {
+                    for ((vault_id, db), result) in vault_dbs.iter().zip(vault_results.iter()) {
+                        match result {
+                            Ok(()) => info!(
+                                region = region.as_str(),
+                                db = "state",
+                                vault_id = vault_id.value(),
+                                last_synced_snapshot_id = db.last_synced_snapshot_id(),
+                                "sync_all_state_dbs: final per-vault state-DB sync complete"
+                            ),
+                            Err(e) => warn!(
+                                region = region.as_str(),
+                                db = "state",
+                                vault_id = vault_id.value(),
+                                error = %e,
+                                "sync_all_state_dbs: final per-vault state-DB sync failed; crash gap narrowed but not zero"
+                            ),
+                        }
                     }
                     match raft_result {
                         Ok(()) => info!(

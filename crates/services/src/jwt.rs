@@ -592,13 +592,13 @@ pub(crate) fn generate_family_id() -> [u8; 16] {
 // ─── Tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::disallowed_methods, clippy::panic)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
     use std::sync::Arc;
 
     use chrono::Utc;
     use inferadb_ledger_state::{
-        InMemoryStorageEngine, StateLayer,
+        InMemoryStorageEngine,
         system::{
             OrganizationRegistry, OrganizationStatus, SigningKey, SigningKeyScope,
             SigningKeyStatus, SystemOrganizationService,
@@ -621,7 +621,10 @@ mod tests {
     fn create_test_service() -> SystemOrganizationService<inferadb_ledger_store::InMemoryBackend> {
         let engine = InMemoryStorageEngine::open().unwrap();
         let meta_engine = InMemoryStorageEngine::open().unwrap();
-        let state = Arc::new(StateLayer::new(engine.db(), meta_engine.db()));
+        let state = Arc::new(
+            inferadb_ledger_state::new_state_layer_shared(engine.db(), meta_engine.db())
+                .expect("build shared StateLayer for jwt test service"),
+        );
         SystemOrganizationService::new(state)
     }
 

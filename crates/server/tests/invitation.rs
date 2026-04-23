@@ -47,7 +47,9 @@ async fn create_invite(
             role: proto::OrganizationMemberRole::Member as i32,
             ttl_hours,
             team: None,
-            slug: Some(proto::InviteSlug { slug: inferadb_ledger_types::snowflake::generate().expect("snowflake") }),
+            slug: Some(proto::InviteSlug {
+                slug: inferadb_ledger_types::snowflake::generate().expect("snowflake"),
+            }),
         })
         .await
         .expect("create invite");
@@ -172,7 +174,9 @@ async fn test_duplicate_pending_returns_already_exists() {
             role: proto::OrganizationMemberRole::Member as i32,
             ttl_hours: 24,
             team: None,
-            slug: Some(proto::InviteSlug { slug: inferadb_ledger_types::snowflake::generate().expect("snowflake") }),
+            slug: Some(proto::InviteSlug {
+                slug: inferadb_ledger_types::snowflake::generate().expect("snowflake"),
+            }),
         })
         .await
         .unwrap_err();
@@ -216,7 +220,9 @@ async fn test_per_email_pending_cap() {
             role: proto::OrganizationMemberRole::Member as i32,
             ttl_hours: 168,
             team: None,
-            slug: Some(proto::InviteSlug { slug: inferadb_ledger_types::snowflake::generate().expect("snowflake") }),
+            slug: Some(proto::InviteSlug {
+                slug: inferadb_ledger_types::snowflake::generate().expect("snowflake"),
+            }),
         })
         .await
         .unwrap_err();
@@ -268,7 +274,9 @@ async fn test_per_email_total_limit() {
             role: proto::OrganizationMemberRole::Member as i32,
             ttl_hours: 168,
             team: None,
-            slug: Some(proto::InviteSlug { slug: inferadb_ledger_types::snowflake::generate().expect("snowflake") }),
+            slug: Some(proto::InviteSlug {
+                slug: inferadb_ledger_types::snowflake::generate().expect("snowflake"),
+            }),
         })
         .await
         .unwrap_err();
@@ -320,7 +328,9 @@ async fn test_cross_org_team_rejected() {
             role: proto::OrganizationMemberRole::Member as i32,
             ttl_hours: 24,
             team: Some(proto::TeamSlug { slug: team_slug }),
-            slug: Some(proto::InviteSlug { slug: inferadb_ledger_types::snowflake::generate().expect("snowflake") }),
+            slug: Some(proto::InviteSlug {
+                slug: inferadb_ledger_types::snowflake::generate().expect("snowflake"),
+            }),
         })
         .await
         .unwrap_err();
@@ -364,7 +374,9 @@ async fn test_plus_addressing_dedup() {
             role: proto::OrganizationMemberRole::Member as i32,
             ttl_hours: 24,
             team: None,
-            slug: Some(proto::InviteSlug { slug: inferadb_ledger_types::snowflake::generate().expect("snowflake") }),
+            slug: Some(proto::InviteSlug {
+                slug: inferadb_ledger_types::snowflake::generate().expect("snowflake"),
+            }),
         })
         .await
         .unwrap_err();
@@ -401,7 +413,9 @@ async fn test_gmail_dot_dedup() {
             role: proto::OrganizationMemberRole::Member as i32,
             ttl_hours: 24,
             team: None,
-            slug: Some(proto::InviteSlug { slug: inferadb_ledger_types::snowflake::generate().expect("snowflake") }),
+            slug: Some(proto::InviteSlug {
+                slug: inferadb_ledger_types::snowflake::generate().expect("snowflake"),
+            }),
         })
         .await
         .unwrap_err();

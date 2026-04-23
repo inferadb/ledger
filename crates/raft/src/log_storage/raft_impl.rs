@@ -1042,7 +1042,11 @@ impl RaftLogStore {
         // Test harnesses that only exercise the raft-log half may have
         // `state_layer` / `block_archive` / `event_writer` all unset; the
         // match below syncs whichever combination is configured.
-        let state_db_opt = self.state_layer.as_ref().map(|sl| Arc::clone(sl.database()));
+        // Slice 2b: `StateLayer::database()` now returns an owned
+        // `Arc<Database<B>>` (the compatibility shim for the system
+        // vault's DB). We still wrap it in `Option` to keep the match
+        // arms compatible with the unconfigured-layer test harnesses.
+        let state_db_opt = self.state_layer.as_ref().map(|sl| sl.database());
         let blocks_db_opt = self.block_archive.as_ref().map(|ba| Arc::clone(ba.db()));
         let events_db_opt = self.event_writer.as_ref().map(|ew| Arc::clone(ew.events_db().db()));
 

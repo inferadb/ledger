@@ -453,7 +453,10 @@ pub(crate) mod tests {
             inferadb_ledger_store::Database::create(&meta_db_path)
                 .expect("create test meta database"),
         );
-        let state = Arc::new(inferadb_ledger_state::StateLayer::new(db, meta_db));
+        let state = Arc::new(
+            inferadb_ledger_state::new_state_layer_shared(db, meta_db)
+                .expect("build shared StateLayer for test mock"),
+        );
         let applied_state_inner = Arc::new(ArcSwap::from_pointee(AppliedState::default()));
         let applied_state = inferadb_ledger_raft::log_storage::AppliedStateAccessor::new_for_test(
             applied_state_inner.clone(),

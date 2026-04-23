@@ -50,13 +50,16 @@ pub use types::{
 };
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::disallowed_methods)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 pub(crate) fn create_test_service()
 -> SystemOrganizationService<inferadb_ledger_store::InMemoryBackend> {
     use std::sync::Arc;
 
     let engine = crate::engine::InMemoryStorageEngine::open().unwrap();
     let meta_engine = crate::engine::InMemoryStorageEngine::open().unwrap();
-    let state = Arc::new(crate::state::StateLayer::new(engine.db(), meta_engine.db()));
+    let state = Arc::new(
+        crate::state::new_state_layer_shared(engine.db(), meta_engine.db())
+            .expect("build shared StateLayer for system test service"),
+    );
     SystemOrganizationService::new(state)
 }
