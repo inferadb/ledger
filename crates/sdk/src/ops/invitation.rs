@@ -34,6 +34,15 @@ impl LedgerClient {
     ) -> Result<InvitationCreated> {
         let email = email.into();
         let role_i32 = role.to_proto();
+        // Generate the invite slug once, outside the retry loop, so every
+        // retry hits the server's apply-side idempotency path instead of
+        // creating duplicate invitations on response-lost-in-flight.
+        let invite_slug =
+            inferadb_ledger_types::snowflake::generate().map_err(|e| {
+                crate::error::SdkError::Config {
+                    message: format!("generate invite slug: {e}"),
+                }
+            })?;
         let pool = self.pool.clone();
         self.call_with_retry("create_organization_invite", || {
             let pool = pool.clone();
@@ -48,6 +57,7 @@ impl LedgerClient {
                     role: role_i32,
                     ttl_hours,
                     team: team.map(|t| proto::TeamSlug { slug: t.value() }),
+                    slug: Some(proto::InviteSlug { slug: invite_slug }),
                 };
 
                 let response = client

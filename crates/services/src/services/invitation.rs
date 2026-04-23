@@ -660,11 +660,19 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
             ));
         }
 
-        // 10. Generate token and slug
-        let invite_slug = InviteSlug::new(
-            inferadb_ledger_types::snowflake::generate()
-                .map_err(|e| error_classify::internal_error("id-generation", &e))?,
-        );
+        // 10. Client-supplied Snowflake slug — required. Retries across
+        // lost responses MUST reuse the same slug so the apply-side
+        // idempotency path returns the existing invite instead of
+        // creating a duplicate record (and sending a duplicate email).
+        let invite_slug_proto = req.slug.as_ref().ok_or_else(|| {
+            Status::invalid_argument("CreateOrganizationInviteRequest.slug is required")
+        })?;
+        if invite_slug_proto.slug == 0 {
+            return Err(Status::invalid_argument(
+                "CreateOrganizationInviteRequest.slug must be a non-zero Snowflake",
+            ));
+        }
+        let invite_slug = InviteSlug::new(invite_slug_proto.slug);
         let (raw_token, token_hash) = Self::generate_token();
 
         // 11. GLOBAL proposal
@@ -1298,6 +1306,7 @@ mod tests {
             role: 0,
             ttl_hours: 24,
             team: None,
+            slug: Some(proto::InviteSlug { slug: inferadb_ledger_types::snowflake::generate().expect("snowflake") }),
         });
 
         let err = InvitationServiceTrait::create_organization_invite(&service, request)
@@ -1317,6 +1326,7 @@ mod tests {
             role: 0,
             ttl_hours: 24,
             team: None,
+            slug: Some(proto::InviteSlug { slug: inferadb_ledger_types::snowflake::generate().expect("snowflake") }),
         });
 
         let err = InvitationServiceTrait::create_organization_invite(&service, request)
@@ -1336,6 +1346,7 @@ mod tests {
             role: 0,
             ttl_hours: 0,
             team: None,
+            slug: Some(proto::InviteSlug { slug: inferadb_ledger_types::snowflake::generate().expect("snowflake") }),
         });
 
         let err = InvitationServiceTrait::create_organization_invite(&service, request)
@@ -1356,6 +1367,7 @@ mod tests {
             role: 0,
             ttl_hours: 721,
             team: None,
+            slug: Some(proto::InviteSlug { slug: inferadb_ledger_types::snowflake::generate().expect("snowflake") }),
         });
 
         let err = InvitationServiceTrait::create_organization_invite(&service, request)
@@ -1376,6 +1388,7 @@ mod tests {
             role: 1,
             ttl_hours: 24,
             team: None,
+            slug: Some(proto::InviteSlug { slug: inferadb_ledger_types::snowflake::generate().expect("snowflake") }),
         });
 
         let err = InvitationServiceTrait::create_organization_invite(&service, request)

@@ -487,9 +487,20 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
                 ))
             })?;
 
-        // Generate a Snowflake slug for the organization
-        let slug = inferadb_ledger_types::snowflake::generate_organization_slug()
-            .map_err(|e| error_classify::internal_error("id-generation", &e))?;
+        // Client-supplied Snowflake slug — required. Retries across lost
+        // responses MUST reuse the same slug so the saga's state-machine
+        // idempotency path returns the existing `OrganizationId` instead
+        // of creating an orphan body. See
+        // `create_organization_is_idempotent_by_slug`.
+        let slug_proto = req.slug.as_ref().ok_or_else(|| {
+            Status::invalid_argument("CreateOrganizationRequest.slug is required")
+        })?;
+        if slug_proto.slug == 0 {
+            return Err(Status::invalid_argument(
+                "CreateOrganizationRequest.slug must be a non-zero Snowflake",
+            ));
+        }
+        let slug = inferadb_ledger_types::OrganizationSlug::new(slug_proto.slug);
 
         let tier = crate::proto_compat::organization_tier_from_proto(req.tier());
 
@@ -1584,11 +1595,20 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             return Err(Status::invalid_argument(e.to_string()));
         }
 
-        // Generate team slug
-        let team_slug = inferadb_ledger_types::snowflake::generate_team_slug().map_err(|e| {
-            ctx.set_error("Internal", &e.to_string());
-            error_classify::internal_error("id-generation", &e)
+        // Client-supplied Snowflake slug — required. Retries across lost
+        // responses MUST reuse the same slug so the per-org apply
+        // idempotency path returns the existing `TeamId` instead of
+        // creating an orphan directory entry. See
+        // `create_organization_team_is_idempotent_by_slug`.
+        let team_slug_proto = inner.slug.as_ref().ok_or_else(|| {
+            Status::invalid_argument("CreateOrganizationTeamRequest.slug is required")
         })?;
+        if team_slug_proto.slug == 0 {
+            return Err(Status::invalid_argument(
+                "CreateOrganizationTeamRequest.slug must be a non-zero Snowflake",
+            ));
+        }
+        let team_slug = inferadb_ledger_types::TeamSlug::new(team_slug_proto.slug);
 
         // Resolve org region before the Raft proposal so Step 2 can use it.
         let org_meta = self

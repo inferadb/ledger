@@ -91,9 +91,10 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         // idempotency path returns the existing `VaultId` instead of
         // creating an orphan body. See
         // `per_org_create_vault_is_idempotent_by_slug`.
-        let vault_proto = req.slug.as_ref().ok_or_else(|| {
-            Status::invalid_argument("CreateVaultRequest.slug is required")
-        })?;
+        let vault_proto = req
+            .slug
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("CreateVaultRequest.slug is required"))?;
         if vault_proto.slug == 0 {
             return Err(Status::invalid_argument(
                 "CreateVaultRequest.slug must be a non-zero Snowflake",

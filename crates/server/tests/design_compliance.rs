@@ -806,8 +806,8 @@ async fn test_idempotency_survives_leader_failover() {
     let mut vault_client =
         common::create_vault_client(leader_addr).await.expect("connect to vault service");
 
-    let vault_slug = inferadb_ledger_types::snowflake::generate_vault_slug()
-        .expect("generate vault slug");
+    let vault_slug =
+        inferadb_ledger_types::snowflake::generate_vault_slug().expect("generate vault slug");
     let vault_response = vault_client
         .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {

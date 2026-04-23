@@ -713,12 +713,14 @@ async fn create_app(
     caller: u64,
 ) -> Result<AppSlug, Box<dyn std::error::Error>> {
     let mut client = create_app_client(addr).await?;
+    let app_slug = inferadb_ledger_types::snowflake::generate_app_slug()?;
     let response = client
         .create_app(proto::CreateAppRequest {
             organization: Some(proto::OrganizationSlug { slug: org.value() }),
             caller: Some(proto::UserSlug { slug: caller }),
             name: name.to_string(),
             description: None,
+            slug: Some(proto::AppSlug { slug: app_slug.value() }),
         })
         .await?;
 

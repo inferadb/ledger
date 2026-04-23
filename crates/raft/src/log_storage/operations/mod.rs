@@ -2140,6 +2140,28 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         }
                     },
                     SystemRequest::CreateOrganization { slug, region, tier, admin } => {
+                        // Idempotency-by-slug: if an Organization with this
+                        // slug already exists in the GLOBAL `slug_index`,
+                        // return the existing `organization_id` instead of
+                        // allocating a new one. The saga retry path re-
+                        // submits the same `SystemRequest::CreateOrganization`
+                        // payload (slug is persisted in saga input from the
+                        // first pass, and client SDK retries use the same
+                        // client-generated slug), so without this check
+                        // re-submission would allocate a fresh
+                        // `OrganizationId` and leave an orphan body under the
+                        // first allocation. Pinning the contract: same slug
+                        // → same `OrganizationId`, sequence counter not
+                        // advanced, no duplicate downstream signals.
+                        if let Some(existing_org_id) = state.slug_index.get(slug).copied() {
+                            return (
+                                LedgerResponse::OrganizationCreated {
+                                    organization_id: existing_org_id,
+                                    organization_slug: *slug,
+                                },
+                                None,
+                            );
+                        }
                         let organization_id = state.sequences.next_organization();
                         let org_meta = OrganizationMeta {
                             organization: organization_id,
@@ -5547,10 +5569,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     .find(|((org, _), meta)| *org == *organization && meta.slug == *slug)
                     .map(|((_, vault_id), _)| *vault_id)
                 {
-                    return (
-                        LedgerResponse::VaultCreated { vault: existing, slug: *slug },
-                        None,
-                    );
+                    return (LedgerResponse::VaultCreated { vault: existing, slug: *slug }, None);
                 }
 
                 // Vault-id allocation is per-organization: each per-org
@@ -6336,8 +6355,29 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     "modify",
                 ) {
                     Ok(state_layer) => {
-                        // Check slug uniqueness
-                        if state.team_slug_index.contains_key(slug) {
+                        // Idempotency-by-slug: if a team with this slug already
+                        // exists within the same organization, return the
+                        // existing `team_id` instead of allocating a new one.
+                        // The client retry path (SDK `call_with_retry` on a
+                        // lost response) re-issues CreateOrganizationTeam with
+                        // the same client-generated slug; without this check
+                        // the apply arm would report `AlreadyExists` on the
+                        // retry and the orphan allocation on the first
+                        // (successful-but-response-lost) call would be
+                        // invisible to the client. Pinning the contract: same
+                        // slug → same `TeamId`, sequence counter not advanced.
+                        if let Some((existing_org, existing_team_id)) =
+                            state.team_slug_index.get(slug).copied()
+                        {
+                            if existing_org == *organization {
+                                return (
+                                    LedgerResponse::OrganizationTeamCreated {
+                                        team_id: existing_team_id,
+                                        team_slug: *slug,
+                                    },
+                                    None,
+                                );
+                            }
                             return (
                                 LedgerResponse::Error {
                                     code: ErrorCode::AlreadyExists,
@@ -6466,7 +6506,29 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     "modify",
                 ) {
                     Ok(state_layer) => {
-                        if state.app_slug_index.contains_key(slug) {
+                        // Idempotency-by-slug: if an App with this slug already
+                        // exists within the same organization, return the
+                        // existing `app_id` instead of allocating a new one.
+                        // The client retry path (SDK `call_with_retry` on a
+                        // lost response) re-issues CreateApp with the same
+                        // client-generated slug; without this check the apply
+                        // arm would report `AlreadyExists` on the retry and
+                        // the orphan allocation on the first (successful-but-
+                        // response-lost) call would be invisible to the
+                        // client. Pinning the contract: same slug → same
+                        // `AppId`, sequence counter not advanced.
+                        if let Some((existing_org, existing_app_id)) =
+                            state.app_slug_index.get(slug).copied()
+                        {
+                            if existing_org == *organization {
+                                return (
+                                    LedgerResponse::AppCreated {
+                                        app_id: existing_app_id,
+                                        app_slug: *slug,
+                                    },
+                                    None,
+                                );
+                            }
                             LedgerResponse::Error {
                                 code: ErrorCode::AlreadyExists,
                                 message: format!("App slug '{}' already exists", slug),

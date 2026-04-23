@@ -64,6 +64,17 @@ impl LedgerClient {
         let name = name.into();
         let proto_region: proto::Region = region.into();
         let region_i32: i32 = proto_region.into();
+        // Generate the organization slug once, outside the retry loop.
+        // Every retry for this logical call reuses it so the saga's
+        // idempotency-by-slug path returns the same OrganizationId
+        // instead of creating a duplicate body on
+        // response-lost-in-flight.
+        let org_slug =
+            inferadb_ledger_types::snowflake::generate_organization_slug().map_err(|e| {
+                crate::error::SdkError::Config {
+                    message: format!("generate organization slug: {e}"),
+                }
+            })?;
         let pool = self.pool.clone();
         self.call_with_retry("create_organization", || {
             let pool = pool.clone();
@@ -76,6 +87,7 @@ impl LedgerClient {
                     region: region_i32,
                     tier: Some(tier.to_proto()),
                     caller: Some(proto::UserSlug { slug: caller.value() }),
+                    slug: Some(proto::OrganizationSlug { slug: org_slug.value() }),
                 };
 
                 let response =
@@ -558,6 +570,14 @@ impl LedgerClient {
     ) -> Result<TeamInfo> {
         let pool = self.pool.clone();
         let name = name.to_string();
+        // Generate the team slug once, outside the retry loop. Every retry
+        // for this logical call reuses it so the per-org apply
+        // idempotency-by-slug path returns the same TeamId instead of
+        // creating a duplicate directory entry on
+        // response-lost-in-flight.
+        let team_slug = inferadb_ledger_types::snowflake::generate_team_slug().map_err(|e| {
+            crate::error::SdkError::Config { message: format!("generate team slug: {e}") }
+        })?;
 
         self.call_with_retry("create_organization_team", || {
             let pool = pool.clone();
@@ -570,6 +590,7 @@ impl LedgerClient {
                     organization: Some(proto::OrganizationSlug { slug: organization.value() }),
                     name: name.clone(),
                     caller: Some(proto::UserSlug { slug: caller.value() }),
+                    slug: Some(proto::TeamSlug { slug: team_slug.value() }),
                 };
 
                 let response = client

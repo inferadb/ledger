@@ -30,6 +30,14 @@ impl LedgerClient {
         description: Option<String>,
     ) -> Result<AppInfo> {
         let name = name.into();
+        // Generate the app slug once, outside the retry loop. Every retry
+        // for this logical call reuses it so the per-org apply
+        // idempotency-by-slug path returns the same AppId instead of
+        // creating a duplicate directory entry on
+        // response-lost-in-flight.
+        let app_slug = inferadb_ledger_types::snowflake::generate_app_slug().map_err(|e| {
+            crate::error::SdkError::Config { message: format!("generate app slug: {e}") }
+        })?;
         let pool = self.pool.clone();
         self.call_with_retry("create_app", || {
             let pool = pool.clone();
@@ -43,6 +51,7 @@ impl LedgerClient {
                     caller: Some(proto::UserSlug { slug: user.value() }),
                     name: name.clone(),
                     description: description.clone(),
+                    slug: Some(proto::AppSlug { slug: app_slug.value() }),
                 };
 
                 let response = client.create_app(tonic::Request::new(request)).await?.into_inner();

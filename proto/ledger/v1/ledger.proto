@@ -1184,6 +1184,15 @@ message CreateOrganizationRequest {
   Region region = 2; // Data residency region (required)
   optional OrganizationTier tier = 3; // Billing tier (Free if not specified)
   UserSlug caller = 4; // Identity of the user performing this operation.
+  // Client-generated Snowflake slug for the new organization. Required.
+  //
+  // The server uses this slug as-is — it is threaded through the saga
+  // input so retries of a lost response reuse the same slug and map to
+  // the same `OrganizationId` instead of allocating a new one. Clients
+  // MUST generate the slug once per logical call and reuse it across
+  // network retries; generating fresh slugs on retry creates orphan
+  // organizations on response-lost-in-flight.
+  OrganizationSlug slug = 5;
 }
 
 message CreateOrganizationResponse {
@@ -1392,6 +1401,14 @@ message CreateOrganizationTeamRequest {
   OrganizationSlug organization = 1;
   string name = 2;           // Unique within organization (1-200 chars)
   UserSlug caller = 3;    // Identity of the user performing this operation.
+  // Client-generated Snowflake slug for the new team. Required.
+  //
+  // The server uses this slug as-is. Retries with the same slug are
+  // idempotent — the apply arm returns the existing `TeamId` instead
+  // of allocating a new one. Clients MUST generate the slug once per
+  // logical call and reuse it across network retries; generating fresh
+  // slugs on retry creates orphan teams on response-lost-in-flight.
+  TeamSlug slug = 4;
 }
 
 message CreateOrganizationTeamResponse {
@@ -2488,6 +2505,14 @@ message CreateOrganizationInviteRequest {
   OrganizationMemberRole role = 4;            // Role upon acceptance
   uint32 ttl_hours = 5;                       // 1–720
   optional TeamSlug team = 6;                // Auto-join team on acceptance
+  // Client-generated Snowflake slug for the new invitation. Required.
+  //
+  // Retries with the same slug are idempotent at the apply layer — returns
+  // the existing invitation instead of creating a duplicate. Clients MUST
+  // generate once per logical call and reuse across network retries;
+  // regenerating on retry creates duplicate invitation records (and
+  // potentially duplicate notification emails).
+  InviteSlug slug = 7;
 }
 
 message CreateOrganizationInviteResponse {
@@ -2682,6 +2707,14 @@ message CreateAppRequest {
   UserSlug caller = 2;
   string name = 3;
   optional string description = 4;
+  // Client-generated Snowflake slug for the new app. Required.
+  //
+  // The server uses this slug as-is. Retries with the same slug are
+  // idempotent — the apply arm returns the existing `AppId` instead
+  // of allocating a new one. Clients MUST generate the slug once per
+  // logical call and reuse it across network retries; generating fresh
+  // slugs on retry creates orphan apps on response-lost-in-flight.
+  AppSlug slug = 5;
 }
 
 message CreateAppResponse {

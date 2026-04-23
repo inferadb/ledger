@@ -1608,6 +1608,11 @@ pub async fn create_test_organization(
     let admin_email = format!("admin-{}@test.example.com", name.to_lowercase().replace(' ', "-"));
     let admin_slug = setup_user(addr, "Admin", &admin_email, node).await;
 
+    // Slug generated once — retries reuse it so CreateOrganization
+    // idempotency-by-slug returns the same OrganizationId on network
+    // retry, matching production SDK behaviour.
+    let org_slug = inferadb_ledger_types::snowflake::generate_organization_slug()?;
+
     // Create org with admin (retry if saga orchestrator not ready)
     let slug = loop {
         let mut client = create_organization_client(addr).await?;
@@ -1617,6 +1622,9 @@ pub async fn create_test_organization(
                 region: 10, // US_EAST_VA
                 tier: None,
                 caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: admin_slug }),
+                slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                    slug: org_slug.value(),
+                }),
             })
             .await;
 
@@ -1692,9 +1700,7 @@ pub async fn create_test_vault(
                 initial_nodes: vec![],
                 retention_policy: None,
                 caller: None,
-                slug: Some(inferadb_ledger_proto::proto::VaultSlug {
-                    slug: vault_slug.value(),
-                }),
+                slug: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug.value() }),
             })
             .await;
 
@@ -1885,6 +1891,12 @@ pub async fn setup_org_with_admin(
     let start = tokio::time::Instant::now();
     let timeout = Duration::from_secs(30);
 
+    // Slug generated once — retries reuse it so CreateOrganization
+    // idempotency-by-slug returns the same OrganizationId on network
+    // retry, matching production SDK behaviour.
+    let requested_slug = inferadb_ledger_types::snowflake::generate_organization_slug()
+        .expect("generate organization slug");
+
     // Create org with the admin user
     let org_slug = loop {
         let mut client = create_organization_client(addr).await.expect("connect org");
@@ -1894,6 +1906,9 @@ pub async fn setup_org_with_admin(
                 region: 10, // US_EAST_VA
                 tier: None,
                 caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: admin_slug }),
+                slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                    slug: requested_slug.value(),
+                }),
             })
             .await;
 
@@ -1944,8 +1959,8 @@ pub async fn create_vault_with_retry(
     caller_slug: u64,
 ) -> inferadb_ledger_types::VaultSlug {
     // Single client-generated slug reused across retries (matches SDK).
-    let vault_slug = inferadb_ledger_types::snowflake::generate_vault_slug()
-        .expect("generate vault slug");
+    let vault_slug =
+        inferadb_ledger_types::snowflake::generate_vault_slug().expect("generate vault slug");
     for attempt in 0..60 {
         let request = inferadb_ledger_proto::proto::CreateVaultRequest {
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {

@@ -8932,29 +8932,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_organization_team_duplicate_slug() {
+    async fn test_create_organization_team_duplicate_slug_cross_org() {
+        // Cross-organization slug collision is still rejected with
+        // `AlreadyExists` — only same-org retries are idempotent (covered by
+        // `create_organization_team_is_idempotent_by_slug`).
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let org_id = create_active_organization(
+        let org_a = create_active_organization(
             &store,
             &mut state,
             inferadb_ledger_types::OrganizationSlug::new(100),
             Region::US_EAST_VA,
         );
+        let org_b = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(101),
+            Region::US_EAST_VA,
+        );
 
         let team_slug = TeamSlug::new(500);
 
-        // Create first team
+        // Create first team in org A
         store.apply_org(
-            &OrganizationRequest::CreateOrganizationTeam { organization: org_id, slug: team_slug },
+            &OrganizationRequest::CreateOrganizationTeam { organization: org_a, slug: team_slug },
             &mut state,
         );
 
-        // Try duplicate slug
+        // Same slug in a different organization is rejected.
         let (response, _) = store.apply_org(
-            &OrganizationRequest::CreateOrganizationTeam { organization: org_id, slug: team_slug },
+            &OrganizationRequest::CreateOrganizationTeam { organization: org_b, slug: team_slug },
             &mut state,
         );
 
@@ -9070,29 +9079,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_app_duplicate_slug() {
+    async fn test_create_app_duplicate_slug_cross_org() {
+        // Cross-organization slug collision is still rejected with
+        // `AlreadyExists` — only same-org retries are idempotent (covered by
+        // `create_app_is_idempotent_by_slug`).
         let dir = tempdir().expect("create temp dir");
         let store = create_store_with_state_layer(&dir);
         let mut state = (*store.applied_state.load_full()).clone();
 
-        let org_id = create_active_organization(
+        let org_a = create_active_organization(
             &store,
             &mut state,
             inferadb_ledger_types::OrganizationSlug::new(100),
             Region::US_EAST_VA,
         );
+        let org_b = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(101),
+            Region::US_EAST_VA,
+        );
 
         let app_slug = inferadb_ledger_types::AppSlug::new(600);
 
-        // Create first app
+        // Create first app in org A
         store.apply_org(
-            &OrganizationRequest::CreateApp { organization: org_id, slug: app_slug },
+            &OrganizationRequest::CreateApp { organization: org_a, slug: app_slug },
             &mut state,
         );
 
-        // Try duplicate slug
+        // Same slug in a different organization is rejected.
         let (response, _) = store.apply_org(
-            &OrganizationRequest::CreateApp { organization: org_id, slug: app_slug },
+            &OrganizationRequest::CreateApp { organization: org_b, slug: app_slug },
             &mut state,
         );
 
@@ -13518,6 +13536,171 @@ mod tests {
             .filter(|((org, _), meta)| *org == organization && meta.slug == slug)
             .count();
         assert_eq!(slug_entries, 1, "retry must not create a duplicate body");
+    }
+
+    /// CreateOrganization is idempotent by `slug`.
+    ///
+    /// The SDK's `call_with_retry` on a lost response re-issues the same
+    /// `CreateOrganizationRequest` with the same client-generated slug; the
+    /// handler threads that slug into the saga input, so a re-submitted
+    /// `SystemRequest::CreateOrganization` proposal must return the existing
+    /// `OrganizationId` instead of allocating a new one. Without idempotency
+    /// the GLOBAL apply would allocate a fresh `OrganizationId` each retry,
+    /// leaving orphan `OrganizationMeta` rows and skewing the sequence
+    /// counter. This test pins the idempotency contract: same slug → same
+    /// `OrganizationId`, `slug_index` holds a single entry, sequence counter
+    /// not advanced.
+    #[tokio::test]
+    async fn create_organization_is_idempotent_by_slug() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = (*store.applied_state.load_full()).clone();
+
+        let slug = inferadb_ledger_types::OrganizationSlug::new(0xAAAA_BBBB);
+        let req = SystemRequest::CreateOrganization {
+            slug,
+            region: Region::US_EAST_VA,
+            tier: Default::default(),
+            admin: UserId::new(1),
+        };
+
+        let (resp1, _) = store.apply_system(&req, &mut state);
+        let org_id_1 = match resp1 {
+            LedgerResponse::OrganizationCreated { organization_id, organization_slug } => {
+                assert_eq!(organization_slug, slug);
+                organization_id
+            },
+            other => panic!("expected OrganizationCreated, got {other:?}"),
+        };
+        let sequence_after_first = state.sequences.clone();
+
+        // Retry with the same slug → same OrganizationId, sequence counter
+        // does NOT advance, no orphan body.
+        let (resp2, _) = store.apply_system(&req, &mut state);
+        let org_id_2 = match resp2 {
+            LedgerResponse::OrganizationCreated { organization_id, organization_slug } => {
+                assert_eq!(organization_slug, slug);
+                organization_id
+            },
+            other => panic!("expected OrganizationCreated on retry, got {other:?}"),
+        };
+
+        assert_eq!(org_id_1, org_id_2, "retry must return the same organization_id");
+        assert_eq!(
+            state.sequences, sequence_after_first,
+            "retry must not advance the sequence counter"
+        );
+        assert_eq!(state.slug_index.get(&slug), Some(&org_id_1));
+        let slug_hits = state.organizations.iter().filter(|(_, meta)| meta.slug == slug).count();
+        assert_eq!(slug_hits, 1, "retry must not create a duplicate organization body");
+    }
+
+    /// CreateOrganizationTeam is idempotent by `(organization, slug)`.
+    ///
+    /// The SDK's `call_with_retry` on a lost response re-issues
+    /// `CreateOrganizationTeamRequest` with the same client-generated slug.
+    /// Without idempotency the apply arm would report `AlreadyExists` on the
+    /// retry and the allocation from the first (successful-but-response-
+    /// lost) call would be invisible to the client. Pinning the contract:
+    /// same slug → same `TeamId`, `team_slug_index` holds a single entry,
+    /// sequence counter not advanced.
+    #[tokio::test]
+    async fn create_organization_team_is_idempotent_by_slug() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = (*store.applied_state.load_full()).clone();
+
+        let organization = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        let slug = TeamSlug::new(0x1234_5678);
+        let req = OrganizationRequest::CreateOrganizationTeam { organization, slug };
+
+        let (resp1, _) = store.apply_org(&req, &mut state);
+        let team_id_1 = match resp1 {
+            LedgerResponse::OrganizationTeamCreated { team_id, team_slug } => {
+                assert_eq!(team_slug, slug);
+                team_id
+            },
+            other => panic!("expected OrganizationTeamCreated, got {other:?}"),
+        };
+        let sequence_after_first = state.sequences.clone();
+
+        // Retry with the same slug → same TeamId, sequence counter does NOT
+        // advance, no orphan directory entry.
+        let (resp2, _) = store.apply_org(&req, &mut state);
+        let team_id_2 = match resp2 {
+            LedgerResponse::OrganizationTeamCreated { team_id, team_slug } => {
+                assert_eq!(team_slug, slug);
+                team_id
+            },
+            other => panic!("expected OrganizationTeamCreated on retry, got {other:?}"),
+        };
+
+        assert_eq!(team_id_1, team_id_2, "retry must return the same team_id");
+        assert_eq!(
+            state.sequences, sequence_after_first,
+            "retry must not advance the per-org sequence counter"
+        );
+        assert_eq!(state.team_slug_index.get(&slug), Some(&(organization, team_id_1)));
+    }
+
+    /// CreateApp is idempotent by `(organization, slug)`.
+    ///
+    /// The SDK's `call_with_retry` on a lost response re-issues
+    /// `CreateAppRequest` with the same client-generated slug. Without
+    /// idempotency the apply arm would report `AlreadyExists` on the retry
+    /// and the allocation from the first (successful-but-response-lost) call
+    /// would be invisible to the client. Pinning the contract: same slug →
+    /// same `AppId`, `app_slug_index` holds a single entry, sequence counter
+    /// not advanced.
+    #[tokio::test]
+    async fn create_app_is_idempotent_by_slug() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = (*store.applied_state.load_full()).clone();
+
+        let organization = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        let slug = inferadb_ledger_types::AppSlug::new(0xDEAD_BEEF);
+        let req = OrganizationRequest::CreateApp { organization, slug };
+
+        let (resp1, _) = store.apply_org(&req, &mut state);
+        let app_id_1 = match resp1 {
+            LedgerResponse::AppCreated { app_id, app_slug } => {
+                assert_eq!(app_slug, slug);
+                app_id
+            },
+            other => panic!("expected AppCreated, got {other:?}"),
+        };
+        let sequence_after_first = state.sequences.clone();
+
+        // Retry with the same slug → same AppId, sequence counter does NOT
+        // advance, no orphan directory entry.
+        let (resp2, _) = store.apply_org(&req, &mut state);
+        let app_id_2 = match resp2 {
+            LedgerResponse::AppCreated { app_id, app_slug } => {
+                assert_eq!(app_slug, slug);
+                app_id
+            },
+            other => panic!("expected AppCreated on retry, got {other:?}"),
+        };
+
+        assert_eq!(app_id_1, app_id_2, "retry must return the same app_id");
+        assert_eq!(
+            state.sequences, sequence_after_first,
+            "retry must not advance the per-org sequence counter"
+        );
+        assert_eq!(state.app_slug_index.get(&slug), Some(&(organization, app_id_1)));
     }
 
     #[tokio::test]

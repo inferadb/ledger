@@ -1215,6 +1215,16 @@ pub struct CreateOrganizationRequest {
     /// Identity of the user performing this operation.
     #[prost(message, optional, tag = "4")]
     pub caller: ::core::option::Option<UserSlug>,
+    /// Client-generated Snowflake slug for the new organization. Required.
+    ///
+    /// The server uses this slug as-is — it is threaded through the saga
+    /// input so retries of a lost response reuse the same slug and map to
+    /// the same `OrganizationId` instead of allocating a new one. Clients
+    /// MUST generate the slug once per logical call and reuse it across
+    /// network retries; generating fresh slugs on retry creates orphan
+    /// organizations on response-lost-in-flight.
+    #[prost(message, optional, tag = "5")]
+    pub slug: ::core::option::Option<OrganizationSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateOrganizationResponse {
@@ -1509,6 +1519,15 @@ pub struct CreateOrganizationTeamRequest {
     /// Identity of the user performing this operation.
     #[prost(message, optional, tag = "3")]
     pub caller: ::core::option::Option<UserSlug>,
+    /// Client-generated Snowflake slug for the new team. Required.
+    ///
+    /// The server uses this slug as-is. Retries with the same slug are
+    /// idempotent — the apply arm returns the existing `TeamId` instead
+    /// of allocating a new one. Clients MUST generate the slug once per
+    /// logical call and reuse it across network retries; generating fresh
+    /// slugs on retry creates orphan teams on response-lost-in-flight.
+    #[prost(message, optional, tag = "4")]
+    pub slug: ::core::option::Option<TeamSlug>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateOrganizationTeamResponse {
@@ -2794,6 +2813,15 @@ pub struct CreateOrganizationInviteRequest {
     /// Auto-join team on acceptance
     #[prost(message, optional, tag = "6")]
     pub team: ::core::option::Option<TeamSlug>,
+    /// Client-generated Snowflake slug for the new invitation. Required.
+    ///
+    /// Retries with the same slug are idempotent at the apply layer — returns
+    /// the existing invitation instead of creating a duplicate. Clients MUST
+    /// generate once per logical call and reuse across network retries;
+    /// regenerating on retry creates duplicate invitation records (and
+    /// potentially duplicate notification emails).
+    #[prost(message, optional, tag = "7")]
+    pub slug: ::core::option::Option<InviteSlug>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateOrganizationInviteResponse {
@@ -2987,6 +3015,15 @@ pub struct CreateAppRequest {
     pub name: ::prost::alloc::string::String,
     #[prost(string, optional, tag = "4")]
     pub description: ::core::option::Option<::prost::alloc::string::String>,
+    /// Client-generated Snowflake slug for the new app. Required.
+    ///
+    /// The server uses this slug as-is. Retries with the same slug are
+    /// idempotent — the apply arm returns the existing `AppId` instead
+    /// of allocating a new one. Clients MUST generate the slug once per
+    /// logical call and reuse it across network retries; generating fresh
+    /// slugs on retry creates orphan apps on response-lost-in-flight.
+    #[prost(message, optional, tag = "5")]
+    pub slug: ::core::option::Option<AppSlug>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateAppResponse {

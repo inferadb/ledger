@@ -331,8 +331,21 @@ impl proto::app_service_server::AppService for AppService {
         super::helpers::extract_caller(&mut ctx, &inner.caller);
         let resolver = self.resolver();
         let org_id = resolver.extract_and_resolve(&inner.organization)?;
-        let slug = inferadb_ledger_types::snowflake::generate_app_slug()
-            .map_err(|e| error_classify::internal_error("id-generation", &e))?;
+        // Client-supplied Snowflake slug — required. Retries across lost
+        // responses MUST reuse the same slug so the per-org apply
+        // idempotency path returns the existing `AppId` instead of
+        // creating an orphan directory entry. See
+        // `create_app_is_idempotent_by_slug`.
+        let slug_proto = inner
+            .slug
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("CreateAppRequest.slug is required"))?;
+        if slug_proto.slug == 0 {
+            return Err(Status::invalid_argument(
+                "CreateAppRequest.slug must be a non-zero Snowflake",
+            ));
+        }
+        let slug = inferadb_ledger_types::AppSlug::new(slug_proto.slug);
 
         let name = inner.name.trim().to_string();
         if name.is_empty() {
@@ -1392,6 +1405,7 @@ mod tests {
             caller: None,
             name: "Test App".to_string(),
             description: None,
+            slug: Some(proto::AppSlug { slug: 42 }),
         });
 
         let err = AppServiceTrait::create_app(&service, request).await.unwrap_err();
@@ -1416,6 +1430,7 @@ mod tests {
             caller: None,
             name: "   ".to_string(),
             description: None,
+            slug: Some(proto::AppSlug { slug: 42 }),
         });
 
         let err = AppServiceTrait::create_app(&service, request).await.unwrap_err();
