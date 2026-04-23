@@ -4625,36 +4625,6 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         }
                     },
 
-                    // γ Phase 3: vault slug-index maintenance on GLOBAL.
-                    // Per-organization groups allocate vault ids from their own
-                    // sequence counters and store record bodies in per-org
-                    // state; GLOBAL retains only the slug-index entries so the
-                    // `SlugResolver` can resolve a `VaultSlug` without knowing
-                    // the owning organization in advance. Re-apply is
-                    // idempotent (overwriting the same tuple is a no-op).
-                    SystemRequest::RegisterVaultDirectoryEntry {
-                        organization,
-                        vault,
-                        slug,
-                    } => {
-                        state.vault_slug_index.insert(*slug, (*organization, *vault));
-                        state.vault_id_to_slug.insert((*organization, *vault), *slug);
-                        pending.vault_slug_index.push((*slug, (*organization, *vault)));
-                        LedgerResponse::Empty
-                    },
-
-                    SystemRequest::UnregisterVaultDirectoryEntry { organization, vault } => {
-                        // Remove by tuple key; look up the slug first so we can
-                        // delete the forward-direction entry and schedule the
-                        // persistent delete.
-                        let key = (*organization, *vault);
-                        if let Some(slug) = state.vault_id_to_slug.remove(&key) {
-                            state.vault_slug_index.remove(&slug);
-                            pending.vault_slug_index_deleted.push(slug);
-                        }
-                        LedgerResponse::Empty
-                    },
-
                     // These SystemRequest variants have full apply logic in the
                     // system-tier apply path (apply_system_request_with_events).
                     // They are routed here correctly by the typed apply worker.
@@ -5033,7 +5003,12 @@ impl<B: StorageBackend> RaftLogStore<B> {
         let block_height = self.region_chain.read().height + 1;
 
         match request {
-            OrganizationRequest::Write { vault, transactions, idempotency_key, request_hash } => {
+            OrganizationRequest::Write {
+                vault,
+                transactions,
+                idempotency_key,
+                request_hash,
+            } => {
                 // Owning organization is implied by the Raft group this
                 // entry lands in; read from the log store field instead
                 // of a payload-carried `organization:` duplicate.

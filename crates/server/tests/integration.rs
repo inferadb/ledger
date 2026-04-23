@@ -13,6 +13,7 @@ mod bootstrap_coordination;
 mod chaos_consistency;
 mod check_relationship;
 mod checkpoint_crash_recovery;
+mod cluster_b1_helpers;
 mod design_compliance;
 mod election;
 mod externalized_state;

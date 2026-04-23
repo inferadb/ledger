@@ -158,6 +158,10 @@ async fn read_entity(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_snapshot_over_10k_entities_per_vault_no_data_loss() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -232,6 +236,10 @@ async fn test_snapshot_over_10k_entities_per_vault_no_data_loss() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_10k_writes_replicated_state_roots_match() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -296,6 +304,10 @@ async fn test_10k_writes_replicated_state_roots_match() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_org_vault_write_distribution_2k_entities() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 

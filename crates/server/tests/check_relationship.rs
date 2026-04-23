@@ -76,6 +76,10 @@ async fn seed_relationship(
 #[tokio::test]
 async fn check_relationship_returns_true_for_existing_tuple() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
@@ -117,6 +121,10 @@ async fn check_relationship_returns_true_for_existing_tuple() {
 #[tokio::test]
 async fn check_relationship_returns_false_for_missing_tuple() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
@@ -156,6 +164,10 @@ async fn check_relationship_returns_false_for_missing_tuple() {
 #[tokio::test]
 async fn check_relationship_partial_match_returns_false() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
@@ -197,6 +209,10 @@ async fn check_relationship_partial_match_returns_false() {
 #[tokio::test]
 async fn check_relationship_rejects_oversize_subject() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");

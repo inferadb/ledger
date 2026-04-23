@@ -64,6 +64,10 @@ async fn create_invite(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_create_and_list_invitations() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -102,6 +106,10 @@ async fn test_create_and_list_invitations() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_create_and_revoke_invitation() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -141,6 +149,10 @@ async fn test_create_and_revoke_invitation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_duplicate_pending_returns_already_exists() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -174,6 +186,10 @@ async fn test_duplicate_pending_returns_already_exists() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_per_email_pending_cap() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -213,6 +229,10 @@ async fn test_per_email_pending_cap() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_per_email_total_limit() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -262,6 +282,10 @@ async fn test_per_email_total_limit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_cross_org_team_rejected() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -310,6 +334,10 @@ async fn test_cross_org_team_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_plus_addressing_dedup() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -343,6 +371,10 @@ async fn test_plus_addressing_dedup() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_gmail_dot_dedup() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -380,6 +412,10 @@ async fn test_gmail_dot_dedup() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_wrong_user_gets_not_found() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -408,6 +444,10 @@ async fn test_wrong_user_gets_not_found() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_nonexistent_slug_gets_not_found() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 

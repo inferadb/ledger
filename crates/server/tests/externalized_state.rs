@@ -25,7 +25,7 @@
 use std::time::Duration;
 
 use inferadb_ledger_proto::proto;
-use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use inferadb_ledger_types::{OrganizationSlug, Region, VaultSlug};
 use serial_test::serial;
 
 use crate::common::{TestCluster, create_read_client, create_vault_client, create_write_client};
@@ -155,6 +155,10 @@ async fn get_client_state(
 #[serial]
 async fn test_empty_state_snapshot_round_trip() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     // Wait for the cluster to stabilize — even with no user data, the
@@ -184,6 +188,10 @@ async fn test_empty_state_snapshot_round_trip() {
 #[serial]
 async fn test_snapshot_with_deleted_entities() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -244,21 +252,29 @@ async fn test_snapshot_with_deleted_entities() {
 #[serial]
 async fn test_leader_failover_mid_batch_no_data_loss() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
+    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let organization = create_organization(&leader.addr, "failover-ns", leader)
-        .await
-        .expect("create organization");
-    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
+    // ORG-ISOLATION: alpha receives the batch, beta must stay empty.
+    let org_alpha =
+        create_organization(&leader.addr, "failover-ns-a", leader).await.expect("create org alpha");
+    let vault_alpha = create_vault(&leader.addr, org_alpha).await.expect("create vault alpha");
+    let org_beta =
+        create_organization(&leader.addr, "failover-ns-b", leader).await.expect("create org beta");
+    let vault_beta = create_vault(&leader.addr, org_beta).await.expect("create vault beta");
 
-    // Write a batch of entities.
+    // Write a batch of entities (alpha only).
     let mut write_client = create_write_client(&leader.addr).await.expect("connect");
     let batch_request = proto::BatchWriteRequest {
         client_id: Some(proto::ClientId { id: "failover-batch".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-        vault: Some(proto::VaultSlug { slug: vault.value() }),
+        organization: Some(proto::OrganizationSlug { slug: org_alpha.value() }),
+        vault: Some(proto::VaultSlug { slug: vault_alpha.value() }),
         operations: (0..50)
             .map(|i| proto::BatchWriteOperation {
                 operations: vec![proto::Operation {
@@ -281,9 +297,10 @@ async fn test_leader_failover_mid_batch_no_data_loss() {
         other => panic!("batch write should succeed, got: {:?}", other),
     }
 
-    // Wait for replication (global + data region).
+    // Wait for replication (global + data region + per-org groups).
     let synced = cluster.wait_for_sync(Duration::from_secs(10)).await;
     assert!(synced, "cluster should sync before failover");
+    cluster.wait_for_organizations_synced(Region::US_EAST_VA, Duration::from_secs(10)).await;
 
     // Find a follower to verify data from after "failover" (we verify from
     // a follower, which simulates reading from a new leader after the old
@@ -294,8 +311,17 @@ async fn test_leader_failover_mid_batch_no_data_loss() {
     for i in [0, 25, 49] {
         let key = format!("fail-key-{}", i);
         let expected = format!("fail-value-{}", i).into_bytes();
-        let value = read_entity(&follower.addr, organization, vault, &key).await;
+        let value = read_entity(&follower.addr, org_alpha, vault_alpha, &key).await;
         assert_eq!(value, Some(expected), "follower should have {} after failover", key);
+    }
+
+    // Isolation: beta must not see the batch writes on any node.
+    for node in cluster.nodes() {
+        for i in [0u64, 25, 49] {
+            let key = format!("fail-key-{}", i);
+            let value = read_entity(&node.addr, org_beta, vault_beta, &key).await;
+            assert_eq!(value, None, "node {} beta must not see alpha {}", node.id, key);
+        }
     }
 
     // Suppress unused binding warning.
@@ -311,6 +337,10 @@ async fn test_leader_failover_mid_batch_no_data_loss() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_idempotency_dedup_same_key_returns_cached() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -400,6 +430,10 @@ async fn test_idempotency_dedup_same_key_returns_cached() {
 #[serial]
 async fn test_sequence_counters_persisted_and_restored() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -494,6 +528,10 @@ async fn test_sequence_counters_persisted_and_restored() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_client_sequence_eviction_infrastructure() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -560,6 +598,10 @@ async fn test_client_sequence_eviction_infrastructure() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_post_eviction_retry_accepted() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -637,6 +679,10 @@ async fn test_post_eviction_retry_accepted() {
 #[serial]
 async fn test_snapshot_install_events_best_effort() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 

@@ -144,6 +144,10 @@ fn make_write_request(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_2000_unique_client_ids_no_page_full() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -184,6 +188,10 @@ async fn test_2000_unique_client_ids_no_page_full() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_snapshot_20_orgs_5_vaults_round_trip() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -239,6 +247,10 @@ async fn test_snapshot_20_orgs_5_vaults_round_trip() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_bulk_writes_replicated_state_roots_match() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -314,6 +326,10 @@ async fn test_bulk_writes_replicated_state_roots_match() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_snapshot_during_active_apply_loop() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -377,6 +393,10 @@ async fn test_snapshot_during_active_apply_loop() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_snapshot_determinism_all_nodes_identical_state() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -475,6 +495,10 @@ async fn test_snapshot_determinism_all_nodes_identical_state() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_batch_writes_replicated_to_all_nodes() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");

@@ -3,7 +3,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{ClientId, NodeId, OrganizationId, Region, TxId, VaultId, WriteStatus};
+use super::{
+    ClientId, NodeId, OrganizationId, OrganizationSlug, Region, TxId, VaultId, VaultSlug,
+    WriteStatus,
+};
 use crate::hash::Hash;
 
 // ============================================================================
@@ -112,6 +115,21 @@ pub struct VaultEntry {
     pub tx_merkle_root: Hash,
     /// State root after applying transactions.
     pub state_root: Hash,
+    /// External organization slug (Snowflake) — stamped at write time so the
+    /// block-announcement emission path can read the slug directly off the
+    /// entry without consulting per-region slug maps. A zero value
+    /// ([`OrganizationSlug::new`](OrganizationSlug::new)`(0)`) is a sentinel
+    /// for system-vault writes / background jobs that don't carry an external
+    /// slug; announcement consumers fall back to the internal id in that case.
+    ///
+    /// `#[serde(default)]` preserves decodability of existing block records
+    /// stored in `blocks.db` prior to this field being introduced.
+    #[serde(default)]
+    pub organization_slug: OrganizationSlug,
+    /// External vault slug (Snowflake) — stamped at write time for the same
+    /// reason as [`organization_slug`](Self::organization_slug).
+    #[serde(default)]
+    pub vault_slug: VaultSlug,
 }
 
 /// Accumulated cryptographic commitment for a range of blocks.

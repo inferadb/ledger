@@ -97,6 +97,10 @@ async fn write_entity(
 #[tokio::test]
 async fn test_watch_blocks_subscribe_before_writes() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -154,6 +158,10 @@ async fn test_watch_blocks_subscribe_before_writes() {
 #[tokio::test]
 async fn test_watch_blocks_historical_then_realtime() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -242,6 +250,10 @@ async fn test_watch_blocks_historical_then_realtime() {
 #[tokio::test]
 async fn test_watch_blocks_multiple_subscribers() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -296,6 +308,10 @@ async fn test_watch_blocks_multiple_subscribers() {
 #[tokio::test]
 async fn test_watch_blocks_vault_isolation() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -378,6 +394,10 @@ async fn test_watch_blocks_vault_isolation() {
 #[tokio::test]
 async fn test_watch_blocks_reconnection_after_restart() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 

@@ -275,7 +275,7 @@ async fn handle_consensus_message(
     let consensus_shard = inferadb_ledger_consensus::types::ConsensusStateId(req.shard_id);
     let group = manager
         .lookup_by_consensus_shard(consensus_shard)
-        .or_else(|| manager.get_region_group(region).ok())
+        .or_else(|| manager.lookup_region_inner(region))
         .ok_or_else(|| Status::not_found("region group not found"))?;
 
     // Validate that the sender is a known cluster member (voter or learner).

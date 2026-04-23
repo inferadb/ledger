@@ -176,6 +176,10 @@ async fn poll_for_public_keys(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_user_session_lifecycle() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
     let user_slug = setup_user(addr, "Test User", "user42@test.com", node).await;
@@ -238,6 +242,10 @@ async fn test_user_session_lifecycle() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_vault_token_lifecycle() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -296,6 +304,10 @@ async fn test_vault_token_lifecycle() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_revoke_all_user_sessions() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
     let user_slug = setup_user(addr, "Test User", "user99@test.com", node).await;
@@ -387,6 +399,10 @@ async fn test_revoke_all_user_sessions() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_org_deletion_cascades_token_revocation() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -448,6 +464,10 @@ async fn test_org_deletion_cascades_token_revocation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_refresh_token_theft_detection() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
     let user_slug = setup_user(addr, "Test User", "user300@test.com", node).await;
@@ -509,6 +529,10 @@ async fn test_refresh_token_theft_detection() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_refresh_and_revoke_all() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
     let user_slug = setup_user(addr, "Test User", "user400@test.com", node).await;
@@ -607,6 +631,10 @@ async fn test_concurrent_refresh_and_revoke_all() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_refresh_same_token() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
     let user_slug = setup_user(addr, "Test User", "user500@test.com", node).await;
@@ -851,6 +879,10 @@ async fn wait_for_vault_token(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_vault_token_scope_validation() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -902,6 +934,10 @@ async fn test_vault_token_scope_validation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_scope_reduction_on_vault_refresh() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -961,6 +997,10 @@ async fn test_scope_reduction_on_vault_refresh() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_scope_expansion_on_vault_refresh() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -1018,6 +1058,10 @@ async fn test_scope_expansion_on_vault_refresh() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_connection_removal_on_vault_refresh() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -1059,6 +1103,10 @@ async fn test_connection_removal_on_vault_refresh() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_app_disabled_rejects_vault_refresh() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -1099,6 +1147,10 @@ async fn test_app_disabled_rejects_vault_refresh() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_app_disabled_blocks_creation_and_revokes_tokens() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -1157,6 +1209,10 @@ async fn test_app_disabled_blocks_creation_and_revokes_tokens() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_connection_removed_blocks_creation_and_revokes_tokens() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -1224,6 +1280,10 @@ async fn test_connection_removed_blocks_creation_and_revokes_tokens() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_signing_key_rotation_during_active_sessions() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
     let user_slug = setup_user(addr, "Test User", "user600@test.com", node).await;
@@ -1309,6 +1369,10 @@ async fn test_signing_key_rotation_during_active_sessions() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_signing_key_revocation_immediately_invalidates() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
     let user_slug = setup_user(addr, "Test User", "user601@test.com", node).await;
@@ -1370,6 +1434,10 @@ async fn test_signing_key_revocation_immediately_invalidates() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_signing_key_rotation_grace_zero() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
     let user_slug = setup_user(addr, "Test User", "user602@test.com", node).await;
@@ -1436,6 +1504,10 @@ async fn test_signing_key_rotation_grace_zero() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_auto_bootstrap_global_signing_key() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -1460,6 +1532,10 @@ async fn test_auto_bootstrap_global_signing_key() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_auto_bootstrap_org_signing_key() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -1488,6 +1564,10 @@ async fn test_auto_bootstrap_org_signing_key() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_create_signing_key_idempotency() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -1550,6 +1630,10 @@ async fn test_create_signing_key_idempotency() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_global_key_not_found_returns_error() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
     let user_slug = setup_user(addr, "Test User", "user700@test.com", node).await;
@@ -1615,6 +1699,10 @@ async fn test_global_key_not_found_returns_error() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_state_machine_timestamps_use_proposed_at() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -1707,6 +1795,10 @@ async fn test_state_machine_timestamps_use_proposed_at() {
 async fn test_poisoned_family_persists_across_replication() {
     let cluster = TestCluster::new(3).await;
 
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     // Wait for leader election and cluster stabilization
     let leader_id = cluster.wait_for_leader().await;
     let leader = cluster.node(leader_id).expect("leader node");
@@ -1789,6 +1881,10 @@ async fn test_poisoned_family_persists_across_replication() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_token_maintenance_transitions_rotated_keys() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 
@@ -1867,6 +1963,10 @@ async fn test_token_maintenance_transitions_rotated_keys() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_token_maintenance_idempotency() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let node = &cluster.nodes()[0];
     let addr = &node.addr;
 

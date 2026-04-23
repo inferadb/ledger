@@ -121,6 +121,10 @@ async fn list_backups(
 #[tokio::test]
 async fn test_backup_create_and_list_metadata() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -173,6 +177,10 @@ async fn test_backup_create_and_list_metadata() {
 #[tokio::test]
 async fn test_backup_during_active_writes() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -218,6 +226,10 @@ async fn test_backup_during_active_writes() {
 #[tokio::test]
 async fn test_backup_list_with_limit() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -275,6 +287,10 @@ async fn test_backup_list_with_limit() {
 #[tokio::test]
 async fn test_backup_checksum_present() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 

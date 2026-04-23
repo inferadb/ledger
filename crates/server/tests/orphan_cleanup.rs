@@ -111,6 +111,10 @@ async fn read_entity(
 #[tokio::test]
 async fn test_orphan_cleanup_job_starts() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -130,6 +134,10 @@ async fn test_orphan_cleanup_job_starts() {
 #[serial]
 async fn test_orphan_cleanup_leader_only() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let leader_id = cluster.wait_for_leader().await;
 
     // Verify we have followers
@@ -150,6 +158,10 @@ async fn test_orphan_cleanup_leader_only() {
 #[tokio::test]
 async fn test_deleted_user_detection() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -253,6 +265,10 @@ async fn test_deleted_user_detection() {
 #[tokio::test]
 async fn test_membership_data_format() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -292,6 +308,10 @@ async fn test_membership_data_format() {
 #[tokio::test]
 async fn test_orphan_cleanup_skips_active_records() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -330,6 +350,10 @@ async fn test_orphan_cleanup_skips_active_records() {
 #[tokio::test]
 async fn test_orphan_cleanup_handles_empty_organization() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -349,6 +373,10 @@ async fn test_orphan_cleanup_handles_empty_organization() {
 #[serial]
 async fn test_orphan_cleanup_with_concurrent_jobs() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("has leader");
 

@@ -12,10 +12,36 @@
 
 use std::time::Duration;
 
-use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use inferadb_ledger_types::{OrganizationSlug, Region, VaultSlug};
 use serial_test::serial;
 
-use crate::common::{TestCluster, TestNode, create_write_client};
+use crate::common::{TestCluster, TestNode, create_read_client, create_write_client};
+
+// ============================================================================
+// Helper: read an entity value (used by isolation assertions).
+// ============================================================================
+
+async fn read_entity(
+    addr: &str,
+    organization: OrganizationSlug,
+    vault: VaultSlug,
+    key: &str,
+) -> Option<Vec<u8>> {
+    let mut client = create_read_client(addr).await.ok()?;
+    let response = client
+        .read(inferadb_ledger_proto::proto::ReadRequest {
+            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                slug: organization.value(),
+            }),
+            vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
+            key: key.to_string(),
+            consistency: 0,
+            caller: None,
+        })
+        .await
+        .ok()?;
+    response.into_inner().value
+}
 
 // ============================================================================
 // Test Helpers
@@ -48,19 +74,28 @@ async fn create_vault(
 #[serial]
 async fn test_ordered_replication() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
+    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
 
-    // Create organization and vault
-    let organization = create_organization(&leader.addr, "ordered-repl-ns", leader)
+    // ORG-ISOLATION: alpha receives writes, beta stays empty.
+    let org_alpha = create_organization(&leader.addr, "ordered-repl-ns-a", leader)
         .await
-        .expect("create organization");
-    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
+        .expect("create org alpha");
+    let vault_alpha = create_vault(&leader.addr, org_alpha).await.expect("create vault alpha");
+    let org_beta = create_organization(&leader.addr, "ordered-repl-ns-b", leader)
+        .await
+        .expect("create org beta");
+    let vault_beta = create_vault(&leader.addr, org_beta).await.expect("create vault beta");
 
     let mut client = create_write_client(&leader.addr).await.expect("connect to leader");
 
-    // Submit multiple writes
+    // Submit multiple writes (alpha only)
     for i in 0..5u64 {
         let request = inferadb_ledger_proto::proto::WriteRequest {
             client_id: Some(inferadb_ledger_proto::proto::ClientId {
@@ -68,9 +103,9 @@ async fn test_ordered_replication() {
             }),
             idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
             organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: organization.value(),
+                slug: org_alpha.value(),
             }),
-            vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
+            vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_alpha.value() }),
             operations: vec![inferadb_ledger_proto::proto::Operation {
                 op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
                     inferadb_ledger_proto::proto::SetEntity {
@@ -95,6 +130,7 @@ async fn test_ordered_replication() {
     // Wait for replication
     let synced = cluster.wait_for_sync(Duration::from_secs(5)).await;
     assert!(synced, "all nodes should sync");
+    cluster.wait_for_organizations_synced(Region::US_EAST_VA, Duration::from_secs(5)).await;
 
     // All nodes should have same last applied
     let leader_applied = leader.last_applied();
@@ -108,6 +144,12 @@ async fn test_ordered_replication() {
             follower.id
         );
     }
+
+    // Isolation: beta must not see alpha's writes on any node.
+    for node in cluster.nodes() {
+        let value = read_entity(&node.addr, org_beta, vault_beta, "key-0").await;
+        assert_eq!(value, None, "node {} beta must not see alpha's key-0", node.id);
+    }
 }
 
 /// Tests that followers have consistent state after writes.
@@ -115,26 +157,35 @@ async fn test_ordered_replication() {
 #[serial]
 async fn test_follower_state_consistency() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
+    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
 
-    // Create organization and vault
-    let organization = create_organization(&leader.addr, "follower-consistency-ns", leader)
+    // ORG-ISOLATION: alpha receives the batch, beta stays empty.
+    let org_alpha = create_organization(&leader.addr, "follower-consistency-ns-a", leader)
         .await
-        .expect("create organization");
-    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
+        .expect("create org alpha");
+    let vault_alpha = create_vault(&leader.addr, org_alpha).await.expect("create vault alpha");
+    let org_beta = create_organization(&leader.addr, "follower-consistency-ns-b", leader)
+        .await
+        .expect("create org beta");
+    let vault_beta = create_vault(&leader.addr, org_beta).await.expect("create vault beta");
 
     let mut client = create_write_client(&leader.addr).await.expect("connect to leader");
 
-    // Submit a batch of writes
+    // Submit a batch of writes (alpha only)
     let batch_request = inferadb_ledger_proto::proto::BatchWriteRequest {
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "batch-test".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: organization.value(),
+            slug: org_alpha.value(),
         }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_alpha.value() }),
         operations: (0..10)
             .map(|i| inferadb_ledger_proto::proto::BatchWriteOperation {
                 operations: vec![inferadb_ledger_proto::proto::Operation {
@@ -163,6 +214,7 @@ async fn test_follower_state_consistency() {
     // Wait for sync
     let synced = cluster.wait_for_sync(Duration::from_secs(5)).await;
     assert!(synced, "all nodes should sync after batch write");
+    cluster.wait_for_organizations_synced(Region::US_EAST_VA, Duration::from_secs(5)).await;
 
     // Verify all nodes are on same term
     let leader_term = leader.current_term();
@@ -174,6 +226,12 @@ async fn test_follower_state_consistency() {
             follower.id
         );
     }
+
+    // Isolation: beta must not see alpha's batch writes on any node.
+    for node in cluster.nodes() {
+        let value = read_entity(&node.addr, org_beta, vault_beta, "batch-key-0").await;
+        assert_eq!(value, None, "node {} beta must not see alpha's batch-key-0", node.id);
+    }
 }
 
 /// Tests that replication succeeds when writes are spaced apart in time.
@@ -184,26 +242,35 @@ async fn test_follower_state_consistency() {
 #[serial]
 async fn test_replication_with_idle_gap_between_writes() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
+    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
 
-    // Create organization and vault
-    let organization = create_organization(&leader.addr, "delay-repl-ns", leader)
+    // ORG-ISOLATION: alpha receives writes, beta stays empty.
+    let org_alpha = create_organization(&leader.addr, "delay-repl-ns-a", leader)
         .await
-        .expect("create organization");
-    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
+        .expect("create org alpha");
+    let vault_alpha = create_vault(&leader.addr, org_alpha).await.expect("create vault alpha");
+    let org_beta = create_organization(&leader.addr, "delay-repl-ns-b", leader)
+        .await
+        .expect("create org beta");
+    let vault_beta = create_vault(&leader.addr, org_beta).await.expect("create vault beta");
 
     let mut client = create_write_client(&leader.addr).await.expect("connect to leader");
 
-    // Write some data
+    // Write some data (alpha only)
     let request = inferadb_ledger_proto::proto::WriteRequest {
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "delay-test".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: organization.value(),
+            slug: org_alpha.value(),
         }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_alpha.value() }),
         operations: vec![inferadb_ledger_proto::proto::Operation {
             op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
                 inferadb_ledger_proto::proto::SetEntity {
@@ -223,14 +290,14 @@ async fn test_replication_with_idle_gap_between_writes() {
     // Small delay to simulate network latency
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Write more data
+    // Write more data (alpha only)
     let request2 = inferadb_ledger_proto::proto::WriteRequest {
         client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "delay-test".to_string() }),
         idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: organization.value(),
+            slug: org_alpha.value(),
         }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_alpha.value() }),
         operations: vec![inferadb_ledger_proto::proto::Operation {
             op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
                 inferadb_ledger_proto::proto::SetEntity {
@@ -250,4 +317,21 @@ async fn test_replication_with_idle_gap_between_writes() {
     // Should still sync
     let synced = cluster.wait_for_sync(Duration::from_secs(5)).await;
     assert!(synced, "cluster should sync after delay");
+    cluster.wait_for_organizations_synced(Region::US_EAST_VA, Duration::from_secs(5)).await;
+
+    // Isolation: beta must not see alpha's delayed writes on any node.
+    for node in cluster.nodes() {
+        assert_eq!(
+            read_entity(&node.addr, org_beta, vault_beta, "delay-key").await,
+            None,
+            "node {} beta must not see alpha delay-key",
+            node.id
+        );
+        assert_eq!(
+            read_entity(&node.addr, org_beta, vault_beta, "delay-key-2").await,
+            None,
+            "node {} beta must not see alpha delay-key-2",
+            node.id
+        );
+    }
 }

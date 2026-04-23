@@ -139,6 +139,10 @@ async fn force_gc(
 #[tokio::test]
 async fn test_force_gc_removes_expired_entities() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -230,6 +234,10 @@ async fn test_force_gc_removes_expired_entities() {
 #[tokio::test]
 async fn test_force_gc_empty_vault() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -251,6 +259,10 @@ async fn test_force_gc_empty_vault() {
 #[tokio::test]
 async fn test_force_gc_all_vaults() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -304,6 +316,10 @@ async fn test_force_gc_all_vaults() {
 #[tokio::test]
 async fn test_force_gc_multiple_ttl_timings() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -357,6 +373,10 @@ async fn test_force_gc_multiple_ttl_timings() {
 #[tokio::test]
 async fn test_force_gc_idempotent() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -398,6 +418,10 @@ async fn test_force_gc_idempotent() {
 #[tokio::test]
 async fn test_expired_entity_not_returned_by_read() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -435,6 +459,10 @@ async fn test_expired_entity_not_returned_by_read() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_force_gc_fails_on_follower() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     // Find a follower

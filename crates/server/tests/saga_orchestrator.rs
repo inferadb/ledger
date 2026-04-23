@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use inferadb_ledger_types::{OrganizationId, OrganizationSlug, UserId, VaultSlug};
+use inferadb_ledger_types::{OrganizationId, OrganizationSlug, Region, UserId, VaultSlug};
 use serial_test::serial;
 
 use crate::common::{TestCluster, create_read_client, create_write_client};
@@ -111,6 +111,10 @@ async fn read_entity(
 #[tokio::test]
 async fn test_saga_orchestrator_starts() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -130,6 +134,11 @@ async fn test_saga_orchestrator_starts() {
 #[serial]
 async fn test_saga_orchestrator_leader_only() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
+    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let leader_id = cluster.wait_for_leader().await;
 
     // Verify we have a leader and followers
@@ -150,6 +159,10 @@ async fn test_delete_user_saga_state_transitions() {
     use inferadb_ledger_state::system::{DeleteUserInput, DeleteUserSaga, Saga, SagaId};
 
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -221,6 +234,10 @@ async fn test_completed_saga_not_reexecuted() {
     use inferadb_ledger_types::Region;
 
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -295,6 +312,10 @@ async fn test_saga_serialization_roundtrip() {
     use inferadb_ledger_types::Region;
 
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 

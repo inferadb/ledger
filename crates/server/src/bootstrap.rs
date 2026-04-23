@@ -533,8 +533,13 @@ pub async fn bootstrap_node(
                     if let Ok(global) = mgr.system_region()
                         && global.handle().is_leader()
                     {
-                        check_peer_liveness_quorum(&mgr, &liveness, &global, &liveness_config)
-                            .await;
+                        check_peer_liveness_quorum(
+                            &mgr,
+                            &liveness,
+                            global.inner(),
+                            &liveness_config,
+                        )
+                        .await;
                     }
                     tokio::select! {
                         _ = liveness_token.cancelled() => break,
@@ -1518,7 +1523,7 @@ async fn process_region_event(
 async fn check_peer_liveness_quorum(
     manager: &inferadb_ledger_raft::RaftManager,
     local_liveness: &parking_lot::RwLock<std::collections::HashMap<u64, std::time::Instant>>,
-    global: &inferadb_ledger_raft::OrganizationGroup,
+    global: &inferadb_ledger_raft::InnerGroup,
     liveness_config: &inferadb_ledger_raft::LivenessConfig,
 ) {
     let Some(reader) = manager.system_state_reader() else { return };

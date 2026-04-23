@@ -71,7 +71,9 @@ pub fn connect_channel(addr: &str) -> tonic::transport::Channel {
 }
 
 use inferadb_ledger_proto::proto::{JoinClusterRequest, admin_service_client::AdminServiceClient};
-use inferadb_ledger_raft::{ConsensusHandle, OrganizationGroup, RaftManager, RegionConfig};
+use inferadb_ledger_raft::{
+    ConsensusHandle, OrganizationGroup, RaftManager, RegionConfig, RegionGroup, SystemGroup,
+};
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::{FileBackend, crypto::InMemoryKeyManager};
 use inferadb_ledger_test_utils::TestDir;
@@ -124,25 +126,24 @@ impl TestNode {
     }
 
     /// Returns the system (GLOBAL) region group.
-    pub fn system_region(&self) -> Arc<OrganizationGroup> {
+    pub fn system_region(&self) -> Arc<SystemGroup> {
         self.manager.system_region().expect("system region exists")
     }
 
     /// Returns a region group by region.
-    pub fn region_group(
-        &self,
-        region: inferadb_ledger_types::Region,
-    ) -> Option<Arc<OrganizationGroup>> {
+    pub fn region_group(&self, region: inferadb_ledger_types::Region) -> Option<Arc<RegionGroup>> {
         self.manager.get_region_group(region).ok()
     }
 
-    /// Returns every shard group registered for `region` on this node.
+    /// Returns every per-organization shard group registered for `region`
+    /// on this node.
     ///
-    /// Multi-shard regions run N independent Raft groups; convergence
-    /// helpers (`data_regions_synced`) iterate all shards rather than
-    /// just shard 0 because writes route across shards via `ShardRouter`,
-    /// and waiting for shard 0 alone leaves later shards racing the
-    /// assertion.
+    /// Under Task 3's tier split the data-region group at
+    /// `OrganizationId::new(0)` is the regional control plane
+    /// ([`RegionGroup`]), not a data-plane shard, so it is excluded from
+    /// this collection. Callers iterating "every shard" mean the
+    /// per-organization groups; the data-region group is reachable via
+    /// [`region_group`].
     pub fn shard_groups(
         &self,
         region: inferadb_ledger_types::Region,
@@ -150,7 +151,7 @@ impl TestNode {
         self.manager
             .list_organization_groups()
             .into_iter()
-            .filter(|(r, _)| *r == region)
+            .filter(|(r, s)| *r == region && *s != inferadb_ledger_types::OrganizationId::new(0))
             .filter_map(|(r, s)| self.manager.get_organization_group(r, s).ok())
             .collect()
     }
@@ -211,8 +212,20 @@ impl TestCluster {
     /// Creates a new test cluster with the given number of nodes and 1 data region.
     ///
     /// The first node bootstraps the cluster, and other nodes join via
-    /// the AdminService's join_cluster RPC.
-    /// All nodes use ephemeral ports on localhost.
+    /// the AdminService's join_cluster RPC. All nodes use ephemeral ports on
+    /// localhost.
+    ///
+    /// Note: the B.1 spec aspires to a lean `new(size)` that only starts the
+    /// system group, with tests calling [`TestCluster::create_data_region`]
+    /// explicitly. That flip is deferred because the production saga path
+    /// (`CreateOrganizationSaga`) on 3-node clusters depends on the eager
+    /// peer-transport registration done during `build_full`'s data-region
+    /// bootstrap. The `SystemRequest::CreateDataRegion` apply path alone
+    /// does not yet set up cross-node transports reliably enough for the
+    /// saga orchestrator's `propose_to_region` step to succeed. See the
+    /// B.1 spec § "Phase A test debt" for context — the 13 listed tests
+    /// plus ~10 siblings hit this issue. Fixing it is a focused saga-path
+    /// task separate from test-infra cleanup.
     pub async fn new(size: usize) -> Self {
         Self::build(size, 1, true).await
     }
@@ -270,7 +283,6 @@ impl TestCluster {
         transport: TestTransport,
     ) -> Self {
         assert!(size >= 1, "cluster must have at least 1 node");
-        assert!(num_data_regions >= 1, "cluster must have at least 1 data region");
 
         let socket_dir = TestDir::new();
         let cluster_id = next_cluster_id();
@@ -906,18 +918,24 @@ impl TestCluster {
     /// case (an idle shard is "synced" by definition since there is
     /// nothing to apply yet).
     fn data_regions_synced(&self) -> bool {
-        let data_regions = &inferadb_ledger_types::ALL_REGIONS[1..];
-        for &dr in data_regions.iter().take(self.num_data_regions) {
-            // Use the leader node as the reference for shard membership;
-            // every node should have the same set of `(region, shard)`
-            // groups registered.
-            let reference_node = &self.nodes[0];
+        // Derive the set of actually-started data regions from the reference
+        // node's manager rather than a fixed count. Data regions may be
+        // brought up eagerly (via `with_data_regions`) or lazily (via
+        // `create_data_region`) after `new`, so the manager is the source of
+        // truth.
+        let reference_node = &self.nodes[0];
+        let started_regions: Vec<inferadb_ledger_types::Region> = reference_node
+            .manager
+            .list_regions()
+            .into_iter()
+            .filter(|r| *r != inferadb_ledger_types::Region::GLOBAL)
+            .collect();
+        for dr in started_regions {
             for shard_group in reference_node.shard_groups(dr) {
                 let organization_id = shard_group.organization_id();
                 let mut indices = Vec::new();
                 for node in &self.nodes {
-                    if let Some(rg) = node.manager.get_organization_group(dr, organization_id).ok()
-                    {
+                    if let Ok(rg) = node.manager.get_organization_group(dr, organization_id) {
                         indices.push(*rg.applied_index_watch().borrow());
                     }
                 }
@@ -957,6 +975,278 @@ impl TestCluster {
     /// Returns all node addresses.
     pub fn addrs(&self) -> Vec<String> {
         self.nodes.iter().map(|n| n.addr.clone()).collect()
+    }
+
+    // ========================================================================
+    // B.1 helpers — on-demand data region + organization creation.
+    //
+    // Phase B.1 replaces the eager `with_data_regions` bootstrap with a lean
+    // `new(size)` bootstrap plus explicit `create_data_region` /
+    // `create_organization` steps. Tests exercising organization isolation
+    // and multi-tier orchestration should use these helpers. The legacy
+    // `with_data_regions` surface is retained until every existing test is
+    // migrated (B.1 Task 14).
+    // ========================================================================
+
+    /// Proposes `SystemRequest::CreateDataRegion` to the system (GLOBAL)
+    /// group and waits for every node's region group for `region` to elect
+    /// a leader.
+    ///
+    /// The bootstrap-installed region-creation handler on every node picks
+    /// up the applied entry and calls `start_data_region` locally, so a
+    /// single GLOBAL proposal fans out across the cluster.
+    pub async fn create_data_region(
+        &self,
+        region: inferadb_ledger_types::Region,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use inferadb_ledger_raft::types::{RaftPayload, SystemRequest};
+
+        // Find the current system leader — `create_data_region` must be
+        // proposed on the leader's handle (followers return NotLeader).
+        let leader = self
+            .nodes
+            .iter()
+            .find(|n| n.is_system_leader())
+            .ok_or("create_data_region: no system leader")?;
+
+        let initial_members: Vec<(u64, String)> =
+            self.nodes.iter().map(|n| (n.id, n.addr.clone())).collect();
+
+        let req = SystemRequest::CreateDataRegion { region, initial_members };
+        let resp = leader
+            .handle
+            .propose_and_wait(RaftPayload::system(req), Duration::from_secs(10))
+            .await
+            .map_err(|e| format!("CreateDataRegion propose failed: {e}"))?;
+
+        match resp {
+            inferadb_ledger_raft::types::LedgerResponse::DataRegionCreated { region: r } => {
+                assert_eq!(r, region, "DataRegionCreated region mismatch");
+            },
+            other => return Err(format!("expected DataRegionCreated, got {other}").into()),
+        }
+
+        // Wait for every node to register the region group and elect a
+        // leader. The region-creation handler is fire-and-forget from the
+        // apply path's perspective, so we poll for registration + leader
+        // election on every node.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let all_ready = self.nodes.iter().all(|n| {
+                n.manager.has_region(region)
+                    && n.manager
+                        .get_region_group(region)
+                        .map(|g| g.handle().current_leader().is_some())
+                        .unwrap_or(false)
+            });
+            if all_ready {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(format!("region {region:?} did not converge within 30s").into());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Proposes `SystemRequest::CreateOrganization` to the system group.
+    ///
+    /// Waits for the multi-tier orchestration (system apply → region
+    /// placement signal → per-voter `start_organization_group`) to complete
+    /// on every node, then returns the allocated `OrganizationId`.
+    ///
+    /// `slug` is a human-readable identifier used to derive a deterministic
+    /// external Snowflake via a fresh `generate_organization_slug()` call.
+    /// The input string is not currently embedded in the organization's
+    /// display name — that's the saga orchestrator's job, which this bypass
+    /// doesn't exercise.
+    pub async fn create_organization(
+        &self,
+        region: inferadb_ledger_types::Region,
+        _slug: &str,
+    ) -> Result<inferadb_ledger_types::OrganizationId, Box<dyn std::error::Error + Send + Sync>>
+    {
+        use inferadb_ledger_raft::types::{RaftPayload, SystemRequest};
+
+        let leader = self
+            .nodes
+            .iter()
+            .find(|n| n.is_system_leader())
+            .ok_or("create_organization: no system leader")?;
+
+        let org_slug = inferadb_ledger_types::snowflake::generate_organization_slug()
+            .map_err(|e| format!("generate_organization_slug: {e}"))?;
+
+        let req = SystemRequest::CreateOrganization {
+            slug: org_slug,
+            region,
+            tier: inferadb_ledger_state::system::OrganizationTier::Free,
+            admin: inferadb_ledger_types::UserId::new(0),
+        };
+
+        let resp = leader
+            .handle
+            .propose_and_wait(RaftPayload::system(req), Duration::from_secs(10))
+            .await
+            .map_err(|e| format!("CreateOrganization propose failed: {e}"))?;
+
+        let organization_id = match resp {
+            inferadb_ledger_raft::types::LedgerResponse::OrganizationCreated {
+                organization_id,
+                ..
+            } => organization_id,
+            other => return Err(format!("expected OrganizationCreated, got {other}").into()),
+        };
+
+        // Wait for the per-org group to start on every node. The
+        // organization-creation handler on each node is fire-and-forget,
+        // so we poll `has_organization_group` across the cluster.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let all_started = self
+                .nodes
+                .iter()
+                .all(|n| n.manager.has_organization_group(region, organization_id));
+            if all_started {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "organization {organization_id} group did not start on all nodes within 30s"
+                )
+                .into());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        Ok(organization_id)
+    }
+
+    /// Returns the `OrganizationGroup` on `node_idx` for
+    /// `(region, organization_id)`. Panics if the node is not a region voter
+    /// or the group is not started.
+    pub fn organization_group(
+        &self,
+        node_idx: usize,
+        region: inferadb_ledger_types::Region,
+        organization_id: inferadb_ledger_types::OrganizationId,
+    ) -> Arc<OrganizationGroup> {
+        self.nodes[node_idx].manager.get_organization_group(region, organization_id).unwrap_or_else(
+            |e| panic!("organization_group({node_idx}, {region:?}, {organization_id}): {e}"),
+        )
+    }
+
+    /// Returns the region control-plane group on `node_idx` for `region`.
+    ///
+    /// Returns `Arc<RegionGroup>` (B.1 Task 3 — three-tier type split).
+    /// `region_group_at(node, GLOBAL)` now refers to the same regional
+    /// control-plane storage as the system tier's organization-0 record,
+    /// but the returned wrapper exposes only regional-tier accessors; if
+    /// a test needs system-tier accessors it should call
+    /// [`TestNode::system_region`] instead.
+    pub fn region_group_at(
+        &self,
+        node_idx: usize,
+        region: inferadb_ledger_types::Region,
+    ) -> Arc<RegionGroup> {
+        self.nodes[node_idx]
+            .manager
+            .get_region_group(region)
+            .unwrap_or_else(|e| panic!("region_group_at({node_idx}, {region:?}): {e}"))
+    }
+
+    /// Returns `true` when every organization group in `region` has
+    /// converged across all nodes (applied indices match and are > 0).
+    ///
+    /// Idle groups (applied index 0 on every node) are treated as synced —
+    /// there is nothing to converge yet. Groups with traffic must match on
+    /// every node to count as converged.
+    pub fn organizations_synced(&self, region: inferadb_ledger_types::Region) -> bool {
+        let reference = &self.nodes[0];
+        let org_ids: Vec<inferadb_ledger_types::OrganizationId> = reference
+            .manager
+            .list_organization_groups()
+            .into_iter()
+            .filter(|(r, _)| *r == region)
+            .map(|(_, org)| org)
+            .collect();
+
+        if org_ids.is_empty() {
+            // No organization groups registered for this region — treat as
+            // synced (nothing to wait for).
+            return true;
+        }
+
+        for org_id in org_ids {
+            let mut indices = Vec::with_capacity(self.nodes.len());
+            for node in &self.nodes {
+                match node.manager.get_organization_group(region, org_id) {
+                    Ok(group) => indices.push(*group.applied_index_watch().borrow()),
+                    Err(_) => return false, // missing group on a node
+                }
+            }
+            let first = indices[0];
+            if first == 0 {
+                // Idle group on the reference node — only synced if every
+                // other node is also idle.
+                if !indices.iter().all(|&i| i == 0) {
+                    return false;
+                }
+                continue;
+            }
+            if !indices.iter().all(|&i| i == first) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Polls until every node has an elected leader for the region group
+    /// at `region`, up to 30 seconds. Returns the leader's node id. Panics
+    /// on timeout.
+    pub async fn wait_for_region_leader(&self, region: inferadb_ledger_types::Region) -> u64 {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            // All nodes must agree on a non-None leader for this region.
+            let leaders: Vec<Option<u64>> = self
+                .nodes
+                .iter()
+                .map(|n| {
+                    n.manager
+                        .get_region_group(region)
+                        .ok()
+                        .and_then(|g| g.handle().current_leader())
+                })
+                .collect();
+
+            if let Some(first) = leaders.first().copied().flatten()
+                && leaders.iter().all(|&l| l == Some(first))
+            {
+                return first;
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                panic!("wait_for_region_leader({region:?}): no agreed leader after 30s");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Polls `organizations_synced(region)` until true or `timeout` elapses.
+    pub async fn wait_for_organizations_synced(
+        &self,
+        region: inferadb_ledger_types::Region,
+        timeout_duration: Duration,
+    ) {
+        let deadline = tokio::time::Instant::now() + timeout_duration;
+        while tokio::time::Instant::now() < deadline {
+            if self.organizations_synced(region) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // Don't panic — match the existing `wait_for_*_sync` helpers, which
+        // return silently on timeout so callers can assert explicitly.
     }
 
     /// Waits until all regions (GLOBAL + data) on the first node have elected

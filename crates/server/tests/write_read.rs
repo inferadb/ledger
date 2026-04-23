@@ -46,6 +46,10 @@ async fn create_vault(
 #[tokio::test]
 async fn test_single_node_write_read() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
@@ -103,6 +107,10 @@ async fn test_single_node_write_read() {
 #[tokio::test]
 async fn test_write_idempotency() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
@@ -168,6 +176,10 @@ async fn test_write_idempotency() {
 #[tokio::test]
 async fn test_write_creates_retrievable_block() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
@@ -255,6 +267,10 @@ async fn test_write_creates_retrievable_block() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_three_node_write_replication() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");

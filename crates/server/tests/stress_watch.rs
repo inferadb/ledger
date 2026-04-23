@@ -99,6 +99,10 @@ async fn write_entity(
 #[tokio::test]
 async fn test_watch_blocks_high_volume_reconnect() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 

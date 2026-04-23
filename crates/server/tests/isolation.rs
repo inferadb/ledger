@@ -121,6 +121,10 @@ async fn read_entity(
 #[tokio::test]
 async fn test_vault_isolation_same_organization() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -165,6 +169,10 @@ async fn test_vault_isolation_same_organization() {
 #[tokio::test]
 async fn test_vault_isolation_key_not_found() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -193,6 +201,10 @@ async fn test_vault_isolation_key_not_found() {
 #[tokio::test]
 async fn test_multi_vault_isolation() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -249,6 +261,10 @@ async fn test_multi_vault_isolation() {
 #[tokio::test]
 async fn test_organization_isolation() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -306,6 +322,10 @@ async fn test_organization_isolation() {
 #[tokio::test]
 async fn test_vault_is_authoritative_identifier() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -367,6 +387,10 @@ async fn test_vault_is_authoritative_identifier() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_vault_writes() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -445,6 +469,10 @@ async fn test_concurrent_vault_writes() {
 #[tokio::test]
 async fn test_vault_global_uniqueness() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -499,6 +527,10 @@ async fn test_vault_global_uniqueness() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_isolation_across_replicas() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -547,6 +579,10 @@ async fn test_isolation_across_replicas() {
 #[tokio::test]
 async fn test_empty_vault_isolation() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -575,6 +611,10 @@ async fn test_empty_vault_isolation() {
 #[tokio::test]
 async fn test_deletion_isolation() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 

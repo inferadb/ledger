@@ -131,7 +131,8 @@ async fn read_entity(
 /// not exist as a separate object.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_per_organization_group_materializes() {
-    let cluster = TestCluster::with_data_regions(1, 1).await;
+    let cluster = TestCluster::new(1).await;
+    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     assert!(cluster.wait_for_leaders(Duration::from_secs(10)).await, "leaders elected");
     let node = cluster.any_node();
 
@@ -171,7 +172,8 @@ async fn test_per_organization_group_materializes() {
 /// own Raft group and storage path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_per_organization_isolation() {
-    let cluster = TestCluster::with_data_regions(1, 1).await;
+    let cluster = TestCluster::new(1).await;
+    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     assert!(cluster.wait_for_leaders(Duration::from_secs(10)).await, "leaders elected");
     let node = cluster.any_node();
 
@@ -218,7 +220,8 @@ async fn test_per_organization_isolation() {
 /// on the leader even within the same region.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_delegated_leadership_follows_region() {
-    let cluster = TestCluster::with_data_regions(3, 1).await;
+    let cluster = TestCluster::new(3).await;
+    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     assert!(cluster.wait_for_leaders(Duration::from_secs(10)).await, "leaders elected");
     let leader = cluster.leader().expect("has leader");
 
@@ -270,7 +273,8 @@ async fn test_delegated_leadership_follows_region() {
 /// engine on a node that hosts multiple per-organization groups.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_consensus_shard_lookup_roundtrip() {
-    let cluster = TestCluster::with_data_regions(1, 1).await;
+    let cluster = TestCluster::new(1).await;
+    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     assert!(cluster.wait_for_leaders(Duration::from_secs(10)).await, "leaders elected");
     let node = cluster.any_node();
 
@@ -304,7 +308,8 @@ async fn test_consensus_shard_lookup_roundtrip() {
 /// does not serialize incorrectly when multiple creations race.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_organization_creation() {
-    let cluster = TestCluster::with_data_regions(1, 1).await;
+    let cluster = TestCluster::new(1).await;
+    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     assert!(cluster.wait_for_leaders(Duration::from_secs(10)).await, "leaders elected");
     let leader = cluster.leader().expect("has leader");
     let addr = leader.addr.as_str();
@@ -344,7 +349,9 @@ async fn test_concurrent_organization_creation() {
 /// create or alter any group in R2.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_cross_region_independence() {
-    let cluster = TestCluster::with_data_regions(1, 2).await;
+    let cluster = TestCluster::new(1).await;
+    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region us-east-va");
+    cluster.create_data_region(Region::US_WEST_OR).await.expect("create data region us-west-or");
     assert!(cluster.wait_for_leaders(Duration::from_secs(10)).await, "leaders elected");
     let node = cluster.any_node();
 
@@ -391,7 +398,8 @@ async fn test_cross_region_independence() {
 /// their timers fired.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_region_leader_transfer_cascades_to_per_org_groups() {
-    let cluster = TestCluster::with_data_regions(3, 1).await;
+    let cluster = TestCluster::new(3).await;
+    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     assert!(cluster.wait_for_leaders(Duration::from_secs(10)).await, "leaders elected");
     let leader = cluster.leader().expect("has leader");
 

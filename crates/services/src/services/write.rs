@@ -407,22 +407,19 @@ impl WriteService {
         idempotency_key: [u8; 16],
         request_hash: u64,
     ) -> Result<OrganizationRequest, Status> {
-        // Convert proto operations to internal Operations
         let internal_ops: Vec<inferadb_ledger_types::Operation> = operations
             .iter()
             .map(inferadb_ledger_types::Operation::try_from)
             .collect::<Result<Vec<_>, Status>>()?;
 
-        // Create a single transaction with all operations
-        // Server-assigned sequences: sequence=0 is a placeholder; actual sequence
-        // is assigned at Raft apply time for deterministic replay.
         let transaction = inferadb_ledger_types::Transaction {
             id: *Uuid::new_v4().as_bytes(),
             client_id: inferadb_ledger_types::ClientId::new(client_id),
-            sequence: 0, // Server-assigned at apply time
+            sequence: 0,
             operations: internal_ops,
             timestamp: chrono::Utc::now(),
         };
+        let _ = organization;
 
         Ok(OrganizationRequest::Write {
             vault: vault.unwrap_or(VaultId::new(0)),
@@ -887,7 +884,6 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
 
         // Server-assigned sequences: no gap check needed
 
-        // Convert to internal request
         let ledger_request = self.operations_to_request(
             organization_id,
             Some(vault_id),
@@ -1609,7 +1605,6 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
 
         // Server-assigned sequences: no gap check needed
 
-        // Convert to internal request
         let ledger_request = self.operations_to_request(
             organization_id,
             Some(vault_id),

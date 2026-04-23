@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use inferadb_ledger_types::{OrganizationSlug, Region, VaultSlug};
 use serial_test::serial;
 
 use crate::{
@@ -53,6 +53,10 @@ async fn create_vault(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_idempotency_key_reuse_detection() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
@@ -141,6 +145,10 @@ async fn test_idempotency_key_reuse_detection() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_distinct_idempotency_keys_both_succeed() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
@@ -218,6 +226,10 @@ async fn test_distinct_idempotency_keys_both_succeed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_two_vault_server_assigned_sequences() {
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
@@ -355,6 +367,10 @@ async fn test_two_vault_server_assigned_sequences() {
 async fn test_vault_divergence_does_not_affect_other_vaults() {
     // Use 1-node cluster to simplify debugging
     let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
@@ -544,6 +560,10 @@ async fn test_vault_divergence_does_not_affect_other_vaults() {
 #[serial]
 async fn test_diverged_vault_returns_unavailable() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
@@ -677,6 +697,10 @@ async fn test_diverged_vault_returns_unavailable() {
 #[serial]
 async fn test_follower_state_root_verification() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
@@ -764,6 +788,11 @@ async fn test_follower_state_root_verification() {
 #[serial]
 async fn test_idempotency_survives_leader_failover() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
+    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let original_leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");

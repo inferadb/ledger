@@ -20,7 +20,7 @@
 use std::{collections::HashSet, time::Duration};
 
 use inferadb_ledger_proto::proto::{ClientId, ReadRequest, WriteRequest};
-use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use inferadb_ledger_types::{OrganizationSlug, Region, VaultSlug};
 use serial_test::serial;
 
 use crate::common::{TestCluster, TestNode, create_read_client, create_write_client};
@@ -119,32 +119,42 @@ async fn read_entity(
 #[serial]
 async fn test_committed_write_survives_leader_crash() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
+    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");
     let leader_addr = &leader.addr;
 
-    // Create organization and vault
-    let organization =
-        create_organization(leader_addr, "crash-ns", leader).await.expect("create organization");
-    let vault = create_vault(leader_addr, organization).await.expect("create vault");
+    // ORG-ISOLATION: two orgs + two vaults. Writes go to alpha; beta must stay
+    // empty on every node.
+    let org_alpha =
+        create_organization(leader_addr, "crash-ns-a", leader).await.expect("create org alpha");
+    let vault_alpha = create_vault(leader_addr, org_alpha).await.expect("create vault alpha");
+    let org_beta =
+        create_organization(leader_addr, "crash-ns-b", leader).await.expect("create org beta");
+    let vault_beta = create_vault(leader_addr, org_beta).await.expect("create vault beta");
 
-    // Wait for org/vault to replicate
+    // Wait for orgs/vaults to replicate
     cluster.wait_for_sync(Duration::from_secs(2)).await;
 
-    // Write some data through the leader
+    // Write some data through the leader (alpha only)
     let mut client = create_write_client(leader_addr).await.expect("connect to leader");
 
     let client_id = format!("test-client-{}", leader_id);
     let write_req =
-        make_write_request(organization, vault, "chaos-key", b"chaos-value", &client_id);
+        make_write_request(org_alpha, vault_alpha, "chaos-key", b"chaos-value", &client_id);
 
     let response = client.write(write_req).await.expect("write should succeed").into_inner();
     let block_height = extract_block_height(response);
     assert!(block_height > 0, "write should be committed");
 
-    // Wait for replication to followers (GLOBAL + data region)
+    // Wait for replication to followers (GLOBAL + data region + per-org groups)
     cluster.wait_for_sync(Duration::from_secs(5)).await;
+    cluster.wait_for_organizations_synced(Region::US_EAST_VA, Duration::from_secs(5)).await;
 
     // Verify all nodes have the same last_applied before we check data
     let applied_indices: Vec<u64> = cluster.nodes().iter().map(|n| n.last_applied()).collect();
@@ -157,8 +167,14 @@ async fn test_committed_write_survives_leader_crash() {
     // Read from a follower to verify the write was replicated
     let followers = cluster.followers();
     let follower = followers.first().expect("should have follower");
-    let value = read_entity(&follower.addr, organization, vault, "chaos-key").await;
+    let value = read_entity(&follower.addr, org_alpha, vault_alpha, "chaos-key").await;
     assert_eq!(value, Some(b"chaos-value".to_vec()), "follower should have the committed write");
+
+    // Isolation: org_beta must not see the alpha write on any node.
+    for node in cluster.nodes() {
+        let value = read_entity(&node.addr, org_beta, vault_beta, "chaos-key").await;
+        assert_eq!(value, None, "node {} org_beta must not see alpha's write", node.id);
+    }
 }
 
 /// Tests that writes are still readable after a new leader is elected.
@@ -172,20 +188,29 @@ async fn test_committed_write_survives_leader_crash() {
 #[serial]
 async fn test_read_consistency_after_leader_change() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
+    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let initial_leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(initial_leader_id).expect("leader exists");
 
-    // Create organization and vault
-    let organization = create_organization(&leader.addr, "read-consistency-ns", leader)
+    // ORG-ISOLATION: alpha receives writes, beta must stay empty.
+    let org_alpha = create_organization(&leader.addr, "read-consistency-ns-a", leader)
         .await
-        .expect("create organization");
-    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
+        .expect("create org alpha");
+    let vault_alpha = create_vault(&leader.addr, org_alpha).await.expect("create vault alpha");
+    let org_beta = create_organization(&leader.addr, "read-consistency-ns-b", leader)
+        .await
+        .expect("create org beta");
+    let vault_beta = create_vault(&leader.addr, org_beta).await.expect("create vault beta");
 
     // Wait for org/vault to replicate
     cluster.wait_for_sync(Duration::from_secs(2)).await;
 
-    // Write data through the initial leader
+    // Write data through the initial leader (alpha only)
     let mut client = create_write_client(&leader.addr).await.expect("connect to leader");
 
     let client_id = format!("test-client-{}", initial_leader_id);
@@ -193,8 +218,8 @@ async fn test_read_consistency_after_leader_change() {
     // Write multiple keys to create state
     for i in 0..5u64 {
         let write_req = make_write_request(
-            organization,
-            vault,
+            org_alpha,
+            vault_alpha,
             &format!("key-{}", i),
             format!("value-{}", i).as_bytes(),
             &client_id,
@@ -202,20 +227,27 @@ async fn test_read_consistency_after_leader_change() {
         client.write(write_req).await.expect("write should succeed");
     }
 
-    // Wait for replication (global + data region)
+    // Wait for replication (global + data region + per-org groups)
     cluster.wait_for_sync(Duration::from_secs(5)).await;
+    cluster.wait_for_organizations_synced(Region::US_EAST_VA, Duration::from_secs(5)).await;
 
-    // Read from all nodes - they should all return the same values
+    // Read from all nodes - they should all return the same values for alpha,
+    // and nothing for beta.
     for node in cluster.nodes() {
         for i in 0..5 {
-            let value = read_entity(&node.addr, organization, vault, &format!("key-{}", i)).await;
+            let value =
+                read_entity(&node.addr, org_alpha, vault_alpha, &format!("key-{}", i)).await;
             assert_eq!(
                 value,
                 Some(format!("value-{}", i).into_bytes()),
-                "node {} should have key-{}",
+                "node {} should have key-{} in alpha",
                 node.id,
                 i
             );
+
+            let beta_value =
+                read_entity(&node.addr, org_beta, vault_beta, &format!("key-{}", i)).await;
+            assert_eq!(beta_value, None, "node {} beta must not see alpha key-{}", node.id, i);
         }
     }
 }
@@ -229,32 +261,57 @@ async fn test_read_consistency_after_leader_change() {
 #[serial]
 async fn test_sequential_writes_readable_on_three_node_cluster() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
+    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");
 
-    // Create organization and vault
-    let organization = create_organization(&leader.addr, "one-down-ns", leader)
-        .await
-        .expect("create organization");
-    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
+    // ORG-ISOLATION: two orgs. Writes go to alpha; beta stays empty.
+    let org_alpha =
+        create_organization(&leader.addr, "one-down-ns-a", leader).await.expect("create org alpha");
+    let vault_alpha = create_vault(&leader.addr, org_alpha).await.expect("create vault alpha");
+    let org_beta =
+        create_organization(&leader.addr, "one-down-ns-b", leader).await.expect("create org beta");
+    let vault_beta = create_vault(&leader.addr, org_beta).await.expect("create vault beta");
 
-    // Write through the leader
+    // Write through the leader (alpha only)
     let mut client = create_write_client(&leader.addr).await.expect("connect to leader");
 
     let client_id = format!("test-client-{}", leader_id);
-    let write_req = make_write_request(organization, vault, "key-1", b"value1", &client_id);
+    let write_req = make_write_request(org_alpha, vault_alpha, "key-1", b"value1", &client_id);
     client.write(write_req).await.expect("write should succeed");
 
-    let write_req = make_write_request(organization, vault, "key-2", b"value2", &client_id);
+    let write_req = make_write_request(org_alpha, vault_alpha, "key-2", b"value2", &client_id);
     client.write(write_req).await.expect("write should succeed");
 
-    // Verify both writes are readable
-    let value1 = read_entity(&leader.addr, organization, vault, "key-1").await;
-    let value2 = read_entity(&leader.addr, organization, vault, "key-2").await;
+    cluster.wait_for_organizations_synced(Region::US_EAST_VA, Duration::from_secs(5)).await;
+
+    // Verify both writes are readable on alpha
+    let value1 = read_entity(&leader.addr, org_alpha, vault_alpha, "key-1").await;
+    let value2 = read_entity(&leader.addr, org_alpha, vault_alpha, "key-2").await;
 
     assert_eq!(value1, Some(b"value1".to_vec()));
     assert_eq!(value2, Some(b"value2".to_vec()));
+
+    // Isolation: beta must not see the keys on any node.
+    for node in cluster.nodes() {
+        assert_eq!(
+            read_entity(&node.addr, org_beta, vault_beta, "key-1").await,
+            None,
+            "node {} beta must not see alpha key-1",
+            node.id
+        );
+        assert_eq!(
+            read_entity(&node.addr, org_beta, vault_beta, "key-2").await,
+            None,
+            "node {} beta must not see alpha key-2",
+            node.id
+        );
+    }
 }
 
 /// Tests that all nodes agree on block height after multiple writes.
@@ -265,15 +322,24 @@ async fn test_sequential_writes_readable_on_three_node_cluster() {
 #[serial]
 async fn test_deterministic_block_height_across_nodes() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
+    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");
 
-    // Create organization and vault
-    let organization = create_organization(&leader.addr, "det-height-ns", leader)
+    // ORG-ISOLATION: two orgs — writes go to alpha, beta stays empty.
+    let org_alpha = create_organization(&leader.addr, "det-height-ns-a", leader)
         .await
-        .expect("create organization");
-    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
+        .expect("create org alpha");
+    let vault_alpha = create_vault(&leader.addr, org_alpha).await.expect("create vault alpha");
+    let org_beta = create_organization(&leader.addr, "det-height-ns-b", leader)
+        .await
+        .expect("create org beta");
+    let vault_beta = create_vault(&leader.addr, org_beta).await.expect("create vault beta");
 
     // Wait for org/vault to replicate
     cluster.wait_for_sync(Duration::from_secs(2)).await;
@@ -282,12 +348,12 @@ async fn test_deterministic_block_height_across_nodes() {
 
     let client_id = format!("test-client-{}", leader_id);
 
-    // Submit multiple writes
+    // Submit multiple writes (alpha only)
     let num_writes = 10u64;
     for i in 0..num_writes {
         let write_req = make_write_request(
-            organization,
-            vault,
+            org_alpha,
+            vault_alpha,
             &format!("det-key-{}", i),
             &(i as u32).to_le_bytes(),
             &client_id,
@@ -295,8 +361,9 @@ async fn test_deterministic_block_height_across_nodes() {
         client.write(write_req).await.expect("write should succeed");
     }
 
-    // Wait for replication to complete
+    // Wait for replication to complete (global + data region + per-org groups)
     cluster.wait_for_sync(Duration::from_secs(5)).await;
+    cluster.wait_for_organizations_synced(Region::US_EAST_VA, Duration::from_secs(5)).await;
 
     // Check that all nodes have the same last_applied index
     let applied_indices: Vec<u64> = cluster.nodes().iter().map(|n| n.last_applied()).collect();
@@ -308,6 +375,12 @@ async fn test_deterministic_block_height_across_nodes() {
         "all nodes should have the same last_applied index, got {:?}",
         applied_indices
     );
+
+    // Isolation: beta must not see alpha's writes on any node.
+    for node in cluster.nodes() {
+        let value = read_entity(&node.addr, org_beta, vault_beta, "det-key-0").await;
+        assert_eq!(value, None, "node {} beta must not see alpha's det-key-0", node.id);
+    }
 }
 
 /// Tests that concurrent writes from multiple clients are all applied.
@@ -318,6 +391,10 @@ async fn test_deterministic_block_height_across_nodes() {
 #[serial]
 async fn test_concurrent_writes_all_applied() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");
@@ -390,25 +467,33 @@ async fn test_concurrent_writes_all_applied() {
 #[serial]
 async fn test_rapid_writes_no_data_loss() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
+    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");
 
-    // Create organization and vault
-    let organization =
-        create_organization(&leader.addr, "rapid-ns", leader).await.expect("create organization");
-    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
+    // ORG-ISOLATION: alpha receives all rapid writes, beta stays empty.
+    let org_alpha =
+        create_organization(&leader.addr, "rapid-ns-a", leader).await.expect("create org alpha");
+    let vault_alpha = create_vault(&leader.addr, org_alpha).await.expect("create vault alpha");
+    let org_beta =
+        create_organization(&leader.addr, "rapid-ns-b", leader).await.expect("create org beta");
+    let vault_beta = create_vault(&leader.addr, org_beta).await.expect("create vault beta");
 
     let mut client = create_write_client(&leader.addr).await.expect("connect to leader");
 
     let client_id = format!("rapid-client-{}", leader_id);
     let num_writes = 50u64;
 
-    // Submit writes as fast as possible
+    // Submit writes as fast as possible (alpha only)
     for i in 0..num_writes {
         let write_req = make_write_request(
-            organization,
-            vault,
+            org_alpha,
+            vault_alpha,
             &format!("rapid-{}", i),
             &(i as u32).to_le_bytes(),
             &client_id,
@@ -418,11 +503,13 @@ async fn test_rapid_writes_no_data_loss() {
 
     // Wait for all writes to replicate
     cluster.wait_for_sync(Duration::from_secs(5)).await;
+    cluster.wait_for_organizations_synced(Region::US_EAST_VA, Duration::from_secs(5)).await;
 
-    // Verify all writes are present
+    // Verify all writes are present on alpha
     let mut found_count = 0u64;
     for i in 0..num_writes {
-        let value = read_entity(&leader.addr, organization, vault, &format!("rapid-{}", i)).await;
+        let value =
+            read_entity(&leader.addr, org_alpha, vault_alpha, &format!("rapid-{}", i)).await;
         if value.is_some() {
             found_count += 1;
         }
@@ -433,6 +520,15 @@ async fn test_rapid_writes_no_data_loss() {
         "all {} rapid writes should be readable, found {}",
         num_writes, found_count
     );
+
+    // Isolation: beta must not see any rapid writes on any node (sample a few).
+    for node in cluster.nodes() {
+        for i in [0u64, 25, 49] {
+            let value =
+                read_entity(&node.addr, org_beta, vault_beta, &format!("rapid-{}", i)).await;
+            assert_eq!(value, None, "node {} beta must not see alpha rapid-{}", node.id, i);
+        }
+    }
 }
 
 /// Tests that the cluster maintains term agreement during normal operation.
@@ -442,22 +538,30 @@ async fn test_rapid_writes_no_data_loss() {
 #[serial]
 async fn test_term_agreement_maintained() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
+    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let leader_id = cluster.wait_for_leader().await;
 
-    // Create organization and vault
+    // ORG-ISOLATION: alpha gets writes, beta stays empty.
     let leader = cluster.leader().expect("should have leader");
-    let organization =
-        create_organization(&leader.addr, "term-ns", leader).await.expect("create organization");
-    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
+    let org_alpha =
+        create_organization(&leader.addr, "term-ns-a", leader).await.expect("create org alpha");
+    let vault_alpha = create_vault(&leader.addr, org_alpha).await.expect("create vault alpha");
+    let org_beta =
+        create_organization(&leader.addr, "term-ns-b", leader).await.expect("create org beta");
+    let vault_beta = create_vault(&leader.addr, org_beta).await.expect("create vault beta");
 
-    // Submit some writes to exercise the cluster
+    // Submit some writes to exercise the cluster (alpha only)
     let mut client = create_write_client(&leader.addr).await.expect("connect to leader");
 
     let client_id = format!("term-test-{}", leader_id);
     for i in 0..5u64 {
         let write_req = make_write_request(
-            organization,
-            vault,
+            org_alpha,
+            vault_alpha,
             &format!("term-key-{}", i),
             b"value",
             &client_id,
@@ -472,6 +576,13 @@ async fn test_term_agreement_maintained() {
     let unique_terms: HashSet<_> = terms.iter().collect();
 
     assert_eq!(unique_terms.len(), 1, "all nodes should be on the same term, got {:?}", terms);
+
+    // Isolation: beta must not see any alpha writes on any node.
+    cluster.wait_for_organizations_synced(Region::US_EAST_VA, Duration::from_secs(5)).await;
+    for node in cluster.nodes() {
+        let value = read_entity(&node.addr, org_beta, vault_beta, "term-key-0").await;
+        assert_eq!(value, None, "node {} beta must not see alpha term-key-0", node.id);
+    }
 }
 
 // Note: Vault and organization isolation tests are in write_read.rs.
@@ -482,15 +593,23 @@ async fn test_term_agreement_maintained() {
 #[serial]
 async fn test_key_overwrite_consistency() {
     let cluster = TestCluster::new(3).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
+    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");
 
-    // Create organization and vault
-    let organization = create_organization(&leader.addr, "overwrite-ns", leader)
+    // ORG-ISOLATION: two orgs. Overwrite happens in alpha; beta must not see it.
+    let org_alpha = create_organization(&leader.addr, "overwrite-ns-a", leader)
         .await
-        .expect("create organization");
-    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
+        .expect("create org alpha");
+    let vault_alpha = create_vault(&leader.addr, org_alpha).await.expect("create vault alpha");
+    let org_beta =
+        create_organization(&leader.addr, "overwrite-ns-b", leader).await.expect("create org beta");
+    let vault_beta = create_vault(&leader.addr, org_beta).await.expect("create vault beta");
 
     // Wait for org/vault to replicate
     cluster.wait_for_sync(Duration::from_secs(2)).await;
@@ -499,22 +618,26 @@ async fn test_key_overwrite_consistency() {
 
     let client_id = format!("overwrite-test-{}", leader_id);
 
-    // Write initial value
+    // Write initial value (alpha)
     let write_req =
-        make_write_request(organization, vault, "overwrite-key", b"initial", &client_id);
+        make_write_request(org_alpha, vault_alpha, "overwrite-key", b"initial", &client_id);
     client.write(write_req).await.expect("initial write");
 
-    // Overwrite with new value
+    // Overwrite with new value (alpha)
     let write_req =
-        make_write_request(organization, vault, "overwrite-key", b"updated", &client_id);
+        make_write_request(org_alpha, vault_alpha, "overwrite-key", b"updated", &client_id);
     client.write(write_req).await.expect("overwrite");
 
-    // Wait for replication (global + data region)
+    // Wait for replication (global + data region + per-org groups)
     cluster.wait_for_sync(Duration::from_secs(5)).await;
+    cluster.wait_for_organizations_synced(Region::US_EAST_VA, Duration::from_secs(5)).await;
 
-    // All nodes should see the updated value
+    // All nodes should see the updated value on alpha AND no value on beta.
     for node in cluster.nodes() {
-        let value = read_entity(&node.addr, organization, vault, "overwrite-key").await;
+        let value = read_entity(&node.addr, org_alpha, vault_alpha, "overwrite-key").await;
         assert_eq!(value, Some(b"updated".to_vec()), "node {} should have updated value", node.id);
+
+        let beta_value = read_entity(&node.addr, org_beta, vault_beta, "overwrite-key").await;
+        assert_eq!(beta_value, None, "node {} beta must not see alpha's overwrite-key", node.id);
     }
 }

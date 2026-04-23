@@ -986,9 +986,7 @@ async fn bootstrap_org_and_vault(
                 break;
             }
             if tokio::time::Instant::now() >= deadline {
-                panic!(
-                    "per-org group (US_EAST_VA, {org_id:?}) did not start within 5s"
-                );
+                panic!("per-org group (US_EAST_VA, {org_id:?}) did not start within 5s");
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -1015,14 +1013,13 @@ async fn bootstrap_org_and_vault(
     // to a `SystemRequest` worker silently fails deserialization and returns `Empty`.
     let vault_slug =
         inferadb_ledger_types::snowflake::generate_vault_slug().expect("generate vault slug");
-    let create_vault = SystemRequest::OrganizationMetadata(Box::new(
-        OrganizationRequest::CreateVault {
+    let create_vault =
+        SystemRequest::OrganizationMetadata(Box::new(OrganizationRequest::CreateVault {
             organization: org_id,
             slug: vault_slug,
             name: Some("sprint-1b3-vault".to_string()),
             retention_policy: None,
-        },
-    ));
+        }));
     let vault_id = match node
         .handle
         .propose_and_wait(RaftPayload::system(create_vault), Duration::from_secs(5))
@@ -1988,7 +1985,7 @@ async fn test_batch_writer_active_in_production() {
 
     let global = node.manager.get_region_group(Region::GLOBAL).expect("GLOBAL region running");
     assert!(
-        global.batch_handle().is_some(),
+        global.inner().batch_handle().is_some(),
         "GLOBAL region must have a BatchWriterHandle wired \
          after bootstrap (batch_handle() returned None — BatchWriter is \
          bypassed in production again)"
@@ -1997,7 +1994,7 @@ async fn test_batch_writer_active_in_production() {
     let data =
         node.manager.get_region_group(Region::US_EAST_VA).expect("US_EAST_VA region running");
     assert!(
-        data.batch_handle().is_some(),
+        data.inner().batch_handle().is_some(),
         "US_EAST_VA region must have a BatchWriterHandle \
          wired after start_data_region (batch_handle() returned None — data-region \
          code path bypasses the batch writer)"
@@ -2267,7 +2264,7 @@ async fn test_batch_writer_throughput_via_grpc_under_concurrent_load() {
     let data =
         node.manager.get_region_group(Region::US_EAST_VA).expect("US_EAST_VA region running");
     assert!(
-        data.batch_handle().is_some(),
+        data.inner().batch_handle().is_some(),
         "BatchWriter was not wired on US_EAST_VA when the gRPC writes ran — the \
          throughput measurement above exercised the direct-proposal fallback, not \
          the BatchWriter::submit path."

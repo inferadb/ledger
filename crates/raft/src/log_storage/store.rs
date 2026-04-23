@@ -85,7 +85,7 @@ pub struct RaftLogStore<B: StorageBackend = FileBackend> {
     /// data-region group; the organization's id for per-organization groups.
     /// Supplied at construction by `raft_manager::start_region`. Apply
     /// handlers read from this instead of payload pattern-matching on
-    /// `OrganizationRequest::Write { organization }` and friends.
+    /// `OrganizationRequest::Write { organization, .. }` and friends.
     pub(super) organization_id: OrganizationId,
     /// Node ID for block metadata.
     pub(super) node_id: NodeId,

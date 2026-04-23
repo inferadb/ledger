@@ -100,7 +100,7 @@ impl PlacementController {
                 .collect();
 
             let mut ops = check_dr_health(
-                &group,
+                group.inner(),
                 &desired,
                 &reader,
                 local_node_id,
@@ -114,11 +114,11 @@ impl PlacementController {
                 self.learner_first_seen.insert((region, node), t);
             }
 
-            ops.extend(schedule_dr_growth(&group, &desired, region));
+            ops.extend(schedule_dr_growth(group.inner(), &desired, region));
             ops.sort_by_key(|op| op.priority);
 
             if let Some(op) = ops.first() {
-                execute_operator(&group, op, &reader, &self.manager).await;
+                execute_operator(group.inner(), op, &reader, &self.manager).await;
             }
 
             let state = group.handle().shard_state();
@@ -128,7 +128,7 @@ impl PlacementController {
         }
 
         if is_global_leader {
-            self.check_drain(&reader, &global).await;
+            self.check_drain(&reader, global.inner()).await;
         }
 
         any_learners
@@ -139,7 +139,7 @@ impl PlacementController {
     async fn check_drain(
         &self,
         reader: &SystemStateReader,
-        global: &inferadb_ledger_raft::OrganizationGroup,
+        global: &inferadb_ledger_raft::InnerGroup,
     ) {
         let statuses = reader.all_node_statuses();
         for &(node_id, status) in &statuses {

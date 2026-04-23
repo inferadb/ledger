@@ -194,12 +194,18 @@ pub trait RegionResolver: Send + Sync {
     }
 }
 
-/// Builds a [`RegionContext`] from a [`OrganizationGroup`], including block announcements.
+/// Builds a [`RegionContext`] from an [`InnerGroup`], including block
+/// announcements.
 ///
-/// Used by the multi-region resolver where every region group provides its own
-/// block announcement channel.
+/// Uses the untyped [`InnerGroup`] because [`RegionContext`] is a shared
+/// carrier that downstream resolvers populate regardless of tier. Callers
+/// pass `.inner()` from their typed wrapper. This is a documented
+/// cross-tier escape hatch — the tier discipline is still enforced at the
+/// caller's type boundary, because the caller must have held an
+/// `Arc<SystemGroup>`, `Arc<RegionGroup>`, or `Arc<OrganizationGroup>` to
+/// reach the inner.
 fn region_context_from(
-    region: &inferadb_ledger_raft::raft_manager::OrganizationGroup,
+    region: &inferadb_ledger_raft::raft_manager::InnerGroup,
 ) -> Result<RegionContext, tonic::Status> {
     Ok(RegionContext {
         region: region.region(),
@@ -275,7 +281,7 @@ impl RegionResolver for RegionResolverService {
             }
         })?;
 
-        region_context_from(&region)
+        region_context_from(region.inner())
     }
 
     fn resolve_with_redirect(&self, organization: OrganizationId) -> Result<ResolveResult, Status> {
@@ -332,7 +338,7 @@ impl RegionResolver for RegionResolverService {
                 ))
             })?;
 
-            return Ok(ResolveResult::Local(region_context_from(&region)?));
+            return Ok(ResolveResult::Local(region_context_from(region.inner())?));
         }
 
         // Protected region, out-of-region: redirect with warning
@@ -353,7 +359,7 @@ impl RegionResolver for RegionResolverService {
             .system_region()
             .map_err(|e| Status::unavailable(format!("System region not available: {}", e)))?;
 
-        region_context_from(&region)
+        region_context_from(region.inner())
     }
 
     fn supports_forwarding(&self) -> bool {

@@ -324,212 +324,164 @@ impl Drop for RegionBackgroundJobs {
     }
 }
 
-/// Organization data-plane Raft group (one per organization, per region).
+/// Internal peer-group storage shared by all three tier wrappers.
 ///
-/// Each `OrganizationGroup` owns the organization's entity writes, vault
-/// lifecycle, app credentials, user/team memberships, and
-/// organization-scoped saga PII. Storage is per-organization
-/// (`{data_dir}/{region}/{organization_id}/`); replication is via Raft
-/// AppendEntries; leader is delegated from the parent
-/// [`RegionGroup`](self::RegionGroup) under the B.1 unified-leadership
-/// model.
+/// **Do not use this type directly from consumer code.** It exists so the three
+/// tier newtypes ([`SystemGroup`], [`RegionGroup`], [`OrganizationGroup`]) can
+/// share a single field layout and a single construction/registration path,
+/// while each wrapper's public API surfaces only the methods appropriate for
+/// its tier.
 ///
-/// Uses FileBackend for production storage — Raft requires durable storage
-/// for safety.
-pub struct OrganizationGroup {
-    /// Region this organization belongs to.
-    region: Region,
-    /// Organization identifier. The pair `(region, organization_id)` is
-    /// the routing key to this group.
-    organization_id: OrganizationId,
+/// ## Why a shared inner and not three independently-typed structs?
+///
+/// The B.1 spec calls for three structurally-distinct structs. Writing them
+/// literally would duplicate a ~1500-line construction + registration pipeline
+/// (`start_region`, `start_background_jobs`, `register_consensus_region`,
+/// hibernation, wake, graceful shutdown). The B.1 guard-rail those distinct
+/// structs give us is *compile-time tier discipline at the API boundary* —
+/// root rule 15. That is what Option C achieves here: the wrappers do not
+/// implement `Deref`, so consumers cannot reach fields on `InnerGroup`
+/// directly; they see only the methods the wrapper chooses to expose.
+///
+/// When the spec's per-tier field divergences actually appear (e.g.
+/// `SystemGroup::coordination_event_tx`, `RegionGroup::leader_change_tx`),
+/// add them here and expose accessors only on the relevant wrapper's `impl`.
+/// Cross-tier leakage is detected when a caller tries to access a tier-wrong
+/// method through the wrapper — that stays a compile error.
+///
+/// `lookup_by_consensus_shard` in `RaftManager` returns `Arc<InnerGroup>`
+/// because the Raft gRPC wire dispatches by `ConsensusStateId` and genuinely
+/// does not know which tier owns the shard. That's the one documented
+/// cross-tier escape hatch.
+pub struct InnerGroup {
+    /// Region this group belongs to.
+    pub(crate) region: Region,
+    /// Organization identifier. `OrganizationId::new(0)` identifies system
+    /// and regional control-plane groups; any other value identifies a
+    /// per-organization data-plane group.
+    pub(crate) organization_id: OrganizationId,
     /// Consensus handle for background jobs and services.
-    handle: Arc<ConsensusHandle>,
-    /// Shared state layer for this region.
-    state: Arc<StateLayer<FileBackend>>,
-    /// `raft.db` handle for this region.
-    ///
-    /// Shared between the [`StateCheckpointer`] (which syncs it on every
-    /// checkpoint tick) and [`RaftManager::sync_all_state_dbs`] (which syncs
-    /// it at graceful shutdown). Both flush paths are required because
-    /// `save_state_core` writes `KEY_APPLIED_STATE` to raft.db via
-    /// `commit_in_memory` — leaving raft.db unsynced causes clean-shutdown
-    /// restarts to read `applied_durable = 0` and replay the entire WAL.
-    /// See the follow-up in
-    /// `docs/superpowers/specs/2026-04-19-commit-durability-audit.md`.
-    raft_db: Arc<Database<FileBackend>>,
-    /// `blocks.db` handle for this region.
-    ///
-    /// Surfaced alongside `raft_db` so the [`StateCheckpointer`] and
-    /// [`RaftManager::sync_all_state_dbs`] can drive `sync_state` on
-    /// blocks.db in lock-step with state.db + raft.db.
-    /// `BlockArchive::append_block` uses `commit_in_memory`; without this
-    /// handle the dirty pages from apply-phase block writes would never
-    /// reach disk outside of ad-hoc flushes. The underlying database is
-    /// shared with `block_archive` — the `BlockArchive` owns the domain
-    /// API, while this field owns the durability lifecycle handle.
-    blocks_db: Arc<Database<FileBackend>>,
+    pub(crate) handle: Arc<ConsensusHandle>,
+    /// Shared state layer.
+    pub(crate) state: Arc<StateLayer<FileBackend>>,
+    /// `raft.db` handle. Shared with [`StateCheckpointer`] and
+    /// [`RaftManager::sync_all_state_dbs`] — skipping its sync leaves
+    /// `applied_durable = 0` and forces full WAL replay on next boot.
+    pub(crate) raft_db: Arc<Database<FileBackend>>,
+    /// `blocks.db` handle. Owned alongside `block_archive` for the
+    /// durability lifecycle.
+    pub(crate) blocks_db: Arc<Database<FileBackend>>,
     /// Block archive for historical blocks.
-    block_archive: Arc<BlockArchive<FileBackend>>,
+    pub(crate) block_archive: Arc<BlockArchive<FileBackend>>,
     /// Accessor for applied state.
-    applied_state: AppliedStateAccessor,
-    /// Block announcement broadcast channel for real-time block notifications.
-    block_announcements: broadcast::Sender<BlockAnnouncement>,
-    /// Background job handles (wrapped in Mutex for mutable access through Arc).
-    background_jobs: parking_lot::Mutex<RegionBackgroundJobs>,
-    /// Batch writer handle for coalescing writes (if batch writing is enabled).
-    batch_handle: Option<BatchWriterHandle>,
-    /// Shared state root commitment buffer.
-    ///
-    /// Populated by `apply_to_state_machine` after each block, drained by the
-    /// leader when constructing the next `RaftPayload` for piggybacked verification.
-    commitment_buffer: std::sync::Arc<std::sync::Mutex<Vec<crate::types::StateRootCommitment>>>,
-    /// Leader lease for fast linearizable reads on the leader.
-    leader_lease: Arc<crate::leader_lease::LeaderLease>,
+    pub(crate) applied_state: AppliedStateAccessor,
+    /// Block announcement broadcast channel.
+    pub(crate) block_announcements: broadcast::Sender<BlockAnnouncement>,
+    /// Background job handles.
+    pub(crate) background_jobs: parking_lot::Mutex<RegionBackgroundJobs>,
+    /// Batch writer handle for coalescing writes (data-plane groups only).
+    pub(crate) batch_handle: Option<BatchWriterHandle>,
+    /// Shared state root commitment buffer. Populated by apply, drained
+    /// by propose for piggybacked verification.
+    pub(crate) commitment_buffer:
+        std::sync::Arc<std::sync::Mutex<Vec<crate::types::StateRootCommitment>>>,
+    /// Leader lease for fast linearizable reads.
+    pub(crate) leader_lease: Arc<crate::leader_lease::LeaderLease>,
     /// Watch channel receiver for applied index (ReadIndex protocol).
-    applied_index_rx: tokio::sync::watch::Receiver<u64>,
+    pub(crate) applied_index_rx: tokio::sync::watch::Receiver<u64>,
     /// Consensus transport for dynamic peer channel management.
-    consensus_transport: Option<crate::consensus_transport::GrpcConsensusTransport>,
-    /// Events database for event queries and handler-phase recording.
-    events_db: Option<Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>>,
-    /// Last activity timestamp (updated on every request).
-    last_activity: Arc<parking_lot::Mutex<std::time::Instant>>,
+    pub(crate) consensus_transport: Option<crate::consensus_transport::GrpcConsensusTransport>,
+    /// Events database.
+    pub(crate) events_db: Option<Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>>,
+    /// Last activity timestamp (for hibernation).
+    pub(crate) last_activity: Arc<parking_lot::Mutex<std::time::Instant>>,
     /// Whether background jobs are currently running.
-    jobs_active: Arc<AtomicBool>,
-    /// Receiver for data region creation signals from the GLOBAL apply handler.
-    ///
-    /// Only populated for the GLOBAL region group. Taken once by the bootstrap
-    /// handler via [`take_region_creation_rx`](OrganizationGroup::take_region_creation_rx).
-    region_creation_rx:
+    pub(crate) jobs_active: Arc<AtomicBool>,
+    /// Receiver for data-region creation signals (system tier only).
+    pub(crate) region_creation_rx:
         parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<RegionCreationRequest>>>,
-    /// Receiver for organization creation signals from the GLOBAL apply handler.
-    ///
-    /// Only populated for the GLOBAL region group. Taken once by the bootstrap
-    /// handler via
-    /// [`take_organization_creation_rx`](OrganizationGroup::take_organization_creation_rx).
-    /// Drives B.1.6 multi-tier orchestration: each `CreateOrganization`
-    /// apply emits a signal here, the bootstrap handler picks it up, and
-    /// each in-region node calls
-    /// [`RaftManager::start_organization_group`](RaftManager::start_organization_group)
-    /// for the new `(region, organization_id)` pair.
-    organization_creation_rx: parking_lot::Mutex<
+    /// Receiver for organization creation signals (system tier only).
+    pub(crate) organization_creation_rx: parking_lot::Mutex<
         Option<tokio::sync::mpsc::UnboundedReceiver<OrganizationCreationRequest>>,
     >,
 }
 
-impl OrganizationGroup {
-    /// Returns the region ID.
+impl InnerGroup {
+    /// Returns the region.
     pub fn region(&self) -> Region {
         self.region
     }
 
-    /// Returns the organization this Raft group owns.
-    ///
-    /// `OrganizationId::new(0)` identifies the data-region group (the
-    /// regional control plane under B.1's compat shim); any other value
-    /// identifies a per-organization data-plane group. Surfaced so
-    /// metrics, tracing, and diagnostics can label output with the
-    /// `organization_id` dimension.
+    /// Returns the organization identifier.
     pub fn organization_id(&self) -> OrganizationId {
         self.organization_id
     }
 
     /// Returns the consensus handle.
-    #[must_use]
     pub fn handle(&self) -> &Arc<ConsensusHandle> {
         &self.handle
     }
 
     /// Returns the state layer.
-    #[must_use]
     pub fn state(&self) -> &Arc<StateLayer<FileBackend>> {
         &self.state
     }
 
-    /// Returns the `raft.db` handle for this region.
-    ///
-    /// Used by [`RaftManager::sync_all_state_dbs`] and the
-    /// [`StateCheckpointer`] to force the `KEY_APPLIED_STATE` blob to disk.
-    /// See [`OrganizationGroup::raft_db`] for the full durability rationale.
-    #[must_use]
+    /// Returns the `raft.db` handle.
     pub fn raft_db(&self) -> &Arc<Database<FileBackend>> {
         &self.raft_db
     }
 
-    /// Returns the `blocks.db` handle for this region.
-    ///
-    /// Used by [`RaftManager::sync_all_state_dbs`] and the
-    /// [`StateCheckpointer`] to drive `sync_state` on blocks.db alongside
-    /// state.db, raft.db, and events.db. The underlying database is shared
-    /// with `block_archive` — this accessor surfaces the raw `Database`
-    /// handle for the durability lifecycle, while `block_archive` exposes
-    /// the domain API.
-    #[must_use]
+    /// Returns the `blocks.db` handle.
     pub fn blocks_db(&self) -> &Arc<Database<FileBackend>> {
         &self.blocks_db
     }
 
-    /// Returns the underlying `events.db` database handle, if this region
-    /// has an events database configured.
-    ///
-    /// Used by [`RaftManager::sync_all_state_dbs`] and the
-    /// [`StateCheckpointer`] to drive `sync_state` on events.db alongside
-    /// state.db, raft.db, and blocks.db. Returns `None` for regions that
-    /// were constructed without an events database (test fixtures,
-    /// historical GLOBAL-only configurations); the checkpointer / shutdown
-    /// sweep silently skip events.db in that case.
-    ///
-    /// The return type intentionally surfaces an owned `Arc` rather than a
-    /// reference so callers can pass it directly to `Database::sync_state`
-    /// (which consumes an `Arc<Self>`).
-    #[must_use]
+    /// Returns the underlying `events.db` database, if configured.
     pub fn events_state_db(&self) -> Option<Arc<Database<FileBackend>>> {
         self.events_db.as_ref().map(|ed| Arc::clone(ed.db()))
     }
 
     /// Returns the block archive.
-    #[must_use]
     pub fn block_archive(&self) -> &Arc<BlockArchive<FileBackend>> {
         &self.block_archive
     }
 
     /// Returns the applied state accessor.
-    #[must_use]
     pub fn applied_state(&self) -> &AppliedStateAccessor {
         &self.applied_state
     }
 
     /// Returns the block announcements broadcast channel.
-    #[must_use]
     pub fn block_announcements(&self) -> &broadcast::Sender<BlockAnnouncement> {
         &self.block_announcements
     }
 
-    /// Returns the consensus transport for dynamic peer channel management.
-    #[must_use]
+    /// Returns the consensus transport.
     pub fn consensus_transport(
         &self,
     ) -> Option<&crate::consensus_transport::GrpcConsensusTransport> {
         self.consensus_transport.as_ref()
     }
 
-    /// Returns the events database, if available.
-    #[must_use]
-    pub fn events_db(&self) -> Option<&Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>> {
+    /// Returns the events database.
+    pub fn events_db(
+        &self,
+    ) -> Option<&Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>> {
         self.events_db.as_ref()
     }
 
-    /// Returns the batch writer handle, if batch writing is enabled for this region.
-    #[must_use]
+    /// Returns the batch writer handle.
     pub fn batch_handle(&self) -> Option<&BatchWriterHandle> {
         self.batch_handle.as_ref()
     }
 
-    /// Records activity on this region group, resetting the idle timer.
+    /// Records activity on this group, resetting the idle timer.
     pub fn touch(&self) {
         *self.last_activity.lock() = std::time::Instant::now();
     }
 
-    /// Returns the number of seconds since the last activity.
+    /// Returns seconds since the last activity.
     pub fn idle_secs(&self) -> u64 {
         self.last_activity.lock().elapsed().as_secs()
     }
@@ -539,24 +491,17 @@ impl OrganizationGroup {
         self.jobs_active.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    /// Returns the leader lease for this region.
-    #[must_use]
+    /// Returns the leader lease.
     pub fn leader_lease(&self) -> &Arc<crate::leader_lease::LeaderLease> {
         &self.leader_lease
     }
 
-    /// Returns a receiver for the applied index watch channel.
-    ///
-    /// Used by the ReadIndex protocol: followers wait on this channel
-    /// until their applied index reaches the leader's committed index.
+    /// Returns a receiver for the applied-index watch channel.
     pub fn applied_index_watch(&self) -> tokio::sync::watch::Receiver<u64> {
         self.applied_index_rx.clone()
     }
 
-    /// Drains all buffered state root commitments.
-    ///
-    /// Called by the leader when constructing `RaftPayload` to piggyback
-    /// commitments from the previous apply batch onto the next entry.
+    /// Drains buffered state root commitments.
     pub fn drain_state_root_commitments(&self) -> Vec<crate::types::StateRootCommitment> {
         std::mem::take(&mut *self.commitment_buffer.lock().unwrap_or_else(|e| e.into_inner()))
     }
@@ -568,37 +513,499 @@ impl OrganizationGroup {
         std::sync::Arc::clone(&self.commitment_buffer)
     }
 
-    /// Checks if this node is the leader for this region.
+    /// Checks if this node is the leader.
     pub fn is_leader(&self, _node_id: LedgerNodeId) -> bool {
         self.handle.is_leader()
     }
 
-    /// Returns the current leader node ID, if known.
+    /// Returns the current leader node ID.
     pub fn current_leader(&self) -> Option<LedgerNodeId> {
         self.handle.current_leader()
     }
 
-    /// Takes the region creation receiver from the GLOBAL region group.
-    ///
-    /// Returns `Some` exactly once for the GLOBAL region. The bootstrap handler
-    /// calls this to spawn a task that starts data regions as they are created
-    /// through GLOBAL Raft consensus.
+    /// Takes the region-creation receiver (system tier only).
     pub fn take_region_creation_rx(
         &self,
     ) -> Option<tokio::sync::mpsc::UnboundedReceiver<RegionCreationRequest>> {
         self.region_creation_rx.lock().take()
     }
 
-    /// Takes the organization-creation receiver from the GLOBAL region group.
-    ///
-    /// Returns `Some` exactly once for the GLOBAL region. The bootstrap
-    /// handler calls this to spawn a task that starts per-organization
-    /// Raft groups as they are created through GLOBAL `CreateOrganization`
-    /// consensus.
+    /// Takes the organization-creation receiver (system tier only).
     pub fn take_organization_creation_rx(
         &self,
     ) -> Option<tokio::sync::mpsc::UnboundedReceiver<OrganizationCreationRequest>> {
         self.organization_creation_rx.lock().take()
+    }
+}
+
+// ============================================================================
+// Tier newtypes — Option C compile-time tier discipline
+// ============================================================================
+//
+// Each wrapper owns an `Arc<InnerGroup>` and exposes only the subset of
+// methods appropriate for its tier. No `Deref` impl — that would leak the
+// full API and defeat tier discipline. Cross-tier access requires explicit
+// re-resolution through `RaftManager`.
+
+/// System-tier Raft group — cluster-wide control plane (`GLOBAL` region,
+/// `OrganizationId::new(0)`).
+///
+/// Owns the organization directory, region directory, cluster signing keys,
+/// and cross-region saga records. Every cluster hosts exactly one
+/// `SystemGroup`; it is the only group that applies `SystemRequest`.
+#[derive(Clone)]
+pub struct SystemGroup(pub(crate) Arc<InnerGroup>);
+
+/// Region-tier Raft group — regional control plane (one per region, at
+/// `OrganizationId::new(0)`).
+///
+/// Owns placement, hibernation/wake, per-region audit, and unified leader
+/// election for every per-organization group in the region. Applies
+/// `RegionRequest` variants; per-organization Raft groups adopt their leader
+/// from this group under `LeadershipMode::Delegated`.
+#[derive(Clone)]
+pub struct RegionGroup(pub(crate) Arc<InnerGroup>);
+
+/// Organization-tier Raft group — data plane (one per organization, per
+/// region).
+///
+/// Owns entity writes, vault lifecycle, app credentials, user/team
+/// memberships, and organization-scoped saga PII. Applies
+/// `OrganizationRequest`. Storage is per-organization
+/// (`{data_dir}/{region}/{organization_id}/`); leader is delegated from the
+/// parent [`RegionGroup`] under the B.1 unified-leadership model.
+#[derive(Clone)]
+pub struct OrganizationGroup(pub(crate) Arc<InnerGroup>);
+
+// ----------------------------------------------------------------------------
+// SystemGroup impl — cluster control plane
+// ----------------------------------------------------------------------------
+
+impl SystemGroup {
+    /// Tier-escape accessor to the underlying [`InnerGroup`] for shared
+    /// machinery that does not need tier-specific methods (e.g.
+    /// constructing a carrier type that holds common consensus state).
+    /// Using this to access tier-inappropriate methods is a tier-discipline
+    /// violation.
+    #[doc(hidden)]
+    pub fn inner(&self) -> &Arc<InnerGroup> {
+        &self.0
+    }
+
+    /// Returns the region (always `Region::GLOBAL`).
+    pub fn region(&self) -> Region {
+        self.0.region()
+    }
+
+    /// Returns the consensus handle.
+    #[must_use]
+    pub fn handle(&self) -> &Arc<ConsensusHandle> {
+        self.0.handle()
+    }
+
+    /// Returns the state layer.
+    #[must_use]
+    pub fn state(&self) -> &Arc<StateLayer<FileBackend>> {
+        self.0.state()
+    }
+
+    /// Returns the `raft.db` handle.
+    #[must_use]
+    pub fn raft_db(&self) -> &Arc<Database<FileBackend>> {
+        self.0.raft_db()
+    }
+
+    /// Returns the `blocks.db` handle.
+    ///
+    /// The system group owns a Merkle chain for saga records.
+    #[must_use]
+    pub fn blocks_db(&self) -> &Arc<Database<FileBackend>> {
+        self.0.blocks_db()
+    }
+
+    /// Returns the underlying `events.db` database, if configured.
+    #[must_use]
+    pub fn events_state_db(&self) -> Option<Arc<Database<FileBackend>>> {
+        self.0.events_state_db()
+    }
+
+    /// Returns the events database, if available.
+    #[must_use]
+    pub fn events_db(&self) -> Option<&Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>> {
+        self.0.events_db()
+    }
+
+    /// Returns the block archive.
+    #[must_use]
+    pub fn block_archive(&self) -> &Arc<BlockArchive<FileBackend>> {
+        self.0.block_archive()
+    }
+
+    /// Returns the applied state accessor.
+    #[must_use]
+    pub fn applied_state(&self) -> &AppliedStateAccessor {
+        self.0.applied_state()
+    }
+
+    /// Returns the block announcements broadcast channel.
+    #[must_use]
+    pub fn block_announcements(&self) -> &broadcast::Sender<BlockAnnouncement> {
+        self.0.block_announcements()
+    }
+
+    /// Returns the leader lease.
+    #[must_use]
+    pub fn leader_lease(&self) -> &Arc<crate::leader_lease::LeaderLease> {
+        self.0.leader_lease()
+    }
+
+    /// Returns the consensus transport.
+    #[must_use]
+    pub fn consensus_transport(
+        &self,
+    ) -> Option<&crate::consensus_transport::GrpcConsensusTransport> {
+        self.0.consensus_transport()
+    }
+
+    /// Returns a receiver for the applied-index watch channel.
+    pub fn applied_index_watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.0.applied_index_watch()
+    }
+
+    /// Drains buffered state root commitments.
+    pub fn drain_state_root_commitments(&self) -> Vec<crate::types::StateRootCommitment> {
+        self.0.drain_state_root_commitments()
+    }
+
+    /// Returns the shared commitment buffer handle.
+    pub fn commitment_buffer(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<Vec<crate::types::StateRootCommitment>>> {
+        self.0.commitment_buffer()
+    }
+
+    /// Records activity on this group.
+    pub fn touch(&self) {
+        self.0.touch();
+    }
+
+    /// Returns seconds since the last activity.
+    pub fn idle_secs(&self) -> u64 {
+        self.0.idle_secs()
+    }
+
+    /// Returns whether background jobs are currently running.
+    pub fn is_jobs_active(&self) -> bool {
+        self.0.is_jobs_active()
+    }
+
+    /// Checks if this node is the leader.
+    pub fn is_leader(&self, node_id: LedgerNodeId) -> bool {
+        self.0.is_leader(node_id)
+    }
+
+    /// Returns the current leader node ID.
+    pub fn current_leader(&self) -> Option<LedgerNodeId> {
+        self.0.current_leader()
+    }
+
+    /// Takes the region-creation receiver. System-tier-only.
+    ///
+    /// Returns `Some` exactly once. The bootstrap handler calls this to spawn
+    /// a task that starts data regions as they are created through GLOBAL
+    /// Raft consensus.
+    pub fn take_region_creation_rx(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<RegionCreationRequest>> {
+        self.0.take_region_creation_rx()
+    }
+
+    /// Takes the organization-creation receiver. System-tier-only.
+    pub fn take_organization_creation_rx(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<OrganizationCreationRequest>> {
+        self.0.take_organization_creation_rx()
+    }
+}
+
+// ----------------------------------------------------------------------------
+// RegionGroup impl — regional control plane
+// ----------------------------------------------------------------------------
+
+impl RegionGroup {
+    /// Tier-escape accessor to the underlying [`InnerGroup`]. See
+    /// [`SystemGroup::inner`] for the rationale and the tier-discipline
+    /// caveat.
+    #[doc(hidden)]
+    pub fn inner(&self) -> &Arc<InnerGroup> {
+        &self.0
+    }
+
+    /// Returns the region this group owns.
+    pub fn region(&self) -> Region {
+        self.0.region()
+    }
+
+    /// Returns the consensus handle.
+    #[must_use]
+    pub fn handle(&self) -> &Arc<ConsensusHandle> {
+        self.0.handle()
+    }
+
+    /// Returns the state layer.
+    #[must_use]
+    pub fn state(&self) -> &Arc<StateLayer<FileBackend>> {
+        self.0.state()
+    }
+
+    /// Returns the `raft.db` handle.
+    #[must_use]
+    pub fn raft_db(&self) -> &Arc<Database<FileBackend>> {
+        self.0.raft_db()
+    }
+
+    /// Returns the `blocks.db` handle.
+    ///
+    /// Under the B.1 compat shim the regional control plane shares storage
+    /// with a data-region group at `OrganizationId::new(0)` — saga records
+    /// ride on that Merkle chain. The spec's RegionGroup has no blocks.db;
+    /// this accessor will disappear when the control plane moves off the
+    /// shared group (B.1.6+).
+    #[must_use]
+    pub fn blocks_db(&self) -> &Arc<Database<FileBackend>> {
+        self.0.blocks_db()
+    }
+
+    /// Returns the underlying `events.db` database, if configured.
+    #[must_use]
+    pub fn events_state_db(&self) -> Option<Arc<Database<FileBackend>>> {
+        self.0.events_state_db()
+    }
+
+    /// Returns the events database, if available.
+    #[must_use]
+    pub fn events_db(&self) -> Option<&Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>> {
+        self.0.events_db()
+    }
+
+    /// Returns the block archive.
+    ///
+    /// B.1 compat shim — see [`blocks_db`](Self::blocks_db).
+    #[must_use]
+    pub fn block_archive(&self) -> &Arc<BlockArchive<FileBackend>> {
+        self.0.block_archive()
+    }
+
+    /// Returns the applied state accessor.
+    #[must_use]
+    pub fn applied_state(&self) -> &AppliedStateAccessor {
+        self.0.applied_state()
+    }
+
+    /// Returns the block announcements broadcast channel.
+    #[must_use]
+    pub fn block_announcements(&self) -> &broadcast::Sender<BlockAnnouncement> {
+        self.0.block_announcements()
+    }
+
+    /// Returns the leader lease — the source of truth for leadership in
+    /// this region.
+    #[must_use]
+    pub fn leader_lease(&self) -> &Arc<crate::leader_lease::LeaderLease> {
+        self.0.leader_lease()
+    }
+
+    /// Returns the consensus transport.
+    #[must_use]
+    pub fn consensus_transport(
+        &self,
+    ) -> Option<&crate::consensus_transport::GrpcConsensusTransport> {
+        self.0.consensus_transport()
+    }
+
+    /// Returns a receiver for the applied-index watch channel.
+    pub fn applied_index_watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.0.applied_index_watch()
+    }
+
+    /// Drains buffered state root commitments.
+    pub fn drain_state_root_commitments(&self) -> Vec<crate::types::StateRootCommitment> {
+        self.0.drain_state_root_commitments()
+    }
+
+    /// Returns the shared commitment buffer handle.
+    pub fn commitment_buffer(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<Vec<crate::types::StateRootCommitment>>> {
+        self.0.commitment_buffer()
+    }
+
+    /// Records activity on this group.
+    pub fn touch(&self) {
+        self.0.touch();
+    }
+
+    /// Returns seconds since the last activity.
+    pub fn idle_secs(&self) -> u64 {
+        self.0.idle_secs()
+    }
+
+    /// Returns whether background jobs are currently running.
+    pub fn is_jobs_active(&self) -> bool {
+        self.0.is_jobs_active()
+    }
+
+    /// Checks if this node is the region leader.
+    pub fn is_leader(&self, node_id: LedgerNodeId) -> bool {
+        self.0.is_leader(node_id)
+    }
+
+    /// Returns the current region leader node ID.
+    pub fn current_leader(&self) -> Option<LedgerNodeId> {
+        self.0.current_leader()
+    }
+}
+
+// ----------------------------------------------------------------------------
+// OrganizationGroup impl — data plane
+// ----------------------------------------------------------------------------
+
+impl OrganizationGroup {
+    /// Tier-escape accessor to the underlying [`InnerGroup`]. See
+    /// [`SystemGroup::inner`] for the rationale and the tier-discipline
+    /// caveat.
+    #[doc(hidden)]
+    pub fn inner(&self) -> &Arc<InnerGroup> {
+        &self.0
+    }
+
+    /// Returns the region.
+    pub fn region(&self) -> Region {
+        self.0.region()
+    }
+
+    /// Returns the organization this group owns.
+    pub fn organization_id(&self) -> OrganizationId {
+        self.0.organization_id()
+    }
+
+    /// Returns the consensus handle.
+    #[must_use]
+    pub fn handle(&self) -> &Arc<ConsensusHandle> {
+        self.0.handle()
+    }
+
+    /// Returns the state layer.
+    #[must_use]
+    pub fn state(&self) -> &Arc<StateLayer<FileBackend>> {
+        self.0.state()
+    }
+
+    /// Returns the `raft.db` handle.
+    #[must_use]
+    pub fn raft_db(&self) -> &Arc<Database<FileBackend>> {
+        self.0.raft_db()
+    }
+
+    /// Returns the `blocks.db` handle.
+    #[must_use]
+    pub fn blocks_db(&self) -> &Arc<Database<FileBackend>> {
+        self.0.blocks_db()
+    }
+
+    /// Returns the underlying `events.db` database, if configured.
+    #[must_use]
+    pub fn events_state_db(&self) -> Option<Arc<Database<FileBackend>>> {
+        self.0.events_state_db()
+    }
+
+    /// Returns the events database, if available.
+    #[must_use]
+    pub fn events_db(&self) -> Option<&Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>> {
+        self.0.events_db()
+    }
+
+    /// Returns the block archive.
+    #[must_use]
+    pub fn block_archive(&self) -> &Arc<BlockArchive<FileBackend>> {
+        self.0.block_archive()
+    }
+
+    /// Returns the applied state accessor.
+    #[must_use]
+    pub fn applied_state(&self) -> &AppliedStateAccessor {
+        self.0.applied_state()
+    }
+
+    /// Returns the block announcements broadcast channel.
+    #[must_use]
+    pub fn block_announcements(&self) -> &broadcast::Sender<BlockAnnouncement> {
+        self.0.block_announcements()
+    }
+
+    /// Returns the batch writer handle, if batch writing is enabled.
+    #[must_use]
+    pub fn batch_handle(&self) -> Option<&BatchWriterHandle> {
+        self.0.batch_handle()
+    }
+
+    /// Returns the leader lease. Under `LeadershipMode::Delegated` this is
+    /// the parent region group's lease.
+    #[must_use]
+    pub fn leader_lease(&self) -> &Arc<crate::leader_lease::LeaderLease> {
+        self.0.leader_lease()
+    }
+
+    /// Returns the consensus transport (shared with the parent region
+    /// group).
+    #[must_use]
+    pub fn consensus_transport(
+        &self,
+    ) -> Option<&crate::consensus_transport::GrpcConsensusTransport> {
+        self.0.consensus_transport()
+    }
+
+    /// Returns a receiver for the applied-index watch channel.
+    pub fn applied_index_watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.0.applied_index_watch()
+    }
+
+    /// Drains buffered state root commitments.
+    pub fn drain_state_root_commitments(&self) -> Vec<crate::types::StateRootCommitment> {
+        self.0.drain_state_root_commitments()
+    }
+
+    /// Returns the shared commitment buffer handle.
+    pub fn commitment_buffer(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<Vec<crate::types::StateRootCommitment>>> {
+        self.0.commitment_buffer()
+    }
+
+    /// Records activity on this group.
+    pub fn touch(&self) {
+        self.0.touch();
+    }
+
+    /// Returns seconds since the last activity.
+    pub fn idle_secs(&self) -> u64 {
+        self.0.idle_secs()
+    }
+
+    /// Returns whether background jobs are currently running.
+    pub fn is_jobs_active(&self) -> bool {
+        self.0.is_jobs_active()
+    }
+
+    /// Checks if this node is the leader for this organization (delegated
+    /// from the parent region group).
+    pub fn is_leader(&self, node_id: LedgerNodeId) -> bool {
+        self.0.is_leader(node_id)
+    }
+
+    /// Returns the current leader node ID.
+    pub fn current_leader(&self) -> Option<LedgerNodeId> {
+        self.0.current_leader()
     }
 }
 
@@ -623,7 +1030,7 @@ pub struct RaftManager {
     /// that address a region alone resolve via `get_region_group(region)`,
     /// which returns the data-region group. Per-organization routing goes
     /// through `route_organization(organization_id)`.
-    regions: RwLock<HashMap<(Region, OrganizationId), Arc<OrganizationGroup>>>,
+    regions: RwLock<HashMap<(Region, OrganizationId), Arc<InnerGroup>>>,
     /// Shared peer address map (node ID → network address).
     ///
     /// Populated from `initial_members` during region startup and updated
@@ -766,7 +1173,7 @@ impl RaftManager {
     ///
     /// Returns [`RaftManagerError::RegionNotFound`] if no region with the given ID
     /// is currently active.
-    pub fn get_region_group(&self, region: Region) -> Result<Arc<OrganizationGroup>> {
+    pub fn get_region_group(&self, region: Region) -> Result<Arc<RegionGroup>> {
         // Task 4 shim: single-shard-per-region runtime (Task 4.2 will loop
         // start_region over N shards; Task 5 will plumb OrganizationId through
         // services). Until then, legacy callers continue to address shard 0.
@@ -774,6 +1181,7 @@ impl RaftManager {
             .read()
             .get(&(region, OrganizationId::new(0)))
             .cloned()
+            .map(|inner| Arc::new(RegionGroup(inner)))
             .ok_or(RaftManagerError::RegionNotFound { region })
     }
 
@@ -803,8 +1211,24 @@ impl RaftManager {
     pub fn lookup_by_consensus_shard(
         &self,
         shard_id: inferadb_ledger_consensus::types::ConsensusStateId,
-    ) -> Option<Arc<OrganizationGroup>> {
+    ) -> Option<Arc<InnerGroup>> {
+        // Documented cross-tier escape hatch: the gRPC `RaftService` dispatches
+        // incoming consensus `Replicate` messages by `ConsensusStateId` and
+        // genuinely does not know which tier owns the shard. Returns the
+        // untiered [`InnerGroup`] so consumers can reach `handle()` without
+        // committing to a tier; any other use is a tier-discipline violation.
         self.regions.read().values().find(|group| group.handle().shard_id() == shard_id).cloned()
+    }
+
+    /// Untyped region-group lookup used by the gRPC `RaftService` fallback
+    /// path when `lookup_by_consensus_shard` misses.
+    ///
+    /// Cross-tier escape hatch — see [`lookup_by_consensus_shard`] for the
+    /// rationale. Callers that know their tier should use
+    /// [`get_region_group`] (regional), [`system_region`] (system), or
+    /// [`get_organization_group`] (organization) instead.
+    pub fn lookup_region_inner(&self, region: Region) -> Option<Arc<InnerGroup>> {
+        self.regions.read().get(&(region, OrganizationId::new(0))).cloned()
     }
 
     pub fn get_organization_group(
@@ -816,6 +1240,7 @@ impl RaftManager {
             .read()
             .get(&(region, shard))
             .cloned()
+            .map(|inner| Arc::new(OrganizationGroup(inner)))
             .ok_or(RaftManagerError::RegionNotFound { region })
     }
 
@@ -825,8 +1250,13 @@ impl RaftManager {
     ///
     /// Returns [`RaftManagerError::RegionNotFound`] if the system region (ID 0)
     /// has not been started.
-    pub fn system_region(&self) -> Result<Arc<OrganizationGroup>> {
-        self.get_region_group(Region::GLOBAL)
+    pub fn system_region(&self) -> Result<Arc<SystemGroup>> {
+        self.regions
+            .read()
+            .get(&(Region::GLOBAL, OrganizationId::new(0)))
+            .cloned()
+            .map(|inner| Arc::new(SystemGroup(inner)))
+            .ok_or(RaftManagerError::RegionNotFound { region: Region::GLOBAL })
     }
 
     /// Returns a read-only accessor for the GLOBAL region's applied state.
@@ -952,14 +1382,14 @@ impl RaftManager {
         commitment_buffer: std::sync::Arc<std::sync::Mutex<Vec<crate::types::StateRootCommitment>>>,
         leader_lease: Arc<crate::leader_lease::LeaderLease>,
         applied_index_rx: tokio::sync::watch::Receiver<u64>,
-    ) -> Result<Arc<OrganizationGroup>> {
+    ) -> Result<Arc<SystemGroup>> {
         if self.has_region(region) {
             return Err(RaftManagerError::RegionExists { region });
         }
 
         let blocks_db = Arc::clone(block_archive.db());
 
-        let region_group = Arc::new(OrganizationGroup {
+        let inner = Arc::new(InnerGroup {
             region,
             organization_id: OrganizationId::new(0),
             handle,
@@ -984,10 +1414,10 @@ impl RaftManager {
 
         {
             let mut regions = self.regions.write();
-            regions.insert((region, OrganizationId::new(0)), region_group.clone());
+            regions.insert((region, OrganizationId::new(0)), Arc::clone(&inner));
         }
 
-        Ok(region_group)
+        Ok(Arc::new(SystemGroup(inner)))
     }
 
     /// Routes an organization to the `(region, shard)` Raft group that
@@ -1032,15 +1462,15 @@ impl RaftManager {
         // start_region_shards), so we don't lazily create here — the shard
         // must already exist from a prior consensus proposal + region
         // start.
-        let group = self.regions.read().get(&(region, organization_id)).cloned()?;
-        group.touch();
+        let inner = self.regions.read().get(&(region, organization_id)).cloned()?;
+        inner.touch();
 
         // Auto-wake hibernated regions on first request
-        if !group.is_jobs_active() {
+        if !inner.is_jobs_active() {
             let _ = self.wake_region(region);
         }
 
-        Some(group)
+        Some(Arc::new(OrganizationGroup(inner)))
     }
 
     /// Returns the region ID for an organization.
@@ -1069,7 +1499,7 @@ impl RaftManager {
     pub async fn start_system_region(
         &self,
         region_config: RegionConfig,
-    ) -> Result<Arc<OrganizationGroup>> {
+    ) -> Result<Arc<SystemGroup>> {
         if region_config.region != Region::GLOBAL {
             return Err(RaftManagerError::Raft {
                 region: region_config.region,
@@ -1079,7 +1509,8 @@ impl RaftManager {
 
         // GLOBAL is always single-shard — cluster-wide control state has no
         // routing dimension to spread across additional shards.
-        self.start_region(region_config, OrganizationId::new(0)).await
+        let inner = self.start_region(region_config, OrganizationId::new(0)).await?;
+        Ok(Arc::new(SystemGroup(inner)))
     }
 
     /// Starts a data region.
@@ -1130,7 +1561,7 @@ impl RaftManager {
             events_config,
             delegated_leadership: true,
         };
-        let org_group = self.start_region(region_config, organization_id).await?;
+        let org_inner = self.start_region(region_config, organization_id).await?;
 
         // Activate delegated leadership: the new org ConsensusState does not run
         // its own elections (LeadershipMode::Delegated). Its leader is
@@ -1138,9 +1569,15 @@ impl RaftManager {
         // a one-time adoption now (in case the region already has a
         // leader), then spawn a watcher that re-adopts on every region
         // leader change.
-        if let Ok(region_group) = self.get_organization_group(region, OrganizationId::new(0)) {
-            let region_handle = region_group.handle().clone();
-            let org_handle = org_group.handle().clone();
+        //
+        // The read-guard must be dropped before the first `.await` below
+        // (`adopt_leader`). Taking the lookup result in its own let-binding
+        // forces the guard out of scope before the `if let` body executes.
+        let region_inner_opt =
+            self.regions.read().get(&(region, OrganizationId::new(0))).cloned();
+        if let Some(region_inner) = region_inner_opt {
+            let region_handle = region_inner.handle().clone();
+            let org_handle = org_inner.handle().clone();
             let initial_state = region_handle.shard_state();
             if let Some(leader) = initial_state.leader {
                 let _ = org_handle.adopt_leader(leader, initial_state.term).await;
@@ -1160,13 +1597,13 @@ impl RaftManager {
             });
         }
 
-        Ok(org_group)
+        Ok(Arc::new(OrganizationGroup(org_inner)))
     }
 
     pub async fn start_data_region(
         &self,
         region_config: RegionConfig,
-    ) -> Result<Arc<OrganizationGroup>> {
+    ) -> Result<Arc<RegionGroup>> {
         // Verify system region is running
         if !self.has_region(Region::GLOBAL) {
             return Err(RaftManagerError::SystemRegionRequired);
@@ -1185,7 +1622,8 @@ impl RaftManager {
         // groups are created by `CreateOrganization` apply + the bootstrap
         // handler's `start_organization_group`, not by `start_region`
         // iteration.
-        self.start_region(region_config, OrganizationId::new(0)).await
+        let inner = self.start_region(region_config, OrganizationId::new(0)).await?;
+        Ok(Arc::new(RegionGroup(inner)))
     }
 
     /// Ensures a data region is active, creating it lazily if needed.
@@ -1209,7 +1647,7 @@ impl RaftManager {
     pub async fn ensure_data_region(
         &self,
         region_config: RegionConfig,
-    ) -> Result<(Arc<OrganizationGroup>, bool)> {
+    ) -> Result<(Arc<RegionGroup>, bool)> {
         let region = region_config.region;
 
         // GLOBAL is the control plane — always created eagerly via start_system_region
@@ -1233,9 +1671,9 @@ impl RaftManager {
         // - RegionExists: start_region's has_shard check saw it after map insert
         // - RegionAlreadyOpen: RegionStorageManager rejected a second opener
         match self.start_region(region_config, OrganizationId::new(0)).await {
-            Ok(group) => {
+            Ok(inner) => {
                 info!(region = region.as_str(), "Lazily created region group");
-                Ok((group, true))
+                Ok((Arc::new(RegionGroup(inner)), true))
             },
             Err(
                 RaftManagerError::RegionExists { .. } | RaftManagerError::RegionAlreadyOpen { .. },
@@ -1269,7 +1707,7 @@ impl RaftManager {
         &self,
         region_config: RegionConfig,
         organization_id: OrganizationId,
-    ) -> Result<Arc<OrganizationGroup>> {
+    ) -> Result<Arc<InnerGroup>> {
         // Destructure config upfront to avoid partial-move issues
         let RegionConfig {
             region,
@@ -1689,7 +2127,7 @@ impl RaftManager {
         // `block_archive` (which owns a domain API, not a durability API).
         let jobs_running = enable_background_jobs;
         let blocks_db = Arc::clone(block_archive.db());
-        let region_group = Arc::new(OrganizationGroup {
+        let inner = Arc::new(InnerGroup {
             region,
             organization_id,
             handle,
@@ -1714,7 +2152,7 @@ impl RaftManager {
 
         {
             let mut regions = self.regions.write();
-            regions.insert((region, organization_id), region_group.clone());
+            regions.insert((region, organization_id), Arc::clone(&inner));
         }
 
         info!(
@@ -1723,7 +2161,7 @@ impl RaftManager {
             "Region group started successfully"
         );
 
-        Ok(region_group)
+        Ok(inner)
     }
 
     /// Starts background jobs for a region.
@@ -2236,11 +2674,16 @@ impl RaftManager {
     /// Returns [`RaftManagerError::RegionNotFound`] if no region with the given ID
     /// is currently active.
     pub fn hibernate_region(&self, region: Region) -> Result<()> {
-        let group = self.get_region_group(region)?;
+        let inner = self
+            .regions
+            .read()
+            .get(&(region, OrganizationId::new(0)))
+            .cloned()
+            .ok_or(RaftManagerError::RegionNotFound { region })?;
 
         // Atomically transition from active to inactive.
         // Only one caller wins; others return early.
-        if group
+        if inner
             .jobs_active
             .compare_exchange(
                 true,
@@ -2253,7 +2696,7 @@ impl RaftManager {
             return Ok(());
         }
 
-        group.background_jobs.lock().cancel();
+        inner.background_jobs.lock().cancel();
         info!(%region, "Region group hibernated");
         Ok(())
     }
@@ -2267,11 +2710,16 @@ impl RaftManager {
     /// Returns [`RaftManagerError::RegionNotFound`] if no region with the given ID
     /// is currently active.
     pub fn wake_region(&self, region: Region) -> Result<()> {
-        let group = self.get_region_group(region)?;
+        let inner = self
+            .regions
+            .read()
+            .get(&(region, OrganizationId::new(0)))
+            .cloned()
+            .ok_or(RaftManagerError::RegionNotFound { region })?;
 
         // Atomically transition from inactive to active.
         // Only one caller wins; others return early.
-        if group
+        if inner
             .jobs_active
             .compare_exchange(
                 false,
@@ -2284,20 +2732,20 @@ impl RaftManager {
             return Ok(());
         }
 
-        group.touch();
+        inner.touch();
         let jobs = self.start_background_jobs(
             region,
-            group.organization_id(),
-            group.handle().clone(),
-            group.state().clone(),
-            Arc::clone(group.raft_db()),
-            Arc::clone(group.blocks_db()),
-            group.events_state_db(),
-            group.block_archive().clone(),
-            group.applied_state().clone(),
-            group.applied_index_watch(),
+            inner.organization_id(),
+            inner.handle().clone(),
+            inner.state().clone(),
+            Arc::clone(inner.raft_db()),
+            Arc::clone(inner.blocks_db()),
+            inner.events_state_db(),
+            inner.block_archive().clone(),
+            inner.applied_state().clone(),
+            inner.applied_index_watch(),
         );
-        *group.background_jobs.lock() = jobs;
+        *inner.background_jobs.lock() = jobs;
         info!(%region, "Region group woken from hibernation");
         Ok(())
     }
@@ -2307,7 +2755,7 @@ impl RaftManager {
     ///
     /// The system region (`GLOBAL`) is never hibernated.
     pub fn hibernate_idle_regions(&self, idle_timeout_secs: u64) {
-        let regions: Vec<((Region, OrganizationId), Arc<OrganizationGroup>)> =
+        let regions: Vec<((Region, OrganizationId), Arc<InnerGroup>)> =
             self.regions.read().iter().map(|(k, g)| (*k, g.clone())).collect();
 
         for ((region, _shard), group) in regions {
@@ -2777,7 +3225,7 @@ mod tests {
         let region = manager.get_region_group(Region::GLOBAL).expect("get region");
 
         // Background jobs should be None when disabled
-        let jobs = region.background_jobs.lock();
+        let jobs = region.0.background_jobs.lock();
         assert!(jobs.gc_handle.is_none());
         assert!(jobs.compactor_handle.is_none());
         assert!(jobs.recovery_handle.is_none());
@@ -2802,7 +3250,7 @@ mod tests {
         let region = manager.get_region_group(Region::GLOBAL).expect("get region");
 
         // Background jobs should be Some when enabled
-        let jobs = region.background_jobs.lock();
+        let jobs = region.0.background_jobs.lock();
         assert!(jobs.gc_handle.is_some(), "GC job should be started");
         assert!(jobs.compactor_handle.is_some(), "Compactor job should be started");
         assert!(jobs.recovery_handle.is_some(), "Recovery job should be started");
@@ -2909,7 +3357,7 @@ mod tests {
         // Verify jobs are running before stop
         {
             let region = manager.get_region_group(Region::GLOBAL).expect("get region");
-            let jobs = region.background_jobs.lock();
+            let jobs = region.0.background_jobs.lock();
             assert!(jobs.gc_handle.is_some());
             assert!(jobs.compactor_handle.is_some());
             assert!(jobs.recovery_handle.is_some());
@@ -3340,7 +3788,7 @@ mod tests {
         assert!(group.is_jobs_active());
 
         // Set last_activity to the past so idle_secs() > 0
-        *group.last_activity.lock() = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        *group.0.last_activity.lock() = std::time::Instant::now() - std::time::Duration::from_secs(5);
 
         manager.hibernate_idle_regions(0);
         assert!(!group.is_jobs_active());
