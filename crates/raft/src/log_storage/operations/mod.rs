@@ -6008,13 +6008,48 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     "modify",
                 ) {
                     Ok(state_layer) => {
+                        // Idempotency-by-slug: if `_idx:invite:slug:{slug}`
+                        // already exists, this is a retry of a prior
+                        // CreateOrganizationInvite. Return the existing
+                        // (invite_id, expires_at) so the client sees the
+                        // same response as the first call. Prevents
+                        // orphan token_hash and email_hash index entries
+                        // from accumulating on retries; paired with the
+                        // client-side slug stabilisation in the SDK.
+                        //
+                        // Note: the raw token is not stored anywhere —
+                        // only its hash — so a retry cannot recover the
+                        // original raw token if the first response was
+                        // lost. Clients that genuinely need the raw token
+                        // on retry must re-initiate the invite flow.
+                        let slug_key = SystemKeys::invite_slug_index_key(*slug);
+                        if let Ok(Some(existing_entity)) =
+                            state_layer.get_entity(SYSTEM_VAULT_ID, slug_key.as_bytes())
+                            && let Ok(existing) =
+                                decode::<InviteIndexEntry>(&existing_entity.value)
+                        {
+                            let expires_at =
+                                DateTime::<Utc>::from_timestamp(existing.expires_at_unix, 0)
+                                    .unwrap_or(block_timestamp);
+                            return (
+                                LedgerResponse::OrganizationInviteCreated {
+                                    invite_id: existing.invite,
+                                    invite_slug: *slug,
+                                    expires_at,
+                                },
+                                None,
+                            );
+                        }
+
                         let invite_id = state.sequences.next_invite();
                         let expires_at = block_timestamp + Duration::hours(i64::from(*ttl_hours));
 
                         // Write slug index: _idx:invite:slug:{slug} → InviteIndexEntry
-                        let slug_key = SystemKeys::invite_slug_index_key(*slug);
-                        let slug_entry =
-                            InviteIndexEntry { organization: *organization, invite: invite_id };
+                        let slug_entry = InviteIndexEntry {
+                            organization: *organization,
+                            invite: invite_id,
+                            expires_at_unix: expires_at.timestamp(),
+                        };
                         let slug_value = match encode(&slug_entry) {
                             Ok(v) => v,
                             Err(e) => {

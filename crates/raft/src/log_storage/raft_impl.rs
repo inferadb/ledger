@@ -4,7 +4,7 @@
 //! snapshot builder/installer. The openraft trait implementations have been
 //! removed — all consensus integration goes through [`CommittedEntry`] batches.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use chrono::DateTime;
 use inferadb_ledger_consensus::{committed::CommittedEntry, types::EntryKind};
@@ -423,10 +423,18 @@ impl RaftLogStore {
         let current = self.applied_state.load_full();
         let mut state = (*current).clone();
 
+        // Per-phase latency instrumentation. Labels stay low-cardinality
+        // via `metrics::ApplyPhase` — see `record_apply_phase`. Pre-
+        // stringify the ConsensusState once; cloning the region string is
+        // cheap and keeps the record-site inline.
+        let phase_region = self.region.as_str();
+        let phase_org = self.organization_id().value().to_string();
+
         // Pre-decode all Normal entry payloads once. Membership entries get None.
         // This avoids redundant deserialization — the same payload was previously
         // decoded up to 3 times (timestamp extraction, commitment verification,
         // and the main apply loop).
+        let decode_start = Instant::now();
         let decoded_payloads: Vec<Option<crate::types::RaftPayload<R>>> = entries
             .iter()
             .map(|e| match &e.kind {
@@ -436,6 +444,12 @@ impl RaftLogStore {
                 EntryKind::Membership(_) => None,
             })
             .collect();
+        crate::metrics::record_apply_phase(
+            phase_region,
+            &phase_org,
+            crate::metrics::ApplyPhase::Decode,
+            decode_start.elapsed().as_secs_f64(),
+        );
 
         // Event accumulation — deterministic timestamp from leader's proposal.
         let block_timestamp = decoded_payloads
@@ -470,6 +484,7 @@ impl RaftLogStore {
                 },
             });
 
+        let apply_loop_start = Instant::now();
         for (entry, decoded_payload) in entries.iter().zip(decoded_payloads.into_iter()) {
             let log_id = LogId::new(entry.term, 0, entry.index);
 
@@ -537,6 +552,12 @@ impl RaftLogStore {
                 vault_entries.push(entry);
             }
         }
+        crate::metrics::record_apply_phase(
+            phase_region,
+            &phase_org,
+            crate::metrics::ApplyPhase::ApplyLoop,
+            apply_loop_start.elapsed().as_secs_f64(),
+        );
 
         // Amortized + parallel state-root computation (Opt B + Opt
         // Parallel-apply): because `apply_request_with_events` was called
@@ -580,6 +601,7 @@ impl RaftLogStore {
             let pool = &*inferadb_ledger_state::apply_pool::APPLY_POOL;
 
             // Step 2: parallel compute_state_root across unique vaults.
+            let state_root_start = Instant::now();
             let patched_roots: std::collections::HashMap<
                 inferadb_ledger_types::VaultId,
                 inferadb_ledger_types::Hash,
@@ -599,6 +621,12 @@ impl RaftLogStore {
                     })
                     .collect()
             });
+            crate::metrics::record_apply_phase(
+                phase_region,
+                &phase_org,
+                crate::metrics::ApplyPhase::StateRoot,
+                state_root_start.elapsed().as_secs_f64(),
+            );
 
             // Step 3: serial patch of vault_entries' state_root fields.
             for entry in &mut vault_entries {
@@ -608,9 +636,16 @@ impl RaftLogStore {
             }
 
             // Step 4: parallel block_hash computation (pure CPU).
+            let block_hash_start = Instant::now();
             let block_hashes: Vec<inferadb_ledger_types::Hash> = pool.install(|| {
                 vault_entries.par_iter().map(|e| self.compute_vault_block_hash(e)).collect()
             });
+            crate::metrics::record_apply_phase(
+                phase_region,
+                &phase_org,
+                crate::metrics::ApplyPhase::BlockHash,
+                block_hash_start.elapsed().as_secs_f64(),
+            );
 
             // Step 5: serial patch of Write response block_hashes using the
             // pre-computed values. `vault_entries` mirrors the subset of
@@ -655,10 +690,17 @@ impl RaftLogStore {
                 committed_index,
             };
 
-            if let Some(archive) = &self.block_archive
-                && let Err(e) = archive.append_block(&region_block)
-            {
-                tracing::error!("Failed to store block: {}", e);
+            if let Some(archive) = &self.block_archive {
+                let archive_start = Instant::now();
+                if let Err(e) = archive.append_block(&region_block) {
+                    tracing::error!("Failed to store block: {}", e);
+                }
+                crate::metrics::record_apply_phase(
+                    phase_region,
+                    &phase_org,
+                    crate::metrics::ApplyPhase::BlockArchive,
+                    archive_start.elapsed().as_secs_f64(),
+                );
             }
 
             // Broadcast block announcements for real-time subscribers.
@@ -672,6 +714,7 @@ impl RaftLogStore {
             // For entries without a stamped slug (background jobs / saga /
             // system-vault writes leave the zero sentinel), fall back to the
             // internal id so existing tests that match on raw id still pass.
+            let broadcast_start = Instant::now();
             if let Some(sender) = &self.block_announcements {
                 for entry in &vault_entries {
                     let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
@@ -711,6 +754,12 @@ impl RaftLogStore {
                     );
                 }
             }
+            crate::metrics::record_apply_phase(
+                phase_region,
+                &phase_org,
+                crate::metrics::ApplyPhase::Broadcast,
+                broadcast_start.elapsed().as_secs_f64(),
+            );
 
             // Update previous vault hashes for each entry
             for entry in &vault_entries {

@@ -63,6 +63,15 @@ const APPLY_BATCH_LATENCY: &str = "inferadb_ledger_raft_apply_batch_latency_seco
 const APPLY_BATCH_SIZE: &str = "inferadb_ledger_raft_apply_batch_size";
 const APPLY_ENTRIES_TOTAL: &str = "inferadb_ledger_raft_apply_entries_total";
 
+// Apply-pipeline phase-level latency histograms.
+//
+// `APPLY_BATCH_LATENCY` above reports end-to-end apply-batch time. These
+// per-phase histograms break down where that time is spent, so
+// parallelism / pipelining work can target the dominant phase instead of
+// optimising speculatively. Labelled by `(region, organization_id, phase)`
+// so you can slice per-org to see which tier dominates.
+const APPLY_PHASE_LATENCY: &str = "inferadb_ledger_raft_apply_phase_latency_seconds";
+
 // State machine metrics
 const STATE_ROOT_COMPUTATIONS: &str = "inferadb_ledger_state_root_computations_total";
 const STATE_ROOT_LATENCY: &str = "inferadb_ledger_state_root_latency_seconds";
@@ -256,6 +265,80 @@ pub fn record_apply_batch(
             .record(latency_secs);
         }
     );
+}
+
+/// Records a per-phase latency within a single `apply_committed_entries`
+/// call. `phase` should be a small fixed-cardinality label — see
+/// [`ApplyPhase`] for the canonical set.
+#[inline]
+pub fn record_apply_phase(
+    region: &str,
+    organization_id: &str,
+    phase: ApplyPhase,
+    latency_secs: f64,
+) {
+    gated!(
+        APPLY_PHASE_LATENCY,
+        &[
+            (fields::REGION, region),
+            (fields::ORGANIZATION_ID, organization_id),
+            ("phase", phase.as_str()),
+        ],
+        {
+            histogram!(
+                APPLY_PHASE_LATENCY,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+                "phase" => phase.as_str(),
+            )
+            .record(latency_secs);
+        }
+    );
+}
+
+/// Phases within a single `apply_committed_entries` call. The set is
+/// intentionally small and fixed so Prometheus label cardinality stays
+/// bounded (`#phases × #(region, org_id)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyPhase {
+    /// Pre-decode of every `CommittedEntry`'s payload bytes into
+    /// `RaftPayload<R>`. Single serial pass, parallelisable — low
+    /// priority unless proven dominant.
+    Decode,
+    /// The main serial apply loop. Each entry calls `R::apply_on` against
+    /// `AppliedState` and `StateLayer`. Raft-ordered, cannot be
+    /// parallelised without intra-batch vault-group sharding.
+    ApplyLoop,
+    /// Per-unique-vault `StateLayer::compute_state_root`. Already
+    /// parallelised across vaults via the bounded apply rayon pool.
+    StateRoot,
+    /// Per-`VaultEntry` block hash. Already parallelised.
+    BlockHash,
+    /// `BlockArchive::append_block` — page-cache commit to `blocks.db` +
+    /// buffered segment-file append. No fsync on the apply path.
+    BlockArchive,
+    /// `block_announcements.send()` fan-out. Non-blocking broadcast
+    /// channel send.
+    Broadcast,
+    /// Response delivery — partitioning into waiter-send vs spillover
+    /// and the oneshot sends themselves.
+    ResponseFanout,
+}
+
+impl ApplyPhase {
+    /// Prometheus label value for this phase. Must stay ASCII / lowercase.
+    #[inline]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Decode => "decode",
+            Self::ApplyLoop => "apply_loop",
+            Self::StateRoot => "state_root",
+            Self::BlockHash => "block_hash",
+            Self::BlockArchive => "block_archive",
+            Self::Broadcast => "broadcast",
+            Self::ResponseFanout => "response_fanout",
+        }
+    }
 }
 
 /// Sets the current Raft commit index.

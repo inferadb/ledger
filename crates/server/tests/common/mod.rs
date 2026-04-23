@@ -1001,6 +1001,44 @@ impl TestCluster {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use inferadb_ledger_raft::types::{RaftPayload, SystemRequest};
 
+        // Pre-flight: wait until every node's `peer_addresses` map
+        // contains all other nodes' addresses. CreateDataRegion's apply
+        // path registers peer transports from `initial_members`, but the
+        // saga orchestrator's `propose_to_region` path — which runs for
+        // subsequent CreateOrganization calls — resolves peers via
+        // `manager.peer_addresses()` (populated through the GLOBAL
+        // `RegisterPeerAddress` apply). Without this wait, a multi-node
+        // cluster can race: CreateDataRegion applies + elects a leader
+        // before every node has applied every peer's
+        // `RegisterPeerAddress` entry, so follow-on saga RPCs from a
+        // non-leader node can't route to the region leader. This
+        // matches the `build_full` eager path's explicit `JoinCluster`
+        // propagation without the eager region bootstrap.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let all_synced = self.nodes.iter().all(|n| {
+                // `peer_addresses` is the org-wide map; it includes self
+                // on some code paths and not others — the robust check is
+                // that every OTHER node's id is present.
+                let peers = n.manager.peer_addresses();
+                self.nodes
+                    .iter()
+                    .filter(|other| other.id != n.id)
+                    .all(|other| peers.get(other.id).is_some())
+            });
+            if all_synced {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "peer_addresses did not propagate to all {} nodes within 10s",
+                    self.nodes.len()
+                )
+                .into());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
         // Find the current system leader — `create_data_region` must be
         // proposed on the leader's handle (followers return NotLeader).
         let leader = self

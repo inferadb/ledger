@@ -157,7 +157,13 @@ impl<R: ApplyableRequest> ApplyWorker<R> {
                 },
             };
 
-            // Phase 1: remove waiters under a short `response_map` lock.
+            // Response fan-out (3 sub-phases: remove-waiters, lock-free
+            // send, spillover-insert). Phase instrumentation lumps them
+            // together — internal split is not separately actionable
+            // because the lock-free send dominates unless contention is
+            // pathological, and the map locks are acquired only in
+            // short critical sections between sends.
+            let fanout_start = Instant::now();
             let mut to_send: Vec<(
                 oneshot::Sender<crate::types::LedgerResponse>,
                 crate::types::LedgerResponse,
@@ -188,6 +194,12 @@ impl<R: ApplyableRequest> ApplyWorker<R> {
                     spillover.insert(index, response);
                 }
             }
+            metrics::record_apply_phase(
+                &self.region,
+                &self.shard,
+                metrics::ApplyPhase::ResponseFanout,
+                fanout_start.elapsed().as_secs_f64(),
+            );
             // Wake the PlacementController so data region membership is reconciled
             // promptly after GLOBAL state changes (new voter, decommission, etc.).
             // Only the GLOBAL region's worker has this set; DR workers skip.
