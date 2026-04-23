@@ -277,6 +277,8 @@ pub fn arb_vault_entry() -> impl Strategy<Value = VaultEntry> {
                     transactions,
                     tx_merkle_root,
                     state_root,
+                    organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                    vault_slug: inferadb_ledger_types::VaultSlug::new(0),
                 }
             },
         )

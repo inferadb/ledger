@@ -429,6 +429,8 @@ mod tests {
                     transactions,
                     tx_merkle_root,
                     state_root,
+                    organization_slug: crate::types::OrganizationSlug::new(0),
+                    vault_slug: crate::types::VaultSlug::new(0),
                 };
                 let bytes = encode(&entry).expect("encode vault entry");
                 let decoded: VaultEntry = decode(&bytes).expect("decode vault entry");

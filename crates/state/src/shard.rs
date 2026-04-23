@@ -567,6 +567,8 @@ mod tests {
                 transactions: vec![tx],
                 tx_merkle_root: [0u8; 32],
                 state_root: expected_root,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             }],
             timestamp: Utc::now(),
             leader_id: NodeId::new("node-1"),
@@ -612,7 +614,10 @@ mod tests {
                 previous_vault_hash: inferadb_ledger_types::ZERO_HASH,
                 transactions: vec![tx],
                 tx_merkle_root: [0u8; 32],
-                state_root: [42u8; 32], // Wrong!
+                state_root: [42u8; 32], // Wrong!,
+
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             }],
             timestamp: Utc::now(),
             leader_id: NodeId::new("node-1"),

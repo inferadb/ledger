@@ -385,6 +385,8 @@ fn extract_vault_block_selects_correct_height() {
         transactions: vec![],
         tx_merkle_root: ZERO_HASH,
         state_root: [0x55; 32],
+        organization_slug: OrganizationSlug::new(0),
+        vault_slug: VaultSlug::new(0),
     };
     let entry_h6 = VaultEntry {
         organization: org,
@@ -394,6 +396,8 @@ fn extract_vault_block_selects_correct_height() {
         transactions: vec![],
         tx_merkle_root: ZERO_HASH,
         state_root: [0x66; 32],
+        organization_slug: OrganizationSlug::new(0),
+        vault_slug: VaultSlug::new(0),
     };
 
     let block = RegionBlock {

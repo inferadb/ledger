@@ -432,6 +432,8 @@ mod tests {
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
 
         let (response, _vault_entry) = store.apply_org(&request, &mut state);
@@ -1480,6 +1482,8 @@ mod tests {
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
         let (response, _) = store.apply_org(&write, &mut state);
 
@@ -1650,6 +1654,8 @@ mod tests {
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
         let (response, _) = store.apply_org(&write, &mut state);
 
@@ -1754,6 +1760,8 @@ mod tests {
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
         let (response, _) = store.apply_org(&write, &mut state);
 
@@ -2115,18 +2123,24 @@ mod tests {
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         });
         apply_both_org!(OrganizationRequest::Write {
             vault: VaultId::new(1),
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         });
         apply_both_org!(OrganizationRequest::Write {
             vault: VaultId::new(3),
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         });
         apply_both_system!(SystemRequest::CreateUser {
             user: UserId::new(1),
@@ -2258,6 +2272,8 @@ mod tests {
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             };
             store_a.apply_org(&write, &mut state_a);
             store_b.apply_org(&write, &mut state_b);
@@ -2340,30 +2356,40 @@ mod tests {
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
             OrganizationRequest::Write {
                 vault: VaultId::new(2),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
             OrganizationRequest::Write {
                 vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
             OrganizationRequest::Write {
                 vault: VaultId::new(2),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
             OrganizationRequest::Write {
                 vault: VaultId::new(1),
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
         ];
 
@@ -2502,6 +2528,8 @@ mod tests {
             transactions: vec![tx],
             idempotency_key: [0u8; 16],
             request_hash: 0,
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
 
         let (response, vault_entry) = store.apply_org(&request, &mut state);
@@ -2751,12 +2779,19 @@ mod tests {
         }
 
         // Now call apply_to_state_machine with a Write entry
-        // This should broadcast a BlockAnnouncement
+        // This should broadcast a BlockAnnouncement.
+        // γ Phase 3a: the announcement path reads external slugs from the
+        // stamped `VaultEntry` (not from `state.id_to_slug`). The write-path
+        // service layer lifts these from the incoming gRPC request; this
+        // test exercises the apply handler directly so we stamp the same
+        // slugs the service layer would.
         let write_request = OrganizationRequest::Write {
             vault: VaultId::new(1),
             transactions: vec![], // Empty transactions still create a block
             idempotency_key: [0u8; 16],
             request_hash: 0,
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(42),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(1),
         };
 
         let entry = make_committed_entry(1, 1, wrap_org_payload(write_request));
@@ -2834,6 +2869,8 @@ mod tests {
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
 
         let entry = make_committed_entry(1, 1, wrap_org_payload(write_request));
@@ -2898,6 +2935,9 @@ mod tests {
             }],
             idempotency_key: [0u8; 16],
             request_hash: 0,
+
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
 
         let payload = RaftPayload {
@@ -2978,6 +3018,8 @@ mod tests {
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
 
         let payload = RaftPayload {
@@ -3036,6 +3078,9 @@ mod tests {
             }],
             idempotency_key: [0u8; 16],
             request_hash: 0,
+
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
 
         // Helper to create a store, set up state, and apply
@@ -3312,6 +3357,8 @@ mod tests {
             transactions: vec![],
             idempotency_key: [0u8; 16],
             request_hash: 0,
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
         let (response, _) = store.apply_org(&write, &mut state);
         assert!(matches!(response, LedgerResponse::Error { .. }));
@@ -3554,6 +3601,8 @@ mod tests {
                 transactions: vec![tx1],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
             &mut state,
         );
@@ -3582,6 +3631,8 @@ mod tests {
                 transactions: vec![tx2],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
             &mut state,
         );
@@ -3638,6 +3689,8 @@ mod tests {
                 transactions: vec![tx_set],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
             &mut state,
         );
@@ -3659,6 +3712,8 @@ mod tests {
                 transactions: vec![tx_del],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
             &mut state,
         );
@@ -3711,6 +3766,8 @@ mod tests {
                 transactions: vec![tx],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
             &mut state,
         );
@@ -3788,6 +3845,8 @@ mod tests {
                 transactions: vec![tx1],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
             &mut state,
         );
@@ -3811,6 +3870,8 @@ mod tests {
                 transactions: vec![tx2],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
             &mut state,
         );
@@ -3899,6 +3960,8 @@ mod tests {
                 transactions: vec![tx],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
             &mut state,
         );
@@ -4020,6 +4083,8 @@ mod tests {
                     transactions: vec![tx],
                     idempotency_key: [0u8; 16],
                     request_hash: 0,
+                    organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                    vault_slug: inferadb_ledger_types::VaultSlug::new(0),
                 },
                 &mut state,
             );
@@ -4081,6 +4146,9 @@ mod tests {
             }],
             idempotency_key: [0u8; 16],
             request_hash: 0,
+
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         }
     }
 
@@ -4259,7 +4327,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let store = store_with_events(dir.path());
         let mut state = (*store.applied_state.load_full()).clone();
-        let (org_id, vault_id) = setup_org_and_vault(&mut state);
+        let (_org_id, vault_id) = setup_org_and_vault(&mut state);
 
         // Write request with two ExpireEntity operations
         let request = OrganizationRequest::Write {
@@ -4276,6 +4344,9 @@ mod tests {
             }],
             idempotency_key: [0u8; 16],
             request_hash: 0,
+
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
 
         let mut events: Vec<EventEntry> = Vec::new();
@@ -4980,6 +5051,9 @@ mod tests {
                     }],
                     idempotency_key: [0u8; 16],
                     request_hash: 0,
+
+                    organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                    vault_slug: inferadb_ledger_types::VaultSlug::new(0),
                 },
             ],
         };
@@ -5154,6 +5228,9 @@ mod tests {
                 }],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
+
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
             &mut state,
             ts,
@@ -5301,6 +5378,9 @@ mod tests {
                 }],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
+
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
             &mut state,
             ts,
@@ -5972,6 +6052,8 @@ mod tests {
                     transactions: vec![],
                     idempotency_key: [1u8; 16],
                     request_hash: 42,
+                    organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                    vault_slug: inferadb_ledger_types::VaultSlug::new(0),
                 }),
             ),
             // Entry 3: Create vault in org 2
@@ -5994,6 +6076,8 @@ mod tests {
                     transactions: vec![],
                     idempotency_key: [2u8; 16],
                     request_hash: 99,
+                    organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                    vault_slug: inferadb_ledger_types::VaultSlug::new(0),
                 }),
             ),
         ];
@@ -6324,6 +6408,9 @@ mod tests {
                     }],
                     idempotency_key: [0u8; 16],
                     request_hash: 0,
+
+                    organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                    vault_slug: inferadb_ledger_types::VaultSlug::new(0),
                 }),
             ),
         ];
@@ -10448,6 +10535,8 @@ mod tests {
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
             &mut state,
         );
@@ -10496,6 +10585,8 @@ mod tests {
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
             &mut state,
         );
@@ -13091,6 +13182,342 @@ mod tests {
             events_db.db().last_synced_snapshot_id() > events_synced_before,
             "events.db last_synced_snapshot_id must advance on post-replay sync"
         );
+    }
+
+    // =========================================================================
+    // γ Phase 3b: per-organization vault lifecycle routing
+    // =========================================================================
+
+    /// `SystemRequest::RegisterVaultDirectoryEntry` inserts into GLOBAL's
+    /// bidirectional slug index (`vault_slug_index` + `vault_id_to_slug`)
+    /// and is idempotent — re-applying the same `(slug, org, vault_id)`
+    /// tuple is a no-op at the index level.
+    #[tokio::test]
+    async fn register_vault_directory_entry_populates_slug_index_and_is_idempotent() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(0));
+        let mut state = (*store.applied_state.load_full()).clone();
+
+        let organization = OrganizationId::new(7);
+        let vault = VaultId::new(42);
+        let slug = VaultSlug::new(0xABCD_EF00);
+
+        let req = SystemRequest::RegisterVaultDirectoryEntry { organization, vault, slug };
+
+        let (resp1, _) = store.apply_system(&req, &mut state);
+        assert!(matches!(resp1, LedgerResponse::Empty));
+        assert_eq!(state.vault_slug_index.get(&slug).copied(), Some((organization, vault)));
+        assert_eq!(state.vault_id_to_slug.get(&(organization, vault)).copied(), Some(slug));
+
+        // Idempotent re-apply — index values identical.
+        let (resp2, _) = store.apply_system(&req, &mut state);
+        assert!(matches!(resp2, LedgerResponse::Empty));
+        assert_eq!(state.vault_slug_index.get(&slug).copied(), Some((organization, vault)));
+        assert_eq!(state.vault_id_to_slug.get(&(organization, vault)).copied(), Some(slug));
+    }
+
+    /// `SystemRequest::UnregisterVaultDirectoryEntry` removes both sides of
+    /// the index and is idempotent on a missing entry.
+    #[tokio::test]
+    async fn unregister_vault_directory_entry_removes_both_sides_and_is_idempotent() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(0));
+        let mut state = (*store.applied_state.load_full()).clone();
+
+        let organization = OrganizationId::new(9);
+        let vault = VaultId::new(21);
+        let slug = VaultSlug::new(0xDEAD_BEEF);
+
+        let register = SystemRequest::RegisterVaultDirectoryEntry { organization, vault, slug };
+        store.apply_system(&register, &mut state);
+        assert!(state.vault_slug_index.contains_key(&slug));
+        assert!(state.vault_id_to_slug.contains_key(&(organization, vault)));
+
+        let unregister = SystemRequest::UnregisterVaultDirectoryEntry { organization, vault };
+        let (resp1, _) = store.apply_system(&unregister, &mut state);
+        assert!(matches!(resp1, LedgerResponse::Empty));
+        assert!(!state.vault_slug_index.contains_key(&slug));
+        assert!(!state.vault_id_to_slug.contains_key(&(organization, vault)));
+
+        // Idempotent when the entry is already absent.
+        let (resp2, _) = store.apply_system(&unregister, &mut state);
+        assert!(matches!(resp2, LedgerResponse::Empty));
+    }
+
+    /// `SystemRequest::RegisterVaultDirectoryEntry` rejects collisions: a second
+    /// register with the same `(org, vault)` but a different slug, or the same
+    /// slug but a different `(org, vault)`, returns a `FailedPrecondition` error
+    /// instead of silently overwriting one side of the bidirectional index.
+    ///
+    /// In practice Snowflake slug generation prevents collisions, but
+    /// defence-in-depth matters — a bug elsewhere that sends inconsistent
+    /// register entries should surface loudly rather than desync the index.
+    #[tokio::test]
+    async fn register_vault_directory_entry_rejects_collisions() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(0));
+        let mut state = (*store.applied_state.load_full()).clone();
+
+        let organization = OrganizationId::new(3);
+        let vault = VaultId::new(11);
+        let slug = VaultSlug::new(0x1234_5678);
+
+        let ok = SystemRequest::RegisterVaultDirectoryEntry { organization, vault, slug };
+        let (resp, _) = store.apply_system(&ok, &mut state);
+        assert!(matches!(resp, LedgerResponse::Empty));
+
+        // Collision: same (org, vault), different slug.
+        let slug_conflict = SystemRequest::RegisterVaultDirectoryEntry {
+            organization,
+            vault,
+            slug: VaultSlug::new(0x9999_9999),
+        };
+        let (resp, _) = store.apply_system(&slug_conflict, &mut state);
+        assert!(matches!(resp, LedgerResponse::Error { code, .. }
+            if code == ErrorCode::FailedPrecondition));
+
+        // Collision: same slug, different (org, vault).
+        let vault_conflict = SystemRequest::RegisterVaultDirectoryEntry {
+            organization: OrganizationId::new(5),
+            vault: VaultId::new(99),
+            slug,
+        };
+        let (resp, _) = store.apply_system(&vault_conflict, &mut state);
+        assert!(matches!(resp, LedgerResponse::Error { code, .. }
+            if code == ErrorCode::FailedPrecondition));
+
+        // Original entry remains untouched.
+        assert_eq!(state.vault_slug_index.get(&slug).copied(), Some((organization, vault)));
+        assert_eq!(state.vault_id_to_slug.get(&(organization, vault)).copied(), Some(slug));
+    }
+
+    /// `OrganizationRequest::CreateVault` routed through the
+    /// `SystemRequest::OrganizationMetadata` GLOBAL shim is rejected with a
+    /// tier-violation error. Post-γ-3b the vault body must land on the
+    /// per-organization group, and the slug-index is maintained via
+    /// `RegisterVaultDirectoryEntry` — routing through the metadata shim
+    /// would put the body on GLOBAL and skip the directory proposal.
+    #[tokio::test]
+    async fn organization_metadata_shim_rejects_create_vault() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(0));
+        let mut state = (*store.applied_state.load_full()).clone();
+
+        let request =
+            SystemRequest::OrganizationMetadata(Box::new(OrganizationRequest::CreateVault {
+                organization: OrganizationId::new(1),
+                slug: VaultSlug::new(1),
+                name: Some("rejected".to_string()),
+                retention_policy: None,
+            }));
+        let (response, _) = store.apply_system(&request, &mut state);
+        match response {
+            LedgerResponse::Error { code, message } => {
+                assert_eq!(code, ErrorCode::InvalidArgument);
+                assert!(
+                    message.contains("CreateVault"),
+                    "expected message to reference CreateVault, got: {message}"
+                );
+                assert!(
+                    message.contains("tier"),
+                    "expected message to mention tier violation, got: {message}"
+                );
+            },
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    /// Same shim rejection for `UpdateVault`.
+    #[tokio::test]
+    async fn organization_metadata_shim_rejects_update_vault() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(0));
+        let mut state = (*store.applied_state.load_full()).clone();
+
+        let request =
+            SystemRequest::OrganizationMetadata(Box::new(OrganizationRequest::UpdateVault {
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
+                retention_policy: None,
+            }));
+        let (response, _) = store.apply_system(&request, &mut state);
+        assert!(
+            matches!(response, LedgerResponse::Error { code: ErrorCode::InvalidArgument, .. }),
+            "expected InvalidArgument, got {response:?}"
+        );
+    }
+
+    /// Same shim rejection for `DeleteVault`.
+    #[tokio::test]
+    async fn organization_metadata_shim_rejects_delete_vault() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(0));
+        let mut state = (*store.applied_state.load_full()).clone();
+
+        let request =
+            SystemRequest::OrganizationMetadata(Box::new(OrganizationRequest::DeleteVault {
+                organization: OrganizationId::new(1),
+                vault: VaultId::new(1),
+            }));
+        let (response, _) = store.apply_system(&request, &mut state);
+        assert!(
+            matches!(response, LedgerResponse::Error { code: ErrorCode::InvalidArgument, .. }),
+            "expected InvalidArgument, got {response:?}"
+        );
+    }
+
+    /// Per-organization `CreateVault` apply does NOT mutate the slug-index
+    /// maps (`vault_slug_index` / `vault_id_to_slug`) — those live on
+    /// GLOBAL and are maintained via `RegisterVaultDirectoryEntry`.
+    /// Mutating them from per-org apply changed state-root identity in
+    /// prior flip attempts and broke block-announcement delivery.
+    #[tokio::test]
+    async fn per_org_create_vault_does_not_touch_slug_index() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+        // Per-organization group: organization_id != 0.
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
+        let mut state = (*store.applied_state.load_full()).clone();
+
+        // Seed the organization as Active in the per-org state so
+        // `require_fully_active_org` passes.
+        let organization = OrganizationId::new(1);
+        create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(1),
+            Region::US_EAST_VA,
+        );
+
+        // CreateVault through the per-org apply path.
+        let slug = VaultSlug::new(0xCAFE_BEEF);
+        let req = OrganizationRequest::CreateVault {
+            organization,
+            slug,
+            name: Some("per-org".to_string()),
+            retention_policy: None,
+        };
+        let (response, _) = store.apply_org(&req, &mut state);
+        let vault_id = match response {
+            LedgerResponse::VaultCreated { vault, slug: out_slug } => {
+                assert_eq!(out_slug, slug);
+                vault
+            },
+            other => panic!("expected VaultCreated, got {other:?}"),
+        };
+
+        // Vault body lives in per-org state.
+        assert!(state.vaults.contains_key(&(organization, vault_id)));
+        assert!(state.vault_heights.contains_key(&(organization, vault_id)));
+        assert!(state.vault_health.contains_key(&(organization, vault_id)));
+
+        // Slug-index maps are untouched by per-org apply — they are
+        // populated separately via `SystemRequest::RegisterVaultDirectoryEntry`
+        // on GLOBAL.
+        assert!(
+            !state.vault_slug_index.contains_key(&slug),
+            "per-org CreateVault must not insert into vault_slug_index \
+             (state-root invariant — prior flip attempts regressed \
+             watch_blocks_realtime by doing this)"
+        );
+        assert!(
+            !state.vault_id_to_slug.contains_key(&(organization, vault_id)),
+            "per-org CreateVault must not insert into vault_id_to_slug \
+             (state-root invariant)"
+        );
+    }
+
+    /// Per-organization CreateVault is idempotent by `(organization, slug)`.
+    ///
+    /// γ Phase 3b's dual-propose path can fail between step (a)
+    /// per-org CreateVault and step (b) GLOBAL RegisterVaultDirectoryEntry.
+    /// The client retry then re-issues CreateVault with the same slug.
+    /// Without idempotency the per-org apply would allocate a new `VaultId`
+    /// each retry, leaving orphan vault bodies on per-org state. This
+    /// test pins the idempotency contract: same slug → same vault_id,
+    /// sequence counter not advanced.
+    #[tokio::test]
+    async fn per_org_create_vault_is_idempotent_by_slug() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("raft_log.db");
+        let store = RaftLogStore::<FileBackend>::open(&path)
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
+        let mut state = (*store.applied_state.load_full()).clone();
+
+        let organization = OrganizationId::new(1);
+        create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(1),
+            Region::US_EAST_VA,
+        );
+
+        let slug = VaultSlug::new(0x1111_2222);
+        let req = OrganizationRequest::CreateVault {
+            organization,
+            slug,
+            name: Some("first".to_string()),
+            retention_policy: None,
+        };
+
+        let (resp1, _) = store.apply_org(&req, &mut state);
+        let vault_id_1 = match resp1 {
+            LedgerResponse::VaultCreated { vault, slug: out } => {
+                assert_eq!(out, slug);
+                vault
+            },
+            other => panic!("expected VaultCreated, got {other:?}"),
+        };
+        let sequence_after_first = state.sequences.clone();
+
+        // Retry with the same slug → returns the existing vault_id, sequence
+        // counter does NOT advance, no orphan body created.
+        let (resp2, _) = store.apply_org(&req, &mut state);
+        let vault_id_2 = match resp2 {
+            LedgerResponse::VaultCreated { vault, slug: out } => {
+                assert_eq!(out, slug);
+                vault
+            },
+            other => panic!("expected VaultCreated on retry, got {other:?}"),
+        };
+
+        assert_eq!(
+            vault_id_1, vault_id_2,
+            "retry must return the same vault_id (idempotent by slug)"
+        );
+        assert_eq!(
+            state.sequences, sequence_after_first,
+            "retry must not advance the per-org sequence counter"
+        );
+
+        // Only one entry in `state.vaults` under this slug.
+        let slug_entries = state
+            .vaults
+            .iter()
+            .filter(|((org, _), meta)| *org == organization && meta.slug == slug)
+            .count();
+        assert_eq!(slug_entries, 1, "retry must not create a duplicate body");
     }
 
     #[tokio::test]

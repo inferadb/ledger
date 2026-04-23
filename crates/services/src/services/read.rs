@@ -681,17 +681,30 @@ impl ReadService {
                 // Compute vault block hash using the same function as get_tip_hashes
                 let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
 
+                // γ Phase 3a: prefer the slug stamped on the entry itself.
+                // Fall back to `applied_state` map lookups (historical blocks
+                // written before Phase 3a did not stamp the entry; they carry
+                // the zero sentinel post-serde-default).
+                let organization_slug = if entry.organization_slug.value() == 0 {
+                    applied_state
+                        .resolve_id_to_slug(entry.organization)
+                        .map_or(entry.organization.value() as u64, |s| s.value())
+                } else {
+                    entry.organization_slug.value()
+                };
+                let vault_slug = if entry.vault_slug.value() == 0 {
+                    applied_state
+                        .resolve_vault_id_to_slug(entry.organization, entry.vault)
+                        .map_or(0, |s| s.value())
+                } else {
+                    entry.vault_slug.value()
+                };
+
                 announcements.push(BlockAnnouncement {
                     organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                        slug: applied_state
-                            .resolve_id_to_slug(entry.organization)
-                            .map_or(entry.organization.value() as u64, |s| s.value()),
+                        slug: organization_slug,
                     }),
-                    vault: Some(inferadb_ledger_proto::proto::VaultSlug {
-                        slug: applied_state
-                            .resolve_vault_id_to_slug(entry.organization, entry.vault)
-                            .map_or(0, |s| s.value()),
-                    }),
+                    vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
                     height: entry.vault_height,
                     block_hash: Some(inferadb_ledger_proto::proto::Hash {
                         value: block_hash.to_vec(),
@@ -1482,13 +1495,19 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             start_height - 1 // Will accept blocks at start_height and above
         };
 
-        // Filter by internal IDs and normalize announcement slugs.
-        // REGIONAL Raft apply handlers populate announcement org/vault fields from
-        // internal-ID-to-slug maps that may be empty in the REGIONAL applied state.
-        // We filter by internal ID and then replace the announcement's org/vault
-        // slugs with the correct external Snowflake slugs.
+        // Filter announcements that target this subscription's (org, vault).
+        //
+        // γ Phase 3a: the apply path now stamps the external slugs onto the
+        // `VaultEntry` (see `log_storage/operations/mod.rs` + `raft_impl.rs`),
+        // so announcements typically carry the external Snowflake slug.
+        // Background-job / saga / system-vault writes that don't know the
+        // external slug leave a zero sentinel and the emitter falls back to
+        // the internal id — so we match on EITHER the external slug OR the
+        // internal id to cover both cases.
         let watch_org_id = organization_id;
         let watch_vault_id = vault_id;
+        let watch_org_slug = req.organization.as_ref().map_or(0, |o| o.slug);
+        let watch_vault_slug = req.vault.as_ref().map_or(0, |v| v.slug);
         let org_slug_proto = req.organization;
         let vault_slug_proto = req.vault;
         let broadcast_stream =
@@ -1501,20 +1520,23 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                             let ann_org = announcement.organization.as_ref().map_or(0, |n| n.slug);
                             let ann_vault = announcement.vault.as_ref().map_or(0, |v| v.slug);
 
-                            // Match on internal ID (REGIONAL) or external slug (GLOBAL).
-                            // In REGIONAL mode, announcements carry internal IDs as fallback.
-                            if ann_org != watch_org_id.value() as u64 {
-                                return None;
-                            }
-                            if ann_vault != watch_vault_id.value() as u64 {
+                            // Accept either the external slug (γ Phase 3a
+                            // stamped path) or the internal-id fallback
+                            // (background-job / system-vault path).
+                            let org_matches =
+                                ann_org == watch_org_slug || ann_org == watch_org_id.value() as u64;
+                            let vault_matches = ann_vault == watch_vault_slug
+                                || ann_vault == watch_vault_id.value() as u64;
+                            if !org_matches || !vault_matches {
                                 return None;
                             }
                             // Skip blocks we already sent from history
                             if announcement.height <= last_historical_height {
                                 return None;
                             }
-                            // Normalize: ensure announcement carries external slugs,
-                            // not internal IDs (REGIONAL apply handler may set internal IDs)
+                            // Normalize: ensure announcement carries external
+                            // slugs for the client (collapses the two-source
+                            // ambiguity into a single wire representation).
                             announcement.organization = org_slug_proto;
                             announcement.vault = vault_slug_proto;
                             Some(Ok(announcement))
@@ -1997,7 +2019,8 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
             status_with_correlation(e, &ctx.request_id(), ctx.trace_id())
         })?;
         // Vault slug indexes are in GLOBAL applied state, not the data region's.
-        let vault_id = SlugResolver::new(system.applied_state).resolve_vault(domain.vault).map_err(|e| {
+        let vault_id =
+            SlugResolver::new(system.applied_state).resolve_vault(domain.vault).map_err(|e| {
                 ctx.set_error("slug_resolve_vault", e.message());
                 status_with_correlation(e, &ctx.request_id(), ctx.trace_id())
             })?;

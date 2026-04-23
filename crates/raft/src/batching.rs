@@ -456,6 +456,8 @@ mod tests {
             transactions: vec![],
             idempotency_key: [0; 16],
             request_hash: 0,
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         }
     }
 
@@ -797,6 +799,8 @@ mod tests {
                 transactions: vec![],
                 idempotency_key: [0u8; 16],
                 request_hash: idx,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             }
         }
 

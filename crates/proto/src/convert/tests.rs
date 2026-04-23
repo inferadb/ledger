@@ -292,6 +292,8 @@ fn test_vault_entry_to_proto_block_empty_transactions() {
         transactions: vec![],
         tx_merkle_root: Hash::from([0xCDu8; 32]),
         state_root: Hash::from([0xEFu8; 32]),
+        organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+        vault_slug: inferadb_ledger_types::VaultSlug::new(0),
     };
 
     let region_block = inferadb_ledger_types::RegionBlock {
@@ -343,6 +345,8 @@ fn test_vault_entry_to_proto_block_with_transaction() {
         transactions: vec![tx],
         tx_merkle_root: Hash::default(),
         state_root: Hash::default(),
+        organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+        vault_slug: inferadb_ledger_types::VaultSlug::new(0),
     };
 
     let region_block = inferadb_ledger_types::RegionBlock {
@@ -382,6 +386,8 @@ fn test_vault_entry_to_proto_block_slug_independent_of_vault_id() {
         transactions: vec![],
         tx_merkle_root: Hash::default(),
         state_root: Hash::default(),
+        organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+        vault_slug: inferadb_ledger_types::VaultSlug::new(0),
     };
 
     let region_block = inferadb_ledger_types::RegionBlock {

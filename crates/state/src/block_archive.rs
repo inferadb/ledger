@@ -596,6 +596,8 @@ mod tests {
                 transactions: vec![],
                 tx_merkle_root: [0u8; 32],
                 state_root: [region_height as u8; 32],
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             }],
             timestamp: Utc::now(),
             leader_id: NodeId::new("node-1"),
@@ -704,6 +706,8 @@ mod tests {
             transactions: vec![],
             tx_merkle_root: [0u8; 32],
             state_root: [42u8; 32],
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         });
 
         archive.append_block(&block).expect("append block");
@@ -752,6 +756,8 @@ mod tests {
                 transactions,
                 tx_merkle_root: [100u8; 32],
                 state_root: [region_height as u8; 32],
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             }],
             timestamp: Utc::now(),
             leader_id: NodeId::new("node-1"),
@@ -1107,6 +1113,9 @@ mod tests {
                         }],
                         tx_merkle_root: [seed; 32],
                         state_root: [(height % 256) as u8; 32],
+
+                        organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                        vault_slug: inferadb_ledger_types::VaultSlug::new(0),
                     }],
                     timestamp: fixed_ts,
                     leader_id: NodeId::new("node-1"),

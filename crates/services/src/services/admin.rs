@@ -411,8 +411,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 if height > 0 { vec![(org, v, height)] } else { vec![] }
             } else if let Some(ref manager) = self.raft_manager {
                 let mut heights = Vec::new();
-                manager
-                    .for_each_vault_across_groups(|org, vault, h| heights.push((org, vault, h)));
+                manager.for_each_vault_across_groups(|org, vault, h| heights.push((org, vault, h)));
                 heights
             } else {
                 let mut heights = Vec::new();
@@ -1354,7 +1353,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             slug_resolver.extract_and_resolve(&req.organization).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
             })?;
-        let vault_id = slug_resolver.extract_and_resolve_vault(&req.vault).inspect_err(|status| {
+        let vault_id =
+            slug_resolver.extract_and_resolve_vault(&req.vault).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
             })?;
 
@@ -1675,7 +1675,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 ctx.set_error("InvalidArgument", status.message());
             })?;
 
-        let vault_id = slug_resolver.extract_and_resolve_vault(&req.vault).inspect_err(|status| {
+        let vault_id =
+            slug_resolver.extract_and_resolve_vault(&req.vault).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
             })?;
 
@@ -1898,6 +1899,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                     transactions: vec![transaction],
                     idempotency_key: [0; 16],
                     request_hash: 0,
+                    organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                    vault_slug: inferadb_ledger_types::VaultSlug::new(0),
                 }))
                 .await
             {
@@ -2884,6 +2887,8 @@ mod tests {
             transactions: vec![],
             tx_merkle_root: [0u8; 32],
             state_root: [0u8; 32],
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
 
         let hash1 = compute_vault_block_hash(&entry);
@@ -2902,6 +2907,8 @@ mod tests {
             transactions: vec![],
             tx_merkle_root: [0u8; 32],
             state_root: [0u8; 32],
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
 
         let entry2 = VaultEntry {
@@ -2912,6 +2919,8 @@ mod tests {
             transactions: vec![],
             tx_merkle_root: [0u8; 32],
             state_root: [0u8; 32],
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
 
         let hash1 = compute_vault_block_hash(&entry1);
@@ -2930,6 +2939,8 @@ mod tests {
             transactions: vec![],
             tx_merkle_root: [0u8; 32],
             state_root: [0u8; 32],
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
 
         let entry2 = VaultEntry {
@@ -2939,7 +2950,10 @@ mod tests {
             previous_vault_hash: [0u8; 32],
             transactions: vec![],
             tx_merkle_root: [0u8; 32],
-            state_root: [1u8; 32], // Different state root
+            state_root: [1u8; 32], // Different state root,
+
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
 
         let hash1 = compute_vault_block_hash(&entry1);
@@ -2959,6 +2973,8 @@ mod tests {
             transactions: vec![],
             tx_merkle_root: [0u8; 32],
             state_root: [1u8; 32],
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
 
         let hash1 = compute_vault_block_hash(&entry1);
@@ -2971,6 +2987,8 @@ mod tests {
             transactions: vec![],
             tx_merkle_root: [0u8; 32],
             state_root: [2u8; 32],
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
 
         let hash2 = compute_vault_block_hash(&entry2);
@@ -2987,6 +3005,8 @@ mod tests {
             transactions: vec![],
             tx_merkle_root: [0u8; 32],
             state_root: [2u8; 32],
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
 
         let hash2_wrong = compute_vault_block_hash(&entry2_wrong);
@@ -3006,6 +3026,8 @@ mod tests {
             transactions: vec![],
             tx_merkle_root: [5u8; 32],
             state_root: [6u8; 32],
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
 
         let base_hash = compute_vault_block_hash(&base_entry);

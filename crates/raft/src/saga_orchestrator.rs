@@ -708,6 +708,10 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 transactions: vec![transaction],
                 idempotency_key: [0; 16],
                 request_hash: 0,
+                // Saga writes don't carry an external client-supplied slug;
+                // the announcement path falls back to the internal id.
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             };
             let request_bytes = serialize_saga_payload(request)?;
 
@@ -717,18 +721,13 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                 // `ApplyWorker<SystemRequest>`.
                 let org_group = manager.route_organization(organization).ok_or_else(|| {
                     SagaError::SagaRaftWrite {
-                        message: format!(
-                            "Organization {organization} is not active on this node"
-                        ),
+                        message: format!("Organization {organization} is not active on this node"),
                         backtrace: snafu::Backtrace::generate(),
                     }
                 })?;
                 org_group
                     .handle()
-                    .propose_bytes_and_wait(
-                        request_bytes,
-                        std::time::Duration::from_secs(30),
-                    )
+                    .propose_bytes_and_wait(request_bytes, std::time::Duration::from_secs(30))
                     .await
                     .map_err(|e| SagaError::SagaRaftWrite {
                         message: format!("{e:?}"),
@@ -797,8 +796,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
     ) -> Result<(), SagaError> {
         let payload = serde_json::to_vec(pii).context(SerializationSnafu)?;
         let key = SystemKeys::saga_pii_key(saga_id.value());
-        let expires_at =
-            (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp() as u64;
+        let expires_at = (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp() as u64;
         let operation = Operation::SetEntity {
             key,
             value: payload,

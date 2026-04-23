@@ -254,6 +254,8 @@ impl<B: StorageBackend + 'static> OrphanCleanupJob<B> {
                 transactions: vec![transaction],
                 idempotency_key: [0; 16],
                 request_hash: 0,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             }))
             .await
             .map_err(|e| OrphanCleanupError::OrphanRaftWrite {

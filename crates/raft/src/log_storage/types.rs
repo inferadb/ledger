@@ -985,7 +985,9 @@ mod tests {
     #[test]
     fn test_pending_external_writes_not_empty_after_push_vault_slug_index() {
         let mut writes = PendingExternalWrites::new();
-        writes.vault_slug_index.push((VaultSlug::new(200), (OrganizationId::new(1), VaultId::new(1))));
+        writes
+            .vault_slug_index
+            .push((VaultSlug::new(200), (OrganizationId::new(1), VaultId::new(1))));
         assert!(!writes.is_empty());
     }
 

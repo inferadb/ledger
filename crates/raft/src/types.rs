@@ -1099,6 +1099,42 @@ pub enum SystemRequest {
     /// route to the per-org `ApplyWorker<OrganizationRequest>` via
     /// `propose_to_organization_bytes`.
     OrganizationMetadata(Box<OrganizationRequest>),
+
+    /// Registers a vault's slug-index entry in GLOBAL state (γ Phase 3b).
+    ///
+    /// Under per-organization vault-id allocation, vault record bodies
+    /// (`VaultMeta`, heights, health) live in the per-organization group's
+    /// `AppliedState`. GLOBAL retains only the slug-index entries
+    /// (`vault_slug_index` + `vault_id_to_slug`) so `SlugResolver` can
+    /// resolve a `VaultSlug` to its owning `(OrganizationId, VaultId)`
+    /// pair before the caller knows which org owns the vault.
+    ///
+    /// The vault service proposes this variant to GLOBAL after the
+    /// per-org `CreateVault` apply succeeds and returns the allocated
+    /// `vault_id`. Re-apply is idempotent: overwriting the same
+    /// `(slug, org, vault_id)` tuple is a no-op.
+    RegisterVaultDirectoryEntry {
+        /// Owning organization.
+        organization: OrganizationId,
+        /// Vault id allocated by the per-organization sequence counter.
+        vault: VaultId,
+        /// External Snowflake slug (globally unique).
+        slug: VaultSlug,
+    },
+
+    /// Removes a vault's slug-index entry from GLOBAL state (γ Phase 3b).
+    ///
+    /// Paired with the per-org `DeleteVault` apply — after the per-org
+    /// group soft-deletes the vault record, this variant removes the
+    /// slug-resolver entry so `SlugResolver::resolve_vault` returns
+    /// `NotFound`. Idempotent: removing a non-existent entry is a
+    /// no-op.
+    UnregisterVaultDirectoryEntry {
+        /// Owning organization.
+        organization: OrganizationId,
+        /// Vault id to remove.
+        vault: VaultId,
+    },
 }
 
 // =============================================================================
@@ -1201,6 +1237,14 @@ pub enum OrganizationRequest {
     /// by the Raft group the entry lands in — apply handlers read it
     /// from [`RaftLogStore::organization_id`] rather than carrying it
     /// in the payload.
+    ///
+    /// `organization_slug` / `vault_slug` carry the external Snowflake slugs
+    /// so the apply handler can stamp them onto the emitted `VaultEntry`.
+    /// This lets the block-announcement formatter read slugs directly off the
+    /// entry without consulting `AppliedState.id_to_slug` — the per-org state
+    /// root does not own those maps. Callers without slug context (saga,
+    /// background GC, tests) leave them at their zero-sentinel default;
+    /// `VaultEntry` consumers fall back to the internal id in that case.
     Write {
         /// Target vault within the organization.
         vault: VaultId,
@@ -1212,6 +1256,13 @@ pub enum OrganizationRequest {
         /// Hash of the request payload (seahash).
         #[serde(default)]
         request_hash: u64,
+        /// External organization slug (Snowflake). Zero sentinel when unknown
+        /// (e.g., background-job writes to the system vault).
+        #[serde(default)]
+        organization_slug: OrganizationSlug,
+        /// External vault slug (Snowflake). Zero sentinel when unknown.
+        #[serde(default)]
+        vault_slug: VaultSlug,
     },
     /// Batches of requests applied atomically in a single Raft entry.
     BatchWrite {
@@ -2618,6 +2669,8 @@ mod tests {
                 transactions: vec![],
                 idempotency_key: [0; 16],
                 request_hash: 0,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
             proposed_at: ts,
             state_root_commitments: vec![],
@@ -2696,6 +2749,8 @@ mod tests {
                 transactions: vec![],
                 idempotency_key: [0; 16],
                 request_hash: 0,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
             proposed_at: Utc.with_ymd_and_hms(2099, 6, 15, 12, 0, 0).unwrap(),
             state_root_commitments: commitments.clone(),
@@ -2750,6 +2805,8 @@ mod tests {
                 transactions: vec![],
                 idempotency_key: [42; 16],
                 request_hash: 12345,
+                organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
             proposed_at: Utc.with_ymd_and_hms(2099, 3, 1, 0, 0, 0).unwrap(),
             state_root_commitments: vec![StateRootCommitment {
@@ -3848,6 +3905,11 @@ mod tests {
             // The inner OrganizationRequest may or may not carry PII; use Global
             // here since the wrapper routes to GLOBAL's AppliedState.
             SystemRequest::OrganizationMetadata(_) => RaftScope::Global,
+
+            // γ Phase 3b: vault slug-index maintenance on GLOBAL. No PII — just
+            // identifiers and the globally-unique vault slug.
+            SystemRequest::RegisterVaultDirectoryEntry { .. } => RaftScope::Global,
+            SystemRequest::UnregisterVaultDirectoryEntry { .. } => RaftScope::Global,
         }
     }
 

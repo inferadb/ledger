@@ -444,6 +444,8 @@ mod tests {
             transactions: vec![],
             tx_merkle_root: [1u8; 32],
             state_root: [2u8; 32],
+            organization_slug: OrganizationSlug::new(0),
+            vault_slug: VaultSlug::new(0),
         }
     }
 

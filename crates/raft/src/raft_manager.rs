@@ -465,9 +465,7 @@ impl InnerGroup {
     }
 
     /// Returns the events database.
-    pub fn events_db(
-        &self,
-    ) -> Option<&Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>> {
+    pub fn events_db(&self) -> Option<&Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>> {
         self.events_db.as_ref()
     }
 
@@ -1318,12 +1316,7 @@ impl RaftManager {
     /// Used by `AdminService::create_backup` for backup metadata versioning.
     /// Returns 0 if no org groups are active.
     pub fn max_region_height(&self) -> u64 {
-        self.regions
-            .read()
-            .values()
-            .map(|g| g.applied_state().region_height())
-            .max()
-            .unwrap_or(0)
+        self.regions.read().values().map(|g| g.applied_state().region_height()).max().unwrap_or(0)
     }
 
     /// Takes the DR event receiver. Called once by bootstrap to pass to the
@@ -1573,8 +1566,7 @@ impl RaftManager {
         // The read-guard must be dropped before the first `.await` below
         // (`adopt_leader`). Taking the lookup result in its own let-binding
         // forces the guard out of scope before the `if let` body executes.
-        let region_inner_opt =
-            self.regions.read().get(&(region, OrganizationId::new(0))).cloned();
+        let region_inner_opt = self.regions.read().get(&(region, OrganizationId::new(0))).cloned();
         if let Some(region_inner) = region_inner_opt {
             let region_handle = region_inner.handle().clone();
             let org_handle = org_inner.handle().clone();
@@ -1600,10 +1592,7 @@ impl RaftManager {
         Ok(Arc::new(OrganizationGroup(org_inner)))
     }
 
-    pub async fn start_data_region(
-        &self,
-        region_config: RegionConfig,
-    ) -> Result<Arc<RegionGroup>> {
+    pub async fn start_data_region(&self, region_config: RegionConfig) -> Result<Arc<RegionGroup>> {
         // Verify system region is running
         if !self.has_region(Region::GLOBAL) {
             return Err(RaftManagerError::SystemRegionRequired);
@@ -3788,7 +3777,8 @@ mod tests {
         assert!(group.is_jobs_active());
 
         // Set last_activity to the past so idle_secs() > 0
-        *group.0.last_activity.lock() = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        *group.0.last_activity.lock() =
+            std::time::Instant::now() - std::time::Duration::from_secs(5);
 
         manager.hibernate_idle_regions(0);
         assert!(!group.is_jobs_active());

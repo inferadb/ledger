@@ -4577,52 +4577,139 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     // not through this transitional shim. Routing them here is a tier
                     // violation: the VaultEntry produced by Write is silently dropped,
                     // and the write bypasses the per-org state machine entirely.
-                    SystemRequest::OrganizationMetadata(org_req) => {
-                        match org_req.as_ref() {
-                            OrganizationRequest::Write { .. } => LedgerResponse::Error {
-                                code: ErrorCode::InvalidArgument,
-                                message: "OrganizationRequest::Write sent through \
+                    SystemRequest::OrganizationMetadata(org_req) => match org_req.as_ref() {
+                        OrganizationRequest::Write { .. } => LedgerResponse::Error {
+                            code: ErrorCode::InvalidArgument,
+                            message: "OrganizationRequest::Write sent through \
                                           SystemRequest::OrganizationMetadata — tier \
                                           violation. Route data-plane writes through the \
                                           per-org group via propose_to_organization_bytes."
-                                    .to_string(),
-                            },
-                            OrganizationRequest::BatchWrite { .. } => LedgerResponse::Error {
-                                code: ErrorCode::InvalidArgument,
-                                message: "OrganizationRequest::BatchWrite sent through \
+                                .to_string(),
+                        },
+                        OrganizationRequest::BatchWrite { .. } => LedgerResponse::Error {
+                            code: ErrorCode::InvalidArgument,
+                            message: "OrganizationRequest::BatchWrite sent through \
                                           SystemRequest::OrganizationMetadata — tier \
                                           violation. Route data-plane writes through the \
                                           per-org group via propose_to_organization_bytes."
-                                    .to_string(),
-                            },
-                            OrganizationRequest::IngestExternalEvents { .. } => {
-                                LedgerResponse::Error {
-                                    code: ErrorCode::InvalidArgument,
-                                    message: "OrganizationRequest::IngestExternalEvents sent \
+                                .to_string(),
+                        },
+                        OrganizationRequest::IngestExternalEvents { .. } => LedgerResponse::Error {
+                            code: ErrorCode::InvalidArgument,
+                            message: "OrganizationRequest::IngestExternalEvents sent \
                                               through SystemRequest::OrganizationMetadata — \
                                               tier violation. Route data-plane writes through \
                                               the per-org group via \
                                               propose_to_organization_bytes."
-                                        .to_string(),
-                                }
+                                .to_string(),
+                        },
+                        // γ Phase 3b: vault lifecycle is routed directly to the
+                        // per-organization group. The `OrganizationMetadata` GLOBAL
+                        // shim path is a tier violation — the vault body would
+                        // land in GLOBAL `AppliedState` instead of the owning
+                        // org's per-org state where record bodies now live, and
+                        // the slug-index entry would skip the GLOBAL
+                        // `RegisterVaultDirectoryEntry` apply that is the
+                        // canonical post-γ directory maintenance point.
+                        OrganizationRequest::CreateVault { .. } => LedgerResponse::Error {
+                            code: ErrorCode::InvalidArgument,
+                            message: "OrganizationRequest::CreateVault sent through \
+                                          SystemRequest::OrganizationMetadata — tier \
+                                          violation. Route vault lifecycle ops through \
+                                          the per-org group via \
+                                          propose_to_organization_bytes, then propose \
+                                          SystemRequest::RegisterVaultDirectoryEntry to \
+                                          GLOBAL for the slug-index entry."
+                                .to_string(),
+                        },
+                        OrganizationRequest::UpdateVault { .. } => LedgerResponse::Error {
+                            code: ErrorCode::InvalidArgument,
+                            message: "OrganizationRequest::UpdateVault sent through \
+                                          SystemRequest::OrganizationMetadata — tier \
+                                          violation. Route vault lifecycle ops through \
+                                          the per-org group via \
+                                          propose_to_organization_bytes."
+                                .to_string(),
+                        },
+                        OrganizationRequest::DeleteVault { .. } => LedgerResponse::Error {
+                            code: ErrorCode::InvalidArgument,
+                            message: "OrganizationRequest::DeleteVault sent through \
+                                          SystemRequest::OrganizationMetadata — tier \
+                                          violation. Route vault lifecycle ops through \
+                                          the per-org group via \
+                                          propose_to_organization_bytes, then propose \
+                                          SystemRequest::UnregisterVaultDirectoryEntry \
+                                          to GLOBAL for the slug-index entry."
+                                .to_string(),
+                        },
+                        _ => {
+                            let (resp, _entry) = self.apply_organization_request_with_events(
+                                org_req,
+                                state,
+                                block_timestamp,
+                                op_index,
+                                events,
+                                ttl_days,
+                                pending,
+                                log_id_bytes,
+                                skip_state_writes,
+                                caller,
+                                defer_state_root,
+                            );
+                            resp
+                        },
+                    },
+
+                    // γ Phase 3b: vault slug-index maintenance on GLOBAL. Per-
+                    // organization groups allocate vault ids from their own
+                    // sequence counters and store record bodies in per-org
+                    // state; GLOBAL retains only the slug-index entries so
+                    // `SlugResolver` can resolve a `VaultSlug` without knowing
+                    // the owning organization in advance. Re-apply is
+                    // idempotent (overwriting the same tuple is a no-op).
+                    SystemRequest::RegisterVaultDirectoryEntry { organization, vault, slug } => {
+                        let key = (*organization, *vault);
+                        // Idempotency + collision guard: if (org, vault) already maps
+                        // to a slug or slug already maps to a vault, the tuple must
+                        // match exactly. Anything else is inconsistent and we reject
+                        // rather than silently overwrite.
+                        match (
+                            state.vault_id_to_slug.get(&key).copied(),
+                            state.vault_slug_index.get(slug).copied(),
+                        ) {
+                            (Some(existing_slug), Some(existing_key))
+                                if existing_slug == *slug && existing_key == key =>
+                            {
+                                // Idempotent re-apply — no-op.
+                                LedgerResponse::Empty
                             },
-                            _ => {
-                                let (resp, _entry) = self.apply_organization_request_with_events(
-                                    org_req,
-                                    state,
-                                    block_timestamp,
-                                    op_index,
-                                    events,
-                                    ttl_days,
-                                    pending,
-                                    log_id_bytes,
-                                    skip_state_writes,
-                                    caller,
-                                    defer_state_root,
-                                );
-                                resp
+                            (None, None) => {
+                                state.vault_slug_index.insert(*slug, key);
+                                state.vault_id_to_slug.insert(key, *slug);
+                                pending.vault_slug_index.push((*slug, key));
+                                LedgerResponse::Empty
+                            },
+                            (existing_slug, existing_key) => LedgerResponse::Error {
+                                code: ErrorCode::FailedPrecondition,
+                                message: format!(
+                                    "vault directory register collision: (org={}, vault={}) \
+                                     already has slug {:?}; slug {} already maps to {:?}",
+                                    organization, vault, existing_slug, slug, existing_key
+                                ),
                             },
                         }
+                    },
+
+                    SystemRequest::UnregisterVaultDirectoryEntry { organization, vault } => {
+                        // Remove by tuple key; look up the slug first so we can
+                        // delete the forward-direction entry and schedule the
+                        // persistent delete. Idempotent when the entry is absent.
+                        let key = (*organization, *vault);
+                        if let Some(slug) = state.vault_id_to_slug.remove(&key) {
+                            state.vault_slug_index.remove(&slug);
+                            pending.vault_slug_index_deleted.push(slug);
+                        }
+                        LedgerResponse::Empty
                     },
 
                     // These SystemRequest variants have full apply logic in the
@@ -4862,22 +4949,22 @@ impl<B: StorageBackend> RaftLogStore<B> {
     pub(super) fn apply_region_request_with_events(
         &self,
         request: &RegionRequest,
-        state: &mut AppliedState,
-        block_timestamp: DateTime<Utc>,
-        op_index: &mut u32,
-        events: &mut Vec<EventEntry>,
-        ttl_days: u32,
-        pending: &mut PendingExternalWrites,
-        log_id_bytes: Option<&[u8]>,
+        _state: &mut AppliedState,
+        _block_timestamp: DateTime<Utc>,
+        _op_index: &mut u32,
+        _events: &mut Vec<EventEntry>,
+        _ttl_days: u32,
+        _pending: &mut PendingExternalWrites,
+        _log_id_bytes: Option<&[u8]>,
         skip_state_writes: bool,
-        caller: u64,
+        _caller: u64,
         // When true, skip the per-entity `compute_state_root` call and leave
         // `state_root` in the returned `VaultEntry` as `EMPTY_HASH`. The
         // caller must patch the final state_root (and recompute block_hash
         // in the response) after all entries in the batch apply. Setting
         // this to true amortizes state-root work from O(entries) to
         // O(unique-vaults-in-batch).
-        defer_state_root: bool,
+        _defer_state_root: bool,
     ) -> (LedgerResponse, Option<VaultEntry>) {
         // Block height for event emission (from region chain state)
         let block_height = self.region_chain.read().height + 1;
@@ -5008,6 +5095,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 transactions,
                 idempotency_key,
                 request_hash,
+                organization_slug,
+                vault_slug,
             } => {
                 // Owning organization is implied by the Raft group this
                 // entry lands in; read from the log store field instead
@@ -5345,7 +5434,15 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     })
                     .collect();
 
-                // Build VaultEntry for RegionBlock with server-assigned sequences
+                // Build VaultEntry for RegionBlock with server-assigned sequences.
+                //
+                // γ Phase 3a: stamp the external slugs onto the entry so the
+                // block-announcement emission path in `raft_impl.rs` can read
+                // them directly without consulting `state.id_to_slug` /
+                // `state.vault_id_to_slug`. Mutating those maps from this
+                // hot-path apply arm broke state-root agreement in three
+                // prior flip attempts — don't do it here; stamp the entry
+                // instead.
                 let vault_entry = VaultEntry {
                     organization: organization,
                     vault: *vault,
@@ -5354,6 +5451,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     transactions: sequenced_transactions,
                     tx_merkle_root,
                     state_root,
+                    organization_slug: *organization_slug,
+                    vault_slug: *vault_slug,
                 };
 
                 // Compute block hash from vault entry (for response)
@@ -5411,10 +5510,53 @@ impl<B: StorageBackend> RaftLogStore<B> {
             },
 
             OrganizationRequest::CreateVault { organization, slug, name, retention_policy } => {
+                // γ Phase 3b routing: this apply arm runs on the per-
+                // organization group's `AppliedState`. Vault body tables
+                // (`vaults`, `vault_heights`, `vault_health`) live on this
+                // per-org state. The slug-index tables
+                // (`vault_slug_index`, `vault_id_to_slug`) remain on GLOBAL
+                // and are maintained by the follow-up
+                // `SystemRequest::RegisterVaultDirectoryEntry` proposal —
+                // never touched from per-org apply because mutating those
+                // `im::HashMap`s here changed per-entry state-root identity
+                // in prior flip attempts and broke block-announcement
+                // delivery for `watch_blocks_realtime` tests.
+                //
+                // The `OrganizationMetadata` GLOBAL shim path explicitly
+                // rejects CreateVault so this arm only executes on the
+                // per-org apply worker.
                 if let Err(resp) = require_fully_active_org(organization, state) {
                     return (resp, None);
                 }
 
+                // Idempotency-by-slug: if a VaultMeta with this slug already
+                // exists in the per-org state, return its `vault_id` rather
+                // than allocating a new one. This covers the γ Phase 3b
+                // retry scenario where step (a) succeeded but step (b)
+                // (GLOBAL `RegisterVaultDirectoryEntry`) failed — the client
+                // retry of `create_vault` must not create an orphan body.
+                //
+                // Scan is O(|vaults in this org|); CreateVault is not the
+                // hot path so this is acceptable. If org sizes ever require
+                // it, a local per-org slug→id map can be added to
+                // `AppliedState` — for now the scan keeps the state surface
+                // minimal.
+                if let Some(existing) = state
+                    .vaults
+                    .iter()
+                    .find(|((org, _), meta)| *org == *organization && meta.slug == *slug)
+                    .map(|((_, vault_id), _)| *vault_id)
+                {
+                    return (
+                        LedgerResponse::VaultCreated { vault: existing, slug: *slug },
+                        None,
+                    );
+                }
+
+                // Vault-id allocation is per-organization: each per-org
+                // `AppliedState` has its own `SequenceCounters`, so
+                // `next_vault()` draws from the owning organization's
+                // counter — not from a shared global sequence.
                 let vault_id = state.sequences.next_vault();
                 let key = (*organization, vault_id);
                 state.vault_heights.insert(key, 0);
@@ -5435,13 +5577,18 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 }
                 state.vaults.insert(key, vault_meta);
 
-                // Insert into bidirectional vault slug index (tuple-keyed
-                // post-γ: vault ids are per-organization).
-                state.vault_slug_index.insert(*slug, (*organization, vault_id));
-                state.vault_id_to_slug.insert((*organization, vault_id), *slug);
-                pending.vault_slug_index.push((*slug, (*organization, vault_id)));
+                // NOTE: `state.vault_slug_index` / `state.vault_id_to_slug`
+                // and `pending.vault_slug_index` are deliberately NOT
+                // touched here. Those entries land in GLOBAL `AppliedState`
+                // via `SystemRequest::RegisterVaultDirectoryEntry` proposed
+                // by `vault.rs::create_vault` after this per-org apply
+                // succeeds and returns the allocated `vault_id`.
 
-                // Emit VaultCreated event
+                // Emit VaultCreated event. Per-org `AppliedState.id_to_slug`
+                // is empty (populated only on GLOBAL by `CreateOrganization`
+                // apply), so `org_slug` resolves to `None` — same graceful
+                // degradation as the per-org Write arm, which tests
+                // tolerate.
                 let org_slug = state.id_to_slug.get(organization).copied();
                 events.push(
                     ApplyPhaseEmitter::for_organization(
@@ -5456,7 +5603,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 );
                 *op_index += 1;
 
-                // Audit: vault creation
+                // Audit: vault creation. `slug` is in the request payload —
+                // no need to consult the GLOBAL slug index.
                 let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
                 self.emit_audit(
                     AuditKeys::vault(slug.value(), "create", ts_ns),
@@ -5474,9 +5622,16 @@ impl<B: StorageBackend> RaftLogStore<B> {
             },
 
             OrganizationRequest::DeleteVault { organization, vault } => {
+                // γ Phase 3b routing: this apply arm runs on the per-
+                // organization group. Vault body (state.vaults) lives here;
+                // the slug index (`vault_slug_index`, `vault_id_to_slug`)
+                // lives on GLOBAL and is removed by the paired
+                // `SystemRequest::UnregisterVaultDirectoryEntry` proposal.
                 let key = (*organization, *vault);
-                // Capture vault slug before state mutation removes it
-                let vault_slug_for_audit = state.vault_id_to_slug.get(&key).copied();
+                // Capture vault slug from the per-org VaultMeta for audit.
+                // The GLOBAL slug index is NOT consulted here to avoid
+                // mutating state-root-participating maps on per-org apply.
+                let vault_slug_for_audit = state.vaults.get(&key).map(|v| v.slug);
                 // Mark vault as deleted (keep heights for historical queries)
                 let response = if let Some(vault_meta) = state.vaults.get(&key) {
                     let mut vault_meta = vault_meta.clone();
@@ -5487,11 +5642,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     }
                     state.vaults.insert(key, vault_meta);
 
-                    // Clean up vault slug index (tuple-keyed post-γ).
-                    if let Some(slug) = state.vault_id_to_slug.remove(&key) {
-                        state.vault_slug_index.remove(&slug);
-                        pending.vault_slug_index_deleted.push(slug);
-                    }
+                    // NOTE: slug-index cleanup is deliberately NOT performed
+                    // here. The GLOBAL slug index is maintained via
+                    // `SystemRequest::UnregisterVaultDirectoryEntry`
+                    // proposed by `vault.rs::delete_vault` after this
+                    // per-org apply succeeds.
 
                     LedgerResponse::VaultDeleted { success: true }
                 } else {

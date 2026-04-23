@@ -994,10 +994,8 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
 
         // Persist the saga record in GLOBAL so the orchestrator can drive
         // the migration to completion (`load_pending_sagas` polls GLOBAL).
-        let saga_response = self
-            .ctx
-            .propose_system_request(saga_write, &grpc_metadata, &mut ctx)
-            .await?;
+        let saga_response =
+            self.ctx.propose_system_request(saga_write, &grpc_metadata, &mut ctx).await?;
 
         match saga_response {
             LedgerResponse::Write { .. } => {

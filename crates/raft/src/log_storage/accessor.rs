@@ -259,10 +259,7 @@ impl AppliedStateAccessor {
     /// alongside the vault id. Prefer this over
     /// [`resolve_vault_slug_to_id`](Self::resolve_vault_slug_to_id) when
     /// the caller does not already have the organization in scope.
-    pub fn resolve_vault_slug_to_pair(
-        &self,
-        slug: VaultSlug,
-    ) -> Option<(OrganizationId, VaultId)> {
+    pub fn resolve_vault_slug_to_pair(&self, slug: VaultSlug) -> Option<(OrganizationId, VaultId)> {
         self.state.load().vault_slug_index.get(&slug).copied()
     }
 

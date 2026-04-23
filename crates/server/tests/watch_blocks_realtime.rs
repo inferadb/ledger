@@ -498,3 +498,89 @@ async fn test_watch_blocks_reconnection_after_restart() {
         );
     }
 }
+
+/// γ Phase 3a: verify block announcements carry the client-supplied external
+/// slugs (not the internal i64 ids) end-to-end.
+///
+/// Setup:
+/// 1. Create a cluster with a fresh organization + vault — the SDK layer produces external
+///    Snowflake `*Slug` values that are distinct from the internal `*Id` values the state machine
+///    allocates.
+/// 2. Subscribe to `watch_blocks`.
+/// 3. Write once.
+/// 4. Assert the announcement's `organization.slug` / `vault.slug` fields match the slugs the
+///    client originally passed — the same external Snowflake values returned by the create RPCs.
+///
+/// This validates the full stamping chain:
+///   `WriteRequest.{organization,vault}.slug`
+///     → `operations_to_request` captures them
+///     → `OrganizationRequest::Write.{organization_slug,vault_slug}`
+///     → apply handler stamps them onto `VaultEntry`
+///     → `raft_impl` emits them directly in the announcement
+///     → `read.rs` filter accepts the external-slug path
+///
+/// Regression guard: earlier flip attempts populated `state.id_to_slug`
+/// inside the Write apply arm to achieve the same end state, which broke
+/// state-root agreement and made announcements never arrive. This test
+/// catches a silent fallback to the internal id (the old pre-stamping
+/// behaviour) by insisting on a *specific* external Snowflake value.
+#[tokio::test]
+async fn test_watch_blocks_announcement_carries_external_slugs() {
+    let cluster = TestCluster::new(1).await;
+    cluster
+        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
+        .await
+        .expect("create data region");
+    let _leader_id = cluster.wait_for_leader().await;
+    let leader = cluster.leader().expect("should have leader");
+
+    // External slugs — returned by the create RPCs; Snowflake-shaped `u64`.
+    let organization =
+        create_organization(&leader.addr, "slug-stamping-org", leader).await.expect("create org");
+    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
+
+    // Sanity: external slugs should be non-zero Snowflakes, distinct from a
+    // freshly-allocated internal id. This keeps the test meaningful — if
+    // the announcement carries the internal id as a fallback, it will NOT
+    // match the external slug asserted below.
+    assert_ne!(organization.value(), 0, "organization slug must be a real Snowflake");
+    assert_ne!(vault.value(), 0, "vault slug must be a real Snowflake");
+
+    let mut read_client = create_read_client(&leader.addr).await.expect("create read client");
+    let request = inferadb_ledger_proto::proto::WatchBlocksRequest {
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: organization.value(),
+        }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
+        start_height: 1,
+        caller: None,
+    };
+    let mut stream =
+        read_client.watch_blocks(request).await.expect("watch_blocks should succeed").into_inner();
+
+    write_entity(&leader.addr, organization, vault, "k", b"v", "slug-client")
+        .await
+        .expect("write should succeed");
+
+    let announcement = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("announcement should arrive within timeout")
+        .expect("stream should have item")
+        .expect("announcement should be Ok");
+
+    // The core assertion: the announcement carries the ORIGINAL external
+    // Snowflake slugs the client passed — not the internal ids.
+    assert_eq!(
+        announcement.organization.as_ref().map(|n| n.slug),
+        Some(organization.value()),
+        "announcement.organization.slug must match the external Snowflake the \
+         client sent, not the internal OrganizationId",
+    );
+    assert_eq!(
+        announcement.vault.as_ref().map(|v| v.slug),
+        Some(vault.value()),
+        "announcement.vault.slug must match the external Snowflake the \
+         client sent, not the internal VaultId",
+    );
+    assert_eq!(announcement.height, 1);
+}

@@ -89,12 +89,16 @@ pub(crate) struct ServiceContext {
 ///
 /// Selects which Raft group receives the serialized payload. `Global` routes
 /// to the GLOBAL `(GLOBAL, 0)` group (cluster control plane); `Region` routes
-/// to the target region's regional control-plane group (`(region, 0)`).
+/// to the target region's regional control-plane group (`(region, 0)`);
+/// `Organization` routes to a specific `(region, organization_id)` per-
+/// organization group (data plane, γ Phase 3b).
 enum ProposalRoute {
     /// GLOBAL Raft group (cluster control plane).
     Global,
     /// A specific region's Raft group (regional control plane).
     Region(Region),
+    /// A specific `(region, organization_id)` per-organization group.
+    Organization(Region, OrganizationId),
 }
 
 impl ServiceContext {
@@ -151,11 +155,16 @@ impl ServiceContext {
             ProposalRoute::Region(region) => {
                 self.proposer.propose_to_region_bytes(region, bytes, timeout).await
             },
+            ProposalRoute::Organization(region, organization) => {
+                self.proposer
+                    .propose_to_organization_bytes(region, organization, bytes, timeout)
+                    .await
+            },
         };
         ctx.end_raft_timer();
 
-        let result = result
-            .map_err(|e| status_with_correlation(e, &ctx.request_id(), ctx.trace_id()));
+        let result =
+            result.map_err(|e| status_with_correlation(e, &ctx.request_id(), ctx.trace_id()));
         if let Err(ref e) = result {
             ctx.set_error("ProposalError", e.message());
         }
@@ -204,6 +213,39 @@ impl ServiceContext {
         self.propose_serialized(wrapped, ProposalRoute::Global, grpc_metadata, ctx).await
     }
 
+    /// Proposes an [`OrganizationRequest`] directly to the per-organization
+    /// Raft group (γ Phase 3b routing).
+    ///
+    /// Unlike [`propose_organization_request`](Self::propose_organization_request) —
+    /// which wraps in `SystemRequest::OrganizationMetadata` and lands in
+    /// GLOBAL state via the transitional metadata shim — this helper
+    /// serializes the request as `RaftPayload<OrganizationRequest>` and
+    /// routes to the per-org group via `route_organization`. The per-org
+    /// `ApplyWorker<OrganizationRequest>` decodes the bytes and applies
+    /// against the owning organization's `AppliedState`.
+    ///
+    /// Used by the vault service for `CreateVault` / `UpdateVault` /
+    /// `DeleteVault` after γ Phase 3b: the record body lands on per-org
+    /// state (via this helper), then the vault service follows up with a
+    /// GLOBAL `SystemRequest::RegisterVaultDirectoryEntry` /
+    /// `UnregisterVaultDirectoryEntry` to maintain the slug index.
+    pub(crate) async fn propose_to_organization_request(
+        &self,
+        region: Region,
+        organization: OrganizationId,
+        organization_request: OrganizationRequest,
+        grpc_metadata: &tonic::metadata::MetadataMap,
+        ctx: &mut RequestContext,
+    ) -> Result<LedgerResponse, Status> {
+        self.propose_serialized(
+            organization_request,
+            ProposalRoute::Organization(region, organization),
+            grpc_metadata,
+            ctx,
+        )
+        .await
+    }
+
     /// Proposes a [`RegionRequest`] to the target region's Raft group
     /// (regional control plane tier).
     ///
@@ -245,7 +287,8 @@ impl ServiceContext {
         grpc_metadata: &tonic::metadata::MetadataMap,
         ctx: &mut RequestContext,
     ) -> Result<LedgerResponse, Status> {
-        self.propose_serialized(system_request, ProposalRoute::Region(region), grpc_metadata, ctx).await
+        self.propose_serialized(system_request, ProposalRoute::Region(region), grpc_metadata, ctx)
+            .await
     }
 
     /// Returns the state layer for a specific region's Raft group.

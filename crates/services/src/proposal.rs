@@ -268,9 +268,7 @@ impl ProposalService for RaftProposalService {
             return Err(super::services::metadata::not_leader_status_from_handle(
                 org_group.handle().as_ref(),
                 Some(manager.peer_addresses()),
-                format!(
-                    "Not the leader for organization {organization} in region {region}"
-                ),
+                format!("Not the leader for organization {organization} in region {region}"),
             ));
         }
 
@@ -398,6 +396,7 @@ pub(crate) mod mock {
         }
 
         /// Returns the raw proposal bytes captured from `propose_bytes()` calls.
+        #[allow(dead_code)]
         pub(crate) fn raw_proposals(&self) -> Vec<Vec<u8>> {
             self.proposals.lock().clone()
         }

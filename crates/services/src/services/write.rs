@@ -398,6 +398,12 @@ impl WriteService {
     ///
     /// Server-assigned sequences: The transaction's sequence is set to 0 here;
     /// the actual sequence will be assigned by the Raft state machine at apply time.
+    ///
+    /// `organization_slug` / `vault_slug` are the external Snowflake slugs
+    /// carried from the incoming gRPC request. They're stamped onto the
+    /// emitted `VaultEntry` at apply time (γ Phase 3a) so the
+    /// block-announcement formatter can read them directly without
+    /// consulting per-region `AppliedState` slug maps.
     fn operations_to_request(
         &self,
         organization: OrganizationId,
@@ -406,6 +412,8 @@ impl WriteService {
         client_id: &str,
         idempotency_key: [u8; 16],
         request_hash: u64,
+        organization_slug: inferadb_ledger_types::OrganizationSlug,
+        vault_slug: inferadb_ledger_types::VaultSlug,
     ) -> Result<OrganizationRequest, Status> {
         let internal_ops: Vec<inferadb_ledger_types::Operation> = operations
             .iter()
@@ -426,6 +434,8 @@ impl WriteService {
             transactions: vec![transaction],
             idempotency_key,
             request_hash,
+            organization_slug,
+            vault_slug,
         })
     }
 }
@@ -884,6 +894,17 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
 
         // Server-assigned sequences: no gap check needed
 
+        // γ Phase 3a: capture the external slugs from the incoming request
+        // so the apply handler can stamp them onto the emitted `VaultEntry`.
+        // The SDK sends `{Entity}Slug { slug: u64 }` in `req.organization`
+        // and `req.vault`; we already resolved them to internal ids above,
+        // so the slug values here are authoritative.
+        let organization_slug = inferadb_ledger_types::OrganizationSlug::new(
+            req.organization.as_ref().map_or(0, |o| o.slug),
+        );
+        let vault_slug =
+            inferadb_ledger_types::VaultSlug::new(req.vault.as_ref().map_or(0, |v| v.slug));
+
         let ledger_request = self.operations_to_request(
             organization_id,
             Some(vault_id),
@@ -891,6 +912,8 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             &client_id,
             idempotency_key,
             request_hash,
+            organization_slug,
+            vault_slug,
         )?;
 
         // Re-validate vault slug before proposal submission.
@@ -1605,6 +1628,14 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
 
         // Server-assigned sequences: no gap check needed
 
+        // γ Phase 3a: carry external slugs through to apply-time stamping
+        // on `VaultEntry` (see the `write` path above for rationale).
+        let organization_slug = inferadb_ledger_types::OrganizationSlug::new(
+            req.organization.as_ref().map_or(0, |o| o.slug),
+        );
+        let vault_slug =
+            inferadb_ledger_types::VaultSlug::new(req.vault.as_ref().map_or(0, |v| v.slug));
+
         let ledger_request = self.operations_to_request(
             organization_id,
             Some(vault_id),
@@ -1612,6 +1643,8 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             &client_id,
             idempotency_key,
             request_hash,
+            organization_slug,
+            vault_slug,
         )?;
 
         // Re-validate vault slug before proposal submission.

@@ -3,11 +3,12 @@
 //! Each tier in the B.1 three-tier model has its own typed apply pipeline:
 //!
 //! - [`SystemApplyWorker`] applies [`SystemRequest`](crate::types::SystemRequest) committed entries
-//!   against the `(GLOBAL, 0)` [`OrganizationGroup`](crate::raft_manager::OrganizationGroup)
-//!   (the cluster control-plane group until B.1.6 ships a distinct SystemGroup storage path).
+//!   against the `(GLOBAL, 0)` [`OrganizationGroup`](crate::raft_manager::OrganizationGroup) (the
+//!   cluster control-plane group until B.1.6 ships a distinct SystemGroup storage path).
 //! - [`RegionApplyWorker`] applies [`RegionRequest`](crate::types::RegionRequest) committed entries
-//!   against per-region `(region, 0)` [`OrganizationGroup`](crate::raft_manager::OrganizationGroup)s
-//!   (the regional control-plane group until B.1.6 ships a distinct RegionGroup storage path).
+//!   against per-region `(region, 0)`
+//!   [`OrganizationGroup`](crate::raft_manager::OrganizationGroup)s (the regional control-plane
+//!   group until B.1.6 ships a distinct RegionGroup storage path).
 //! - [`OrganizationApplyWorker`] applies [`OrganizationRequest`](crate::types::OrganizationRequest)
 //!   committed entries against a per-organization
 //!   [`OrganizationGroup`](crate::raft_manager::OrganizationGroup) via
@@ -157,8 +158,10 @@ impl<R: ApplyableRequest> ApplyWorker<R> {
             };
 
             // Phase 1: remove waiters under a short `response_map` lock.
-            let mut to_send: Vec<(oneshot::Sender<crate::types::LedgerResponse>, crate::types::LedgerResponse)> =
-                Vec::with_capacity(batch_size);
+            let mut to_send: Vec<(
+                oneshot::Sender<crate::types::LedgerResponse>,
+                crate::types::LedgerResponse,
+            )> = Vec::with_capacity(batch_size);
             let mut to_spillover: Vec<(u64, crate::types::LedgerResponse)> =
                 Vec::with_capacity(batch_size);
             {

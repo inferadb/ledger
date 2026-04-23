@@ -1003,32 +1003,45 @@ async fn bootstrap_org_and_vault(
         .await
         .expect("UpdateOrganizationStatus propose");
 
-    // Step 4: CreateVault on GLOBAL — registers the vault slug index so
-    //         the service layer can resolve external slugs to internal IDs.
-    //
-    // Post-Phase D: GLOBAL has `ApplyWorker<SystemRequest>`. To land vault
-    // metadata in GLOBAL's `AppliedState`, wrap the org-tier request in
-    // `SystemRequest::OrganizationMetadata` — the same path `propose_organization_request`
-    // in `service_infra.rs` uses. Sending raw `RaftPayload<OrganizationRequest>` bytes
-    // to a `SystemRequest` worker silently fails deserialization and returns `Empty`.
+    // Step 4: CreateVault — dual-propose (γ Phase 3b).
+    //   (a) Propose `OrganizationRequest::CreateVault` to the per-organization
+    //       group. The per-org apply allocates the internal `VaultId` from
+    //       the per-org `SequenceCounters.vault`, writes the vault body
+    //       (VaultMeta, vault_heights, vault_health) to per-org state, and
+    //       returns the allocated id in `LedgerResponse::VaultCreated`.
+    //   (b) Propose `SystemRequest::RegisterVaultDirectoryEntry` to GLOBAL so
+    //       the slug-index (`vault_slug_index`, `vault_id_to_slug`) resolves
+    //       external `VaultSlug` values to `(OrganizationId, VaultId)` pairs
+    //       cluster-wide.
     let vault_slug =
         inferadb_ledger_types::snowflake::generate_vault_slug().expect("generate vault slug");
-    let create_vault =
-        SystemRequest::OrganizationMetadata(Box::new(OrganizationRequest::CreateVault {
-            organization: org_id,
-            slug: vault_slug,
-            name: Some("sprint-1b3-vault".to_string()),
-            retention_policy: None,
-        }));
-    let vault_id = match node
-        .handle
-        .propose_and_wait(RaftPayload::system(create_vault), Duration::from_secs(5))
+    let org_group =
+        node.manager.route_organization(org_id).expect("per-organization group registered");
+    let create_vault = OrganizationRequest::CreateVault {
+        organization: org_id,
+        slug: vault_slug,
+        name: Some("sprint-1b3-vault".to_string()),
+        retention_policy: None,
+    };
+    let vault_id = match org_group
+        .handle()
+        .propose_and_wait(RaftPayload::new(create_vault, 0), Duration::from_secs(5))
         .await
-        .expect("CreateVault propose")
+        .expect("CreateVault propose to per-org")
     {
         inferadb_ledger_raft::types::LedgerResponse::VaultCreated { vault, .. } => vault,
         other => panic!("CreateVault expected VaultCreated, got {other}"),
     };
+    let register = SystemRequest::RegisterVaultDirectoryEntry {
+        organization: org_id,
+        vault: vault_id,
+        slug: vault_slug,
+    };
+    let _ = node
+        .handle
+        .propose_and_wait(RaftPayload::system(register), Duration::from_secs(5))
+        .await
+        .expect("RegisterVaultDirectoryEntry propose");
 
     (user_id, org_slug, org_id, vault_slug, vault_id)
 }
@@ -1074,6 +1087,8 @@ async fn propose_regional_writes(
             transactions: vec![txn],
             idempotency_key: *uuid::Uuid::new_v4().as_bytes(),
             request_hash: i as u64,
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
         let resp = region_group
             .handle()

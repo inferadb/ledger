@@ -170,10 +170,7 @@ impl SlugResolver {
     /// caller does not already have the organization in scope — e.g.
     /// the `HealthService` probe path that accepts a vault slug
     /// without a required organization slug in the request.
-    pub fn resolve_vault_pair(
-        &self,
-        slug: VaultSlug,
-    ) -> Result<(OrganizationId, VaultId), Status> {
+    pub fn resolve_vault_pair(&self, slug: VaultSlug) -> Result<(OrganizationId, VaultId), Status> {
         self.state
             .resolve_vault_slug_to_pair(slug)
             .ok_or_else(|| Status::not_found(format!("Vault with slug {} not found", slug.value())))
@@ -672,9 +669,7 @@ mod tests {
     #[test]
     fn resolve_vault_slug_reverse_lookup() {
         let resolver = make_resolver_with_vaults(&[], &[(100, 1)]);
-        let slug = resolver
-            .resolve_vault_slug(OrganizationId::new(0), VaultId::new(1))
-            .unwrap();
+        let slug = resolver.resolve_vault_slug(OrganizationId::new(0), VaultId::new(1)).unwrap();
         assert_eq!(slug.value(), 100);
     }
 

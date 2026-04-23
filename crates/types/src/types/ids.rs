@@ -92,13 +92,17 @@ macro_rules! define_slug {
         $(#[$meta])*
         #[derive(
             Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord,
-            Serialize, Deserialize,
+            Serialize, Deserialize, Default,
         )]
         #[serde(transparent)]
         pub struct $name(u64);
 
         impl $name {
             /// Creates a new slug from a raw Snowflake ID value.
+            ///
+            /// A value of `0` is a sentinel (e.g., system-vault writes / background
+            /// jobs that do not carry an external slug) and is also the value
+            /// returned by [`Default::default`].
             #[inline]
             pub const fn new(value: u64) -> Self {
                 Self(value)

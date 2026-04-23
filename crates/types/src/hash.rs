@@ -736,6 +736,8 @@ mod tests {
             transactions: vec![],
             tx_merkle_root: [1u8; 32],
             state_root: [2u8; 32],
+            organization_slug: crate::types::OrganizationSlug::new(0),
+            vault_slug: crate::types::VaultSlug::new(0),
         };
 
         let h1 = vault_entry_hash(&entry);
@@ -754,6 +756,8 @@ mod tests {
             transactions: vec![],
             tx_merkle_root: [1u8; 32],
             state_root: [2u8; 32],
+            organization_slug: crate::types::OrganizationSlug::new(0),
+            vault_slug: crate::types::VaultSlug::new(0),
         };
 
         let base_hash = vault_entry_hash(&base);

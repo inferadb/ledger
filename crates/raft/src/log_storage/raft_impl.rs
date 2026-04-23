@@ -661,23 +661,35 @@ impl RaftLogStore {
                 tracing::error!("Failed to store block: {}", e);
             }
 
-            // Broadcast block announcements for real-time subscribers
+            // Broadcast block announcements for real-time subscribers.
+            //
+            // γ Phase 3a: slugs are read directly from the stamped `VaultEntry`
+            // fields rather than looked up in `state.id_to_slug` /
+            // `state.vault_id_to_slug`. The per-org `AppliedState` does not
+            // own those maps — attempting to populate them inside the Write
+            // apply arm broke state-root agreement in three earlier flip
+            // attempts (`docs/superpowers/plans/2026-04-22-gamma-per-org-vault-allocation.md`).
+            // For entries without a stamped slug (background jobs / saga /
+            // system-vault writes leave the zero sentinel), fall back to the
+            // internal id so existing tests that match on raw id still pass.
             if let Some(sender) = &self.block_announcements {
                 for entry in &vault_entries {
                     let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
+                    let organization_slug = if entry.organization_slug.value() == 0 {
+                        entry.organization.value() as u64
+                    } else {
+                        entry.organization_slug.value()
+                    };
+                    let vault_slug = if entry.vault_slug.value() == 0 {
+                        entry.vault.value() as u64
+                    } else {
+                        entry.vault_slug.value()
+                    };
                     let announcement = inferadb_ledger_proto::proto::BlockAnnouncement {
                         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                            slug: state
-                                .id_to_slug
-                                .get(&entry.organization)
-                                .map_or(entry.organization.value() as u64, |s| s.value()),
+                            slug: organization_slug,
                         }),
-                        vault: Some(inferadb_ledger_proto::proto::VaultSlug {
-                            slug: state
-                                .vault_id_to_slug
-                                .get(&(entry.organization, entry.vault))
-                                .map_or(entry.vault.value() as u64, |s| s.value()),
-                        }),
+                        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
                         height: entry.vault_height,
                         block_hash: Some(inferadb_ledger_proto::proto::Hash {
                             value: block_hash.to_vec(),
@@ -1384,12 +1396,8 @@ impl RaftLogStore {
                 let vault_id = inferadb_ledger_types::VaultId::new(vault_id_val);
                 match decode::<super::types::VaultMeta>(&value_bytes) {
                     Ok(meta) => {
-                        state
-                            .vault_id_to_slug
-                            .insert((meta.organization, vault_id), meta.slug);
-                        state
-                            .vault_slug_index
-                            .insert(meta.slug, (meta.organization, vault_id));
+                        state.vault_id_to_slug.insert((meta.organization, vault_id), meta.slug);
+                        state.vault_slug_index.insert(meta.slug, (meta.organization, vault_id));
                         state.vaults.insert((meta.organization, vault_id), meta);
                     },
                     Err(e) => {
@@ -1545,10 +1553,9 @@ impl RaftLogStore {
             // Values are `(OrganizationId, VaultId)` tuples post-γ.
             if let (Some(slug_val), Some(pair)) = (
                 <u64 as inferadb_ledger_store::Key>::decode(&key_bytes),
-                decode::<(
-                    inferadb_ledger_types::OrganizationId,
-                    inferadb_ledger_types::VaultId,
-                )>(&value_bytes)
+                decode::<(inferadb_ledger_types::OrganizationId, inferadb_ledger_types::VaultId)>(
+                    &value_bytes,
+                )
                 .ok(),
             ) {
                 let slug = inferadb_ledger_types::VaultSlug::new(slug_val);

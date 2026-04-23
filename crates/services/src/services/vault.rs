@@ -14,7 +14,10 @@ use inferadb_ledger_proto::proto::{
 };
 use inferadb_ledger_raft::{
     metrics,
-    types::{BlockRetentionMode, BlockRetentionPolicy, LedgerResponse, OrganizationRequest},
+    types::{
+        BlockRetentionMode, BlockRetentionPolicy, LedgerResponse, OrganizationRequest,
+        SystemRequest,
+    },
 };
 use inferadb_ledger_types::{
     VaultEntry, ZERO_HASH,
@@ -93,9 +96,22 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
             .get_organization(organization_id)
             .ok_or_else(|| Status::not_found("Organization not found"))?;
 
+        // γ Phase 3b dual-propose:
+        //   (a) CreateVault → per-org group: allocates `VaultId` from the
+        //       per-org counter, writes the vault body (VaultMeta,
+        //       vault_heights, vault_health) to per-org `AppliedState`.
+        //   (b) RegisterVaultDirectoryEntry → GLOBAL: inserts the slug-index
+        //       entry so `SlugResolver::resolve_vault(slug)` returns the
+        //       `(organization, vault_id)` pair cluster-wide.
+        //
+        // Failure mode: step (b) can fail after step (a) succeeds. That
+        // leaves a vault body in per-org state with no GLOBAL slug-index
+        // entry. The error surfaces to the client, who can retry — step
+        // (b) is idempotent (inserting the same tuple is a no-op), so the
+        // next attempt (or an orphan-cleanup sweep) resolves it.
         let response = self
             .ctx
-            .propose_organization_request(
+            .propose_to_organization_request(
                 org_meta.region,
                 organization_id,
                 OrganizationRequest::CreateVault {
@@ -111,6 +127,22 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
 
         match response {
             LedgerResponse::VaultCreated { vault: vault_id, slug } => {
+                // Step (b): register the slug-index entry on GLOBAL so the
+                // vault can be resolved by external slug. Must complete
+                // before returning success — if it fails, the client sees
+                // the error and can retry (idempotent on re-apply).
+                self.ctx
+                    .propose_system_request(
+                        SystemRequest::RegisterVaultDirectoryEntry {
+                            organization: organization_id,
+                            vault: vault_id,
+                            slug,
+                        },
+                        &grpc_metadata,
+                        &mut ctx,
+                    )
+                    .await?;
+
                 ctx.set_vault(slug.value());
                 ctx.set_success();
                 metrics::record_organization_operation(organization_id, "create_vault");
@@ -152,6 +184,9 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
                     transactions: vec![],
                     tx_merkle_root: ZERO_HASH,
                     state_root,
+
+                    organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+                    vault_slug: inferadb_ledger_types::VaultSlug::new(0),
                 };
                 let genesis_hash = inferadb_ledger_types::vault_entry_hash(&genesis_entry);
                 let organization = slug_resolver.resolve_slug(organization_id)?;
@@ -215,7 +250,8 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
                 ctx.set_error("InvalidArgument", status.message());
             })?;
 
-        let vault_id = slug_resolver.extract_and_resolve_vault(&req.vault).inspect_err(|status| {
+        let vault_id =
+            slug_resolver.extract_and_resolve_vault(&req.vault).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
             })?;
 
@@ -229,9 +265,21 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
             .get_organization(organization_id)
             .ok_or_else(|| Status::not_found("Organization not found"))?;
 
+        // γ Phase 3b dual-propose:
+        //   (a) DeleteVault → per-org group: soft-deletes the vault body
+        //       (sets `VaultMeta.deleted = true` in per-org state).
+        //   (b) UnregisterVaultDirectoryEntry → GLOBAL: removes the
+        //       slug-index entry so subsequent `SlugResolver::resolve_vault`
+        //       calls return `NotFound`.
+        //
+        // Failure mode: step (b) can fail after step (a) succeeds. That
+        // leaves a deleted body in per-org state with an orphan slug-index
+        // entry on GLOBAL. Step (b) is idempotent (removing a missing
+        // entry is a no-op), so a retry — or an orphan-cleanup sweep —
+        // resolves it.
         let response = self
             .ctx
-            .propose_organization_request(
+            .propose_to_organization_request(
                 org_meta.region,
                 organization_id,
                 OrganizationRequest::DeleteVault { organization: organization_id, vault: vault_id },
@@ -243,6 +291,20 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
         match response {
             LedgerResponse::VaultDeleted { success } => {
                 if success {
+                    // Step (b): remove the GLOBAL slug-index entry. Any
+                    // failure here logs + surfaces to the client so a
+                    // retry (idempotent) can reconcile.
+                    self.ctx
+                        .propose_system_request(
+                            SystemRequest::UnregisterVaultDirectoryEntry {
+                                organization: organization_id,
+                                vault: vault_id,
+                            },
+                            &grpc_metadata,
+                            &mut ctx,
+                        )
+                        .await?;
+
                     ctx.set_success();
                     metrics::record_organization_operation(organization_id, "delete_vault");
                     metrics::record_organization_latency(
@@ -293,7 +355,8 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
                 ctx.set_error("InvalidArgument", status.message());
             })?;
 
-        let vault_id = slug_resolver.extract_and_resolve_vault(&req.vault).inspect_err(|status| {
+        let vault_id =
+            slug_resolver.extract_and_resolve_vault(&req.vault).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
             })?;
 
@@ -443,7 +506,8 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
             slug_resolver.extract_and_resolve(&req.organization).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
             })?;
-        let vault_id = slug_resolver.extract_and_resolve_vault(&req.vault).inspect_err(|status| {
+        let vault_id =
+            slug_resolver.extract_and_resolve_vault(&req.vault).inspect_err(|status| {
                 ctx.set_error("InvalidArgument", status.message());
             })?;
 
@@ -467,9 +531,12 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
             .get_organization(organization_id)
             .ok_or_else(|| Status::not_found("Organization not found"))?;
 
+        // γ Phase 3b: UpdateVault touches only the per-org vault body
+        // (retention policy lives on `VaultMeta`). No GLOBAL slug-index
+        // change — this is a single-propose path.
         let response = self
             .ctx
-            .propose_organization_request(
+            .propose_to_organization_request(
                 org_meta.region,
                 organization_id,
                 OrganizationRequest::UpdateVault {
