@@ -115,6 +115,50 @@ pub enum RegionStorageError {
         /// Description of the error.
         message: String,
     },
+
+    /// Legacy pre–Slice 1 layout detected: the `_meta:last_applied`
+    /// sentinel lives in state.db (old layout) but the `_meta.db`
+    /// coordinator database is empty or missing. This build moves the
+    /// sentinel to `_meta.db`; migration is not supported.
+    #[snafu(display(
+        "Legacy state-layer layout detected for organization {organization_id} in region \
+         {region}: _meta:last_applied found in state.db at {state_db_path} but no sentinel \
+         in meta.db at {meta_db_path}. This build requires the _meta.db coordinator \
+         introduced by spec 2026-04-23-per-vault-consensus.md (Slice 1). Wipe the data \
+         directory and restart."
+    ))]
+    LegacyStateLayout {
+        /// The region the organization belongs to.
+        region: Region,
+        /// The organization whose data directory carries the legacy artefact.
+        organization_id: OrganizationId,
+        /// Path of the state.db that carries the legacy sentinel.
+        state_db_path: String,
+        /// Expected path of the meta.db coordinator.
+        meta_db_path: String,
+    },
+
+    /// Inconsistent layout: the legacy sentinel is present in state.db AND
+    /// a sentinel has been written to meta.db. This can happen only if a
+    /// previous boot crashed mid-migration or someone hand-edited the data
+    /// directory. Operator investigates; automatic recovery is unsafe.
+    #[snafu(display(
+        "Inconsistent state-layer layout for organization {organization_id} in region \
+         {region}: legacy sentinel present in state.db at {state_db_path} AND a sentinel \
+         is already recorded in meta.db at {meta_db_path}. This indicates a mid-migration \
+         crash or manual tampering; automatic recovery is unsafe. Operator must \
+         investigate."
+    ))]
+    InconsistentStateLayout {
+        /// The region the organization belongs to.
+        region: Region,
+        /// The organization whose data directory is inconsistent.
+        organization_id: OrganizationId,
+        /// Path of the state.db carrying the stale legacy sentinel.
+        state_db_path: String,
+        /// Path of the meta.db with its own sentinel.
+        meta_db_path: String,
+    },
 }
 
 // ============================================================================
@@ -146,6 +190,12 @@ pub struct RegionStorage {
     /// State database (entity / relationship stores, indexes; for the system
     /// org this also holds the cluster + organization directory).
     state_db: Arc<Database<FileBackend>>,
+    /// Per-organization coordination database (`_meta.db`) introduced by
+    /// Slice 1 of per-vault consensus. Owns the `_meta:last_applied`
+    /// crash-recovery sentinel; syncs **after** state.db / raft.db /
+    /// blocks.db / events.db in the checkpointer + shutdown fsync order so
+    /// the sentinel on disk never outruns the entity data it references.
+    meta_db: Arc<Database<FileBackend>>,
     /// Blocks database (historical blockchain data for this organization).
     blocks_db: Arc<Database<FileBackend>>,
     /// Events database (apply-phase audit events for this organization).
@@ -166,6 +216,15 @@ impl RegionStorage {
     /// Returns the state database handle.
     pub fn state_db(&self) -> &Arc<Database<FileBackend>> {
         &self.state_db
+    }
+
+    /// Returns the per-organization meta database handle (`_meta.db`).
+    ///
+    /// Owns the `_meta:last_applied` crash-recovery sentinel; the
+    /// checkpointer must sync this handle **after** state.db / raft.db /
+    /// blocks.db / events.db on every tick.
+    pub fn meta_db(&self) -> &Arc<Database<FileBackend>> {
+        &self.meta_db
     }
 
     /// Returns the blocks database handle.
@@ -318,6 +377,39 @@ impl RegionStorageManager {
         let blocks_db = open_or_create_db(&blocks_db_path, region, organization_id)?;
         let blocks_db = Arc::new(blocks_db);
 
+        // Open or create the per-organization meta database.
+        //
+        // `_meta.db` was introduced by Slice 1 of per-vault consensus — it
+        // owns the `_meta:last_applied` crash-recovery sentinel (previously
+        // bundled into state.db's Entities table). Opening this DB here
+        // ensures every call path that consumes `state_db()` also has
+        // `meta_db()` available without a second discovery step.
+        let meta_db_path = organization_dir.join("_meta.db");
+        let meta_db = open_or_create_db(&meta_db_path, region, organization_id)?;
+        let meta_db = Arc::new(meta_db);
+
+        // Legacy-layout detection, run exactly here (post-open, pre-apply).
+        //
+        // Pre–Slice 1 builds persisted `_meta:last_applied` inside
+        // `state.db`'s Entities table. Now the sentinel lives in
+        // `_meta.db`. On startup, a data_dir written by an older build
+        // will carry the sentinel in state.db and the freshly-created
+        // `_meta.db` will have no sentinel — that signal alone is
+        // sufficient to refuse to boot.
+        //
+        // If BOTH databases carry a sentinel, the data_dir is in an
+        // inconsistent state — a prior crash between migration steps or
+        // manual tampering. Refuse to boot with a different error so the
+        // operator investigates.
+        detect_legacy_layout(
+            region,
+            organization_id,
+            &state_db_path,
+            &meta_db_path,
+            &state_db,
+            &meta_db,
+        )?;
+
         // Open or create events database
         let events_db = EventsDatabase::<FileBackend>::open(&organization_dir).map_err(|e| {
             RegionStorageError::Storage {
@@ -328,8 +420,14 @@ impl RegionStorageManager {
         })?;
         let events_db = Arc::new(events_db);
 
-        let storage =
-            Arc::new(RegionStorage { region, organization_id, state_db, blocks_db, events_db });
+        let storage = Arc::new(RegionStorage {
+            region,
+            organization_id,
+            state_db,
+            meta_db,
+            blocks_db,
+            events_db,
+        });
 
         organizations.insert((region, organization_id), storage.clone());
 
@@ -447,6 +545,85 @@ fn open_or_create_db(
         region,
         organization_id,
         message: format!("failed to open database {}: {e}", path.display()),
+    })
+}
+
+/// Boot-time detector for the pre–Slice 1 state-layer layout.
+///
+/// Slice 1 of per-vault consensus moved the `_meta:last_applied` sentinel
+/// from state.db's Entities table into a dedicated `_meta.db`. Two cases
+/// to catch:
+///
+/// 1. Legacy sentinel in state.db + no sentinel in meta.db (typical
+///    upgrade scenario from an older build) → refuse to boot; operator
+///    must wipe the data directory.
+/// 2. Legacy sentinel in state.db + sentinel in meta.db (inconsistent;
+///    previous boot crashed mid-migration or the data_dir was tampered
+///    with) → refuse to boot with a distinct error.
+///
+/// The detector runs after the databases are opened but before any apply /
+/// replay activity so the apply pipeline never observes a mid-migration
+/// state.
+fn detect_legacy_layout(
+    region: Region,
+    organization_id: OrganizationId,
+    state_db_path: &Path,
+    meta_db_path: &Path,
+    state_db: &Database<FileBackend>,
+    meta_db: &Database<FileBackend>,
+) -> Result<(), RegionStorageError> {
+    use inferadb_ledger_store::tables::Entities;
+
+    let legacy_key = inferadb_ledger_state::StateLayer::<FileBackend>::LAST_APPLIED_KEY.to_vec();
+
+    // Inspect state.db for the legacy sentinel.
+    let state_txn = state_db.read().map_err(|e| RegionStorageError::Storage {
+        region,
+        organization_id,
+        message: format!("failed to open state.db read txn for legacy detection: {e}"),
+    })?;
+    let legacy_sentinel =
+        state_txn.get::<Entities>(&legacy_key).map_err(|e| RegionStorageError::Storage {
+            region,
+            organization_id,
+            message: format!("failed to read legacy sentinel from state.db: {e}"),
+        })?;
+    drop(state_txn);
+
+    if legacy_sentinel.is_none() {
+        // Clean layout (or brand-new data_dir). Nothing to do.
+        return Ok(());
+    }
+
+    // Legacy artefact present — inspect meta.db to distinguish the two
+    // cases.
+    let meta_txn = meta_db.read().map_err(|e| RegionStorageError::Storage {
+        region,
+        organization_id,
+        message: format!("failed to open meta.db read txn for legacy detection: {e}"),
+    })?;
+    let meta_sentinel =
+        meta_txn.get::<Entities>(&legacy_key).map_err(|e| RegionStorageError::Storage {
+            region,
+            organization_id,
+            message: format!("failed to read sentinel from meta.db: {e}"),
+        })?;
+    drop(meta_txn);
+
+    if meta_sentinel.is_some() {
+        return Err(RegionStorageError::InconsistentStateLayout {
+            region,
+            organization_id,
+            state_db_path: state_db_path.display().to_string(),
+            meta_db_path: meta_db_path.display().to_string(),
+        });
+    }
+
+    Err(RegionStorageError::LegacyStateLayout {
+        region,
+        organization_id,
+        state_db_path: state_db_path.display().to_string(),
+        meta_db_path: meta_db_path.display().to_string(),
     })
 }
 
@@ -757,5 +934,132 @@ mod tests {
         assert_eq!(discovered.len(), 2);
         assert!(discovered.contains(&Region::US_EAST_VA));
         assert!(discovered.contains(&Region::IE_EAST_DUBLIN));
+    }
+
+    // ========================================================================
+    // Slice 1 legacy-layout detection
+    // ========================================================================
+
+    /// Simulates a pre–Slice 1 data_dir by writing the legacy
+    /// `_meta:last_applied` sentinel into state.db before open_organization
+    /// runs. open_organization must refuse to boot with LegacyStateLayout.
+    #[test]
+    fn test_open_organization_refuses_legacy_sentinel_in_state_db() {
+        use inferadb_ledger_store::tables::Entities;
+        let temp = TestDir::new();
+        let mgr = RegionStorageManager::new(temp.path().to_path_buf());
+
+        let org = OrganizationId::new(42);
+        let org_dir = mgr.organization_dir(Region::US_EAST_VA, org);
+        std::fs::create_dir_all(&org_dir).expect("create org dir");
+
+        // Pre-seed state.db with the legacy sentinel key (mirrors what a
+        // pre–Slice 1 apply arm wrote into the Entities table).
+        let state_db_path = org_dir.join("state.db");
+        {
+            let db = Database::<FileBackend>::create(&state_db_path).expect("create state.db");
+            let mut txn = db.write().expect("open write txn");
+            let key =
+                inferadb_ledger_state::StateLayer::<FileBackend>::LAST_APPLIED_KEY.to_vec();
+            txn.insert_raw(
+                inferadb_ledger_store::tables::TableId::Entities,
+                &key,
+                b"legacy_sentinel",
+            )
+            .expect("insert legacy sentinel");
+            txn.commit().expect("commit legacy sentinel");
+            // Sanity: the legacy sentinel is visible before we close.
+            let rtxn = db.read().expect("read txn");
+            assert!(rtxn.get::<Entities>(&key).expect("get").is_some());
+        }
+
+        let result = mgr.open_organization(Region::US_EAST_VA, org);
+        match result {
+            Err(RegionStorageError::LegacyStateLayout {
+                region,
+                organization_id,
+                state_db_path: reported_state_db_path,
+                meta_db_path,
+            }) => {
+                assert_eq!(region, Region::US_EAST_VA);
+                assert_eq!(organization_id, org);
+                assert!(
+                    reported_state_db_path.contains("state.db"),
+                    "state.db path reported: {reported_state_db_path}"
+                );
+                assert!(
+                    meta_db_path.contains("_meta.db"),
+                    "meta.db path reported: {meta_db_path}"
+                );
+            },
+            Ok(_) => panic!("expected LegacyStateLayout, got Ok"),
+            Err(other) => panic!("expected LegacyStateLayout, got: {other:?}"),
+        }
+    }
+
+    /// Both the legacy sentinel in state.db AND a sentinel in meta.db
+    /// indicate mid-migration state. open_organization must refuse with
+    /// InconsistentStateLayout so an operator intervenes.
+    #[test]
+    fn test_open_organization_refuses_inconsistent_layout() {
+        let temp = TestDir::new();
+        let mgr = RegionStorageManager::new(temp.path().to_path_buf());
+
+        let org = OrganizationId::new(43);
+        let org_dir = mgr.organization_dir(Region::US_EAST_VA, org);
+        std::fs::create_dir_all(&org_dir).expect("create org dir");
+
+        let key = inferadb_ledger_state::StateLayer::<FileBackend>::LAST_APPLIED_KEY.to_vec();
+
+        // Legacy sentinel in state.db.
+        {
+            let db = Database::<FileBackend>::create(org_dir.join("state.db"))
+                .expect("create state.db");
+            let mut txn = db.write().expect("open write txn");
+            txn.insert_raw(
+                inferadb_ledger_store::tables::TableId::Entities,
+                &key,
+                b"legacy_sentinel",
+            )
+            .expect("insert legacy sentinel");
+            txn.commit().expect("commit");
+        }
+        // Sentinel also in meta.db — inconsistent state.
+        {
+            let db = Database::<FileBackend>::create(org_dir.join("_meta.db"))
+                .expect("create meta.db");
+            let mut txn = db.write().expect("open write txn");
+            txn.insert_raw(inferadb_ledger_store::tables::TableId::Entities, &key, b"new_sentinel")
+                .expect("insert meta sentinel");
+            txn.commit().expect("commit");
+        }
+
+        let result = mgr.open_organization(Region::US_EAST_VA, org);
+        match result {
+            Err(RegionStorageError::InconsistentStateLayout { region, organization_id, .. }) => {
+                assert_eq!(region, Region::US_EAST_VA);
+                assert_eq!(organization_id, org);
+            },
+            Ok(_) => panic!("expected InconsistentStateLayout, got Ok"),
+            Err(other) => panic!("expected InconsistentStateLayout, got: {other:?}"),
+        }
+    }
+
+    /// A brand-new data_dir must open cleanly — no legacy artefacts.
+    #[test]
+    fn test_open_organization_fresh_data_dir_has_no_legacy_false_positive() {
+        let temp = TestDir::new();
+        let mgr = RegionStorageManager::new(temp.path().to_path_buf());
+
+        let storage = mgr
+            .open_organization(Region::US_EAST_VA, OrganizationId::new(99))
+            .expect("open fresh org");
+
+        // meta.db must exist under the org dir.
+        let meta_db_path = temp.path().join("us-east-va").join("99").join("_meta.db");
+        assert!(meta_db_path.exists(), "meta.db must be created alongside state.db");
+
+        // Round-trip: meta_db() returns a usable handle.
+        assert!(storage.meta_db().read().is_ok());
     }
 }

@@ -6812,7 +6812,11 @@ mod tests {
             inferadb_ledger_store::Database::create(dir.path().join("state.db"))
                 .expect("create state db"),
         );
-        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(state_db));
+        let meta_db = Arc::new(
+            inferadb_ledger_store::Database::create(dir.path().join("_meta.db"))
+                .expect("create meta db"),
+        );
+        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(state_db, meta_db));
         let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
             .expect("open store")
             .with_state_layer(state_layer);
@@ -6901,7 +6905,11 @@ mod tests {
             inferadb_ledger_store::Database::create(dir.path().join("state.db"))
                 .expect("create state db"),
         );
-        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(state_db));
+        let meta_db = Arc::new(
+            inferadb_ledger_store::Database::create(dir.path().join("_meta.db"))
+                .expect("create meta db"),
+        );
+        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(state_db, meta_db));
         let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
             .expect("open store")
             .with_state_layer(state_layer.clone());
@@ -6987,7 +6995,11 @@ mod tests {
             inferadb_ledger_store::Database::create(dir.path().join("state.db"))
                 .expect("create state db"),
         );
-        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(state_db));
+        let meta_db = Arc::new(
+            inferadb_ledger_store::Database::create(dir.path().join("_meta.db"))
+                .expect("create meta db"),
+        );
+        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(state_db, meta_db));
         let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
             .expect("open store")
             .with_state_layer(state_layer.clone());
@@ -7063,7 +7075,11 @@ mod tests {
         let state_db = Arc::new(
             inferadb_ledger_store::Database::create(dir.join("state.db")).expect("create state db"),
         );
-        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(state_db));
+        let meta_db = Arc::new(
+            inferadb_ledger_store::Database::create(dir.join("_meta.db"))
+                .expect("create meta db"),
+        );
+        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(state_db, meta_db));
         RaftLogStore::<FileBackend>::open(dir.join("raft_log.db"))
             .expect("open store")
             .with_state_layer(state_layer)
@@ -8010,7 +8026,11 @@ mod tests {
             inferadb_ledger_store::Database::create(dir.path().join("state.db"))
                 .expect("create state db"),
         );
-        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(state_db));
+        let meta_db = Arc::new(
+            inferadb_ledger_store::Database::create(dir.path().join("_meta.db"))
+                .expect("create meta db"),
+        );
+        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(state_db, meta_db));
         RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
             .expect("open store")
             .with_state_layer(state_layer)
@@ -13188,7 +13208,14 @@ mod tests {
         std::fs::create_dir_all(&events_subdir).expect("create events dir");
         let events_db = Arc::new(EventsDatabase::open(&events_subdir).expect("open"));
 
-        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(Arc::clone(&state_db)));
+        let meta_db = Arc::new(
+            inferadb_ledger_store::Database::create(dir.path().join("_meta.db"))
+                .expect("create meta db"),
+        );
+        let state_layer = Arc::new(inferadb_ledger_state::StateLayer::new(
+            Arc::clone(&state_db),
+            Arc::clone(&meta_db),
+        ));
         let block_archive =
             Arc::new(inferadb_ledger_state::BlockArchive::new(Arc::clone(&blocks_db)));
         let event_writer =

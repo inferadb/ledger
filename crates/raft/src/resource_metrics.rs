@@ -232,7 +232,8 @@ mod tests {
     fn test_resource_metrics_collector_database_metrics() {
         // Verify collection doesn't panic with in-memory database
         let db = inferadb_ledger_store::Database::open_in_memory().unwrap();
-        let state = Arc::new(StateLayer::new(Arc::new(db)));
+        let meta_db = inferadb_ledger_store::Database::open_in_memory().unwrap();
+        let state = Arc::new(StateLayer::new(Arc::new(db), Arc::new(meta_db)));
         let dir = tempfile::tempdir().unwrap();
 
         let collector = ResourceMetricsCollector::builder()

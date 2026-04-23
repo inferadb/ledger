@@ -448,7 +448,12 @@ pub(crate) mod tests {
         let db = Arc::new(
             inferadb_ledger_store::Database::create(&db_path).expect("create test database"),
         );
-        let state = Arc::new(inferadb_ledger_state::StateLayer::new(db));
+        let meta_db_path = temp.path().join("test_mock_meta.db");
+        let meta_db = Arc::new(
+            inferadb_ledger_store::Database::create(&meta_db_path)
+                .expect("create test meta database"),
+        );
+        let state = Arc::new(inferadb_ledger_state::StateLayer::new(db, meta_db));
         let applied_state_inner = Arc::new(ArcSwap::from_pointee(AppliedState::default()));
         let applied_state = inferadb_ledger_raft::log_storage::AppliedStateAccessor::new_for_test(
             applied_state_inner.clone(),

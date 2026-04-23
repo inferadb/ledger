@@ -111,12 +111,21 @@ pub type Result<T> = std::result::Result<T, StateError>;
 /// use inferadb_ledger_state::StateLayer;
 ///
 /// let db = Arc::new(Database::open_in_memory()?);
-/// let state = StateLayer::new(db);
+/// let meta_db = Arc::new(Database::open_in_memory()?);
+/// let state = StateLayer::new(db, meta_db);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub struct StateLayer<B: StorageBackend> {
-    /// Shared database handle.
+    /// Shared state database handle (entity / relationship tables).
     db: Arc<Database<B>>,
+    /// Per-organization coordination database handle (`_meta.db`).
+    ///
+    /// Owns the `_meta:last_applied` crash-recovery sentinel as of the
+    /// per-vault consensus Slice 1 cleave. Must always be synced **after**
+    /// `db` (and `raft.db` / `blocks.db` / `events.db`) so the sentinel on
+    /// disk never advances past entity data that has not yet reached the
+    /// page cache's dual-slot on-disk pointer.
+    meta_db: Arc<Database<B>>,
     /// Per-vault commitment tracking.
     vault_commitments: RwLock<HashMap<VaultId, VaultCommitment>>,
     /// Cached per-vault string dictionaries for relationship storage.
@@ -127,10 +136,19 @@ pub struct StateLayer<B: StorageBackend> {
 
 #[allow(clippy::result_large_err)]
 impl<B: StorageBackend> StateLayer<B> {
-    /// Creates a new state layer backed by the given database.
-    pub fn new(db: Arc<Database<B>>) -> Self {
+    /// Creates a new state layer backed by the given state and meta databases.
+    ///
+    /// `meta_db` is the per-organization `_meta.db` coordinator introduced by
+    /// Slice 1 of per-vault consensus. It owns the
+    /// `_meta:last_applied` sentinel; entity data continues to live in `db`.
+    /// The apply path commits entity data to `db` first, then records the
+    /// sentinel in `meta_db` in a second transaction so any crash between the
+    /// two commits merely re-drives idempotent replay instead of advancing
+    /// the sentinel past work that never reached the state DB.
+    pub fn new(db: Arc<Database<B>>, meta_db: Arc<Database<B>>) -> Self {
         Self {
             db,
+            meta_db,
             vault_commitments: RwLock::new(HashMap::new()),
             vault_dictionaries: RwLock::new(HashMap::new()),
             relationship_index: Arc::new(RelationshipIndex::new()),
@@ -252,33 +270,51 @@ impl<B: StorageBackend> StateLayer<B> {
 
     /// Sentinel key for crash-recovery atomicity.
     ///
-    /// Stored in the Entities table with a raw byte key (no vault/bucket prefix)
-    /// so it cannot collide with vault-scoped entity keys which always start with
-    /// an 8-byte big-endian `VaultId`.
-    const LAST_APPLIED_KEY: &[u8] = b"_meta:last_applied";
+    /// Stored in the meta.db coordinator database (post–Slice 1) with a raw
+    /// byte key. A byte-identical sentinel previously lived in state.db under
+    /// the Entities table; legacy detection refuses to boot when that
+    /// artefact is still present (see [`detect_legacy_sentinel`]).
+    pub const LAST_APPLIED_KEY: &'static [u8] = b"_meta:last_applied";
 
-    /// Persists a Raft log ID sentinel in the same write transaction as entity data.
+    /// Returns a reference to the underlying meta database for diagnostics
+    /// and durability-lifecycle wiring (checkpointer fan-out, shutdown
+    /// fsync).
+    pub fn meta_database(&self) -> &Arc<Database<B>> {
+        &self.meta_db
+    }
+
+    /// Persists a Raft log ID sentinel to the meta database in its own
+    /// write transaction.
     ///
-    /// On crash recovery, comparing this sentinel against the Raft DB's
-    /// `AppliedStateCore.last_applied` reveals whether the state layer is
-    /// already up-to-date, preventing re-application of committed entries.
+    /// Under Slice 1 of per-vault consensus the sentinel is no longer
+    /// bundled into the entity-data write transaction. The apply path
+    /// commits entity data to state.db first, then calls this method to
+    /// record the sentinel in meta.db in a separate transaction. A crash
+    /// between the two commits leaves the sentinel un-advanced; WAL replay
+    /// re-drives the idempotent apply path on restart.
+    ///
+    /// The commit uses `commit_in_memory`, matching the apply path's
+    /// durability model — the `StateCheckpointer` fans out a strict-ordered
+    /// fsync (state/raft/blocks/events before meta) to realise on-disk
+    /// durability. Never invert that ordering: meta.db must never reach
+    /// disk ahead of the entity data it references.
     ///
     /// # Errors
     ///
-    /// Returns [`StateError::Store`] if the table insert fails.
-    pub fn persist_last_applied(
-        txn: &mut WriteTransaction<'_, B>,
-        log_id_bytes: &[u8],
-    ) -> Result<()> {
+    /// Returns [`StateError::Store`] if the meta-db write transaction
+    /// cannot be opened, the sentinel insert fails, or the commit fails.
+    pub fn persist_last_applied_meta(&self, log_id_bytes: &[u8]) -> Result<()> {
+        let mut txn = self.meta_db.write().context(StoreSnafu)?;
         txn.insert_raw(
             inferadb_ledger_store::tables::TableId::Entities,
             Self::LAST_APPLIED_KEY,
             log_id_bytes,
         )
-        .context(StoreSnafu)
+        .context(StoreSnafu)?;
+        txn.commit_in_memory().context(StoreSnafu)
     }
 
-    /// Reads the last-applied Raft log ID sentinel from the state layer DB.
+    /// Reads the last-applied Raft log ID sentinel from the meta database.
     ///
     /// Returns `None` on first boot (no sentinel written yet).
     ///
@@ -286,6 +322,20 @@ impl<B: StorageBackend> StateLayer<B> {
     ///
     /// Returns [`StateError::Store`] if the read transaction fails.
     pub fn read_last_applied(&self) -> Result<Option<Vec<u8>>> {
+        let txn = self.meta_db.read().context(StoreSnafu)?;
+        let key = Self::LAST_APPLIED_KEY.to_vec();
+        txn.get::<inferadb_ledger_store::tables::Entities>(&key).context(StoreSnafu)
+    }
+
+    /// Reads the legacy `_meta:last_applied` sentinel from the state
+    /// database, returning `Some(bytes)` if a pre–Slice 1 layout is
+    /// detected. Slice 1 moves the sentinel to meta.db; any hit here on
+    /// startup means the data directory was written by an older build.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Store`] if the read transaction fails.
+    pub fn read_legacy_last_applied_from_state_db(&self) -> Result<Option<Vec<u8>>> {
         let txn = self.db.read().context(StoreSnafu)?;
         let key = Self::LAST_APPLIED_KEY.to_vec();
         txn.get::<inferadb_ledger_store::tables::Entities>(&key).context(StoreSnafu)
@@ -530,7 +580,8 @@ impl<B: StorageBackend> StateLayer<B> {
     /// use inferadb_ledger_types::types::{Operation, VaultId};
     ///
     /// # let db = Arc::new(Database::open_in_memory()?);
-    /// # let state = StateLayer::new(db);
+    /// # let meta_db = Arc::new(Database::open_in_memory()?);
+    /// # let state = StateLayer::new(db, meta_db);
     /// let ops = vec![Operation::SetEntity {
     ///     key: "user:alice".into(),
     ///     value: b"data".to_vec(),
@@ -1178,6 +1229,7 @@ impl<B: StorageBackend> Clone for StateLayer<B> {
     fn clone(&self) -> Self {
         Self {
             db: Arc::clone(&self.db),
+            meta_db: Arc::clone(&self.meta_db),
             vault_commitments: RwLock::new(HashMap::new()), // Each clone starts fresh
             vault_dictionaries: RwLock::new(HashMap::new()), // Each clone starts fresh
             relationship_index: Arc::clone(&self.relationship_index), // Shared across clones
@@ -1228,7 +1280,8 @@ mod tests {
 
     fn create_test_state() -> StateLayer<InMemoryBackend> {
         let engine = InMemoryStorageEngine::open().expect("open engine");
-        StateLayer::new(engine.db())
+        let meta_engine = InMemoryStorageEngine::open().expect("open meta engine");
+        StateLayer::new(engine.db(), meta_engine.db())
     }
 
     #[test]
@@ -2069,10 +2122,10 @@ mod tests {
         let state = create_test_state();
         let log_id_bytes = b"test_log_id_v1";
 
-        // Persist sentinel in a write transaction
-        let mut txn = state.begin_write().unwrap();
-        StateLayer::persist_last_applied(&mut txn, log_id_bytes).unwrap();
-        txn.commit().unwrap();
+        // Persist sentinel through the meta-db helper (Slice 1 cleave: the
+        // sentinel lives in its own database, committed in a separate txn
+        // after the state.db apply).
+        state.persist_last_applied_meta(log_id_bytes).unwrap();
 
         // Read it back
         let result = state.read_last_applied().unwrap();
@@ -2083,26 +2136,22 @@ mod tests {
     fn test_sentinel_overwrites_on_update() {
         let state = create_test_state();
 
-        // Write first sentinel
-        let mut txn = state.begin_write().unwrap();
-        StateLayer::persist_last_applied(&mut txn, b"log_id_1").unwrap();
-        txn.commit().unwrap();
-
-        // Overwrite with second sentinel
-        let mut txn = state.begin_write().unwrap();
-        StateLayer::persist_last_applied(&mut txn, b"log_id_2").unwrap();
-        txn.commit().unwrap();
+        state.persist_last_applied_meta(b"log_id_1").unwrap();
+        state.persist_last_applied_meta(b"log_id_2").unwrap();
 
         let result = state.read_last_applied().unwrap();
         assert_eq!(result.as_deref(), Some(b"log_id_2".as_slice()));
     }
 
+    /// Post–Slice 1, entity writes and the sentinel commit in two separate
+    /// transactions across two separate databases. Success of both leaves
+    /// both readable — this test pins that behaviour.
     #[test]
-    fn test_sentinel_atomic_with_entity_writes() {
+    fn test_entity_and_sentinel_visible_after_two_step_apply() {
         let state = create_test_state();
         let vault = VaultId::new(1);
 
-        // Write entity data AND sentinel in the same transaction
+        // Step 1: entity data → state.db.
         let mut txn = state.begin_write().unwrap();
         let mut dict = crate::dictionary::VaultDictionary::new(vault);
         state
@@ -2119,21 +2168,26 @@ mod tests {
                 1,
             )
             .unwrap();
-        StateLayer::persist_last_applied(&mut txn, b"log_id_100").unwrap();
         txn.commit().unwrap();
 
-        // Both entity and sentinel should be readable
+        // Step 2: sentinel → meta.db.
+        state.persist_last_applied_meta(b"log_id_100").unwrap();
+
         let entity = state.get_entity(vault, b"key1").unwrap();
         assert!(entity.is_some());
         assert_eq!(state.read_last_applied().unwrap().as_deref(), Some(b"log_id_100".as_slice()));
     }
 
+    /// Crash-between-commits model: step 1 succeeded (entity data is in
+    /// state.db) but step 2 never ran (sentinel was not written to
+    /// meta.db). On the next boot, `read_last_applied` returns `None`, so
+    /// replay re-drives the idempotent apply path — no double-apply, no
+    /// ghost sentinel.
     #[test]
-    fn test_sentinel_rolled_back_with_entity_writes() {
+    fn test_crash_between_commits_leaves_sentinel_unadvanced() {
         let state = create_test_state();
         let vault = VaultId::new(1);
 
-        // Write entity data AND sentinel, but drop txn (rollback)
         let mut txn = state.begin_write().unwrap();
         let mut dict = crate::dictionary::VaultDictionary::new(vault);
         state
@@ -2150,26 +2204,32 @@ mod tests {
                 1,
             )
             .unwrap();
-        StateLayer::persist_last_applied(&mut txn, b"log_id_100").unwrap();
-        drop(txn); // Rollback — don't commit
+        txn.commit().unwrap();
+        // Simulate crash before step 2: we never call
+        // persist_last_applied_meta.
 
-        // Neither entity nor sentinel should exist
         let entity = state.get_entity(vault, b"key1").unwrap();
-        assert!(entity.is_none());
-        assert!(state.read_last_applied().unwrap().is_none());
+        assert!(entity.is_some(), "step 1's entity data persists");
+        assert!(
+            state.read_last_applied().unwrap().is_none(),
+            "step 2 never ran — the sentinel must not have advanced"
+        );
     }
 
+    /// Sentinel now lives in meta.db, so writing an entity with the same
+    /// byte key ("_meta:last_applied") into state.db does not overwrite
+    /// the sentinel — distinct B+ trees across databases.
     #[test]
     fn test_sentinel_does_not_collide_with_entity_keys() {
         let state = create_test_state();
         let vault = VaultId::new(1);
 
-        // Write sentinel
-        let mut txn = state.begin_write().unwrap();
-        StateLayer::persist_last_applied(&mut txn, b"sentinel_value").unwrap();
-        txn.commit().unwrap();
+        state.persist_last_applied_meta(b"sentinel_value").unwrap();
 
-        // Write an entity with a key that starts with _meta:
+        // Write an entity with a key that starts with _meta:. The
+        // `state_layer.apply_operations` path uses a vault-scoped storage
+        // key, so this entity lands under a completely different B+ tree
+        // key in state.db.
         state
             .apply_operations(
                 vault,
@@ -2183,14 +2243,39 @@ mod tests {
             )
             .unwrap();
 
-        // Sentinel uses raw key (no vault+bucket prefix), so it's a
-        // different B+ tree key than the vault-scoped entity.
         let sentinel = state.read_last_applied().unwrap();
         assert_eq!(sentinel.as_deref(), Some(b"sentinel_value".as_slice()));
 
         let entity = state.get_entity(vault, b"_meta:last_applied").unwrap();
         assert!(entity.is_some());
         assert_eq!(entity.unwrap().value, b"entity_value");
+    }
+
+    /// Legacy detector: a pre–Slice 1 data_dir carries the sentinel under
+    /// the Entities table in state.db. Writing that artefact directly
+    /// lets us confirm `read_legacy_last_applied_from_state_db` picks it
+    /// up.
+    #[test]
+    fn test_legacy_sentinel_detection_reads_state_db() {
+        let state = create_test_state();
+
+        // Simulate a pre–Slice 1 artefact: sentinel bytes written under
+        // the legacy key into state.db's Entities table.
+        let mut txn = state.begin_write().unwrap();
+        txn.insert_raw(
+            inferadb_ledger_store::tables::TableId::Entities,
+            StateLayer::<InMemoryBackend>::LAST_APPLIED_KEY,
+            b"legacy_sentinel",
+        )
+        .unwrap();
+        txn.commit().unwrap();
+
+        let legacy = state.read_legacy_last_applied_from_state_db().unwrap();
+        assert_eq!(legacy.as_deref(), Some(b"legacy_sentinel".as_slice()));
+
+        // meta.db is pristine — the sentinel hasn't been written through
+        // the new API.
+        assert!(state.read_last_applied().unwrap().is_none());
     }
 
     #[test]
@@ -2881,12 +2966,15 @@ mod tests {
 
         let tmp = tempdir().unwrap();
         let lazy_path = tmp.path().join("lazy.ink");
+        let lazy_meta_path = tmp.path().join("lazy_meta.ink");
         let durable_path = tmp.path().join("durable.ink");
+        let durable_meta_path = tmp.path().join("durable_meta.ink");
 
         // Lazy side: apply_operations_lazy → reopen → write is GONE.
         {
             let db = Arc::new(Database::<FileBackend>::create(&lazy_path).unwrap());
-            let state = StateLayer::new(db);
+            let meta_db = Arc::new(Database::<FileBackend>::create(&lazy_meta_path).unwrap());
+            let state = StateLayer::new(db, meta_db);
             state
                 .apply_operations_lazy(
                     VaultId::new(1),
@@ -2904,7 +2992,8 @@ mod tests {
         }
 
         let reopened_lazy = Arc::new(Database::<FileBackend>::open(&lazy_path).unwrap());
-        let state_reopened_lazy = StateLayer::new(reopened_lazy);
+        let reopened_lazy_meta = Arc::new(Database::<FileBackend>::open(&lazy_meta_path).unwrap());
+        let state_reopened_lazy = StateLayer::new(reopened_lazy, reopened_lazy_meta);
         assert!(
             state_reopened_lazy.get_entity(VaultId::new(1), b"lazy_key").unwrap().is_none(),
             "apply_operations_lazy must NOT persist the dual-slot state pointer — \
@@ -2914,7 +3003,8 @@ mod tests {
         // Durable side: apply_operations → reopen → write IS there.
         {
             let db = Arc::new(Database::<FileBackend>::create(&durable_path).unwrap());
-            let state = StateLayer::new(db);
+            let meta_db = Arc::new(Database::<FileBackend>::create(&durable_meta_path).unwrap());
+            let state = StateLayer::new(db, meta_db);
             state
                 .apply_operations(
                     VaultId::new(1),
@@ -2930,7 +3020,9 @@ mod tests {
         }
 
         let reopened_durable = Arc::new(Database::<FileBackend>::open(&durable_path).unwrap());
-        let state_reopened_durable = StateLayer::new(reopened_durable);
+        let reopened_durable_meta =
+            Arc::new(Database::<FileBackend>::open(&durable_meta_path).unwrap());
+        let state_reopened_durable = StateLayer::new(reopened_durable, reopened_durable_meta);
         let entity = state_reopened_durable
             .get_entity(VaultId::new(1), b"durable_key")
             .unwrap()

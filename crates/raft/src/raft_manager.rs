@@ -368,6 +368,13 @@ pub struct InnerGroup {
     /// [`RaftManager::sync_all_state_dbs`] — skipping its sync leaves
     /// `applied_durable = 0` and forces full WAL replay on next boot.
     pub(crate) raft_db: Arc<Database<FileBackend>>,
+    /// `_meta.db` handle — per-organization coordinator introduced by
+    /// Slice 1 of per-vault consensus. Owns the `_meta:last_applied`
+    /// crash-recovery sentinel. The [`StateCheckpointer`] and
+    /// [`RaftManager::sync_all_state_dbs`] must sync this handle **after**
+    /// state.db / raft.db / blocks.db / events.db so the sentinel on disk
+    /// never outruns the entity data it references.
+    pub(crate) meta_db: Arc<Database<FileBackend>>,
     /// `blocks.db` handle. Owned alongside `block_archive` for the
     /// durability lifecycle.
     pub(crate) blocks_db: Arc<Database<FileBackend>>,
@@ -430,6 +437,12 @@ impl InnerGroup {
     /// Returns the `raft.db` handle.
     pub fn raft_db(&self) -> &Arc<Database<FileBackend>> {
         &self.raft_db
+    }
+
+    /// Returns the `_meta.db` handle — per-organization coordinator for
+    /// the `_meta:last_applied` sentinel. See [`InnerGroup::meta_db`].
+    pub fn meta_db(&self) -> &Arc<Database<FileBackend>> {
+        &self.meta_db
     }
 
     /// Returns the `blocks.db` handle.
@@ -613,6 +626,13 @@ impl SystemGroup {
         self.0.raft_db()
     }
 
+    /// Returns the `_meta.db` handle — per-organization coordinator for
+    /// the `_meta:last_applied` sentinel. Slice 1 of per-vault consensus.
+    #[must_use]
+    pub fn meta_db(&self) -> &Arc<Database<FileBackend>> {
+        self.0.meta_db()
+    }
+
     /// Returns the `blocks.db` handle.
     ///
     /// The system group owns a Merkle chain for saga records.
@@ -762,6 +782,13 @@ impl RegionGroup {
         self.0.raft_db()
     }
 
+    /// Returns the `_meta.db` handle — per-organization coordinator for
+    /// the `_meta:last_applied` sentinel. Slice 1 of per-vault consensus.
+    #[must_use]
+    pub fn meta_db(&self) -> &Arc<Database<FileBackend>> {
+        self.0.meta_db()
+    }
+
     /// Returns the `blocks.db` handle.
     ///
     /// Under the B.1 compat shim the regional control plane shares storage
@@ -903,6 +930,13 @@ impl OrganizationGroup {
     #[must_use]
     pub fn raft_db(&self) -> &Arc<Database<FileBackend>> {
         self.0.raft_db()
+    }
+
+    /// Returns the `_meta.db` handle — per-organization coordinator for
+    /// the `_meta:last_applied` sentinel. Slice 1 of per-vault consensus.
+    #[must_use]
+    pub fn meta_db(&self) -> &Arc<Database<FileBackend>> {
+        self.0.meta_db()
     }
 
     /// Returns the `blocks.db` handle.
@@ -1381,6 +1415,7 @@ impl RaftManager {
         }
 
         let blocks_db = Arc::clone(block_archive.db());
+        let meta_db = Arc::clone(state.meta_database());
 
         let inner = Arc::new(InnerGroup {
             region,
@@ -1388,6 +1423,7 @@ impl RaftManager {
             handle,
             state: state.clone(),
             raft_db,
+            meta_db,
             blocks_db,
             block_archive,
             applied_state,
@@ -2041,7 +2077,11 @@ impl RaftManager {
             None
         };
 
-        // Start background jobs if enabled
+        // Start background jobs if enabled. `meta.db` is threaded through
+        // alongside the entity-data DBs so the `StateCheckpointer` can
+        // enforce the Slice 1 strict fsync ordering (state/raft/blocks/
+        // events, then meta).
+        let meta_db = Arc::clone(state.meta_database());
         let background_jobs = if enable_background_jobs {
             self.start_background_jobs(
                 region,
@@ -2051,6 +2091,7 @@ impl RaftManager {
                 Arc::clone(&raft_db),
                 Arc::clone(block_archive.db()),
                 Some(Arc::clone(events_db.db())),
+                Arc::clone(&meta_db),
                 block_archive.clone(),
                 applied_state.clone(),
                 applied_index_rx.clone(),
@@ -2122,6 +2163,7 @@ impl RaftManager {
             handle,
             state,
             raft_db,
+            meta_db,
             blocks_db,
             block_archive,
             applied_state,
@@ -2155,12 +2197,13 @@ impl RaftManager {
 
     /// Starts background jobs for a region.
     ///
-    /// `raft_db`, `blocks_db`, and `events_db` are plumbed into the
-    /// [`StateCheckpointer`] so it can `sync_state` on every durability
-    /// DB in lock-step. `events_db` is `Option`
-    /// because some regions (test fixtures, historical GLOBAL-only
-    /// configurations) are constructed without an events writer.
-    #[allow(clippy::too_many_arguments)]
+    /// `raft_db`, `blocks_db`, `events_db`, and `meta_db` are plumbed into
+    /// the [`StateCheckpointer`] so it can `sync_state` on every
+    /// durability DB under the Slice 1 strict two-phase ordering
+    /// (state/raft/blocks/events first; meta last). `events_db` is
+    /// `Option` because some regions (test fixtures, historical
+    /// GLOBAL-only configurations) are constructed without an events
+    /// writer.
     #[allow(clippy::too_many_arguments)]
     fn start_background_jobs(
         &self,
@@ -2171,6 +2214,7 @@ impl RaftManager {
         raft_db: Arc<Database<FileBackend>>,
         blocks_db: Arc<Database<FileBackend>>,
         events_db: Option<Arc<Database<FileBackend>>>,
+        meta_db: Arc<Database<FileBackend>>,
         block_archive: Arc<BlockArchive<FileBackend>>,
         applied_state: AppliedStateAccessor,
         applied_index_rx: tokio::sync::watch::Receiver<u64>,
@@ -2237,6 +2281,7 @@ impl RaftManager {
             raft_db,
             blocks_db,
             events_db,
+            meta_db,
             runtime_config,
             applied_index_rx,
             parent_token.child_token(),
@@ -2303,8 +2348,13 @@ impl RaftManager {
                 }
             })?;
 
-        // Wrap raw databases in domain-specific types
-        let state = Arc::new(StateLayer::new(storage.state_db().clone()));
+        // Wrap raw databases in domain-specific types. `meta.db` is the
+        // Slice 1 per-organization coordinator — it sits alongside
+        // state.db and owns the `_meta:last_applied` sentinel.
+        let state = Arc::new(StateLayer::new(
+            storage.state_db().clone(),
+            storage.meta_db().clone(),
+        ));
         let block_archive = Arc::new(BlockArchive::new(storage.blocks_db().clone()));
 
         // Create block announcements broadcast channel for real-time notifications.
@@ -2484,7 +2534,7 @@ impl RaftManager {
             regions = regions.len(),
             per_region_timeout_ms = per_region_timeout.as_millis() as u64,
             "sync_all_state_dbs: forcing final state.db + raft.db + blocks.db + events.db \
-             (if configured) sync across all regions"
+             (if configured) then meta.db sync across all regions (strict ordering)"
         );
 
         for region in regions {
@@ -2503,21 +2553,30 @@ impl RaftManager {
             let raft_db = Arc::clone(group.raft_db());
             let blocks_db = Arc::clone(group.blocks_db());
             let events_db_opt = group.events_state_db();
+            let meta_db = Arc::clone(group.meta_db());
 
-            // Sync every configured DB concurrently inside the per-region
-            // timeout. Using `tokio::join!` rather than splitting the budget
-            // means a slow fsync on one DB doesn't starve the others.
+            // Sync every configured DB under a strict two-phase ordering
+            // inside the per-region timeout:
+            //
+            // Phase A — state.db / raft.db / blocks.db / events.db
+            // concurrently via `tokio::join!`. These are the entity-data
+            // DBs; they must reach disk before the sentinel in meta.db
+            // that references them.
+            //
+            // Phase B — meta.db, synced AFTER Phase A completes. This is
+            // the Slice 1 strict-ordering invariant. Never invert.
+            //
             // `sync_state` consumes an `Arc<Self>`, so clone for the await
             // and reuse the originals to read `last_synced_snapshot_id`
-            // after the join. When `events_db_opt` is `None` the match
-            // picks the 3-arm variant so absent-events regions don't
-            // contribute a spurious Ok to the log.
+            // after the join.
             let state_fut = Arc::clone(&state_db).sync_state();
             let raft_fut = Arc::clone(&raft_db).sync_state();
             let blocks_fut = Arc::clone(&blocks_db).sync_state();
             let events_db_for_sync = events_db_opt.clone();
+            let meta_db_for_sync = Arc::clone(&meta_db);
             let timeout_outcome = tokio::time::timeout(per_region_timeout, async {
-                match events_db_for_sync {
+                // Phase A.
+                let (s, r, b, e) = match events_db_for_sync {
                     Some(events_db) => {
                         let events_fut = Arc::clone(&events_db).sync_state();
                         let (s, r, b, e) =
@@ -2528,12 +2587,16 @@ impl RaftManager {
                         let (s, r, b) = tokio::join!(state_fut, raft_fut, blocks_fut);
                         (s, r, b, None)
                     },
-                }
+                };
+                // Phase B — strict ordering: meta.db always after the
+                // entity DBs it's a sentinel for.
+                let m = meta_db_for_sync.sync_state().await;
+                (s, r, b, e, m)
             })
             .await;
 
             match timeout_outcome {
-                Ok((state_result, raft_result, blocks_result, events_result)) => {
+                Ok((state_result, raft_result, blocks_result, events_result, meta_result)) => {
                     match state_result {
                         Ok(()) => info!(
                             region = region.as_str(),
@@ -2604,12 +2667,26 @@ impl RaftManager {
                             );
                         },
                     }
+                    match meta_result {
+                        Ok(()) => info!(
+                            region = region.as_str(),
+                            db = "meta",
+                            last_synced_snapshot_id = meta_db.last_synced_snapshot_id(),
+                            "sync_all_state_dbs: final state-DB sync complete"
+                        ),
+                        Err(e) => warn!(
+                            region = region.as_str(),
+                            db = "meta",
+                            error = %e,
+                            "sync_all_state_dbs: final state-DB sync failed; crash gap narrowed but not zero"
+                        ),
+                    }
                 },
                 Err(_) => {
                     warn!(
                         region = region.as_str(),
                         timeout_ms = per_region_timeout.as_millis() as u64,
-                        "sync_all_state_dbs: final state-DB sync (state + raft + blocks + events) \
+                        "sync_all_state_dbs: final state-DB sync (state + raft + blocks + events then meta) \
                          timed out; continuing with remaining regions"
                     );
                 },
@@ -2730,6 +2807,7 @@ impl RaftManager {
             Arc::clone(inner.raft_db()),
             Arc::clone(inner.blocks_db()),
             inner.events_state_db(),
+            Arc::clone(inner.meta_db()),
             inner.block_archive().clone(),
             inner.applied_state().clone(),
             inner.applied_index_watch(),
@@ -3297,10 +3375,12 @@ mod tests {
         let raft_db = Arc::clone(region.raft_db());
         let blocks_db = Arc::clone(region.blocks_db());
         let events_db = region.events_state_db();
+        let meta_db = Arc::clone(region.meta_db());
         let state_before = state_db.last_synced_snapshot_id();
         let raft_before = raft_db.last_synced_snapshot_id();
         let blocks_before = blocks_db.last_synced_snapshot_id();
         let events_before = events_db.as_ref().map(|db| db.last_synced_snapshot_id());
+        let meta_before = meta_db.last_synced_snapshot_id();
 
         manager.sync_all_state_dbs(std::time::Duration::from_secs(5)).await;
 
@@ -3308,6 +3388,7 @@ mod tests {
         let raft_after = raft_db.last_synced_snapshot_id();
         let blocks_after = blocks_db.last_synced_snapshot_id();
         let events_after = events_db.as_ref().map(|db| db.last_synced_snapshot_id());
+        let meta_after = meta_db.last_synced_snapshot_id();
 
         assert!(
             state_after >= state_before,
@@ -3331,6 +3412,11 @@ mod tests {
                 "events_db handle appeared or disappeared between calls: before={a:?}, after={b:?}"
             ),
         }
+        assert!(
+            meta_after >= meta_before,
+            "meta.db last_synced_snapshot_id regressed (before={meta_before}, after={meta_after}) — \
+             Slice 1 strict-ordering invariant"
+        );
     }
 
     #[tokio::test]

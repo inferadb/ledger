@@ -109,6 +109,18 @@ pub struct StateCheckpointer {
     /// this handle must be synced to prevent apply-phase event pages from
     /// accumulating unbounded between ticks.
     events_db: Option<Arc<Database<FileBackend>>>,
+    /// Meta DB handle (`_meta.db`) — the per-organization coordinator
+    /// introduced by Slice 1 of per-vault consensus. Owns the
+    /// `_meta:last_applied` crash-recovery sentinel.
+    ///
+    /// **Strict ordering invariant:** meta.db must sync **after** state.db
+    /// / raft.db / blocks.db / events.db on every tick. Inverting the
+    /// order would allow the sentinel on disk to advance past entity data
+    /// that has not yet reached the dual-slot on-disk pointer — a
+    /// correctness bug on crash-recovery. `do_checkpoint` enforces this
+    /// explicitly: the first `tokio::join!` covers the four entity/state
+    /// DBs, then meta.db is synced separately, after they all succeed.
+    meta_db: Arc<Database<FileBackend>>,
     /// Live runtime-config handle. Re-read on every wake-up so live
     /// `UpdateConfig` RPCs take effect on the next tick.
     runtime_config: RuntimeConfigHandle,
@@ -157,6 +169,7 @@ impl StateCheckpointer {
         raft_db: Arc<Database<FileBackend>>,
         blocks_db: Arc<Database<FileBackend>>,
         events_db: Option<Arc<Database<FileBackend>>>,
+        meta_db: Arc<Database<FileBackend>>,
         runtime_config: RuntimeConfigHandle,
         applied_rx: watch::Receiver<u64>,
         cancellation_token: CancellationToken,
@@ -169,6 +182,7 @@ impl StateCheckpointer {
             raft_db,
             blocks_db,
             events_db,
+            meta_db,
             runtime_config,
             applied_rx,
             cancellation_token,
@@ -230,16 +244,20 @@ impl StateCheckpointer {
     }
 
     /// Returns the peak `cache_dirty_page_count()` across every configured
-    /// DB (state, raft, blocks, and events when Some). The trigger must
-    /// fire on whichever DB is under pressure, not solely state.db, because
-    /// ingest-heavy workloads can dirty events.db while state.db stays clean.
+    /// DB (state, raft, blocks, events when Some, and meta). The trigger
+    /// must fire on whichever DB is under pressure, not solely state.db,
+    /// because ingest-heavy workloads can dirty events.db while state.db
+    /// stays clean. meta.db contributes per-entry sentinel writes and must
+    /// be part of the `max()` so the checkpointer catches per-tick
+    /// sentinel pressure too.
     fn max_dirty_pages(&self) -> u64 {
         let state = self.state_db.cache_dirty_page_count() as u64;
         let raft = self.raft_db.cache_dirty_page_count() as u64;
         let blocks = self.blocks_db.cache_dirty_page_count() as u64;
         let events =
             self.events_db.as_ref().map(|db| db.cache_dirty_page_count() as u64).unwrap_or(0);
-        state.max(raft).max(blocks).max(events)
+        let meta = self.meta_db.cache_dirty_page_count() as u64;
+        state.max(raft).max(blocks).max(events).max(meta)
     }
 
     /// Executes a single checkpoint. On success, advances the trigger
@@ -250,12 +268,27 @@ impl StateCheckpointer {
     /// contract preserves `last_synced_snapshot_id` and `pending_frees`
     /// on error, so retry is safe.
     ///
-    /// Sync semantics: all 3-or-4 DB syncs run concurrently via
-    /// `tokio::join!`. A single-DB failure does not short-circuit the
-    /// tick — the remaining DBs still get their sync so each flush
+    /// Sync semantics:
+    ///
+    /// 1. **Phase A** — state.db / raft.db / blocks.db / events.db (when
+    ///    present) run concurrently via `tokio::join!`. These are the
+    ///    entity-data stores; they must reach disk before the sentinel
+    ///    that references them advances.
+    /// 2. **Phase B** — meta.db is synced **after** Phase A completes.
+    ///    meta.db owns the `_meta:last_applied` sentinel; landing it on
+    ///    disk before the entity data would allow a post-crash boot to
+    ///    observe a sentinel that references writes still trapped in the
+    ///    page cache.
+    ///
+    /// A single-DB failure in Phase A does not short-circuit the tick —
+    /// the remaining Phase A DBs still get their sync so each flush
     /// narrows the crash gap. Accumulators advance only when **every**
     /// configured DB's sync succeeded, keeping the lock-step policy the
-    /// 2-DB version established.
+    /// 2-DB version established. If any Phase A DB fails, meta.db is
+    /// still synced — the strict ordering holds because entity data that
+    /// failed to reach disk won't be referenced by the sentinel (the
+    /// apply path commits state.db first, then meta.db; a stale sentinel
+    /// simply points at the prior-apply snapshot).
     async fn do_checkpoint(&self, trigger: &'static str, latest_applied_at_start: u64) {
         // Compute how many entries this checkpoint is flushing before we
         // reset the accumulator. Used in both the success debug! and the
@@ -266,8 +299,8 @@ impl StateCheckpointer {
 
         let start = Instant::now();
 
-        // Sync every configured DB concurrently: state.db owns the
-        // entity/relationship tables, raft.db owns `KEY_APPLIED_STATE`,
+        // Phase A: sync every entity/state DB concurrently. state.db owns
+        // the entity/relationship tables, raft.db owns `KEY_APPLIED_STATE`,
         // blocks.db owns the historical block archive, events.db (when
         // configured) owns apply-phase audit events. The blocks.db +
         // events.db apply-path commits use `commit_in_memory`; all of them
@@ -297,13 +330,20 @@ impl StateCheckpointer {
                 (s, r, b, None)
             },
         };
+
+        // Phase B: sync meta.db **after** the Phase A entity DBs have
+        // resolved. This is the strict-ordering invariant — the sentinel
+        // on disk must never race ahead of the entity data it references.
+        let meta_result = Arc::clone(&self.meta_db).sync_state().await;
+
         let duration = start.elapsed();
         let duration_secs = duration.as_secs_f64();
 
         let all_ok = state_result.is_ok()
             && raft_result.is_ok()
             && blocks_result.is_ok()
-            && events_result.as_ref().is_none_or(|r| r.is_ok());
+            && events_result.as_ref().is_none_or(|r| r.is_ok())
+            && meta_result.is_ok();
 
         // Log per-DB failures separately so operators can tell which slot
         // lagged. We continue on a single-DB failure because syncing the
@@ -344,6 +384,15 @@ impl StateCheckpointer {
                 "state checkpoint sync failed; leaving accumulators untouched so the next tick retries"
             );
         }
+        if let Err(ref e) = meta_result {
+            warn!(
+                error = %e,
+                trigger,
+                db = "meta",
+                region = %self.region,
+                "state checkpoint sync failed; leaving accumulators untouched so the next tick retries"
+            );
+        }
 
         if all_ok {
             // Advance internal accumulators only when EVERY configured DB
@@ -380,7 +429,7 @@ impl StateCheckpointer {
                 dirty_pages,
                 events_enabled = self.events_db.is_some(),
                 region = %self.region,
-                "state checkpoint complete (state.db + raft.db + blocks.db + events.db if enabled)"
+                "state checkpoint complete (state.db + raft.db + blocks.db + events.db if enabled, then meta.db)"
             );
         } else {
             metrics::record_state_checkpoint(
@@ -496,10 +545,11 @@ mod tests {
         raft: Arc<Database<FileBackend>>,
         blocks: Arc<Database<FileBackend>>,
         events: Option<Arc<Database<FileBackend>>>,
+        meta: Arc<Database<FileBackend>>,
     }
 
-    /// Builds file-backed state + raft + blocks DBs in a tempdir. No events
-    /// DB — matches regions configured without an events writer.
+    /// Builds file-backed state + raft + blocks + meta DBs in a tempdir.
+    /// No events DB — matches regions configured without an events writer.
     fn new_test_db() -> TestDbs {
         let dir = TempDir::new().expect("tempdir");
         let state =
@@ -507,12 +557,14 @@ mod tests {
         let raft = Arc::new(Database::create(dir.path().join("raft.db")).expect("create raft db"));
         let blocks =
             Arc::new(Database::create(dir.path().join("blocks.db")).expect("create blocks db"));
-        TestDbs { _dir: dir, state, raft, blocks, events: None }
+        let meta =
+            Arc::new(Database::create(dir.path().join("_meta.db")).expect("create meta db"));
+        TestDbs { _dir: dir, state, raft, blocks, events: None, meta }
     }
 
-    /// Builds file-backed state + raft + blocks + events DBs in a tempdir.
-    /// Matches the production region configuration where every DB is
-    /// present.
+    /// Builds file-backed state + raft + blocks + events + meta DBs in a
+    /// tempdir. Matches the production region configuration where every DB
+    /// is present.
     fn new_test_db_with_events() -> TestDbs {
         let dir = TempDir::new().expect("tempdir");
         let state =
@@ -522,7 +574,9 @@ mod tests {
             Arc::new(Database::create(dir.path().join("blocks.db")).expect("create blocks db"));
         let events =
             Arc::new(Database::create(dir.path().join("events.db")).expect("create events db"));
-        TestDbs { _dir: dir, state, raft, blocks, events: Some(events) }
+        let meta =
+            Arc::new(Database::create(dir.path().join("_meta.db")).expect("create meta db"));
+        TestDbs { _dir: dir, state, raft, blocks, events: Some(events), meta }
     }
 
     /// Dirties a page in the given DB via `commit_in_memory`.
@@ -548,6 +602,7 @@ mod tests {
             Arc::clone(&dbs.raft),
             Arc::clone(&dbs.blocks),
             dbs.events.as_ref().map(Arc::clone),
+            Arc::clone(&dbs.meta),
             runtime_config.clone(),
             rx,
             token.clone(),
@@ -884,6 +939,7 @@ mod tests {
             Arc::clone(&dbs.raft),
             Arc::clone(&dbs.blocks),
             dbs.events.as_ref().map(Arc::clone),
+            Arc::clone(&dbs.meta),
             runtime_config,
             rx,
             token,
@@ -893,6 +949,69 @@ mod tests {
 
         let cfg = cp.current_config();
         assert_eq!(cfg, CheckpointConfig::default());
+    }
+
+    /// Slice 1 durability-ordering gate: meta.db must advance alongside
+    /// every other DB on a successful checkpoint. This is the fundament
+    /// of the crash-recovery contract — on restart, the sentinel in
+    /// meta.db is the anchor `replay_crash_gap` uses to skip already-
+    /// applied entries.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checkpoint_advances_meta_db_after_entity_dbs() {
+        let dbs = new_test_db_with_events();
+        let events_handle =
+            Arc::clone(dbs.events.as_ref().expect("events db configured by helper"));
+        commit_in_memory_one(&dbs.state, b"k1", b"v1");
+        commit_in_memory_one(&dbs.raft, b"k1", b"v1");
+        commit_in_memory_one(&dbs.blocks, b"k1", b"v1");
+        commit_in_memory_one(&events_handle, b"k1", b"v1");
+        commit_in_memory_one(&dbs.meta, b"sentinel", b"log_id_1");
+        let state_handle = Arc::clone(&dbs.state);
+        let raft_handle = Arc::clone(&dbs.raft);
+        let blocks_handle = Arc::clone(&dbs.blocks);
+        let meta_handle = Arc::clone(&dbs.meta);
+
+        let cfg = CheckpointConfig::builder()
+            .interval_ms(50)
+            .applies_threshold(1_000_000)
+            .dirty_pages_threshold(1_000_000)
+            .build()
+            .unwrap();
+        let (cp, _rc, _tok, _tx) = new_checkpointer(&dbs, cfg.clone(), 0);
+
+        *cp.last_checkpoint_at.lock() = Instant::now() - Duration::from_millis(500);
+        cp.tick(&cfg).await;
+
+        assert!(state_handle.last_synced_snapshot_id() > 0, "state.db must advance");
+        assert!(raft_handle.last_synced_snapshot_id() > 0, "raft.db must advance");
+        assert!(blocks_handle.last_synced_snapshot_id() > 0, "blocks.db must advance");
+        assert!(events_handle.last_synced_snapshot_id() > 0, "events.db must advance");
+        assert!(
+            meta_handle.last_synced_snapshot_id() > 0,
+            "meta.db must advance — Slice 1 strict-ordering gate"
+        );
+    }
+
+    /// `max()` trigger must include meta.db — dirty pages in meta.db alone
+    /// must fire the dirty-pages trigger.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checkpoint_max_trigger_fires_on_meta_db_pressure() {
+        let dbs = new_test_db_with_events();
+        commit_in_memory_one(&dbs.meta, b"sentinel", b"log_id_1");
+
+        let cfg = CheckpointConfig::builder()
+            .interval_ms(60_000)
+            .applies_threshold(1_000_000)
+            .dirty_pages_threshold(1)
+            .build()
+            .unwrap();
+        let (cp, _rc, _tok, _tx) = new_checkpointer(&dbs, cfg.clone(), 0);
+
+        assert_eq!(dbs.state.cache_dirty_page_count() as u64, 0);
+        assert_eq!(dbs.raft.cache_dirty_page_count() as u64, 0);
+        assert_eq!(dbs.blocks.cache_dirty_page_count() as u64, 0);
+        assert!(dbs.meta.cache_dirty_page_count() as u64 >= 1);
+        assert_eq!(cp.should_checkpoint(&cfg, 0, cp.max_dirty_pages()), Some(TRIGGER_DIRTY));
     }
 
     // ── 4-DB coverage ─────────────────────────────

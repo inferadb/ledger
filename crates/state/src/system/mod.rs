@@ -56,6 +56,7 @@ pub(crate) fn create_test_service()
     use std::sync::Arc;
 
     let engine = crate::engine::InMemoryStorageEngine::open().unwrap();
-    let state = Arc::new(crate::state::StateLayer::new(engine.db()));
+    let meta_engine = crate::engine::InMemoryStorageEngine::open().unwrap();
+    let state = Arc::new(crate::state::StateLayer::new(engine.db(), meta_engine.db()));
     SystemOrganizationService::new(state)
 }

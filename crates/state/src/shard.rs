@@ -138,16 +138,21 @@ pub struct ShardManager<B: StorageBackend> {
 #[allow(clippy::result_large_err)]
 impl<B: StorageBackend> ShardManager<B> {
     /// Creates a new shard manager.
+    ///
+    /// `meta_db` is the per-organization `_meta.db` coordinator. Slice 1 of
+    /// per-vault consensus introduced this as a separate database alongside
+    /// state.db; callers constructing a `ShardManager` must supply both.
     pub fn new(
         region: Region,
         db: Arc<Database<B>>,
+        meta_db: Arc<Database<B>>,
         snapshot_dir: PathBuf,
         max_snapshots: usize,
     ) -> Self {
         Self {
             region,
             db: Arc::clone(&db),
-            state: StateLayer::new(Arc::clone(&db)),
+            state: StateLayer::new(Arc::clone(&db), meta_db),
             blocks: BlockArchive::new(Arc::clone(&db)),
             snapshots: SnapshotManager::new(snapshot_dir, max_snapshots),
             vault_meta: RwLock::new(HashMap::new()),
@@ -505,9 +510,16 @@ mod tests {
 
     fn create_test_manager() -> (ShardManager<inferadb_ledger_store::InMemoryBackend>, TestDir) {
         let engine = InMemoryStorageEngine::open().expect("open engine");
+        let meta_engine = InMemoryStorageEngine::open().expect("open meta engine");
         let temp = TestDir::new();
 
-        let manager = ShardManager::new(Region::GLOBAL, engine.db(), temp.join("snapshots"), 3);
+        let manager = ShardManager::new(
+            Region::GLOBAL,
+            engine.db(),
+            meta_engine.db(),
+            temp.join("snapshots"),
+            3,
+        );
 
         (manager, temp)
     }
@@ -551,8 +563,15 @@ mod tests {
 
         // Reset state and apply via block
         let engine = InMemoryStorageEngine::open().expect("open engine");
+        let meta_engine = InMemoryStorageEngine::open().expect("open meta engine");
         let temp = TestDir::new();
-        let manager = ShardManager::new(Region::GLOBAL, engine.db(), temp.join("snapshots"), 3);
+        let manager = ShardManager::new(
+            Region::GLOBAL,
+            engine.db(),
+            meta_engine.db(),
+            temp.join("snapshots"),
+            3,
+        );
         manager.register_vault(OrganizationId::new(1), VaultId::new(1));
 
         let block = RegionBlock {
@@ -636,8 +655,15 @@ mod tests {
     #[test]
     fn test_snapshot_and_restore() {
         let engine = InMemoryStorageEngine::open().expect("open engine");
+        let meta_engine = InMemoryStorageEngine::open().expect("open meta engine");
         let temp = TestDir::new();
-        let manager = ShardManager::new(Region::GLOBAL, engine.db(), temp.join("snapshots"), 3);
+        let manager = ShardManager::new(
+            Region::GLOBAL,
+            engine.db(),
+            meta_engine.db(),
+            temp.join("snapshots"),
+            3,
+        );
 
         manager.register_vault(OrganizationId::new(1), VaultId::new(1));
 
@@ -665,8 +691,14 @@ mod tests {
 
         // Create new manager and restore
         let engine2 = InMemoryStorageEngine::open().expect("open engine");
-        let manager2 =
-            ShardManager::new(Region::GLOBAL, engine2.db(), temp.path().join("snapshots"), 3);
+        let meta_engine2 = InMemoryStorageEngine::open().expect("open meta engine");
+        let manager2 = ShardManager::new(
+            Region::GLOBAL,
+            engine2.db(),
+            meta_engine2.db(),
+            temp.path().join("snapshots"),
+            3,
+        );
 
         let snapshot = Snapshot::read_from_file(&snapshot_path).expect("read snapshot");
         manager2.restore_from_snapshot(&snapshot).expect("restore");

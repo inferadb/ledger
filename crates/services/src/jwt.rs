@@ -620,7 +620,8 @@ mod tests {
 
     fn create_test_service() -> SystemOrganizationService<inferadb_ledger_store::InMemoryBackend> {
         let engine = InMemoryStorageEngine::open().unwrap();
-        let state = Arc::new(StateLayer::new(engine.db()));
+        let meta_engine = InMemoryStorageEngine::open().unwrap();
+        let state = Arc::new(StateLayer::new(engine.db(), meta_engine.db()));
         SystemOrganizationService::new(state)
     }
 

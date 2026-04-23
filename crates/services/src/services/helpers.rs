@@ -297,7 +297,11 @@ pub(crate) fn create_replay_context() -> Result<(TempDir, StateLayer<FileBackend
         Database::<FileBackend>::create(temp_dir.path().join("replay.db"))
             .map_err(|e| error_classify::storage_error(&e))?,
     );
-    let temp_state = StateLayer::new(temp_db);
+    let temp_meta_db = Arc::new(
+        Database::<FileBackend>::create(temp_dir.path().join("replay_meta.db"))
+            .map_err(|e| error_classify::storage_error(&e))?,
+    );
+    let temp_state = StateLayer::new(temp_db, temp_meta_db);
     Ok((temp_dir, temp_state))
 }
 

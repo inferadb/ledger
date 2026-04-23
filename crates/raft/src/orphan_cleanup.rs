@@ -391,7 +391,9 @@ mod tests {
     /// Creates an in-memory StateLayer for testing.
     fn create_test_state() -> StateLayer<InMemoryBackend> {
         let db = inferadb_ledger_store::Database::open_in_memory().expect("open in-memory db");
-        StateLayer::new(Arc::new(db))
+        let meta_db =
+            inferadb_ledger_store::Database::open_in_memory().expect("open in-memory meta db");
+        StateLayer::new(Arc::new(db), Arc::new(meta_db))
     }
 
     /// Creates an AppliedStateAccessor with org and vault metadata populated.

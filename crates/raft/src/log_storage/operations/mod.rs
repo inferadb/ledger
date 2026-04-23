@@ -4483,6 +4483,11 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             if skip_state_writes {
                                 state_layer.mark_all_dirty(*vault);
                             } else {
+                                // Step 1: entity data → state.db. Slice 1 of
+                                // per-vault consensus cleaved the
+                                // _meta:last_applied sentinel out of this
+                                // transaction; it now lands in meta.db in a
+                                // strictly-later commit (step 2 below).
                                 let mut write_txn = match state_layer.begin_write() {
                                     Ok(txn) => txn,
                                     Err(e) => {
@@ -4553,23 +4558,6 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                         },
                                     }
                                 }
-                                if let Some(lid_bytes) = log_id_bytes
-                                    && let Err(e) =
-                                        inferadb_ledger_state::StateLayer::persist_last_applied(
-                                            &mut write_txn,
-                                            lid_bytes,
-                                        )
-                                {
-                                    return (
-                                        LedgerResponse::Error {
-                                            code: ErrorCode::Internal,
-                                            message: format!(
-                                                "SystemRequest::Write: failed to persist last_applied sentinel: {e}"
-                                            ),
-                                        },
-                                        None,
-                                    );
-                                }
                                 state_layer.mark_dirty_keys(*vault, &all_dirty_keys);
                                 if let Err(e) = write_txn.commit_in_memory() {
                                     return (
@@ -4583,6 +4571,27 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                     );
                                 }
                                 state_layer.return_dictionary(*vault, dict);
+
+                                // Step 2: sentinel → meta.db. This commit
+                                // runs AFTER step 1 succeeds; a crash
+                                // between step 1 and step 2 leaves the
+                                // sentinel un-advanced — WAL replay
+                                // re-drives the idempotent apply on next
+                                // boot.
+                                if let Some(lid_bytes) = log_id_bytes
+                                    && let Err(e) =
+                                        state_layer.persist_last_applied_meta(lid_bytes)
+                                {
+                                    return (
+                                        LedgerResponse::Error {
+                                            code: ErrorCode::Internal,
+                                            message: format!(
+                                                "SystemRequest::Write: failed to persist last_applied sentinel to meta.db: {e}"
+                                            ),
+                                        },
+                                        None,
+                                    );
+                                }
                             }
                         }
                         LedgerResponse::Empty
@@ -5231,28 +5240,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 },
                             }
                         }
-                        // Persist atomicity sentinel in the same transaction as
-                        // entity data so crash recovery can detect
-                        // already-applied entries.
-                        if let Some(lid_bytes) = log_id_bytes
-                            && let Err(e) = inferadb_ledger_state::StateLayer::persist_last_applied(
-                                &mut write_txn,
-                                lid_bytes,
-                            )
-                        {
-                            return (
-                                LedgerResponse::Error {
-                                    code: ErrorCode::Internal,
-                                    message: format!(
-                                        "Failed to persist last_applied sentinel: {e}"
-                                    ),
-                                },
-                                None,
-                            );
-                        }
                         // Atomic audit: include the audit record in the same
                         // write transaction so it commits or rolls back with
-                        // the entity writes.
+                        // the entity writes. Slice 1 cleaved the
+                        // `_meta:last_applied` sentinel out of this
+                        // transaction — it lands in meta.db in a strictly-
+                        // later commit after state.db's commit_in_memory
+                        // below succeeds.
                         let ts_ns = block_timestamp.timestamp_nanos_opt().unwrap_or(0);
                         let audit_key = AuditKeys::vault(
                             state
@@ -5338,6 +5332,29 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         state_layer.return_dictionary(*vault, dict);
                         if let Some(audit_dict) = audit_dict_to_return {
                             state_layer.return_dictionary(SYSTEM_VAULT_ID, audit_dict);
+                        }
+
+                        // Step 2 (Slice 1 two-step apply): sentinel →
+                        // meta.db. Runs AFTER state.db's commit_in_memory
+                        // above succeeds. A crash between steps 1 and 2
+                        // leaves the sentinel un-advanced; WAL replay
+                        // re-drives the idempotent apply on next boot —
+                        // no double-apply because CAS conditions see the
+                        // prior-run results, and
+                        // `replay_crash_gap`'s state-sentinel gate still
+                        // holds.
+                        if let Some(lid_bytes) = log_id_bytes
+                            && let Err(e) = state_layer.persist_last_applied_meta(lid_bytes)
+                        {
+                            return (
+                                LedgerResponse::Error {
+                                    code: ErrorCode::Internal,
+                                    message: format!(
+                                        "Failed to persist last_applied sentinel to meta.db: {e}"
+                                    ),
+                                },
+                                None,
+                            );
                         }
                     }
 
