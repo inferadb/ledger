@@ -123,7 +123,6 @@ async fn test_committed_write_survives_leader_crash() {
         .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
         .await
         .expect("create data region");
-    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");
@@ -192,7 +191,6 @@ async fn test_read_consistency_after_leader_change() {
         .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
         .await
         .expect("create data region");
-    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let initial_leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(initial_leader_id).expect("leader exists");
@@ -265,7 +263,6 @@ async fn test_sequential_writes_readable_on_three_node_cluster() {
         .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
         .await
         .expect("create data region");
-    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");
@@ -326,7 +323,6 @@ async fn test_deterministic_block_height_across_nodes() {
         .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
         .await
         .expect("create data region");
-    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");
@@ -471,7 +467,6 @@ async fn test_rapid_writes_no_data_loss() {
         .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
         .await
         .expect("create data region");
-    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");
@@ -542,7 +537,6 @@ async fn test_term_agreement_maintained() {
         .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
         .await
         .expect("create data region");
-    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let leader_id = cluster.wait_for_leader().await;
 
     // ORG-ISOLATION: alpha gets writes, beta stays empty.
@@ -597,7 +591,6 @@ async fn test_key_overwrite_consistency() {
         .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
         .await
         .expect("create data region");
-    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");

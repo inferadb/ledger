@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use inferadb_ledger_types::{OrganizationId, OrganizationSlug, Region, UserId, VaultSlug};
+use inferadb_ledger_types::{OrganizationId, OrganizationSlug, UserId, VaultSlug};
 use serial_test::serial;
 
 use crate::common::{TestCluster, create_read_client, create_write_client};
@@ -138,7 +138,6 @@ async fn test_saga_orchestrator_leader_only() {
         .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
         .await
         .expect("create data region");
-    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let leader_id = cluster.wait_for_leader().await;
 
     // Verify we have a leader and followers

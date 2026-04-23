@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use inferadb_ledger_types::{OrganizationSlug, Region, VaultSlug};
+use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 use serial_test::serial;
 
 use crate::{
@@ -792,7 +792,6 @@ async fn test_idempotency_survives_leader_failover() {
         .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
         .await
         .expect("create data region");
-    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let original_leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");

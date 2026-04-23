@@ -78,7 +78,6 @@ async fn test_ordered_replication() {
         .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
         .await
         .expect("create data region");
-    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
@@ -161,7 +160,6 @@ async fn test_follower_state_consistency() {
         .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
         .await
         .expect("create data region");
-    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
@@ -246,7 +244,6 @@ async fn test_replication_with_idle_gap_between_writes() {
         .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
         .await
         .expect("create data region");
-    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");

@@ -256,7 +256,6 @@ async fn test_leader_failover_mid_batch_no_data_loss() {
         .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
         .await
         .expect("create data region");
-    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
     let leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 

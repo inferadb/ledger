@@ -209,25 +209,16 @@ pub struct TestCluster {
 }
 
 impl TestCluster {
-    /// Creates a new test cluster with the given number of nodes and 1 data region.
+    /// Creates a new test cluster with the given number of nodes — lean, system
+    /// group only.
     ///
-    /// The first node bootstraps the cluster, and other nodes join via
-    /// the AdminService's join_cluster RPC. All nodes use ephemeral ports on
-    /// localhost.
-    ///
-    /// Note: the B.1 spec aspires to a lean `new(size)` that only starts the
-    /// system group, with tests calling [`TestCluster::create_data_region`]
-    /// explicitly. That flip is deferred because the production saga path
-    /// (`CreateOrganizationSaga`) on 3-node clusters depends on the eager
-    /// peer-transport registration done during `build_full`'s data-region
-    /// bootstrap. The `SystemRequest::CreateDataRegion` apply path alone
-    /// does not yet set up cross-node transports reliably enough for the
-    /// saga orchestrator's `propose_to_region` step to succeed. See the
-    /// B.1 spec § "Phase A test debt" for context — the 13 listed tests
-    /// plus ~10 siblings hit this issue. Fixing it is a focused saga-path
-    /// task separate from test-infra cleanup.
+    /// The first node bootstraps the cluster, and other nodes join via the
+    /// AdminService's `join_cluster` RPC. No data regions are started. Tests
+    /// that need a data region must call [`TestCluster::create_data_region`]
+    /// explicitly — this matches production, where data regions are created
+    /// through cluster consensus rather than being pinned at startup.
     pub async fn new(size: usize) -> Self {
-        Self::build(size, 1, true).await
+        Self::build(size, 0, true).await
     }
 
     /// Creates a new test cluster with the given number of nodes and data regions.
@@ -1078,13 +1069,76 @@ impl TestCluster {
                         .unwrap_or(false)
             });
             if all_ready {
-                return Ok(());
+                break;
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(format!("region {region:?} did not converge within 30s").into());
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+
+        // Colocate the region leader with the system (GLOBAL) leader.
+        //
+        // Tests use `.leader().addr` (the system leader) as the entry point
+        // for writes that ultimately route through the per-organization
+        // groups. Per-organization groups default to `Delegated` leadership
+        // and follow their parent `RegionGroup`'s leader via
+        // `adopt_leader`, so if the region leader is a different node than
+        // the system leader, per-org writes on the system leader return
+        // `NotLeader` — the test helpers that use direct tonic clients
+        // (e.g. `create_test_vault`, `write_entity`) don't follow
+        // `LeaderHint` redirects, so the test hangs/fails.
+        //
+        // The production SDK (`RegionLeaderCache`) DOES follow redirects;
+        // this colocation step is only needed for the direct-tonic-client
+        // test harness. Transfer is a no-op when the leaders are already
+        // colocated.
+        let system_leader_id = self
+            .nodes
+            .iter()
+            .find(|n| n.is_system_leader())
+            .map(|n| n.id)
+            .ok_or("create_data_region: no system leader for colocation step")?;
+        let region_leader_id = self
+            .nodes
+            .iter()
+            .find_map(|n| {
+                n.manager.get_region_group(region).ok().and_then(|g| g.handle().current_leader())
+            })
+            .ok_or("create_data_region: no region leader for colocation step")?;
+        if region_leader_id != system_leader_id {
+            // Only the current region leader can initiate a transfer.
+            let current_region_leader = self
+                .nodes
+                .iter()
+                .find(|n| n.id == region_leader_id)
+                .ok_or("create_data_region: region leader not in cluster")?;
+            if let Ok(rg) = current_region_leader.manager.get_region_group(region) {
+                let _ = rg.handle().transfer_leader(system_leader_id).await;
+            }
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let colocated = self.nodes.iter().all(|n| {
+                    n.manager
+                        .get_region_group(region)
+                        .ok()
+                        .and_then(|g| g.handle().current_leader())
+                        == Some(system_leader_id)
+                });
+                if colocated {
+                    break;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(format!(
+                        "region {region:?} leader did not colocate with system leader within 10s"
+                    )
+                    .into());
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+
+        Ok(())
     }
 
     /// Proposes `SystemRequest::CreateOrganization` to the system group.
