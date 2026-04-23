@@ -9,7 +9,7 @@ use std::{sync::Arc, time::Instant};
 use chrono::DateTime;
 use inferadb_ledger_consensus::{committed::CommittedEntry, types::EntryKind};
 use inferadb_ledger_state::EventsDatabase;
-use inferadb_ledger_store::{FileBackend, TableId, tables};
+use inferadb_ledger_store::{Database, FileBackend, TableId, tables};
 use inferadb_ledger_types::{
     AppId, AppSlug, ClientAssertionId, EmailVerifyTokenId, TeamId, TeamSlug, UserEmailId, UserId,
     decode, encode, events::EventConfig,
@@ -1042,108 +1042,59 @@ impl RaftLogStore {
         // Test harnesses that only exercise the raft-log half may have
         // `state_layer` / `block_archive` / `event_writer` all unset; the
         // match below syncs whichever combination is configured.
-        // Slice 2b: `StateLayer::database()` now returns an owned
-        // `Arc<Database<B>>` (the compatibility shim for the system
-        // vault's DB). We still wrap it in `Option` to keep the match
-        // arms compatible with the unconfigured-layer test harnesses.
-        let state_db_opt = self.state_layer.as_ref().map(|sl| sl.database());
+        // Slice 2c: there is no longer a singleton state DB — each
+        // vault owns its own `Database`. Snapshot the live vault set
+        // and fan out per-vault `sync_state` alongside raft.db / blocks.db
+        // / events.db. Test harnesses exercising the raft-log half alone
+        // configure neither a state layer, block archive, nor event writer
+        // and therefore skip every per-vault sync.
+        let vault_dbs: Vec<(inferadb_ledger_types::VaultId, Arc<Database<FileBackend>>)> =
+            self.state_layer.as_ref().map(|sl| sl.live_vault_dbs()).unwrap_or_default();
         let blocks_db_opt = self.block_archive.as_ref().map(|ba| Arc::clone(ba.db()));
         let events_db_opt = self.event_writer.as_ref().map(|ew| Arc::clone(ew.events_db().db()));
 
         let raft_db = Arc::clone(&self.db);
 
-        // Launch every configured sync concurrently, then individually
-        // surface the first error. The match picks the right arity based
-        // on which of state/blocks/events are configured. On error, we
-        // propagate with the first-to-fail DB tagged so operators can
-        // diagnose the failing target.
-        match (state_db_opt, blocks_db_opt, events_db_opt) {
-            (Some(state_db), Some(blocks_db), Some(events_db)) => {
-                let (raft_res, state_res, blocks_res, events_res) = tokio::join!(
-                    raft_db.sync_state(),
-                    state_db.sync_state(),
-                    blocks_db.sync_state(),
-                    events_db.sync_state(),
-                );
-                log_replay_sync_outcome(&self.region, "raft", &raft_res);
-                log_replay_sync_outcome(&self.region, "state", &state_res);
-                log_replay_sync_outcome(&self.region, "blocks", &blocks_res);
-                log_replay_sync_outcome(&self.region, "events", &events_res);
-                raft_res.map_err(|e| to_storage_error(&e))?;
-                state_res.map_err(|e| to_storage_error(&e))?;
-                blocks_res.map_err(|e| to_storage_error(&e))?;
-                events_res.map_err(|e| to_storage_error(&e))?;
-            },
-            (Some(state_db), Some(blocks_db), None) => {
-                let (raft_res, state_res, blocks_res) = tokio::join!(
-                    raft_db.sync_state(),
-                    state_db.sync_state(),
-                    blocks_db.sync_state(),
-                );
-                log_replay_sync_outcome(&self.region, "raft", &raft_res);
-                log_replay_sync_outcome(&self.region, "state", &state_res);
-                log_replay_sync_outcome(&self.region, "blocks", &blocks_res);
-                raft_res.map_err(|e| to_storage_error(&e))?;
-                state_res.map_err(|e| to_storage_error(&e))?;
-                blocks_res.map_err(|e| to_storage_error(&e))?;
-            },
-            (Some(state_db), None, Some(events_db)) => {
-                let (raft_res, state_res, events_res) = tokio::join!(
-                    raft_db.sync_state(),
-                    state_db.sync_state(),
-                    events_db.sync_state(),
-                );
-                log_replay_sync_outcome(&self.region, "raft", &raft_res);
-                log_replay_sync_outcome(&self.region, "state", &state_res);
-                log_replay_sync_outcome(&self.region, "events", &events_res);
-                raft_res.map_err(|e| to_storage_error(&e))?;
-                state_res.map_err(|e| to_storage_error(&e))?;
-                events_res.map_err(|e| to_storage_error(&e))?;
-            },
-            (Some(state_db), None, None) => {
-                let (raft_res, state_res) =
-                    tokio::join!(raft_db.sync_state(), state_db.sync_state());
-                log_replay_sync_outcome(&self.region, "raft", &raft_res);
-                log_replay_sync_outcome(&self.region, "state", &state_res);
-                raft_res.map_err(|e| to_storage_error(&e))?;
-                state_res.map_err(|e| to_storage_error(&e))?;
-            },
-            (None, Some(blocks_db), Some(events_db)) => {
-                let (raft_res, blocks_res, events_res) = tokio::join!(
-                    raft_db.sync_state(),
-                    blocks_db.sync_state(),
-                    events_db.sync_state(),
-                );
-                log_replay_sync_outcome(&self.region, "raft", &raft_res);
-                log_replay_sync_outcome(&self.region, "blocks", &blocks_res);
-                log_replay_sync_outcome(&self.region, "events", &events_res);
-                raft_res.map_err(|e| to_storage_error(&e))?;
-                blocks_res.map_err(|e| to_storage_error(&e))?;
-                events_res.map_err(|e| to_storage_error(&e))?;
-            },
-            (None, Some(blocks_db), None) => {
-                let (raft_res, blocks_res) =
-                    tokio::join!(raft_db.sync_state(), blocks_db.sync_state());
-                log_replay_sync_outcome(&self.region, "raft", &raft_res);
-                log_replay_sync_outcome(&self.region, "blocks", &blocks_res);
-                raft_res.map_err(|e| to_storage_error(&e))?;
-                blocks_res.map_err(|e| to_storage_error(&e))?;
-            },
-            (None, None, Some(events_db)) => {
-                let (raft_res, events_res) =
-                    tokio::join!(raft_db.sync_state(), events_db.sync_state());
-                log_replay_sync_outcome(&self.region, "raft", &raft_res);
-                log_replay_sync_outcome(&self.region, "events", &events_res);
-                raft_res.map_err(|e| to_storage_error(&e))?;
-                events_res.map_err(|e| to_storage_error(&e))?;
-            },
-            (None, None, None) => {
-                // No domain DBs configured (test harnesses exercising the
-                // raft-log half alone). Sync raft.db and return.
-                let raft_res = raft_db.sync_state().await;
-                log_replay_sync_outcome(&self.region, "raft", &raft_res);
-                raft_res.map_err(|e| to_storage_error(&e))?;
-            },
+        // Launch every configured sync concurrently, then surface the
+        // first error. Per-vault state DB syncs run in parallel
+        // alongside raft.db / blocks.db / events.db so a region with
+        // many materialised vaults doesn't serialise post-replay
+        // durability.
+        let vault_futs =
+            futures::future::join_all(vault_dbs.iter().map(|(_, db)| Arc::clone(db).sync_state()));
+        let raft_fut = raft_db.sync_state();
+        let blocks_fut_opt = blocks_db_opt.as_ref().map(Arc::clone);
+        let blocks_fut = async move {
+            if let Some(db) = blocks_fut_opt { Some(db.sync_state().await) } else { None }
+        };
+        let events_fut_opt = events_db_opt.as_ref().map(Arc::clone);
+        let events_fut = async move {
+            if let Some(db) = events_fut_opt { Some(db.sync_state().await) } else { None }
+        };
+
+        let (vault_results, raft_res, blocks_res_opt, events_res_opt) =
+            tokio::join!(vault_futs, raft_fut, blocks_fut, events_fut);
+
+        log_replay_sync_outcome(&self.region, "raft", &raft_res);
+        for ((vault, _), res) in vault_dbs.iter().zip(vault_results.iter()) {
+            log_replay_sync_outcome(&self.region, &format!("state(vault-{})", vault.value()), res);
+        }
+        if let Some(ref res) = blocks_res_opt {
+            log_replay_sync_outcome(&self.region, "blocks", res);
+        }
+        if let Some(ref res) = events_res_opt {
+            log_replay_sync_outcome(&self.region, "events", res);
+        }
+
+        raft_res.map_err(|e| to_storage_error(&e))?;
+        for res in vault_results {
+            res.map_err(|e| to_storage_error(&e))?;
+        }
+        if let Some(res) = blocks_res_opt {
+            res.map_err(|e| to_storage_error(&e))?;
+        }
+        if let Some(res) = events_res_opt {
+            res.map_err(|e| to_storage_error(&e))?;
         }
 
         Ok(RecoveryStats {
@@ -1758,7 +1709,7 @@ pub(super) fn to_serde_error<E: std::error::Error>(e: &E) -> StoreError {
 /// propagates the underlying `Result` separately.
 fn log_replay_sync_outcome<E: std::fmt::Display>(
     region: &inferadb_ledger_types::Region,
-    db: &'static str,
+    db: &str,
     result: &Result<(), E>,
 ) {
     match result {

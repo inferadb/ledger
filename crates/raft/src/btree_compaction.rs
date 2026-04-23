@@ -67,9 +67,13 @@ impl<B: StorageBackend + 'static> BTreeCompactor<B> {
         self.handle.is_leader()
     }
 
-    /// Runs a single compaction cycle.
+    /// Runs a single compaction cycle across every live vault DB.
     ///
-    /// Compacts all B+ tree tables, merging underfull leaf nodes.
+    /// Slice 2c routes B+ tree compaction per-vault — `compact_tables`
+    /// addresses one vault at a time so a corruption or contention
+    /// spike in one vault DB does not block compaction of the rest.
+    /// Aggregates per-vault `pages_merged` / `pages_freed` for the
+    /// cycle metric.
     fn run_cycle(&self) {
         if !self.is_leader() {
             debug!("Skipping B+ tree compaction cycle (not leader)");
@@ -81,39 +85,52 @@ impl<B: StorageBackend + 'static> BTreeCompactor<B> {
         let cycle_start = Instant::now();
         debug!(trace_id = %trace_ctx.trace_id, "Starting B+ tree compaction cycle");
 
-        match self.state.compact_tables(self.min_fill_factor) {
-            Ok(stats) => {
-                let duration_secs = cycle_start.elapsed().as_secs_f64();
-                record_btree_compaction(stats.pages_merged, stats.pages_freed);
-                job.record_items(stats.pages_merged);
+        let vaults = self.state.live_vault_dbs();
+        let mut total_merged = 0u64;
+        let mut total_freed = 0u64;
+        let mut had_failure = false;
 
-                if stats.pages_merged > 0 {
-                    info!(
+        for (vault, _db) in &vaults {
+            match self.state.compact_tables(*vault, self.min_fill_factor) {
+                Ok(stats) => {
+                    total_merged = total_merged.saturating_add(stats.pages_merged);
+                    total_freed = total_freed.saturating_add(stats.pages_freed);
+                },
+                Err(e) => {
+                    had_failure = true;
+                    warn!(
                         trace_id = %trace_ctx.trace_id,
-                        pages_merged = stats.pages_merged,
-                        pages_freed = stats.pages_freed,
-                        duration_secs,
-                        "B+ tree compaction cycle complete"
+                        vault_id = vault.value(),
+                        error = %e,
+                        "B+ tree compaction failed for vault"
                     );
-                } else {
-                    debug!(
-                        trace_id = %trace_ctx.trace_id,
-                        duration_secs,
-                        "B+ tree compaction cycle complete (no pages merged)"
-                    );
-                }
-            },
-            Err(e) => {
-                let duration_secs = cycle_start.elapsed().as_secs_f64();
-                job.set_failure();
+                },
+            }
+        }
 
-                warn!(
-                    trace_id = %trace_ctx.trace_id,
-                    error = %e,
-                    duration_secs,
-                    "B+ tree compaction cycle failed"
-                );
-            },
+        let duration_secs = cycle_start.elapsed().as_secs_f64();
+        record_btree_compaction(total_merged, total_freed);
+        job.record_items(total_merged);
+        if had_failure {
+            job.set_failure();
+        }
+
+        if total_merged > 0 {
+            info!(
+                trace_id = %trace_ctx.trace_id,
+                vaults = vaults.len(),
+                pages_merged = total_merged,
+                pages_freed = total_freed,
+                duration_secs,
+                "B+ tree compaction cycle complete"
+            );
+        } else {
+            debug!(
+                trace_id = %trace_ctx.trace_id,
+                vaults = vaults.len(),
+                duration_secs,
+                "B+ tree compaction cycle complete (no pages merged)"
+            );
         }
     }
 

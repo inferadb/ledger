@@ -2280,6 +2280,14 @@ impl RaftManager {
         // can enumerate per-vault DBs on every tick via
         // `live_vault_dbs()`. Phase A of `do_checkpoint` fans out across
         // the live vault set; Phase B syncs meta.db strictly after.
+        //
+        // Clone the per-org DB handles before they're moved into the
+        // checkpointer — the integrity scrubber below needs the same
+        // raft / blocks / events / meta DBs, one Arc clone per consumer.
+        let raft_db_for_scrub = Arc::clone(&raft_db);
+        let blocks_db_for_scrub = Arc::clone(&blocks_db);
+        let events_db_for_scrub = events_db.as_ref().map(Arc::clone);
+        let meta_db_for_scrub = Arc::clone(&meta_db);
         let state_checkpointer = StateCheckpointer::from_config(
             Arc::clone(&state),
             raft_db,
@@ -2295,9 +2303,19 @@ impl RaftManager {
         let state_checkpointer_handle = state_checkpointer.start();
         info!(region = region.as_str(), "Started state checkpointer");
 
-        // Integrity Scrubber
+        // Integrity Scrubber.
+        //
+        // Slice 2c routes scrubbing per-DB so a corruption hit in one
+        // vault does not block scan progress in any other DB. The
+        // scrubber walks every materialised vault DB plus the per-org
+        // raft.db / blocks.db / events.db / meta.db; each owns its own
+        // progressive cursor.
         let integrity_scrubber = IntegrityScrubberJob::builder()
             .state(state.clone())
+            .raft_db(Some(raft_db_for_scrub))
+            .blocks_db(Some(blocks_db_for_scrub))
+            .events_db(events_db_for_scrub)
+            .meta_db(Some(meta_db_for_scrub))
             .cancellation_token(parent_token.child_token())
             .build();
         let integrity_scrubber_handle = integrity_scrubber.start();
@@ -3415,7 +3433,13 @@ mod tests {
         manager.start_system_region(region_config).await.expect("start system");
 
         let region = manager.get_region_group(Region::GLOBAL).expect("get region");
-        let state_db = region.state().database().clone();
+        // Slice 2c: `state.database()` is gone. Address the system vault
+        // explicitly — under GLOBAL, the only vault that has been
+        // materialised at this point is the system vault.
+        let state_db = region
+            .state()
+            .db_for(inferadb_ledger_state::system::SYSTEM_VAULT_ID)
+            .expect("system vault DB available");
         let raft_db = Arc::clone(region.raft_db());
         let blocks_db = Arc::clone(region.blocks_db());
         let events_db = region.events_state_db();

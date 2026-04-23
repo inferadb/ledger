@@ -414,7 +414,13 @@ impl CrashableNode {
         let region =
             self.manager.get_region_group(Region::GLOBAL).expect("global region available");
         let applied = *region.applied_index_watch().borrow();
-        let synced = region.state().database().last_synced_snapshot_id();
+        // Slice 2c: `state.database()` is gone. Probe the system vault
+        // DB explicitly — under GLOBAL the only vault the test exercises.
+        let synced = region
+            .state()
+            .db_for(inferadb_ledger_state::system::SYSTEM_VAULT_ID)
+            .expect("system vault DB available")
+            .last_synced_snapshot_id();
         (applied, synced)
     }
 }

@@ -215,15 +215,13 @@ impl<B: StorageBackend> StateLayer<B> {
     /// the two commits merely re-drives idempotent replay instead of
     /// advancing the sentinel past work that never reached the state DB.
     ///
-    /// This constructor eagerly materialises the
-    /// [`crate::system::SYSTEM_VAULT_ID`] database via the factory. That
-    /// guarantees [`Self::database`], [`Self::table_depths`], and
-    /// [`Self::database_stats`] — the Slice 2b compatibility shims for
-    /// `AdminService` / `IntegrityScrubber` / `compact_tables` /
-    /// `rewrap_pages` / `sidecar_page_count` — always have a concrete DB
-    /// to delegate to without taking a [`VaultId`] argument. Slice 2c
-    /// threads `VaultId` through those callers and drops the eager
-    /// materialisation.
+    /// The constructor eagerly materialises the
+    /// [`crate::system::SYSTEM_VAULT_ID`] database via the factory.
+    /// Beyond the system vault, every other vault DB is opened lazily on
+    /// the first [`Self::db_for`] call. The eager materialisation keeps
+    /// the system organization's slug index, refresh tokens, signing
+    /// keys, and other GLOBAL-tier records reachable without a callsite
+    /// having to first register the system vault.
     ///
     /// # Errors
     ///
@@ -238,12 +236,10 @@ impl<B: StorageBackend> StateLayer<B> {
         F: Fn(VaultId) -> Result<Arc<Database<B>>> + Send + Sync + 'static,
     {
         let factory: VaultDbFactory<B> = Arc::new(db_factory);
-        // Eagerly materialise SYSTEM_VAULT_ID so the Slice 2b
-        // compatibility shims (`database()`, `table_depths()`,
-        // `database_stats()`, `compact_tables()`, `rewrap_pages()`,
-        // `sidecar_page_count()`) always have a concrete DB to delegate
-        // to without a `VaultId` argument. This mirrors the pre-Slice-2b
-        // invariant where a single shared state DB was always present.
+        // Eagerly materialise SYSTEM_VAULT_ID so the system organization's
+        // GLOBAL-tier records (slug indexes, signing keys, refresh
+        // tokens) are reachable without a callsite first registering the
+        // system vault.
         let system_db = (factory)(crate::system::SYSTEM_VAULT_ID)?;
         let mut dbs = HashMap::new();
         dbs.insert(crate::system::SYSTEM_VAULT_ID, system_db);
@@ -257,65 +253,61 @@ impl<B: StorageBackend> StateLayer<B> {
         })
     }
 
-    /// Returns aggregate database-level statistics for metrics collection.
+    /// Returns aggregate database-level statistics across every
+    /// materialised vault DB for metrics collection.
     ///
-    /// Slice 2b compatibility shim: pre-Slice-2b this method returned
-    /// stats from the single shared state DB. With per-vault DBs, there
-    /// is no single "state DB" — this implementation delegates to the
-    /// `SYSTEM_VAULT_ID` database, which is always materialised by
-    /// [`Self::new`]. Slice 2c reworks this into an aggregate across all
-    /// live vault DBs.
+    /// Counters (`cache_hits`, `cache_misses`, `page_splits`) and
+    /// page-count fields (`total_pages`, `cached_pages`, `dirty_pages`,
+    /// `free_pages`) are summed across vaults. `page_size` is taken
+    /// from the first DB (every vault DB shares the same page size by
+    /// construction — see `RegionStorageManager::open_organization`'s
+    /// `ORGANIZATION_PAGE_SIZE`).
     pub fn database_stats(&self) -> DatabaseStats {
-        self.any_db().stats()
+        let snapshot = self.live_vault_dbs();
+        let mut combined = DatabaseStats::default();
+        let mut page_size_set = false;
+        for (_, db) in &snapshot {
+            let s = db.stats();
+            if !page_size_set {
+                combined.page_size = s.page_size;
+                page_size_set = true;
+            }
+            combined.total_pages += s.total_pages;
+            combined.cached_pages += s.cached_pages;
+            combined.dirty_pages += s.dirty_pages;
+            combined.free_pages += s.free_pages;
+            combined.cache_hits += s.cache_hits;
+            combined.cache_misses += s.cache_misses;
+            combined.page_splits += s.page_splits;
+        }
+        combined
     }
 
-    /// Returns a reference to the underlying database for integrity
-    /// scrubbing and diagnostics.
+    /// Returns the maximum B-tree depth observed for each table across
+    /// every materialised vault DB.
     ///
-    /// Slice 2b compatibility shim: returns a handle to the
-    /// `SYSTEM_VAULT_ID` database for `AdminService` backup/restore and
-    /// `IntegrityScrubber`. Slice 2c threads `VaultId` through those
-    /// callers and replaces this accessor with per-vault routing.
-    pub fn database(&self) -> Arc<Database<B>> {
-        self.any_db()
-    }
-
-    /// Returns B-tree depths for all non-empty tables.
-    ///
-    /// Opens a read transaction internally to walk each table's B-tree.
-    ///
-    /// Slice 2b compatibility shim: delegates to the `SYSTEM_VAULT_ID`
-    /// database; Slice 2c aggregates across all vault DBs.
+    /// Each table is reported once with the deepest tree found in any
+    /// vault — the per-region metric tracks worst-case depth so a single
+    /// pathological vault is visible. Empty databases (every vault has
+    /// depth 0 for that table) report 0.
     ///
     /// # Errors
     ///
-    /// Returns [`StateError::Store`] if the database read fails.
+    /// Returns [`StateError::Store`] if any per-vault read transaction
+    /// fails. The first failure short-circuits.
     pub fn table_depths(&self) -> Result<Vec<(&'static str, u32)>> {
-        self.any_db().table_depths().context(StoreSnafu)
-    }
-
-    /// Returns the `SYSTEM_VAULT_ID` database — the Slice 2b
-    /// compatibility backing for APIs that have not yet been threaded
-    /// with a [`VaultId`] routing key (backup/restore, integrity scrub,
-    /// compaction, rewrap). Always succeeds because [`Self::new`]
-    /// eagerly materialises the system vault DB.
-    ///
-    /// Slice 2c reworks every caller of this shim to pass a vault id; at
-    /// that point this helper is deleted.
-    fn any_db(&self) -> Arc<Database<B>> {
-        let dbs = self.dbs.read();
-        // SAFETY (root rule 8): `new` inserts SYSTEM_VAULT_ID before
-        // returning, and nothing in the API removes from `dbs`, so the
-        // lookup is infallible. A future Phase-4 hibernation feature
-        // that evicts vault DBs would need to guard SYSTEM_VAULT_ID or
-        // rework this helper — at that point this accessor is also
-        // gone (Slice 2c replaces every caller with per-vault
-        // routing).
-        #[allow(clippy::expect_used)]
-        let db = dbs
-            .get(&crate::system::SYSTEM_VAULT_ID)
-            .expect("StateLayer::new materialises SYSTEM_VAULT_ID");
-        Arc::clone(db)
+        let snapshot = self.live_vault_dbs();
+        let mut max_depths: HashMap<&'static str, u32> = HashMap::new();
+        for (_, db) in &snapshot {
+            let depths = db.table_depths().context(StoreSnafu)?;
+            for (name, depth) in depths {
+                let entry = max_depths.entry(name).or_insert(0);
+                if depth > *entry {
+                    *entry = depth;
+                }
+            }
+        }
+        Ok(max_depths.into_iter().collect())
     }
 
     /// Execute a function with mutable access to a vault's commitment.
@@ -554,7 +546,11 @@ impl<B: StorageBackend> StateLayer<B> {
     ///
     /// Returns [`StateError::Store`] if the read transaction fails.
     pub fn read_legacy_last_applied_from_state_db(&self) -> Result<Option<Vec<u8>>> {
-        let db = self.any_db();
+        // Probe the system vault's DB explicitly. The legacy in-state.db
+        // sentinel pre-dates per-vault storage; under Slice 2b the only
+        // place a stray legacy artefact could sit is the system-vault
+        // DB (the eagerly-materialised one).
+        let db = self.db_for(crate::system::SYSTEM_VAULT_ID)?;
         let txn = db.read().context(StoreSnafu)?;
         let key = Self::LAST_APPLIED_KEY.to_vec();
         txn.get::<inferadb_ledger_store::tables::Entities>(&key).context(StoreSnafu)
@@ -1218,59 +1214,63 @@ impl<B: StorageBackend> StateLayer<B> {
         self.vault_commitments.read().get(&vault).map(|c| *c.bucket_roots())
     }
 
-    /// Compacts all B+ tree tables, merging underfull leaf nodes.
+    /// Compacts every B+ tree table inside a single vault's database,
+    /// merging underfull leaf nodes.
     ///
-    /// Returns aggregate compaction statistics across all tables.
-    ///
-    /// Slice 2b compatibility shim: compacts only the `SYSTEM_VAULT_ID`
-    /// database (via [`Self::any_db`]). Slice 2c threads `VaultId`
-    /// through the compaction caller and fans out across every live
-    /// vault DB.
+    /// Returns aggregate compaction statistics across all tables of the
+    /// addressed vault. Callers iterating multiple vaults should sum the
+    /// returned `pages_merged` / `pages_freed` themselves.
     ///
     /// # Errors
     ///
-    /// Returns [`StateError::Store`] if the compaction operation or commit fails.
-    pub fn compact_tables(&self, min_fill_factor: f64) -> Result<CompactionStats> {
-        let db = self.any_db();
+    /// Returns [`StateError::Store`] if the compaction operation, the
+    /// per-vault DB lookup, or the commit fails.
+    pub fn compact_tables(&self, vault: VaultId, min_fill_factor: f64) -> Result<CompactionStats> {
+        let db = self.db_for(vault)?;
         let mut txn = db.write().context(StoreSnafu)?;
         let stats = txn.compact_all_tables(min_fill_factor).context(StoreSnafu)?;
         txn.commit().context(StoreSnafu)?;
         Ok(stats)
     }
 
-    /// Re-wraps a batch of pages' crypto sidecar metadata to a target RMK version.
+    /// Re-wraps a batch of crypto sidecar metadata pages for a single
+    /// vault's database to a target RMK version.
     ///
-    /// Delegates to [`Database::rewrap_pages`]. Non-encrypted backends are a no-op.
-    ///
-    /// Slice 2b compatibility shim: rewraps only the `SYSTEM_VAULT_ID`
-    /// database. Slice 2c threads `VaultId` through `dek_rewrap` and
-    /// iterates across every live vault DB.
+    /// Delegates to [`Database::rewrap_pages`]. Non-encrypted backends
+    /// are a no-op. Callers that need to cover every live vault iterate
+    /// over [`Self::live_vault_dbs`] and call this method once per vault.
     ///
     /// # Errors
     ///
-    /// Returns [`StateError::Store`] if the rewrap operation fails.
+    /// Returns [`StateError::Store`] if the per-vault DB lookup or the
+    /// rewrap operation fails.
     pub fn rewrap_pages(
         &self,
+        vault: VaultId,
         start_page_id: u64,
         batch_size: usize,
         target_version: Option<u32>,
     ) -> Result<(usize, Option<u64>)> {
-        self.any_db().rewrap_pages(start_page_id, batch_size, target_version).context(StoreSnafu)
+        let db = self.db_for(vault)?;
+        db.rewrap_pages(start_page_id, batch_size, target_version).context(StoreSnafu)
     }
 
-    /// Returns the total page count in the crypto sidecar.
+    /// Returns the sum of crypto sidecar page counts across every
+    /// materialised vault DB.
     ///
-    /// Non-encrypted backends return 0.
-    ///
-    /// Slice 2b compatibility shim: returns the sidecar page count for
-    /// the `SYSTEM_VAULT_ID` database only. Slice 2c sums across every
-    /// live vault DB.
+    /// Non-encrypted backends contribute 0.
     ///
     /// # Errors
     ///
-    /// Returns [`StateError::Store`] if the sidecar metadata cannot be read.
+    /// Returns [`StateError::Store`] if any per-vault sidecar read
+    /// fails. The first failure short-circuits.
     pub fn sidecar_page_count(&self) -> Result<u64> {
-        self.any_db().sidecar_page_count().context(StoreSnafu)
+        let snapshot = self.live_vault_dbs();
+        let mut total = 0u64;
+        for (_, db) in &snapshot {
+            total = total.saturating_add(db.sidecar_page_count().context(StoreSnafu)?);
+        }
+        Ok(total)
     }
 
     /// Lists subjects for a given resource and relation.
@@ -2328,7 +2328,7 @@ mod tests {
     #[test]
     fn test_compact_tables_empty() {
         let state = create_test_state();
-        let stats = state.compact_tables(0.4).unwrap();
+        let stats = state.compact_tables(SYSTEM_VAULT_ID, 0.4).unwrap();
         assert_eq!(stats.pages_merged, 0);
         assert_eq!(stats.pages_freed, 0);
     }
@@ -2355,8 +2355,9 @@ mod tests {
             state.apply_operations(vault, &ops, 200 + i as u64).unwrap();
         }
 
-        // Run compaction
-        let stats = state.compact_tables(0.4).unwrap();
+        // Run compaction on the vault that received the writes — Slice 2c
+        // signature requires the caller to address a specific vault.
+        let stats = state.compact_tables(vault, 0.4).unwrap();
 
         // Verify remaining data is intact
         for i in 80..100 {
@@ -2535,8 +2536,9 @@ mod tests {
 
         // Simulate a pre–Slice 1 artefact: sentinel bytes written under
         // the legacy key into the system vault's state.db Entities table.
-        // Under Slice 2b, `read_legacy_last_applied_from_state_db` probes
-        // the system-vault DB (the same handle surfaced by `any_db`).
+        // Under Slice 2c the legacy probe is scoped explicitly to the
+        // system vault DB (no `any_db` shim — every consumer addresses a
+        // specific vault id).
         let db = state.db_for(SYSTEM_VAULT_ID).unwrap();
         let mut txn = db.write().unwrap();
         txn.insert_raw(

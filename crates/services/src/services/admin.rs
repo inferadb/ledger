@@ -2034,43 +2034,23 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
 
         let tag = req.tag.unwrap_or_default();
 
-        let meta = if let Some(base_backup_id) = req.base_backup_id {
-            // Incremental backup: capture only pages changed since the base backup.
-            let base_meta = backup_manager.get_metadata(&base_backup_id).map_err(|e| {
-                ctx.set_error("BaseBackupNotFound", &e.to_string());
-                Status::not_found(format!("Base backup not found: {e}"))
-            })?;
-
-            // B.1: per-org groups track their own region_height; GLOBAL's
-            // applied_state.region_height() stays at 0. Use the manager's
-            // aggregate max for backup versioning when available.
-            let region_height = self
-                .raft_manager
-                .as_ref()
-                .map_or_else(|| self.applied_state.region_height(), |m| m.max_region_height());
-            // Slice 2b compatibility: `state.database()` returns the
-            // system-vault DB (see `StateLayer::database` docs). Slice
-            // 2c threads per-vault backup routing through AdminService.
-            let db = self.state.database();
-
-            let meta = backup_manager
-                .create_incremental_backup(
-                    &db,
-                    &base_backup_id,
-                    base_meta.region,
-                    region_height,
-                    &tag,
-                )
-                .await
-                .map_err(|e| {
-                    ctx.set_error("BackupError", &e.to_string());
-                    error_classify::storage_error(&e)
-                })?;
-
-            // Clear dirty bitmap after successful incremental backup
-            db.clear_dirty_bitmap();
-
-            meta
+        let meta = if let Some(_base_backup_id) = req.base_backup_id {
+            // Slice 2c: page-level incremental backups operate on a single
+            // `Database`'s dirty bitmap. Under per-vault storage the user's
+            // data lives across many per-vault DBs, so a "give me one
+            // page-level diff" request no longer maps to a single source.
+            // The forward-looking design (per-vault tarball with per-vault
+            // dirty deltas) lands in a future phase. Until then the
+            // server explicitly rejects incremental backup requests so
+            // operators don't get a silently incomplete artefact.
+            ctx.set_error(
+                "Unimplemented",
+                "Incremental backups are unavailable under per-vault storage",
+            );
+            return Err(Status::unimplemented(
+                "Incremental backups are unavailable under per-vault storage. \
+                 Take a full backup (omit base_backup_id) instead.",
+            ));
         } else {
             // Full snapshot-based backup: build a state snapshot directly from
             // the current StateLayer + AppliedState rather than going through
@@ -2084,18 +2064,27 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             use inferadb_ledger_types::EMPTY_HASH;
 
             // `create_backup` takes a pre-built `Snapshot`; per its contract,
-            // the caller must sync the state DB
-            // first so the `StateLayer` reads below observe durable state.
+            // the caller must sync every per-vault state DB first so the
+            // `StateLayer` reads below observe durable state.
             //
-            // Slice 2b compatibility: `state.database()` now returns the
-            // system-vault DB only. Slice 2c threads per-vault sync
-            // through the backup path so every vault's DB is synced
-            // before the snapshot reads from it.
-            let db = self.state.database();
-            db.sync_state().await.map_err(|e| {
-                ctx.set_error("SyncStateError", &e.to_string());
-                error_classify::storage_error(&e)
-            })?;
+            // Slice 2c: enumerate vaults via `applied_state.all_vaults()` —
+            // the authoritative set of vaults that exist in the org —
+            // rather than `live_vault_dbs()` which only contains vaults
+            // that have been touched since startup. A backup must capture
+            // every vault that exists, including ones that have never had
+            // a write this boot. Touching `db_for(vault)` lazily opens the
+            // vault DB so the subsequent sync covers it.
+            let all_vaults = self.applied_state.all_vaults();
+            for (_org_id, vault_id) in all_vaults.keys() {
+                let db = self.state.db_for(*vault_id).map_err(|e| {
+                    ctx.set_error("BackupVaultOpenError", &e.to_string());
+                    error_classify::storage_error(&e)
+                })?;
+                db.sync_state().await.map_err(|e| {
+                    ctx.set_error("SyncStateError", &e.to_string());
+                    error_classify::storage_error(&e)
+                })?;
+            }
 
             // B.1: per-org groups track their own region_height; GLOBAL's
             // applied_state.region_height() stays at 0. Use the manager's
@@ -2104,7 +2093,6 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 .raft_manager
                 .as_ref()
                 .map_or_else(|| self.applied_state.region_height(), |m| m.max_region_height());
-            let all_vaults = self.applied_state.all_vaults();
 
             let mut vault_states = Vec::new();
             let mut vault_entities = HashMap::new();
@@ -2257,25 +2245,20 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         })?;
 
         let (restored_height, message) = if meta.page_count.is_some() {
-            // Page-level backup (full page or incremental): resolve chain and restore pages
-            let chain = backup_manager.resolve_backup_chain(&req.backup_id).map_err(|e| {
-                ctx.set_error("ChainResolutionError", &e.to_string());
-                error_classify::storage_error(&e)
-            })?;
-
-            let db = self.state.database();
-            let height = backup_manager.restore_page_chain(&chain, db.as_ref()).map_err(|e| {
-                ctx.set_error("RestoreError", &e.to_string());
-                error_classify::storage_error(&e)
-            })?;
-
-            let msg = format!(
-                "Page backup {} (chain length {}, height {}) restored. Restart the node to apply.",
-                meta.backup_id,
-                chain.len(),
-                height
+            // Slice 2c: page-level backups were authored against a single
+            // monolithic state DB. Per-vault storage no longer maps onto
+            // that shape — restoring page bytes into one DB would only
+            // recover the system-vault subset of the cluster's data.
+            // Reject explicitly so operators don't end up with a
+            // partially-restored cluster.
+            ctx.set_error(
+                "Unimplemented",
+                "Page-level backup restore is unavailable under per-vault storage",
             );
-            (height, msg)
+            return Err(Status::unimplemented(
+                "Page-level backup restore is unavailable under per-vault storage. \
+                 Restore from a snapshot-based backup instead.",
+            ));
         } else {
             // Snapshot-based backup (existing behavior)
             let snapshot = backup_manager.load_backup(&req.backup_id).map_err(|e| {

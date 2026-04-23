@@ -560,6 +560,14 @@ pub async fn bootstrap_node(
     let events_db = system_region.events_db().cloned().ok_or_else(|| BootstrapError::Database {
         message: "system region missing events_db".to_string(),
     })?;
+    // Per-org DB handles required by the integrity scrubber (Slice 2c).
+    // The scrubber walks every per-org DB plus every materialised vault DB
+    // so corruption isolation extends to raft.db / blocks.db / events.db /
+    // _meta.db, not just per-vault state DBs.
+    let system_raft_db = Arc::clone(system_region.raft_db());
+    let system_blocks_db = Arc::clone(system_region.blocks_db());
+    let system_events_state_db = system_region.events_state_db();
+    let system_meta_db = Arc::clone(system_region.meta_db());
 
     let snapshot_dir = storage_manager.snapshot_dir(
         inferadb_ledger_types::Region::GLOBAL,
@@ -765,6 +773,10 @@ pub async fn bootstrap_node(
             block_archive: &block_archive,
             applied_state_accessor: &applied_state_accessor,
             events_db: &events_db,
+            system_raft_db: Arc::clone(&system_raft_db),
+            system_blocks_db: Arc::clone(&system_blocks_db),
+            system_events_state_db: system_events_state_db.clone(),
+            system_meta_db: Arc::clone(&system_meta_db),
             snapshot_manager,
             snapshot_manager_for_backup,
             backup_manager,
@@ -910,6 +922,10 @@ pub async fn bootstrap_node(
             block_archive: &block_archive,
             applied_state_accessor: &applied_state_accessor,
             events_db: &events_db,
+            system_raft_db: Arc::clone(&system_raft_db),
+            system_blocks_db: Arc::clone(&system_blocks_db),
+            system_events_state_db: system_events_state_db.clone(),
+            system_meta_db: Arc::clone(&system_meta_db),
             snapshot_manager,
             snapshot_manager_for_backup,
             backup_manager,
@@ -1158,6 +1174,15 @@ struct StartJobsInput<'a> {
     block_archive: &'a Arc<BlockArchive<FileBackend>>,
     applied_state_accessor: &'a AppliedStateAccessor,
     events_db: &'a Arc<EventsDatabase<FileBackend>>,
+    /// System region's `raft.db` handle (Slice 2c integrity scrubber input).
+    system_raft_db: Arc<inferadb_ledger_store::Database<FileBackend>>,
+    /// System region's `blocks.db` handle.
+    system_blocks_db: Arc<inferadb_ledger_store::Database<FileBackend>>,
+    /// System region's `events.db` handle (raw `Database`, not the typed
+    /// `EventsDatabase` wrapper); `None` when the region has no events writer.
+    system_events_state_db: Option<Arc<inferadb_ledger_store::Database<FileBackend>>>,
+    /// System region's `_meta.db` handle.
+    system_meta_db: Arc<inferadb_ledger_store::Database<FileBackend>>,
     snapshot_manager: Arc<SnapshotManager>,
     snapshot_manager_for_backup: Arc<SnapshotManager>,
     backup_manager: Option<Arc<BackupManager>>,
@@ -1327,6 +1352,10 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
 
     let integrity_scrub_handle = IntegrityScrubberJob::builder()
         .state(input.state.clone())
+        .raft_db(Some(Arc::clone(&input.system_raft_db)))
+        .blocks_db(Some(Arc::clone(&input.system_blocks_db)))
+        .events_db(input.system_events_state_db.clone())
+        .meta_db(Some(Arc::clone(&input.system_meta_db)))
         .interval(Duration::from_secs(input.config.integrity.scrub_interval_secs))
         .pages_per_cycle_percent(input.config.integrity.pages_per_cycle_percent)
         .watchdog_handle(watchdog.map(|w| w.register("integrity_scrub", 7200)))

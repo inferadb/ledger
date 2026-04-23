@@ -27,7 +27,7 @@ use crate::{
 };
 
 /// Database statistics.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DatabaseStats {
     /// Page size in bytes.
     pub page_size: usize,

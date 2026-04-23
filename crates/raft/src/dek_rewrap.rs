@@ -13,14 +13,15 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime},
 };
 
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::StorageBackend;
-use inferadb_ledger_types::{config::RewrapConfig, trace_context::TraceContext};
+use inferadb_ledger_types::{VaultId, config::RewrapConfig, trace_context::TraceContext};
+use parking_lot::RwLock;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
@@ -33,10 +34,17 @@ use crate::{
 ///
 /// Stored behind an `Arc` so the admin service can read progress
 /// while the background job writes it.
+///
+/// Slice 2c: under per-vault storage, sidecar pages live in many
+/// per-vault DBs. The aggregate counters (`total_pages`,
+/// `next_page_id`, `pages_rewrapped`) accumulate across vaults; the
+/// `current_vault` cursor + `vault_queue` track which vault is being
+/// drained right now.
 pub struct RewrapProgress {
-    /// Total pages in the sidecar.
+    /// Total pages in the sidecar across every live vault DB.
     pub total_pages: AtomicU64,
-    /// Next page ID to process.
+    /// Cumulative pages traversed across vaults (used for completion
+    /// estimation; not a within-vault page id).
     pub next_page_id: AtomicU64,
     /// Total pages actually re-wrapped (had old version).
     pub pages_rewrapped: AtomicU64,
@@ -46,6 +54,14 @@ pub struct RewrapProgress {
     pub target_version: AtomicU64,
     /// Wall-clock start time as milliseconds since UNIX epoch.
     started_at_millis: AtomicU64,
+    /// `VaultId.value()` of the vault currently being drained, or -1
+    /// if no rotation is active. Cursor for the rewrap loop.
+    current_vault: AtomicI64,
+    /// Page id within the current vault to resume from.
+    current_vault_next_page: AtomicU64,
+    /// Vaults still to process this rotation. Drained in order; the
+    /// head (`vault_queue[0]`) corresponds to `current_vault`.
+    vault_queue: RwLock<Vec<VaultId>>,
 }
 
 impl RewrapProgress {
@@ -58,6 +74,9 @@ impl RewrapProgress {
             complete: AtomicBool::new(true), // No rotation in progress
             target_version: AtomicU64::new(0),
             started_at_millis: AtomicU64::new(0),
+            current_vault: AtomicI64::new(-1),
+            current_vault_next_page: AtomicU64::new(0),
+            vault_queue: RwLock::new(Vec::new()),
         }
     }
 
@@ -74,11 +93,21 @@ impl RewrapProgress {
         self.pages_rewrapped.store(0, Ordering::Release);
         self.started_at_millis.store(Self::now_millis(), Ordering::Release);
         self.complete.store(false, Ordering::Release);
+        // The vault queue is populated lazily by the rewrap job on
+        // its first cycle after `complete` flips false — that way the
+        // job snapshots the current set of live vault DBs at rotation
+        // start time without needing a `StateLayer` reference here.
+        self.current_vault.store(-1, Ordering::Release);
+        self.current_vault_next_page.store(0, Ordering::Release);
+        self.vault_queue.write().clear();
     }
 
     /// Marks the rotation as complete.
     pub fn mark_complete(&self) {
         self.complete.store(true, Ordering::Release);
+        self.current_vault.store(-1, Ordering::Release);
+        self.current_vault_next_page.store(0, Ordering::Release);
+        self.vault_queue.write().clear();
     }
 
     /// Returns estimated remaining seconds based on pages processed and elapsed time.
@@ -156,7 +185,13 @@ impl<B: StorageBackend + 'static> DekRewrapJob<B> {
         self.handle.is_leader()
     }
 
-    /// Runs a single re-wrapping batch cycle.
+    /// Runs a single re-wrapping batch cycle, scoped to one vault DB.
+    ///
+    /// Slice 2c: under per-vault storage every vault has its own
+    /// crypto sidecar. The cycle drains the head of the rotation's
+    /// vault queue one batch at a time; when the head finishes
+    /// (`next` returned `None`), it advances to the next vault. When
+    /// the queue empties the rotation is marked complete.
     fn run_cycle(&self) {
         if !self.is_leader() {
             debug!("Skipping DEK re-wrap cycle (not leader)");
@@ -178,41 +213,86 @@ impl<B: StorageBackend + 'static> DekRewrapJob<B> {
             return;
         }
 
+        // Lazily seed the vault queue at the start of a rotation. The
+        // queue is populated on the first cycle after `start_rotation`
+        // — using whatever vault set is live at that moment. Vaults
+        // materialised mid-rotation are picked up by the next rotation.
+        if self.progress.vault_queue.read().is_empty()
+            && self.progress.current_vault.load(Ordering::Acquire) < 0
+        {
+            let live = self.state.live_vault_dbs();
+            let vaults: Vec<VaultId> = live.into_iter().map(|(v, _)| v).collect();
+            if vaults.is_empty() {
+                // Nothing to rewrap.
+                self.progress.mark_complete();
+                record_rewrap_remaining(0);
+                return;
+            }
+            let head = vaults[0];
+            *self.progress.vault_queue.write() = vaults;
+            self.progress.current_vault.store(head.value(), Ordering::Release);
+            self.progress.current_vault_next_page.store(0, Ordering::Release);
+        }
+
+        let current_vault_value = self.progress.current_vault.load(Ordering::Acquire);
+        if current_vault_value < 0 {
+            // No active vault and queue is empty → rotation done.
+            self.progress.mark_complete();
+            record_rewrap_remaining(0);
+            return;
+        }
+        let vault = VaultId::new(current_vault_value);
+        let next_page = self.progress.current_vault_next_page.load(Ordering::Acquire);
+
         let mut job = crate::logging::JobContext::new("dek_rewrap", None);
         let trace_ctx = TraceContext::new();
         let cycle_start = Instant::now();
-        let next_page = self.progress.next_page_id.load(Ordering::Acquire);
 
         debug!(
             trace_id = %trace_ctx.trace_id,
+            vault_id = vault.value(),
             next_page_id = next_page,
             batch_size = self.batch_size,
             "Starting DEK re-wrap cycle"
         );
 
-        match self.state.rewrap_pages(next_page, self.batch_size, self.target_version) {
+        match self.state.rewrap_pages(vault, next_page, self.batch_size, self.target_version) {
             Ok((rewrapped, next)) => {
                 let duration = cycle_start.elapsed().as_secs_f64();
 
-                // Update progress
+                // Update aggregate counters.
                 self.progress.pages_rewrapped.fetch_add(rewrapped as u64, Ordering::Release);
+                self.progress.next_page_id.fetch_add(rewrapped as u64, Ordering::Release);
 
                 if let Some(next_id) = next {
-                    self.progress.next_page_id.store(next_id, Ordering::Release);
+                    // Stay on this vault; resume at next_id next cycle.
+                    self.progress.current_vault_next_page.store(next_id, Ordering::Release);
                     let total = self.progress.total_pages.load(Ordering::Acquire);
-                    let remaining = total.saturating_sub(next_id);
+                    let processed = self.progress.next_page_id.load(Ordering::Acquire);
+                    let remaining = total.saturating_sub(processed);
                     record_rewrap_remaining(remaining);
                 } else {
-                    // All pages processed
-                    self.progress.mark_complete();
-                    record_rewrap_remaining(0);
-                    let total_rewrapped = self.progress.pages_rewrapped.load(Ordering::Acquire);
-                    info!(
-                        trace_id = %trace_ctx.trace_id,
-                        total_rewrapped = total_rewrapped,
-                        target_version = ?self.target_version,
-                        "DEK re-wrapping complete"
-                    );
+                    // This vault is done — advance the queue.
+                    let mut queue = self.progress.vault_queue.write();
+                    if !queue.is_empty() {
+                        queue.remove(0);
+                    }
+                    if let Some(&next_vault) = queue.first() {
+                        self.progress.current_vault.store(next_vault.value(), Ordering::Release);
+                        self.progress.current_vault_next_page.store(0, Ordering::Release);
+                    } else {
+                        // Queue empty → rotation complete.
+                        drop(queue);
+                        self.progress.mark_complete();
+                        record_rewrap_remaining(0);
+                        let total_rewrapped = self.progress.pages_rewrapped.load(Ordering::Acquire);
+                        info!(
+                            trace_id = %trace_ctx.trace_id,
+                            total_rewrapped = total_rewrapped,
+                            target_version = ?self.target_version,
+                            "DEK re-wrapping complete"
+                        );
+                    }
                 }
 
                 // Record metrics
@@ -222,6 +302,7 @@ impl<B: StorageBackend + 'static> DekRewrapJob<B> {
                 if rewrapped > 0 {
                     info!(
                         trace_id = %trace_ctx.trace_id,
+                        vault_id = vault.value(),
                         pages_rewrapped = rewrapped,
                         next_page_id = ?next,
                         duration_secs = duration,
@@ -230,6 +311,7 @@ impl<B: StorageBackend + 'static> DekRewrapJob<B> {
                 } else {
                     debug!(
                         trace_id = %trace_ctx.trace_id,
+                        vault_id = vault.value(),
                         next_page_id = ?next,
                         duration_secs = duration,
                         "DEK re-wrap batch complete (no pages re-wrapped)"
@@ -242,6 +324,7 @@ impl<B: StorageBackend + 'static> DekRewrapJob<B> {
 
                 warn!(
                     trace_id = %trace_ctx.trace_id,
+                    vault_id = vault.value(),
                     error = %e,
                     next_page_id = next_page,
                     duration_secs = duration,
