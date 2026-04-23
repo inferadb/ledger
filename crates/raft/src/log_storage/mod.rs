@@ -8176,6 +8176,86 @@ mod tests {
         }
     }
 
+    /// Retry of `CreateOrganizationInvite` with the same slug is idempotent:
+    /// returns the existing `(invite_id, expires_at)` without allocating a
+    /// new invite_id, advancing the invite sequence counter, or writing
+    /// duplicate token_hash/email_hash index entries. Pairs with the
+    /// client-side slug stabilisation in `sdk/src/ops/invitation.rs`.
+    #[tokio::test]
+    async fn test_create_organization_invite_is_idempotent_by_slug() {
+        let dir = tempdir().expect("create temp dir");
+        let store = create_store_with_state_layer(&dir);
+        let mut state = (*store.applied_state.load_full()).clone();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(100),
+            Region::US_EAST_VA,
+        );
+
+        let slug = InviteSlug::new(4242);
+        let token_hash_first = [0xAA; 32];
+        let token_hash_retry = [0xBB; 32]; // different hash on retry (server regenerates)
+
+        let request = OrganizationRequest::CreateOrganizationInvite {
+            organization: org_id,
+            slug,
+            token_hash: token_hash_first,
+            invitee_email_hmac: "abc123".to_string(),
+            ttl_hours: 72,
+        };
+        let (response, _) = store.apply_org(&request, &mut state);
+        let (first_invite_id, first_expires_at) = match response {
+            LedgerResponse::OrganizationInviteCreated {
+                invite_id,
+                invite_slug,
+                expires_at,
+            } => {
+                assert_eq!(invite_slug, slug);
+                (invite_id, expires_at)
+            },
+            other => panic!("expected OrganizationInviteCreated, got {other}"),
+        };
+
+        let sequence_after_first = state.sequences.clone();
+
+        // Retry with same slug but different token_hash + email_hmac
+        // (simulating server regenerating them on client retry).
+        let retry = OrganizationRequest::CreateOrganizationInvite {
+            organization: org_id,
+            slug,
+            token_hash: token_hash_retry,
+            invitee_email_hmac: "different".to_string(),
+            ttl_hours: 72,
+        };
+        let (retry_response, _) = store.apply_org(&retry, &mut state);
+        match retry_response {
+            LedgerResponse::OrganizationInviteCreated {
+                invite_id,
+                invite_slug,
+                expires_at,
+            } => {
+                assert_eq!(
+                    invite_id, first_invite_id,
+                    "retry must return the same invite_id (idempotent by slug)"
+                );
+                assert_eq!(invite_slug, slug);
+                assert_eq!(
+                    expires_at, first_expires_at,
+                    "retry must return the same expires_at from the stored index entry"
+                );
+            },
+            other => panic!("expected OrganizationInviteCreated on retry, got {other}"),
+        }
+
+        // Invite sequence counter NOT advanced — no new invite_id allocated.
+        assert_eq!(
+            state.sequences, sequence_after_first,
+            "retry must not advance state.sequences.invite"
+        );
+    }
+
     #[tokio::test]
     async fn test_create_invite_nonexistent_org() {
         let dir = tempdir().expect("create temp dir");

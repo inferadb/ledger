@@ -114,14 +114,15 @@ pub struct InviteIndexEntry {
     pub organization: OrganizationId,
     /// Internal invitation identifier for REGIONAL record lookup.
     pub invite: InviteId,
-    /// Invitation expiry timestamp (Unix seconds). Stored here so
-    /// apply-side idempotency can reconstruct the
-    /// `OrganizationInviteCreated` response on retry without a
-    /// secondary lookup. Older serialized entries default to `0`, which
-    /// makes the idempotent-retry response degrade gracefully — callers
-    /// should re-query if they need the exact expiry.
+    /// Invitation expiry timestamp (Unix microseconds). Stored here so
+    /// apply-side idempotency can reconstruct the exact
+    /// `OrganizationInviteCreated` response on retry — including the
+    /// sub-second precision of `block_timestamp`, which originates from
+    /// the leader's proposal clock. Older serialized entries default to
+    /// `0`, which makes the idempotent-retry response degrade gracefully
+    /// — callers should re-query if they need the exact expiry.
     #[serde(default)]
-    pub expires_at_unix: i64,
+    pub expires_at_micros: i64,
 }
 
 /// Lightweight index entry stored in GLOBAL
@@ -213,7 +214,7 @@ mod tests {
         let entry = InviteIndexEntry {
             organization: OrganizationId::new(42),
             invite: InviteId::new(7),
-            expires_at_unix: 1_700_000_000,
+            expires_at_micros: 1_700_000_000_000_000,
         };
         let bytes = postcard::to_allocvec(&entry).unwrap();
         let deserialized: InviteIndexEntry = postcard::from_bytes(&bytes).unwrap();

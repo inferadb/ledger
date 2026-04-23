@@ -6029,7 +6029,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 decode::<InviteIndexEntry>(&existing_entity.value)
                         {
                             let expires_at =
-                                DateTime::<Utc>::from_timestamp(existing.expires_at_unix, 0)
+                                DateTime::<Utc>::from_timestamp_micros(existing.expires_at_micros)
                                     .unwrap_or(block_timestamp);
                             return (
                                 LedgerResponse::OrganizationInviteCreated {
@@ -6048,7 +6048,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         let slug_entry = InviteIndexEntry {
                             organization: *organization,
                             invite: invite_id,
-                            expires_at_unix: expires_at.timestamp(),
+                            expires_at_micros: expires_at.timestamp_micros(),
                         };
                         let slug_value = match encode(&slug_entry) {
                             Ok(v) => v,
