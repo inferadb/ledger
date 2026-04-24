@@ -95,13 +95,36 @@ pub struct TestNode {
     /// Multi-Raft manager for region routing and data region access.
     pub manager: Arc<RaftManager>,
     /// Temporary directory for node data.
-    _temp_dir: TestDir,
+    ///
+    /// Captured as an `Option` so `TestCluster::graceful_restart` can take
+    /// ownership and preserve the data_dir across server lifetimes — a
+    /// restart re-runs `bootstrap_node` against the same on-disk state.
+    _temp_dir: Option<TestDir>,
     /// Server task handle for cleanup.
-    _server_handle: tokio::task::JoinHandle<()>,
+    ///
+    /// `Option` so `graceful_restart` can take ownership and await the task
+    /// for clean termination before re-bootstrapping.
+    _server_handle: Option<tokio::task::JoinHandle<()>>,
     /// Shutdown sender — kept alive so the server doesn't immediately exit.
     /// When dropped, the watch receiver in `serve_with_shutdown` resolves,
     /// triggering graceful shutdown.
-    _shutdown_tx: tokio::sync::watch::Sender<bool>,
+    ///
+    /// `Option` so `graceful_restart` can take ownership and explicitly
+    /// trigger a clean shutdown (rather than relying on the implicit drop
+    /// path) before re-bootstrapping.
+    _shutdown_tx: Option<tokio::sync::watch::Sender<bool>>,
+    /// Shutdown coordinator — held so `graceful_restart` can drain
+    /// background tasks (compaction, GC, checkpointer, etc.) before
+    /// re-bootstrapping against the same data_dir. Without an explicit
+    /// coordinator drain, those tasks keep file descriptors open and
+    /// the new `bootstrap_node` call can race them on B+ tree open.
+    coordinator: Option<Arc<inferadb_ledger_server::shutdown::ShutdownCoordinator>>,
+    /// UDS socket path (if the transport is UDS) — preserved so restart can
+    /// rebind to the same path.
+    socket_path: Option<std::path::PathBuf>,
+    /// TCP listen addr (if the transport is TCP) — preserved so restart can
+    /// rebind to the same port.
+    listen: Option<std::net::SocketAddr>,
 }
 
 impl TestNode {
@@ -206,6 +229,20 @@ pub struct TestCluster {
     num_data_regions: usize,
     /// Keeps socket files alive for cluster lifetime.
     _socket_dir: TestDir,
+    /// Transport mode — preserved so `graceful_restart` can reconstruct
+    /// server configs with the same UDS/TCP choice.
+    transport: TestTransport,
+    /// Whether the email blinding key was configured on the bootstrap node
+    /// — preserved so `graceful_restart` restores the same surface.
+    include_blinding_key: bool,
+    /// Rate-limit override passed to `build_full`, if any — preserved so
+    /// `graceful_restart` restores the same throttling surface.
+    rate_limit_override: Option<inferadb_ledger_types::config::RateLimitConfig>,
+    /// Shared key manager — SAME instance across the whole cluster, SAME
+    /// instance across a restart. Per-region keys are derived from this
+    /// manager; a fresh manager after restart would not unseal any existing
+    /// vault.
+    key_manager: Arc<dyn inferadb_ledger_store::crypto::RegionKeyManager>,
 }
 
 impl TestCluster {
@@ -360,6 +397,7 @@ impl TestCluster {
         let handle_clone = bootstrapped.handle.clone();
         let state_clone = bootstrapped.state.clone();
         let manager_clone = bootstrapped.manager.clone();
+        let coordinator = bootstrapped.coordinator.clone();
         let bg_server_handle = bootstrapped.server_handle;
         let server_handle = tokio::spawn(async move {
             let _ = bg_server_handle.await;
@@ -373,9 +411,12 @@ impl TestCluster {
             handle: handle_clone,
             state: state_clone,
             manager: manager_clone.clone(),
-            _temp_dir: temp_dir,
-            _server_handle: server_handle,
-            _shutdown_tx: shutdown_tx,
+            _temp_dir: Some(temp_dir),
+            _server_handle: Some(server_handle),
+            _shutdown_tx: Some(shutdown_tx),
+            coordinator: Some(coordinator),
+            socket_path: socket_path.clone(),
+            listen,
         });
 
         // Wait for the bootstrap node to become GLOBAL leader first.
@@ -476,7 +517,7 @@ impl TestCluster {
 
             let config = inferadb_ledger_server::config::Config {
                 listen: join_listen,
-                socket: join_socket,
+                socket: join_socket.clone(),
                 metrics_addr: None,
                 data_dir: Some(data_dir.clone()),
                 backup: Some(backup_config),
@@ -515,6 +556,7 @@ impl TestCluster {
             let handle_clone = bootstrapped.handle.clone();
             let state_clone = bootstrapped.state.clone();
             let manager_clone = bootstrapped.manager.clone();
+            let coordinator = bootstrapped.coordinator.clone();
             let bg_server_handle = bootstrapped.server_handle;
             let server_handle = tokio::spawn(async move {
                 let _ = bg_server_handle.await;
@@ -586,9 +628,12 @@ impl TestCluster {
                 handle: handle_clone,
                 state: state_clone,
                 manager: manager_clone,
-                _temp_dir: temp_dir,
-                _server_handle: server_handle,
-                _shutdown_tx: shutdown_tx,
+                _temp_dir: Some(temp_dir),
+                _server_handle: Some(server_handle),
+                _shutdown_tx: Some(shutdown_tx),
+                coordinator: Some(coordinator),
+                socket_path: join_socket.clone(),
+                listen: join_listen,
             });
 
             // Wait for the new node to see a leader after joining.
@@ -748,7 +793,15 @@ impl TestCluster {
             }
         }
 
-        Self { nodes, num_data_regions, _socket_dir: socket_dir }
+        Self {
+            nodes,
+            num_data_regions,
+            _socket_dir: socket_dir,
+            transport,
+            include_blinding_key,
+            rate_limit_override,
+            key_manager,
+        }
     }
 
     /// Waits for a leader to be elected AND all nodes to agree.
@@ -1371,6 +1424,400 @@ impl TestCluster {
         }
 
         false
+    }
+
+    /// Gracefully shuts down every node in the cluster, then re-bootstraps
+    /// each node against the same on-disk state (data_dir, cluster_id, node
+    /// id, socket / listen address, shared key manager). Returns a fresh
+    /// `TestCluster` handle over the restarted nodes.
+    ///
+    /// This is the test-only equivalent of a whole-cluster restart:
+    ///
+    ///   1. Every node's WAL is flushed via
+    ///      `ConsensusHandle::flush_for_shutdown` so `applied_durable ==
+    ///      last_committed` at the moment of shutdown. Combined with (2),
+    ///      this matches the production clean-shutdown contract.
+    ///   2. Every node's state DBs (state.db + raft.db, per region, per
+    ///      vault) are synced via `RaftManager::sync_all_state_dbs` — the
+    ///      same call `main.rs`'s `pre_shutdown` closure makes. Without
+    ///      this, `applied_durable` resets to 0 on restart and the full WAL
+    ///      replays, which is correct but defeats the point of a
+    ///      "graceful" restart.
+    ///   3. The server task for each node is signalled (`shutdown_tx.send(true)`)
+    ///      and awaited with a per-node timeout. Nodes that do not
+    ///      terminate cleanly within the timeout are abandoned; the
+    ///      subsequent restart will still observe their on-disk state
+    ///      because the WAL + DB syncs above already happened.
+    ///   4. Each node is re-bootstrapped via `bootstrap_node` against the
+    ///      same data_dir. Because the cluster_id file already exists,
+    ///      `bootstrap_node` takes the restart path, which rediscovers
+    ///      and restarts data regions via `discover_existing_regions`,
+    ///      rediscovers and rehydrates per-organization Raft groups via
+    ///      `discover_existing_organizations` +
+    ///      `rehydrate_organization_group` (Task #151), and rehydrates
+    ///      per-vault Raft groups inside `start_organization_group`
+    ///      (Task #146).
+    ///
+    /// The restart intentionally does NOT pre-populate
+    /// `RaftManager::peer_addresses` — that map starts empty on each
+    /// re-bootstrapped node and populates incrementally as the GLOBAL log
+    /// replays (for `RegisterPeerAddress` entries). Rehydration of
+    /// per-organization groups with an empty voter set is warn-and-skip by
+    /// design in `rehydrate_organization_group`; the test helpers wait long
+    /// enough for `peer_addresses` to populate before relying on the groups
+    /// being live.
+    pub async fn graceful_restart(self) -> Self {
+        // Destructure the cluster so we can move per-node blueprints out of
+        // the nodes Vec without hitting partial-move errors through a &mut.
+        let Self {
+            nodes,
+            num_data_regions,
+            _socket_dir,
+            transport,
+            include_blinding_key,
+            rate_limit_override,
+            key_manager,
+        } = self;
+
+        // Phase 1: drain background tasks, flush WAL, sync state DBs, then
+        // stop the gRPC server per node. Approximates the production
+        // `main.rs` shutdown ordering:
+        //   a. Cancel the coordinator's root token so background tasks
+        //      exit their loops. `root_token.cancel()` is a fast signal;
+        //      we do NOT await each handle (the coordinator's default
+        //      30s-per-handle deadline balloons test time unacceptably
+        //      — cancelled tasks drop their file handles on drop of
+        //      their enclosing Arcs below, which is sufficient for the
+        //      restart to re-open the same paths).
+        //   b. `flush_for_shutdown` on the consensus handle pushes any
+        //      pending WAL writes out.
+        //   c. `sync_all_state_dbs` force-syncs state.db + raft.db per
+        //      region + vault, narrowing post-restart WAL replay to zero.
+        //   d. `shutdown_tx.send(true)` signals the gRPC listener to
+        //      stop; await the task with a timeout.
+        let mut blueprints: Vec<NodeRestartBlueprint> = Vec::with_capacity(nodes.len());
+        for mut node in nodes.into_iter() {
+            // Flush + state DB sync FIRST so clean-shutdown durability is
+            // preserved before we tear down the consensus engines.
+            let _ = node.handle.flush_for_shutdown(Duration::from_secs(5)).await;
+            node.manager.sync_all_state_dbs(Duration::from_secs(5)).await;
+
+            // Drain the coordinator — cancels child tokens and awaits the
+            // registered background handles. Wrapped in an outer timeout
+            // because the coordinator's default per-handle deadline is 30s
+            // and we have many handles; without the outer cap the test
+            // deadline balloons.
+            if let Some(coordinator) = node.coordinator.take() {
+                let _ = tokio::time::timeout(Duration::from_secs(15), async move {
+                    coordinator.shutdown().await;
+                })
+                .await;
+            }
+
+            // Tear down every region's consensus engine. `stop_region`
+            // drops the engine (which closes its control_inbox and
+            // propagates to the reactor task), flushes pending WAL entries,
+            // and releases the log-store handle. Without this, the OLD
+            // reactor task keeps running on the OLD WAL files even after
+            // the gRPC server stops — the NEW `bootstrap_node` call then
+            // opens the same paths while the OLD engine still holds them,
+            // and the NEW engine's election timers never fire (racy shared
+            // state on the backing files).
+            let _ =
+                tokio::time::timeout(Duration::from_secs(15), node.manager.shutdown()).await;
+
+            if let Some(tx) = node._shutdown_tx.take() {
+                let _ = tx.send(true);
+            }
+            if let Some(handle) = node._server_handle.take() {
+                let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
+            }
+
+            // Dropping `manager` / `handle` / `state` is essential — their
+            // background tasks hold file descriptors and channel
+            // references on the data_dir. Moving them into `_` forces the
+            // drop BEFORE the new bootstrap re-opens the same paths.
+            let TestNode {
+                id,
+                addr,
+                handle: _,
+                state: _,
+                manager: _,
+                _temp_dir,
+                socket_path,
+                listen,
+                ..
+            } = node;
+
+            let temp_dir = _temp_dir.expect(
+                "graceful_restart: temp_dir must be live for the node's entire pre-restart \
+                 lifetime",
+            );
+            blueprints.push(NodeRestartBlueprint { id, addr, temp_dir, socket_path, listen });
+        }
+
+        // Give dropped tasks a tick to actually release file handles.
+        // Some background tokio tasks spawned off the coordinator's child
+        // tokens observe cancellation on their next loop iteration; yielding
+        // plus a short sleep lets them run to completion before the new
+        // bootstrap reopens the same paths.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Phase 2: re-bootstrap each node against the same data_dir. The
+        // `cluster_id` file inside `temp_dir` is already populated from the
+        // initial `build_full` pass, so `bootstrap_node` takes the restart
+        // path.
+        //
+        // Collect the TCP join-seed list once — if `transport == Tcp` the
+        // restart path spawns a background seed-discovery task that
+        // populates `peer_addresses` as soon as every re-bootstrapped node
+        // is listening. For UDS transport, `parse_seed_addresses` rejects
+        // non-`SocketAddr` strings, so the join list is empty and peers
+        // must auto-register via incoming consensus traffic instead — a
+        // node that elects itself leader on restart will broadcast
+        // RequestVote using the transport's auto-registration of the
+        // `from_address` field carried on every consensus RPC.
+        let join_seeds: Vec<String> = match transport {
+            TestTransport::Tcp => blueprints.iter().map(|b| b.addr.clone()).collect(),
+            TestTransport::Uds => Vec::new(),
+        };
+
+        let mut restarted: Vec<TestNode> = Vec::with_capacity(blueprints.len());
+        for blueprint in blueprints {
+            // Seed list excludes the node's own address so the node doesn't
+            // discover itself. Leaving self in the list is harmless (the
+            // restart seed loop filters by `info.node_id != my_node_id`)
+            // but cleaner to scope here.
+            let seeds_for_node: Option<Vec<String>> = if join_seeds.is_empty() {
+                None
+            } else {
+                let own_addr = &blueprint.addr;
+                let seeds: Vec<String> =
+                    join_seeds.iter().filter(|a| *a != own_addr).cloned().collect();
+                if seeds.is_empty() { None } else { Some(seeds) }
+            };
+            let node = bootstrap_one_node(
+                blueprint,
+                key_manager.clone(),
+                include_blinding_key,
+                rate_limit_override.clone(),
+                seeds_for_node,
+            )
+            .await;
+            restarted.push(node);
+        }
+
+        // Phase 3: fan-out peer registration across all restarted nodes.
+        //
+        // The production restart path relies on `RegisterPeerAddress` Raft
+        // log entries re-applying during log replay to repopulate
+        // `RaftManager::peer_addresses`. After clean shutdown
+        // `applied_durable == last_committed`, so no entries re-apply —
+        // meaning the map stays empty on restart until some external
+        // mechanism (the `--join` seed discovery task, or a peer
+        // initiating a consensus RPC and auto-registering via
+        // `from_address`) re-injects entries.
+        //
+        // The seed discovery task is a one-shot best-effort spawn from
+        // `bootstrap_node` and runs in parallel with `bootstrap_one_node`
+        // returning — when the entire cluster restarts simultaneously,
+        // every seed-discovery task's targets are either mid-bootstrap or
+        // not-yet-listening, so none of them succeed cleanly. The test
+        // therefore performs the peer-registration step explicitly here:
+        // iterate every pair and register (node_id, addr) via both the
+        // shared peer-address map AND the system-region consensus
+        // transport (so `RequestVote` / `AppendEntries` have a channel to
+        // use).
+        //
+        // This is a TEST-HARNESS workaround for a production gap —
+        // production nodes use `--join` seeds to bootstrap peer addresses.
+        // The assertion below tests the rehydration chain CONDITIONAL on
+        // peer addresses being known, which is the invariant the
+        // production code relies on.
+        for node in &restarted {
+            for other in &restarted {
+                if other.id == node.id {
+                    continue;
+                }
+                node.manager.peer_addresses().insert(other.id, other.addr.clone());
+            }
+            // `reconcile_transport_channels` walks every region's consensus
+            // transport and registers every known peer that isn't already
+            // in the transport's channel map — this is the same helper the
+            // production `PlacementController` uses on its periodic
+            // reconciliation cycle. It covers every region, not just the
+            // system region, so data-region elections can proceed too.
+            inferadb_ledger_server::placement::reconcile_transport_channels(&node.manager).await;
+        }
+
+        // The rehydration sweep inside `bootstrap_node` runs with empty
+        // `peer_addresses` (the WAL replay of `RegisterPeerAddress` entries
+        // has nothing to replay after clean shutdown, and seed discovery is
+        // an async background task that races the sweep). Skipping nodes
+        // mean the per-organization groups are NOT started on every voter
+        // at this point. Now that `peer_addresses` is populated, walk the
+        // on-disk organization directories on every restarted node and
+        // invoke `start_organization_group` directly — the call is
+        // idempotent (`Ok(_)` on "already running"), so nodes where the
+        // first sweep succeeded are no-ops.
+        //
+        // This mirrors exactly what `bootstrap.rs`'s restart-path
+        // rehydration block does, including the same bootstrap-selection
+        // rule (smallest node id bootstraps). The test re-runs the sweep
+        // here because the production sweep is synchronous inside
+        // `bootstrap_node` and there's no re-trigger hook.
+        let voter_set: Vec<(u64, String)> =
+            restarted.iter().map(|n| (n.id, n.addr.clone())).collect();
+        let bootstrap_node_id =
+            voter_set.iter().map(|(id, _)| *id).min().unwrap_or(0);
+        for node in &restarted {
+            let mgr = node.manager.clone();
+            let storage = inferadb_ledger_raft::RegionStorageManager::new(
+                node._temp_dir
+                    .as_ref()
+                    .expect("temp_dir captured post-bootstrap")
+                    .path()
+                    .to_path_buf(),
+            );
+            for region in mgr.list_regions() {
+                if region == inferadb_ledger_types::Region::GLOBAL {
+                    continue;
+                }
+                let Ok(org_ids) = storage.discover_existing_organizations(region) else {
+                    continue;
+                };
+                for organization_id in org_ids {
+                    let bootstrap = node.id == bootstrap_node_id;
+                    let _ = mgr
+                        .start_organization_group(
+                            region,
+                            organization_id,
+                            voter_set.clone(),
+                            bootstrap,
+                            None,
+                            None,
+                        )
+                        .await;
+                }
+            }
+        }
+
+        Self {
+            nodes: restarted,
+            num_data_regions,
+            _socket_dir,
+            transport,
+            include_blinding_key,
+            rate_limit_override,
+            key_manager,
+        }
+    }
+}
+
+/// Preserved per-node state required to re-bootstrap a node against the same
+/// on-disk data directory, node id, and socket / TCP address.
+///
+/// The `temp_dir` ownership is critical: it outlives the original server
+/// task's file descriptors, so the new `bootstrap_node` call opens the same
+/// paths.
+struct NodeRestartBlueprint {
+    id: u64,
+    addr: String,
+    temp_dir: TestDir,
+    socket_path: Option<std::path::PathBuf>,
+    listen: Option<std::net::SocketAddr>,
+}
+
+/// Re-bootstraps a single node against its preserved data_dir + socket /
+/// listen address. Used exclusively by `TestCluster::graceful_restart`.
+///
+/// The node's on-disk `cluster_id` file (written by `build_full` on first
+/// boot) steers `bootstrap_node` into the restart path, so this helper does
+/// NOT write the file again. The same shared `key_manager` from the cluster
+/// is passed through so region keys unseal identically.
+async fn bootstrap_one_node(
+    blueprint: NodeRestartBlueprint,
+    key_manager: Arc<dyn inferadb_ledger_store::crypto::RegionKeyManager>,
+    include_blinding_key: bool,
+    rate_limit_override: Option<inferadb_ledger_types::config::RateLimitConfig>,
+    join_seeds: Option<Vec<String>>,
+) -> TestNode {
+    let NodeRestartBlueprint { id: node_id_hint, addr, temp_dir, socket_path, listen } = blueprint;
+    let data_dir = temp_dir.path().to_path_buf();
+
+    let backup_config = inferadb_ledger_types::config::BackupConfig::builder()
+        .destination(data_dir.join("backups").to_string_lossy().to_string())
+        .build()
+        .expect("valid backup config");
+
+    let config = inferadb_ledger_server::config::Config {
+        listen,
+        socket: socket_path.clone(),
+        metrics_addr: None,
+        data_dir: Some(data_dir.clone()),
+        backup: Some(backup_config),
+        raft: Some(test_raft_config()),
+        saga: inferadb_ledger_types::config::SagaConfig { poll_interval_secs: 2 },
+        token_maintenance_interval_secs: 3,
+        rate_limit: Some(rate_limit_override.unwrap_or_else(test_rate_limit_config)),
+        email_blinding_key: if include_blinding_key {
+            Some(TEST_BLINDING_KEY_HEX.to_string())
+        } else {
+            None
+        },
+        join: join_seeds,
+        ..inferadb_ledger_server::config::Config::default()
+    };
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let health_state = inferadb_ledger_raft::HealthState::new();
+    let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(
+        &config,
+        &data_dir,
+        health_state.clone(),
+        shutdown_rx,
+        Some(key_manager),
+    )
+    .await
+    .expect("bootstrap node (restart path)");
+
+    health_state.mark_ready();
+
+    // `bootstrap_node` re-derives node_id from the cluster-id file + stored
+    // data, so it must return the SAME id as before the restart. A mismatch
+    // here means bootstrap lost the node's identity — assert eagerly so the
+    // downstream assertion in the test reports a clean failure mode.
+    let node_id = bootstrapped.handle.node_id();
+    assert_eq!(
+        node_id, node_id_hint,
+        "graceful_restart: node id changed across restart (before={}, after={}) — data_dir / \
+         cluster_id mismatch",
+        node_id_hint, node_id,
+    );
+
+    let handle_clone = bootstrapped.handle.clone();
+    let state_clone = bootstrapped.state.clone();
+    let manager_clone = bootstrapped.manager.clone();
+    let coordinator = bootstrapped.coordinator.clone();
+    let bg_server_handle = bootstrapped.server_handle;
+    let server_handle = tokio::spawn(async move {
+        let _ = bg_server_handle.await;
+    });
+
+    TestNode {
+        id: node_id,
+        addr,
+        handle: handle_clone,
+        state: state_clone,
+        manager: manager_clone,
+        _temp_dir: Some(temp_dir),
+        _server_handle: Some(server_handle),
+        _shutdown_tx: Some(shutdown_tx),
+        coordinator: Some(coordinator),
+        socket_path,
+        listen,
     }
 }
 
