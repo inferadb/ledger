@@ -1209,6 +1209,19 @@ pub struct InnerVaultGroup {
     pub(crate) block_archive: Arc<BlockArchive<FileBackend>>,
     /// Accessor for applied state.
     pub(crate) applied_state: AppliedStateAccessor,
+    /// Per-vault applied state — carries apply progress and vault-scoped
+    /// counters for this vault's Raft group. Populated with the default
+    /// empty state at vault-group start; populated by the vault's apply
+    /// worker as committed entries land.
+    ///
+    /// The parent org's [`applied_state`](Self::applied_state) accessor
+    /// holds the org-scoped applied state (slug indices, organization
+    /// registry, etc.). This field holds the subset that's keyed
+    /// per-vault — `last_applied` for this vault's Raft log,
+    /// `vault_height` for this vault's block chain, `client_sequences`
+    /// for writes targeting this vault.
+    pub(crate) vault_applied_state:
+        Arc<arc_swap::ArcSwap<crate::log_storage::VaultAppliedState>>,
     /// Block announcement broadcast channel. Shared with the parent org
     /// for now; Phase 4 will scope announcements per-vault.
     pub(crate) block_announcements: broadcast::Sender<BlockAnnouncement>,
@@ -1282,6 +1295,15 @@ impl InnerVaultGroup {
     /// Returns the applied state accessor.
     pub fn applied_state(&self) -> &AppliedStateAccessor {
         &self.applied_state
+    }
+
+    /// Returns a handle to the vault's per-vault applied state. Uses
+    /// [`arc_swap::ArcSwap`] for lock-free reads; the apply worker swaps
+    /// in a new snapshot on each committed entry.
+    pub fn vault_applied_state(
+        &self,
+    ) -> &Arc<arc_swap::ArcSwap<crate::log_storage::VaultAppliedState>> {
+        &self.vault_applied_state
     }
 
     /// Returns the block announcements broadcast channel.
@@ -1408,6 +1430,16 @@ impl VaultGroup {
     #[must_use]
     pub fn applied_state(&self) -> &AppliedStateAccessor {
         self.0.applied_state()
+    }
+
+    /// Returns a handle to the vault's per-vault applied state. Uses
+    /// [`arc_swap::ArcSwap`] for lock-free reads; the apply worker swaps
+    /// in a new snapshot on each committed entry.
+    #[must_use]
+    pub fn vault_applied_state(
+        &self,
+    ) -> &Arc<arc_swap::ArcSwap<crate::log_storage::VaultAppliedState>> {
+        self.0.vault_applied_state()
     }
 
     /// Returns the block announcements broadcast channel.
@@ -2418,6 +2450,15 @@ impl RaftManager {
         let vault_applied_state = vault_log_store.accessor();
         let vault_commitment_buffer = vault_log_store.commitment_buffer();
         let vault_applied_index_rx = vault_log_store.applied_index_watch();
+        // Per-vault apply-progress snapshot. Initialised to the default
+        // empty state at start-time; the per-vault apply worker swaps in
+        // a new pointee on each committed entry. Holds `last_applied`,
+        // `vault_height`, `client_sequences`, and the chain-continuity
+        // hash for this vault's Raft log (the org-scoped accessor above
+        // continues to back slug indices and other shared state).
+        let vault_applied_state_swap = Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::log_storage::VaultAppliedState::default(),
+        ));
         // Parallel `Arc` to the per-vault `raft.db` so the shutdown sync
         // sweep can fan out to it alongside the vault's `state.db`. The
         // apply task also keeps an `Arc` alive via the owned log store;
@@ -2631,6 +2672,7 @@ impl RaftManager {
             state: Arc::clone(org_inner.state()),
             block_archive: Arc::clone(org_inner.block_archive()),
             applied_state: vault_applied_state,
+            vault_applied_state: vault_applied_state_swap,
             block_announcements: org_inner.block_announcements().clone(),
             batch_handle: None,
             commitment_buffer: vault_commitment_buffer,
@@ -4734,6 +4776,43 @@ mod tests {
         let org_shard = org_group.handle().shard_id();
         assert_ne!(v1.shard_id(), org_shard, "vault shard must not collide with parent org shard",);
         assert_ne!(v2.shard_id(), org_shard, "vault shard must not collide with parent org shard",);
+    }
+
+    #[tokio::test]
+    async fn test_start_vault_group_initializes_empty_vault_applied_state() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+        manager
+            .start_organization_group(
+                Region::GLOBAL,
+                OrganizationId::new(66),
+                vec![(1, "127.0.0.1:50051".to_string())],
+                true,
+                None,
+                None,
+            )
+            .await
+            .expect("start org group");
+
+        let vault = manager
+            .start_vault_group(Region::GLOBAL, OrganizationId::new(66), VaultId::new(1))
+            .await
+            .expect("start vault group");
+
+        let state = vault.vault_applied_state().load();
+        assert!(state.last_applied.is_none(), "fresh vault must have no applied LogId");
+        assert_eq!(state.vault_height, 0, "fresh vault must have height 0");
+        assert_eq!(state.last_applied_timestamp_ns, 0, "fresh vault must have zero apply ts");
+        assert!(state.client_sequences.is_empty(), "fresh vault must have no client sequences");
+        assert_eq!(
+            state.previous_vault_hash,
+            inferadb_ledger_types::ZERO_HASH,
+            "fresh vault chain head must be ZERO_HASH",
+        );
     }
 
     #[tokio::test]
