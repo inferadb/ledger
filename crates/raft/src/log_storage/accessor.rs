@@ -365,6 +365,17 @@ impl AppliedStateAccessor {
     pub fn new_for_test(state: Arc<ArcSwap<AppliedState>>) -> Self {
         Self { state }
     }
+
+    /// Replaces the backing state with a caller-supplied value (for testing).
+    ///
+    /// Tests use this to seed specific `AppliedState` fields (e.g., the
+    /// `vaults` map) after an accessor has been handed out by a real
+    /// `RaftLogStore`, without standing up the apply pipeline to
+    /// reconstruct the state via `CreateVault` proposals.
+    #[doc(hidden)]
+    pub fn store_for_test(&self, state: AppliedState) {
+        self.state.store(Arc::new(state));
+    }
 }
 
 #[cfg(test)]

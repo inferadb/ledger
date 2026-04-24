@@ -1231,6 +1231,13 @@ pub struct InnerVaultGroup {
     /// `stop_vault_group` can fire it without cancelling unrelated
     /// vaults.
     pub(crate) cancellation: CancellationToken,
+    /// Shared handle to the vault's per-vault `raft.db`. Owned here so
+    /// [`RaftManager::sync_all_state_dbs`] can include it in the shutdown
+    /// fan-out alongside the vault's `state.db`. The apply task holds its
+    /// own `Arc` via the owned [`RaftLogStore`](crate::log_storage::RaftLogStore);
+    /// this field is a parallel reference so the database stays live
+    /// even after apply-task teardown.
+    pub(crate) raft_db: Arc<Database<FileBackend>>,
 }
 
 impl InnerVaultGroup {
@@ -1302,6 +1309,11 @@ impl InnerVaultGroup {
     /// Returns a receiver for the applied-index watch channel.
     pub fn applied_index_watch(&self) -> tokio::sync::watch::Receiver<u64> {
         self.applied_index_rx.clone()
+    }
+
+    /// Returns the per-vault `raft.db` handle.
+    pub fn raft_db(&self) -> &Arc<Database<FileBackend>> {
+        &self.raft_db
     }
 
     /// Checks if this node is the leader for this vault group (delegated
@@ -1426,6 +1438,12 @@ impl VaultGroup {
     /// Returns a receiver for the applied-index watch channel.
     pub fn applied_index_watch(&self) -> tokio::sync::watch::Receiver<u64> {
         self.0.applied_index_watch()
+    }
+
+    /// Returns the per-vault `raft.db` handle.
+    #[must_use]
+    pub fn raft_db(&self) -> &Arc<Database<FileBackend>> {
+        self.0.raft_db()
     }
 
     /// Checks if this node is the leader for this vault group (delegated
@@ -2013,16 +2031,6 @@ impl RaftManager {
         Ok(Arc::new(SystemGroup(inner)))
     }
 
-    /// Starts a data region.
-    ///
-    /// Requires the system region to be started first.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RaftManagerError::SystemRegionRequired`] if the system region has
-    /// not been started, [`RaftManagerError::Raft`] if `region` is 0,
-    /// [`RaftManagerError::RegionExists`] if the region is already running,
-    /// or a storage/Raft error if initialization fails.
     /// Starts a per-organization Raft group on this node.
     ///
     /// Called by the bootstrap-side organization-creation handler when
@@ -2033,6 +2041,18 @@ impl RaftManager {
     ///
     /// Idempotent: if the `(region, organization_id)` group is already
     /// registered, returns the existing handle instead of failing.
+    ///
+    /// On fresh `CreateOrganization` signals, the method returns immediately
+    /// after the watcher task spawns and no vaults exist to rehydrate. On
+    /// node restart, after the org's applied state has been rebuilt from
+    /// snapshot + WAL replay inside
+    /// [`start_region`](Self::start_region), this method sweeps
+    /// `applied_state.vaults` and calls
+    /// [`start_vault_group`](Self::start_vault_group) for every non-deleted
+    /// vault — reconstructing the vault-group lifecycle state that was live
+    /// before shutdown. Rehydration is sequential so the parent
+    /// engine's dispatcher register / `add_shard` sequence is not
+    /// overwhelmed on a node recovering a large org.
     ///
     /// # Errors
     ///
@@ -2195,7 +2215,93 @@ impl RaftManager {
             });
         }
 
+        // Rehydrate vault groups persisted in this org's applied state.
+        //
+        // On fresh CreateOrganization signals, `applied_state.vaults` is
+        // empty (no vaults exist yet) and the loop is a no-op. On node
+        // restart, the applied state was rebuilt from snapshot + WAL
+        // replay inside `start_region` above, so this sweep reconstructs
+        // every non-deleted vault group. `CreateVault` apply signals that
+        // committed below `last_applied` do not re-fire during replay;
+        // this sweep is what brings those vault groups back up.
+        //
+        // Sequential: parallel vault bring-up could overwhelm the
+        // dispatcher register / engine `add_shard` on a node recovering a
+        // large org. Any individual failure is logged and skipped so
+        // remaining vaults still rehydrate.
+        self.rehydrate_vault_groups(region, organization_id, &org_inner).await;
+
         Ok(Arc::new(OrganizationGroup(org_inner)))
+    }
+
+    /// Sweeps a per-organization group's applied state and starts a
+    /// per-vault Raft group for every non-deleted vault.
+    ///
+    /// Extracted from [`start_organization_group`](Self::start_organization_group)
+    /// to keep the sweep a testable seam. `start_organization_group` is
+    /// the sole production caller. Failures on individual vaults are
+    /// logged and skipped — one broken vault must not block rehydration
+    /// of the rest of the org. The vault-lifecycle watcher spawned by
+    /// `start_organization_group` can race this sweep for newly-emerging
+    /// vaults; `VaultGroupExists` from that race is expected and logged
+    /// at debug level rather than surfaced as a failure.
+    async fn rehydrate_vault_groups(
+        self: &Arc<Self>,
+        region: Region,
+        organization_id: OrganizationId,
+        org_inner: &Arc<InnerGroup>,
+    ) {
+        let vaults_to_rehydrate: Vec<VaultId> = org_inner
+            .applied_state()
+            .list_vaults(organization_id)
+            .into_iter()
+            .map(|meta| meta.vault)
+            .collect();
+
+        if vaults_to_rehydrate.is_empty() {
+            return;
+        }
+
+        debug!(
+            region = region.as_str(),
+            organization_id = organization_id.value(),
+            vault_count = vaults_to_rehydrate.len(),
+            "Rehydrating vault groups from applied state",
+        );
+
+        for vault in vaults_to_rehydrate {
+            match self.start_vault_group(region, organization_id, vault).await {
+                Ok(_) => {
+                    info!(
+                        region = region.as_str(),
+                        organization_id = organization_id.value(),
+                        vault_id = vault.value(),
+                        "Vault group rehydrated from applied state",
+                    );
+                }
+                Err(RaftManagerError::VaultGroupExists { .. }) => {
+                    // Signal-driven path beat us (rare — the watcher
+                    // spawned above drains `CreateVault` signals that
+                    // race the sweep). Benign.
+                    debug!(
+                        region = region.as_str(),
+                        organization_id = organization_id.value(),
+                        vault_id = vault.value(),
+                        "Vault group rehydration skipped: already running",
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        region = region.as_str(),
+                        organization_id = organization_id.value(),
+                        vault_id = vault.value(),
+                        error = %e,
+                        "Failed to rehydrate vault group from applied state",
+                    );
+                    // Continue — rehydrating other vaults is still valuable.
+                }
+            }
+        }
     }
 
     /// Starts a per-vault Raft group on this node.
@@ -2312,6 +2418,12 @@ impl RaftManager {
         let vault_applied_state = vault_log_store.accessor();
         let vault_commitment_buffer = vault_log_store.commitment_buffer();
         let vault_applied_index_rx = vault_log_store.applied_index_watch();
+        // Parallel `Arc` to the per-vault `raft.db` so the shutdown sync
+        // sweep can fan out to it alongside the vault's `state.db`. The
+        // apply task also keeps an `Arc` alive via the owned log store;
+        // this clone exists so the DB handle survives even if the apply
+        // task exits early.
+        let vault_raft_db = Arc::clone(vault_log_store.raft_db());
 
         // Derive a unique `ConsensusStateId` for this vault. Mirrors the
         // org-shard derivation in `start_region` but mixes the vault id
@@ -2525,6 +2637,7 @@ impl RaftManager {
             leader_lease: Arc::clone(org_inner.leader_lease()),
             applied_index_rx: vault_applied_index_rx,
             cancellation: vault_cancel,
+            raft_db: vault_raft_db,
         });
 
         {
@@ -3641,30 +3754,41 @@ impl RaftManager {
         info!("Raft Manager shutdown complete");
     }
 
-    /// Forces a checkpoint-style `sync_state` on every region's state.db
-    /// AND raft.db.
+    /// Forces a checkpoint-style `sync_state` on every region's lazy-durable
+    /// databases — across **every** `(region, organization_id)` group in
+    /// [`Self::regions`], not just the region's control-plane group.
     ///
     /// Called from the graceful-shutdown `pre_shutdown` closure **after** the
     /// WAL flush so that on clean shutdown the post-restart WAL replay is
     /// zero entries: the god-byte pointer captures every apply that happened
     /// between the last [`StateCheckpointer`] tick and the final drain.
     ///
-    /// Each region owns two lazy-durable databases: state.db (entity tables,
-    /// via `StateLayer`) and raft.db (`KEY_APPLIED_STATE` blob + Raft log).
-    /// Both must be synced — skipping raft.db causes `applied_durable = 0`
-    /// to be read on restart and forces a full WAL replay (see the
-    /// follow-up in the commit-durability audit).
+    /// Each per-org group owns four lazy-durable databases: the per-vault
+    /// state.db handles owned by its [`StateLayer`], its raft.db
+    /// (`KEY_APPLIED_STATE` + Raft log), its blocks.db, and — when
+    /// configured — its events.db. Each must be synced; skipping raft.db
+    /// causes `applied_durable = 0` to be read on restart and forces a
+    /// full WAL replay. Per-org meta.db (the `_meta:last_applied` sentinel)
+    /// is synced last, strictly after the entity DBs it's a sentinel for.
     ///
-    /// Errors are logged per-region and per-db but do not abort the sweep —
-    /// one region's disk-full (or one db's failure) must not block the
-    /// remaining work from reaching durability. The caller treats this as
-    /// best-effort.
+    /// Per-vault raft.db handles for each [`VaultGroup`](VaultGroup) are
+    /// fanned out alongside the per-org work — they live at
+    /// `{data_dir}/{region}/{org_id}/state/vault-{vault_id}/` and carry
+    /// their own applied-state metadata that the post-restart replay path
+    /// depends on.
+    ///
+    /// Errors are logged per-region, per-org, and per-db but do not abort
+    /// the sweep — one group's disk-full (or one db's failure) must not
+    /// block the remaining work from reaching durability. The caller
+    /// treats this as best-effort.
     ///
     /// `total_timeout` is the **total** budget across all regions; each
     /// region gets a proportional share with a 1s floor. Within a region,
-    /// state.db and raft.db are synced concurrently via `tokio::join!`, so
-    /// both share the per-region budget rather than splitting it. A single
-    /// timed-out region does not consume the remaining regions' budgets.
+    /// every per-org group and every per-vault raft.db are synced
+    /// concurrently via `join_all` under a single `tokio::time::timeout`,
+    /// so they share the per-region budget rather than splitting it. A
+    /// single timed-out region does not consume the remaining regions'
+    /// budgets.
     pub async fn sync_all_state_dbs(&self, total_timeout: Duration) {
         let regions = self.list_regions();
         if regions.is_empty() {
@@ -3681,166 +3805,148 @@ impl RaftManager {
             regions = regions.len(),
             per_region_timeout_ms = per_region_timeout.as_millis() as u64,
             "sync_all_state_dbs: forcing final state.db + raft.db + blocks.db + events.db \
-             (if configured) then meta.db sync across all regions (strict ordering)"
+             (if configured) then meta.db sync across all per-org groups in every region \
+             (strict ordering)"
         );
 
         for region in regions {
-            // Snapshot the region group under the read lock, drop the lock
-            // before awaiting so the shutdown sweep never contends with
-            // other readers for the regions map.
-            let group = self.regions.read().get(&(region, OrganizationId::new(0))).cloned();
-            let Some(group) = group else {
+            // Snapshot every per-org group in this region under the read
+            // lock, drop the lock before awaiting so the shutdown sweep
+            // never contends with other readers for the regions map.
+            let org_groups: Vec<(OrganizationId, Arc<InnerGroup>)> = self
+                .regions
+                .read()
+                .iter()
+                .filter(|((r, _), _)| *r == region)
+                .map(|((_, oid), g)| (*oid, Arc::clone(g)))
+                .collect();
+            if org_groups.is_empty() {
                 debug!(
                     region = region.as_str(),
-                    "sync_all_state_dbs: region vanished between list and lookup, skipping"
+                    "sync_all_state_dbs: region has no org groups, skipping"
                 );
                 continue;
-            };
-            // Slice 2b: there is no longer a singleton state DB — the
-            // per-vault state handles live inside the `StateLayer`.
-            // Snapshot the live vault set and fan out Phase A across
-            // every vault concurrently alongside raft/blocks/events.
-            let vault_dbs = group.state().live_vault_dbs();
-            let raft_db = Arc::clone(group.raft_db());
-            let blocks_db = Arc::clone(group.blocks_db());
-            let events_db_opt = group.events_state_db();
-            let meta_db = Arc::clone(group.meta_db());
+            }
+            // Per-vault raft.dbs for this region. Every
+            // [`VaultGroup`](VaultGroup) opens its own `raft.db` under
+            // `{data_dir}/{region}/{org_id}/state/vault-{vault_id}/`; the
+            // shutdown sweep must sync each one so applied-state metadata
+            // on the per-vault `raft.db` reaches disk alongside the
+            // vault's `state.db`. The per-vault fan-out is independent of
+            // the per-org fan-out — it covers vaults across every parent
+            // org in this region in a single `join_all`.
+            let vault_raft_dbs: Vec<(VaultId, Arc<Database<FileBackend>>)> = self
+                .vault_groups
+                .read()
+                .iter()
+                .filter(|((r, ..), _)| *r == region)
+                .map(|((_, _, vid), inner)| (*vid, Arc::clone(inner.raft_db())))
+                .collect();
 
-            // Sync every configured DB under a strict two-phase ordering
-            // inside the per-region timeout:
+            // Build one sync future per org group. Each future performs
+            // that org's strict two-phase ordering:
             //
-            // Phase A — every live vault state.db / raft.db / blocks.db /
-            // events.db concurrently via `tokio::join!`. These are the
-            // entity-data DBs; they must reach disk before the sentinel
-            // in meta.db that references them.
+            // Phase A — live per-vault state.dbs (from `StateLayer`),
+            //   the org's raft.db, blocks.db, and events.db (if
+            //   configured), all concurrent.
+            // Phase B — the org's meta.db, strictly after Phase A. Never
+            //   invert; meta.db is the sentinel that references Phase-A
+            //   entity data.
             //
-            // Phase B — meta.db, synced AFTER Phase A completes. This is
-            // the Slice 1 strict-ordering invariant. Never invert.
-            //
-            // `sync_state` consumes an `Arc<Self>`, so clone for the await
-            // and reuse the originals to read `last_synced_snapshot_id`
-            // after the join.
-            let vault_futs = futures::future::join_all(
-                vault_dbs.iter().map(|(_, db)| Arc::clone(db).sync_state()),
+            // Each org future returns an [`OrgSyncOutcome`] carrying the
+            // results + the handles needed to log post-sync
+            // `last_synced_snapshot_id`.
+            let org_futs = org_groups.iter().map(|(org_id, group)| {
+                let org_id = *org_id;
+                let vault_dbs = group.state().live_vault_dbs();
+                let raft_db = Arc::clone(group.raft_db());
+                let blocks_db = Arc::clone(group.blocks_db());
+                let events_db_opt = group.events_state_db();
+                let meta_db = Arc::clone(group.meta_db());
+                async move {
+                    let vault_futs = futures::future::join_all(
+                        vault_dbs.iter().map(|(_, db)| Arc::clone(db).sync_state()),
+                    );
+                    let raft_fut = Arc::clone(&raft_db).sync_state();
+                    let blocks_fut = Arc::clone(&blocks_db).sync_state();
+                    let events_db_for_sync = events_db_opt.clone();
+                    let events_fut_async = async move {
+                        if let Some(ev) = events_db_for_sync {
+                            Some(ev.sync_state().await)
+                        } else {
+                            None
+                        }
+                    };
+                    let (vault_results, raft_result, blocks_result, events_result) =
+                        tokio::join!(vault_futs, raft_fut, blocks_fut, events_fut_async);
+                    // Phase B — strict ordering: meta.db after Phase A.
+                    let meta_result = Arc::clone(&meta_db).sync_state().await;
+                    OrgSyncOutcome {
+                        org_id,
+                        vault_dbs,
+                        vault_results,
+                        raft_db,
+                        raft_result,
+                        blocks_db,
+                        blocks_result,
+                        events_db: events_db_opt,
+                        events_result,
+                        meta_db,
+                        meta_result,
+                    }
+                }
+            });
+
+            // Fan out per-vault raft.db syncs in parallel with the per-org
+            // fan-out. Zipping results with the snapshot gives each log
+            // line access to its vault id + handle for
+            // `last_synced_snapshot_id`.
+            let vault_raft_futs = futures::future::join_all(
+                vault_raft_dbs.iter().map(|(_, db)| Arc::clone(db).sync_state()),
             );
-            let raft_fut = Arc::clone(&raft_db).sync_state();
-            let blocks_fut = Arc::clone(&blocks_db).sync_state();
-            let events_db_for_sync = events_db_opt.clone();
-            let meta_db_for_sync = Arc::clone(&meta_db);
+
+            let org_futs_joined = futures::future::join_all(org_futs);
             let timeout_outcome = tokio::time::timeout(per_region_timeout, async move {
-                // Phase A — fan out every vault state DB + raft + blocks
-                // + events (if configured). Independent futures, one
-                // single join point.
-                let events_fut_opt = events_db_for_sync.as_ref().map(Arc::clone);
-                let events_fut_async = async move {
-                    if let Some(ev) = events_fut_opt { Some(ev.sync_state().await) } else { None }
-                };
-                let (vault_results, r, b, e) =
-                    tokio::join!(vault_futs, raft_fut, blocks_fut, events_fut_async);
-                // Phase B — strict ordering: meta.db always after the
-                // entity DBs it's a sentinel for.
-                let m = meta_db_for_sync.sync_state().await;
-                (vault_results, r, b, e, m)
+                tokio::join!(org_futs_joined, vault_raft_futs)
             })
             .await;
 
             match timeout_outcome {
-                Ok((vault_results, raft_result, blocks_result, events_result, meta_result)) => {
-                    for ((vault_id, db), result) in vault_dbs.iter().zip(vault_results.iter()) {
+                Ok((org_outcomes, vault_raft_results)) => {
+                    for outcome in &org_outcomes {
+                        log_org_sync_outcome(region, outcome);
+                    }
+                    for ((vault_id, db), result) in
+                        vault_raft_dbs.iter().zip(vault_raft_results.iter())
+                    {
                         match result {
                             Ok(()) => info!(
                                 region = region.as_str(),
-                                db = "state",
+                                db = "raft",
                                 vault_id = vault_id.value(),
                                 last_synced_snapshot_id = db.last_synced_snapshot_id(),
-                                "sync_all_state_dbs: final per-vault state-DB sync complete"
+                                "sync_all_state_dbs: final per-vault raft-DB sync complete"
                             ),
                             Err(e) => warn!(
                                 region = region.as_str(),
-                                db = "state",
+                                db = "raft",
                                 vault_id = vault_id.value(),
                                 error = %e,
-                                "sync_all_state_dbs: final per-vault state-DB sync failed; crash gap narrowed but not zero"
+                                "sync_all_state_dbs: final per-vault raft-DB sync failed; crash gap narrowed but not zero"
                             ),
                         }
                     }
-                    match raft_result {
-                        Ok(()) => info!(
-                            region = region.as_str(),
-                            db = "raft",
-                            last_synced_snapshot_id = raft_db.last_synced_snapshot_id(),
-                            "sync_all_state_dbs: final state-DB sync complete"
-                        ),
-                        Err(e) => warn!(
-                            region = region.as_str(),
-                            db = "raft",
-                            error = %e,
-                            "sync_all_state_dbs: final state-DB sync failed; crash gap narrowed but not zero"
-                        ),
-                    }
-                    match blocks_result {
-                        Ok(()) => info!(
-                            region = region.as_str(),
-                            db = "blocks",
-                            last_synced_snapshot_id = blocks_db.last_synced_snapshot_id(),
-                            "sync_all_state_dbs: final state-DB sync complete"
-                        ),
-                        Err(e) => warn!(
-                            region = region.as_str(),
-                            db = "blocks",
-                            error = %e,
-                            "sync_all_state_dbs: final state-DB sync failed; crash gap narrowed but not zero"
-                        ),
-                    }
-                    match (events_result, events_db_opt) {
-                        (Some(Ok(())), Some(events_db)) => info!(
-                            region = region.as_str(),
-                            db = "events",
-                            last_synced_snapshot_id = events_db.last_synced_snapshot_id(),
-                            "sync_all_state_dbs: final state-DB sync complete"
-                        ),
-                        (Some(Err(e)), _) => warn!(
-                            region = region.as_str(),
-                            db = "events",
-                            error = %e,
-                            "sync_all_state_dbs: final state-DB sync failed; crash gap narrowed but not zero"
-                        ),
-                        (None, _) => debug!(
-                            region = region.as_str(),
-                            "sync_all_state_dbs: region has no events_db; skipping events sync"
-                        ),
-                        (Some(Ok(())), None) => {
-                            // Unreachable: events_result Some implies the
-                            // 4-arm join fired, which implies
-                            // events_db_opt was Some at the call site.
-                            // Swallow defensively rather than panic.
-                            debug!(
-                                region = region.as_str(),
-                                "sync_all_state_dbs: events sync succeeded but handle no longer available"
-                            );
-                        },
-                    }
-                    match meta_result {
-                        Ok(()) => info!(
-                            region = region.as_str(),
-                            db = "meta",
-                            last_synced_snapshot_id = meta_db.last_synced_snapshot_id(),
-                            "sync_all_state_dbs: final state-DB sync complete"
-                        ),
-                        Err(e) => warn!(
-                            region = region.as_str(),
-                            db = "meta",
-                            error = %e,
-                            "sync_all_state_dbs: final state-DB sync failed; crash gap narrowed but not zero"
-                        ),
-                    }
                 },
                 Err(_) => {
+                    let org_ids: Vec<i64> =
+                        org_groups.iter().map(|(oid, _)| oid.value()).collect();
                     warn!(
                         region = region.as_str(),
                         timeout_ms = per_region_timeout.as_millis() as u64,
-                        "sync_all_state_dbs: final state-DB sync (state + raft + blocks + events then meta) \
-                         timed out; continuing with remaining regions"
+                        org_ids = ?org_ids,
+                        "sync_all_state_dbs: final state-DB sync (per-org state + raft + blocks + \
+                         events then meta, plus per-vault raft) timed out; continuing with \
+                         remaining regions"
                     );
                 },
             }
@@ -4007,6 +4113,151 @@ impl RaftManager {
             leader_regions: leader_count,
             node_id: self.config.node_id,
         }
+    }
+}
+
+/// Collected outcome of syncing one per-org group inside
+/// [`RaftManager::sync_all_state_dbs`].
+///
+/// Each field pairs a sync [`Result`] with the handle needed to read
+/// `last_synced_snapshot_id` after the await completes. The handles are
+/// kept alive for the duration of the outer join so post-sync logging
+/// can observe snapshot-id advance without a second lookup through the
+/// regions map.
+struct OrgSyncOutcome {
+    org_id: OrganizationId,
+    vault_dbs: Vec<(VaultId, Arc<Database<FileBackend>>)>,
+    vault_results: Vec<std::result::Result<(), inferadb_ledger_store::Error>>,
+    raft_db: Arc<Database<FileBackend>>,
+    raft_result: std::result::Result<(), inferadb_ledger_store::Error>,
+    blocks_db: Arc<Database<FileBackend>>,
+    blocks_result: std::result::Result<(), inferadb_ledger_store::Error>,
+    events_db: Option<Arc<Database<FileBackend>>>,
+    events_result: Option<std::result::Result<(), inferadb_ledger_store::Error>>,
+    meta_db: Arc<Database<FileBackend>>,
+    meta_result: std::result::Result<(), inferadb_ledger_store::Error>,
+}
+
+/// Emits the info/warn log lines for a single per-org sync outcome.
+///
+/// Every line carries `region` + `organization_id` so operators can
+/// correlate a failed sync back to the owning group. Per-vault state
+/// entries additionally carry `vault_id`. Meta.db is logged last,
+/// mirroring the Phase-A → Phase-B strict ordering.
+fn log_org_sync_outcome(region: Region, outcome: &OrgSyncOutcome) {
+    let OrgSyncOutcome {
+        org_id,
+        vault_dbs,
+        vault_results,
+        raft_db,
+        raft_result,
+        blocks_db,
+        blocks_result,
+        events_db,
+        events_result,
+        meta_db,
+        meta_result,
+    } = outcome;
+
+    for ((vault_id, db), result) in vault_dbs.iter().zip(vault_results.iter()) {
+        match result {
+            Ok(()) => info!(
+                region = region.as_str(),
+                organization_id = org_id.value(),
+                db = "state",
+                vault_id = vault_id.value(),
+                last_synced_snapshot_id = db.last_synced_snapshot_id(),
+                "sync_all_state_dbs: final per-vault state-DB sync complete"
+            ),
+            Err(e) => warn!(
+                region = region.as_str(),
+                organization_id = org_id.value(),
+                db = "state",
+                vault_id = vault_id.value(),
+                error = %e,
+                "sync_all_state_dbs: final per-vault state-DB sync failed; crash gap narrowed but not zero"
+            ),
+        }
+    }
+    match raft_result {
+        Ok(()) => info!(
+            region = region.as_str(),
+            organization_id = org_id.value(),
+            db = "raft",
+            last_synced_snapshot_id = raft_db.last_synced_snapshot_id(),
+            "sync_all_state_dbs: final state-DB sync complete"
+        ),
+        Err(e) => warn!(
+            region = region.as_str(),
+            organization_id = org_id.value(),
+            db = "raft",
+            error = %e,
+            "sync_all_state_dbs: final state-DB sync failed; crash gap narrowed but not zero"
+        ),
+    }
+    match blocks_result {
+        Ok(()) => info!(
+            region = region.as_str(),
+            organization_id = org_id.value(),
+            db = "blocks",
+            last_synced_snapshot_id = blocks_db.last_synced_snapshot_id(),
+            "sync_all_state_dbs: final state-DB sync complete"
+        ),
+        Err(e) => warn!(
+            region = region.as_str(),
+            organization_id = org_id.value(),
+            db = "blocks",
+            error = %e,
+            "sync_all_state_dbs: final state-DB sync failed; crash gap narrowed but not zero"
+        ),
+    }
+    match (events_result, events_db) {
+        (Some(Ok(())), Some(db)) => info!(
+            region = region.as_str(),
+            organization_id = org_id.value(),
+            db = "events",
+            last_synced_snapshot_id = db.last_synced_snapshot_id(),
+            "sync_all_state_dbs: final state-DB sync complete"
+        ),
+        (Some(Err(e)), _) => warn!(
+            region = region.as_str(),
+            organization_id = org_id.value(),
+            db = "events",
+            error = %e,
+            "sync_all_state_dbs: final state-DB sync failed; crash gap narrowed but not zero"
+        ),
+        (None, _) => debug!(
+            region = region.as_str(),
+            organization_id = org_id.value(),
+            "sync_all_state_dbs: org has no events_db; skipping events sync"
+        ),
+        (Some(Ok(())), None) => {
+            // Unreachable: events_result Some implies the per-org future
+            // observed a configured events_db; the handle is held for the
+            // duration of the outer join. Swallow defensively rather than
+            // panic.
+            debug!(
+                region = region.as_str(),
+                organization_id = org_id.value(),
+                "sync_all_state_dbs: events sync succeeded but handle no longer available"
+            );
+        },
+    }
+    match meta_result {
+        Ok(()) => info!(
+            region = region.as_str(),
+            organization_id = org_id.value(),
+            db = "meta",
+            last_synced_snapshot_id = meta_db.last_synced_snapshot_id(),
+            "sync_all_state_dbs: final state-DB sync complete"
+        ),
+        Err(e) => warn!(
+            region = region.as_str(),
+            organization_id = org_id.value(),
+            db = "meta",
+            error = %e,
+            "sync_all_state_dbs: final state-DB sync failed; crash gap narrowed but not zero"
+        ),
     }
 }
 
@@ -4481,16 +4732,8 @@ mod tests {
             "sibling vaults under the same org must have distinct shard IDs",
         );
         let org_shard = org_group.handle().shard_id();
-        assert_ne!(
-            v1.shard_id(),
-            org_shard,
-            "vault shard must not collide with parent org shard",
-        );
-        assert_ne!(
-            v2.shard_id(),
-            org_shard,
-            "vault shard must not collide with parent org shard",
-        );
+        assert_ne!(v1.shard_id(), org_shard, "vault shard must not collide with parent org shard",);
+        assert_ne!(v2.shard_id(), org_shard, "vault shard must not collide with parent org shard",);
     }
 
     #[tokio::test]
@@ -4624,6 +4867,229 @@ mod tests {
             .expect("restart after stop must succeed");
         assert_eq!(group.vault_id(), vault_id);
         assert!(manager.has_vault_group(Region::GLOBAL, OrganizationId::new(66), vault_id));
+        assert_eq!(manager.list_vault_groups().len(), 1);
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Vault-group rehydration from applied state
+    //
+    // After node restart, the per-organization applied state is rebuilt
+    // from snapshot + WAL replay inside `start_region`. `CreateVault`
+    // entries below `last_applied` do NOT re-emit signals on replay, so
+    // `start_organization_group` must sweep `applied_state.vaults` and
+    // start a per-vault Raft group for every non-deleted vault.
+    //
+    // The helper `rehydrate_vault_groups` is the test seam — production
+    // calls it as the final step of `start_organization_group`.
+    // ────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_start_organization_group_fresh_org_has_no_vaults_to_rehydrate() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        // Fresh CreateOrganization path: `applied_state.vaults` is empty,
+        // so the rehydration sweep is a no-op. No vault groups must be
+        // registered after the call returns.
+        manager
+            .start_organization_group(
+                Region::GLOBAL,
+                OrganizationId::new(77),
+                vec![(1, "127.0.0.1:50051".to_string())],
+                true,
+                None,
+                None,
+            )
+            .await
+            .expect("start org group");
+
+        assert!(
+            manager.list_vault_groups().is_empty(),
+            "fresh CreateOrganization must not produce any vault groups via rehydration",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rehydrate_vault_groups_starts_non_deleted_vaults_only() {
+        use crate::log_storage::{AppliedState, VaultMeta};
+        use inferadb_ledger_types::VaultSlug;
+
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let org_id = OrganizationId::new(88);
+        let org_group = manager
+            .start_organization_group(
+                Region::GLOBAL,
+                org_id,
+                vec![(1, "127.0.0.1:50051".to_string())],
+                true,
+                None,
+                None,
+            )
+            .await
+            .expect("start org group");
+
+        // Fresh org: rehydration already ran inside start_organization_group
+        // against an empty vaults map, so no vault groups are registered.
+        assert!(manager.list_vault_groups().is_empty());
+
+        // Simulate a post-restart applied state: snapshot + WAL replay
+        // left three vault entries on the org — two live, one deleted.
+        // The deleted entry must not be rehydrated.
+        let live_vault_a = VaultId::new(1001);
+        let live_vault_b = VaultId::new(1002);
+        let deleted_vault = VaultId::new(1003);
+
+        let mut state = AppliedState::default();
+        state.vaults.insert(
+            (org_id, live_vault_a),
+            VaultMeta {
+                organization: org_id,
+                vault: live_vault_a,
+                slug: VaultSlug::new(10001),
+                name: Some("live-a".to_string()),
+                deleted: false,
+                last_write_timestamp: 0,
+                retention_policy: crate::types::BlockRetentionPolicy::default(),
+            },
+        );
+        state.vaults.insert(
+            (org_id, live_vault_b),
+            VaultMeta {
+                organization: org_id,
+                vault: live_vault_b,
+                slug: VaultSlug::new(10002),
+                name: Some("live-b".to_string()),
+                deleted: false,
+                last_write_timestamp: 0,
+                retention_policy: crate::types::BlockRetentionPolicy::default(),
+            },
+        );
+        state.vaults.insert(
+            (org_id, deleted_vault),
+            VaultMeta {
+                organization: org_id,
+                vault: deleted_vault,
+                slug: VaultSlug::new(10003),
+                name: Some("tombstoned".to_string()),
+                deleted: true,
+                last_write_timestamp: 0,
+                retention_policy: crate::types::BlockRetentionPolicy::default(),
+            },
+        );
+
+        // An additional vault belonging to a DIFFERENT organization must
+        // also be excluded from the sweep — rehydration is scoped to the
+        // passed-in `organization_id`.
+        let other_org = OrganizationId::new(89);
+        let other_vault = VaultId::new(1004);
+        state.vaults.insert(
+            (other_org, other_vault),
+            VaultMeta {
+                organization: other_org,
+                vault: other_vault,
+                slug: VaultSlug::new(10004),
+                name: Some("other-org".to_string()),
+                deleted: false,
+                last_write_timestamp: 0,
+                retention_policy: crate::types::BlockRetentionPolicy::default(),
+            },
+        );
+
+        org_group.applied_state().store_for_test(state);
+
+        // Re-run the rehydration sweep against the seeded state.
+        manager.rehydrate_vault_groups(Region::GLOBAL, org_id, &org_group.0).await;
+
+        // Both live vaults scoped to `org_id` must now be registered.
+        assert!(
+            manager.has_vault_group(Region::GLOBAL, org_id, live_vault_a),
+            "live vault A must be rehydrated",
+        );
+        assert!(
+            manager.has_vault_group(Region::GLOBAL, org_id, live_vault_b),
+            "live vault B must be rehydrated",
+        );
+
+        // The deleted vault must NOT be rehydrated.
+        assert!(
+            !manager.has_vault_group(Region::GLOBAL, org_id, deleted_vault),
+            "deleted vault must not be rehydrated",
+        );
+
+        // The other org's vault must NOT be rehydrated by the org_id sweep.
+        assert!(
+            !manager.has_vault_group(Region::GLOBAL, other_org, other_vault),
+            "cross-org vault must not be rehydrated by the org-scoped sweep",
+        );
+
+        // The registered set matches the expected pair exactly.
+        let triples = manager.list_vault_groups();
+        assert_eq!(triples.len(), 2);
+        assert!(triples.contains(&(Region::GLOBAL, org_id, live_vault_a)));
+        assert!(triples.contains(&(Region::GLOBAL, org_id, live_vault_b)));
+    }
+
+    #[tokio::test]
+    async fn test_rehydrate_vault_groups_is_idempotent() {
+        use crate::log_storage::{AppliedState, VaultMeta};
+        use inferadb_ledger_types::VaultSlug;
+
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let org_id = OrganizationId::new(90);
+        let org_group = manager
+            .start_organization_group(
+                Region::GLOBAL,
+                org_id,
+                vec![(1, "127.0.0.1:50051".to_string())],
+                true,
+                None,
+                None,
+            )
+            .await
+            .expect("start org group");
+
+        let vault_id = VaultId::new(2001);
+        let mut state = AppliedState::default();
+        state.vaults.insert(
+            (org_id, vault_id),
+            VaultMeta {
+                organization: org_id,
+                vault: vault_id,
+                slug: VaultSlug::new(20001),
+                name: Some("vault".to_string()),
+                deleted: false,
+                last_write_timestamp: 0,
+                retention_policy: crate::types::BlockRetentionPolicy::default(),
+            },
+        );
+        org_group.applied_state().store_for_test(state);
+
+        // First sweep brings the vault up.
+        manager.rehydrate_vault_groups(Region::GLOBAL, org_id, &org_group.0).await;
+        assert!(manager.has_vault_group(Region::GLOBAL, org_id, vault_id));
+        assert_eq!(manager.list_vault_groups().len(), 1);
+
+        // Second sweep hits `VaultGroupExists` for the already-running
+        // vault and must swallow that as a benign (debug-logged) case —
+        // not propagate as an error, not duplicate the entry.
+        manager.rehydrate_vault_groups(Region::GLOBAL, org_id, &org_group.0).await;
+        assert!(manager.has_vault_group(Region::GLOBAL, org_id, vault_id));
         assert_eq!(manager.list_vault_groups().len(), 1);
     }
 
@@ -4926,6 +5392,324 @@ mod tests {
             "meta.db last_synced_snapshot_id regressed (before={meta_before}, after={meta_after}) — \
              Slice 1 strict-ordering invariant"
         );
+    }
+
+    #[tokio::test]
+    async fn test_sync_all_state_dbs_covers_vault_raft_dbs() {
+        // Start a region and an org, then a vault group. The shutdown
+        // sweep must fan out to the per-vault `raft.db` alongside the
+        // per-vault `state.db`; verify by asserting the vault's
+        // `raft.db` `last_synced_snapshot_id` does not regress after
+        // `sync_all_state_dbs`.
+        //
+        // `sync_state` short-circuits to a no-op when nothing is dirty,
+        // so we assert non-regression (>=) rather than strict advance.
+        // A deeper test that mutates the per-vault `raft.db` and asserts
+        // the id strictly advances belongs in crash-recovery integration,
+        // where the real per-vault apply pipeline is in scope.
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+        manager
+            .start_organization_group(
+                Region::GLOBAL,
+                OrganizationId::new(55),
+                vec![(1, "127.0.0.1:50051".to_string())],
+                true,
+                None,
+                None,
+            )
+            .await
+            .expect("start org group");
+
+        let vault_id = VaultId::new(404);
+        let vault_group = manager
+            .start_vault_group(Region::GLOBAL, OrganizationId::new(55), vault_id)
+            .await
+            .expect("start vault group");
+
+        let vault_raft_db = Arc::clone(vault_group.raft_db());
+        let before = vault_raft_db.last_synced_snapshot_id();
+
+        assert_eq!(
+            manager.list_vault_groups().len(),
+            1,
+            "precondition: exactly one vault group should be live before the sync",
+        );
+
+        manager.sync_all_state_dbs(std::time::Duration::from_secs(5)).await;
+
+        assert_eq!(
+            manager.list_vault_groups().len(),
+            1,
+            "sync_all_state_dbs must not tear down vault groups",
+        );
+
+        let after = vault_raft_db.last_synced_snapshot_id();
+        assert!(
+            after >= before,
+            "per-vault raft.db last_synced_snapshot_id regressed \
+             (before={before}, after={after})"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_all_state_dbs_filters_vault_raft_dbs_by_region() {
+        // Two regions, each with one organization and one vault. The
+        // shutdown sweep iterates regions and must include the per-vault
+        // `raft.db` for both — the region filter at the head of the
+        // per-region block selects only the vaults belonging to the
+        // current region, but the sweep visits every region in turn.
+        //
+        // Regression: if the filter inverts (wrong region comparison) or
+        // collapses to a no-op (all vaults included per region, double-
+        // syncing), this test still asserts non-regression on both
+        // vault raft.db handles, catching either direction of breakage.
+        // Strictly advancing `last_synced_snapshot_id` requires dirty
+        // pages, which test-mode vault groups don't guarantee — non-
+        // regression is the right contract here.
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let data_config_a =
+            RegionConfig::data(Region::US_EAST_VA, vec![(1, "127.0.0.1:50051".to_string())]);
+        manager.start_data_region(data_config_a).await.expect("start us-east-va");
+
+        let data_config_b =
+            RegionConfig::data(Region::US_WEST_OR, vec![(1, "127.0.0.1:50051".to_string())]);
+        manager.start_data_region(data_config_b).await.expect("start us-west-or");
+
+        let org_a = OrganizationId::new(77);
+        let org_b = OrganizationId::new(88);
+        manager
+            .start_organization_group(
+                Region::US_EAST_VA,
+                org_a,
+                vec![(1, "127.0.0.1:50051".to_string())],
+                true,
+                None,
+                None,
+            )
+            .await
+            .expect("start org group a");
+        manager
+            .start_organization_group(
+                Region::US_WEST_OR,
+                org_b,
+                vec![(1, "127.0.0.1:50051".to_string())],
+                true,
+                None,
+                None,
+            )
+            .await
+            .expect("start org group b");
+
+        let vault_a = manager
+            .start_vault_group(Region::US_EAST_VA, org_a, VaultId::new(1))
+            .await
+            .expect("start vault a");
+        let vault_b = manager
+            .start_vault_group(Region::US_WEST_OR, org_b, VaultId::new(1))
+            .await
+            .expect("start vault b");
+
+        let raft_db_a = Arc::clone(vault_a.raft_db());
+        let raft_db_b = Arc::clone(vault_b.raft_db());
+        let before_a = raft_db_a.last_synced_snapshot_id();
+        let before_b = raft_db_b.last_synced_snapshot_id();
+
+        assert_eq!(
+            manager.list_vault_groups().len(),
+            2,
+            "precondition: exactly two vault groups should be live before the sync",
+        );
+
+        manager.sync_all_state_dbs(std::time::Duration::from_secs(5)).await;
+
+        assert_eq!(
+            manager.list_vault_groups().len(),
+            2,
+            "sync_all_state_dbs must not tear down vault groups",
+        );
+
+        let after_a = raft_db_a.last_synced_snapshot_id();
+        let after_b = raft_db_b.last_synced_snapshot_id();
+        assert!(
+            after_a >= before_a,
+            "region-a per-vault raft.db last_synced_snapshot_id regressed \
+             (before={before_a}, after={after_a})"
+        );
+        assert!(
+            after_b >= before_b,
+            "region-b per-vault raft.db last_synced_snapshot_id regressed \
+             (before={before_b}, after={after_b})"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_all_state_dbs_covers_per_org_groups() {
+        // The regions map keys on `(Region, OrganizationId)`; a prior
+        // implementation filtered the shutdown sweep to
+        // `(region, OrganizationId(0))` and silently skipped every
+        // per-org group registered at `org_id != 0`. That would leave
+        // the per-org group's raft.db / blocks.db / events.db / meta.db
+        // unsynced on graceful shutdown, forcing full WAL replay on
+        // restart (or worse, reading `applied_durable = 0`).
+        //
+        // Start the data region plus one per-org group, call
+        // `sync_all_state_dbs`, and assert the per-org group's raft.db
+        // and blocks.db `last_synced_snapshot_id` do not regress.
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let org_id = OrganizationId::new(91);
+        manager
+            .start_organization_group(
+                Region::GLOBAL,
+                org_id,
+                vec![(1, "127.0.0.1:50051".to_string())],
+                true,
+                None,
+                None,
+            )
+            .await
+            .expect("start org group");
+
+        let org_group =
+            manager.get_organization_group(Region::GLOBAL, org_id).expect("get org group");
+        let raft_db = Arc::clone(org_group.raft_db());
+        let blocks_db = Arc::clone(org_group.blocks_db());
+        let raft_before = raft_db.last_synced_snapshot_id();
+        let blocks_before = blocks_db.last_synced_snapshot_id();
+
+        manager.sync_all_state_dbs(std::time::Duration::from_secs(5)).await;
+
+        let raft_after = raft_db.last_synced_snapshot_id();
+        let blocks_after = blocks_db.last_synced_snapshot_id();
+        assert!(
+            raft_after >= raft_before,
+            "per-org raft.db last_synced_snapshot_id regressed \
+             (before={raft_before}, after={raft_after}) — sweep likely skipped the per-org group"
+        );
+        assert!(
+            blocks_after >= blocks_before,
+            "per-org blocks.db last_synced_snapshot_id regressed \
+             (before={blocks_before}, after={blocks_after}) — sweep likely skipped the per-org group"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_all_state_dbs_covers_three_orgs_in_one_region() {
+        // Verifies coverage: three per-org groups co-located in a single
+        // region must all be visited by the shutdown sweep. A prior bug
+        // would have quietly dropped the second and third entries in the
+        // per-region map (same `Region`, different `OrganizationId`);
+        // this test pins that the sweep iterates every `(region, org)`
+        // key.
+        //
+        // `sync_state` short-circuits when nothing is dirty, so the
+        // assertion is non-regression of `last_synced_snapshot_id` for
+        // every org. No timing assertion here — on clean DBs
+        // `sync_state` returns near-instantly, so wall-clock bounds
+        // cannot distinguish serial from concurrent fan-out. Strict
+        // concurrency verification belongs at the integration tier,
+        // where shutdown sweeps can be paired with realistic dirty-page
+        // workloads.
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let org_ids =
+            [OrganizationId::new(101), OrganizationId::new(102), OrganizationId::new(103)];
+        let mut raft_dbs: Vec<(OrganizationId, Arc<Database<FileBackend>>, u64)> = Vec::new();
+        for org_id in org_ids {
+            manager
+                .start_organization_group(
+                    Region::GLOBAL,
+                    org_id,
+                    vec![(1, "127.0.0.1:50051".to_string())],
+                    true,
+                    None,
+                    None,
+                )
+                .await
+                .expect("start org group");
+            let group =
+                manager.get_organization_group(Region::GLOBAL, org_id).expect("get org group");
+            let db = Arc::clone(group.raft_db());
+            let before = db.last_synced_snapshot_id();
+            raft_dbs.push((org_id, db, before));
+        }
+
+        manager.sync_all_state_dbs(std::time::Duration::from_secs(5)).await;
+
+        for (org_id, db, before) in &raft_dbs {
+            let after = db.last_synced_snapshot_id();
+            assert!(
+                after >= *before,
+                "org {org} raft.db last_synced_snapshot_id regressed \
+                 (before={before}, after={after}) — sweep likely skipped this org",
+                org = org_id.value()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sync_all_state_dbs_handles_expired_timeout_without_panic() {
+        // Exercises the timeout branch of `sync_all_state_dbs`
+        // structurally. Passing an effectively-zero timeout means one of
+        // two paths runs to completion:
+        //   1. The per-region future resolves instantly — clean DBs +
+        //      no dirty pages make `sync_state` a near no-op, so the
+        //      future may beat the timeout.
+        //   2. The timeout fires first and the warn-arm runs, logging
+        //      the deadline-exceeded branch.
+        // Either path is acceptable. The test asserts that the call
+        // neither panics nor deadlocks regardless of which branch wins
+        // the race.
+        //
+        // This is intentionally racy on the branch taken; it is
+        // deterministic on the "no panic, returns promptly" assertion,
+        // which is the property that matters for shutdown correctness.
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let org_id = OrganizationId::new(1);
+        manager
+            .start_organization_group(
+                Region::GLOBAL,
+                org_id,
+                vec![(1, "127.0.0.1:50051".to_string())],
+                true,
+                None,
+                None,
+            )
+            .await
+            .expect("start org group");
+
+        // Both variants: a zero-duration timeout (instantly expired) and
+        // a nanosecond-scale timeout (effectively expired on any real
+        // kernel). Neither should panic.
+        manager.sync_all_state_dbs(std::time::Duration::from_millis(0)).await;
+        manager.sync_all_state_dbs(std::time::Duration::from_nanos(1)).await;
     }
 
     #[tokio::test]

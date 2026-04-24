@@ -32,5 +32,6 @@ mod telemetry_context;
 mod three_tier_consensus;
 mod token_lifecycle;
 mod ttl_gc;
+mod vault_lifecycle;
 mod watch_blocks_realtime;
 mod write_read;

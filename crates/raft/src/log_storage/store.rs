@@ -540,6 +540,18 @@ impl<B: StorageBackend> RaftLogStore<B> {
         Arc::clone(&self.state_root_commitments)
     }
 
+    /// Returns the shared `raft.db` handle.
+    ///
+    /// Used by vault-group construction to stash a parallel `Arc` on
+    /// [`InnerVaultGroup`](crate::raft_manager::InnerVaultGroup) so the
+    /// shutdown sync sweep can fan out to the per-vault `raft.db` alongside
+    /// the per-vault `state.db`. The log store retains its own `Arc` for
+    /// the lifetime of the owning apply task; this accessor hands out a
+    /// clone-able reference without moving the store.
+    pub(crate) fn raft_db(&self) -> &Arc<Database<FileBackend>> {
+        &self.db
+    }
+
     /// Replaces the default leader lease with one derived from the Raft config.
     ///
     /// `lease_duration` is typically `election_timeout_min / 2` — half the
