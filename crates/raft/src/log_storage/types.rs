@@ -279,6 +279,45 @@ pub struct AppliedState {
     pub last_applied_timestamp_ns: i64,
 }
 
+/// Applied state for a single vault's Raft group.
+///
+/// Path A carves the per-vault apply pipeline out of the org-scoped
+/// [`AppliedState`]. Org-level indices (slug_index, team_slug_index,
+/// user_org_index, etc.) remain on `AppliedState` because they are naturally
+/// shared across every vault in the org. A vault's state machine only tracks
+/// the apply progress of entries targeting *this* vault, plus the per-vault
+/// block-chain continuity data.
+///
+/// Constructed by
+/// [`RaftLogStore::open_for_vault`](super::store::RaftLogStore::open_for_vault)
+/// and consumed by the per-vault apply pipeline when a vault group's Raft
+/// state machine applies a committed entry.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VaultAppliedState {
+    /// Last applied log ID for this vault's Raft group.
+    pub last_applied: Option<LogId>,
+    /// Stored membership for this vault's Raft group.
+    pub membership: StoredMembership,
+    /// Current block height for this vault (collapsed from the `(org, vault)`-keyed
+    /// [`AppliedState::vault_heights`] map — a vault group owns only one entry).
+    pub vault_height: u64,
+    /// Health status for this vault (collapsed from [`AppliedState::vault_health`]).
+    pub vault_health: VaultHealthStatus,
+    /// Previous block hash for this vault's chain continuity (collapsed from
+    /// [`AppliedState::previous_vault_hashes`]).
+    pub previous_vault_hash: Hash,
+    /// Per-client sequence tracking scoped to this vault.
+    ///
+    /// The org-scoped [`AppliedState::client_sequences`] is keyed by
+    /// `(OrganizationId, VaultId, ClientId)`. A vault group owns only the
+    /// third coordinate; the tuple collapses to `ClientId`.
+    pub client_sequences: im::HashMap<ClientId, ClientSequenceEntry>,
+    /// Deterministic timestamp (nanoseconds since epoch) from the last applied
+    /// Raft entry's `proposed_at`.
+    #[serde(default)]
+    pub last_applied_timestamp_ns: i64,
+}
+
 /// Metadata for an organization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrganizationMeta {
@@ -513,6 +552,31 @@ pub struct AppliedStateCore {
     pub previous_region_hash: Hash,
     /// Deterministic timestamp (nanoseconds since epoch) from the last applied
     /// Raft entry's `proposed_at`. Used for snapshot event collection cutoff.
+    #[serde(default)]
+    pub last_applied_timestamp_ns: i64,
+}
+
+/// Minimal persistence struct for the fixed-size structural fields of
+/// [`VaultAppliedState`]. Mirrors the [`AppliedStateCore`] pattern.
+///
+/// The variable-size field (`client_sequences` `HashMap`) is externalized
+/// to a dedicated B+ tree table; the structural fields are blobbed in the
+/// vault's `raft.db` state table. Only for persistence — the in-memory
+/// [`VaultAppliedState`] remains the authoritative read path.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VaultAppliedStateCore {
+    /// Last applied log ID for this vault's Raft group.
+    pub last_applied: Option<LogId>,
+    /// Stored membership for this vault's Raft group.
+    pub membership: StoredMembership,
+    /// Current block height for this vault.
+    pub vault_height: u64,
+    /// Previous block hash for this vault's chain continuity.
+    pub previous_vault_hash: Hash,
+    /// Health status for this vault.
+    pub vault_health: VaultHealthStatus,
+    /// Deterministic timestamp (nanoseconds since epoch) from the last applied
+    /// Raft entry's `proposed_at`.
     #[serde(default)]
     pub last_applied_timestamp_ns: i64,
 }

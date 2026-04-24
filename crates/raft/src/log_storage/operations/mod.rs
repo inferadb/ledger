@@ -5700,6 +5700,29 @@ impl<B: StorageBackend> RaftLogStore<B> {
                     block_height,
                 );
 
+                // P2b.2.c: signal the per-org vault-lifecycle watcher that a
+                // new vault exists. Fires only on successful stamp — the
+                // idempotent-by-slug short-circuit and the
+                // `require_fully_active_org` bailout above return early
+                // without reaching this point. P2b.2.d wires the watcher to
+                // `start_vault_group`; for now the receiver just logs.
+                if let Some(ref sender) = self.vault_creation_sender {
+                    let req = crate::raft_manager::VaultCreationRequest {
+                        region: self.region,
+                        organization: *organization,
+                        vault: vault_id,
+                    };
+                    if let Err(e) = sender.send(req) {
+                        tracing::warn!(
+                            region = self.region.as_str(),
+                            organization_id = organization.value(),
+                            vault_id = vault_id.value(),
+                            error = %e,
+                            "VaultCreationRequest channel closed — skipping signal"
+                        );
+                    }
+                }
+
                 (LedgerResponse::VaultCreated { vault: vault_id, slug: *slug }, None)
             },
 
@@ -5775,6 +5798,27 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         },
                         block_height,
                     );
+
+                    // P2b.2.c: signal the per-org vault-lifecycle watcher that
+                    // a vault was deleted. Gated on the success branch so the
+                    // `NotFound` arm (which returns an error response) does
+                    // not fire the signal.
+                    if let Some(ref sender) = self.vault_deletion_sender {
+                        let req = crate::raft_manager::VaultDeletionRequest {
+                            region: self.region,
+                            organization: *organization,
+                            vault: *vault,
+                        };
+                        if let Err(e) = sender.send(req) {
+                            tracing::warn!(
+                                region = self.region.as_str(),
+                                organization_id = organization.value(),
+                                vault_id = vault.value(),
+                                error = %e,
+                                "VaultDeletionRequest channel closed — skipping signal"
+                            );
+                        }
+                    }
                 }
 
                 (response, None)

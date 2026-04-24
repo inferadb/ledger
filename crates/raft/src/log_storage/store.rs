@@ -87,6 +87,16 @@ pub struct RaftLogStore<B: StorageBackend = FileBackend> {
     /// handlers read from this instead of payload pattern-matching on
     /// `OrganizationRequest::Write { organization, .. }` and friends.
     pub(super) organization_id: OrganizationId,
+    /// Vault this Raft group owns, when the store backs a single
+    /// per-vault group under Path A.
+    ///
+    /// `None` when this store backs an org-scoped `OrganizationGroup` (the
+    /// existing behaviour of [`Self::open`]); `Some(vault)` when it backs a
+    /// per-vault `VaultGroup` constructed via [`Self::open_for_vault`]. No
+    /// code outside the per-vault lifecycle should read this field; it
+    /// exists so the store's residency identity is explicit from
+    /// construction.
+    pub(super) vault_id: Option<VaultId>,
     /// Node ID for block metadata.
     pub(super) node_id: NodeId,
     /// Numeric node ID for leader lease comparisons.
@@ -148,6 +158,28 @@ pub struct RaftLogStore<B: StorageBackend = FileBackend> {
     pub(super) organization_creation_sender: Option<
         tokio::sync::mpsc::UnboundedSender<crate::raft_manager::OrganizationCreationRequest>,
     >,
+    /// Channel for signaling vault creation to the per-org watcher task.
+    ///
+    /// When a `CreateVault` entry is applied on a per-organization log
+    /// store, the `(region, organization, vault)` triple is sent through
+    /// this channel. The receiver task spawned in
+    /// [`RaftManager::start_organization_group`](crate::raft_manager::RaftManager::start_organization_group)
+    /// drains the channel and (in a later slice) calls `start_vault_group`
+    /// so each in-region node spawns the per-vault Raft group.
+    ///
+    /// Mirrors [`organization_creation_sender`](Self::organization_creation_sender)
+    /// semantics — fire-and-forget; the apply path does not wait for the
+    /// group to come up.
+    pub(super) vault_creation_sender:
+        Option<tokio::sync::mpsc::UnboundedSender<crate::raft_manager::VaultCreationRequest>>,
+    /// Channel for signaling vault deletion to the per-org watcher task.
+    ///
+    /// When a `DeleteVault` entry successfully applies on a per-organization
+    /// log store, the `(region, organization, vault)` triple is sent here.
+    /// The same watcher that consumes [`vault_creation_sender`](Self::vault_creation_sender)
+    /// drains it and (in a later slice) calls `stop_vault_group`.
+    pub(super) vault_deletion_sender:
+        Option<tokio::sync::mpsc::UnboundedSender<crate::raft_manager::VaultDeletionRequest>>,
     /// Shared peer address map for propagating addresses via Raft.
     ///
     /// When a `RegisterPeerAddress` entry is applied, the address is stored
@@ -226,6 +258,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             block_archive: None,
             region: Region::GLOBAL,
             organization_id: OrganizationId::new(0),
+            vault_id: None,
             node_id: NodeId::new(""),
             ledger_node_id: 0,
             region_chain: RwLock::new(RegionChainState {
@@ -240,6 +273,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
             divergence_sender: None,
             region_creation_sender: None,
             organization_creation_sender: None,
+            vault_creation_sender: None,
+            vault_deletion_sender: None,
             peer_addresses: None,
             leader_lease: Arc::new(crate::leader_lease::LeaderLease::new(
                 std::time::Duration::from_millis(150),
@@ -251,6 +286,32 @@ impl<B: StorageBackend> RaftLogStore<B> {
         // Load cached values
         store.load_caches()?;
 
+        Ok(store)
+    }
+
+    /// Opens a Raft log storage database scoped to a single vault.
+    ///
+    /// Companion to [`Self::open`]. Unlike the org-scoped constructor, this
+    /// seeds the store with a narrower applied-state shape (see
+    /// [`VaultAppliedState`](super::types::VaultAppliedState)) carrying only
+    /// this vault's apply progress. The caller passes the owning
+    /// `organization_id` and the `vault_id` so the store's residency
+    /// identity is stamped at construction time: `organization_id` matches
+    /// the parent `OrganizationGroup`, and `vault_id` is the slug-resolved
+    /// internal id of the vault this store's Raft group owns.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StoreError` if the database file cannot be opened or created,
+    /// or if the cached vote/purge metadata cannot be loaded.
+    pub fn open_for_vault(
+        path: impl AsRef<Path>,
+        organization_id: OrganizationId,
+        vault_id: VaultId,
+    ) -> Result<Self, StoreError> {
+        let mut store = Self::open(path)?;
+        store.organization_id = organization_id;
+        store.vault_id = Some(vault_id);
         Ok(store)
     }
 
@@ -543,6 +604,34 @@ impl<B: StorageBackend> RaftLogStore<B> {
         >,
     ) -> Self {
         self.organization_creation_sender = Some(sender);
+        self
+    }
+
+    /// Configures the vault-creation signal channel.
+    ///
+    /// When set, successful `OrganizationRequest::CreateVault` applies emit
+    /// a [`VaultCreationRequest`](crate::raft_manager::VaultCreationRequest)
+    /// so the per-org watcher task installed by
+    /// [`RaftManager::start_organization_group`](crate::raft_manager::RaftManager::start_organization_group)
+    /// can spawn the per-vault Raft group on each in-region node.
+    pub fn with_vault_creation_sender(
+        mut self,
+        sender: tokio::sync::mpsc::UnboundedSender<crate::raft_manager::VaultCreationRequest>,
+    ) -> Self {
+        self.vault_creation_sender = Some(sender);
+        self
+    }
+
+    /// Configures the vault-deletion signal channel.
+    ///
+    /// When set, successful `OrganizationRequest::DeleteVault` applies emit
+    /// a [`VaultDeletionRequest`](crate::raft_manager::VaultDeletionRequest)
+    /// so the per-org watcher task can stop the per-vault Raft group.
+    pub fn with_vault_deletion_sender(
+        mut self,
+        sender: tokio::sync::mpsc::UnboundedSender<crate::raft_manager::VaultDeletionRequest>,
+    ) -> Self {
+        self.vault_deletion_sender = Some(sender);
         self
     }
 

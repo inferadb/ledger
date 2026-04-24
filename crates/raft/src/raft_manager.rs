@@ -144,6 +144,19 @@ pub enum RaftManagerError {
         "Vault group {vault_id} (organization {organization_id}, region {region}) not found"
     ))]
     VaultGroupNotFound { region: Region, organization_id: OrganizationId, vault_id: VaultId },
+
+    /// A vault group with this identifier is already registered.
+    ///
+    /// Returned by [`RaftManager::start_vault_group`] when the caller
+    /// attempts to re-register a `(region, organization_id, vault_id)`
+    /// triple that already has a running vault group. Duplicate starts
+    /// are an explicit error rather than a silent return of the existing
+    /// group — the apply-side watcher surfaces duplicate
+    /// `VaultCreationRequest` signals instead of leaking them.
+    #[snafu(display(
+        "Vault group {vault_id} (organization {organization_id}, region {region}) already exists"
+    ))]
+    VaultGroupExists { region: Region, organization_id: OrganizationId, vault_id: VaultId },
 }
 
 /// Result type for multi-raft operations.
@@ -161,8 +174,45 @@ pub type RegionCreationRequest = (Region, Vec<(u64, String)>);
 /// on each in-region node so the per-organization Raft group spins up.
 pub type OrganizationCreationRequest = (Region, OrganizationId);
 
+/// Signal fired by `CreateVault` apply; drained by the per-org watcher
+/// task to trigger `start_vault_group` on every voter in the org.
+///
+/// Fire-and-forget: the apply path does not wait for the vault group to
+/// come up. Mirrors the [`OrganizationCreationRequest`] pattern, but
+/// scoped to a single `(region, organization)` Raft group. P2b.2.c
+/// delivers the signal plumbing; P2b.2.d wires the watcher onto
+/// [`RaftManager::start_vault_group`](RaftManager::start_vault_group).
+#[derive(Debug, Clone)]
+pub struct VaultCreationRequest {
+    /// Region hosting the owning organization's Raft group.
+    pub region: Region,
+    /// Owning organization.
+    pub organization: OrganizationId,
+    /// Newly-allocated vault id.
+    pub vault: VaultId,
+}
+
+/// Signal fired by `DeleteVault` apply; drained to trigger
+/// `stop_vault_group` on every voter in the org.
+///
+/// Fire-and-forget; same semantics as [`VaultCreationRequest`].
+#[derive(Debug, Clone)]
+pub struct VaultDeletionRequest {
+    /// Region hosting the owning organization's Raft group.
+    pub region: Region,
+    /// Owning organization.
+    pub organization: OrganizationId,
+    /// Vault id marked deleted.
+    pub vault: VaultId,
+}
+
 /// Storage components returned from region opening (state, block archive, raft log store,
-/// block announcements, events db, optional region creation receiver).
+/// block announcements, events db, optional region-/organization-/vault-
+/// lifecycle signal receivers).
+///
+/// The region + organization receivers are populated only for the GLOBAL log
+/// store (system tier); the vault receivers are populated only for
+/// per-organization groups (`organization_id != OrganizationId::new(0)`).
 type OpenedRegionStorage = (
     Arc<StateLayer<FileBackend>>,
     Arc<BlockArchive<FileBackend>>,
@@ -171,6 +221,8 @@ type OpenedRegionStorage = (
     Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>,
     Option<tokio::sync::mpsc::UnboundedReceiver<RegionCreationRequest>>,
     Option<tokio::sync::mpsc::UnboundedReceiver<OrganizationCreationRequest>>,
+    Option<tokio::sync::mpsc::UnboundedReceiver<VaultCreationRequest>>,
+    Option<tokio::sync::mpsc::UnboundedReceiver<VaultDeletionRequest>>,
 );
 
 // ============================================================================
@@ -424,6 +476,21 @@ pub struct InnerGroup {
     pub(crate) organization_creation_rx: parking_lot::Mutex<
         Option<tokio::sync::mpsc::UnboundedReceiver<OrganizationCreationRequest>>,
     >,
+    /// Receiver for vault creation signals (per-organization groups only).
+    ///
+    /// Populated for groups whose `organization_id != OrganizationId::new(0)`;
+    /// drained by the watcher task spawned in
+    /// [`RaftManager::start_organization_group`](RaftManager::start_organization_group).
+    /// P2b.2.c delivers the plumbing; P2b.2.d wires the drain onto
+    /// `start_vault_group`.
+    pub(crate) vault_creation_rx:
+        parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<VaultCreationRequest>>>,
+    /// Receiver for vault deletion signals (per-organization groups only).
+    ///
+    /// Same shape as [`vault_creation_rx`](Self::vault_creation_rx) — drained
+    /// by the per-org watcher task.
+    pub(crate) vault_deletion_rx:
+        parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<VaultDeletionRequest>>>,
     /// Per-engine commit dispatcher (P2b.1).
     ///
     /// Owns the engine's commit receiver and fans `CommittedBatch` values
@@ -579,6 +646,20 @@ impl InnerGroup {
         &self,
     ) -> Option<tokio::sync::mpsc::UnboundedReceiver<OrganizationCreationRequest>> {
         self.organization_creation_rx.lock().take()
+    }
+
+    /// Takes the vault-creation receiver (per-organization groups only).
+    pub fn take_vault_creation_rx(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<VaultCreationRequest>> {
+        self.vault_creation_rx.lock().take()
+    }
+
+    /// Takes the vault-deletion receiver (per-organization groups only).
+    pub fn take_vault_deletion_rx(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<VaultDeletionRequest>> {
+        self.vault_deletion_rx.lock().take()
     }
 }
 
@@ -1770,7 +1851,8 @@ impl RaftManager {
         // `CommitDispatcher::new` and pass the dispatcher in.
         let (_unused_tx, unused_rx) =
             tokio::sync::mpsc::channel::<inferadb_ledger_consensus::committed::CommittedBatch>(1);
-        let commit_dispatcher = Arc::new(crate::commit_dispatcher::CommitDispatcher::new(unused_rx));
+        let commit_dispatcher =
+            Arc::new(crate::commit_dispatcher::CommitDispatcher::new(unused_rx));
 
         let inner = Arc::new(InnerGroup {
             region,
@@ -1794,6 +1876,8 @@ impl RaftManager {
             jobs_active: Arc::new(AtomicBool::new(false)),
             region_creation_rx: parking_lot::Mutex::new(None),
             organization_creation_rx: parking_lot::Mutex::new(None),
+            vault_creation_rx: parking_lot::Mutex::new(None),
+            vault_deletion_rx: parking_lot::Mutex::new(None),
             commit_dispatcher,
         });
 
@@ -1981,7 +2065,379 @@ impl RaftManager {
             });
         }
 
+        // P2b.2.c: spawn the per-org vault-lifecycle watcher. Drains the
+        // vault create/delete signal channels wired by `open_region_storage`
+        // for this per-organization log store. For now the watcher just
+        // logs on receive — P2b.2.d wires the actual
+        // `start_vault_group` / `stop_vault_group` calls. The signal
+        // plumbing (apply-arm → mpsc channel → drainer) is what this
+        // slice delivers; the drainer is already tied to the manager's
+        // cancellation token so it exits cleanly on shutdown.
+        let vault_creation_rx_opt = org_inner.take_vault_creation_rx();
+        let vault_deletion_rx_opt = org_inner.take_vault_deletion_rx();
+        if let (Some(mut vault_create_rx), Some(mut vault_delete_rx)) =
+            (vault_creation_rx_opt, vault_deletion_rx_opt)
+        {
+            let cancel = self.cancellation_token.lock().child_token();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => {
+                            debug!(
+                                region = region.as_str(),
+                                organization_id = organization_id.value(),
+                                "Vault-lifecycle watcher exiting on cancellation",
+                            );
+                            break;
+                        }
+                        Some(req) = vault_create_rx.recv() => {
+                            info!(
+                                region = req.region.as_str(),
+                                organization_id = req.organization.value(),
+                                vault_id = req.vault.value(),
+                                "VaultCreationRequest received (start_vault_group integration pending P2b.2.d)",
+                            );
+                        }
+                        Some(req) = vault_delete_rx.recv() => {
+                            info!(
+                                region = req.region.as_str(),
+                                organization_id = req.organization.value(),
+                                vault_id = req.vault.value(),
+                                "VaultDeletionRequest received (stop_vault_group integration pending P2b.2.d)",
+                            );
+                        }
+                        else => break,
+                    }
+                }
+            });
+        }
+
         Ok(Arc::new(OrganizationGroup(org_inner)))
+    }
+
+    /// Starts a per-vault Raft group on this node.
+    ///
+    /// Creates a per-vault Raft group scoped to
+    /// `(region, organization_id, vault_id)` by registering a new shard on
+    /// the parent organization's existing [`ConsensusEngine`] (via
+    /// [`ConsensusHandle::add_shard`]). Opens the vault's `raft.db`
+    /// through [`RaftLogStore::open_for_vault`], builds a
+    /// [`ConsensusState`](inferadb_ledger_consensus::ConsensusState) in
+    /// [`LeadershipMode::Delegated`](inferadb_ledger_consensus::LeadershipMode::Delegated)
+    /// — vault groups never run independent elections; leadership is
+    /// adopted from the parent [`OrganizationGroup`] — registers the
+    /// shard with the parent's [`CommitDispatcher`](crate::commit_dispatcher::CommitDispatcher),
+    /// spawns a commit-pump task bound to the manager's cancellation
+    /// token, and inserts a new [`InnerVaultGroup`] into `vault_groups`.
+    ///
+    /// The parent organization group must already be running on this
+    /// node; double-starting the same triple returns
+    /// [`RaftManagerError::VaultGroupExists`].
+    ///
+    /// ## Commit-pump stub
+    ///
+    /// The per-vault apply pipeline is currently a debug-log stub:
+    /// committed batches routed into the vault shard's channel are
+    /// drained by a task that logs and drops them. The real apply path
+    /// — with tier validation and `VaultAppliedState` mutations — is
+    /// wired in a later slice; this method deliberately avoids standing
+    /// it up so the lifecycle surface can land independently.
+    ///
+    /// Leadership adoption for the fresh vault shard is similarly
+    /// deferred: both the one-shot `adopt_leader` call and the
+    /// parent-leader watcher land together in the slice that flips the
+    /// `VaultCreationRequest` watcher onto this method. A freshly-started
+    /// vault shard therefore stays leaderless until that driver is in
+    /// place.
+    ///
+    /// ## Shared vs per-vault fields on [`InnerVaultGroup`]
+    ///
+    /// Under delegated leadership the vault group shares several fields
+    /// with the parent org: `handle`, `state`, `block_archive`,
+    /// `block_announcements`, and `leader_lease`. Only the raft-log-driven
+    /// fields (`applied_state`, `commitment_buffer`, `applied_index_rx`)
+    /// are genuinely per-vault, sourced from the per-vault
+    /// [`RaftLogStore`]. This matches the per-vault-consensus spec —
+    /// "vault groups inherit parent org's … leader, voter set, etc."
+    ///
+    /// ## Errors
+    ///
+    /// - [`RaftManagerError::RegionNotFound`] if the parent `(region, organization_id)`
+    ///   organization group is not registered on this node.
+    /// - [`RaftManagerError::VaultGroupExists`] if a vault group for the same `(region,
+    ///   organization_id, vault_id)` triple is already registered.
+    /// - [`RaftManagerError::Storage`] if the per-vault `raft.db` cannot be opened or if the vault
+    ///   directory cannot be created.
+    /// - [`RaftManagerError::Raft`] if the parent engine rejects the new shard registration (e.g.
+    ///   the engine reactor has shut down).
+    pub async fn start_vault_group(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+        vault_id: VaultId,
+    ) -> Result<Arc<VaultGroup>> {
+        // Precondition: parent org group must be running on this node.
+        let org_group = self.get_organization_group(region, organization_id)?;
+        let org_inner = Arc::clone(&org_group.0);
+
+        // Precondition: no vault group already registered for this triple.
+        if self.has_vault_group(region, organization_id, vault_id) {
+            return Err(RaftManagerError::VaultGroupExists { region, organization_id, vault_id });
+        }
+
+        info!(
+            region = region.as_str(),
+            organization_id = organization_id.value(),
+            vault_id = vault_id.value(),
+            "Starting vault group",
+        );
+
+        // Compose the per-vault raft.db path under
+        // `{data_dir}/{region}/{organization_id}/state/vault-{vault_id}/raft.db`
+        // (P2b.0 layout). The org's `RegionStorage` already exposes the
+        // per-vault directory helper; we reuse it instead of re-composing.
+        let region_storage = self
+            .storage_manager
+            .get_organization(region, organization_id)
+            .ok_or(RaftManagerError::RegionNotFound { region })?;
+        let vault_dir = region_storage.vault_dir(vault_id);
+        std::fs::create_dir_all(&vault_dir).map_err(|e| RaftManagerError::Storage {
+            region,
+            message: format!("failed to create vault directory {}: {e}", vault_dir.display()),
+        })?;
+        let vault_raft_db_path = vault_dir.join("raft.db");
+
+        // Open the per-vault Raft log store. `open_for_vault` stamps the
+        // store's residency identity (organization_id + vault_id) at
+        // construction time so downstream apply workers can't accidentally
+        // mutate another vault's state.
+        let vault_log_store = RaftLogStore::<FileBackend>::open_for_vault(
+            &vault_raft_db_path,
+            organization_id,
+            vault_id,
+        )
+        .map_err(|e| RaftManagerError::Storage {
+            region,
+            message: format!(
+                "failed to open vault raft.db at {}: {e}",
+                vault_raft_db_path.display()
+            ),
+        })?;
+
+        // Per-vault applied-state accessors, surfaced before the log store
+        // is moved into the debug-stub worker task.
+        let vault_applied_state = vault_log_store.accessor();
+        let vault_commitment_buffer = vault_log_store.commitment_buffer();
+        let vault_applied_index_rx = vault_log_store.applied_index_watch();
+
+        // Derive a unique `ConsensusStateId` for this vault. Mirrors the
+        // org-shard derivation in `start_region` but mixes the vault id
+        // in so per-vault shards are disjoint from each other and from the
+        // org's own shard in the dispatcher's routing table.
+        let shard_id = {
+            let mut bytes = Vec::with_capacity(region.as_str().len() + 16);
+            bytes.extend_from_slice(region.as_str().as_bytes());
+            bytes.extend_from_slice(&organization_id.value().to_le_bytes());
+            bytes.extend_from_slice(&vault_id.value().to_le_bytes());
+            inferadb_ledger_consensus::types::ConsensusStateId(seahash::hash(&bytes))
+        };
+
+        // Inherit the parent org's voter set. The B.1 unified-leadership
+        // model keeps every voter of the org voting on every vault group
+        // within that org (see
+        // `docs/superpowers/specs/2026-04-23-per-vault-consensus.md`
+        // — "Shared append-only WAL per organization").
+        let parent_shard_state = org_inner.handle().shard_state();
+        let vault_membership = if parent_shard_state.voters.is_empty() {
+            // Fallback for a freshly-started parent whose membership
+            // watcher hasn't populated yet — seed with the local node so
+            // `ConsensusState::new` has a non-empty voter set. The real
+            // voter set is inherited on the first parent leader-change
+            // fan-out (added in a later slice).
+            warn!(
+                region = region.as_str(),
+                organization_id = organization_id.value(),
+                vault_id = vault_id.value(),
+                "Parent organization voters not yet populated at vault-group start; \
+                 falling back to local-node-only membership. Correct membership is \
+                 inherited on the next parent leader-change fan-out.",
+            );
+            let voters: std::collections::BTreeSet<inferadb_ledger_consensus::types::NodeId> =
+                [inferadb_ledger_consensus::types::NodeId(self.config.node_id)]
+                    .into_iter()
+                    .collect();
+            inferadb_ledger_consensus::types::Membership::new(voters)
+        } else {
+            let mut membership = inferadb_ledger_consensus::types::Membership::new(
+                parent_shard_state.voters.clone(),
+            );
+            for learner in &parent_shard_state.learners {
+                membership.add_learner(*learner);
+            }
+            membership
+        };
+
+        let shard_config = inferadb_ledger_consensus::ShardConfig {
+            election_timeout_min: std::time::Duration::from_millis(
+                self.config.election_timeout_min_ms,
+            ),
+            election_timeout_max: std::time::Duration::from_millis(
+                self.config.election_timeout_max_ms,
+            ),
+            heartbeat_interval: std::time::Duration::from_millis(self.config.heartbeat_interval_ms),
+            // Vault shards never run elections under delegated leadership;
+            // auto_promote is irrelevant but we default it off to match
+            // data-region groups.
+            auto_promote: false,
+            ..Default::default()
+        };
+
+        let mut consensus_shard = inferadb_ledger_consensus::ConsensusState::new(
+            shard_id,
+            inferadb_ledger_consensus::types::NodeId(self.config.node_id),
+            vault_membership,
+            shard_config,
+            inferadb_ledger_consensus::SystemClock,
+            inferadb_ledger_consensus::rng::SystemRng,
+            // initial_term =
+            0,
+            // initial_voted_for =
+            None,
+            // initial_committed_index =
+            0,
+        );
+        // Vault groups always run delegated — leadership is adopted from
+        // the parent org on every org leader change.
+        consensus_shard.set_leadership_mode(inferadb_ledger_consensus::LeadershipMode::Delegated);
+
+        // Leadership adoption is deferred: unlike `start_organization_group`,
+        // this method does not call `adopt_leader` on the fresh shard.
+        // Both the one-shot adoption and the parent-leader watcher land
+        // together in the follow-up slice that flips the vault creation
+        // watcher to call `start_vault_group`. Splitting them would leave
+        // an intermediate state where vault groups are live but never
+        // adopt the parent's leader on startup — better to keep the shard
+        // leaderless until the watcher and adoption land as one unit.
+
+        // Create the per-vault commit channel and register with the
+        // parent org's dispatcher before handing the shard to the
+        // engine — register must complete before the engine could
+        // possibly commit a batch for the new shard
+        // (see `commit_dispatcher.rs` module docs).
+        let (vault_batch_tx, vault_batch_rx) = tokio::sync::mpsc::channel::<
+            inferadb_ledger_consensus::committed::CommittedBatch,
+        >(10_000);
+        org_inner.commit_dispatcher().register(shard_id, vault_batch_tx);
+
+        // Register the vault shard with the parent engine. On failure we
+        // deregister so the dispatcher doesn't hold a stale sender
+        // reference for a shard the engine doesn't know about.
+        if let Err(e) = org_inner.handle().add_shard(consensus_shard).await {
+            org_inner.commit_dispatcher().deregister(shard_id);
+            return Err(RaftManagerError::Raft {
+                region,
+                message: format!("failed to register vault shard on parent engine: {e}"),
+            });
+        }
+
+        // Spawn the debug-log stub apply worker. The stub owns the
+        // per-vault log store for the lifetime of the vault group so the
+        // store's `raft.db` handle and applied-state watch sender stay
+        // alive as long as any receiver is observing them. Real per-vault
+        // apply — with `VaultAppliedState` mutations and tier validation
+        // — replaces this stub in a later slice.
+        let cancel = self.cancellation_token.lock().child_token();
+        let stub_region = region;
+        let stub_org = organization_id;
+        let stub_vault = vault_id;
+        let stub_shard_id = shard_id;
+        tokio::spawn(async move {
+            // `InnerVaultGroup` intentionally does not own `RaftLogStore`.
+            // The store's `applied_index` watch-sender must live
+            // co-located with the task that drives applies, so the sender
+            // stays alive whenever a receiver is observed. The debug stub
+            // here plays that role — the real apply worker (once wired)
+            // will take over the same ownership responsibility. Do not
+            // remove this binding without relocating ownership; dropping
+            // the store here closes `applied_index_watch()` for every
+            // holder of the receiver.
+            let _vault_log_store = vault_log_store;
+            let mut vault_batch_rx = vault_batch_rx;
+            loop {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => {
+                        debug!(
+                            region = stub_region.as_str(),
+                            organization_id = stub_org.value(),
+                            vault_id = stub_vault.value(),
+                            shard_id = stub_shard_id.0,
+                            "Vault debug-apply stub exiting on cancellation",
+                        );
+                        break;
+                    }
+                    maybe_batch = vault_batch_rx.recv() => {
+                        match maybe_batch {
+                            Some(batch) => {
+                                debug!(
+                                    region = stub_region.as_str(),
+                                    organization_id = stub_org.value(),
+                                    vault_id = stub_vault.value(),
+                                    shard_id = stub_shard_id.0,
+                                    entry_count = batch.entries.len(),
+                                    "Vault commit batch received (stub handler — real apply pipeline not yet wired)",
+                                );
+                            }
+                            None => {
+                                debug!(
+                                    region = stub_region.as_str(),
+                                    organization_id = stub_org.value(),
+                                    vault_id = stub_vault.value(),
+                                    shard_id = stub_shard_id.0,
+                                    "Vault commit channel closed — stub exiting",
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // Build the per-vault group, reusing shared fields from the
+        // parent org where the data plane overlaps (handle, state,
+        // block_archive, block_announcements, leader_lease under
+        // delegated leadership).
+        let inner = Arc::new(InnerVaultGroup {
+            region,
+            organization_id,
+            vault_id,
+            handle: Arc::clone(org_inner.handle()),
+            state: Arc::clone(org_inner.state()),
+            block_archive: Arc::clone(org_inner.block_archive()),
+            applied_state: vault_applied_state,
+            block_announcements: org_inner.block_announcements().clone(),
+            batch_handle: None,
+            commitment_buffer: vault_commitment_buffer,
+            leader_lease: Arc::clone(org_inner.leader_lease()),
+            applied_index_rx: vault_applied_index_rx,
+        });
+
+        {
+            let mut vault_groups = self.vault_groups.write();
+            vault_groups.insert((region, organization_id, vault_id), Arc::clone(&inner));
+        }
+
+        info!(
+            region = region.as_str(),
+            organization_id = organization_id.value(),
+            vault_id = vault_id.value(),
+            shard_id = shard_id.0,
+            "Vault group started successfully",
+        );
+
+        Ok(Arc::new(VaultGroup(inner)))
     }
 
     pub async fn start_data_region(&self, region_config: RegionConfig) -> Result<Arc<RegionGroup>> {
@@ -2139,6 +2595,8 @@ impl RaftManager {
             events_db,
             region_creation_rx,
             organization_creation_rx,
+            vault_creation_rx,
+            vault_deletion_rx,
         ) = self.open_region_storage(
             region,
             organization_id,
@@ -2380,11 +2838,11 @@ impl RaftManager {
         // The org-shard downstream channel matches the engine commit
         // channel's capacity (10_000) so the dispatcher does not become a
         // throughput bottleneck for the org's own batches.
-        let commit_dispatcher = Arc::new(crate::commit_dispatcher::CommitDispatcher::new(commit_rx));
-        let (org_batch_tx, org_batch_rx) =
-            tokio::sync::mpsc::channel::<inferadb_ledger_consensus::committed::CommittedBatch>(
-                10_000,
-            );
+        let commit_dispatcher =
+            Arc::new(crate::commit_dispatcher::CommitDispatcher::new(commit_rx));
+        let (org_batch_tx, org_batch_rx) = tokio::sync::mpsc::channel::<
+            inferadb_ledger_consensus::committed::CommittedBatch,
+        >(10_000);
         commit_dispatcher.register(shard_id, org_batch_tx);
 
         let state_rx = state_watchers.get(&shard_id).cloned().unwrap_or_else(|| {
@@ -2555,6 +3013,8 @@ impl RaftManager {
             jobs_active: Arc::new(AtomicBool::new(jobs_running)),
             region_creation_rx: parking_lot::Mutex::new(region_creation_rx),
             organization_creation_rx: parking_lot::Mutex::new(organization_creation_rx),
+            vault_creation_rx: parking_lot::Mutex::new(vault_creation_rx),
+            vault_deletion_rx: parking_lot::Mutex::new(vault_deletion_rx),
             commit_dispatcher,
         });
 
@@ -2860,6 +3320,25 @@ impl RaftManager {
             None
         };
 
+        // P2b.2.c: wire vault create/delete signal channels for
+        // per-organization log stores (organization_id != 0). Vault
+        // lifecycle is scoped to a single `(region, organization)` pair,
+        // so the system/region-plane groups (`organization_id == 0`) do
+        // not need the channels. `start_organization_group` takes the
+        // receivers and spawns a watcher task that (in P2b.2.d) calls
+        // `start_vault_group` / `stop_vault_group` on every in-region
+        // node.
+        let (vault_creation_rx, vault_deletion_rx) = if organization_id != OrganizationId::new(0) {
+            let (vault_create_tx, vault_create_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (vault_delete_tx, vault_delete_rx) = tokio::sync::mpsc::unbounded_channel();
+            log_store = log_store
+                .with_vault_creation_sender(vault_create_tx)
+                .with_vault_deletion_sender(vault_delete_tx);
+            (Some(vault_create_rx), Some(vault_delete_rx))
+        } else {
+            (None, None)
+        };
+
         // Wire event writer: use the explicitly provided writer, or create one
         // from the region's own events_db when only an EventConfig was supplied.
         // This avoids callers needing to pre-open the events database.
@@ -2879,6 +3358,8 @@ impl RaftManager {
             events_db,
             region_creation_rx,
             organization_creation_rx,
+            vault_creation_rx,
+            vault_deletion_rx,
         ))
     }
 
@@ -3616,6 +4097,128 @@ mod tests {
             },
             Err(other) => panic!("expected VaultGroupNotFound, got {other:?}"),
         }
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // start_vault_group lifecycle
+    //
+    // Exercises the happy path, the precondition failures, and the double-
+    // start rejection. The per-vault apply pipeline is currently a
+    // debug-log stub — these tests assert registration and accessors
+    // only, not any committed-batch routing behaviour.
+    // ────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_start_vault_group_errors_when_org_missing() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        // Start system region so the region-level preconditions are met,
+        // but do NOT start the org group. `start_vault_group` must reject.
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let result = manager
+            .start_vault_group(Region::GLOBAL, OrganizationId::new(42), VaultId::new(7))
+            .await;
+        match result {
+            Ok(_) => panic!("expected RegionNotFound when parent org missing"),
+            Err(RaftManagerError::RegionNotFound { region }) => {
+                assert_eq!(region, Region::GLOBAL);
+            },
+            Err(other) => panic!("expected RegionNotFound, got {other:?}"),
+        }
+        assert!(manager.list_vault_groups().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_start_vault_group_registers_and_returns_accessors() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        // System region + org group serve as the parent for the vault.
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+        manager
+            .start_organization_group(
+                Region::GLOBAL,
+                OrganizationId::new(11),
+                vec![(1, "127.0.0.1:50051".to_string())],
+                true,
+                None,
+                None,
+            )
+            .await
+            .expect("start org group");
+
+        let vault_id = VaultId::new(101);
+        let group = manager
+            .start_vault_group(Region::GLOBAL, OrganizationId::new(11), vault_id)
+            .await
+            .expect("start vault group");
+
+        assert_eq!(group.region(), Region::GLOBAL);
+        assert_eq!(group.organization_id(), OrganizationId::new(11));
+        assert_eq!(group.vault_id(), vault_id);
+
+        assert!(manager.has_vault_group(Region::GLOBAL, OrganizationId::new(11), vault_id));
+        let triples = manager.list_vault_groups();
+        assert_eq!(triples.len(), 1);
+        assert_eq!(triples[0], (Region::GLOBAL, OrganizationId::new(11), vault_id));
+
+        let fetched = manager
+            .get_vault_group(Region::GLOBAL, OrganizationId::new(11), vault_id)
+            .expect("get_vault_group after start");
+        assert_eq!(fetched.region(), Region::GLOBAL);
+        assert_eq!(fetched.organization_id(), OrganizationId::new(11));
+        assert_eq!(fetched.vault_id(), vault_id);
+    }
+
+    #[tokio::test]
+    async fn test_start_vault_group_rejects_double_start() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+        manager
+            .start_organization_group(
+                Region::GLOBAL,
+                OrganizationId::new(22),
+                vec![(1, "127.0.0.1:50051".to_string())],
+                true,
+                None,
+                None,
+            )
+            .await
+            .expect("start org group");
+
+        let vault_id = VaultId::new(202);
+        manager
+            .start_vault_group(Region::GLOBAL, OrganizationId::new(22), vault_id)
+            .await
+            .expect("first start_vault_group must succeed");
+
+        // Second call for the same triple is an explicit error — not a
+        // silent no-op — so the apply-side watcher surfaces duplicate
+        // `VaultCreationRequest` signals rather than leaking them.
+        let result =
+            manager.start_vault_group(Region::GLOBAL, OrganizationId::new(22), vault_id).await;
+        match result {
+            Ok(_) => panic!("expected VaultGroupExists on second start"),
+            Err(RaftManagerError::VaultGroupExists { region, organization_id, vault_id: got }) => {
+                assert_eq!(region, Region::GLOBAL);
+                assert_eq!(organization_id.value(), 22);
+                assert_eq!(got, vault_id);
+            },
+            Err(other) => panic!("expected VaultGroupExists, got {other:?}"),
+        }
+
+        // Map size unchanged by the rejected double-start.
+        assert_eq!(manager.list_vault_groups().len(), 1);
     }
 
     #[test]

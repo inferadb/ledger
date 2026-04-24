@@ -674,10 +674,7 @@ mod tests {
 
         // Remove a different shard id to prove the argument is the one
         // threaded to the engine (not this handle's own shard_id()).
-        handle
-            .remove_shard(ConsensusStateId(99))
-            .await
-            .expect("remove_shard passthrough");
+        handle.remove_shard(ConsensusStateId(99)).await.expect("remove_shard passthrough");
     }
 
     #[tokio::test]

@@ -5018,6 +5018,202 @@ mod tests {
         );
     }
 
+    /// P2b.2.c: the `CreateVault` apply arm emits a `VaultCreationRequest`
+    /// on the wired sender channel for every successfully-stamped vault.
+    /// Mechanical correctness check for the signal-firing code; the
+    /// watcher task itself is exercised end-to-end by later slices.
+    #[test]
+    fn vault_creation_signal_emitted_on_create_vault_apply() {
+        use crate::raft_manager::VaultCreationRequest;
+
+        let dir = tempdir().expect("create temp dir");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<VaultCreationRequest>();
+        let store = store_with_events(dir.path())
+            .with_region_config(
+                Region::US_EAST_VA,
+                inferadb_ledger_types::NodeId::new("test-node"),
+                1,
+            )
+            .with_vault_creation_sender(tx);
+        let mut state = (*store.applied_state.load_full()).clone();
+
+        let org_id = create_active_organization(
+            &store,
+            &mut state,
+            inferadb_ledger_types::OrganizationSlug::new(7000),
+            Region::US_EAST_VA,
+        );
+        let slug = VaultSlug::new(8000);
+
+        let create_vault = OrganizationRequest::CreateVault {
+            organization: org_id,
+            slug,
+            name: Some("signal-vault".to_string()),
+            retention_policy: None,
+        };
+        let ts = fixed_timestamp();
+        let mut events: Vec<EventEntry> = Vec::new();
+        let mut op_index = 0u32;
+
+        let (resp, _) = store.apply_organization_request_with_events(
+            &create_vault,
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut events,
+            90,
+            &mut PendingExternalWrites::default(),
+            None,
+            false,
+            0,
+            false,
+        );
+        let vault_id = match resp {
+            LedgerResponse::VaultCreated { vault, .. } => vault,
+            other => panic!("expected VaultCreated, got {other:?}"),
+        };
+
+        let signal =
+            rx.try_recv().expect("VaultCreationRequest must be emitted on successful apply");
+        assert_eq!(signal.region, Region::US_EAST_VA);
+        assert_eq!(signal.organization, org_id);
+        assert_eq!(signal.vault, vault_id);
+        assert!(rx.try_recv().is_err(), "exactly one signal expected per CreateVault apply");
+    }
+
+    /// P2b.2.c: the `DeleteVault` apply arm emits a `VaultDeletionRequest`
+    /// on the wired sender channel for every successfully-marked delete.
+    /// The `NotFound` error arm must not fire the signal.
+    #[test]
+    fn vault_deletion_signal_emitted_on_delete_vault_apply() {
+        use crate::raft_manager::VaultDeletionRequest;
+
+        let dir = tempdir().expect("create temp dir");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<VaultDeletionRequest>();
+        let store = store_with_events(dir.path())
+            .with_region_config(
+                Region::US_EAST_VA,
+                inferadb_ledger_types::NodeId::new("test-node"),
+                1,
+            )
+            .with_vault_deletion_sender(tx);
+        let mut state = (*store.applied_state.load_full()).clone();
+        let (org_id, vault_id) = setup_org_and_vault(&mut state);
+
+        // Unknown vault → NotFound response, no signal.
+        let unknown = VaultId::new(999);
+        let delete_unknown =
+            OrganizationRequest::DeleteVault { organization: org_id, vault: unknown };
+        let ts = fixed_timestamp();
+        let mut events: Vec<EventEntry> = Vec::new();
+        let mut op_index = 0u32;
+        let (resp, _) = store.apply_organization_request_with_events(
+            &delete_unknown,
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut events,
+            90,
+            &mut PendingExternalWrites::default(),
+            None,
+            false,
+            0,
+            false,
+        );
+        assert!(
+            matches!(resp, LedgerResponse::Error { .. }),
+            "expected NotFound error for unknown vault, got {resp:?}"
+        );
+        assert!(rx.try_recv().is_err(), "NotFound arm must NOT emit a VaultDeletionRequest");
+
+        // Known vault → success, signal fires.
+        let delete_vault =
+            OrganizationRequest::DeleteVault { organization: org_id, vault: vault_id };
+        let (resp, _) = store.apply_organization_request_with_events(
+            &delete_vault,
+            &mut state,
+            ts,
+            &mut op_index,
+            &mut events,
+            90,
+            &mut PendingExternalWrites::default(),
+            None,
+            false,
+            0,
+            false,
+        );
+        assert!(
+            matches!(resp, LedgerResponse::VaultDeleted { success: true }),
+            "expected VaultDeleted success response"
+        );
+
+        let signal =
+            rx.try_recv().expect("VaultDeletionRequest must be emitted on successful apply");
+        assert_eq!(signal.region, Region::US_EAST_VA);
+        assert_eq!(signal.organization, org_id);
+        assert_eq!(signal.vault, vault_id);
+        assert!(rx.try_recv().is_err(), "exactly one signal expected per successful DeleteVault");
+    }
+
+    // =========================================================================
+    // P2b.2.b: VaultAppliedState + RaftLogStore::open_for_vault
+    // =========================================================================
+
+    /// P2b.2.b: the carved-out per-vault applied state defaults to an empty
+    /// state — no last-applied log, zero block height, empty client-sequence
+    /// map, and the zero previous-vault-hash sentinel. Mirrors the shape of
+    /// `AppliedState::default()` for the fields it retains.
+    #[test]
+    fn vault_applied_state_default_is_empty() {
+        let state = super::types::VaultAppliedState::default();
+        assert!(state.last_applied.is_none());
+        assert_eq!(state.vault_height, 0);
+        assert_eq!(state.last_applied_timestamp_ns, 0);
+        assert!(state.client_sequences.is_empty());
+        assert_eq!(state.previous_vault_hash, inferadb_ledger_types::ZERO_HASH);
+        assert_eq!(state.membership, super::types::StoredMembership::default());
+        assert_eq!(state.vault_health, super::types::VaultHealthStatus::Healthy);
+    }
+
+    /// P2b.2.b: the per-vault constructor tags the store with both the
+    /// owning `OrganizationId` and the `VaultId`, proving the type surface
+    /// compiles. No call sites use this constructor yet; P2b.2.d wires it
+    /// into `start_vault_group`.
+    #[test]
+    fn raft_log_store_open_for_vault_sets_ids() {
+        let tmp = tempdir().expect("create temp dir");
+        let store = super::store::RaftLogStore::<FileBackend>::open_for_vault(
+            tmp.path().join("raft.db"),
+            OrganizationId::new(42),
+            VaultId::new(7),
+        )
+        .expect("open_for_vault");
+        assert_eq!(store.organization_id, OrganizationId::new(42));
+        assert_eq!(store.vault_id, Some(VaultId::new(7)));
+    }
+
+    /// P2b.2.b: structural fields of `VaultAppliedStateCore` postcard
+    /// round-trip identically, mirroring the `AppliedStateCore` contract.
+    /// The `client_sequences` HashMap is externalized to a dedicated B+ tree
+    /// table and so is not part of the core blob.
+    #[test]
+    fn vault_applied_state_core_postcard_round_trip() {
+        let core = super::types::VaultAppliedStateCore {
+            last_applied: Some(super::types::LogId::new(5, 42, 100)),
+            membership: super::types::StoredMembership::default(),
+            vault_height: 999,
+            previous_vault_hash: [0xAB_u8; 32],
+            vault_health: super::types::VaultHealthStatus::Healthy,
+            last_applied_timestamp_ns: 12345,
+        };
+
+        let encoded = postcard::to_allocvec(&core).expect("serialize");
+        let decoded: super::types::VaultAppliedStateCore =
+            postcard::from_bytes(&encoded).expect("deserialize");
+
+        assert_eq!(decoded, core);
+    }
+
     #[test]
     // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
     // carries an `organization:` field — a single `RaftLogStore`

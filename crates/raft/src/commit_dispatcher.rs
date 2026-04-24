@@ -20,18 +20,16 @@
 //! ## Lifecycle invariants
 //!
 //! - **One dispatcher per engine** (i.e. per region's `ConsensusEngine`).
-//! - **Register before propose**: a shard must call [`register`] before its
-//!   first batch can arrive on the engine's commit channel — in practice
-//!   that means before
+//! - **Register before propose**: a shard must call [`register`] before its first batch can arrive
+//!   on the engine's commit channel — in practice that means before
 //!   [`ConsensusEngine::add_shard`](inferadb_ledger_consensus::ConsensusEngine::add_shard)
 //!   completes.
 //! - **Deregister before remove**: a shard must call [`deregister`] before
 //!   [`ConsensusEngine::remove_shard`](inferadb_ledger_consensus::ConsensusEngine::remove_shard)
-//!   returns. After deregister, any in-flight batch for the shard is logged
-//!   and dropped — Raft semantics guarantee a removed shard's state is no
-//!   longer authoritative, so the drop is safe.
-//! - **The dispatcher task exits when the engine's commit channel closes**
-//!   (engine shutdown). No explicit teardown is required at engine shutdown.
+//!   returns. After deregister, any in-flight batch for the shard is logged and dropped — Raft
+//!   semantics guarantee a removed shard's state is no longer authoritative, so the drop is safe.
+//! - **The dispatcher task exits when the engine's commit channel closes** (engine shutdown). No
+//!   explicit teardown is required at engine shutdown.
 //!
 //! [`register`]: CommitDispatcher::register
 //! [`deregister`]: CommitDispatcher::deregister
@@ -112,14 +110,14 @@ async fn dispatcher_loop(mut commit_rx: mpsc::Receiver<CommittedBatch>, routes: 
                         "CommitDispatcher: downstream channel closed; batch dropped",
                     );
                 }
-            }
+            },
             None => {
                 tracing::warn!(
                     shard = shard_id.0,
                     entry_count = batch.entries.len(),
                     "CommitDispatcher: no downstream registered; batch dropped",
                 );
-            }
+            },
         }
     }
 }
@@ -195,10 +193,7 @@ mod tests {
 
         // Orphan batch — no downstream. Dispatcher must drop it (with a log)
         // and not block subsequent batches.
-        src_tx
-            .send(batch_for(ConsensusStateId(42), "orphan"))
-            .await
-            .expect("src send orphan");
+        src_tx.send(batch_for(ConsensusStateId(42), "orphan")).await.expect("src send orphan");
 
         // A subsequent batch for the registered shard must still flow through.
         src_tx
