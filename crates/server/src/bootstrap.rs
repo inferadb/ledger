@@ -360,48 +360,14 @@ pub async fn bootstrap_node(
                 let events_cfg = org_events_config.clone();
                 let batch_cfg = org_batch_config.clone();
                 let result = tokio::spawn(async move {
-                    // Voter set under B.1 uniform replication: all known cluster
-                    // voters (matches the system region's voter set, which is
-                    // always the full cluster).
-                    let voters: Vec<(u64, String)> = mgr_clone
-                        .peer_addresses()
-                        .iter_peers()
-                        .into_iter()
-                        .map(|(node_id, addr)| (node_id, addr))
-                        .collect();
-                    if voters.is_empty() {
-                        tracing::warn!(
-                            region = region.as_str(),
-                            organization_id = organization_id.value(),
-                            "Organization handler: no peers known yet — skipping group bootstrap"
-                        );
-                        return;
-                    }
-                    // First voter (lexically smallest node id) bootstraps;
-                    // others join via AppendEntries from the leader.
-                    let bootstrap_node_id = voters.iter().map(|(id, _)| *id).min().unwrap_or(0);
-                    let self_id = mgr_clone.config().node_id;
-                    let bootstrap = self_id == bootstrap_node_id;
-                    if let Err(e) = mgr_clone
-                        .start_organization_group(
-                            region,
-                            organization_id,
-                            voters,
-                            bootstrap,
-                            Some(events_cfg),
-                            Some(inferadb_ledger_raft::batching::BatchWriterConfig::from(
-                                &batch_cfg,
-                            )),
-                        )
-                        .await
-                    {
-                        tracing::error!(
-                            region = region.as_str(),
-                            organization_id = organization_id.value(),
-                            error = %e,
-                            "Failed to start organization group from CreateOrganization signal"
-                        );
-                    }
+                    rehydrate_organization_group(
+                        &mgr_clone,
+                        region,
+                        organization_id,
+                        &events_cfg,
+                        &batch_cfg,
+                    )
+                    .await;
                 })
                 .await;
 
@@ -517,6 +483,61 @@ pub async fn bootstrap_node(
                         );
                     },
                 }
+            }
+        }
+
+        // === Restart: re-start persisted per-organization Raft groups ===
+        //
+        // The per-organization group lifecycle (`start_organization_group`)
+        // is driven by the `CreateOrganization` signal on fresh applies. On
+        // a graceful restart the signal does not re-fire — clean shutdown
+        // closes `applied_durable == last_committed`, so the WAL replay gap
+        // is empty. Without an explicit sweep here, pre-existing per-org
+        // groups stay unregistered on the local `RaftManager` (and the
+        // startup vault-rehydration sweep inside `start_organization_group`
+        // never runs).
+        //
+        // Runs after the data-region rediscovery above so every region's
+        // storage is open before we probe it for organization directories.
+        // Voter set uses the currently-known peers; when peer rediscovery
+        // has not yet populated the map, affected organizations skip with
+        // a warning and stay unregistered until the next restart. The
+        // strict-quorum variant is a follow-up refinement.
+        for region in manager.list_regions() {
+            if region == inferadb_ledger_types::Region::GLOBAL {
+                // GLOBAL hosts the system org (id 0) only; per-org groups
+                // live under data regions.
+                continue;
+            }
+            let org_ids = match storage_manager.discover_existing_organizations(region) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    tracing::error!(
+                        region = region.as_str(),
+                        error = %e,
+                        "Restart: organization discovery failed — per-org groups will not \
+                         rehydrate until the next restart",
+                    );
+                    continue;
+                },
+            };
+            if org_ids.is_empty() {
+                continue;
+            }
+            tracing::info!(
+                region = region.as_str(),
+                count = org_ids.len(),
+                "Restart: re-starting discovered per-organization Raft groups",
+            );
+            for organization_id in org_ids {
+                rehydrate_organization_group(
+                    &manager,
+                    region,
+                    organization_id,
+                    &config.events,
+                    &config.batching,
+                )
+                .await;
             }
         }
 
@@ -1479,6 +1500,77 @@ fn parse_hex_key(hex_str: &str) -> Result<[u8; 32], String> {
             .map_err(|e| format!("invalid hex at position {}: {e}", i * 2))?;
     }
     Ok(bytes)
+}
+
+/// Starts a per-organization Raft group on this node using the
+/// currently-known cluster voter set.
+///
+/// Shared between the `CreateOrganization` signal handler (fresh-apply
+/// path) and the restart-path rehydration sweep. Both callers need the
+/// same three-step dance — collect voter set from the peer-address map,
+/// pick the lexically smallest node id as the bootstrap voter, and hand
+/// off to [`RaftManager::start_organization_group`] — with identical
+/// diagnostics on empty peers / already-running groups / fatal errors.
+///
+/// On an empty voter set the call is skipped with a warning; the group
+/// stays unregistered until it is rehydrated on a subsequent restart
+/// with peers known. `RegionExists` is treated as a successful no-op
+/// (the group is already running on this node from a prior signal).
+async fn rehydrate_organization_group(
+    manager: &Arc<RaftManager>,
+    region: inferadb_ledger_types::Region,
+    organization_id: inferadb_ledger_types::OrganizationId,
+    events_config: &inferadb_ledger_types::events::EventConfig,
+    batch_config: &inferadb_ledger_types::config::BatchConfig,
+) {
+    let voters: Vec<(u64, String)> = manager.peer_addresses().iter_peers();
+    if voters.is_empty() {
+        tracing::warn!(
+            region = region.as_str(),
+            organization_id = organization_id.value(),
+            "Organization rehydration: no peers known yet — skipping group bootstrap",
+        );
+        return;
+    }
+    // Smallest node id bootstraps; others join via AppendEntries.
+    let bootstrap_node_id = voters.iter().map(|(id, _)| *id).min().unwrap_or(0);
+    let self_id = manager.config().node_id;
+    let bootstrap = self_id == bootstrap_node_id;
+
+    match manager
+        .start_organization_group(
+            region,
+            organization_id,
+            voters,
+            bootstrap,
+            Some(events_config.clone()),
+            Some(inferadb_ledger_raft::batching::BatchWriterConfig::from(batch_config)),
+        )
+        .await
+    {
+        Ok(_) => {
+            tracing::info!(
+                region = region.as_str(),
+                organization_id = organization_id.value(),
+                "Organization Raft group started",
+            );
+        },
+        Err(inferadb_ledger_raft::raft_manager::RaftManagerError::RegionExists { .. }) => {
+            tracing::debug!(
+                region = region.as_str(),
+                organization_id = organization_id.value(),
+                "Organization rehydration: group already running — skipping",
+            );
+        },
+        Err(e) => {
+            tracing::error!(
+                region = region.as_str(),
+                organization_id = organization_id.value(),
+                error = %e,
+                "Failed to start organization Raft group",
+            );
+        },
+    }
 }
 
 /// Processes a single region event from the GLOBAL apply worker channel.

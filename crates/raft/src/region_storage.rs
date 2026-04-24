@@ -619,6 +619,116 @@ impl RegionStorageManager {
         }
         discovered
     }
+
+    /// Discovers per-organization Raft groups with persisted data under
+    /// `region`.
+    ///
+    /// Scans `{region_dir}/` for subdirectories whose names parse as a
+    /// non-negative integer and that carry the per-org layout marker
+    /// (`state/` subdirectory). Returns the internal [`OrganizationId`]
+    /// list in ascending order.
+    ///
+    /// `OrganizationId::new(0)` is skipped — the system org in the GLOBAL
+    /// region, and the data-region control plane in data regions, are
+    /// both rehydrated via [`discover_existing_regions`] (and the
+    /// system-group bootstrap) rather than through this path.
+    ///
+    /// Entries that fail the layout check (non-numeric name, missing
+    /// `state/` subdirectory, non-directory entry) are silently skipped
+    /// and logged at debug level. A single malformed entry does not fail
+    /// the whole scan.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegionStorageError::Storage`] if the region directory
+    /// cannot be opened for reading for a reason other than "does not
+    /// exist". A missing region directory yields an empty result.
+    pub fn discover_existing_organizations(
+        &self,
+        region: Region,
+    ) -> Result<Vec<OrganizationId>, RegionStorageError> {
+        let region_dir = self.region_dir(region);
+        let entries = match std::fs::read_dir(&region_dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(RegionStorageError::Storage {
+                    region,
+                    organization_id: OrganizationId::new(0),
+                    message: format!(
+                        "failed to read region directory {}: {e}",
+                        region_dir.display()
+                    ),
+                });
+            },
+        };
+
+        let mut discovered: Vec<OrganizationId> = Vec::new();
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::debug!(
+                        region = region.as_str(),
+                        error = %e,
+                        "Organization discovery: skipping entry with I/O error",
+                    );
+                    continue;
+                },
+            };
+            let path = entry.path();
+            if !path.is_dir() {
+                tracing::debug!(
+                    region = region.as_str(),
+                    entry = %path.display(),
+                    "Organization discovery: skipping non-directory entry",
+                );
+                continue;
+            }
+            let dir_name = match entry.file_name().into_string() {
+                Ok(name) => name,
+                Err(_) => {
+                    tracing::debug!(
+                        region = region.as_str(),
+                        entry = %path.display(),
+                        "Organization discovery: skipping non-UTF-8 directory name",
+                    );
+                    continue;
+                },
+            };
+            let organization_id = match dir_name.parse::<i64>() {
+                Ok(n) => OrganizationId::new(n),
+                Err(_) => {
+                    // `_meta/` (the region-group subdirectory) and any
+                    // non-numeric sibling directories land here.
+                    tracing::debug!(
+                        region = region.as_str(),
+                        dir_name = %dir_name,
+                        "Organization discovery: skipping non-numeric directory",
+                    );
+                    continue;
+                },
+            };
+            // Skip the data-region control plane (organization id 0).
+            if organization_id == OrganizationId::new(0) {
+                continue;
+            }
+            // Strict P2b.0 layout check: the per-org directory must have
+            // a `state/` subdirectory.
+            if !path.join("state").is_dir() {
+                tracing::debug!(
+                    region = region.as_str(),
+                    organization_id = organization_id.value(),
+                    entry = %path.display(),
+                    "Organization discovery: skipping org directory without state/ subdir",
+                );
+                continue;
+            }
+            discovered.push(organization_id);
+        }
+        discovered.sort_by_key(|id| id.value());
+        Ok(discovered)
+    }
 }
 
 // ============================================================================
@@ -978,6 +1088,69 @@ mod tests {
         assert_eq!(discovered.len(), 2);
         assert!(discovered.contains(&Region::US_EAST_VA));
         assert!(discovered.contains(&Region::IE_EAST_DUBLIN));
+    }
+
+    #[test]
+    fn test_discover_existing_organizations_empty_region() {
+        let temp = TestDir::new();
+        let mgr = RegionStorageManager::new(temp.path().to_path_buf());
+
+        // Region directory does not exist — empty result, no error.
+        let discovered = mgr
+            .discover_existing_organizations(Region::US_EAST_VA)
+            .expect("scan must succeed on missing region dir");
+        assert!(discovered.is_empty());
+    }
+
+    #[test]
+    fn test_discover_existing_organizations_filters_and_sorts() {
+        let temp = TestDir::new();
+        let mgr = RegionStorageManager::new(temp.path().to_path_buf());
+
+        let region_dir = temp.path().join("us-east-va");
+        // Three well-formed per-org directories (including the id=0
+        // control plane, which must be filtered out).
+        for org in [0_i64, 1, 2] {
+            let dir = region_dir.join(org.to_string()).join("state");
+            std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
+        }
+        // Junk entries: non-numeric directory name (future `_meta/`
+        // sibling), numeric directory without the `state/` marker, and
+        // a plain file with a numeric name.
+        std::fs::create_dir_all(region_dir.join("not_a_number"))
+            .expect("create non-numeric entry");
+        std::fs::create_dir_all(region_dir.join("99")).expect("create malformed org 99");
+        std::fs::write(region_dir.join("42"), b"file, not a directory")
+            .expect("create file masquerading as org");
+
+        let discovered = mgr
+            .discover_existing_organizations(Region::US_EAST_VA)
+            .expect("scan must succeed");
+        assert_eq!(
+            discovered,
+            vec![OrganizationId::new(1), OrganizationId::new(2)],
+            "must exclude org 0, non-numeric names, files, and dirs missing state/"
+        );
+    }
+
+    #[test]
+    fn test_discover_existing_organizations_global_skips_system_org() {
+        let temp = TestDir::new();
+        let mgr = RegionStorageManager::new(temp.path().to_path_buf());
+
+        // GLOBAL always houses the system org at id 0 — the discovery
+        // helper must skip it, since the system-group bootstrap brings
+        // it back up on restart.
+        let global_dir = temp.path().join("global");
+        std::fs::create_dir_all(global_dir.join("0").join("state")).expect("create global/0/state");
+
+        let discovered = mgr
+            .discover_existing_organizations(Region::GLOBAL)
+            .expect("scan must succeed");
+        assert!(
+            discovered.is_empty(),
+            "GLOBAL's system org (id 0) must not be returned by this helper"
+        );
     }
 
     // ========================================================================
