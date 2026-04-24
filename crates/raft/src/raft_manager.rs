@@ -67,7 +67,7 @@ use inferadb_ledger_state::{
     system::{MIN_NODES_PER_PROTECTED_REGION, SystemOrganizationService},
 };
 use inferadb_ledger_store::{Database, FileBackend};
-use inferadb_ledger_types::{NodeId, OrganizationId, Region};
+use inferadb_ledger_types::{NodeId, OrganizationId, Region, VaultId};
 use parking_lot::RwLock;
 use snafu::Snafu;
 use tokio::{sync::broadcast, task::JoinHandle};
@@ -131,6 +131,19 @@ pub enum RaftManagerError {
         "Protected region {region} requires at least {required} initial members, found {found}"
     ))]
     InsufficientNodes { region: Region, required: usize, found: usize },
+
+    /// Vault group not found on this node.
+    ///
+    /// Returned by [`RaftManager::get_vault_group`] when the requested
+    /// `(region, organization_id, vault_id)` triple has no registered
+    /// vault group on this node. Under Slice 2a of per-vault consensus
+    /// Phase 2, no vault groups are started yet, so every lookup returns
+    /// this variant; Slice 2b wires `CreateVault` to
+    /// `start_vault_group` and populates the map.
+    #[snafu(display(
+        "Vault group {vault_id} (organization {organization_id}, region {region}) not found"
+    ))]
+    VaultGroupNotFound { region: Region, organization_id: OrganizationId, vault_id: VaultId },
 }
 
 /// Result type for multi-raft operations.
@@ -411,6 +424,15 @@ pub struct InnerGroup {
     pub(crate) organization_creation_rx: parking_lot::Mutex<
         Option<tokio::sync::mpsc::UnboundedReceiver<OrganizationCreationRequest>>,
     >,
+    /// Per-engine commit dispatcher (P2b.1).
+    ///
+    /// Owns the engine's commit receiver and fans `CommittedBatch` values
+    /// out to per-shard apply-worker channels. The org's own shard is
+    /// registered during [`RaftManager::start_region`]; per-vault shards are
+    /// registered by `start_vault_group` (P2b.2) via [`commit_dispatcher`].
+    ///
+    /// [`commit_dispatcher`]: InnerGroup::commit_dispatcher
+    pub(crate) commit_dispatcher: Arc<crate::commit_dispatcher::CommitDispatcher>,
 }
 
 impl InnerGroup {
@@ -485,6 +507,17 @@ impl InnerGroup {
     /// Returns the batch writer handle.
     pub fn batch_handle(&self) -> Option<&BatchWriterHandle> {
         self.batch_handle.as_ref()
+    }
+
+    /// Returns the per-engine commit dispatcher.
+    ///
+    /// Used by `start_vault_group` (P2b.2) to register additional vault
+    /// shards with the dispatcher and by `stop_vault_group` to deregister
+    /// them before
+    /// [`ConsensusEngine::remove_shard`](inferadb_ledger_consensus::ConsensusEngine::remove_shard)
+    /// returns.
+    pub fn commit_dispatcher(&self) -> &Arc<crate::commit_dispatcher::CommitDispatcher> {
+        &self.commit_dispatcher
     }
 
     /// Records activity on this group, resetting the idle timer.
@@ -1041,6 +1074,260 @@ impl OrganizationGroup {
     }
 }
 
+// ----------------------------------------------------------------------------
+// VaultGroup — per-vault data plane (Phase 2 of per-vault consensus)
+// ----------------------------------------------------------------------------
+
+/// Internal per-vault Raft-group storage.
+///
+/// Mirrors the shape of [`InnerGroup`] but scoped to a single vault
+/// `(region, organization_id, vault_id)`. A vault group has no independent
+/// elections — its leader is delegated from the parent
+/// [`OrganizationGroup`] via [`ConsensusHandle::adopt_leader`]. Vault groups
+/// share the parent org's `consensus_transport` rather than owning their own,
+/// so this type intentionally omits a `consensus_transport` field (unlike
+/// [`InnerGroup`]).
+///
+/// **Do not use this type directly from consumer code.** It exists so the
+/// [`VaultGroup`] newtype can surface a tier-appropriate method set without
+/// a `Deref` leak — same rationale as [`InnerGroup`] vs the three tier
+/// wrappers above.
+///
+/// ## Slice 2a scope
+///
+/// This type and the [`VaultGroup`] newtype are introduced by Slice 2a of
+/// per-vault consensus Phase 2 to give the routing code a concrete
+/// destination for vault-scoped proposals. `RaftManager` does not yet start
+/// vault groups (`start_vault_group` is a Slice 2b deliverable); the
+/// read-side lookups (`get_vault_group`, `list_vault_groups`,
+/// `has_vault_group`) return empty / `RegionNotFound` until Slice 2b wires
+/// the `CreateVault` → `start_vault_group` channel.
+pub struct InnerVaultGroup {
+    /// Region this vault group lives in.
+    pub(crate) region: Region,
+    /// Parent organization.
+    pub(crate) organization_id: OrganizationId,
+    /// Vault identifier — the third tier key.
+    pub(crate) vault_id: VaultId,
+    /// Consensus handle for background jobs and services.
+    pub(crate) handle: Arc<ConsensusHandle>,
+    /// Shared state layer. Phase 1 already made the underlying `state.db`
+    /// per-vault; a vault group still borrows the parent org's
+    /// `StateLayer` (which owns the per-vault `Database`s internally) so
+    /// apply workers write through the same accessor the org uses for
+    /// metadata reads.
+    pub(crate) state: Arc<StateLayer<FileBackend>>,
+    /// Per-vault block archive — the vault's own Merkle chain.
+    pub(crate) block_archive: Arc<BlockArchive<FileBackend>>,
+    /// Accessor for applied state.
+    pub(crate) applied_state: AppliedStateAccessor,
+    /// Block announcement broadcast channel. Shared with the parent org
+    /// for now; Phase 4 will scope announcements per-vault.
+    pub(crate) block_announcements: broadcast::Sender<BlockAnnouncement>,
+    /// Batch writer handle for coalescing vault-scoped writes.
+    pub(crate) batch_handle: Option<BatchWriterHandle>,
+    /// Shared state root commitment buffer.
+    pub(crate) commitment_buffer:
+        std::sync::Arc<std::sync::Mutex<Vec<crate::types::StateRootCommitment>>>,
+    /// Leader lease — under `LeadershipMode::Delegated` this points at the
+    /// parent org's lease (vault groups never run elections).
+    pub(crate) leader_lease: Arc<crate::leader_lease::LeaderLease>,
+    /// Watch channel receiver for applied index (ReadIndex protocol).
+    pub(crate) applied_index_rx: tokio::sync::watch::Receiver<u64>,
+}
+
+impl InnerVaultGroup {
+    /// Returns the region.
+    pub fn region(&self) -> Region {
+        self.region
+    }
+
+    /// Returns the parent organization identifier.
+    pub fn organization_id(&self) -> OrganizationId {
+        self.organization_id
+    }
+
+    /// Returns the vault identifier.
+    pub fn vault_id(&self) -> VaultId {
+        self.vault_id
+    }
+
+    /// Returns the consensus handle.
+    pub fn handle(&self) -> &Arc<ConsensusHandle> {
+        &self.handle
+    }
+
+    /// Returns the state layer.
+    pub fn state(&self) -> &Arc<StateLayer<FileBackend>> {
+        &self.state
+    }
+
+    /// Returns the block archive.
+    pub fn block_archive(&self) -> &Arc<BlockArchive<FileBackend>> {
+        &self.block_archive
+    }
+
+    /// Returns the applied state accessor.
+    pub fn applied_state(&self) -> &AppliedStateAccessor {
+        &self.applied_state
+    }
+
+    /// Returns the block announcements broadcast channel.
+    pub fn block_announcements(&self) -> &broadcast::Sender<BlockAnnouncement> {
+        &self.block_announcements
+    }
+
+    /// Returns the batch writer handle.
+    pub fn batch_handle(&self) -> Option<&BatchWriterHandle> {
+        self.batch_handle.as_ref()
+    }
+
+    /// Returns the shared commitment buffer handle.
+    pub fn commitment_buffer(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<Vec<crate::types::StateRootCommitment>>> {
+        std::sync::Arc::clone(&self.commitment_buffer)
+    }
+
+    /// Returns the leader lease.
+    pub fn leader_lease(&self) -> &Arc<crate::leader_lease::LeaderLease> {
+        &self.leader_lease
+    }
+
+    /// Returns a receiver for the applied-index watch channel.
+    pub fn applied_index_watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.applied_index_rx.clone()
+    }
+
+    /// Checks if this node is the leader for this vault group (delegated
+    /// from the parent organization group).
+    pub fn is_leader(&self, _node_id: LedgerNodeId) -> bool {
+        self.handle.is_leader()
+    }
+
+    /// Returns the current leader node ID.
+    pub fn current_leader(&self) -> Option<LedgerNodeId> {
+        self.handle.current_leader()
+    }
+}
+
+/// Vault-tier Raft group — data plane scoped to a single vault within an
+/// organization.
+///
+/// Owns entity writes (`Write`, `BatchWrite`, `IngestExternalEvents`) for
+/// one vault. Under the Phase 2 design, leadership is delegated from the
+/// parent [`OrganizationGroup`] via [`ConsensusHandle::adopt_leader`] — vault
+/// groups never run independent elections. Storage (state.db, blocks.db,
+/// events.db, raft.db, WAL) is per-vault under
+/// `{data_dir}/{region}/{organization_id}/state/vault-{vault_id}/`.
+///
+/// Variant validation at the apply worker rejects org-scoped variants
+/// (`CreateVault`, `AddOrganizationMember`, team / invitation / app
+/// lifecycle, etc.) with a tier-violation error — those continue to apply
+/// through the parent [`OrganizationGroup`].
+///
+/// ## Slice 2a scope
+///
+/// Slice 2a introduces the type and the [`RaftManager`] read-side lookup
+/// surface. `start_vault_group` / `stop_vault_group` and the
+/// `CreateVault` → start-group wiring arrive in Slice 2b. Until Slice 2b
+/// lands, the `RaftManager` holds no vault groups — `get_vault_group`
+/// returns [`RaftManagerError::RegionNotFound`] and `list_vault_groups`
+/// returns an empty [`Vec`]. The Write path continues to propose through
+/// the parent [`OrganizationGroup`]; Slice 2c flips the routing key.
+#[derive(Clone)]
+pub struct VaultGroup(pub(crate) Arc<InnerVaultGroup>);
+
+impl VaultGroup {
+    /// Tier-escape accessor to the underlying [`InnerVaultGroup`]. See
+    /// [`SystemGroup::inner`] for the rationale and the tier-discipline
+    /// caveat.
+    #[doc(hidden)]
+    pub fn inner(&self) -> &Arc<InnerVaultGroup> {
+        &self.0
+    }
+
+    /// Returns the region.
+    pub fn region(&self) -> Region {
+        self.0.region()
+    }
+
+    /// Returns the parent organization identifier.
+    pub fn organization_id(&self) -> OrganizationId {
+        self.0.organization_id()
+    }
+
+    /// Returns the vault identifier.
+    pub fn vault_id(&self) -> VaultId {
+        self.0.vault_id()
+    }
+
+    /// Returns the consensus handle.
+    #[must_use]
+    pub fn handle(&self) -> &Arc<ConsensusHandle> {
+        self.0.handle()
+    }
+
+    /// Returns the state layer.
+    #[must_use]
+    pub fn state(&self) -> &Arc<StateLayer<FileBackend>> {
+        self.0.state()
+    }
+
+    /// Returns the block archive.
+    #[must_use]
+    pub fn block_archive(&self) -> &Arc<BlockArchive<FileBackend>> {
+        self.0.block_archive()
+    }
+
+    /// Returns the applied state accessor.
+    #[must_use]
+    pub fn applied_state(&self) -> &AppliedStateAccessor {
+        self.0.applied_state()
+    }
+
+    /// Returns the block announcements broadcast channel.
+    #[must_use]
+    pub fn block_announcements(&self) -> &broadcast::Sender<BlockAnnouncement> {
+        self.0.block_announcements()
+    }
+
+    /// Returns the batch writer handle, if batch writing is enabled.
+    #[must_use]
+    pub fn batch_handle(&self) -> Option<&BatchWriterHandle> {
+        self.0.batch_handle()
+    }
+
+    /// Returns the shared commitment buffer handle.
+    pub fn commitment_buffer(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<Vec<crate::types::StateRootCommitment>>> {
+        self.0.commitment_buffer()
+    }
+
+    /// Returns the leader lease.
+    #[must_use]
+    pub fn leader_lease(&self) -> &Arc<crate::leader_lease::LeaderLease> {
+        self.0.leader_lease()
+    }
+
+    /// Returns a receiver for the applied-index watch channel.
+    pub fn applied_index_watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.0.applied_index_watch()
+    }
+
+    /// Checks if this node is the leader for this vault group (delegated
+    /// from the parent organization group).
+    pub fn is_leader(&self, node_id: LedgerNodeId) -> bool {
+        self.0.is_leader(node_id)
+    }
+
+    /// Returns the current leader node ID.
+    pub fn current_leader(&self) -> Option<LedgerNodeId> {
+        self.0.current_leader()
+    }
+}
+
 // ============================================================================
 // Raft Manager
 // ============================================================================
@@ -1063,6 +1350,15 @@ pub struct RaftManager {
     /// which returns the data-region group. Per-organization routing goes
     /// through `route_organization(organization_id)`.
     regions: RwLock<HashMap<(Region, OrganizationId), Arc<InnerGroup>>>,
+    /// Per-vault Raft groups indexed by `(region, organization_id, vault_id)`.
+    ///
+    /// Introduced by Slice 2a of per-vault consensus Phase 2; populated
+    /// by Slice 2b's `start_vault_group` when `CreateVault` applies in
+    /// the parent `OrganizationGroup`. Each vault group runs under
+    /// [`inferadb_ledger_consensus::LeadershipMode::Delegated`] — its
+    /// leader is adopted from the parent `OrganizationGroup` rather than
+    /// elected independently.
+    vault_groups: RwLock<HashMap<(Region, OrganizationId, VaultId), Arc<InnerVaultGroup>>>,
     /// Shared peer address map (node ID → network address).
     ///
     /// Populated from `initial_members` during region startup and updated
@@ -1120,6 +1416,7 @@ impl RaftManager {
             config,
             storage_manager,
             regions: RwLock::new(HashMap::new()),
+            vault_groups: RwLock::new(HashMap::new()),
             peer_addresses: crate::peer_address_map::PeerAddressMap::new(),
             registry,
             dr_event_tx: tx,
@@ -1312,6 +1609,51 @@ impl RaftManager {
         self.regions.read().keys().copied().collect()
     }
 
+    /// Lists all active per-vault `(region, organization_id, vault_id)`
+    /// triples registered on this node.
+    ///
+    /// Returns an empty [`Vec`] under Slice 2a — no vault groups are
+    /// started until Slice 2b wires `CreateVault` to
+    /// [`RaftManager::start_vault_group`]. Used by backup, monitoring,
+    /// and the consensus-transport dispatch layer once vault groups are
+    /// live.
+    pub fn list_vault_groups(&self) -> Vec<(Region, OrganizationId, VaultId)> {
+        self.vault_groups.read().keys().copied().collect()
+    }
+
+    /// Returns the vault group owning `(region, organization_id, vault_id)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RaftManagerError::VaultGroupNotFound`] if no vault group
+    /// with the given triple is registered on this node. Under Slice 2a
+    /// this is always the case; Slice 2b begins populating the map from
+    /// `CreateVault` apply.
+    pub fn get_vault_group(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+        vault_id: VaultId,
+    ) -> Result<Arc<VaultGroup>> {
+        self.vault_groups.read().get(&(region, organization_id, vault_id)).cloned().map_or(
+            Err(RaftManagerError::VaultGroupNotFound { region, organization_id, vault_id }),
+            |inner| Ok(Arc::new(VaultGroup(inner))),
+        )
+    }
+
+    /// Checks if a specific `(region, organization_id, vault_id)` vault
+    /// group is active on this node.
+    ///
+    /// Returns `false` for every triple under Slice 2a.
+    pub fn has_vault_group(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+        vault_id: VaultId,
+    ) -> bool {
+        self.vault_groups.read().contains_key(&(region, organization_id, vault_id))
+    }
+
     /// Iterates every `(organization_id, vault_id, vault_height)` tuple across
     /// all per-organization groups registered on this node.
     ///
@@ -1417,6 +1759,19 @@ impl RaftManager {
         let blocks_db = Arc::clone(block_archive.db());
         let meta_db = Arc::clone(state.meta_database());
 
+        // P2b.1: this externally-wired registration path supplies a
+        // pre-built `ConsensusHandle` whose engine's `commit_rx` is owned
+        // upstream (by whichever bootstrap caller built the handle). The
+        // dispatcher here owns a never-fed receiver — the
+        // background task simply parks on `recv()` and exits when the
+        // sender drops. This keeps the field invariant intact for a path
+        // that has no in-tree callers today; if the path acquires real
+        // callers, they must wire the engine's `commit_rx` through
+        // `CommitDispatcher::new` and pass the dispatcher in.
+        let (_unused_tx, unused_rx) =
+            tokio::sync::mpsc::channel::<inferadb_ledger_consensus::committed::CommittedBatch>(1);
+        let commit_dispatcher = Arc::new(crate::commit_dispatcher::CommitDispatcher::new(unused_rx));
+
         let inner = Arc::new(InnerGroup {
             region,
             organization_id: OrganizationId::new(0),
@@ -1439,6 +1794,7 @@ impl RaftManager {
             jobs_active: Arc::new(AtomicBool::new(false)),
             region_creation_rx: parking_lot::Mutex::new(None),
             organization_creation_rx: parking_lot::Mutex::new(None),
+            commit_dispatcher,
         });
 
         {
@@ -2015,6 +2371,22 @@ impl RaftManager {
             std::time::Duration::from_millis(2),
         );
 
+        // P2b.1: introduce the per-engine commit dispatcher between the
+        // engine's single commit channel and the per-shard apply workers.
+        // The org's own shard is the only initial registration; P2b.2 will
+        // register additional vault shards from `start_vault_group` against
+        // `InnerGroup::commit_dispatcher()`.
+        //
+        // The org-shard downstream channel matches the engine commit
+        // channel's capacity (10_000) so the dispatcher does not become a
+        // throughput bottleneck for the org's own batches.
+        let commit_dispatcher = Arc::new(crate::commit_dispatcher::CommitDispatcher::new(commit_rx));
+        let (org_batch_tx, org_batch_rx) =
+            tokio::sync::mpsc::channel::<inferadb_ledger_consensus::committed::CommittedBatch>(
+                10_000,
+            );
+        commit_dispatcher.register(shard_id, org_batch_tx);
+
         let state_rx = state_watchers.get(&shard_id).cloned().unwrap_or_else(|| {
             let (_, rx) = tokio::sync::watch::channel(
                 inferadb_ledger_consensus::leadership::ShardState::default(),
@@ -2135,7 +2507,9 @@ impl RaftManager {
             if region == inferadb_ledger_types::Region::GLOBAL {
                 apply_worker = apply_worker.with_dr_event_tx(self.dr_event_tx.clone());
             }
-            tokio::spawn(apply_worker.run(commit_rx));
+            // Apply worker reads from the per-shard channel registered with
+            // the dispatcher above, not the raw engine commit channel.
+            tokio::spawn(apply_worker.run(org_batch_rx));
         } else {
             // Per-organization group — uses OrganizationRequest.
             let apply_worker =
@@ -2146,7 +2520,9 @@ impl RaftManager {
                     region.as_str().to_string(),
                     organization_id,
                 );
-            tokio::spawn(apply_worker.run(commit_rx));
+            // Apply worker reads from the per-shard channel registered with
+            // the dispatcher above, not the raw engine commit channel.
+            tokio::spawn(apply_worker.run(org_batch_rx));
         }
 
         // Create region group.
@@ -2179,6 +2555,7 @@ impl RaftManager {
             jobs_active: Arc::new(AtomicBool::new(jobs_running)),
             region_creation_rx: parking_lot::Mutex::new(region_creation_rx),
             organization_creation_rx: parking_lot::Mutex::new(organization_creation_rx),
+            commit_dispatcher,
         });
 
         {
@@ -2376,16 +2753,32 @@ impl RaftManager {
         // sentinel.
         //
         // Slice 2b: `StateLayer` no longer holds a singleton state DB.
-        // It materialises per-vault DBs lazily via this factory closure,
-        // which composes `{organization_dir}/state/vault-{id}.db` per
-        // vault. `RegionStorageManager::open_organization` already
-        // created the `state/` directory; the factory only needs to
-        // open (or create) the per-vault file.
+        // It materialises per-vault DBs lazily via this factory closure.
+        // P2b.0 moves each vault's state.db down one level into a
+        // per-vault subdirectory so future slices can add per-vault
+        // `raft.db` / `blocks.db` / `events.db` alongside — the factory
+        // composes `{organization_dir}/state/vault-{id}/state.db` via
+        // `RegionStorage::vault_db_path` and creates the parent
+        // `vault-{id}/` directory lazily on first reference.
+        // `RegionStorageManager::open_organization` already created the
+        // top-level `state/` directory.
         let region_storage_for_factory = Arc::clone(&storage);
         let state = Arc::new(
             StateLayer::new(
                 move |vault| {
                     let path = region_storage_for_factory.vault_db_path(vault);
+                    // P2b.0: ensure the per-vault `vault-{id}/` directory
+                    // exists before opening state.db. Lazy creation keeps
+                    // `open_organization` O(1) regardless of how many
+                    // vaults the org ever had.
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| {
+                            inferadb_ledger_state::StateError::Store {
+                                source: inferadb_ledger_store::Error::Io { source: e },
+                                location: snafu::location!(),
+                            }
+                        })?;
+                    }
                     let db = if path.exists() {
                         Database::<FileBackend>::open(&path)
                     } else {
@@ -2408,7 +2801,7 @@ impl RaftManager {
             )
             .map_err(|e| RaftManagerError::Storage {
                 region,
-                message: format!("Failed to open StateLayer (Slice 2b factory): {e}"),
+                message: format!("Failed to open StateLayer (P2b.0 factory): {e}"),
             })?,
         );
         let block_archive = Arc::new(BlockArchive::new(storage.blocks_db().clone()));
@@ -3184,6 +3577,45 @@ mod tests {
         assert_eq!(stats.total_regions, 0);
         assert_eq!(stats.leader_regions, 0);
         assert_eq!(stats.node_id, 1);
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Slice 2a: VaultGroup lookup surface
+    //
+    // Under Slice 2a no vault groups are actually started — the map is
+    // empty and all lookups return `VaultGroupNotFound`. Slice 2b wires
+    // `CreateVault` apply to `start_vault_group` and begins populating
+    // the map; these tests will continue to pass because they exercise
+    // the empty-map path explicitly.
+    // ────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_vault_groups_empty_on_fresh_manager() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        assert!(manager.list_vault_groups().is_empty());
+        assert!(!manager.has_vault_group(Region::GLOBAL, OrganizationId::new(1), VaultId::new(1),));
+    }
+
+    #[test]
+    fn test_get_vault_group_returns_not_found_when_unregistered() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        let result =
+            manager.get_vault_group(Region::US_EAST_VA, OrganizationId::new(7), VaultId::new(42));
+        match result {
+            Ok(_) => panic!("expected VaultGroupNotFound on fresh manager"),
+            Err(RaftManagerError::VaultGroupNotFound { region, organization_id, vault_id }) => {
+                assert_eq!(region, Region::US_EAST_VA);
+                assert_eq!(organization_id.value(), 7);
+                assert_eq!(vault_id.value(), 42);
+            },
+            Err(other) => panic!("expected VaultGroupNotFound, got {other:?}"),
+        }
     }
 
     #[test]

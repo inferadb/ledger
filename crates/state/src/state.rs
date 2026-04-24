@@ -103,7 +103,7 @@ pub type Result<T> = std::result::Result<T, StateError>;
 /// closure at every call site.
 ///
 /// Production code uses a per-vault factory
-/// (`{org_dir}/state/vault-{id}.db`) assembled in
+/// (`{org_dir}/state/vault-{id}/state.db`) assembled in
 /// `RaftManager::open_region_storage` and must not call this helper.
 ///
 /// # Errors
@@ -127,9 +127,12 @@ where
 /// Factory closure that opens (or creates) the [`Database`] backing a
 /// specific vault's state.
 ///
-/// Introduced by Slice 2b of per-vault consensus. The production factory
-/// captures the per-organization path components and composes
-/// `{data_dir}/{region}/{organization_id}/state/vault-{vault_id}.db`.
+/// Introduced by Slice 2b of per-vault consensus. P2b.0 drops each
+/// vault's state.db one level deeper so future slices can add
+/// per-vault `raft.db` / `blocks.db` / `events.db` alongside. The
+/// production factory captures the per-organization path components
+/// and composes
+/// `{data_dir}/{region}/{organization_id}/state/vault-{vault_id}/state.db`.
 /// Test factories capture an in-memory backend and open a fresh
 /// [`Database::open_in_memory`] per vault. The factory is invoked exactly
 /// once per vault — the per-vault HashMap caches the resulting [`Arc`] for
@@ -3244,19 +3247,22 @@ mod tests {
         use inferadb_ledger_store::{Database, FileBackend};
         use tempfile::tempdir;
 
-        // Slice 2b: the factory shape mirrors production —
-        // `state/vault-{vault_id}.db` under a per-case directory.
+        // P2b.0: the factory shape mirrors production —
+        // `state/vault-{vault_id}/state.db` under a per-case directory.
+        // The factory creates the per-vault directory lazily before
+        // opening state.db, matching the production factory in
+        // `RaftManager::open_region_storage`.
         fn make_factory(
             root: PathBuf,
         ) -> impl Fn(VaultId) -> Result<Arc<Database<FileBackend>>> + Send + Sync + 'static
         {
             move |vault: VaultId| {
-                let state_dir = root.join("state");
-                std::fs::create_dir_all(&state_dir).map_err(|e| StateError::Store {
+                let vault_dir = root.join("state").join(format!("vault-{}", vault.value()));
+                std::fs::create_dir_all(&vault_dir).map_err(|e| StateError::Store {
                     source: inferadb_ledger_store::Error::Io { source: e },
                     location: snafu::location!(),
                 })?;
-                let path = state_dir.join(format!("vault-{}.db", vault.value()));
+                let path = vault_dir.join("state.db");
                 let db = if path.exists() {
                     Database::<FileBackend>::open(&path)
                 } else {

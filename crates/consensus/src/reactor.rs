@@ -4,7 +4,12 @@
 //! channel, dispatches them to the appropriate [`ConsensusState`], collects [`Action`]
 //! values, manages timer expirations, and performs periodic WAL flushes.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    any::Any,
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use metrics::counter;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -26,7 +31,6 @@ use crate::{
 };
 
 /// Events sent to the reactor via the inbox channel.
-#[derive(Debug)]
 pub enum ReactorEvent {
     /// Propose a single entry to a shard.
     Propose {
@@ -141,6 +145,49 @@ pub enum ReactorEvent {
         /// The leader's term.
         term: u64,
     },
+    /// Register a new shard at runtime.
+    ///
+    /// The shard is constructed externally (with its `LeadershipMode`
+    /// already set via [`crate::ConsensusState::set_leadership_mode`]) and
+    /// handed to the reactor; the reactor downcasts it to its concrete
+    /// [`crate::ConsensusState<C, R>`] type, inserts it into the shard map,
+    /// installs the state watcher, and processes initial actions (e.g.,
+    /// scheduling the election timer).
+    ///
+    /// The `boxed_shard` must be a `Box<ConsensusState<C, R>>` whose
+    /// generics match those of the running reactor. The downcast is a
+    /// runtime check; a mismatch is logged and the registration is
+    /// dropped.
+    AddShard {
+        /// The shard to register, type-erased. The reactor downcasts to
+        /// its concrete `ConsensusState<C, R>` on receipt.
+        boxed_shard: Box<dyn Any + Send>,
+        /// ID of the shard — used to look up / guard against duplicate
+        /// registration before the downcast runs.
+        shard_id: ConsensusStateId,
+        /// Watch sender for broadcasting the shard's state transitions.
+        /// Dropped if the registration is rejected (duplicate / downcast
+        /// failure), which invalidates the caller's receiver.
+        state_tx: watch::Sender<ShardState>,
+    },
+    /// Mark a shard for graceful shutdown and drop it after a grace
+    /// period.
+    ///
+    /// Pending proposals for the shard are rejected immediately with
+    /// [`ConsensusError::NotLeader`]. Election / heartbeat timers are
+    /// cancelled. A cleanup timer fires after 30 seconds to drop the
+    /// shard from the reactor's maps (`shards`, `state_watchers`,
+    /// `last_applied`).
+    ///
+    /// This is the inverse of [`ReactorEvent::AddShard`] and is the
+    /// primitive used when a per-vault / per-organization shard is being
+    /// decommissioned (as opposed to being removed from membership,
+    /// which is driven by the [`crate::action::Action::ShardRemoved`]
+    /// path).
+    RemoveShard {
+        /// Target shard.
+        shard: ConsensusStateId,
+    },
     /// Graceful shutdown request.
     Shutdown,
 }
@@ -181,6 +228,12 @@ pub struct Reactor<C: Clock, R: RngSource, W: WalBackend, T: NetworkTransport> {
     /// Async fsync lifecycle phase — `Idle` until entries are submitted, then
     /// `Submitted` until the fsync completes (or immediately for sync backends).
     fsync_phase: FsyncPhase,
+    /// Shards that were marked for explicit removal via
+    /// [`ReactorEvent::RemoveShard`]. The cleanup timer unconditionally drops
+    /// these from the reactor's maps, bypassing the "still in membership"
+    /// restore-from-shutdown guard used for the membership-driven
+    /// [`crate::action::Action::ShardRemoved`] path.
+    force_removal_shards: HashSet<ConsensusStateId>,
 }
 
 impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor<C, R, W, T> {
@@ -218,6 +271,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             last_applied: HashMap::new(),
             state_watchers: HashMap::new(),
             fsync_phase: FsyncPhase::Idle,
+            force_removal_shards: HashSet::new(),
         }
     }
 
@@ -630,6 +684,100 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                 let _ = ack.send(result);
                 vec![]
             },
+            ReactorEvent::AddShard { boxed_shard, shard_id, state_tx } => {
+                // Duplicate-registration guard. A duplicate is a caller
+                // bug — ignore and drop `state_tx` so the caller's receiver
+                // observes a closed channel.
+                if self.shards.contains_key(&shard_id) {
+                    tracing::warn!(
+                        shard = shard_id.0,
+                        "AddShard: shard already registered — ignoring duplicate",
+                    );
+                    drop(state_tx);
+                    return vec![];
+                }
+                // The reactor is generic over `C, R` so we know exactly the
+                // target type of the downcast. A mismatch here means a
+                // caller built a shard with different generics than the
+                // reactor — a programming error. Log and drop to avoid
+                // corrupting state.
+                let shard: ConsensusState<C, R> =
+                    match boxed_shard.downcast::<ConsensusState<C, R>>() {
+                        Ok(b) => *b,
+                        Err(_) => {
+                            tracing::error!(
+                                shard = shard_id.0,
+                                "AddShard: boxed_shard type did not match \
+                             reactor's ConsensusState<C, R> — dropping registration",
+                            );
+                            drop(state_tx);
+                            return vec![];
+                        },
+                    };
+                debug_assert_eq!(
+                    shard.id(),
+                    shard_id,
+                    "AddShard: shard_id in event must match ConsensusState::id"
+                );
+                // Initial actions (typically schedules the election timer).
+                let actions = shard.initial_actions();
+                // Initialize last_applied from the shard's commit_index
+                // when the shard was constructed with non-zero commit
+                // (post-snapshot or post-crash recovery), matching the
+                // behaviour of [`Self::add_shard`] at startup.
+                let restored_commit = shard.commit_index();
+                if restored_commit > 0 {
+                    self.last_applied.insert(shard_id, restored_commit);
+                }
+                // Install into reactor maps.
+                self.shards.insert(shard_id, shard);
+                self.state_watchers.insert(shard_id, state_tx);
+                // Process initial actions (schedules election timer).
+                self.process_actions(actions);
+                tracing::info!(shard = shard_id.0, "AddShard: registered at runtime");
+                vec![shard_id]
+            },
+            ReactorEvent::RemoveShard { shard } => {
+                let Some(s) = self.shards.get_mut(&shard) else {
+                    tracing::debug!(
+                        shard = shard.0,
+                        "RemoveShard: shard not registered — ignoring",
+                    );
+                    return vec![];
+                };
+                tracing::info!(shard = shard.0, "RemoveShard: marking for graceful shutdown");
+                // Mark the shard as Shutdown. It still processes in-flight
+                // peer messages during the grace period but will not
+                // initiate elections or heartbeats.
+                s.mark_shutdown();
+                // Record this as an explicit removal so the cleanup timer
+                // unconditionally drops it (bypassing the
+                // restore-from-shutdown guard used by the
+                // membership-driven ShardRemoved path).
+                self.force_removal_shards.insert(shard);
+                // Cancel election / heartbeat timers — the shard is
+                // winding down. `cancel_all` does not touch Cleanup, so
+                // scheduling the Cleanup timer below is safe.
+                self.timers.cancel_all(shard);
+                // Drain pending proposal responses for this shard with
+                // NotLeader so waiters unblock immediately rather than
+                // hanging until the oneshot drops.
+                let mut still_pending = Vec::with_capacity(self.pending_responses.len());
+                for (sid, idx, resp) in self.pending_responses.drain(..) {
+                    if sid == shard {
+                        let _ = resp.send(Err(ConsensusError::NotLeader));
+                    } else {
+                        still_pending.push((sid, idx, resp));
+                    }
+                }
+                self.pending_responses = still_pending;
+                // Schedule cleanup (30s grace period for in-flight
+                // messages). On expiry, process_expired_timers drops the
+                // shard from the reactor's maps.
+                let deadline = self.clock.now() + Duration::from_secs(30);
+                self.timers.schedule(shard, TimerKind::Cleanup, deadline);
+                vec![shard]
+            },
             ReactorEvent::AdoptLeader { shard, leader, term } => {
                 // Route to the target shard's `adopt_leader` (delegated
                 // leadership). If the shard is not registered with this
@@ -711,30 +859,44 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                         }
                     },
                     TimerKind::Cleanup => {
-                        // Grace period expired. Only remove if the local node is
-                        // still absent from the shard's membership. During log
-                        // replay, a node that joined after the shard was created
-                        // may see historical entries that don't include it,
-                        // triggering a spurious ShardRemoved+Cleanup. By the time
-                        // the timer fires, later entries will have restored
-                        // membership — check before removing.
-                        let local = shard.local_node_id();
-                        let still_removed = !shard.membership().is_voter(local)
-                            && !shard.membership().is_learner(local);
-                        if still_removed {
+                        // Explicit removals (via `ReactorEvent::RemoveShard`)
+                        // unconditionally drop the shard. The shard is being
+                        // decommissioned as a whole, not removed from Raft
+                        // membership — the membership-restore heuristic below
+                        // does not apply.
+                        if self.force_removal_shards.contains(&shard_id) {
                             tracing::info!(
                                 shard = shard_id.0,
-                                "ConsensusState cleanup timer expired — removing"
+                                "RemoveShard cleanup timer expired — removing"
                             );
                             shards_to_remove.push(shard_id);
+                            Vec::new()
                         } else {
-                            tracing::info!(
-                                shard = shard_id.0,
-                                "ConsensusState cleanup timer expired but node is back in membership — keeping"
-                            );
-                            shard.restore_from_shutdown();
+                            // Grace period expired. Only remove if the local node is
+                            // still absent from the shard's membership. During log
+                            // replay, a node that joined after the shard was created
+                            // may see historical entries that don't include it,
+                            // triggering a spurious ShardRemoved+Cleanup. By the time
+                            // the timer fires, later entries will have restored
+                            // membership — check before removing.
+                            let local = shard.local_node_id();
+                            let still_removed = !shard.membership().is_voter(local)
+                                && !shard.membership().is_learner(local);
+                            if still_removed {
+                                tracing::info!(
+                                    shard = shard_id.0,
+                                    "ConsensusState cleanup timer expired — removing"
+                                );
+                                shards_to_remove.push(shard_id);
+                            } else {
+                                tracing::info!(
+                                    shard = shard_id.0,
+                                    "ConsensusState cleanup timer expired but node is back in membership — keeping"
+                                );
+                                shard.restore_from_shutdown();
+                            }
+                            Vec::new()
                         }
-                        Vec::new()
                     },
                 };
                 all_actions.extend(actions);
@@ -742,10 +904,14 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             }
         }
 
-        // Remove shutdown shards after the grace period.
+        // Remove shutdown shards after the grace period. Drop every
+        // per-shard map entry — a later AddShard with the same id should
+        // start from a clean slate.
         for shard_id in shards_to_remove {
             self.shards.remove(&shard_id);
             self.state_watchers.remove(&shard_id);
+            self.last_applied.remove(&shard_id);
+            self.force_removal_shards.remove(&shard_id);
         }
 
         self.process_actions(all_actions);

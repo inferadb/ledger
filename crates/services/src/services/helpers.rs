@@ -297,16 +297,26 @@ pub(crate) fn create_replay_context() -> Result<(TempDir, StateLayer<FileBackend
         Database::<FileBackend>::create(temp_dir.path().join("replay_meta.db"))
             .map_err(|e| error_classify::storage_error(&e))?,
     );
-    // Slice 2b: the replay context owns no persistent state across calls,
-    // so the factory returns a per-vault file under a `replay-state/`
-    // directory inside `temp_dir`. Every replay gets a fresh temp dir,
-    // so opening by create vs. open doesn't matter — the path never
-    // exists when the factory first fires.
+    // P2b.0: the replay context owns no persistent state across calls,
+    // so the factory opens a per-vault file under
+    // `replay-state/vault-{id}/state.db` inside `temp_dir`. Every
+    // replay gets a fresh temp dir, so opening by create vs. open
+    // doesn't matter — the path never exists when the factory first
+    // fires. The factory creates the per-vault directory lazily to
+    // match the production factory in
+    // `RaftManager::open_region_storage`.
     let state_dir = temp_dir.path().join("replay-state");
     std::fs::create_dir_all(&state_dir).map_err(|e| error_classify::storage_error(&e))?;
     let state_dir_for_factory = state_dir.clone();
     let factory = move |vault: inferadb_ledger_types::VaultId| {
-        let path = state_dir_for_factory.join(format!("vault-{}.db", vault.value()));
+        let vault_dir = state_dir_for_factory.join(format!("vault-{}", vault.value()));
+        std::fs::create_dir_all(&vault_dir).map_err(|e| {
+            inferadb_ledger_state::StateError::Store {
+                source: inferadb_ledger_store::Error::Io { source: e },
+                location: snafu::location!(),
+            }
+        })?;
+        let path = vault_dir.join("state.db");
         let db = if path.exists() {
             Database::<FileBackend>::open(&path)
         } else {

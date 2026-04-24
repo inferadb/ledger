@@ -255,6 +255,80 @@ impl ConsensusHandle {
         self.engine.adopt_leader(self.shard, leader, term).await
     }
 
+    /// Registers a new shard on the underlying [`ConsensusEngine`].
+    ///
+    /// Passthrough to [`ConsensusEngine::add_shard`]. Used by
+    /// `RaftManager::start_vault_group` (P2b.2.x) to attach a new
+    /// per-vault `ConsensusState` to the parent organization's engine
+    /// without re-plumbing the engine handle through every call site.
+    ///
+    /// The shard's `C` / `R` generics must match those of the engine
+    /// this handle wraps — enforced at runtime by the reactor's
+    /// `Box<dyn Any>` downcast inside
+    /// [`ConsensusEngine::add_shard`]. In practice callers reuse the
+    /// same concrete types passed to [`ConsensusEngine::start`]
+    /// (production: [`inferadb_ledger_consensus::clock::SystemClock`] /
+    /// [`inferadb_ledger_consensus::rng::SystemRng`]).
+    ///
+    /// Returns the [`watch::Receiver<ShardState>`] for the newly
+    /// registered shard so the caller can observe leader / term /
+    /// commit-index transitions. See [`ConsensusEngine::add_shard`] for
+    /// full semantics.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`ConsensusError`] returned by the engine — in
+    /// particular [`ConsensusError::InboxFull`] when the reactor's
+    /// control inbox is full or the reactor has shut down.
+    ///
+    /// ```no_run
+    /// # use inferadb_ledger_consensus::{
+    /// #     clock::SystemClock, rng::SystemRng, consensus_state::ConsensusState,
+    /// # };
+    /// # use inferadb_ledger_raft::ConsensusHandle;
+    /// # async fn register(
+    /// #     parent: &ConsensusHandle,
+    /// #     vault_shard: ConsensusState<SystemClock, SystemRng>,
+    /// # ) -> Result<(), inferadb_ledger_consensus::ConsensusError> {
+    /// // Attach a per-vault shard onto the parent organization's engine.
+    /// let _state_rx = parent.add_shard(vault_shard).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn add_shard<C, R>(
+        &self,
+        shard: inferadb_ledger_consensus::consensus_state::ConsensusState<C, R>,
+    ) -> Result<watch::Receiver<ShardState>, ConsensusError>
+    where
+        C: inferadb_ledger_consensus::clock::Clock + Clone + Send + 'static,
+        R: inferadb_ledger_consensus::rng::RngSource + Send + 'static,
+    {
+        self.engine.add_shard(shard).await
+    }
+
+    /// Marks a shard for graceful shutdown on the underlying
+    /// [`ConsensusEngine`].
+    ///
+    /// Passthrough to [`ConsensusEngine::remove_shard`]. Fire-and-forget:
+    /// returns `Ok(())` once the removal event is enqueued; the reactor
+    /// rejects pending proposals, cancels timers, and drops the shard
+    /// from every map after a grace period, invalidating any
+    /// `watch::Receiver<ShardState>` held by callers for that shard.
+    ///
+    /// Note: the `shard` argument is the [`ConsensusStateId`] to remove,
+    /// which may differ from this handle's own `shard_id()` — a single
+    /// handle can drive removal of sibling shards on the same engine
+    /// (e.g. an organization handle removing a per-vault shard).
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`ConsensusError`] returned by the engine — in
+    /// particular [`ConsensusError::InboxFull`] when the reactor's
+    /// control inbox is full or the reactor has shut down.
+    pub async fn remove_shard(&self, shard: ConsensusStateId) -> Result<(), ConsensusError> {
+        self.engine.remove_shard(shard).await
+    }
+
     /// Returns `true` if a membership change is currently in-flight.
     pub fn has_pending_membership(&self) -> bool {
         self.state_rx.borrow().pending_membership
@@ -553,6 +627,57 @@ mod tests {
         let state = make_state(ConsensusStateId(0), NodeState::Follower, None, 1);
         let (handle, _map) = make_handle(node_id, state);
         assert!(handle.spillover().lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn add_shard_passthrough_registers_new_shard_on_engine() {
+        // The handle is created around an engine started with a shard at
+        // ConsensusStateId(0). A passthrough call to add_shard(...) with a
+        // fresh ConsensusStateId must reach ConsensusEngine::add_shard and
+        // come back with a state receiver whose snapshot matches the new
+        // shard's initial state.
+        let node_id: LedgerNodeId = 1;
+        let initial_state =
+            make_state(ConsensusStateId(0), NodeState::Follower, Some(NodeId(1)), 1);
+        let (handle, _map) = make_handle(node_id, initial_state);
+
+        let new_shard_id = ConsensusStateId(42);
+        let new_shard = ConsensusState::<SystemClock, SystemRng>::new(
+            new_shard_id,
+            NodeId(node_id),
+            Membership::new([NodeId(node_id)]),
+            ShardConfig::default(),
+            SystemClock,
+            SystemRng,
+            0,
+            None,
+            0,
+        );
+
+        let state_rx = handle.add_shard(new_shard).await.expect("add_shard passthrough");
+
+        let snapshot = state_rx.borrow().clone();
+        assert_eq!(snapshot.shard, new_shard_id);
+        assert_eq!(snapshot.term, 0);
+        assert_eq!(snapshot.leader, None);
+    }
+
+    #[tokio::test]
+    async fn remove_shard_passthrough_returns_ok() {
+        // remove_shard is fire-and-forget on the engine: enqueueing the
+        // removal event is the success signal. Asserting Ok(()) confirms
+        // the control inbox is reachable through the handle — the only
+        // observable of the passthrough itself.
+        let node_id: LedgerNodeId = 1;
+        let state = make_state(ConsensusStateId(0), NodeState::Follower, None, 1);
+        let (handle, _map) = make_handle(node_id, state);
+
+        // Remove a different shard id to prove the argument is the one
+        // threaded to the engine (not this handle's own shard_id()).
+        handle
+            .remove_shard(ConsensusStateId(99))
+            .await
+            .expect("remove_shard passthrough");
     }
 
     #[tokio::test]

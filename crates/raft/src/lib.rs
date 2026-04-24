@@ -48,6 +48,8 @@ pub mod backup;
 #[doc(hidden)]
 pub mod batching;
 #[doc(hidden)]
+pub mod commit_dispatcher;
+#[doc(hidden)]
 pub mod consensus_handle;
 #[doc(hidden)]
 pub mod consensus_transport;
@@ -162,6 +164,8 @@ pub use auto_recovery::AutoRecoveryJob;
 pub use backup::{BackupJob, BackupManager};
 #[doc(hidden)]
 pub use block_compaction::BlockCompactor;
+#[doc(hidden)]
+pub use commit_dispatcher::CommitDispatcher;
 #[doc(hidden)]
 pub use consensus_handle::{ConsensusHandle, HandleError, ResponseMap, SpilloverMap};
 #[doc(hidden)]

@@ -165,16 +165,22 @@ Every vault group has no per-vault `leader_lease` field — leadership is entire
 │   ├── vault-{vault_id}/
 │   │   ├── state.db            ← per-vault Database (from Phase 1)
 │   │   ├── blocks.db           ← per-vault block chain
-│   │   └── events.db           ← per-vault events
+│   │   ├── events.db           ← per-vault events
+│   │   └── raft.db             ← per-vault Raft metadata (term, voted_for,
+│   │                              membership, AppliedState snapshot)
 │   ├── ...
 │   └── _meta.db                ← per-org coordination (applied_durable
 │                                   sentinels, vault directory, hibernation
 │                                   state)
-└── raft.db                     ← per-org Raft metadata (term, voted_for,
-                                    membership) — unchanged
+└── raft.db                     ← ORG-SHARD Raft metadata (term, voted_for,
+                                    membership for the org's OWN consensus
+                                    state — for metadata-plane ops like
+                                    CreateVault / CreateApp / etc.)
 ```
 
-Key property: `raft.db` holds org-level Raft membership (the voters). Vault groups inherit that membership (every voter of the org votes on every vault). Per-vault Raft log entries live in the shared WAL, tagged by `vault_id`.
+**Design clarification (resolves the Option A/B/C design gap surfaced during P2b implementation):** every shard — org-tier and vault-tier — owns its own `raft.db` file. The org's shard uses `{org_id}/raft.db`; each vault's shard uses `{org_id}/state/vault-{vault_id}/raft.db`. Each `RaftLogStore` instance has its own file-backed BTree — no cross-shard contention on vote caches, membership, or `AppliedState` snapshots. The shared resource is ONLY the **WAL** (append-only log) which is tagged per-shard. Per-vault `AppliedState` holds only that vault's data-plane fields (`vault_heights`, `vault_health`, `vaults[(org, this_vault)]`, client sequences for writes targeting this vault); org-tier `AppliedState` holds everything else (vault directory, org metadata, app registry, saga records, slug indexes).
+
+Key property: vault groups inherit parent org's Raft voter set (every voter of the org votes on every vault). Per-vault Raft log entries live in the shared WAL, tagged by `vault_id`. Per-vault apply pipeline reads its shard's entries from the shared WAL and mutates its own per-vault `raft.db` + per-vault `state.db`.
 
 The shared WAL uses the **TiKV Raft Engine model**: append-only, single `fdatasync` per batch, per-vault MemTable for in-memory index. Crash recovery re-reads the shared log once and rebuilds all per-vault MemTables.
 

@@ -485,6 +485,72 @@ impl ConsensusEngine {
             .map_err(|_| ConsensusError::ReactorShutdown)?
     }
 
+    /// Registers a new shard with the running reactor.
+    ///
+    /// Used to register per-vault / per-organization shards mid-flight
+    /// after the engine has started. The shard must be fully constructed
+    /// (membership set, leadership mode set) before being handed off;
+    /// this method does not configure the shard.
+    ///
+    /// Returns a [`watch::Receiver<ShardState>`] so the caller can
+    /// observe the new shard's state transitions.
+    ///
+    /// # Type safety
+    ///
+    /// The shard's `C` and `R` generics must match those of the reactor
+    /// the engine spawned. A mismatch is detected at runtime by the
+    /// reactor's `Box<dyn Any>` downcast — a mismatch logs an error and
+    /// drops the registration. In practice this is enforced by the
+    /// caller using the same concrete types passed to
+    /// [`ConsensusEngine::start`].
+    ///
+    /// Concurrent calls are safe — registrations are serialised through
+    /// the reactor's control inbox.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConsensusError::InboxFull`] if the control inbox is
+    /// full or the reactor has shut down.
+    pub async fn add_shard<C, R>(
+        &self,
+        shard: crate::consensus_state::ConsensusState<C, R>,
+    ) -> Result<watch::Receiver<ShardState>, ConsensusError>
+    where
+        C: crate::clock::Clock + Clone + Send + 'static,
+        R: crate::rng::RngSource + Send + 'static,
+    {
+        let shard_id = shard.id();
+        let initial_state = shard.state_snapshot();
+        let (state_tx, state_rx) = watch::channel(initial_state);
+        let boxed_shard: Box<dyn std::any::Any + Send> = Box::new(shard);
+        self.control_inbox
+            .send(ReactorEvent::AddShard { boxed_shard, shard_id, state_tx })
+            .await
+            .map_err(|_| ConsensusError::InboxFull)?;
+        Ok(state_rx)
+    }
+
+    /// Marks a shard for graceful shutdown.
+    ///
+    /// Pending proposals for the shard are rejected immediately with
+    /// [`ConsensusError::NotLeader`]. Election / heartbeat timers are
+    /// cancelled. After a 30-second grace period the shard is dropped
+    /// from every reactor map (shards, state watchers, last-applied
+    /// tracking), invalidating any [`watch::Receiver`] held by callers.
+    ///
+    /// Fire-and-forget: returns `Ok(())` once the event is enqueued.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConsensusError::InboxFull`] if the control inbox is
+    /// full or the reactor has shut down.
+    pub async fn remove_shard(&self, shard: ConsensusStateId) -> Result<(), ConsensusError> {
+        self.control_inbox
+            .send(ReactorEvent::RemoveShard { shard })
+            .await
+            .map_err(|_| ConsensusError::InboxFull)
+    }
+
     /// Gracefully shuts down the reactor and waits for it to finish.
     pub async fn shutdown(self) {
         let _ = self.control_inbox.send(ReactorEvent::Shutdown).await;
