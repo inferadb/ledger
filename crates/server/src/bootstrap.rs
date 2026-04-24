@@ -410,6 +410,7 @@ pub async fn bootstrap_node(
             let peer_addresses = manager.peer_addresses().clone();
             let my_node_id = node_id;
             let ct = system_region.consensus_transport().cloned();
+            let manager_for_seed = Arc::clone(&manager);
             tokio::spawn(async move {
                 for addr in &addrs {
                     match crate::discovery::discover_node_info(*addr, Duration::from_secs(5)).await
@@ -445,6 +446,28 @@ pub async fn bootstrap_node(
                         },
                     }
                 }
+
+                // Transport reconciliation after seed discovery.
+                //
+                // The loop above populates `peer_addresses` asynchronously.
+                // `reconcile_transport_channels` was already called by
+                // `start_data_region` for each rediscovered region earlier in
+                // this bootstrap flow, but at that point `peer_addresses` was
+                // still empty (this seed task had not yet completed). Re-
+                // reconciling here walks every region's consensus engine and
+                // registers transport for the now-discovered peers, unblocking
+                // any election that started before peers were reachable.
+                //
+                // `reconcile_transport_channels` is idempotent: it skips peers
+                // already registered, so calling it a second time is a no-op
+                // for regions that observed the full peer set on their first
+                // pass. When no peers were discovered (e.g. all seeds
+                // unreachable), it iterates an empty peer list and exits.
+                tracing::info!(
+                    discovered_peers = peer_addresses.iter_peers().len(),
+                    "Restart: seed discovery complete, reconciling transport channels"
+                );
+                crate::placement::reconcile_transport_channels(&manager_for_seed).await;
             });
         }
 
