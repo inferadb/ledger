@@ -452,6 +452,14 @@ pub struct InnerGroup {
     pub(crate) background_jobs: parking_lot::Mutex<RegionBackgroundJobs>,
     /// Batch writer handle for coalescing writes (data-plane groups only).
     pub(crate) batch_handle: Option<BatchWriterHandle>,
+    /// Original batch-writer configuration that constructed
+    /// [`Self::batch_handle`]. Retained so per-vault Raft groups created
+    /// under this organization can construct their own
+    /// [`BatchWriter`](crate::batching::BatchWriter) with the same
+    /// coalescing thresholds. `None` when the org started without
+    /// batching configured (e.g. test fixtures); per-vault groups under
+    /// such an org also start without a batch writer.
+    pub(crate) batch_writer_config: Option<BatchWriterConfig>,
     /// Shared state root commitment buffer. Populated by apply, drained
     /// by propose for piggybacked verification.
     pub(crate) commitment_buffer:
@@ -573,6 +581,14 @@ impl InnerGroup {
     /// Returns the batch writer handle.
     pub fn batch_handle(&self) -> Option<&BatchWriterHandle> {
         self.batch_handle.as_ref()
+    }
+
+    /// Returns the batch-writer configuration that constructed this
+    /// group's [`Self::batch_handle`]. Used by `start_vault_group` to
+    /// give per-vault groups the same coalescing thresholds as their
+    /// parent organization.
+    pub fn batch_writer_config(&self) -> Option<&BatchWriterConfig> {
+        self.batch_writer_config.as_ref()
     }
 
     /// Returns the per-engine commit dispatcher.
@@ -1978,6 +1994,7 @@ impl RaftManager {
             block_announcements,
             background_jobs: parking_lot::Mutex::new(RegionBackgroundJobs::none()),
             batch_handle: None,
+            batch_writer_config: None,
             commitment_buffer,
             leader_lease,
             applied_index_rx,
@@ -3065,6 +3082,115 @@ impl RaftManager {
             });
         }
 
+        // P2c.3.b.4: per-vault batch writer.
+        //
+        // Mirrors the org-side construction in `start_region` — same
+        // submit-fn shape (`OrganizationRequest::BatchWrite { requests }`
+        // wrapped in a `RaftPayload` with piggybacked commitments) but
+        // routed through the vault's own `ConsensusHandle` so the
+        // proposal lands on the per-vault shard instead of the parent
+        // org's. Each vault gets its own coalescing window, so concurrent
+        // writes to the same vault still amortize WAL fsync cost.
+        //
+        // The config is inherited from the parent organization
+        // (option (a) in the task #164 design): per-vault tuning is not
+        // expected to diverge from per-org tuning, and adding a new
+        // `RegionConfig` field for it would expand the construction
+        // surface without a concrete need. When the parent org started
+        // without batching configured (e.g. test fixtures), the vault
+        // group also starts without a batch handle — the Write /
+        // BatchWrite handlers fall back to direct propose.
+        //
+        // `BatchWrite` is classified as `VaultTier::VaultScoped` (see
+        // `classify_vault_tier`), so the per-vault commit pump accepts
+        // it; the apply pipeline decodes the batch and fans out the
+        // returned `Vec<LedgerResponse>` to the per-vault response map.
+        //
+        // Lifecycle: the writer task is spawned via `tokio::spawn` and
+        // wrapped in `tokio::select!` against `vault_cancel` and
+        // `manager_cancel`. `stop_vault_group` cancels `vault_cancel`
+        // (see `InnerVaultGroup.cancellation`), so the spawned task
+        // exits when this single vault is torn down. Process-wide
+        // shutdown fires `manager_cancel`. Pending submissions in the
+        // queue at cancellation time are dropped — callers receive
+        // `BatchError::Dropped` via the `oneshot` `Sender` being
+        // dropped, surfacing as `ApplyDropped` to the SDK and
+        // triggering retry.
+        let vault_batch_handle = if let Some(batch_config) =
+            org_inner.batch_writer_config().cloned()
+        {
+            let handle_clone = Arc::clone(&vault_handle);
+            let buffer_clone = Arc::clone(&vault_commitment_buffer);
+            let submit_fn = move |requests: Vec<OrganizationRequest>| {
+                let h = Arc::clone(&handle_clone);
+                let buffer = Arc::clone(&buffer_clone);
+                Box::pin(async move {
+                    let batch_request = OrganizationRequest::BatchWrite { requests };
+                    let commitments =
+                        std::mem::take(&mut *buffer.lock().unwrap_or_else(|e| e.into_inner()));
+                    let payload = RaftPayload::with_commitments(batch_request, commitments, 0);
+                    match h.propose_and_wait(payload, std::time::Duration::from_secs(30)).await {
+                        Ok(LedgerResponse::BatchWrite { responses }) => Ok(responses),
+                        Ok(other) => Ok(vec![other]),
+                        Err(e) => Err(format!("Consensus error: {}", e)),
+                    }
+                })
+                    as futures::future::BoxFuture<
+                        'static,
+                        std::result::Result<Vec<LedgerResponse>, String>,
+                    >
+            };
+
+            let writer =
+                BatchWriter::new(batch_config, submit_fn, region.to_string(), organization_id);
+            let bw_handle = writer.handle();
+
+            // Spawn the writer loop with cancellation. `BatchWriter::run`
+            // is an infinite loop without its own cancellation hook
+            // (matching the org-side spawn pattern); wrapping in
+            // `tokio::select!` against the per-vault and manager tokens
+            // is what makes per-vault teardown clean — the alternative
+            // would be leaking the task until process exit, which is
+            // tolerable for org groups (one per process) but not for
+            // vault groups (one per vault, with `stop_vault_group`
+            // running on every `DeleteVault`).
+            let bw_manager_cancel = manager_cancel.clone();
+            let bw_vault_cancel = vault_cancel.clone();
+            let bw_region = region;
+            let bw_org = organization_id;
+            let bw_vault = vault_id;
+            tokio::spawn(async move {
+                tokio::select! {
+                    biased;
+                    () = bw_manager_cancel.cancelled() => {
+                        debug!(
+                            region = bw_region.as_str(),
+                            organization_id = bw_org.value(),
+                            vault_id = bw_vault.value(),
+                            "Per-vault batch writer exiting on manager cancellation",
+                        );
+                    }
+                    () = bw_vault_cancel.cancelled() => {
+                        debug!(
+                            region = bw_region.as_str(),
+                            organization_id = bw_org.value(),
+                            vault_id = bw_vault.value(),
+                            "Per-vault batch writer exiting on per-vault cancellation",
+                        );
+                    }
+                    () = writer.run() => {
+                        // Unreachable: `BatchWriter::run` only returns
+                        // when its semaphore closes, which never happens
+                        // because the semaphore is owned by the writer
+                        // itself. Treat as a defensive arm.
+                    }
+                }
+            });
+            Some(bw_handle)
+        } else {
+            None
+        };
+
         // Build the per-vault group, reusing shared fields from the
         // parent org where the data plane overlaps (handle, state,
         // block_archive, block_announcements, leader_lease under
@@ -3080,7 +3206,7 @@ impl RaftManager {
             applied_state: vault_applied_state,
             vault_applied_state: vault_applied_state_swap,
             block_announcements: org_inner.block_announcements().clone(),
-            batch_handle: None,
+            batch_handle: vault_batch_handle,
             commitment_buffer: vault_commitment_buffer,
             leader_lease: Arc::clone(org_inner.leader_lease()),
             applied_index_rx: vault_applied_index_rx,
@@ -3659,6 +3785,12 @@ impl RaftManager {
         // wired for test-expected invariants but is not reached by any
         // production call path — service handlers route org-tier writes to
         // per-org groups via `propose_to_organization_bytes`.
+        // The batch-writer config is consumed twice below: once by
+        // `BatchWriter::new` (moved into the writer task) and once by
+        // `InnerGroup::batch_writer_config` (retained so vault groups
+        // started under this org can build their own writers with the
+        // same coalescing thresholds).
+        let stored_batch_writer_config = batch_writer_config.clone();
         let batch_handle = if let Some(batch_config) = batch_writer_config {
             let handle_clone = handle.clone();
             let buffer_clone = commitment_buffer.clone();
@@ -3788,6 +3920,7 @@ impl RaftManager {
             block_announcements,
             background_jobs: parking_lot::Mutex::new(background_jobs),
             batch_handle,
+            batch_writer_config: stored_batch_writer_config,
             commitment_buffer,
             leader_lease,
             applied_index_rx,
@@ -5352,6 +5485,96 @@ mod tests {
             state.previous_vault_hash,
             inferadb_ledger_types::ZERO_HASH,
             "fresh vault chain head must be ZERO_HASH",
+        );
+    }
+
+    /// P2c.3.b.4: when the parent organization is configured with a
+    /// [`BatchWriterConfig`], `start_vault_group` constructs a per-vault
+    /// batch writer and populates [`InnerVaultGroup::batch_handle`].
+    /// Without this, the gRPC Write handler falls back to the
+    /// direct-propose path and pays per-write fsync cost.
+    #[tokio::test]
+    async fn test_start_vault_group_inherits_parent_batch_writer_config() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let batch_config = crate::batching::BatchWriterConfig::default();
+        let org_id = OrganizationId::new(88);
+        let org_group = manager
+            .start_organization_group(
+                Region::GLOBAL,
+                org_id,
+                vec![(1, "127.0.0.1:50051".to_string())],
+                true,
+                None,
+                Some(batch_config),
+            )
+            .await
+            .expect("start org group");
+
+        // Sanity: the parent org also has a batch_handle (precondition).
+        assert!(
+            org_group.batch_handle().is_some(),
+            "parent org must have batch_handle when batch_writer_config was supplied",
+        );
+
+        let vault = manager
+            .start_vault_group(Region::GLOBAL, org_id, VaultId::new(1))
+            .await
+            .expect("start vault group");
+
+        assert!(
+            vault.batch_handle().is_some(),
+            "vault group must inherit a batch_handle from parent org's batch_writer_config",
+        );
+    }
+
+    /// P2c.3.b.4: when the parent organization started without a
+    /// [`BatchWriterConfig`] (test-fixture path — `start_organization_group`
+    /// passes `None`), `start_vault_group` MUST NOT construct a per-vault
+    /// batch writer. The Write handler falls back to direct propose
+    /// through `vault_group.handle()`.
+    #[tokio::test]
+    async fn test_start_vault_group_without_parent_batch_config_yields_no_batch_handle() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let org_id = OrganizationId::new(99);
+        let org_group = manager
+            .start_organization_group(
+                Region::GLOBAL,
+                org_id,
+                vec![(1, "127.0.0.1:50051".to_string())],
+                true,
+                None,
+                // No batch config on the parent org.
+                None,
+            )
+            .await
+            .expect("start org group");
+
+        // Sanity: the parent org also has no batch_handle (precondition).
+        assert!(
+            org_group.batch_handle().is_none(),
+            "parent org must not have batch_handle when batch_writer_config was None",
+        );
+
+        let vault = manager
+            .start_vault_group(Region::GLOBAL, org_id, VaultId::new(1))
+            .await
+            .expect("start vault group");
+
+        assert!(
+            vault.batch_handle().is_none(),
+            "vault group must not have batch_handle when parent org has none",
         );
     }
 

@@ -932,14 +932,19 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         let timeout =
             inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
-        // P2c.3.b.2: route the proposal to the vault's per-vault Raft shard,
-        // not the parent organization shard. The `VaultGroup`'s apply
-        // pipeline runs the vault-scoped tier-validation gate (P2c.1) and
-        // advances the per-vault `last_applied` counter.
+        // P2c.3.b.2 / P2c.3.b.4: route the proposal to the vault's per-vault
+        // Raft shard, not the parent organization shard. The `VaultGroup`'s
+        // apply pipeline runs the vault-scoped tier-validation gate (P2c.1)
+        // and advances the per-vault `last_applied` counter.
         //
-        // Option (b) per task #164: bypass the region-level `batch_handle`
-        // and direct-propose through `vault_group.handle()`. Per-vault
-        // batch writers are Phase 4 work.
+        // Per task #164 (option (a)): prefer the per-vault batch writer
+        // when the vault group has one — it coalesces concurrent writes to
+        // the same vault into a single fsync, restoring the throughput
+        // amortization that the org-side `batch_handle` used to provide
+        // before the vault-shard routing flip. When the vault group has no
+        // batch handle (e.g. the parent org started without batching
+        // configured — test fixtures typically omit it), fall back to a
+        // direct propose through `vault_group.handle()`.
         let manager = self.manager.as_ref().ok_or_else(|| {
             status_with_correlation(
                 Status::internal("Vault-scoped writes require RaftManager configuration"),
@@ -980,39 +985,81 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         metrics::record_raft_proposal();
         ctx.start_raft_timer();
         ctx.set_batch_info(false, 1);
-        let commitments = std::mem::take(
-            &mut *vault_group.commitment_buffer().lock().unwrap_or_else(|e| e.into_inner()),
-        );
-        let payload = inferadb_ledger_raft::types::RaftPayload {
-            request: ledger_request,
-            proposed_at: chrono::Utc::now(),
-            caller: ctx.caller_or_zero(),
-            state_root_commitments: commitments,
-        };
-        let response = match vault_group.handle().propose_and_wait(payload, timeout).await {
-            Ok(result) => result,
-            Err(inferadb_ledger_raft::HandleError::Timeout { .. }) => {
-                ctx.end_raft_timer();
-                ctx.set_error("ProposalTimeout", "Raft proposal timed out");
-                metrics::record_raft_proposal_timeout();
-                return Err(status_with_correlation(
-                    Status::deadline_exceeded(format!(
-                        "Raft proposal timed out after {}ms",
-                        timeout.as_millis()
-                    )),
-                    &ctx.request_id(),
-                    ctx.trace_id(),
-                ));
-            },
-            Err(e) => {
-                ctx.end_raft_timer();
-                ctx.set_error("RaftError", &e.to_string());
-                return Err(status_with_correlation(
-                    classify_raft_error(&e.to_string()),
-                    &ctx.request_id(),
-                    ctx.trace_id(),
-                ));
-            },
+        let response = if let Some(batch_handle) = vault_group.batch_handle() {
+            // Batched path: hand the request to the per-vault batch
+            // writer. The writer drains its commitment buffer and wraps
+            // the request in `OrganizationRequest::BatchWrite { requests }`
+            // before proposing — see `start_vault_group`'s `submit_fn`.
+            let receiver = batch_handle.submit(ledger_request);
+            let result = match tokio::time::timeout(timeout, receiver).await {
+                Ok(Ok(Ok(response))) => Ok(response),
+                Ok(Ok(Err(batch_err))) => Err(batch_err.to_string()),
+                Ok(Err(_dropped)) => Err("Batch writer dropped response".to_string()),
+                Err(_elapsed) => {
+                    ctx.end_raft_timer();
+                    ctx.set_error("ProposalTimeout", "Raft proposal timed out");
+                    metrics::record_raft_proposal_timeout();
+                    return Err(status_with_correlation(
+                        Status::deadline_exceeded(format!(
+                            "Raft proposal timed out after {}ms",
+                            timeout.as_millis()
+                        )),
+                        &ctx.request_id(),
+                        ctx.trace_id(),
+                    ));
+                },
+            };
+            match result {
+                Ok(r) => r,
+                Err(message) => {
+                    ctx.end_raft_timer();
+                    ctx.set_error("RaftError", &message);
+                    return Err(status_with_correlation(
+                        classify_raft_error(&message),
+                        &ctx.request_id(),
+                        ctx.trace_id(),
+                    ));
+                },
+            }
+        } else {
+            // Fallback: direct propose through the vault's consensus
+            // handle. Drains the per-vault commitment buffer and wraps
+            // the request in a one-shot `RaftPayload` — same shape the
+            // batch writer's `submit_fn` produces, but unbatched.
+            let commitments = std::mem::take(
+                &mut *vault_group.commitment_buffer().lock().unwrap_or_else(|e| e.into_inner()),
+            );
+            let payload = inferadb_ledger_raft::types::RaftPayload {
+                request: ledger_request,
+                proposed_at: chrono::Utc::now(),
+                caller: ctx.caller_or_zero(),
+                state_root_commitments: commitments,
+            };
+            match vault_group.handle().propose_and_wait(payload, timeout).await {
+                Ok(result) => result,
+                Err(inferadb_ledger_raft::HandleError::Timeout { .. }) => {
+                    ctx.end_raft_timer();
+                    ctx.set_error("ProposalTimeout", "Raft proposal timed out");
+                    metrics::record_raft_proposal_timeout();
+                    return Err(status_with_correlation(
+                        Status::deadline_exceeded(format!(
+                            "Raft proposal timed out after {}ms",
+                            timeout.as_millis()
+                        )),
+                        &ctx.request_id(),
+                        ctx.trace_id(),
+                    ));
+                },
+                Err(e) => {
+                    ctx.end_raft_timer();
+                    ctx.set_error("RaftError", &e.to_string());
+                    return Err(status_with_correlation(
+                        classify_raft_error(&e.to_string()),
+                        &ctx.request_id(),
+                        ctx.trace_id(),
+                    ));
+                },
+            }
         };
         ctx.end_raft_timer();
 
@@ -1665,12 +1712,16 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         let timeout =
             inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
-        // P2c.3.b.2: route the proposal to the vault's per-vault Raft
-        // shard, not the parent organization shard. See `write()` above
-        // for the full rationale; this is the BatchWrite twin of the
-        // same flip. `batch_write` never used `batch_handle` (direct
-        // proposal only), so this is a straight swap of `region.handle`
-        // for `vault_group.handle()`.
+        // P2c.3.b.2 / P2c.3.b.4: route the proposal to the vault's per-vault
+        // Raft shard, not the parent organization shard. See `write()`
+        // above for the full rationale; this is the BatchWrite twin of the
+        // same flip.
+        //
+        // Per task #164: prefer the per-vault batch writer when present so
+        // concurrent BatchWrites against the same vault still amortize
+        // WAL fsync cost. Fall back to direct propose when the vault
+        // group has no batch handle (parent org started without batching
+        // configured).
         let manager = self.manager.as_ref().ok_or_else(|| {
             status_with_correlation(
                 Status::internal("Vault-scoped writes require RaftManager configuration"),
@@ -1705,39 +1756,73 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
 
         metrics::record_raft_proposal();
         ctx.start_raft_timer();
-        let commitments = std::mem::take(
-            &mut *vault_group.commitment_buffer().lock().unwrap_or_else(|e| e.into_inner()),
-        );
-        let payload = inferadb_ledger_raft::types::RaftPayload {
-            request: ledger_request,
-            proposed_at: chrono::Utc::now(),
-            caller: ctx.caller_or_zero(),
-            state_root_commitments: commitments,
-        };
-        let response = match vault_group.handle().propose_and_wait(payload, timeout).await {
-            Ok(result) => result,
-            Err(inferadb_ledger_raft::HandleError::Timeout { .. }) => {
-                ctx.end_raft_timer();
-                ctx.set_error("ProposalTimeout", "Raft proposal timed out");
-                metrics::record_raft_proposal_timeout();
-                return Err(status_with_correlation(
-                    Status::deadline_exceeded(format!(
-                        "Raft proposal timed out after {}ms",
-                        timeout.as_millis()
-                    )),
-                    &ctx.request_id(),
-                    ctx.trace_id(),
-                ));
-            },
-            Err(e) => {
-                ctx.end_raft_timer();
-                ctx.set_error("RaftError", &e.to_string());
-                return Err(status_with_correlation(
-                    classify_raft_error(&e.to_string()),
-                    &ctx.request_id(),
-                    ctx.trace_id(),
-                ));
-            },
+        let response = if let Some(batch_handle) = vault_group.batch_handle() {
+            let receiver = batch_handle.submit(ledger_request);
+            let result = match tokio::time::timeout(timeout, receiver).await {
+                Ok(Ok(Ok(response))) => Ok(response),
+                Ok(Ok(Err(batch_err))) => Err(batch_err.to_string()),
+                Ok(Err(_dropped)) => Err("Batch writer dropped response".to_string()),
+                Err(_elapsed) => {
+                    ctx.end_raft_timer();
+                    ctx.set_error("ProposalTimeout", "Raft proposal timed out");
+                    metrics::record_raft_proposal_timeout();
+                    return Err(status_with_correlation(
+                        Status::deadline_exceeded(format!(
+                            "Raft proposal timed out after {}ms",
+                            timeout.as_millis()
+                        )),
+                        &ctx.request_id(),
+                        ctx.trace_id(),
+                    ));
+                },
+            };
+            match result {
+                Ok(r) => r,
+                Err(message) => {
+                    ctx.end_raft_timer();
+                    ctx.set_error("RaftError", &message);
+                    return Err(status_with_correlation(
+                        classify_raft_error(&message),
+                        &ctx.request_id(),
+                        ctx.trace_id(),
+                    ));
+                },
+            }
+        } else {
+            let commitments = std::mem::take(
+                &mut *vault_group.commitment_buffer().lock().unwrap_or_else(|e| e.into_inner()),
+            );
+            let payload = inferadb_ledger_raft::types::RaftPayload {
+                request: ledger_request,
+                proposed_at: chrono::Utc::now(),
+                caller: ctx.caller_or_zero(),
+                state_root_commitments: commitments,
+            };
+            match vault_group.handle().propose_and_wait(payload, timeout).await {
+                Ok(result) => result,
+                Err(inferadb_ledger_raft::HandleError::Timeout { .. }) => {
+                    ctx.end_raft_timer();
+                    ctx.set_error("ProposalTimeout", "Raft proposal timed out");
+                    metrics::record_raft_proposal_timeout();
+                    return Err(status_with_correlation(
+                        Status::deadline_exceeded(format!(
+                            "Raft proposal timed out after {}ms",
+                            timeout.as_millis()
+                        )),
+                        &ctx.request_id(),
+                        ctx.trace_id(),
+                    ));
+                },
+                Err(e) => {
+                    ctx.end_raft_timer();
+                    ctx.set_error("RaftError", &e.to_string());
+                    return Err(status_with_correlation(
+                        classify_raft_error(&e.to_string()),
+                        &ctx.request_id(),
+                        ctx.trace_id(),
+                    ));
+                },
+            }
         };
         ctx.end_raft_timer();
 
