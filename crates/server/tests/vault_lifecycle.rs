@@ -743,13 +743,19 @@ async fn test_delete_vault_tears_down_vault_group() {
 /// compose correctly through a real restart. No production code path is
 /// stubbed or bypassed.
 #[tokio::test]
-#[ignore = "blocked on cold-restart election convergence: HTTP/2 server keepalive (Task #167) \
-            and sender-side ack-timeout liveness probe (Task #153 / `peer_sender::ACK_TIMEOUT`) \
-            are both in place but voters still observe `term=1, leader=None` for the full 60s \
-            budget. Symptom: simultaneous whole-cluster restart leaves the consensus engines \
-            unable to even START an election — the term never advances past 1, ruling out ack \
-            delivery as the gap. Follow-up tracked in tasks #152 and #153 (election-timer / \
-            timer-tick on cold-restart path)."]
+#[ignore = "Task #153 — Fix A (pre-register persisted-membership peers) closes the early \
+            silent-drop in `start_region`, but cold-restart election convergence remains broken. \
+            Trace observation 2026-04-25 (3/3 fail, ~144s wall time): post-restart the per-org \
+            and per-vault delegated child shards happily replicate AppendEntries with the \
+            pre-restart leader still asserting leadership, while the parent REGION groups \
+            (GLOBAL `shard_id=5500327960291946835`, us-east-va `shard_id=3569755914963517415`) \
+            send and receive ZERO messages — no PreVoteRequest, no RequestVote, no AppendEntries, \
+            no incoming traffic — for the entire 60s budget. Election timer on the region groups \
+            either never fires post-restart, or fires but the messages never reach \
+            `peer_sender::run_drain_loop`. Term stays at 1 (one run advanced two voters to term=2 \
+            via PreVote, but never elected). Distinct from the silent-drop bug Fix A targeted: \
+            messages are never produced at the engine level. Next step is to instrument \
+            `Reactor::tick`/election-timer firing and `Shard::on_tick` for the region shards."]
 async fn test_vault_group_rehydrates_after_graceful_cluster_restart() {
     // TCP transport is required for this test: on restart, peer addresses
     // must re-populate before the per-organization rehydration sweep runs,

@@ -156,9 +156,27 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
         tokio::spawn(async move {
             while let Some(msg) = inbound.next().await {
                 let ack = match msg {
-                    Ok(req) => handle_consensus_message(&manager, peer_liveness.as_ref(), req)
-                        .await
-                        .map(|_| ConsensusAck {}),
+                    Ok(req) => {
+                        // Trace the inbound message at the entry point —
+                        // BEFORE membership validation, deserialization, or
+                        // dispatch. Pairs with the sender-side
+                        // `peer_sender: dispatched message to req_tx` log so
+                        // a missing message can be localized to either the
+                        // outbound queue, the network, or the apply pipeline.
+                        // Decoding the postcard payload here would duplicate
+                        // work the dispatch path performs, so we log the
+                        // wire-level shard / sender / payload size and let
+                        // the existing dispatch path log the decoded variant.
+                        tracing::debug!(
+                            from_node = req.from_node,
+                            shard_id = req.shard_id,
+                            payload_bytes = req.payload.len(),
+                            "raft_service: received message on replicate stream",
+                        );
+                        handle_consensus_message(&manager, peer_liveness.as_ref(), req)
+                            .await
+                            .map(|_| ConsensusAck {})
+                    },
                     Err(e) => {
                         tracing::debug!(error = %e, "Consensus stream inbound error; closing");
                         break;

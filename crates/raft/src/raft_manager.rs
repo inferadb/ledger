@@ -3800,6 +3800,47 @@ impl RaftManager {
                 }
             }
         }
+
+        // On restart, persisted membership (loaded from raft.db on startup)
+        // may include voters that aren't present in `initial_members` — for
+        // data-region groups, `initial_members` is `[self only]` while the
+        // committed configuration on disk lists every cluster peer. Without
+        // this pass, outbound messages dispatched before
+        // `reconcile_transport_channels` fires are silently dropped because
+        // the peer-sender doesn't yet have a registered channel for them.
+        // Pre-register every persisted voter whose address is already known
+        // via `peer_addresses` (populated by seed discovery / initial members
+        // on a previous boot). Voters whose address isn't yet known are left
+        // alone — `reconcile_transport_channels` registers them when the
+        // address arrives via discovery.
+        let persisted_voter_ids = log_store.persisted_membership().voter_ids;
+        for voter_id in persisted_voter_ids {
+            if voter_id == self.config.node_id {
+                continue;
+            }
+            if initial_members.iter().any(|(id, _)| *id == voter_id) {
+                continue;
+            }
+            if let Some(addr) = self.peer_addresses.get(voter_id) {
+                match consensus_transport.set_peer_via_registry(voter_id, &addr).await {
+                    Ok(()) => {
+                        debug!(
+                            voter_id,
+                            addr = %addr,
+                            "Pre-registered persisted-membership peer for restart-path transport",
+                        );
+                    },
+                    Err(e) => {
+                        warn!(
+                            voter_id,
+                            addr = %addr,
+                            error = %e,
+                            "Failed to pre-register persisted-membership peer on restart",
+                        );
+                    },
+                }
+            }
+        }
         let (engine, commit_rx, state_watchers) = inferadb_ledger_consensus::ConsensusEngine::start(
             vec![consensus_shard],
             wal,

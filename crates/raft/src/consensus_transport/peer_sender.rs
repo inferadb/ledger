@@ -225,6 +225,26 @@ fn jittered(d: Duration) -> Duration {
     Duration::from_secs_f64(d.as_secs_f64() * factor)
 }
 
+/// Static label for a [`Message`] variant. Used in `tracing` fields for
+/// diagnostic correlation between sender and receiver — keeping the label
+/// out of the serialized payload avoids extra wire cost while still letting
+/// us identify which Raft message kind moved past which checkpoint in the
+/// transport pipeline.
+fn message_kind_label(msg: &inferadb_ledger_consensus::Message) -> &'static str {
+    use inferadb_ledger_consensus::Message;
+    match msg {
+        Message::PreVoteRequest { .. } => "PreVoteRequest",
+        Message::PreVoteResponse { .. } => "PreVoteResponse",
+        Message::VoteRequest { .. } => "VoteRequest",
+        Message::VoteResponse { .. } => "VoteResponse",
+        Message::AppendEntries { .. } => "AppendEntries",
+        Message::AppendEntriesResponse { .. } => "AppendEntriesResponse",
+        Message::InstallSnapshot { .. } => "InstallSnapshot",
+        Message::InstallSnapshotResponse { .. } => "InstallSnapshotResponse",
+        Message::TimeoutNow => "TimeoutNow",
+    }
+}
+
 /// Build a protobuf request for a single outbound consensus message.
 ///
 /// Returns `None` if postcard serialization fails — the message is
@@ -383,6 +403,10 @@ async fn run_drain_loop(
                         ack_liveness
                             .last_ack_at_millis
                             .store(millis_since(ack_base, Instant::now()), Ordering::Relaxed);
+                        tracing::debug!(
+                            target_node_id = ack_peer,
+                            "peer_sender: received ack from peer",
+                        );
                     },
                     Err(e) => {
                         tracing::debug!(
@@ -469,6 +493,12 @@ async fn run_drain_loop(
             let mut broke = false;
             for msg in drained {
                 let send_start = std::time::Instant::now();
+                // Capture diagnostic fields before `build_consensus_request`
+                // consumes the message — these flow into the post-send
+                // `debug!` so a sender-side trace can be correlated with
+                // the receiver-side trace in `RaftService::replicate`.
+                let kind_label = message_kind_label(&msg.msg);
+                let shard_id = msg.shard.0;
                 let Some(req) = build_consensus_request(msg, from_node, &from_address, region)
                 else {
                     // Serialization failure — metric still useful for rate.
@@ -489,6 +519,14 @@ async fn run_drain_loop(
                     broke = true;
                     break;
                 }
+
+                tracing::debug!(
+                    target_node_id = inner.peer_id,
+                    region = %region,
+                    shard_id,
+                    message_kind = kind_label,
+                    "peer_sender: dispatched message to req_tx",
+                );
 
                 liveness.sends_issued.fetch_add(1, Ordering::Relaxed);
                 crate::metrics::record_peer_send_latency(
