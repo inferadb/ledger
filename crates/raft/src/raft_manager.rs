@@ -2709,6 +2709,14 @@ impl RaftManager {
         // proposer hasn't yet inserted (closes the propose→apply TOCTOU).
         let stub_response_map = Arc::clone(&vault_response_map);
         let stub_spillover = Arc::clone(vault_handle.spillover());
+        // Per-vault apply-progress projection target. The same `ArcSwap`
+        // that lives on `InnerVaultGroup.vault_applied_state` (the value
+        // passed into `InnerVaultGroup` below). The pump projects the
+        // log store's full `AppliedState` into a `VaultAppliedState`
+        // after each successful apply and stores it through this clone;
+        // both clones share the same `ArcSwap`, so observability
+        // readers on `InnerVaultGroup` see the projected value.
+        let stub_vault_applied_state = Arc::clone(&vault_applied_state_swap);
         tokio::spawn(async move {
             // `InnerVaultGroup` intentionally does not own `RaftLogStore`.
             // The store's `applied_index` watch-sender must live
@@ -2845,6 +2853,7 @@ impl RaftManager {
                                 // mapped to a synthetic `LedgerResponse::Error`
                                 // so waiters never hang on a bad batch.
                                 let entry_count = entries_to_apply.len();
+                                let mut apply_succeeded = false;
                                 let responses: Vec<crate::types::LedgerResponse> =
                                     match vault_log_store
                                         .apply_committed_entries::<OrganizationRequest>(
@@ -2853,7 +2862,10 @@ impl RaftManager {
                                         )
                                         .await
                                     {
-                                        Ok(rs) => rs,
+                                        Ok(rs) => {
+                                            apply_succeeded = true;
+                                            rs
+                                        }
                                         Err(e) => {
                                             tracing::error!(
                                                 region = stub_region.as_str(),
@@ -2914,6 +2926,26 @@ impl RaftManager {
                                     for (index, response) in to_spillover {
                                         spillover.insert(index, response);
                                     }
+                                }
+
+                                // Stage 4: project the log store's full
+                                // `AppliedState` into a `VaultAppliedState`
+                                // and publish it through the
+                                // `InnerVaultGroup.vault_applied_state`
+                                // `ArcSwap`. Skipped on apply failure —
+                                // the log store's `AppliedState` is only
+                                // mutated on the Ok arm of
+                                // `apply_committed_entries`, so a
+                                // projection on Err would just re-publish
+                                // the previous snapshot.
+                                if apply_succeeded {
+                                    let projected =
+                                        crate::log_storage::VaultAppliedState::from_applied_state(
+                                            &vault_log_store.applied_state().load(),
+                                            stub_org,
+                                            stub_vault,
+                                        );
+                                    stub_vault_applied_state.store(Arc::new(projected));
                                 }
                             }
                             None => {
@@ -5473,6 +5505,114 @@ mod tests {
             response,
             crate::types::LedgerResponse::Empty,
             "empty Normal entry must apply to LedgerResponse::Empty",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_vault_commit_pump_projects_into_vault_applied_state() {
+        // Task #165: after each successful apply, the vault commit pump
+        // must project the log store's full `AppliedState` into a
+        // `VaultAppliedState` and publish it through the
+        // `InnerVaultGroup.vault_applied_state` `ArcSwap`. Without this
+        // projection, P2c.0's wired-up ArcSwap stays pinned at the
+        // default empty value forever and observability readers see
+        // stale apply progress.
+        //
+        // This test proposes an empty Normal entry through the vault
+        // handle (the same payload shape exercised by
+        // `test_vault_commit_pump_delivers_responses_via_response_map`)
+        // and asserts that the projected `VaultAppliedState` advances
+        // its `last_applied` field after apply.
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+        let org_id = OrganizationId::new(99);
+        let org_group = manager
+            .start_organization_group(
+                Region::GLOBAL,
+                org_id,
+                vec![(1, "127.0.0.1:50051".to_string())],
+                true,
+                None,
+                None,
+            )
+            .await
+            .expect("start org group");
+
+        // Wait for the single-node org group to elect itself, then for
+        // the vault group's delegated adoption to land.
+        let start = std::time::Instant::now();
+        while org_group.handle().current_leader().is_none()
+            && start.elapsed() < std::time::Duration::from_secs(5)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            org_group.handle().current_leader().is_some(),
+            "test sanity: single-node org must elect a leader within 5s",
+        );
+
+        let vault_id = VaultId::new(1);
+        let vault = manager
+            .start_vault_group(Region::GLOBAL, org_id, vault_id)
+            .await
+            .expect("start vault group");
+
+        let start = std::time::Instant::now();
+        while !vault.handle().is_leader() && start.elapsed() < std::time::Duration::from_secs(2) {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            vault.handle().is_leader(),
+            "test sanity: vault must adopt parent leader before propose",
+        );
+
+        // Initial state: default-constructed at start_vault_group time
+        // (P2c.0). `last_applied` must be `None` until the first apply.
+        let initial = vault.vault_applied_state().load();
+        assert!(
+            initial.last_applied.is_none(),
+            "fresh vault_applied_state must have no applied LogId before any apply",
+        );
+
+        // Drive an empty Normal entry through the vault's apply
+        // pipeline. The fan-out test above covers the response path;
+        // here we care that the commit pump's Stage 4 projection runs
+        // after `apply_committed_entries` mutates the log store's
+        // `AppliedState`.
+        let response = vault
+            .handle()
+            .propose_bytes_and_wait(Vec::new(), std::time::Duration::from_secs(5))
+            .await
+            .expect("propose_bytes_and_wait must return");
+        assert_eq!(
+            response,
+            crate::types::LedgerResponse::Empty,
+            "empty Normal entry must apply to LedgerResponse::Empty",
+        );
+
+        // The projection runs after the response fan-out, in the same
+        // task that delivered the response. Once `propose_bytes_and_wait`
+        // returns, the projection has either already landed or is on
+        // the next scheduler tick. Poll briefly for `last_applied` to
+        // become `Some`.
+        let start = std::time::Instant::now();
+        let after = loop {
+            let snapshot = vault.vault_applied_state().load();
+            if snapshot.last_applied.is_some() {
+                break snapshot;
+            }
+            if start.elapsed() >= std::time::Duration::from_secs(2) {
+                break snapshot;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        assert!(
+            after.last_applied.is_some(),
+            "vault_applied_state must advance after propose+apply — projection regression",
         );
     }
 

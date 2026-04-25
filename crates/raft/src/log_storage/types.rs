@@ -318,6 +318,61 @@ pub struct VaultAppliedState {
     pub last_applied_timestamp_ns: i64,
 }
 
+impl VaultAppliedState {
+    /// Projects an [`AppliedState`] snapshot to its vault-scoped subset.
+    ///
+    /// The vault's [`RaftLogStore`](super::store::RaftLogStore) carries a
+    /// full [`AppliedState`], but only vault-scoped entries are populated
+    /// (the store is opened per-vault via
+    /// [`RaftLogStore::open_for_vault`](super::store::RaftLogStore::open_for_vault),
+    /// so org-level fields like `slug_index`, `organizations`, etc. stay
+    /// empty). This projection extracts the vault-relevant fields so
+    /// callers can read per-vault apply progress through the narrow
+    /// [`VaultAppliedState`] surface without loading the full
+    /// [`AppliedState`] and deciding which fields are vault-scoped.
+    ///
+    /// Driven by the per-vault commit pump after each successful
+    /// [`apply_committed_entries`](super::store::RaftLogStore::apply_committed_entries)
+    /// call: the pump projects the log store's updated [`AppliedState`]
+    /// into a fresh [`VaultAppliedState`] and stores it into the
+    /// `InnerVaultGroup.vault_applied_state` `ArcSwap` so observability
+    /// readers see the new apply progress.
+    pub fn from_applied_state(
+        full: &AppliedState,
+        organization_id: OrganizationId,
+        vault_id: VaultId,
+    ) -> Self {
+        let key = (organization_id, vault_id);
+        Self {
+            last_applied: full.last_applied,
+            membership: full.membership.clone(),
+            vault_height: full.vault_heights.get(&key).copied().unwrap_or(0),
+            vault_health: full
+                .vault_health
+                .get(&key)
+                .cloned()
+                .unwrap_or_default(),
+            previous_vault_hash: full
+                .previous_vault_hashes
+                .get(&key)
+                .copied()
+                .unwrap_or_default(),
+            client_sequences: full
+                .client_sequences
+                .iter()
+                .filter_map(|((org, vault, client), entry)| {
+                    if *org == organization_id && *vault == vault_id {
+                        Some((client.clone(), entry.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            last_applied_timestamp_ns: full.last_applied_timestamp_ns,
+        }
+    }
+}
+
 /// Metadata for an organization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrganizationMeta {

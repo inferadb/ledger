@@ -522,6 +522,20 @@ impl<B: StorageBackend> RaftLogStore<B> {
         AppliedStateAccessor::new(self.applied_state.clone())
     }
 
+    /// Returns the shared `ArcSwap<AppliedState>` backing this store.
+    ///
+    /// Used by the per-vault commit pump in
+    /// [`RaftManager::start_vault_group`](crate::raft_manager::RaftManager::start_vault_group)
+    /// to read the full [`AppliedState`] after each apply and project it
+    /// into a [`VaultAppliedState`](super::types::VaultAppliedState) on
+    /// the owning `InnerVaultGroup`'s `ArcSwap`. Most callers should
+    /// prefer [`Self::accessor`] for typed read access; this raw handle
+    /// exists so the projection step in the commit pump can run without
+    /// duplicating the accessor's read logic.
+    pub fn applied_state(&self) -> &Arc<ArcSwap<AppliedState>> {
+        &self.applied_state
+    }
+
     /// Returns the persisted membership from the applied state.
     ///
     /// Called during region startup to initialize the consensus shard with the
