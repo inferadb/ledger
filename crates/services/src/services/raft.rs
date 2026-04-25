@@ -287,6 +287,15 @@ async fn handle_consensus_message(
     // shard_id isn't found locally (covers the data-region group itself
     // and the brief race between message arrival and per-org group
     // bootstrap completion).
+    //
+    // Per-vault shards (P2 of per-vault consensus) register on their
+    // parent organization's `ConsensusEngine`, so
+    // `lookup_by_consensus_shard` resolves a vault `shard_id` to the
+    // parent org's [`InnerGroup`]. The engine on that group has the vault
+    // shard in its reactor dispatch table; the dispatch below uses the
+    // wire-side `consensus_shard` (not the handle's bound shard) so the
+    // message lands on the right shard regardless of whether it targets
+    // the org shard or a per-vault shard sharing the engine.
     let consensus_shard = inferadb_ledger_consensus::types::ConsensusStateId(req.shard_id);
     let group = manager
         .lookup_by_consensus_shard(consensus_shard)
@@ -339,10 +348,23 @@ async fn handle_consensus_message(
     let message: inferadb_ledger_consensus::Message =
         decode(&req.payload).map_err(|e| Status::invalid_argument(format!("deserialize: {e}")))?;
 
-    // Route to the consensus engine via the handle.
+    // Route to the consensus engine using the wire-side `consensus_shard`
+    // rather than the resolved group's bound shard. The handle's
+    // `peer_message` hardcodes its own `shard_id`, which silently misroutes
+    // every per-vault `Replicate` message to the parent org shard (see
+    // `lookup_by_consensus_shard` for why per-vault shards resolve through
+    // the parent org's `InnerGroup`). The reactor dispatches to the right
+    // `ConsensusState` by the shard id passed in, so dispatching directly
+    // through the engine with `consensus_shard` is the correct lookup key
+    // for both org shards and per-vault shards sharing the engine.
     group
         .handle()
-        .peer_message(req.from_node, message)
+        .engine_arc()
+        .peer_message(
+            consensus_shard,
+            inferadb_ledger_consensus::types::NodeId(req.from_node),
+            message,
+        )
         .await
         .map_err(|e| Status::internal(format!("consensus: {e}")))?;
 

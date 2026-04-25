@@ -208,6 +208,88 @@ async fn test_create_vault_brings_vault_group_live_on_all_voters() {
     );
 }
 
+/// Regression test for #166: per-vault Raft replication on followers.
+///
+/// `lookup_by_consensus_shard` must resolve a per-vault `ConsensusStateId`
+/// to the parent organization's `InnerGroup` on every voter. The gRPC
+/// `RaftService::replicate` handler dispatches inbound `Replicate`
+/// messages by shard id; before this fix, the lookup only scanned
+/// `RaftManager::regions` (system + data + per-org groups) and missed
+/// per-vault shards that register on the parent org's
+/// [`ConsensusEngine`]. Misses fell back to the data-region group and
+/// the AppendEntries was silently misrouted to the wrong shard, breaking
+/// quorum formation on the vault's Raft log.
+///
+/// This asserts the post-fix invariant: for every voter, the vault's
+/// shard id resolves to a group whose engine is the parent organization
+/// group's engine. The follow-on `RaftService::replicate` dispatch path
+/// then calls `engine.peer_message(consensus_shard, ...)` with the
+/// wire-side shard id directly, landing on the per-vault shard
+/// registered via `org_inner.handle().add_shard(consensus_shard)`.
+#[tokio::test]
+async fn test_vault_shard_lookup_resolves_to_parent_org_group_on_every_voter() {
+    let cluster = TestCluster::with_data_regions(3, 1).await;
+    cluster.wait_for_leader().await;
+
+    let region = Region::US_EAST_VA;
+    let leader = cluster.leader().expect("cluster has a leader");
+
+    let (org_slug, _admin_slug) =
+        crate::common::create_test_organization(&leader.addr, "vault-shard-lookup-org", leader)
+            .await
+            .expect("create organization");
+    let org_id = resolve_org_id(leader, org_slug);
+    crate::common::create_test_vault(&leader.addr, org_slug).await.expect("create vault");
+    let vault_id =
+        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(15))
+            .await;
+
+    for node in cluster.nodes() {
+        // Local sanity: the vault group is live on this voter and exposes a
+        // shard id distinct from the parent org's shard id.
+        let vault_group = node
+            .manager
+            .get_vault_group(region, org_id, vault_id)
+            .expect("vault group registered on every voter");
+        let vault_shard_id = vault_group.shard_id();
+
+        let parent_org_group = node
+            .manager
+            .get_organization_group(region, org_id)
+            .expect("parent organization group registered on every voter");
+        let parent_shard_id = parent_org_group.handle().shard_id();
+        assert_ne!(
+            vault_shard_id, parent_shard_id,
+            "node {}: vault shard id collides with parent org shard id — derivation regression",
+            node.id,
+        );
+
+        // Critical: looking up the vault's shard id through the
+        // RaftService dispatch helper must resolve to a group whose
+        // engine matches the parent org's engine. The `Arc::ptr_eq`
+        // check is what guarantees the inbound `Replicate` path will
+        // dispatch into the same reactor where the vault shard is
+        // registered.
+        let resolved =
+            node.manager.lookup_by_consensus_shard(vault_shard_id).unwrap_or_else(|| {
+                panic!(
+                    "node {}: lookup_by_consensus_shard({vault_shard_id:?}) returned None for live \
+                 vault — replication path would silently misroute",
+                    node.id,
+                )
+            });
+        assert!(
+            std::sync::Arc::ptr_eq(
+                &resolved.handle().engine_arc(),
+                &parent_org_group.handle().engine_arc(),
+            ),
+            "node {}: vault shard {vault_shard_id:?} resolved to a group whose engine is not the \
+             parent org's engine — peer_message would dispatch into the wrong reactor",
+            node.id,
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Additional helpers — used by the multi-vault, cross-org, and delete tests.
 // ---------------------------------------------------------------------------
@@ -814,26 +896,11 @@ async fn test_vault_group_rehydrates_after_graceful_cluster_restart() {
 ///   6. Assert the leader's vault group `last_applied` advanced — confirms the proposal landed on
 ///      the vault shard's apply pipeline.
 ///
-/// **Currently `#[ignore]`d — routing flip is BLOCKED on vault leader
-/// adoption.** The `Write` / `BatchWrite` handlers in
-/// `crates/services/src/services/write.rs` continue to propose through
-/// `region.handle` (the parent organization shard) until the per-vault
-/// `Shard::adopt_leader` watcher lands. The minimal scaffolding from
-/// this slice — `ProposalService::propose_to_vault_bytes` + the
-/// production / mock implementations — is in place so the routing flip
-/// can land cleanly once the leader-adoption watcher exists. The
-/// flip itself was attempted and reverted; vault shards return
-/// `Not the leader` from `propose_and_wait` on a freshly-started vault
-/// (Phase 4 of the per-vault consensus spec, see
-/// `docs/superpowers/specs/2026-04-23-per-vault-consensus.md`).
-///
-/// When vault leader adoption ships, re-flip the proposal call site in
-/// `WriteService::write` / `WriteService::batch_write` to use
-/// `vault_group.handle()` (and `vault_group.batch_handle()` /
-/// `vault_group.commitment_buffer()`), then remove this `#[ignore]`.
-#[ignore = "Vault shard leader adoption (Phase 4) not yet wired — proposal against vault shard \
-            returns Not the leader. Routing flip in write.rs intentionally not landed in this \
-            slice. See docstring."]
+/// Regression-tests the full per-vault write routing pipeline:
+/// vault leader adoption (#160), vault response fan-out (#163), and
+/// per-vault Raft replication on followers (#166). `WriteService::write`
+/// proposes through `vault_group.handle()` (see task #162 / P2c.3.b.2);
+/// a failure here means one of those links regressed.
 #[tokio::test]
 async fn test_write_routes_to_vault_shard_and_lands_in_vault_state() {
     let cluster = TestCluster::with_data_regions(3, 1).await;
@@ -862,20 +929,22 @@ async fn test_write_routes_to_vault_shard_and_lands_in_vault_state() {
         wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(15))
             .await;
 
-    // Capture baseline per-vault `last_applied` index on the leader's
-    // vault group. This is the per-vault Raft log apply counter — distinct
-    // from the parent org's `applied_state.last_applied`. It only
-    // advances when an entry applies on the vault shard. `None` when the
-    // vault has not yet applied any entries; we capture as `index` (0
-    // when unset) for comparison.
+    // Capture baseline per-vault applied index on the leader's vault
+    // group. `applied_index_watch()` surfaces the vault `RaftLogStore`'s
+    // last-applied counter, driven forward by
+    // `RaftLogStore::apply_committed_entries` every time the vault apply
+    // pipeline runs an entry — distinct from the parent org's
+    // `applied_state.last_applied`. It only advances when an entry
+    // applies on the vault shard.
+    //
+    // Note: `InnerVaultGroup::vault_applied_state` (the `ArcSwap`
+    // carve-out) is not yet wired — task #165 ("Project
+    // vault_applied_state from RaftLogStore.applied_state on each
+    // apply") is pending — so we observe the advance through the watch
+    // channel instead.
     let leader_vault_pre =
         leader.manager.get_vault_group(region, org_id, vault_id).expect("leader has vault group");
-    let last_applied_index_pre = leader_vault_pre
-        .vault_applied_state()
-        .load()
-        .last_applied
-        .as_ref()
-        .map_or(0, |log_id| log_id.index);
+    let last_applied_index_pre = *leader_vault_pre.applied_index_watch().borrow();
 
     // Issue a `Write` through the gRPC surface — same code path a real
     // SDK client hits.
@@ -916,23 +985,19 @@ async fn test_write_routes_to_vault_shard_and_lands_in_vault_state() {
         None => panic!("write response had no result"),
     }
 
-    // Poll the leader's vault group `last_applied` until it advances.
-    // The Raft apply path is asynchronous: `propose_and_wait` returns
-    // when the apply worker delivers the response, but the
-    // `vault_applied_state` swap may race the response delivery by a
-    // few microseconds. Allow a short grace period.
+    // Poll the leader's vault-group applied index until it advances.
+    // `propose_and_wait` returns when the apply worker delivers the
+    // response, so by the time the write call above unblocks, the vault
+    // `RaftLogStore::applied_state` has already been mutated and the
+    // watch broadcast has fired. We still poll with a short grace
+    // window to absorb the watch-channel scheduling delay.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let leader_vault = leader
             .manager
             .get_vault_group(region, org_id, vault_id)
             .expect("leader has vault group");
-        let last_applied_index_post = leader_vault
-            .vault_applied_state()
-            .load()
-            .last_applied
-            .as_ref()
-            .map_or(0, |log_id| log_id.index);
+        let last_applied_index_post = *leader_vault.applied_index_watch().borrow();
         if last_applied_index_post > last_applied_index_pre {
             return;
         }

@@ -13,7 +13,6 @@ use inferadb_ledger_proto::proto::{
     WriteRequest, WriteResponse, WriteSuccess,
 };
 use inferadb_ledger_raft::{
-    batching::BatchError,
     error::classify_raft_error,
     event_writer::EventEmitter,
     idempotency::IdempotencyCache,
@@ -32,22 +31,9 @@ use uuid::Uuid;
 
 pub(crate) use super::metadata::{response_with_correlation, status_with_correlation};
 use super::{
-    error_classify,
     region_resolver::{RegionContext, RegionResolver, ResolveResult},
     slug_resolver::SlugResolver,
 };
-
-/// Classifies a batch writer error into the appropriate `tonic::Status`.
-///
-/// `BatchError::RaftError` may contain leadership-related messages that
-/// should map to `UNAVAILABLE` (retryable) instead of `INTERNAL`.
-fn classify_batch_error(err: &BatchError) -> Status {
-    match err {
-        BatchError::RaftError(msg) => classify_raft_error(msg),
-        BatchError::Dropped => Status::unavailable("Batch writer dropped request"),
-        BatchError::Internal(msg) => error_classify::raft_error(&msg),
-    }
-}
 
 /// gRPC handler for transaction submission.
 #[derive(bon::Builder)]
@@ -946,85 +932,88 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         let timeout =
             inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
-        // Submit to Raft via batch writer (if available for this region) or direct proposal
+        // P2c.3.b.2: route the proposal to the vault's per-vault Raft shard,
+        // not the parent organization shard. The `VaultGroup`'s apply
+        // pipeline runs the vault-scoped tier-validation gate (P2c.1) and
+        // advances the per-vault `last_applied` counter.
+        //
+        // Option (b) per task #164: bypass the region-level `batch_handle`
+        // and direct-propose through `vault_group.handle()`. Per-vault
+        // batch writers are Phase 4 work.
+        let manager = self.manager.as_ref().ok_or_else(|| {
+            status_with_correlation(
+                Status::internal("Vault-scoped writes require RaftManager configuration"),
+                &ctx.request_id(),
+                ctx.trace_id(),
+            )
+        })?;
+        let vault_group =
+            manager.get_vault_group(region.region, organization_id, vault_id).map_err(|_| {
+                status_with_correlation(
+                    Status::unavailable(format!(
+                        "Vault {vault_id} (organization {organization_id}) is not active on this \
+                         node in region {}; retry so the SDK can reconnect",
+                        region.region,
+                    )),
+                    &ctx.request_id(),
+                    ctx.trace_id(),
+                )
+            })?;
+
+        // Re-check leadership against the vault shard specifically.
+        // Delegated leadership means `vault_group.handle().is_leader()`
+        // mirrors the parent org's leader; the check here narrows the
+        // NotLeader hint to the vault shard's view in case the parent's
+        // leader flipped between the earlier check and now.
+        if !vault_group.handle().is_leader() {
+            return Err(status_with_correlation(
+                super::metadata::not_leader_status_from_handle(
+                    vault_group.handle().as_ref(),
+                    self.peer_addresses.as_ref(),
+                    "Not the leader for this vault",
+                ),
+                &ctx.request_id(),
+                ctx.trace_id(),
+            ));
+        }
+
         metrics::record_raft_proposal();
         ctx.start_raft_timer();
-        let response = if let Some(ref batch_handle) = region.batch_handle {
-            ctx.set_batch_info(true, 1);
-            let rx = batch_handle.submit(ledger_request);
-            match tokio::time::timeout(timeout, rx).await {
-                Ok(Ok(Ok(resp))) => resp,
-                Ok(Ok(Err(batch_err))) => {
-                    ctx.end_raft_timer();
-                    ctx.set_error("BatchError", &batch_err.to_string());
-                    return Err(status_with_correlation(
-                        classify_batch_error(&batch_err),
-                        &ctx.request_id(),
-                        ctx.trace_id(),
-                    ));
-                },
-                Ok(Err(_recv_err)) => {
-                    ctx.end_raft_timer();
-                    ctx.set_error("BatchChannelClosed", "Batch writer channel closed");
-                    return Err(status_with_correlation(
-                        Status::internal("Batch writer unavailable"),
-                        &ctx.request_id(),
-                        ctx.trace_id(),
-                    ));
-                },
-                Err(_elapsed) => {
-                    ctx.end_raft_timer();
-                    ctx.set_error("ProposalTimeout", "Raft proposal timed out");
-                    metrics::record_raft_proposal_timeout();
-                    return Err(status_with_correlation(
-                        Status::deadline_exceeded(format!(
-                            "Raft proposal timed out after {}ms",
-                            timeout.as_millis()
-                        )),
-                        &ctx.request_id(),
-                        ctx.trace_id(),
-                    ));
-                },
-            }
-        } else {
-            ctx.set_batch_info(false, 1);
-            // Direct Raft proposal
-            let commitments = region
-                .commitment_buffer
-                .as_ref()
-                .map(|buf| std::mem::take(&mut *buf.lock().unwrap_or_else(|e| e.into_inner())))
-                .unwrap_or_default();
-            let payload = inferadb_ledger_raft::types::RaftPayload {
-                request: ledger_request,
-                proposed_at: chrono::Utc::now(),
-                caller: ctx.caller_or_zero(),
-                state_root_commitments: commitments,
-            };
-            match region.handle.propose_and_wait(payload, timeout).await {
-                Ok(result) => result,
-                Err(inferadb_ledger_raft::HandleError::Timeout { .. }) => {
-                    ctx.end_raft_timer();
-                    ctx.set_error("ProposalTimeout", "Raft proposal timed out");
-                    metrics::record_raft_proposal_timeout();
-                    return Err(status_with_correlation(
-                        Status::deadline_exceeded(format!(
-                            "Raft proposal timed out after {}ms",
-                            timeout.as_millis()
-                        )),
-                        &ctx.request_id(),
-                        ctx.trace_id(),
-                    ));
-                },
-                Err(e) => {
-                    ctx.end_raft_timer();
-                    ctx.set_error("RaftError", &e.to_string());
-                    return Err(status_with_correlation(
-                        classify_raft_error(&e.to_string()),
-                        &ctx.request_id(),
-                        ctx.trace_id(),
-                    ));
-                },
-            }
+        ctx.set_batch_info(false, 1);
+        let commitments =
+            std::mem::take(&mut *vault_group.commitment_buffer().lock().unwrap_or_else(|e| {
+                e.into_inner()
+            }));
+        let payload = inferadb_ledger_raft::types::RaftPayload {
+            request: ledger_request,
+            proposed_at: chrono::Utc::now(),
+            caller: ctx.caller_or_zero(),
+            state_root_commitments: commitments,
+        };
+        let response = match vault_group.handle().propose_and_wait(payload, timeout).await {
+            Ok(result) => result,
+            Err(inferadb_ledger_raft::HandleError::Timeout { .. }) => {
+                ctx.end_raft_timer();
+                ctx.set_error("ProposalTimeout", "Raft proposal timed out");
+                metrics::record_raft_proposal_timeout();
+                return Err(status_with_correlation(
+                    Status::deadline_exceeded(format!(
+                        "Raft proposal timed out after {}ms",
+                        timeout.as_millis()
+                    )),
+                    &ctx.request_id(),
+                    ctx.trace_id(),
+                ));
+            },
+            Err(e) => {
+                ctx.end_raft_timer();
+                ctx.set_error("RaftError", &e.to_string());
+                return Err(status_with_correlation(
+                    classify_raft_error(&e.to_string()),
+                    &ctx.request_id(),
+                    ctx.trace_id(),
+                ));
+            },
         };
         ctx.end_raft_timer();
 
@@ -1677,21 +1666,57 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         let timeout =
             inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
 
-        // Submit to Raft — batch_write always uses direct proposal (not batch writer)
+        // P2c.3.b.2: route the proposal to the vault's per-vault Raft
+        // shard, not the parent organization shard. See `write()` above
+        // for the full rationale; this is the BatchWrite twin of the
+        // same flip. `batch_write` never used `batch_handle` (direct
+        // proposal only), so this is a straight swap of `region.handle`
+        // for `vault_group.handle()`.
+        let manager = self.manager.as_ref().ok_or_else(|| {
+            status_with_correlation(
+                Status::internal("Vault-scoped writes require RaftManager configuration"),
+                &ctx.request_id(),
+                ctx.trace_id(),
+            )
+        })?;
+        let vault_group =
+            manager.get_vault_group(region.region, organization_id, vault_id).map_err(|_| {
+                status_with_correlation(
+                    Status::unavailable(format!(
+                        "Vault {vault_id} (organization {organization_id}) is not active on this \
+                         node in region {}; retry so the SDK can reconnect",
+                        region.region,
+                    )),
+                    &ctx.request_id(),
+                    ctx.trace_id(),
+                )
+            })?;
+
+        if !vault_group.handle().is_leader() {
+            return Err(status_with_correlation(
+                super::metadata::not_leader_status_from_handle(
+                    vault_group.handle().as_ref(),
+                    self.peer_addresses.as_ref(),
+                    "Not the leader for this vault",
+                ),
+                &ctx.request_id(),
+                ctx.trace_id(),
+            ));
+        }
+
         metrics::record_raft_proposal();
         ctx.start_raft_timer();
-        let commitments = region
-            .commitment_buffer
-            .as_ref()
-            .map(|buf| std::mem::take(&mut *buf.lock().unwrap_or_else(|e| e.into_inner())))
-            .unwrap_or_default();
+        let commitments =
+            std::mem::take(&mut *vault_group.commitment_buffer().lock().unwrap_or_else(|e| {
+                e.into_inner()
+            }));
         let payload = inferadb_ledger_raft::types::RaftPayload {
             request: ledger_request,
             proposed_at: chrono::Utc::now(),
             caller: ctx.caller_or_zero(),
             state_root_commitments: commitments,
         };
-        let response = match region.handle.propose_and_wait(payload, timeout).await {
+        let response = match vault_group.handle().propose_and_wait(payload, timeout).await {
             Ok(result) => result,
             Err(inferadb_ledger_raft::HandleError::Timeout { .. }) => {
                 ctx.end_raft_timer();
@@ -1859,39 +1884,10 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
     use inferadb_ledger_proto::proto::{self, WriteErrorCode};
-    use inferadb_ledger_raft::batching::BatchError;
     use inferadb_ledger_types::{config::ValidationConfig, validation};
     use tonic::Status;
 
-    use super::{WriteService, classify_batch_error};
-
-    // =========================================================================
-    // classify_batch_error
-    // =========================================================================
-
-    #[test]
-    fn classify_batch_error_dropped_returns_unavailable() {
-        let status = classify_batch_error(&BatchError::Dropped);
-        assert_eq!(status.code(), tonic::Code::Unavailable);
-    }
-
-    #[test]
-    fn classify_batch_error_internal_returns_internal() {
-        let status = classify_batch_error(&BatchError::Internal("disk full".into()));
-        assert_eq!(status.code(), tonic::Code::Internal);
-    }
-
-    #[test]
-    fn classify_batch_error_raft_leadership_returns_unavailable() {
-        let status = classify_batch_error(&BatchError::RaftError("not leader".into()));
-        assert_eq!(status.code(), tonic::Code::Unavailable);
-    }
-
-    #[test]
-    fn classify_batch_error_raft_generic_returns_internal() {
-        let status = classify_batch_error(&BatchError::RaftError("storage failure".into()));
-        assert_eq!(status.code(), tonic::Code::Internal);
-    }
+    use super::WriteService;
 
     /// Helper: run the same validate-and-map-to-Status logic the service uses.
     fn validate_proto_operations(

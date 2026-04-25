@@ -1712,7 +1712,33 @@ impl RaftManager {
         // genuinely does not know which tier owns the shard. Returns the
         // untiered [`InnerGroup`] so consumers can reach `handle()` without
         // committing to a tier; any other use is a tier-discipline violation.
-        self.regions.read().values().find(|group| group.handle().shard_id() == shard_id).cloned()
+        //
+        // Per-vault shards are registered on the parent organization's
+        // `ConsensusEngine` (see `start_vault_group` —
+        // `org_inner.handle().add_shard(consensus_shard)`). They have no
+        // entry in `self.regions` of their own, so a direct match against
+        // `group.handle().shard_id()` misses every vault shard. To dispatch
+        // an inbound vault `Replicate` message correctly the receiver must
+        // resolve to the parent org's [`InnerGroup`] (which owns the
+        // engine, the transport, and is registered in `self.regions`).
+        // After the direct match, scan `self.vault_groups` and resolve the
+        // vault's `(region, organization_id)` parent.
+        if let Some(group) = self
+            .regions
+            .read()
+            .values()
+            .find(|group| group.handle().shard_id() == shard_id)
+            .cloned()
+        {
+            return Some(group);
+        }
+        let parent_key = self
+            .vault_groups
+            .read()
+            .values()
+            .find(|vault| vault.shard_id == shard_id)
+            .map(|vault| (vault.region, vault.organization_id))?;
+        self.regions.read().get(&parent_key).cloned()
     }
 
     /// Untyped region-group lookup used by the gRPC `RaftService` fallback
@@ -2916,19 +2942,15 @@ impl RaftManager {
         //
         // Two parts:
         //
-        // 1. One-shot adoption — if the parent org already has a leader,
-        //    adopt it before returning so the vault group doesn't sit
-        //    leaderless between start and the next parent leader-change.
-        //    When the parent hasn't elected yet (e.g., during cluster
-        //    bootstrap), this arm is a no-op and the watcher covers the
-        //    first real change.
+        // 1. One-shot adoption — if the parent org already has a leader, adopt it before returning
+        //    so the vault group doesn't sit leaderless between start and the next parent
+        //    leader-change. When the parent hasn't elected yet (e.g., during cluster bootstrap),
+        //    this arm is a no-op and the watcher covers the first real change.
         //
-        // 2. Watcher task — subscribes to the parent org's state watch
-        //    and re-adopts on every leader / term change. Bound to the
-        //    per-vault cancellation token so `stop_vault_group` tears it
-        //    down without disturbing sibling vaults, and to the manager
-        //    token so process-wide shutdown drains it alongside the
-        //    commit-pump stub.
+        // 2. Watcher task — subscribes to the parent org's state watch and re-adopts on every
+        //    leader / term change. Bound to the per-vault cancellation token so `stop_vault_group`
+        //    tears it down without disturbing sibling vaults, and to the manager token so
+        //    process-wide shutdown drains it alongside the commit-pump stub.
         let org_handle_for_adopt = org_inner.handle().clone();
         let initial_org_state = org_handle_for_adopt.shard_state();
         if let Some(leader) = initial_org_state.leader {
@@ -5428,9 +5450,7 @@ mod tests {
             .expect("start vault group");
 
         let start = std::time::Instant::now();
-        while !vault.handle().is_leader()
-            && start.elapsed() < std::time::Duration::from_secs(2)
-        {
+        while !vault.handle().is_leader() && start.elapsed() < std::time::Duration::from_secs(2) {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         assert!(
