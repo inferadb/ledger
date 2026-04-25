@@ -2185,7 +2185,33 @@ async fn test_batch_writer_throughput_via_grpc_under_concurrent_load() {
     // path would add ~5s per test; `bootstrap_org_and_vault` returns an Active
     // org + registered vault in < 500ms. Shared across all writer tasks — the
     // 2-5s SDK-client-usable setup cost does not multiply per task.
-    let (_user_id, org_slug, _org_id, vault_slug, _vault_id) = bootstrap_org_and_vault(&node).await;
+    let (_user_id, org_slug, org_id, vault_slug, vault_id) = bootstrap_org_and_vault(&node).await;
+
+    // Wait for the per-vault group to come up before driving gRPC writes.
+    // `bootstrap_org_and_vault` returns once the per-org `CreateVault` apply
+    // has fired the `VaultCreationRequest` signal, but the watcher's
+    // `start_vault_group` call is async — until it completes, the vault
+    // shard isn't registered on this voter and `WriteService::write` would
+    // either fall back to direct-proposal or fail to route. Mirrors the
+    // `wait_for_vault_group_live_on_all_voters` helper from
+    // `vault_lifecycle.rs`, narrowed to the single-node `CrashableNode`
+    // harness.
+    {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            if node.manager.has_vault_group(Region::US_EAST_VA, org_id, vault_id) {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "vault group (US_EAST_VA, {org_id:?}, {vault_id:?}) did not register \
+                     within 15s — watcher → start_vault_group did not complete after \
+                     CreateVault apply"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
 
     let addr = node.addr.clone();
     let start = std::time::Instant::now();
@@ -2277,17 +2303,20 @@ async fn test_batch_writer_throughput_via_grpc_under_concurrent_load() {
     );
 
     // Third — operational proof that the BatchWriter path was exercised.
-    // `WriteService::write` only uses `batch_handle.submit(...)` when
-    // `region.batch_handle` is `Some`; otherwise it falls through to direct
-    // proposal. With the handle present AND the writes succeeding AND the
-    // request routing through gRPC, `BatchWriter::submit` is the only path
-    // the server could have taken — no direct metric scrape required.
-    let data =
-        node.manager.get_region_group(Region::US_EAST_VA).expect("US_EAST_VA region running");
+    // Post-Task-#164, vault writes route through the per-vault group's
+    // `batch_handle.submit(...)`; `WriteService::write` only falls through
+    // to direct proposal when the vault group's `batch_handle` is `None`.
+    // With the handle present AND the writes succeeding AND the request
+    // routing through gRPC, `BatchWriter::submit` is the only path the
+    // server could have taken — no direct metric scrape required.
+    let vault_group = node
+        .manager
+        .get_vault_group(Region::US_EAST_VA, org_id, vault_id)
+        .expect("vault group registered after wait above");
     assert!(
-        data.inner().batch_handle().is_some(),
-        "BatchWriter was not wired on US_EAST_VA when the gRPC writes ran — the \
-         throughput measurement above exercised the direct-proposal fallback, not \
+        vault_group.batch_handle().is_some(),
+        "BatchWriter was not wired on the per-vault group when the gRPC writes ran — \
+         the throughput measurement above exercised the direct-proposal fallback, not \
          the BatchWriter::submit path."
     );
 
