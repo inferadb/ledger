@@ -744,10 +744,8 @@ mod tests {
 
         // Build an engine via the existing test fixture, then snapshot
         // its Arc so both handles can share it.
-        let (org_handle, _org_map) = make_handle(
-            node_id,
-            make_state(org_shard_id, NodeState::Follower, None, 1),
-        );
+        let (org_handle, _org_map) =
+            make_handle(node_id, make_state(org_shard_id, NodeState::Follower, None, 1));
         let engine = org_handle.engine_arc();
 
         // Vault-side state watch + response map are independent of the

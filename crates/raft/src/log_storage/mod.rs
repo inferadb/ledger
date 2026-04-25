@@ -5288,9 +5288,8 @@ mod tests {
             inferadb_ledger_store::Database::<FileBackend>::create(tmp.path().join("blocks.db"))
                 .expect("create blocks db"),
         );
-        let block_archive = std::sync::Arc::new(
-            inferadb_ledger_state::BlockArchive::<FileBackend>::new(blocks_db),
-        );
+        let block_archive =
+            std::sync::Arc::new(inferadb_ledger_state::BlockArchive::<FileBackend>::new(blocks_db));
         let (block_announcements, _) = broadcast::channel(16);
         let leader_lease = std::sync::Arc::new(crate::leader_lease::LeaderLease::new(
             std::time::Duration::from_millis(150),
@@ -5308,11 +5307,7 @@ mod tests {
         .with_state_layer(state_layer)
         .with_block_archive(block_archive)
         .with_block_announcements(block_announcements)
-        .with_region_config(
-            Region::US_EAST_VA,
-            inferadb_ledger_types::NodeId::new("1"),
-            1,
-        )
+        .with_region_config(Region::US_EAST_VA, inferadb_ledger_types::NodeId::new("1"), 1)
         .with_leader_lease(leader_lease);
 
         // The stamped vault identity persists through the wiring chain —

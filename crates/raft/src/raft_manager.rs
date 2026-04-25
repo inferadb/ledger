@@ -2453,37 +2453,29 @@ impl RaftManager {
         // resources below are shared with the parent org rather than
         // per-vault:
         //
-        // - `state_layer` — the org's `StateLayer` already materialises
-        //   per-vault `state.db` databases via its lazy factory (P2b.0).
-        //   Sharing the accessor lets vault apply land entity writes in
-        //   the correct per-vault database without duplicating the layer.
-        // - `block_archive` — vault writes append to the org's chain. A
-        //   per-vault Merkle chain is a separate slice; until then,
-        //   vault-shard `RegionBlock`s land in the org's `blocks.db`.
-        // - `block_announcements` — broadcast through the org's channel
-        //   so subscribers see vault-shard commits alongside org-shard
-        //   commits.
-        // - `leader_lease` — vault groups run delegated leadership; the
-        //   parent org's lease is the authoritative read-validity window.
+        // - `state_layer` — the org's `StateLayer` already materialises per-vault `state.db`
+        //   databases via its lazy factory (P2b.0). Sharing the accessor lets vault apply land
+        //   entity writes in the correct per-vault database without duplicating the layer.
+        // - `block_archive` — vault writes append to the org's chain. A per-vault Merkle chain is a
+        //   separate slice; until then, vault-shard `RegionBlock`s land in the org's `blocks.db`.
+        // - `block_announcements` — broadcast through the org's channel so subscribers see
+        //   vault-shard commits alongside org-shard commits.
+        // - `leader_lease` — vault groups run delegated leadership; the parent org's lease is the
+        //   authoritative read-validity window.
         // - `region_config` — region + node identity match the parent.
         //
         // Not wired in this slice (acceptable; documented):
         //
-        // - `event_writer` — the org's writer was moved into the org's
-        //   `RaftLogStore` and is consumed by its apply worker; there is
-        //   no shared accessor. Apply tolerates a missing `event_writer`
-        //   (events are skipped). A separate slice attaches a vault-side
-        //   writer once an `EventConfig` accessor is exposed on
-        //   `InnerGroup`.
-        // - `divergence_sender` — divergence detection compares against
-        //   piggybacked commitments; the vault's chain starts at height 0
-        //   so there is nothing to compare yet. Wired alongside
-        //   per-vault commitment piggyback in a later slice.
-        // - `region_chain` pre-seed — left at the default
-        //   `{height: 0, previous_hash: ZERO_HASH}`. The vault's chain is
-        //   its own; pre-seeding from the parent's accumulated chain
-        //   would interleave with writes still routing to the parent
-        //   pre-flip.
+        // - `event_writer` — the org's writer was moved into the org's `RaftLogStore` and is
+        //   consumed by its apply worker; there is no shared accessor. Apply tolerates a missing
+        //   `event_writer` (events are skipped). A separate slice attaches a vault-side writer once
+        //   an `EventConfig` accessor is exposed on `InnerGroup`.
+        // - `divergence_sender` — divergence detection compares against piggybacked commitments;
+        //   the vault's chain starts at height 0 so there is nothing to compare yet. Wired
+        //   alongside per-vault commitment piggyback in a later slice.
+        // - `region_chain` pre-seed — left at the default `{height: 0, previous_hash: ZERO_HASH}`.
+        //   The vault's chain is its own; pre-seeding from the parent's accumulated chain would
+        //   interleave with writes still routing to the parent pre-flip.
         let vault_log_store = RaftLogStore::<FileBackend>::open_for_vault(
             &vault_raft_db_path,
             organization_id,
@@ -2642,7 +2634,7 @@ impl RaftManager {
                     region,
                     message: format!("failed to register vault shard on parent engine: {e}"),
                 });
-            }
+            },
         };
 
         // Per-vault response map. Apply on the vault shard fills this

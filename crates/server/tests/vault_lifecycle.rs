@@ -23,7 +23,7 @@ use std::time::Duration;
 use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{OrganizationId, OrganizationSlug, Region, VaultId, VaultSlug};
 
-use crate::common::{TestCluster, TestNode, create_vault_client};
+use crate::common::{TestCluster, TestNode, create_vault_client, create_write_client};
 
 /// Resolves an external `OrganizationSlug` to its internal `OrganizationId`
 /// via the GLOBAL applied-state accessor. Panics if the slug is not yet
@@ -797,5 +797,153 @@ async fn test_vault_group_rehydrates_after_graceful_cluster_restart() {
              {vault_id_post:?})",
             node.id,
         );
+    }
+}
+
+/// P2c.3.b: a `Write` gRPC RPC must propose to the vault's per-vault Raft
+/// shard, not the parent organization shard. The vault's `VaultGroup` apply
+/// pipeline runs the proposed entry and advances the per-vault
+/// `last_applied` counter; the org group's apply pipeline does not.
+///
+/// Flow:
+///   1. 3-voter cluster + 1 data region.
+///   2. Create org + vault; wait for the `VaultGroup` to register on every voter.
+///   3. Capture the per-vault `last_applied` baseline on the leader's vault group.
+///   4. Issue a `Write` via the gRPC `WriteService` against the leader.
+///   5. Assert the write succeeded.
+///   6. Assert the leader's vault group `last_applied` advanced — confirms the proposal landed on
+///      the vault shard's apply pipeline.
+///
+/// **Currently `#[ignore]`d — routing flip is BLOCKED on vault leader
+/// adoption.** The `Write` / `BatchWrite` handlers in
+/// `crates/services/src/services/write.rs` continue to propose through
+/// `region.handle` (the parent organization shard) until the per-vault
+/// `Shard::adopt_leader` watcher lands. The minimal scaffolding from
+/// this slice — `ProposalService::propose_to_vault_bytes` + the
+/// production / mock implementations — is in place so the routing flip
+/// can land cleanly once the leader-adoption watcher exists. The
+/// flip itself was attempted and reverted; vault shards return
+/// `Not the leader` from `propose_and_wait` on a freshly-started vault
+/// (Phase 4 of the per-vault consensus spec, see
+/// `docs/superpowers/specs/2026-04-23-per-vault-consensus.md`).
+///
+/// When vault leader adoption ships, re-flip the proposal call site in
+/// `WriteService::write` / `WriteService::batch_write` to use
+/// `vault_group.handle()` (and `vault_group.batch_handle()` /
+/// `vault_group.commitment_buffer()`), then remove this `#[ignore]`.
+#[ignore = "Vault shard leader adoption (Phase 4) not yet wired — proposal against vault shard \
+            returns Not the leader. Routing flip in write.rs intentionally not landed in this \
+            slice. See docstring."]
+#[tokio::test]
+async fn test_write_routes_to_vault_shard_and_lands_in_vault_state() {
+    let cluster = TestCluster::with_data_regions(3, 1).await;
+    cluster.wait_for_leader().await;
+
+    let region = Region::US_EAST_VA;
+    let leader = cluster.leader().expect("cluster has a leader");
+
+    // Create an organization through the production gRPC + saga path.
+    let (org_slug, _admin_slug) =
+        crate::common::create_test_organization(&leader.addr, "vault-write-routing-org", leader)
+            .await
+            .expect("create organization");
+    let org_id = resolve_org_id(leader, org_slug);
+
+    // Create the vault. The `create_test_vault` helper retries while the
+    // per-org group spins up, so by the time it returns the org group is
+    // live on the leader.
+    let vault_slug =
+        crate::common::create_test_vault(&leader.addr, org_slug).await.expect("create vault");
+
+    // Wait for the per-vault `VaultGroup` to register on every voter via
+    // the apply → watcher → `start_vault_group` chain. Returns the
+    // internal `VaultId` every node agrees on.
+    let vault_id =
+        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(15))
+            .await;
+
+    // Capture baseline per-vault `last_applied` index on the leader's
+    // vault group. This is the per-vault Raft log apply counter — distinct
+    // from the parent org's `applied_state.last_applied`. It only
+    // advances when an entry applies on the vault shard. `None` when the
+    // vault has not yet applied any entries; we capture as `index` (0
+    // when unset) for comparison.
+    let leader_vault_pre =
+        leader.manager.get_vault_group(region, org_id, vault_id).expect("leader has vault group");
+    let last_applied_index_pre = leader_vault_pre
+        .vault_applied_state()
+        .load()
+        .last_applied
+        .as_ref()
+        .map_or(0, |log_id| log_id.index);
+
+    // Issue a `Write` through the gRPC surface — same code path a real
+    // SDK client hits.
+    let mut client =
+        create_write_client(&leader.addr).await.expect("connect to leader write service");
+    let request = inferadb_ledger_proto::proto::WriteRequest {
+        client_id: Some(inferadb_ledger_proto::proto::ClientId {
+            id: "vault-routing-test-client".to_string(),
+        }),
+        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: org_slug.value(),
+        }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug.value() }),
+        operations: vec![inferadb_ledger_proto::proto::Operation {
+            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                inferadb_ledger_proto::proto::SetEntity {
+                    key: "vault-routing-test-key".to_string(),
+                    value: b"vault-routing-test-value".to_vec(),
+                    expires_at: None,
+                    condition: None,
+                },
+            )),
+        }],
+        include_tx_proof: false,
+        caller: None,
+    };
+
+    let response = client.write(request).await.expect("write should succeed").into_inner();
+    match response.result {
+        Some(inferadb_ledger_proto::proto::write_response::Result::Success(success)) => {
+            assert!(success.tx_id.is_some(), "write success must include tx_id");
+            assert!(success.block_height > 0, "write success must include block_height > 0");
+        },
+        Some(inferadb_ledger_proto::proto::write_response::Result::Error(err)) => {
+            panic!("write failed: code={:?} message={:?}", err.code, err.message,);
+        },
+        None => panic!("write response had no result"),
+    }
+
+    // Poll the leader's vault group `last_applied` until it advances.
+    // The Raft apply path is asynchronous: `propose_and_wait` returns
+    // when the apply worker delivers the response, but the
+    // `vault_applied_state` swap may race the response delivery by a
+    // few microseconds. Allow a short grace period.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let leader_vault = leader
+            .manager
+            .get_vault_group(region, org_id, vault_id)
+            .expect("leader has vault group");
+        let last_applied_index_post = leader_vault
+            .vault_applied_state()
+            .load()
+            .last_applied
+            .as_ref()
+            .map_or(0, |log_id| log_id.index);
+        if last_applied_index_post > last_applied_index_pre {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "leader's vault group last_applied did not advance after Write: pre={} post={} \
+                 (vault_id={:?}, org_id={:?}). Write may have routed to org shard instead of \
+                 vault shard.",
+                last_applied_index_pre, last_applied_index_post, vault_id, org_id,
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }

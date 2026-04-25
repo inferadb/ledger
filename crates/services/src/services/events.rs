@@ -928,6 +928,19 @@ mod tests {
             Ok(LedgerResponse::Empty)
         }
 
+        async fn propose_to_vault_bytes(
+            &self,
+            _region: Region,
+            _organization: OrganizationId,
+            _vault_id: inferadb_ledger_types::VaultId,
+            _bytes: Vec<u8>,
+            _timeout: Duration,
+        ) -> Result<LedgerResponse, Status> {
+            Err(Status::unimplemented(
+                "TestIngestProposer only supports propose_to_organization_bytes",
+            ))
+        }
+
         fn regional_state(
             &self,
             _region: Region,

@@ -13,7 +13,7 @@ use inferadb_ledger_raft::{
 };
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
-use inferadb_ledger_types::{OrganizationId, Region};
+use inferadb_ledger_types::{OrganizationId, Region, VaultId};
 use tonic::Status;
 
 /// Serializes a `RaftPayload<R>` to postcard bytes.
@@ -107,6 +107,34 @@ pub trait ProposalService: Send + Sync {
         &self,
         region: Region,
         organization: OrganizationId,
+        bytes: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<LedgerResponse, Status>;
+
+    /// Proposes pre-serialized `postcard(RaftPayload<OrganizationRequest>)` bytes
+    /// to a specific vault's per-vault Raft shard.
+    ///
+    /// Looks up the [`VaultGroup`](inferadb_ledger_raft::raft_manager::VaultGroup)
+    /// registered on this node for `(region, organization, vault_id)` and
+    /// proposes through its vault-specific
+    /// [`ConsensusHandle`](inferadb_ledger_raft::ConsensusHandle). Used by gRPC
+    /// handlers that target vault-scoped variants (`Write`, `BatchWrite`,
+    /// `IngestExternalEvents`) — the vault-scoped apply path on the vault
+    /// shard runs the variant validation gate added by P2c.1.
+    ///
+    /// `vault_id` is the internal `VaultId` resolved at the handler via
+    /// `SlugResolver`. It is the routing key used to locate the
+    /// `VaultGroup`; the vault identity is also encoded inside the payload
+    /// bytes (per-operation), so the apply pipeline still tier-validates.
+    ///
+    /// Returns `UNAVAILABLE` when the vault group is not registered on this
+    /// node (not yet started, deleted, or migrated). The caller propagates
+    /// the status so the SDK can retry on the correct leader.
+    async fn propose_to_vault_bytes(
+        &self,
+        region: Region,
+        organization: OrganizationId,
+        vault_id: VaultId,
         bytes: Vec<u8>,
         timeout: Duration,
     ) -> Result<LedgerResponse, Status>;
@@ -297,6 +325,64 @@ impl ProposalService for RaftProposalService {
         }
     }
 
+    async fn propose_to_vault_bytes(
+        &self,
+        region: Region,
+        organization: OrganizationId,
+        vault_id: VaultId,
+        bytes: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<LedgerResponse, Status> {
+        let manager = self.manager.as_ref().ok_or_else(|| {
+            Status::failed_precondition("Per-vault proposals require RaftManager configuration")
+        })?;
+
+        let vault_group =
+            manager.get_vault_group(region, organization, vault_id).map_err(|_| {
+                Status::unavailable(format!(
+                    "Vault {vault_id} (organization {organization}) is not active on this \
+                     node in region {region}"
+                ))
+            })?;
+
+        if !vault_group.handle().is_leader() {
+            return Err(super::services::metadata::not_leader_status_from_handle(
+                vault_group.handle().as_ref(),
+                Some(manager.peer_addresses()),
+                format!(
+                    "Not the leader for vault {vault_id} (organization {organization}) in \
+                     region {region}"
+                ),
+            ));
+        }
+
+        match vault_group.handle().propose_bytes_and_wait(bytes, timeout).await {
+            Ok(response) => Ok(response),
+            Err(HandleError::Consensus { source, .. })
+                if source.to_string().contains("Not the leader") =>
+            {
+                Err(super::services::metadata::not_leader_status_from_handle(
+                    vault_group.handle().as_ref(),
+                    Some(manager.peer_addresses()),
+                    format!(
+                        "Not the leader for vault {vault_id} (organization {organization}) \
+                         in region {region} (lost leadership mid-propose)"
+                    ),
+                ))
+            },
+            Err(HandleError::Consensus { source, .. }) => Err(consensus_error_to_status(source)),
+            Err(HandleError::Timeout { .. }) => {
+                inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
+                Err(Status::deadline_exceeded(format!(
+                    "Vault Raft proposal timed out after {}ms (vault: {vault_id}, org: \
+                     {organization}, region: {region})",
+                    timeout.as_millis()
+                )))
+            },
+            Err(e) => Err(Status::internal(e.to_string())),
+        }
+    }
+
     fn regional_state(&self, region: Region) -> Result<Arc<StateLayer<FileBackend>>, Status> {
         let manager = self.manager.as_ref().ok_or_else(|| {
             Status::failed_precondition("Regional state access requires RaftManager configuration")
@@ -333,7 +419,7 @@ pub(crate) mod mock {
     use inferadb_ledger_raft::types::{LedgerResponse, RaftPayload};
     use inferadb_ledger_state::StateLayer;
     use inferadb_ledger_store::FileBackend;
-    use inferadb_ledger_types::{OrganizationId, Region};
+    use inferadb_ledger_types::{OrganizationId, Region, VaultId};
     use parking_lot::Mutex;
     use tonic::Status;
 
@@ -349,12 +435,15 @@ pub(crate) mod mock {
         responses: Mutex<VecDeque<Result<LedgerResponse, Status>>>,
         regional_responses: Mutex<VecDeque<Result<LedgerResponse, Status>>>,
         organization_responses: Mutex<VecDeque<Result<LedgerResponse, Status>>>,
+        vault_responses: Mutex<VecDeque<Result<LedgerResponse, Status>>>,
         /// Captured global proposals as raw `postcard(RaftPayload<R>)` bytes.
         proposals: Mutex<Vec<Vec<u8>>>,
         /// Captured regional proposals as raw bytes with (region, bytes).
         regional_proposals: Mutex<Vec<(Region, Vec<u8>)>>,
         /// Captured organization proposals as raw bytes with (region, organization_id, bytes).
         organization_proposals: Mutex<Vec<(Region, OrganizationId, Vec<u8>)>>,
+        /// Captured vault proposals as raw bytes with (region, organization_id, vault_id, bytes).
+        vault_proposals: Mutex<Vec<(Region, OrganizationId, VaultId, Vec<u8>)>>,
         regional_state_layer: Mutex<Option<Arc<StateLayer<FileBackend>>>>,
     }
 
@@ -365,9 +454,11 @@ pub(crate) mod mock {
                 responses: Mutex::new(VecDeque::new()),
                 regional_responses: Mutex::new(VecDeque::new()),
                 organization_responses: Mutex::new(VecDeque::new()),
+                vault_responses: Mutex::new(VecDeque::new()),
                 proposals: Mutex::new(Vec::new()),
                 regional_proposals: Mutex::new(Vec::new()),
                 organization_proposals: Mutex::new(Vec::new()),
+                vault_proposals: Mutex::new(Vec::new()),
                 regional_state_layer: Mutex::new(None),
             }
         }
@@ -387,6 +478,12 @@ pub(crate) mod mock {
         #[allow(dead_code)]
         pub(crate) fn enqueue_organization(&self, response: Result<LedgerResponse, Status>) {
             self.organization_responses.lock().push_back(response);
+        }
+
+        /// Enqueues a response for the next `propose_to_vault_bytes()` call.
+        #[allow(dead_code)]
+        pub(crate) fn enqueue_vault(&self, response: Result<LedgerResponse, Status>) {
+            self.vault_responses.lock().push_back(response);
         }
 
         /// Sets the state layer returned by `regional_state()`.
@@ -413,6 +510,15 @@ pub(crate) mod mock {
         #[allow(dead_code)]
         pub(crate) fn raw_organization_proposals(&self) -> Vec<(Region, OrganizationId, Vec<u8>)> {
             self.organization_proposals.lock().clone()
+        }
+
+        /// Returns the raw vault proposal bytes captured from
+        /// `propose_to_vault_bytes()` calls.
+        #[allow(dead_code)]
+        pub(crate) fn raw_vault_proposals(
+            &self,
+        ) -> Vec<(Region, OrganizationId, VaultId, Vec<u8>)> {
+            self.vault_proposals.lock().clone()
         }
 
         /// Decodes captured `propose_bytes` calls into typed `RaftPayload<R>`.
@@ -516,6 +622,21 @@ pub(crate) mod mock {
                 .lock()
                 .pop_front()
                 .unwrap_or_else(|| Err(Status::internal("no mock organization response enqueued")))
+        }
+
+        async fn propose_to_vault_bytes(
+            &self,
+            region: Region,
+            organization: OrganizationId,
+            vault_id: VaultId,
+            bytes: Vec<u8>,
+            _timeout: Duration,
+        ) -> Result<LedgerResponse, Status> {
+            self.vault_proposals.lock().push((region, organization, vault_id, bytes));
+            self.vault_responses
+                .lock()
+                .pop_front()
+                .unwrap_or_else(|| Err(Status::internal("no mock vault response enqueued")))
         }
 
         fn regional_state(&self, region: Region) -> Result<Arc<StateLayer<FileBackend>>, Status> {
