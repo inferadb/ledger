@@ -87,7 +87,7 @@ use crate::{
     metrics,
     region_storage::RegionStorageManager,
     runtime_config::RuntimeConfigHandle,
-    state_checkpointer::StateCheckpointer,
+    state_checkpointer::{StateCheckpointer, VaultRaftDbsFn},
     ttl_gc::TtlGarbageCollector,
     types::{LedgerNodeId, LedgerResponse, OrganizationRequest, RaftPayload},
 };
@@ -1540,7 +1540,7 @@ pub struct RaftManager {
     /// [`inferadb_ledger_consensus::LeadershipMode::Delegated`] — its
     /// leader is adopted from the parent `OrganizationGroup` rather than
     /// elected independently.
-    vault_groups: RwLock<HashMap<(Region, OrganizationId, VaultId), Arc<InnerVaultGroup>>>,
+    vault_groups: Arc<RwLock<HashMap<(Region, OrganizationId, VaultId), Arc<InnerVaultGroup>>>>,
     /// Shared peer address map (node ID → network address).
     ///
     /// Populated from `initial_members` during region startup and updated
@@ -1598,7 +1598,7 @@ impl RaftManager {
             config,
             storage_manager,
             regions: RwLock::new(HashMap::new()),
-            vault_groups: RwLock::new(HashMap::new()),
+            vault_groups: Arc::new(RwLock::new(HashMap::new())),
             peer_addresses: crate::peer_address_map::PeerAddressMap::new(),
             registry,
             dr_event_tx: tx,
@@ -4042,12 +4042,35 @@ impl RaftManager {
         let blocks_db_for_scrub = Arc::clone(&blocks_db);
         let events_db_for_scrub = events_db.as_ref().map(Arc::clone);
         let meta_db_for_scrub = Arc::clone(&meta_db);
+        // Closure that snapshots the per-vault `raft.db` handles owned
+        // by every `InnerVaultGroup` whose key matches this
+        // checkpointer's `(region, organization_id)` scope. The
+        // checkpointer invokes the closure once per tick (Task #170)
+        // so vaults started or stopped between ticks are picked up
+        // automatically — mirroring the per-vault state.db enumeration
+        // that goes through `StateLayer::live_vault_dbs()`. The
+        // shutdown-side equivalent is built inline in
+        // [`Self::sync_all_state_dbs`] (Task #145).
+        let vault_groups_for_checkpointer = Arc::clone(&self.vault_groups);
+        let region_for_checkpointer = region;
+        let organization_id_for_checkpointer = organization_id;
+        let vault_raft_dbs_fn: VaultRaftDbsFn = Arc::new(move || {
+            vault_groups_for_checkpointer
+                .read()
+                .iter()
+                .filter(|((r, o, _), _)| {
+                    *r == region_for_checkpointer && *o == organization_id_for_checkpointer
+                })
+                .map(|((_, _, vid), inner)| (*vid, Arc::clone(inner.raft_db())))
+                .collect()
+        });
         let state_checkpointer = StateCheckpointer::from_config(
             Arc::clone(&state),
             raft_db,
             blocks_db,
             events_db,
             meta_db,
+            vault_raft_dbs_fn,
             runtime_config,
             applied_index_rx,
             parent_token.child_token(),

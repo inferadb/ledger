@@ -6,17 +6,21 @@
 //! so writes visible to in-process readers may be ahead of the dual-slot
 //! on-disk pointer until the next checkpoint. This task narrows that gap.
 //!
-//! Each region has up to **four** `Database<FileBackend>` handles that go
-//! lazy: `state.db` (entity/relationship tables, owned by `StateLayer`),
-//! `raft.db` (`KEY_APPLIED_STATE` + Raft log, owned by
+//! Each region has up to **four** per-org `Database<FileBackend>` handles
+//! that go lazy: `state.db` (entity/relationship tables, owned by
+//! `StateLayer`), `raft.db` (`KEY_APPLIED_STATE` + Raft log, owned by
 //! `RaftLogStore`), `blocks.db` (historical block archive, owned by
 //! `BlockArchive`), and `events.db` (audit events, owned by
 //! `EventsDatabase` — optional: some regions are configured without events).
-//! All flipped DBs receive `commit_in_memory` commits on every applied
-//! batch, so the checkpointer syncs them concurrently on every fire.
-//! Missing the raft.db sync would cause `applied_durable = 0` to be read on
-//! clean-shutdown restart (`KEY_APPLIED_STATE` never reaches disk), forcing
-//! a full WAL replay — see the follow-up in the commit-durability audit.
+//! Per-vault consensus adds **two more** lazy handles per live vault:
+//! the per-vault `state.db` (enumerated by `StateLayer::live_vault_dbs()`)
+//! and the per-vault `raft.db` (snapshotted via the `vault_raft_dbs_fn`
+//! closure threaded in from `RaftManager`). All of these receive
+//! `commit_in_memory` commits on every applied batch, so the checkpointer
+//! syncs them concurrently on every fire. Missing the per-org or per-vault
+//! raft.db sync would cause `applied_durable = 0` to be read on clean-
+//! shutdown restart (`KEY_APPLIED_STATE` never reaches disk), forcing a
+//! full WAL replay — see the follow-up in the commit-durability audit.
 //! Missing blocks.db or events.db would leave their dirty pages
 //! accumulating unbounded in memory between ticks.
 //!
@@ -51,13 +55,30 @@ use std::{
 
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::{Database, FileBackend};
-use inferadb_ledger_types::{OrganizationId, config::CheckpointConfig};
+use inferadb_ledger_types::{OrganizationId, VaultId, config::CheckpointConfig};
 use parking_lot::Mutex;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::{metrics, runtime_config::RuntimeConfigHandle};
+
+/// Snapshot accessor for the per-vault `raft.db` handles owned by the parent
+/// [`RaftManager`]'s `vault_groups` map, scoped to the `(region,
+/// organization_id)` this checkpointer instance binds to.
+///
+/// Invoked once per tick — both inside `max_dirty_pages` (for the
+/// dirty-page trigger) and at the top of `do_checkpoint` (for the Phase A
+/// fan-out). The closure returns whatever vault groups are live at the
+/// moment of invocation; vaults materialised mid-tick are simply picked up
+/// on the next tick, mirroring the per-vault `state.db` snapshot semantics.
+///
+/// Boxed behind `Arc<dyn Fn>` so the checkpointer does not hold a generic
+/// type parameter on the parent `RaftManager`'s internal map shape; the
+/// caller (in `raft_manager::start_background_jobs`) is the only place
+/// that knows how to filter `vault_groups` by region + organization.
+pub type VaultRaftDbsFn =
+    Arc<dyn Fn() -> Vec<(VaultId, Arc<Database<FileBackend>>)> + Send + Sync>;
 
 /// Floor on the internal poll cadence so sub-50ms `interval_ms` settings do
 /// not spin the task at the tokio timer's minimum resolution.
@@ -131,6 +152,22 @@ pub struct StateCheckpointer {
     /// explicitly: the first `tokio::join!` covers the four entity/state
     /// DBs, then meta.db is synced separately, after they all succeed.
     meta_db: Arc<Database<FileBackend>>,
+    /// Snapshot accessor for the per-vault `raft.db` handles bound to this
+    /// checkpointer's `(region, organization_id)` scope.
+    ///
+    /// Each vault group opens its own `raft.db` under
+    /// `{data_dir}/{region}/{org_id}/state/vault-{vault_id}/`. Apply now
+    /// writes per-vault `KEY_APPLIED_STATE` + Raft log entries via
+    /// `commit_in_memory`, so dirty pages accumulate in the per-vault
+    /// `raft.db` page cache between ticks and only reach disk on
+    /// `sync_state`. Without per-tick fsync coverage, the gap is closed
+    /// only by `sync_all_state_dbs` on graceful shutdown — leaving every
+    /// crash window unbounded.
+    ///
+    /// The closure is invoked once per tick (Phase A fan-out) and once
+    /// per dirty-page sample (`max_dirty_pages`). Vaults materialised
+    /// mid-tick are simply picked up on the next tick.
+    vault_raft_dbs_fn: VaultRaftDbsFn,
     /// Live runtime-config handle. Re-read on every wake-up so live
     /// `UpdateConfig` RPCs take effect on the next tick.
     runtime_config: RuntimeConfigHandle,
@@ -180,6 +217,7 @@ impl StateCheckpointer {
         blocks_db: Arc<Database<FileBackend>>,
         events_db: Option<Arc<Database<FileBackend>>>,
         meta_db: Arc<Database<FileBackend>>,
+        vault_raft_dbs_fn: VaultRaftDbsFn,
         runtime_config: RuntimeConfigHandle,
         applied_rx: watch::Receiver<u64>,
         cancellation_token: CancellationToken,
@@ -193,6 +231,7 @@ impl StateCheckpointer {
             blocks_db,
             events_db,
             meta_db,
+            vault_raft_dbs_fn,
             runtime_config,
             applied_rx,
             cancellation_token,
@@ -254,22 +293,30 @@ impl StateCheckpointer {
     }
 
     /// Returns the peak `cache_dirty_page_count()` across every configured
-    /// DB (every live vault DB, plus raft, blocks, events when Some, and
-    /// meta). The trigger must fire on whichever DB is under pressure —
-    /// ingest-heavy workloads can dirty events.db while state DBs stay
-    /// clean, and a single hot vault can accumulate pressure while every
-    /// other vault is idle. meta.db contributes per-entry sentinel writes
-    /// and must be part of the `max()` so the checkpointer catches
-    /// per-tick sentinel pressure too.
+    /// DB (every live vault state.db + per-vault raft.db, plus the per-
+    /// org raft, blocks, events when Some, and meta). The trigger must
+    /// fire on whichever DB is under pressure — ingest-heavy workloads
+    /// can dirty events.db while state DBs stay clean, and a single hot
+    /// vault can accumulate pressure on either its state.db or raft.db
+    /// while every other vault is idle. meta.db contributes per-entry
+    /// sentinel writes and must be part of the `max()` so the
+    /// checkpointer catches per-tick sentinel pressure too.
     ///
-    /// Slice 2b: iterates `StateLayer::live_vault_dbs()` so newly-opened
-    /// vaults automatically contribute to the trigger on the next tick;
-    /// dormant or unopened vaults contribute nothing. Re-evaluated every
-    /// wake-up — no cached snapshot of the vault set.
+    /// Slice 2b iterates `StateLayer::live_vault_dbs()` for per-vault
+    /// state.db dirty pages; the per-vault raft.db handles come from the
+    /// `vault_raft_dbs_fn` closure threaded in from `RaftManager`. Both
+    /// are re-evaluated every wake-up so newly-opened vaults
+    /// automatically contribute on the next tick; dormant or unopened
+    /// vaults contribute nothing.
     fn max_dirty_pages(&self) -> u64 {
-        let vault_max = self
+        let vault_state_max = self
             .state_layer
             .live_vault_dbs()
+            .iter()
+            .map(|(_, db)| db.cache_dirty_page_count() as u64)
+            .max()
+            .unwrap_or(0);
+        let vault_raft_max = (self.vault_raft_dbs_fn)()
             .iter()
             .map(|(_, db)| db.cache_dirty_page_count() as u64)
             .max()
@@ -279,7 +326,7 @@ impl StateCheckpointer {
         let events =
             self.events_db.as_ref().map(|db| db.cache_dirty_page_count() as u64).unwrap_or(0);
         let meta = self.meta_db.cache_dirty_page_count() as u64;
-        vault_max.max(raft).max(blocks).max(events).max(meta)
+        vault_state_max.max(vault_raft_max).max(raft).max(blocks).max(events).max(meta)
     }
 
     /// Executes a single checkpoint. On success, advances the trigger
@@ -292,9 +339,11 @@ impl StateCheckpointer {
     ///
     /// Sync semantics:
     ///
-    /// 1. **Phase A** — state.db / raft.db / blocks.db / events.db (when present) run concurrently
-    ///    via `tokio::join!`. These are the entity-data stores; they must reach disk before the
-    ///    sentinel that references them advances.
+    /// 1. **Phase A** — every live per-vault state.db, every live per-vault raft.db, the per-org
+    ///    raft.db / blocks.db / events.db (when present) all run concurrently via `tokio::join!`.
+    ///    These are the entity-data stores; they must reach disk before the sentinel that
+    ///    references them advances. The per-vault raft.db fan-out mirrors the per-vault state.db
+    ///    fan-out (Task #145 covers the same fan-out on the shutdown side).
     /// 2. **Phase B** — meta.db is synced **after** Phase A completes. meta.db owns the
     ///    `_meta:last_applied` sentinel; landing it on disk before the entity data would allow a
     ///    post-crash boot to observe a sentinel that references writes still trapped in the page
@@ -328,8 +377,16 @@ impl StateCheckpointer {
         //
         // We snapshot the live vault set once at the top of the tick
         // so a vault being materialised mid-tick is simply picked up
-        // on the next tick; retrying is idempotent.
+        // on the next tick; retrying is idempotent. The per-vault
+        // raft.db snapshot mirrors the per-vault state.db snapshot:
+        // each vault group owns its own `raft.db` under
+        // `{data_dir}/{region}/{org_id}/state/vault-{vault_id}/`, and
+        // apply now writes per-vault `KEY_APPLIED_STATE` + Raft log
+        // entries via `commit_in_memory`. Fanning these out in Phase A
+        // alongside the vault state DBs closes the steady-state crash
+        // gap (Task #145 covers the shutdown-side equivalent).
         let vault_dbs = self.state_layer.live_vault_dbs();
+        let vault_raft_dbs = (self.vault_raft_dbs_fn)();
 
         // Launch every Phase A sync as an independent future, then
         // `join_all` them. A per-vault sync failure in the vault fan-
@@ -339,6 +396,9 @@ impl StateCheckpointer {
         // steady until every DB succeeds on a future tick.
         let vault_syncs =
             futures::future::join_all(vault_dbs.iter().map(|(_, db)| Arc::clone(db).sync_state()));
+        let vault_raft_syncs = futures::future::join_all(
+            vault_raft_dbs.iter().map(|(_, db)| Arc::clone(db).sync_state()),
+        );
         let raft_fut = Arc::clone(&self.raft_db).sync_state();
         let blocks_fut = Arc::clone(&self.blocks_db).sync_state();
         let events_db_for_sync = self.events_db.as_ref().map(Arc::clone);
@@ -346,8 +406,8 @@ impl StateCheckpointer {
             if let Some(ev) = events_db_for_sync { Some(ev.sync_state().await) } else { None }
         };
 
-        let (vault_results, raft_result, blocks_result, events_result) =
-            tokio::join!(vault_syncs, raft_fut, blocks_fut, events_fut);
+        let (vault_results, vault_raft_results, raft_result, blocks_result, events_result) =
+            tokio::join!(vault_syncs, vault_raft_syncs, raft_fut, blocks_fut, events_fut);
 
         // Phase B: sync meta.db **after** Phase A entity DBs have
         // resolved. This is the strict-ordering invariant — the
@@ -359,7 +419,9 @@ impl StateCheckpointer {
         let duration_secs = duration.as_secs_f64();
 
         let vault_all_ok = vault_results.iter().all(|r| r.is_ok());
+        let vault_raft_all_ok = vault_raft_results.iter().all(|r| r.is_ok());
         let all_ok = vault_all_ok
+            && vault_raft_all_ok
             && raft_result.is_ok()
             && blocks_result.is_ok()
             && events_result.as_ref().is_none_or(|r| r.is_ok())
@@ -378,6 +440,21 @@ impl StateCheckpointer {
                     vault_id = vault_id.value(),
                     region = %self.region,
                     "state checkpoint sync failed for vault; leaving accumulators untouched so the next tick retries"
+                );
+            }
+        }
+        // Per-vault raft.db failures are logged on the same `db = "raft"`
+        // label as the per-org raft.db; the `vault_id` field disambiguates
+        // (matches Task #145's harmonized labeling on the shutdown path).
+        for ((vault_id, _db), res) in vault_raft_dbs.iter().zip(vault_raft_results.iter()) {
+            if let Err(e) = res {
+                warn!(
+                    error = %e,
+                    trigger,
+                    db = "raft",
+                    vault_id = vault_id.value(),
+                    region = %self.region,
+                    "state checkpoint sync failed for vault raft.db; leaving accumulators untouched so the next tick retries"
                 );
             }
         }
@@ -461,9 +538,10 @@ impl StateCheckpointer {
                 applies_since_last,
                 dirty_pages,
                 vault_count = vault_dbs.len(),
+                vault_raft_count = vault_raft_dbs.len(),
                 events_enabled = self.events_db.is_some(),
                 region = %self.region,
-                "state checkpoint complete (every live vault state.db + raft.db + blocks.db + events.db if enabled, then meta.db)"
+                "state checkpoint complete (every live vault state.db + every live vault raft.db + raft.db + blocks.db + events.db if enabled, then meta.db)"
             );
         } else {
             metrics::record_state_checkpoint(
@@ -635,6 +713,19 @@ mod tests {
         cfg: CheckpointConfig,
         applied: u64,
     ) -> (StateCheckpointer, RuntimeConfigHandle, CancellationToken, watch::Sender<u64>) {
+        new_checkpointer_with_vault_raft_dbs(dbs, cfg, applied, Vec::new())
+    }
+
+    /// Same as [`new_checkpointer`] but allows the caller to supply a list
+    /// of synthetic per-vault `raft.db` handles. The closure returns a
+    /// fresh clone of the supplied list on every invocation, mirroring the
+    /// production behaviour where `vault_groups` is read on every tick.
+    fn new_checkpointer_with_vault_raft_dbs(
+        dbs: &TestDbs,
+        cfg: CheckpointConfig,
+        applied: u64,
+        vault_raft_dbs: Vec<(VaultId, Arc<Database<FileBackend>>)>,
+    ) -> (StateCheckpointer, RuntimeConfigHandle, CancellationToken, watch::Sender<u64>) {
         let runtime_config = RuntimeConfigHandle::new(RuntimeConfig {
             state_checkpoint: Some(cfg),
             ..RuntimeConfig::default()
@@ -648,12 +739,16 @@ mod tests {
             )
             .expect("build shared StateLayer for checkpointer test"),
         );
+        let vault_raft_dbs_fn: VaultRaftDbsFn = Arc::new(move || {
+            vault_raft_dbs.iter().map(|(vid, db)| (*vid, Arc::clone(db))).collect()
+        });
         let cp = StateCheckpointer::from_config(
             state_layer,
             Arc::clone(&dbs.raft),
             Arc::clone(&dbs.blocks),
             dbs.events.as_ref().map(Arc::clone),
             Arc::clone(&dbs.meta),
+            vault_raft_dbs_fn,
             runtime_config.clone(),
             rx,
             token.clone(),
@@ -992,12 +1087,14 @@ mod tests {
             )
             .expect("build shared StateLayer for checkpointer test"),
         );
+        let vault_raft_dbs_fn: VaultRaftDbsFn = Arc::new(Vec::new);
         let cp = StateCheckpointer::from_config(
             state_layer,
             Arc::clone(&dbs.raft),
             Arc::clone(&dbs.blocks),
             dbs.events.as_ref().map(Arc::clone),
             Arc::clone(&dbs.meta),
+            vault_raft_dbs_fn,
             runtime_config,
             rx,
             token,
@@ -1242,6 +1339,182 @@ mod tests {
 
         assert!(dbs.state.cache_dirty_page_count() as u64 >= 1);
         assert_eq!(cp.should_checkpoint(&cfg, 0, cp.max_dirty_pages()), Some(TRIGGER_DIRTY));
+    }
+
+    // ── Per-vault raft.db coverage (P2c.5.a) ───────────────────────────
+
+    /// Builds a synthetic per-vault raft.db backed by a tempdir-scoped
+    /// `Database<FileBackend>`. Tests that need multiple per-vault
+    /// raft.db handles drive this helper repeatedly. Each invocation
+    /// allocates a fresh tempdir so the tests stay independent.
+    fn new_vault_raft_db() -> (TempDir, Arc<Database<FileBackend>>) {
+        let dir = TempDir::new().expect("vault raft tempdir");
+        let db = Arc::new(
+            Database::create(dir.path().join("raft.db")).expect("create per-vault raft db"),
+        );
+        (dir, db)
+    }
+
+    /// Steady-state checkpointer must sync **every** per-vault raft.db
+    /// handle returned by `vault_raft_dbs_fn` on every fire. Without
+    /// this, dirty `KEY_APPLIED_STATE` pages on a vault's `raft.db`
+    /// only reach disk on graceful shutdown — leaving an unbounded
+    /// crash gap between ticks (the same gap Task #145 closed for the
+    /// shutdown side).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checkpoint_advances_every_vault_raft_db() {
+        let dbs = new_test_db();
+        let (_d1, vault_raft_a) = new_vault_raft_db();
+        let (_d2, vault_raft_b) = new_vault_raft_db();
+        // Dirty a page on each per-vault raft.db so a successful sync
+        // advances `last_synced_snapshot_id` past zero.
+        commit_in_memory_one(&vault_raft_a, b"applied_state", b"a");
+        commit_in_memory_one(&vault_raft_b, b"applied_state", b"b");
+        assert_eq!(vault_raft_a.last_synced_snapshot_id(), 0);
+        assert_eq!(vault_raft_b.last_synced_snapshot_id(), 0);
+
+        let cfg = CheckpointConfig::builder()
+            .interval_ms(50)
+            .applies_threshold(1_000_000)
+            .dirty_pages_threshold(1_000_000)
+            .build()
+            .unwrap();
+        let vault_raft_dbs = vec![
+            (VaultId::new(11), Arc::clone(&vault_raft_a)),
+            (VaultId::new(22), Arc::clone(&vault_raft_b)),
+        ];
+        let (cp, _rc, _tok, _tx) =
+            new_checkpointer_with_vault_raft_dbs(&dbs, cfg.clone(), 0, vault_raft_dbs);
+
+        // Time-trigger a single checkpoint by back-dating the
+        // accumulator and driving `tick()` directly.
+        *cp.last_checkpoint_at.lock() = Instant::now() - Duration::from_millis(500);
+        cp.tick(&cfg).await;
+
+        assert!(
+            vault_raft_a.last_synced_snapshot_id() > 0,
+            "first vault raft.db must advance on checkpoint",
+        );
+        assert!(
+            vault_raft_b.last_synced_snapshot_id() > 0,
+            "second vault raft.db must advance on checkpoint",
+        );
+    }
+
+    /// `max()` dirty-pages trigger must include every per-vault raft.db
+    /// returned by the closure — pressure on a single vault raft.db
+    /// alone fires the dirty-pages trigger, even when every other DB
+    /// is clean.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checkpoint_max_trigger_fires_on_vault_raft_db_pressure() {
+        let dbs = new_test_db_with_events();
+        let (_d, vault_raft) = new_vault_raft_db();
+        commit_in_memory_one(&vault_raft, b"applied_state", b"a");
+
+        let cfg = CheckpointConfig::builder()
+            .interval_ms(60_000)
+            .applies_threshold(1_000_000)
+            .dirty_pages_threshold(1)
+            .build()
+            .unwrap();
+        let vault_raft_dbs = vec![(VaultId::new(7), Arc::clone(&vault_raft))];
+        let (cp, _rc, _tok, _tx) =
+            new_checkpointer_with_vault_raft_dbs(&dbs, cfg.clone(), 0, vault_raft_dbs);
+
+        // Every other DB is clean; only the vault raft.db has
+        // pressure. Without the vault-raft contribution to
+        // `max_dirty_pages`, the trigger would not fire.
+        assert_eq!(dbs.state.cache_dirty_page_count() as u64, 0);
+        assert_eq!(dbs.raft.cache_dirty_page_count() as u64, 0);
+        assert_eq!(dbs.blocks.cache_dirty_page_count() as u64, 0);
+        assert!(vault_raft.cache_dirty_page_count() as u64 >= 1);
+        assert!(cp.max_dirty_pages() >= 1);
+        assert_eq!(cp.should_checkpoint(&cfg, 0, cp.max_dirty_pages()), Some(TRIGGER_DIRTY));
+    }
+
+    /// The closure is invoked on every tick — vaults materialised after
+    /// the checkpointer was constructed must contribute on the next
+    /// tick without any reconfiguration. This test toggles a shared
+    /// vector behind the closure to simulate a vault appearing
+    /// mid-lifetime.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn vault_raft_dbs_fn_resnapshots_every_tick() {
+        use parking_lot::RwLock as PlRwLock;
+
+        let dbs = new_test_db();
+        let (_d, vault_raft) = new_vault_raft_db();
+        commit_in_memory_one(&vault_raft, b"applied_state", b"a");
+
+        // Shared inventory: starts empty, then gains one entry to
+        // simulate a `start_vault_group` insert mid-test.
+        let inventory: Arc<PlRwLock<Vec<(VaultId, Arc<Database<FileBackend>>)>>> =
+            Arc::new(PlRwLock::new(Vec::new()));
+        let inventory_for_fn = Arc::clone(&inventory);
+        let vault_raft_dbs_fn: VaultRaftDbsFn = Arc::new(move || {
+            inventory_for_fn
+                .read()
+                .iter()
+                .map(|(vid, db)| (*vid, Arc::clone(db)))
+                .collect()
+        });
+
+        let runtime_config = RuntimeConfigHandle::new(RuntimeConfig {
+            state_checkpoint: Some(
+                CheckpointConfig::builder()
+                    .interval_ms(50)
+                    .applies_threshold(1_000_000)
+                    .dirty_pages_threshold(1_000_000)
+                    .build()
+                    .unwrap(),
+            ),
+            ..RuntimeConfig::default()
+        });
+        let (_tx, rx) = watch::channel(0u64);
+        let token = CancellationToken::new();
+        let state_layer = Arc::new(
+            inferadb_ledger_state::new_state_layer_shared(
+                Arc::clone(&dbs.state),
+                Arc::clone(&dbs.meta),
+            )
+            .expect("build shared StateLayer for checkpointer test"),
+        );
+        let cp = StateCheckpointer::from_config(
+            state_layer,
+            Arc::clone(&dbs.raft),
+            Arc::clone(&dbs.blocks),
+            dbs.events.as_ref().map(Arc::clone),
+            Arc::clone(&dbs.meta),
+            vault_raft_dbs_fn,
+            runtime_config,
+            rx,
+            token,
+            "test-region",
+            OrganizationId::new(0),
+        );
+
+        // First tick: inventory empty — vault raft.db must remain at
+        // snapshot id zero because it is invisible to the closure.
+        let cfg = cp.current_config();
+        *cp.last_checkpoint_at.lock() = Instant::now() - Duration::from_millis(500);
+        cp.tick(&cfg).await;
+        assert_eq!(
+            vault_raft.last_synced_snapshot_id(),
+            0,
+            "vault raft.db must not advance while it is invisible to the closure",
+        );
+
+        // Materialise the vault: closure now returns one entry.
+        inventory.write().push((VaultId::new(13), Arc::clone(&vault_raft)));
+
+        // Second tick picks up the new entry without any
+        // reconstruction of the checkpointer — proves the closure is
+        // invoked fresh on every tick.
+        *cp.last_checkpoint_at.lock() = Instant::now() - Duration::from_millis(500);
+        cp.tick(&cfg).await;
+        assert!(
+            vault_raft.last_synced_snapshot_id() > 0,
+            "vault raft.db must advance on the tick after it became visible to the closure",
+        );
     }
 
     // -----------------------------------------------------------------------
