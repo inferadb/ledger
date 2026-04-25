@@ -2599,14 +2599,11 @@ impl RaftManager {
         // the parent org on every org leader change.
         consensus_shard.set_leadership_mode(inferadb_ledger_consensus::LeadershipMode::Delegated);
 
-        // Leadership adoption is deferred: unlike `start_organization_group`,
-        // this method does not call `adopt_leader` on the fresh shard.
-        // Both the one-shot adoption and the parent-leader watcher land
-        // together in the follow-up slice that flips the vault creation
-        // watcher to call `start_vault_group`. Splitting them would leave
-        // an intermediate state where vault groups are live but never
-        // adopt the parent's leader on startup — better to keep the shard
-        // leaderless until the watcher and adoption land as one unit.
+        // Leadership adoption is wired below, after `vault_handle` and
+        // `vault_cancel` are constructed. Vault groups run delegated
+        // leadership; the leader is adopted from the parent organization's
+        // leader on every org leader change (see the "Delegated leader
+        // adoption" block after the commit-pump spawn).
 
         // Create the per-vault commit channel and register with the
         // parent org's dispatcher before handing the shard to the
@@ -2679,6 +2676,13 @@ impl RaftManager {
         let stub_org = organization_id;
         let stub_vault = vault_id;
         let stub_shard_id = shard_id;
+        // Per-vault response map + spillover, captured into the apply task
+        // for response fan-out. Mirrors `ApplyWorker::run`'s discipline:
+        // each committed entry's response is delivered to the registered
+        // waiter via `response_map`, or stashed in `spillover` when the
+        // proposer hasn't yet inserted (closes the propose→apply TOCTOU).
+        let stub_response_map = Arc::clone(&vault_response_map);
+        let stub_spillover = Arc::clone(vault_handle.spillover());
         tokio::spawn(async move {
             // `InnerVaultGroup` intentionally does not own `RaftLogStore`.
             // The store's `applied_index` watch-sender must live
@@ -2800,29 +2804,90 @@ impl RaftManager {
                                 }
 
                                 // Real apply: drive surviving entries through
-                                // the per-vault `RaftLogStore` apply pipeline.
-                                // Mirrors `ApplyWorker::run`'s call shape but
-                                // without the response fan-out — vault-shard
-                                // proposals don't yet have registered waiters
-                                // (routing flip is a later slice). Errors are
-                                // logged and swallowed so a single bad batch
-                                // can't kill the pump.
-                                if let Err(e) = vault_log_store
-                                    .apply_committed_entries::<OrganizationRequest>(
-                                        &entries_to_apply,
-                                        batch.leader_node,
-                                    )
-                                    .await
+                                // the per-vault `RaftLogStore` apply pipeline,
+                                // then fan out the returned `Vec<LedgerResponse>`
+                                // to the per-vault response map / spillover.
+                                // Mirrors `ApplyWorker::run`'s response delivery
+                                // loop (see `apply_worker.rs` § "Response
+                                // fan-out"): each committed entry's response is
+                                // delivered to a registered waiter via
+                                // `stub_response_map`; if no waiter is present
+                                // (proposer hasn't inserted yet), the response
+                                // is stashed in `stub_spillover` so a late
+                                // `propose_and_wait` can pick it up after
+                                // registering. On apply error, every entry is
+                                // mapped to a synthetic `LedgerResponse::Error`
+                                // so waiters never hang on a bad batch.
+                                let entry_count = entries_to_apply.len();
+                                let responses: Vec<crate::types::LedgerResponse> =
+                                    match vault_log_store
+                                        .apply_committed_entries::<OrganizationRequest>(
+                                            &entries_to_apply,
+                                            batch.leader_node,
+                                        )
+                                        .await
+                                    {
+                                        Ok(rs) => rs,
+                                        Err(e) => {
+                                            tracing::error!(
+                                                region = stub_region.as_str(),
+                                                organization_id = stub_org.value(),
+                                                vault_id = stub_vault.value(),
+                                                shard_id = stub_shard_id.0,
+                                                entry_count,
+                                                error = %e,
+                                                "Vault apply: apply_committed_entries failed",
+                                            );
+                                            let err =
+                                                crate::types::LedgerResponse::Error {
+                                                    code:
+                                                        inferadb_ledger_types::ErrorCode::Internal,
+                                                    message: format!("Vault apply failed: {e}"),
+                                                };
+                                            entries_to_apply
+                                                .iter()
+                                                .map(|_| err.clone())
+                                                .collect()
+                                        },
+                                    };
+
+                                // Stage 1: under the response_map lock, drain
+                                // waiters into `to_send` and the rest into
+                                // `to_spillover`. Keeping the map's critical
+                                // section short avoids contending with
+                                // proposers racing to register.
+                                let mut to_send: Vec<(
+                                    tokio::sync::oneshot::Sender<crate::types::LedgerResponse>,
+                                    crate::types::LedgerResponse,
+                                )> = Vec::with_capacity(entry_count);
+                                let mut to_spillover: Vec<(
+                                    u64,
+                                    crate::types::LedgerResponse,
+                                )> = Vec::with_capacity(entry_count);
                                 {
-                                    tracing::error!(
-                                        region = stub_region.as_str(),
-                                        organization_id = stub_org.value(),
-                                        vault_id = stub_vault.value(),
-                                        shard_id = stub_shard_id.0,
-                                        entry_count = entries_to_apply.len(),
-                                        error = %e,
-                                        "Vault apply: apply_committed_entries failed",
-                                    );
+                                    let mut map = stub_response_map.lock();
+                                    for (entry, response) in
+                                        entries_to_apply.iter().zip(responses.into_iter())
+                                    {
+                                        match map.remove(&entry.index) {
+                                            Some(tx) => to_send.push((tx, response)),
+                                            None => to_spillover.push((entry.index, response)),
+                                        }
+                                    }
+                                }
+
+                                // Stage 2: lock-free oneshot delivery.
+                                for (tx, response) in to_send {
+                                    let _ = tx.send(response);
+                                }
+
+                                // Stage 3: batch-insert spillover under a
+                                // single spillover lock.
+                                if !to_spillover.is_empty() {
+                                    let mut spillover = stub_spillover.lock();
+                                    for (index, response) in to_spillover {
+                                        spillover.insert(index, response);
+                                    }
                                 }
                             }
                             None => {
@@ -2840,6 +2905,111 @@ impl RaftManager {
                 }
             }
         });
+
+        // Delegated leader adoption. Vault shards run
+        // `LeadershipMode::Delegated` — their leader is whoever leads the
+        // parent organization group. Mirrors the region → organization
+        // watcher in `start_organization_group` (see above), one level
+        // deeper: organization → vault. Without this block,
+        // `vault_handle.is_leader()` stays `false` indefinitely and every
+        // propose through the vault handle fails.
+        //
+        // Two parts:
+        //
+        // 1. One-shot adoption — if the parent org already has a leader,
+        //    adopt it before returning so the vault group doesn't sit
+        //    leaderless between start and the next parent leader-change.
+        //    When the parent hasn't elected yet (e.g., during cluster
+        //    bootstrap), this arm is a no-op and the watcher covers the
+        //    first real change.
+        //
+        // 2. Watcher task — subscribes to the parent org's state watch
+        //    and re-adopts on every leader / term change. Bound to the
+        //    per-vault cancellation token so `stop_vault_group` tears it
+        //    down without disturbing sibling vaults, and to the manager
+        //    token so process-wide shutdown drains it alongside the
+        //    commit-pump stub.
+        let org_handle_for_adopt = org_inner.handle().clone();
+        let initial_org_state = org_handle_for_adopt.shard_state();
+        if let Some(leader) = initial_org_state.leader {
+            let term = initial_org_state.term;
+            if let Err(e) = vault_handle.adopt_leader(leader, term).await {
+                warn!(
+                    region = region.as_str(),
+                    organization_id = organization_id.value(),
+                    vault_id = vault_id.value(),
+                    shard_id = shard_id.0,
+                    error = %e,
+                    "Vault leader adoption: initial adoption failed",
+                );
+            } else {
+                debug!(
+                    region = region.as_str(),
+                    organization_id = organization_id.value(),
+                    vault_id = vault_id.value(),
+                    shard_id = shard_id.0,
+                    term = term,
+                    "Vault leader adoption: initial",
+                );
+            }
+        }
+        {
+            let mut parent_state_rx = org_handle_for_adopt.state_rx().clone();
+            let watcher_handle = Arc::clone(&vault_handle);
+            let watcher_manager_cancel = manager_cancel.clone();
+            let watcher_vault_cancel = vault_cancel.clone();
+            let watcher_region = region;
+            let watcher_org = organization_id;
+            let watcher_vault = vault_id;
+            let watcher_shard = shard_id;
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        () = watcher_manager_cancel.cancelled() => {
+                            debug!(
+                                region = watcher_region.as_str(),
+                                organization_id = watcher_org.value(),
+                                vault_id = watcher_vault.value(),
+                                shard_id = watcher_shard.0,
+                                "Vault leader watcher exiting on manager cancellation",
+                            );
+                            break;
+                        }
+                        () = watcher_vault_cancel.cancelled() => {
+                            debug!(
+                                region = watcher_region.as_str(),
+                                organization_id = watcher_org.value(),
+                                vault_id = watcher_vault.value(),
+                                shard_id = watcher_shard.0,
+                                "Vault leader watcher exiting on per-vault cancellation",
+                            );
+                            break;
+                        }
+                        res = parent_state_rx.changed() => {
+                            if res.is_err() {
+                                // Sender dropped — parent engine tore down.
+                                // Nothing left to observe; exit quietly.
+                                break;
+                            }
+                            let snap = parent_state_rx.borrow_and_update().clone();
+                            if let Some(leader) = snap.leader
+                                && watcher_handle
+                                    .adopt_leader(leader, snap.term)
+                                    .await
+                                    .is_err()
+                            {
+                                // Engine rejected adoption (typically
+                                // because its control inbox closed). No
+                                // recovery path from here — exit the
+                                // watcher so the task doesn't spin.
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         // Build the per-vault group, reusing shared fields from the
         // parent org where the data plane overlaps (handle, state,
@@ -5128,6 +5298,161 @@ mod tests {
             state.previous_vault_hash,
             inferadb_ledger_types::ZERO_HASH,
             "fresh vault chain head must be ZERO_HASH",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_start_vault_group_adopts_parent_org_leader() {
+        // Delegated vault shards adopt the parent organization's leader
+        // on start. Without this adoption (initial + watcher),
+        // `vault_handle.is_leader()` stays `false` forever and every
+        // propose through the vault handle fails with "Not the leader".
+        //
+        // Single-node bootstrap: the org group elects itself as leader.
+        // Both the initial one-shot adoption (if the org leader exists
+        // at `start_vault_group` time) and the watcher (first parent
+        // state-change) must converge to the parent's leader.
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+        let org_id = OrganizationId::new(77);
+        let org_group = manager
+            .start_organization_group(
+                Region::GLOBAL,
+                org_id,
+                vec![(1, "127.0.0.1:50051".to_string())],
+                true,
+                None,
+                None,
+            )
+            .await
+            .expect("start org group");
+
+        // Wait up to 5s for the single-node org group to elect itself.
+        // The adoption watcher on the vault fires asynchronously once
+        // the parent's `state_rx` publishes a leader, so both the one-
+        // shot adoption (if the leader is already set when
+        // `start_vault_group` runs) and the watcher arm must converge.
+        let start = std::time::Instant::now();
+        while org_group.handle().current_leader().is_none()
+            && start.elapsed() < std::time::Duration::from_secs(5)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let parent_leader = org_group
+            .handle()
+            .current_leader()
+            .expect("test sanity: single-node org must elect a leader within 5s");
+
+        let vault = manager
+            .start_vault_group(Region::GLOBAL, org_id, VaultId::new(1))
+            .await
+            .expect("start vault group");
+
+        // Poll briefly for adoption to settle. Either the initial-
+        // adoption arm in `start_vault_group` already published the
+        // parent's leader on the vault's state watch, or the watcher
+        // task picks up the next state change. Bounded to 2s.
+        let start = std::time::Instant::now();
+        while vault.handle().current_leader() != Some(parent_leader)
+            && start.elapsed() < std::time::Duration::from_secs(2)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            vault.handle().current_leader(),
+            Some(parent_leader),
+            "vault shard must adopt parent org's leader",
+        );
+        assert!(
+            vault.handle().is_leader(),
+            "single-node vault must see itself as leader once adoption lands",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_vault_commit_pump_delivers_responses_via_response_map() {
+        // P2c.3.b.3: the vault commit pump fans out the
+        // `Vec<LedgerResponse>` returned by `apply_committed_entries`
+        // into the per-vault response map (waiter delivery) or the per-
+        // vault spillover map (TOCTOU race with `propose_bytes_and_wait`).
+        // Without that fan-out, `propose_bytes_and_wait` against the
+        // vault handle hangs until the timeout — the apply runs, but the
+        // oneshot is never signaled.
+        //
+        // This test proposes an empty Normal entry through the vault
+        // handle and asserts the call returns `LedgerResponse::Empty`
+        // within a few seconds. Empty Normal entries take the apply
+        // pipeline's `decoded_payload.is_none()` arm in
+        // `apply_committed_entries` and return `LedgerResponse::Empty`
+        // verbatim, so a successful return proves the response made it
+        // back through the fan-out.
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+        let org_id = OrganizationId::new(88);
+        let org_group = manager
+            .start_organization_group(
+                Region::GLOBAL,
+                org_id,
+                vec![(1, "127.0.0.1:50051".to_string())],
+                true,
+                None,
+                None,
+            )
+            .await
+            .expect("start org group");
+
+        // Wait for the single-node org group to elect itself, then for
+        // the vault group's delegated adoption to land.
+        let start = std::time::Instant::now();
+        while org_group.handle().current_leader().is_none()
+            && start.elapsed() < std::time::Duration::from_secs(5)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            org_group.handle().current_leader().is_some(),
+            "test sanity: single-node org must elect a leader within 5s",
+        );
+
+        let vault = manager
+            .start_vault_group(Region::GLOBAL, org_id, VaultId::new(1))
+            .await
+            .expect("start vault group");
+
+        let start = std::time::Instant::now();
+        while !vault.handle().is_leader()
+            && start.elapsed() < std::time::Duration::from_secs(2)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            vault.handle().is_leader(),
+            "test sanity: vault must adopt parent leader before propose",
+        );
+
+        // Empty bytes -> empty Normal entry -> LedgerResponse::Empty
+        // through the fan-out path. A return within the timeout proves
+        // that the commit pump delivered the response (either to the
+        // registered waiter via `response_map`, or to spillover for the
+        // late-waiter pickup in `propose_bytes_and_wait`).
+        let response = vault
+            .handle()
+            .propose_bytes_and_wait(Vec::new(), std::time::Duration::from_secs(5))
+            .await
+            .expect("propose_bytes_and_wait must return — fan-out regression if timeout");
+
+        assert_eq!(
+            response,
+            crate::types::LedgerResponse::Empty,
+            "empty Normal entry must apply to LedgerResponse::Empty",
         );
     }
 
