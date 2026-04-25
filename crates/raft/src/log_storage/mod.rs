@@ -5257,6 +5257,104 @@ mod tests {
         assert_eq!(*applied_rx.borrow(), 2);
     }
 
+    /// P2c.2.1: A per-vault `RaftLogStore` accepts the same `with_*`
+    /// component-handle chain that the org-side store uses in
+    /// `open_region_storage`. `RaftManager::start_vault_group` wires the
+    /// chain on real `state_layer` / `block_archive` / `block_announcements`
+    /// / `leader_lease` instances before payload-bearing entries route to
+    /// the vault shard. This test exercises the same chain on shared
+    /// fixtures and confirms (a) the chain compiles against `open_for_vault`,
+    /// (b) `apply_committed_entries` on empty-Normal entries still drives
+    /// `last_applied` and the `applied_index_watch` channel forward —
+    /// the existing P2c.2 invariant — but now on a wired store.
+    /// Real Write-payload behaviour is exercised at the integration layer
+    /// once routing flips in P2c.3.
+    #[tokio::test]
+    async fn vault_apply_with_wired_components_pumps_applied_state() {
+        let tmp = tempdir().expect("create temp dir");
+        let state_db = std::sync::Arc::new(
+            inferadb_ledger_store::Database::<FileBackend>::create(tmp.path().join("state.db"))
+                .expect("create state db"),
+        );
+        let meta_db = std::sync::Arc::new(
+            inferadb_ledger_store::Database::<FileBackend>::create(tmp.path().join("_meta.db"))
+                .expect("create meta db"),
+        );
+        let state_layer = std::sync::Arc::new(
+            inferadb_ledger_state::new_state_layer_shared(state_db, meta_db)
+                .expect("build shared StateLayer"),
+        );
+        let blocks_db = std::sync::Arc::new(
+            inferadb_ledger_store::Database::<FileBackend>::create(tmp.path().join("blocks.db"))
+                .expect("create blocks db"),
+        );
+        let block_archive = std::sync::Arc::new(
+            inferadb_ledger_state::BlockArchive::<FileBackend>::new(blocks_db),
+        );
+        let (block_announcements, _) = broadcast::channel(16);
+        let leader_lease = std::sync::Arc::new(crate::leader_lease::LeaderLease::new(
+            std::time::Duration::from_millis(150),
+        ));
+
+        // Mirror the wiring shape `RaftManager::start_vault_group` performs
+        // after `open_for_vault` succeeds: the same `with_*` methods, in the
+        // same order, against the same handle types.
+        let mut store = super::store::RaftLogStore::<FileBackend>::open_for_vault(
+            tmp.path().join("raft.db"),
+            OrganizationId::new(11),
+            VaultId::new(3),
+        )
+        .expect("open_for_vault")
+        .with_state_layer(state_layer)
+        .with_block_archive(block_archive)
+        .with_block_announcements(block_announcements)
+        .with_region_config(
+            Region::US_EAST_VA,
+            inferadb_ledger_types::NodeId::new("1"),
+            1,
+        )
+        .with_leader_lease(leader_lease);
+
+        // The stamped vault identity persists through the wiring chain —
+        // no `with_*` call clobbers it.
+        assert_eq!(store.organization_id, OrganizationId::new(11));
+        assert_eq!(store.vault_id, Some(VaultId::new(3)));
+
+        let mut applied_rx = store.applied_index_watch();
+        assert_eq!(*applied_rx.borrow_and_update(), 0);
+
+        let entries = vec![
+            CommittedEntry {
+                index: 1,
+                term: 1,
+                data: std::sync::Arc::from(Vec::new().as_slice()),
+                kind: EntryKind::Normal,
+            },
+            CommittedEntry {
+                index: 2,
+                term: 1,
+                data: std::sync::Arc::from(Vec::new().as_slice()),
+                kind: EntryKind::Normal,
+            },
+        ];
+
+        let responses = store
+            .apply_committed_entries::<OrganizationRequest>(&entries, None)
+            .await
+            .expect("apply succeeds on wired per-vault store");
+
+        assert_eq!(responses.len(), 2);
+        assert!(matches!(responses[0], LedgerResponse::Empty));
+        assert!(matches!(responses[1], LedgerResponse::Empty));
+
+        let state = store.applied_state.load_full();
+        let last_applied = state.last_applied.expect("last_applied populated after apply");
+        assert_eq!(last_applied.index, 2);
+
+        applied_rx.changed().await.expect("watch updated");
+        assert_eq!(*applied_rx.borrow(), 2);
+    }
+
     /// P2b.2.b: structural fields of `VaultAppliedStateCore` postcard
     /// round-trip identically, mirroring the `AppliedStateCore` contract.
     /// The `client_sequences` HashMap is externalized to a dedicated B+ tree

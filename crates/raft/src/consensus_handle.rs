@@ -72,7 +72,12 @@ pub type SpilloverMap = Arc<Mutex<HashMap<u64, LedgerResponse>>>;
 /// internal/opaque and not stable across renames; `OrganizationId` is
 /// the wire-visible routing dimension.
 pub struct ConsensusHandle {
-    engine: ConsensusEngine,
+    /// Shared `Arc` so multiple handles can drive the same engine with
+    /// different `shard_id`s — used by `RaftManager::start_vault_group` to
+    /// give each per-vault group a handle that proposes against the
+    /// vault's own shard while reusing the parent organization's engine,
+    /// reactor, transport, and dispatcher.
+    engine: Arc<ConsensusEngine>,
     shard: ConsensusStateId,
     /// Organization id this Raft group owns. Surfaced via
     /// [`ConsensusHandle::organization_id`] so the service-layer
@@ -88,8 +93,12 @@ pub struct ConsensusHandle {
 
 impl ConsensusHandle {
     /// Creates a new handle bound to the given shard.
+    ///
+    /// `engine` is held as `Arc<ConsensusEngine>` so additional handles
+    /// for sibling shards on the same engine can be constructed via
+    /// [`Self::new_for_shard`] without taking ownership of the engine.
     pub fn new(
-        engine: ConsensusEngine,
+        engine: Arc<ConsensusEngine>,
         shard: ConsensusStateId,
         organization_id: OrganizationId,
         node_id: LedgerNodeId,
@@ -105,6 +114,34 @@ impl ConsensusHandle {
             response_map,
             spillover: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Creates a handle that shares an existing engine with a different
+    /// `shard_id`.
+    ///
+    /// Used by `RaftManager::start_vault_group` to give each vault group
+    /// a handle that proposes to the vault's own shard rather than the
+    /// parent organization's shard, while reusing the parent's
+    /// `ConsensusEngine`, reactor, transport, and commit dispatcher. The
+    /// `state_rx` and `response_map` are vault-specific — proposals
+    /// through the returned handle wait on the vault's response map and
+    /// observe the vault shard's leadership / commit-index transitions.
+    pub fn new_for_shard(
+        engine: Arc<ConsensusEngine>,
+        shard: ConsensusStateId,
+        organization_id: OrganizationId,
+        node_id: LedgerNodeId,
+        state_rx: watch::Receiver<ShardState>,
+        response_map: ResponseMap,
+    ) -> Self {
+        Self::new(engine, shard, organization_id, node_id, state_rx, response_map)
+    }
+
+    /// Returns a clone of the underlying engine `Arc` so callers can
+    /// construct sibling handles for additional shards on the same
+    /// engine via [`Self::new_for_shard`].
+    pub fn engine_arc(&self) -> Arc<ConsensusEngine> {
+        Arc::clone(&self.engine)
     }
 
     /// Proposes a payload to the shard and returns the commit index.
@@ -517,6 +554,7 @@ mod tests {
             transport,
             Duration::from_millis(10),
         );
+        let engine = Arc::new(engine);
 
         let (tx, rx) = watch::channel(initial_state);
         std::mem::forget(tx);
@@ -690,5 +728,60 @@ mod tests {
         let spillover_clone = handle.spillover().clone();
         assert_eq!(spillover_clone.lock().remove(&99), Some(LedgerResponse::Empty));
         assert!(handle.spillover().lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn new_for_shard_shares_engine_but_uses_distinct_shard_and_response_map() {
+        // Models the start_vault_group wiring: a parent (organization)
+        // handle owns the engine; a sibling (vault) handle is constructed
+        // with new_for_shard so it routes to a different shard while
+        // reusing the engine, reactor, and dispatcher behind it. The
+        // vault's response map must be distinct so apply on the vault
+        // shard does not satisfy waiters registered against the org's map.
+        let node_id: LedgerNodeId = 1;
+        let org_shard_id = ConsensusStateId(0);
+        let vault_shard_id = ConsensusStateId(7);
+
+        // Build an engine via the existing test fixture, then snapshot
+        // its Arc so both handles can share it.
+        let (org_handle, _org_map) = make_handle(
+            node_id,
+            make_state(org_shard_id, NodeState::Follower, None, 1),
+        );
+        let engine = org_handle.engine_arc();
+
+        // Vault-side state watch + response map are independent of the
+        // org's. We forget the sender because the test only inspects the
+        // initial value of the receiver.
+        let (vault_state_tx, vault_state_rx) =
+            watch::channel(make_state(vault_shard_id, NodeState::Follower, None, 1));
+        std::mem::forget(vault_state_tx);
+        let vault_response_map: ResponseMap = Arc::new(Mutex::new(HashMap::new()));
+
+        let vault_handle = ConsensusHandle::new_for_shard(
+            Arc::clone(&engine),
+            vault_shard_id,
+            OrganizationId::new(0),
+            node_id,
+            vault_state_rx,
+            Arc::clone(&vault_response_map),
+        );
+
+        // Same engine behind both handles — the central invariant of
+        // new_for_shard. Pointer equality is sufficient: engine_arc
+        // returns Arc::clone, and ptr_eq compares the heap allocation.
+        assert!(Arc::ptr_eq(&org_handle.engine_arc(), &vault_handle.engine_arc()));
+
+        // Distinct shard ids — proposes go to different routing slots.
+        assert_ne!(org_handle.shard_id(), vault_handle.shard_id());
+        assert_eq!(vault_handle.shard_id(), vault_shard_id);
+
+        // Distinct response maps — apply on the vault shard cannot wake
+        // waiters registered against the org handle's map (and vice
+        // versa). Insertions through one are not visible through the
+        // other.
+        vault_handle.response_map().lock().insert(11, oneshot::channel().0);
+        assert!(vault_handle.response_map().lock().contains_key(&11));
+        assert!(!org_handle.response_map().lock().contains_key(&11));
     }
 }

@@ -1197,7 +1197,12 @@ pub struct InnerVaultGroup {
     /// [`remove_shard`](crate::consensus_handle::ConsensusHandle::remove_shard)
     /// on the engine.
     pub(crate) shard_id: inferadb_ledger_consensus::types::ConsensusStateId,
-    /// Consensus handle for background jobs and services.
+    /// Vault-specific consensus handle. Shares the parent organization's
+    /// `ConsensusEngine` (and therefore reactor, transport, and commit
+    /// dispatcher) but routes proposals to this vault's `shard_id` and
+    /// observes the vault shard's leadership / commit-index transitions.
+    /// Constructed in `RaftManager::start_vault_group` via
+    /// [`ConsensusHandle::new_for_shard`](crate::consensus_handle::ConsensusHandle::new_for_shard).
     pub(crate) handle: Arc<ConsensusHandle>,
     /// Shared state layer. Phase 1 already made the underlying `state.db`
     /// per-vault; a vault group still borrows the parent org's
@@ -2439,6 +2444,46 @@ impl RaftManager {
         // store's residency identity (organization_id + vault_id) at
         // construction time so downstream apply workers can't accidentally
         // mutate another vault's state.
+        //
+        // Component handles are attached via the same `with_*` builder
+        // chain used by the org-side store in `open_region_storage`. Apply
+        // executes against these handles, so a bare store would silently
+        // drop entity writes (no `state_layer`), record no blocks (no
+        // `block_archive`), and emit no real-time announcements. The
+        // resources below are shared with the parent org rather than
+        // per-vault:
+        //
+        // - `state_layer` — the org's `StateLayer` already materialises
+        //   per-vault `state.db` databases via its lazy factory (P2b.0).
+        //   Sharing the accessor lets vault apply land entity writes in
+        //   the correct per-vault database without duplicating the layer.
+        // - `block_archive` — vault writes append to the org's chain. A
+        //   per-vault Merkle chain is a separate slice; until then,
+        //   vault-shard `RegionBlock`s land in the org's `blocks.db`.
+        // - `block_announcements` — broadcast through the org's channel
+        //   so subscribers see vault-shard commits alongside org-shard
+        //   commits.
+        // - `leader_lease` — vault groups run delegated leadership; the
+        //   parent org's lease is the authoritative read-validity window.
+        // - `region_config` — region + node identity match the parent.
+        //
+        // Not wired in this slice (acceptable; documented):
+        //
+        // - `event_writer` — the org's writer was moved into the org's
+        //   `RaftLogStore` and is consumed by its apply worker; there is
+        //   no shared accessor. Apply tolerates a missing `event_writer`
+        //   (events are skipped). A separate slice attaches a vault-side
+        //   writer once an `EventConfig` accessor is exposed on
+        //   `InnerGroup`.
+        // - `divergence_sender` — divergence detection compares against
+        //   piggybacked commitments; the vault's chain starts at height 0
+        //   so there is nothing to compare yet. Wired alongside
+        //   per-vault commitment piggyback in a later slice.
+        // - `region_chain` pre-seed — left at the default
+        //   `{height: 0, previous_hash: ZERO_HASH}`. The vault's chain is
+        //   its own; pre-seeding from the parent's accumulated chain
+        //   would interleave with writes still routing to the parent
+        //   pre-flip.
         let vault_log_store = RaftLogStore::<FileBackend>::open_for_vault(
             &vault_raft_db_path,
             organization_id,
@@ -2450,7 +2495,16 @@ impl RaftManager {
                 "failed to open vault raft.db at {}: {e}",
                 vault_raft_db_path.display()
             ),
-        })?;
+        })?
+        .with_state_layer(Arc::clone(org_inner.state()))
+        .with_block_archive(Arc::clone(org_inner.block_archive()))
+        .with_block_announcements(org_inner.block_announcements().clone())
+        .with_region_config(
+            region,
+            NodeId::new(self.config.node_id.to_string()),
+            self.config.node_id,
+        )
+        .with_leader_lease(Arc::clone(org_inner.leader_lease()));
 
         // Per-vault applied-state accessors, surfaced before the log store
         // is moved into the debug-stub worker task.
@@ -2575,13 +2629,43 @@ impl RaftManager {
         // Register the vault shard with the parent engine. On failure we
         // deregister so the dispatcher doesn't hold a stale sender
         // reference for a shard the engine doesn't know about.
-        if let Err(e) = org_inner.handle().add_shard(consensus_shard).await {
-            org_inner.commit_dispatcher().deregister(shard_id);
-            return Err(RaftManagerError::Raft {
-                region,
-                message: format!("failed to register vault shard on parent engine: {e}"),
-            });
-        }
+        //
+        // `add_shard` returns the shard's leadership / commit-index watch
+        // receiver, which the per-vault `ConsensusHandle` below uses so
+        // `is_leader()`, `current_leader()`, and `commit_index()` reflect
+        // the vault shard rather than the parent organization shard.
+        let vault_state_rx = match org_inner.handle().add_shard(consensus_shard).await {
+            Ok(rx) => rx,
+            Err(e) => {
+                org_inner.commit_dispatcher().deregister(shard_id);
+                return Err(RaftManagerError::Raft {
+                    region,
+                    message: format!("failed to register vault shard on parent engine: {e}"),
+                });
+            }
+        };
+
+        // Per-vault response map. Apply on the vault shard fills this
+        // map, and proposals through the vault handle wait on it. Kept
+        // distinct from the parent organization's map so the vault and
+        // org apply pipelines don't accidentally satisfy each other's
+        // waiters.
+        let vault_response_map: crate::consensus_handle::ResponseMap =
+            Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+        // Vault-specific handle that shares the parent organization's
+        // engine but routes to the vault's own shard. Reuses the
+        // engine, reactor, transport, and commit dispatcher behind the
+        // org handle; introduces its own shard id, state watch, and
+        // response map.
+        let vault_handle = Arc::new(crate::consensus_handle::ConsensusHandle::new_for_shard(
+            org_inner.handle().engine_arc(),
+            shard_id,
+            organization_id,
+            self.config.node_id,
+            vault_state_rx,
+            Arc::clone(&vault_response_map),
+        ));
 
         // Spawn the debug-log stub apply worker. The stub owns the
         // per-vault log store for the lifetime of the vault group so the
@@ -2774,7 +2858,7 @@ impl RaftManager {
             organization_id,
             vault_id,
             shard_id,
-            handle: Arc::clone(org_inner.handle()),
+            handle: vault_handle,
             state: Arc::clone(org_inner.state()),
             block_archive: Arc::clone(org_inner.block_archive()),
             applied_state: vault_applied_state,
@@ -3306,6 +3390,12 @@ impl RaftManager {
             consensus_transport,
             std::time::Duration::from_millis(2),
         );
+        // Wrap the engine in `Arc` immediately so additional per-shard
+        // handles (e.g. per-vault groups built by `start_vault_group`)
+        // can share it via `ConsensusHandle::engine_arc` /
+        // `ConsensusHandle::new_for_shard` without re-plumbing the
+        // engine through every call site.
+        let engine = Arc::new(engine);
 
         // P2b.1: introduce the per-engine commit dispatcher between the
         // engine's single commit channel and the per-shard apply workers.
