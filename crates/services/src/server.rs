@@ -473,9 +473,16 @@ impl LedgerServer {
         }
 
         let mut router = Server::builder()
-            // HTTP/2 and TCP keepalive for long-lived connections
-            .http2_keepalive_interval(Some(Duration::from_secs(60)))
-            .http2_keepalive_timeout(Some(Duration::from_secs(20)))
+            // HTTP/2 server-side keepalive mirrors the client-side configuration in
+            // `node_registry.rs`. Without it, half-open bidi streams from a prior
+            // process lifetime persist on cold restart — clients reconnect but their
+            // Replicate streams report OPEN while messages don't deliver, and the
+            // election state machine on every voter starves for transport. The
+            // 20s/5s pair is shorter than the previous 60s/20s setting because the
+            // longer cadence let half-open streams linger past the consensus
+            // election timeout, so cold-restart elections never made progress.
+            .http2_keepalive_interval(Some(Duration::from_secs(20)))
+            .http2_keepalive_timeout(Some(Duration::from_secs(5)))
             .tcp_keepalive(Some(Duration::from_secs(60)))
             // Track in-flight requests for connection draining during shutdown.
             // Outermost layer so it counts every request, including those rejected
