@@ -27,7 +27,7 @@ use inferadb_ledger_raft::{
 use inferadb_ledger_state::{EventStore, EventsDatabase};
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
-    OrganizationSlug, VaultSlug,
+    OrganizationSlug, VaultId, VaultSlug,
     events::{EventAction, EventConfig, EventEmission, EventEntry, EventOutcome, EventScope},
 };
 use tonic::{Request, Response, Status};
@@ -556,11 +556,19 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
         let org_id = resolver.extract_and_resolve_for_events(&req.organization)?;
         let organization = req.organization.as_ref().map(|o| OrganizationSlug::new(o.slug));
 
-        // 7. Process each entry — validate and convert to EventEntry
+        // 7. Process each entry — validate and convert to EventEntry.
+        //
+        // Each accepted entry is paired with its target `Option<VaultId>`
+        // routing key so the post-loop bucketing step (#8) can split the
+        // batch into one per-shard proposal per distinct vault. `None`
+        // means the entry has no vault (org-level) and routes through the
+        // standard org propose path; `Some(vault_id)` routes through the
+        // per-vault shard.
         let now = Utc::now();
         let ttl_days = config.default_ttl_days;
         let max_details_bytes = config.max_details_size_bytes;
-        let mut accepted_entries: Vec<EventEntry> = Vec::with_capacity(batch_size);
+        let mut accepted_entries: Vec<(Option<VaultId>, EventEntry)> =
+            Vec::with_capacity(batch_size);
         let mut rejections: Vec<proto::RejectedEvent> = Vec::new();
 
         for (idx, proto_entry) in req.entries.iter().enumerate() {
@@ -664,6 +672,45 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
                 EventOutcome::Denied { .. } => EventAction::RequestRateLimited,
             };
 
+            // Resolve the optional vault slug to a routing key. A non-zero
+            // slug must (a) exist in the slug index and (b) belong to the
+            // resolved organization — accepting a vault from a different
+            // org would route the entry to a foreign per-vault shard and
+            // leak cross-org data through Raft replication.
+            let vault_slug_opt = proto_entry.vault.as_ref().map(|v| VaultSlug::new(v.slug));
+            let vault_routing = match vault_slug_opt {
+                None => None,
+                Some(slug) if slug.value() == 0 => {
+                    rejections.push(proto::RejectedEvent {
+                        index: idx as u32,
+                        reason: "vault.slug must be non-zero".to_string(),
+                    });
+                    continue;
+                },
+                Some(slug) => match resolver.resolve_vault_pair(slug) {
+                    Ok((owning_org, vault_id)) if owning_org == org_id => Some(vault_id),
+                    Ok((owning_org, _)) => {
+                        rejections.push(proto::RejectedEvent {
+                            index: idx as u32,
+                            reason: format!(
+                                "vault {} belongs to organization {} not {}",
+                                slug.value(),
+                                owning_org,
+                                org_id
+                            ),
+                        });
+                        continue;
+                    },
+                    Err(_) => {
+                        rejections.push(proto::RejectedEvent {
+                            index: idx as u32,
+                            reason: format!("vault with slug {} not found", slug.value()),
+                        });
+                        continue;
+                    },
+                },
+            };
+
             let entry = EventEntry {
                 expires_at,
                 event_id,
@@ -676,7 +723,7 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
                 principal: proto_entry.principal.clone(),
                 organization_id: org_id,
                 organization,
-                vault: proto_entry.vault.as_ref().map(|v| VaultSlug::new(v.slug)),
+                vault: vault_slug_opt,
                 outcome,
                 details,
                 block_height: None,
@@ -685,11 +732,26 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
                 operations_count: None,
             };
 
-            accepted_entries.push(entry);
+            accepted_entries.push((vault_routing, entry));
         }
 
-        // 8. Route the accepted batch through the REGIONAL Raft group. Rejections + accepted count
-        //    are known locally — the apply response is just an ack.
+        // 8. Route the accepted batch through one Raft proposal per distinct target shard.
+        //    Org-level entries (no `vault_id`) route through the per-org group via
+        //    `propose_to_organization_bytes`; entries with a `vault_id` route through the per-vault
+        //    shard via `propose_to_vault_bytes`. The apply-side classifier
+        //    (`raft_manager::classify_request`) treats `IngestExternalEvents` as `VaultScoped`, so
+        //    vault-scoped batches must arrive pre-bucketed at the per-vault apply pipeline.
+        //
+        //    Rejections + accepted count are known locally — apply
+        //    responses are just acks.
+        //
+        //    Bucketing uses a `BTreeMap<Option<VaultId>, _>` so per-bucket
+        //    proposal ordering is deterministic across retries — a key
+        //    requirement for idempotency, since each per-vault propose
+        //    has its own idempotency cache. The serialized payload bytes
+        //    for a given `(source, vault_routing)` pair are identical
+        //    on retry because (a) the bucket order is fixed and (b)
+        //    entries within a bucket preserve original-request order.
         let accepted_count = accepted_entries.len() as u32;
         let rejected_count = rejections.len() as u32;
         let caller = req.caller.as_ref().map_or(0, |c| c.slug);
@@ -707,10 +769,10 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
             // owning region's Raft log + events.db. Never route to GLOBAL.
             //
             // In production, `manager` is always wired. Tests that inject
-            // only a `proposer` (no `manager`) fall back to the mock's
-            // built-in regional-response queue — the `Region` value is
-            // inspected by the test mock for routing assertions, but the
-            // mock does not consult a real routing table.
+            // only a `proposer` (no `manager`) fall back to a stub region —
+            // the `Region` value is inspected by the test mock for routing
+            // assertions, but the mock does not consult a real routing
+            // table.
             let region = match self.manager.as_ref() {
                 Some(manager) => manager.get_organization_region(org_id).ok_or_else(|| {
                     Status::not_found(format!("Organization {} not found in routing table", org_id))
@@ -718,58 +780,94 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
                 None => inferadb_ledger_types::Region::GLOBAL,
             };
 
-            let payload =
-                crate::proposal::serialize_payload(inferadb_ledger_raft::types::RaftPayload::new(
-                    OrganizationRequest::IngestExternalEvents {
-                        source: source.clone(),
-                        events: accepted_entries,
-                    },
-                    caller,
-                ))
-                .map_err(|status| {
-                    status_with_correlation(status, &correlation_request_id, &correlation_trace_id)
-                })?;
+            // Bucket accepted entries by routing key. `BTreeMap` gives
+            // deterministic iteration order: `None` (org-level) first,
+            // then `Some(vault_id)` ascending — stable across retries.
+            let mut buckets: BTreeMap<Option<VaultId>, Vec<EventEntry>> = BTreeMap::new();
+            for (vault_routing, entry) in accepted_entries {
+                buckets.entry(vault_routing).or_default().push(entry);
+            }
 
             let timeout = self.proposal_timeout;
-            let response = proposer
-                .propose_to_organization_bytes(region, org_id, payload, timeout)
-                .await
+
+            // Sequential per-bucket propose. First-error-wins matches the
+            // pre-refactor "all-or-nothing" semantics — partial success on
+            // mixed-vault batches is not exposed in the response shape.
+            // Concurrent proposals are a possible future optimization;
+            // they need careful idempotency / partial-failure handling
+            // that is out of scope for this slice.
+            for (vault_routing, events) in buckets {
+                let payload = crate::proposal::serialize_payload(
+                    inferadb_ledger_raft::types::RaftPayload::new(
+                        OrganizationRequest::IngestExternalEvents {
+                            source: source.clone(),
+                            events,
+                        },
+                        caller,
+                    ),
+                )
                 .map_err(|status| {
                     status_with_correlation(status, &correlation_request_id, &correlation_trace_id)
                 })?;
 
-            match response {
-                LedgerResponse::Empty => {},
-                LedgerResponse::Error { code, message } => {
-                    tracing::error!(
-                        service = "EventsService",
-                        method = "IngestEvents",
-                        source_service = %source,
-                        org_id = org_id.value(),
-                        error_code = ?code,
-                        "IngestExternalEvents apply returned error"
-                    );
-                    return Err(status_with_correlation(
-                        super::helpers::error_code_to_status(code, message),
-                        &correlation_request_id,
-                        &correlation_trace_id,
-                    ));
-                },
-                other => {
-                    tracing::error!(
-                        service = "EventsService",
-                        method = "IngestEvents",
-                        response = ?std::mem::discriminant(&other),
-                        "IngestExternalEvents returned unexpected response variant"
-                    );
-                    return Err(status_with_correlation(
-                        Status::internal(
-                            "Unexpected response type from IngestExternalEvents apply handler",
-                        ),
-                        &correlation_request_id,
-                        &correlation_trace_id,
-                    ));
-                },
+                let response = match vault_routing {
+                    Some(vault_id) => proposer
+                        .propose_to_vault_bytes(region, org_id, vault_id, payload, timeout)
+                        .await
+                        .map_err(|status| {
+                            status_with_correlation(
+                                status,
+                                &correlation_request_id,
+                                &correlation_trace_id,
+                            )
+                        })?,
+                    None => proposer
+                        .propose_to_organization_bytes(region, org_id, payload, timeout)
+                        .await
+                        .map_err(|status| {
+                            status_with_correlation(
+                                status,
+                                &correlation_request_id,
+                                &correlation_trace_id,
+                            )
+                        })?,
+                };
+
+                match response {
+                    LedgerResponse::Empty => {},
+                    LedgerResponse::Error { code, message } => {
+                        tracing::error!(
+                            service = "EventsService",
+                            method = "IngestEvents",
+                            source_service = %source,
+                            org_id = org_id.value(),
+                            vault_id = vault_routing.map(|v| v.value()).unwrap_or(0),
+                            error_code = ?code,
+                            "IngestExternalEvents apply returned error"
+                        );
+                        return Err(status_with_correlation(
+                            super::helpers::error_code_to_status(code, message),
+                            &correlation_request_id,
+                            &correlation_trace_id,
+                        ));
+                    },
+                    other => {
+                        tracing::error!(
+                            service = "EventsService",
+                            method = "IngestEvents",
+                            vault_id = vault_routing.map(|v| v.value()).unwrap_or(0),
+                            response = ?std::mem::discriminant(&other),
+                            "IngestExternalEvents returned unexpected response variant"
+                        );
+                        return Err(status_with_correlation(
+                            Status::internal(
+                                "Unexpected response type from IngestExternalEvents apply handler",
+                            ),
+                            &correlation_request_id,
+                            &correlation_trace_id,
+                        ));
+                    },
+                }
             }
         }
 
@@ -835,16 +933,22 @@ mod tests {
     /// Test double that stands in for the apply-handler side of the
     /// `IngestExternalEvents` flow.
     ///
-    /// - Captures every `propose_to_region_bytes` call for assertion.
+    /// - Captures every `propose_to_organization_bytes` and `propose_to_vault_bytes` call for
+    ///   assertion. Each captured entry records the routing target (`Option<VaultId>`) so tests can
+    ///   assert on per-vault bucketing.
     /// - Simulates the apply handler's write-through-and-ack by deserializing the proposed bytes
     ///   back to `OrganizationRequest`, writing the `EventEntry` batch into the shared `events_db`
     ///   handle, and returning `Ok(LedgerResponse::Empty)`.
     /// - Optionally returns a canned error response (`set_next_error`) so tests can exercise the
-    ///   apply-error → gRPC-error propagation path.
+    ///   apply-error → gRPC-error propagation path. Errors are consumed in propose-call order
+    ///   across both org and vault routing arms.
     struct TestIngestProposer {
         events_db: EventsDatabase<InMemoryBackend>,
-        /// Captured `(region, request_bytes)` tuples for post-call assertions.
-        proposals: Mutex<Vec<(Region, Vec<u8>)>>,
+        /// Captured `(region, vault_routing, request_bytes)` tuples for
+        /// post-call assertions. `vault_routing == None` means the call
+        /// went through `propose_to_organization_bytes`; `Some(vault_id)`
+        /// means it went through `propose_to_vault_bytes`.
+        proposals: Mutex<Vec<(Region, Option<inferadb_ledger_types::VaultId>, Vec<u8>)>>,
         next_error: Mutex<VecDeque<Status>>,
     }
 
@@ -857,27 +961,48 @@ mod tests {
             }
         }
 
-        fn proposals(&self) -> Vec<(Region, Vec<u8>)> {
+        fn proposals(&self) -> Vec<(Region, Option<inferadb_ledger_types::VaultId>, Vec<u8>)> {
             self.proposals.lock().clone()
         }
 
         /// Deserializes captured proposal bytes to `OrganizationRequest` for assertion.
-        fn decode_proposals(&self) -> Vec<(Region, OrganizationRequest)> {
+        fn decode_proposals(
+            &self,
+        ) -> Vec<(Region, Option<inferadb_ledger_types::VaultId>, OrganizationRequest)> {
             self.proposals
                 .lock()
                 .iter()
-                .map(|(region, bytes)| {
+                .map(|(region, vault_routing, bytes)| {
                     let payload: inferadb_ledger_raft::types::RaftPayload<OrganizationRequest> =
                         postcard::from_bytes(bytes).expect("decode proposal bytes");
-                    (*region, payload.request)
+                    (*region, *vault_routing, payload.request)
                 })
                 .collect()
         }
 
-        /// Enqueues a `tonic::Status` that the next `propose_to_region_bytes` call
-        /// will return instead of simulating a successful apply.
+        /// Enqueues a `tonic::Status` that the next propose call (org or
+        /// vault arm) will return instead of simulating a successful apply.
         fn set_next_error(&self, status: Status) {
             self.next_error.lock().push_back(status);
+        }
+
+        /// Apply-side simulation shared between the org and vault arms.
+        ///
+        /// Decodes the payload as `OrganizationRequest::IngestExternalEvents`
+        /// and writes its `EventEntry` batch through to the shared
+        /// `events_db`, mirroring what the real apply pipeline does on
+        /// commit. Returns `Ok(LedgerResponse::Empty)` to ack the propose.
+        fn simulate_apply(&self, bytes: &[u8]) -> Result<LedgerResponse, Status> {
+            let payload: inferadb_ledger_raft::types::RaftPayload<OrganizationRequest> =
+                postcard::from_bytes(bytes).expect("decode proposal bytes in test mock");
+            if let OrganizationRequest::IngestExternalEvents { ref events, .. } = payload.request {
+                let mut txn = self.events_db.write().expect("test write txn");
+                for entry in events.iter() {
+                    EventStore::write(&mut txn, entry).expect("test write event");
+                }
+                txn.commit().expect("test commit");
+            }
+            Ok(LedgerResponse::Empty)
         }
     }
 
@@ -910,35 +1035,29 @@ mod tests {
             _timeout: Duration,
         ) -> Result<LedgerResponse, Status> {
             if let Some(err) = self.next_error.lock().pop_front() {
-                self.proposals.lock().push((region, bytes));
+                self.proposals.lock().push((region, None, bytes));
                 return Err(err);
             }
-
-            // Simulate the apply-handler side: decode and write events to events.db.
-            let payload: inferadb_ledger_raft::types::RaftPayload<OrganizationRequest> =
-                postcard::from_bytes(&bytes).expect("decode proposal bytes in test mock");
-            if let OrganizationRequest::IngestExternalEvents { ref events, .. } = payload.request {
-                let mut txn = self.events_db.write().expect("test write txn");
-                for entry in events.iter() {
-                    EventStore::write(&mut txn, entry).expect("test write event");
-                }
-                txn.commit().expect("test commit");
-            }
-            self.proposals.lock().push((region, bytes));
-            Ok(LedgerResponse::Empty)
+            let response = self.simulate_apply(&bytes);
+            self.proposals.lock().push((region, None, bytes));
+            response
         }
 
         async fn propose_to_vault_bytes(
             &self,
-            _region: Region,
+            region: Region,
             _organization: OrganizationId,
-            _vault_id: inferadb_ledger_types::VaultId,
-            _bytes: Vec<u8>,
+            vault_id: inferadb_ledger_types::VaultId,
+            bytes: Vec<u8>,
             _timeout: Duration,
         ) -> Result<LedgerResponse, Status> {
-            Err(Status::unimplemented(
-                "TestIngestProposer only supports propose_to_organization_bytes",
-            ))
+            if let Some(err) = self.next_error.lock().pop_front() {
+                self.proposals.lock().push((region, Some(vault_id), bytes));
+                return Err(err);
+            }
+            let response = self.simulate_apply(&bytes);
+            self.proposals.lock().push((region, Some(vault_id), bytes));
+            response
         }
 
         fn regional_state(
@@ -996,6 +1115,65 @@ mod tests {
         org_id: i64,
     ) -> (EventsService<InMemoryBackend>, Arc<TestIngestProposer>) {
         make_ingest_service_with_config(slug, org_id, IngestionConfig::default())
+    }
+
+    /// Like [`make_ingest_service_with_proposer`] but additionally seeds the
+    /// applied state's vault slug index with `vaults`, each tuple
+    /// `(vault_slug, owning_org_id, vault_id)`. Tests that exercise the
+    /// per-vault bucketing path use this to make `resolve_vault_pair`
+    /// succeed against known slugs.
+    fn make_ingest_service_with_vaults(
+        slug: u64,
+        org_id: i64,
+        vaults: &[(u64, i64, i64)],
+    ) -> (EventsService<InMemoryBackend>, Arc<TestIngestProposer>) {
+        let events_db = EventsDatabase::open_in_memory().expect("open");
+        let mut state = AppliedState::default();
+        state.slug_index.insert(
+            inferadb_ledger_types::OrganizationSlug::new(slug),
+            OrganizationId::new(org_id),
+        );
+        state.id_to_slug.insert(
+            OrganizationId::new(org_id),
+            inferadb_ledger_types::OrganizationSlug::new(slug),
+        );
+        for &(vslug, owning_org, vid) in vaults {
+            let key_slug = inferadb_ledger_types::VaultSlug::new(vslug);
+            let pair = (OrganizationId::new(owning_org), inferadb_ledger_types::VaultId::new(vid));
+            state.vault_slug_index.insert(key_slug, pair);
+            state.vault_id_to_slug.insert(pair, key_slug);
+        }
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
+        let ingestion = IngestionConfig::default();
+        let rate_limit = ingestion.ingest_rate_limit_per_source;
+        let config = EventConfig { ingestion, ..EventConfig::default() };
+
+        let proposer = Arc::new(TestIngestProposer::new(events_db.clone()));
+        let proposer_trait: Arc<dyn ProposalService> = proposer.clone();
+
+        let service = EventsService::builder()
+            .events_db(events_db)
+            .applied_state(accessor)
+            .page_token_codec(PageTokenCodec::with_random_key())
+            .event_config(Arc::new(config))
+            .node_id(1_u64)
+            .ingestion_rate_limiter(Arc::new(IngestionRateLimiter::new(rate_limit)))
+            .proposer(proposer_trait)
+            .proposal_timeout(Duration::from_secs(5))
+            .build();
+        (service, proposer)
+    }
+
+    /// Helper to build an `IngestEventEntry` carrying a `VaultSlug`.
+    fn make_ingest_entry_with_vault(
+        event_type: &str,
+        principal: &str,
+        vault_slug: u64,
+    ) -> proto::IngestEventEntry {
+        proto::IngestEventEntry {
+            vault: Some(proto::VaultSlug { slug: vault_slug }),
+            ..make_ingest_entry(event_type, principal)
+        }
     }
 
     /// Builds a service with custom `IngestionConfig` for testing edge cases.
@@ -1916,7 +2094,11 @@ mod tests {
 
     #[tokio::test]
     async fn ingest_events_preserves_metadata() {
-        let service = make_ingest_service(100, 1);
+        // Seed vault slug 42 → (org=1, vault_id=3) so the per-vault routing
+        // resolver accepts the entry. Without a registered slug, the
+        // pre-propose vault validation would reject the event with
+        // "vault with slug 42 not found".
+        let (service, _proposer) = make_ingest_service_with_vaults(100, 1, &[(42, 1, 3)]);
         let req = Request::new(proto::IngestEventsRequest {
             source_service: "engine".to_string(),
             organization: Some(proto::OrganizationSlug { slug: 100 }),
@@ -2077,7 +2259,8 @@ mod tests {
         // Exactly one proposal submitted; it is IngestExternalEvents with 2 events.
         let decoded = proposer.decode_proposals();
         assert_eq!(decoded.len(), 1, "expected exactly one Raft proposal");
-        let (_region, request) = &decoded[0];
+        let (_region, vault_routing, request) = &decoded[0];
+        assert_eq!(*vault_routing, None, "no entry has a vault — must route org-level");
         match request {
             OrganizationRequest::IngestExternalEvents { source, events } => {
                 assert_eq!(source, "engine");
@@ -2141,5 +2324,289 @@ mod tests {
         // The proposal was submitted (captured) before the mock error fired,
         // confirming the proposer was actually invoked.
         assert_eq!(proposer.proposals().len(), 1);
+    }
+
+    // ── Per-vault bucketing tests (Task #161) ──
+
+    /// All entries carrying the same `vault` slug must produce exactly one
+    /// `propose_to_vault_bytes` call — and zero `propose_to_organization_bytes`
+    /// calls — because the vault-routed apply pipeline expects pre-bucketed
+    /// `VaultScoped` payloads.
+    #[tokio::test]
+    async fn ingest_events_single_vault_routes_to_vault_shard() {
+        let (service, proposer) = make_ingest_service_with_vaults(100, 1, &[(200, 1, 5)]);
+        let req = Request::new(proto::IngestEventsRequest {
+            source_service: "engine".to_string(),
+            organization: Some(proto::OrganizationSlug { slug: 100 }),
+            entries: vec![
+                make_ingest_entry_with_vault("engine.task_completed", "alice", 200),
+                make_ingest_entry_with_vault("engine.task_failed", "bob", 200),
+            ],
+            caller: None,
+        });
+        let resp = service.ingest_events(req).await.unwrap();
+        assert_eq!(resp.get_ref().accepted_count, 2);
+
+        let decoded = proposer.decode_proposals();
+        assert_eq!(decoded.len(), 1, "expected exactly one vault-scoped proposal");
+        let (_region, vault_routing, request) = &decoded[0];
+        assert_eq!(*vault_routing, Some(inferadb_ledger_types::VaultId::new(5)));
+        match request {
+            OrganizationRequest::IngestExternalEvents { events, .. } => {
+                assert_eq!(events.len(), 2);
+                for entry in events {
+                    assert_eq!(entry.vault, Some(inferadb_ledger_types::VaultSlug::new(200)));
+                }
+            },
+            other => panic!("expected IngestExternalEvents, got {other:?}"),
+        }
+    }
+
+    /// A multi-vault batch must produce one proposal per distinct vault.
+    /// Within each bucket, entries preserve their original-request order so
+    /// retries serialize to byte-identical payloads (idempotency invariant).
+    #[tokio::test]
+    async fn ingest_events_multi_vault_buckets_and_routes() {
+        let (service, proposer) =
+            make_ingest_service_with_vaults(100, 1, &[(201, 1, 5), (202, 1, 7)]);
+        let req = Request::new(proto::IngestEventsRequest {
+            source_service: "engine".to_string(),
+            organization: Some(proto::OrganizationSlug { slug: 100 }),
+            entries: vec![
+                make_ingest_entry_with_vault("engine.a", "alice", 201),
+                make_ingest_entry_with_vault("engine.b", "bob", 202),
+                make_ingest_entry_with_vault("engine.c", "carol", 201),
+            ],
+            caller: None,
+        });
+        let resp = service.ingest_events(req).await.unwrap();
+        assert_eq!(resp.get_ref().accepted_count, 3);
+        assert_eq!(resp.get_ref().rejected_count, 0);
+
+        let decoded = proposer.decode_proposals();
+        assert_eq!(decoded.len(), 2, "expected one proposal per distinct vault");
+
+        // Buckets iterate in `BTreeMap<Option<VaultId>, _>` order: ascending
+        // VaultId after the `None` org-bucket. Here both are `Some` so the
+        // ordering is VaultId(5) before VaultId(7).
+        let (_region_0, vault_0, req_0) = &decoded[0];
+        let (_region_1, vault_1, req_1) = &decoded[1];
+        assert_eq!(*vault_0, Some(inferadb_ledger_types::VaultId::new(5)));
+        assert_eq!(*vault_1, Some(inferadb_ledger_types::VaultId::new(7)));
+
+        match req_0 {
+            OrganizationRequest::IngestExternalEvents { events, .. } => {
+                assert_eq!(events.len(), 2, "vault 5 bucket holds entries a and c");
+                assert_eq!(events[0].event_type, "engine.a");
+                assert_eq!(events[1].event_type, "engine.c");
+            },
+            other => panic!("expected IngestExternalEvents, got {other:?}"),
+        }
+        match req_1 {
+            OrganizationRequest::IngestExternalEvents { events, .. } => {
+                assert_eq!(events.len(), 1, "vault 7 bucket holds entry b");
+                assert_eq!(events[0].event_type, "engine.b");
+            },
+            other => panic!("expected IngestExternalEvents, got {other:?}"),
+        }
+    }
+
+    /// A mixed batch — some entries with a vault, some without — produces
+    /// one `propose_to_organization_bytes` call (for the org-level entries)
+    /// plus one `propose_to_vault_bytes` call per distinct vault.
+    #[tokio::test]
+    async fn ingest_events_mixed_batch_splits_org_and_vault_proposals() {
+        let (service, proposer) = make_ingest_service_with_vaults(100, 1, &[(201, 1, 5)]);
+        let req = Request::new(proto::IngestEventsRequest {
+            source_service: "engine".to_string(),
+            organization: Some(proto::OrganizationSlug { slug: 100 }),
+            entries: vec![
+                make_ingest_entry("engine.org_level", "alice"),
+                make_ingest_entry_with_vault("engine.vault_level", "bob", 201),
+            ],
+            caller: None,
+        });
+        let resp = service.ingest_events(req).await.unwrap();
+        assert_eq!(resp.get_ref().accepted_count, 2);
+
+        let decoded = proposer.decode_proposals();
+        assert_eq!(decoded.len(), 2);
+
+        // BTreeMap iteration: `None` (org-level) first, then `Some(_)`.
+        let (_, routing_0, req_0) = &decoded[0];
+        let (_, routing_1, req_1) = &decoded[1];
+        assert_eq!(*routing_0, None, "org-level bucket must come first");
+        assert_eq!(*routing_1, Some(inferadb_ledger_types::VaultId::new(5)));
+
+        match req_0 {
+            OrganizationRequest::IngestExternalEvents { events, .. } => {
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].event_type, "engine.org_level");
+                assert!(events[0].vault.is_none());
+            },
+            other => panic!("expected IngestExternalEvents, got {other:?}"),
+        }
+        match req_1 {
+            OrganizationRequest::IngestExternalEvents { events, .. } => {
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].event_type, "engine.vault_level");
+                assert_eq!(events[0].vault, Some(inferadb_ledger_types::VaultSlug::new(201)));
+            },
+            other => panic!("expected IngestExternalEvents, got {other:?}"),
+        }
+    }
+
+    /// An entry that targets a vault belonging to a different organization
+    /// must be rejected per-event with a clear error — never proposed to
+    /// the foreign vault's shard. The other entries in the batch proceed.
+    #[tokio::test]
+    async fn ingest_events_rejects_vault_from_other_org() {
+        // org=1 owns vault slug 201; vault slug 999 belongs to org=2.
+        let (service, proposer) =
+            make_ingest_service_with_vaults(100, 1, &[(201, 1, 5), (999, 2, 11)]);
+        let req = Request::new(proto::IngestEventsRequest {
+            source_service: "engine".to_string(),
+            organization: Some(proto::OrganizationSlug { slug: 100 }),
+            entries: vec![
+                make_ingest_entry_with_vault("engine.ok", "alice", 201),
+                make_ingest_entry_with_vault("engine.foreign", "bob", 999),
+            ],
+            caller: None,
+        });
+        let resp = service.ingest_events(req).await.unwrap();
+        assert_eq!(resp.get_ref().accepted_count, 1);
+        assert_eq!(resp.get_ref().rejected_count, 1);
+        assert_eq!(resp.get_ref().rejections[0].index, 1);
+        assert!(
+            resp.get_ref().rejections[0].reason.contains("belongs to organization"),
+            "unexpected rejection reason: {}",
+            resp.get_ref().rejections[0].reason
+        );
+
+        // Only the in-org vault was proposed.
+        let decoded = proposer.decode_proposals();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].1, Some(inferadb_ledger_types::VaultId::new(5)));
+    }
+
+    /// An entry referencing an unknown vault slug must be rejected per-event
+    /// without short-circuiting the rest of the batch.
+    #[tokio::test]
+    async fn ingest_events_rejects_unknown_vault_slug() {
+        let (service, proposer) = make_ingest_service_with_vaults(100, 1, &[(201, 1, 5)]);
+        let req = Request::new(proto::IngestEventsRequest {
+            source_service: "engine".to_string(),
+            organization: Some(proto::OrganizationSlug { slug: 100 }),
+            entries: vec![
+                make_ingest_entry_with_vault("engine.bogus", "alice", 8888),
+                make_ingest_entry_with_vault("engine.ok", "bob", 201),
+            ],
+            caller: None,
+        });
+        let resp = service.ingest_events(req).await.unwrap();
+        assert_eq!(resp.get_ref().accepted_count, 1);
+        assert_eq!(resp.get_ref().rejected_count, 1);
+        assert_eq!(resp.get_ref().rejections[0].index, 0);
+        assert!(
+            resp.get_ref().rejections[0].reason.contains("not found"),
+            "unexpected rejection reason: {}",
+            resp.get_ref().rejections[0].reason
+        );
+
+        let decoded = proposer.decode_proposals();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].1, Some(inferadb_ledger_types::VaultId::new(5)));
+    }
+
+    /// A multi-bucket batch where the FIRST per-bucket proposal fails must
+    /// surface the error to the caller without continuing to the next
+    /// bucket. Validates the "first error wins" partial-failure contract.
+    #[tokio::test]
+    async fn ingest_events_multi_bucket_first_error_short_circuits() {
+        let (service, proposer) =
+            make_ingest_service_with_vaults(100, 1, &[(201, 1, 5), (202, 1, 7)]);
+        // Inject an error on the first per-bucket propose. With BTreeMap
+        // ordering (ascending VaultId), the vault-5 bucket is dispatched
+        // first, so it consumes the error.
+        proposer.set_next_error(Status::internal("simulated propose failure"));
+
+        let req = Request::new(proto::IngestEventsRequest {
+            source_service: "engine".to_string(),
+            organization: Some(proto::OrganizationSlug { slug: 100 }),
+            entries: vec![
+                make_ingest_entry_with_vault("engine.a", "alice", 201),
+                make_ingest_entry_with_vault("engine.b", "bob", 202),
+            ],
+            caller: None,
+        });
+        let err = service.ingest_events(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Internal);
+        assert!(err.message().contains("simulated propose failure"));
+
+        // Exactly one bucket was attempted before the short-circuit; the
+        // vault-7 bucket never ran.
+        let decoded = proposer.decode_proposals();
+        assert_eq!(decoded.len(), 1, "later buckets must not propose after first error");
+        assert_eq!(decoded[0].1, Some(inferadb_ledger_types::VaultId::new(5)));
+    }
+
+    /// Bucketing must be deterministic across retries so each per-vault
+    /// proposal serializes to byte-identical payload bytes — a prerequisite
+    /// for the per-vault idempotency cache to dedupe replayed batches.
+    /// Two identical requests must produce identical (region, vault, bytes)
+    /// streams.
+    #[tokio::test]
+    async fn ingest_events_per_vault_payload_is_deterministic() {
+        let (service_a, proposer_a) =
+            make_ingest_service_with_vaults(100, 1, &[(201, 1, 5), (202, 1, 7)]);
+        let (service_b, proposer_b) =
+            make_ingest_service_with_vaults(100, 1, &[(201, 1, 5), (202, 1, 7)]);
+
+        // Use deterministic timestamps so the EventEntry payloads don't
+        // diverge on `now`. event_id is per-call random (UUID v4) — that is
+        // a known idempotency boundary owned by the apply pipeline's
+        // per-vault cache, not the bytes themselves; assert on bucket
+        // structure + ordering instead.
+        let make_req = || {
+            Request::new(proto::IngestEventsRequest {
+                source_service: "engine".to_string(),
+                organization: Some(proto::OrganizationSlug { slug: 100 }),
+                entries: vec![
+                    make_ingest_entry_with_vault("engine.a", "alice", 202),
+                    make_ingest_entry_with_vault("engine.b", "bob", 201),
+                    make_ingest_entry_with_vault("engine.c", "carol", 202),
+                ],
+                caller: None,
+            })
+        };
+        service_a.ingest_events(make_req()).await.unwrap();
+        service_b.ingest_events(make_req()).await.unwrap();
+
+        let decoded_a = proposer_a.decode_proposals();
+        let decoded_b = proposer_b.decode_proposals();
+        assert_eq!(decoded_a.len(), 2);
+        assert_eq!(decoded_b.len(), 2);
+        // Bucket ordering must match between the two runs.
+        assert_eq!(decoded_a[0].1, decoded_b[0].1);
+        assert_eq!(decoded_a[1].1, decoded_b[1].1);
+        // Each bucket's per-event ordering must match.
+        for (i, ((_, _, req_a), (_, _, req_b))) in
+            decoded_a.iter().zip(decoded_b.iter()).enumerate()
+        {
+            match (req_a, req_b) {
+                (
+                    OrganizationRequest::IngestExternalEvents { events: events_a, .. },
+                    OrganizationRequest::IngestExternalEvents { events: events_b, .. },
+                ) => {
+                    assert_eq!(events_a.len(), events_b.len(), "bucket {i} length mismatch");
+                    for (a, b) in events_a.iter().zip(events_b.iter()) {
+                        assert_eq!(a.event_type, b.event_type);
+                        assert_eq!(a.principal, b.principal);
+                        assert_eq!(a.vault, b.vault);
+                    }
+                },
+                _ => panic!("expected IngestExternalEvents in both decoded streams"),
+            }
+        }
     }
 }

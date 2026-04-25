@@ -980,10 +980,9 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         metrics::record_raft_proposal();
         ctx.start_raft_timer();
         ctx.set_batch_info(false, 1);
-        let commitments =
-            std::mem::take(&mut *vault_group.commitment_buffer().lock().unwrap_or_else(|e| {
-                e.into_inner()
-            }));
+        let commitments = std::mem::take(
+            &mut *vault_group.commitment_buffer().lock().unwrap_or_else(|e| e.into_inner()),
+        );
         let payload = inferadb_ledger_raft::types::RaftPayload {
             request: ledger_request,
             proposed_at: chrono::Utc::now(),
@@ -1706,10 +1705,9 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
 
         metrics::record_raft_proposal();
         ctx.start_raft_timer();
-        let commitments =
-            std::mem::take(&mut *vault_group.commitment_buffer().lock().unwrap_or_else(|e| {
-                e.into_inner()
-            }));
+        let commitments = std::mem::take(
+            &mut *vault_group.commitment_buffer().lock().unwrap_or_else(|e| e.into_inner()),
+        );
         let payload = inferadb_ledger_raft::types::RaftPayload {
             request: ledger_request,
             proposed_at: chrono::Utc::now(),
