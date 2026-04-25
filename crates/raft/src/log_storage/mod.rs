@@ -5192,6 +5192,71 @@ mod tests {
         assert_eq!(store.vault_id, Some(VaultId::new(7)));
     }
 
+    /// P2c.2: a per-vault `RaftLogStore` (opened via `open_for_vault`)
+    /// must be a valid target for the typed apply pipeline the vault
+    /// commit-pump invokes. Drives `apply_committed_entries` directly
+    /// with the request type the pump uses (`OrganizationRequest`) and a
+    /// pair of empty-Normal entries — the only payload shape that
+    /// reaches the pump until routing flips. Verifies (a) the call
+    /// succeeds without `state_layer` / `block_archive` configured (the
+    /// per-vault store is bare at this slice's scope), (b) `state.last_applied`
+    /// advances to the highest entry's index, and (c) the per-vault
+    /// `applied_index_watch` channel is pumped to that index — the
+    /// invariant that ReadIndex waiters depend on.
+    #[tokio::test]
+    async fn vault_apply_committed_entries_pumps_applied_state() {
+        let tmp = tempdir().expect("create temp dir");
+        let mut store = super::store::RaftLogStore::<FileBackend>::open_for_vault(
+            tmp.path().join("raft.db"),
+            OrganizationId::new(11),
+            VaultId::new(3),
+        )
+        .expect("open_for_vault");
+
+        // Snapshot the watch receiver before apply — it should be 0.
+        let mut applied_rx = store.applied_index_watch();
+        assert_eq!(*applied_rx.borrow_and_update(), 0);
+
+        // Two empty-Normal entries — Raft no-ops. They do not require a
+        // state_layer / block_archive (mirrors the `replay_crash_gap`
+        // tests above) but still drive the AppliedState advance and the
+        // applied_index watch broadcast.
+        let entries = vec![
+            CommittedEntry {
+                index: 1,
+                term: 1,
+                data: std::sync::Arc::from(Vec::new().as_slice()),
+                kind: EntryKind::Normal,
+            },
+            CommittedEntry {
+                index: 2,
+                term: 1,
+                data: std::sync::Arc::from(Vec::new().as_slice()),
+                kind: EntryKind::Normal,
+            },
+        ];
+
+        let responses = store
+            .apply_committed_entries::<OrganizationRequest>(&entries, None)
+            .await
+            .expect("apply succeeds on per-vault store");
+
+        // No-op entries return Empty responses, one per entry.
+        assert_eq!(responses.len(), 2);
+        assert!(matches!(responses[0], LedgerResponse::Empty));
+        assert!(matches!(responses[1], LedgerResponse::Empty));
+
+        // Per-vault applied state advanced to the last entry's index.
+        let state = store.applied_state.load_full();
+        let last_applied = state.last_applied.expect("last_applied populated after apply");
+        assert_eq!(last_applied.index, 2);
+
+        // Watch channel reflects the same advance — ReadIndex waiters
+        // sleeping on this receiver wake on the apply.
+        applied_rx.changed().await.expect("watch updated");
+        assert_eq!(*applied_rx.borrow(), 2);
+    }
+
     /// P2b.2.b: structural fields of `VaultAppliedStateCore` postcard
     /// round-trip identically, mirroring the `AppliedStateCore` contract.
     /// The `client_sequences` HashMap is externalized to a dedicated B+ tree

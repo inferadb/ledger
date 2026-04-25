@@ -1220,8 +1220,7 @@ pub struct InnerVaultGroup {
     /// per-vault — `last_applied` for this vault's Raft log,
     /// `vault_height` for this vault's block chain, `client_sequences`
     /// for writes targeting this vault.
-    pub(crate) vault_applied_state:
-        Arc<arc_swap::ArcSwap<crate::log_storage::VaultAppliedState>>,
+    pub(crate) vault_applied_state: Arc<arc_swap::ArcSwap<crate::log_storage::VaultAppliedState>>,
     /// Block announcement broadcast channel. Shared with the parent org
     /// for now; Phase 4 will scope announcements per-vault.
     pub(crate) block_announcements: broadcast::Sender<BlockAnnouncement>,
@@ -2310,7 +2309,7 @@ impl RaftManager {
                         vault_id = vault.value(),
                         "Vault group rehydrated from applied state",
                     );
-                }
+                },
                 Err(RaftManagerError::VaultGroupExists { .. }) => {
                     // Signal-driven path beat us (rare — the watcher
                     // spawned above drains `CreateVault` signals that
@@ -2321,7 +2320,7 @@ impl RaftManager {
                         vault_id = vault.value(),
                         "Vault group rehydration skipped: already running",
                     );
-                }
+                },
                 Err(e) => {
                     tracing::error!(
                         region = region.as_str(),
@@ -2331,7 +2330,7 @@ impl RaftManager {
                         "Failed to rehydrate vault group from applied state",
                     );
                     // Continue — rehydrating other vaults is still valuable.
-                }
+                },
             }
         }
     }
@@ -2355,14 +2354,22 @@ impl RaftManager {
     /// node; double-starting the same triple returns
     /// [`RaftManagerError::VaultGroupExists`].
     ///
-    /// ## Commit-pump stub
+    /// ## Commit-pump
     ///
-    /// The per-vault apply pipeline is currently a debug-log stub:
-    /// committed batches routed into the vault shard's channel are
-    /// drained by a task that logs and drops them. The real apply path
-    /// — with tier validation and `VaultAppliedState` mutations — is
-    /// wired in a later slice; this method deliberately avoids standing
-    /// it up so the lifecycle surface can land independently.
+    /// The spawned commit-pump task drains committed batches from the
+    /// vault shard's channel, classifies each entry's tier
+    /// ([`classify_vault_tier`]), drops org-scoped tier violations with
+    /// a loud `error!` log, and applies the surviving entries against
+    /// the per-vault [`RaftLogStore`] via
+    /// [`RaftLogStore::apply_committed_entries`]. Membership entries
+    /// and empty-Normal (Raft no-op) entries pass through unfiltered —
+    /// `apply_committed_entries` handles them internally.
+    ///
+    /// Routing-side wiring that flips entity writes from the parent
+    /// `OrganizationGroup` to this vault shard lands in a later slice;
+    /// until then the channel only carries Raft no-op / membership
+    /// entries, so the apply call is exercised but produces no
+    /// entity-data mutations on the per-vault `state.db`.
     ///
     /// Leadership adoption for the fresh vault shard is similarly
     /// deferred: both the one-shot `adopt_leader` call and the
@@ -2600,13 +2607,19 @@ impl RaftManager {
             // `InnerVaultGroup` intentionally does not own `RaftLogStore`.
             // The store's `applied_index` watch-sender must live
             // co-located with the task that drives applies, so the sender
-            // stays alive whenever a receiver is observed. The debug stub
-            // here plays that role — the real apply worker (once wired)
-            // will take over the same ownership responsibility. Do not
-            // remove this binding without relocating ownership; dropping
-            // the store here closes `applied_index_watch()` for every
-            // holder of the receiver.
-            let _vault_log_store = vault_log_store;
+            // stays alive whenever a receiver is observed. The commit
+            // pump plays that role — `apply_committed_entries` takes
+            // `&mut self`, so the binding is `mut`. Do not remove this
+            // binding without relocating ownership; dropping the store
+            // here closes `applied_index_watch()` for every holder of
+            // the receiver.
+            //
+            // Per-vault raft.db is fsync'd by sync_all_state_dbs on graceful shutdown
+            // but is not yet ticked by the steady-state StateCheckpointer. On crash
+            // before shutdown, the vault's applied_durable on raft.db does not advance
+            // and full WAL replay is required on next boot. Production durability of
+            // per-vault raft.db at crash time is a deferred concern.
+            let mut vault_log_store = vault_log_store;
             let mut vault_batch_rx = vault_batch_rx;
             loop {
                 tokio::select! {
@@ -2617,7 +2630,7 @@ impl RaftManager {
                             organization_id = stub_org.value(),
                             vault_id = stub_vault.value(),
                             shard_id = stub_shard_id.0,
-                            "Vault debug-apply stub exiting on manager cancellation",
+                            "Vault commit pump exiting on manager cancellation",
                         );
                         break;
                     }
@@ -2627,21 +2640,114 @@ impl RaftManager {
                             organization_id = stub_org.value(),
                             vault_id = stub_vault.value(),
                             shard_id = stub_shard_id.0,
-                            "Vault debug-apply stub exiting on per-vault cancellation",
+                            "Vault commit pump exiting on per-vault cancellation",
                         );
                         break;
                     }
                     maybe_batch = vault_batch_rx.recv() => {
                         match maybe_batch {
                             Some(batch) => {
+                                if batch.entries.is_empty() {
+                                    continue;
+                                }
                                 debug!(
                                     region = stub_region.as_str(),
                                     organization_id = stub_org.value(),
                                     vault_id = stub_vault.value(),
                                     shard_id = stub_shard_id.0,
                                     entry_count = batch.entries.len(),
-                                    "Vault commit batch received (stub handler — real apply pipeline not yet wired)",
+                                    "Vault commit batch received",
                                 );
+                                // Filter step: keep Membership and empty-Normal
+                                // entries verbatim (`apply_committed_entries`
+                                // handles them internally), keep Normal
+                                // entries that decode AND classify as
+                                // VaultScoped, drop OrgScoped tier violations
+                                // and decode failures with a loud log line.
+                                // Routing-side discipline should make the
+                                // OrgScoped arm unreachable in practice — when
+                                // it fires, it surfaces a routing bug rather
+                                // than corrupting per-vault state.
+                                let mut entries_to_apply: Vec<
+                                    inferadb_ledger_consensus::committed::CommittedEntry,
+                                > = Vec::with_capacity(batch.entries.len());
+                                for entry in batch.entries.iter() {
+                                    match &entry.kind {
+                                        inferadb_ledger_consensus::types::EntryKind::Membership(_) => {
+                                            entries_to_apply.push(entry.clone());
+                                            continue;
+                                        }
+                                        inferadb_ledger_consensus::types::EntryKind::Normal
+                                            if entry.data.is_empty() =>
+                                        {
+                                            entries_to_apply.push(entry.clone());
+                                            continue;
+                                        }
+                                        inferadb_ledger_consensus::types::EntryKind::Normal => {}
+                                    }
+                                    let request = match decode_vault_payload(&entry.data) {
+                                        Ok(r) => r,
+                                        Err(e) => {
+                                            tracing::error!(
+                                                region = stub_region.as_str(),
+                                                organization_id = stub_org.value(),
+                                                vault_id = stub_vault.value(),
+                                                shard_id = stub_shard_id.0,
+                                                entry_index = entry.index,
+                                                bytes_len = entry.data.len(),
+                                                error = %e,
+                                                "Vault apply: decode failed",
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                    match classify_vault_tier(&request) {
+                                        VaultTier::VaultScoped => {
+                                            entries_to_apply.push(entry.clone());
+                                        }
+                                        VaultTier::OrgScoped => {
+                                            tracing::error!(
+                                                region = stub_region.as_str(),
+                                                organization_id = stub_org.value(),
+                                                vault_id = stub_vault.value(),
+                                                shard_id = stub_shard_id.0,
+                                                entry_index = entry.index,
+                                                variant = request_variant_name(&request),
+                                                "Vault apply: tier violation — org-scoped variant routed to vault shard",
+                                            );
+                                        }
+                                    }
+                                }
+
+                                if entries_to_apply.is_empty() {
+                                    continue;
+                                }
+
+                                // Real apply: drive surviving entries through
+                                // the per-vault `RaftLogStore` apply pipeline.
+                                // Mirrors `ApplyWorker::run`'s call shape but
+                                // without the response fan-out — vault-shard
+                                // proposals don't yet have registered waiters
+                                // (routing flip is a later slice). Errors are
+                                // logged and swallowed so a single bad batch
+                                // can't kill the pump.
+                                if let Err(e) = vault_log_store
+                                    .apply_committed_entries::<OrganizationRequest>(
+                                        &entries_to_apply,
+                                        batch.leader_node,
+                                    )
+                                    .await
+                                {
+                                    tracing::error!(
+                                        region = stub_region.as_str(),
+                                        organization_id = stub_org.value(),
+                                        vault_id = stub_vault.value(),
+                                        shard_id = stub_shard_id.0,
+                                        entry_count = entries_to_apply.len(),
+                                        error = %e,
+                                        "Vault apply: apply_committed_entries failed",
+                                    );
+                                }
                             }
                             None => {
                                 debug!(
@@ -2649,7 +2755,7 @@ impl RaftManager {
                                     organization_id = stub_org.value(),
                                     vault_id = stub_vault.value(),
                                     shard_id = stub_shard_id.0,
-                                    "Vault commit channel closed — stub exiting",
+                                    "Vault commit channel closed — pump exiting",
                                 );
                                 break;
                             }
@@ -3980,8 +4086,7 @@ impl RaftManager {
                     }
                 },
                 Err(_) => {
-                    let org_ids: Vec<i64> =
-                        org_groups.iter().map(|(oid, _)| oid.value()).collect();
+                    let org_ids: Vec<i64> = org_groups.iter().map(|(oid, _)| oid.value()).collect();
                     warn!(
                         region = region.as_str(),
                         timeout_ms = per_region_timeout.as_millis() as u64,
@@ -4156,6 +4261,135 @@ impl RaftManager {
             node_id: self.config.node_id,
         }
     }
+}
+
+// ============================================================================
+// Vault-tier classification (P2c.1)
+// ============================================================================
+//
+// The per-vault commit-pump task spawned by [`RaftManager::start_vault_group`]
+// drains [`CommittedBatch`](inferadb_ledger_consensus::committed::CommittedBatch)
+// values produced by the parent organization's
+// [`CommitDispatcher`](crate::commit_dispatcher::CommitDispatcher). Until the
+// per-vault apply pipeline lands (P2c.2), the stub's only correctness
+// responsibility is to verify that every committed entry routed to a vault
+// shard carries a vault-scoped [`OrganizationRequest`] variant.
+//
+// The classification below is the foundation for two follow-on slices:
+//
+// - **P2c.2** wires the real apply path; only `VaultScoped` variants reach it.
+// - **P2c.3** flips routing — vault-scoped writes propose against the vault shard instead of the
+//   parent org shard. A misclassified variant here becomes either a silent acceptance (data lands
+//   on the wrong shard) or a spurious rejection (legitimate write fails apply).
+//
+// When in doubt, default to [`VaultTier::OrgScoped`] — a false-positive tier
+// violation logs loudly; a false-negative silently corrupts routing.
+
+/// Classification of an [`OrganizationRequest`] variant relative to the
+/// vault tier.
+///
+/// Used by the per-vault commit-pump task to detect tier violations:
+/// org-scoped variants must apply at the parent
+/// [`OrganizationGroup`](OrganizationGroup), never at a vault shard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VaultTier {
+    /// Variant operates on entity data within a single vault. Accepted at
+    /// vault apply.
+    VaultScoped,
+    /// Variant operates on org-level metadata (members, teams, invitations,
+    /// apps, vault lifecycle). Must apply at the parent
+    /// [`OrganizationGroup`](OrganizationGroup), not at a vault shard.
+    OrgScoped,
+}
+
+/// Classifies an [`OrganizationRequest`] as vault-scoped or org-scoped.
+///
+/// `Write`, `BatchWrite`, and `IngestExternalEvents` target vault entries;
+/// every other variant is org-level metadata. `BatchWrite` is treated as
+/// vault-scoped because it carries a uniform sub-request set (callers wrap
+/// only `Write` payloads); P2c.2's real apply pipeline will recurse into the
+/// inner requests and reject any non-vault-scoped sub-request at that point.
+fn classify_vault_tier(request: &OrganizationRequest) -> VaultTier {
+    use OrganizationRequest as Req;
+    match request {
+        Req::Write { .. } | Req::BatchWrite { .. } | Req::IngestExternalEvents { .. } => {
+            VaultTier::VaultScoped
+        },
+        Req::CreateVault { .. }
+        | Req::UpdateVault { .. }
+        | Req::DeleteVault { .. }
+        | Req::UpdateVaultHealth { .. }
+        | Req::AddOrganizationMember { .. }
+        | Req::RemoveOrganizationMember { .. }
+        | Req::UpdateOrganizationMemberRole { .. }
+        | Req::CreateOrganizationInvite { .. }
+        | Req::ResolveOrganizationInvite { .. }
+        | Req::PurgeOrganizationInviteIndexes { .. }
+        | Req::RehashInviteEmailIndex { .. }
+        | Req::CreateOrganizationTeam { .. }
+        | Req::DeleteOrganizationTeam { .. }
+        | Req::CreateApp { .. }
+        | Req::DeleteApp { .. }
+        | Req::SetAppEnabled { .. }
+        | Req::SetAppCredentialEnabled { .. }
+        | Req::RotateAppClientSecret { .. }
+        | Req::CreateAppClientAssertion { .. }
+        | Req::DeleteAppClientAssertion { .. }
+        | Req::SetAppClientAssertionEnabled { .. }
+        | Req::AddAppVault { .. }
+        | Req::UpdateAppVault { .. }
+        | Req::RemoveAppVault { .. } => VaultTier::OrgScoped,
+    }
+}
+
+/// Returns a static name for an [`OrganizationRequest`] variant, used for
+/// diagnostic log fields.
+fn request_variant_name(request: &OrganizationRequest) -> &'static str {
+    use OrganizationRequest as Req;
+    match request {
+        Req::Write { .. } => "Write",
+        Req::BatchWrite { .. } => "BatchWrite",
+        Req::IngestExternalEvents { .. } => "IngestExternalEvents",
+        Req::CreateVault { .. } => "CreateVault",
+        Req::UpdateVault { .. } => "UpdateVault",
+        Req::DeleteVault { .. } => "DeleteVault",
+        Req::UpdateVaultHealth { .. } => "UpdateVaultHealth",
+        Req::AddOrganizationMember { .. } => "AddOrganizationMember",
+        Req::RemoveOrganizationMember { .. } => "RemoveOrganizationMember",
+        Req::UpdateOrganizationMemberRole { .. } => "UpdateOrganizationMemberRole",
+        Req::CreateOrganizationInvite { .. } => "CreateOrganizationInvite",
+        Req::ResolveOrganizationInvite { .. } => "ResolveOrganizationInvite",
+        Req::PurgeOrganizationInviteIndexes { .. } => "PurgeOrganizationInviteIndexes",
+        Req::RehashInviteEmailIndex { .. } => "RehashInviteEmailIndex",
+        Req::CreateOrganizationTeam { .. } => "CreateOrganizationTeam",
+        Req::DeleteOrganizationTeam { .. } => "DeleteOrganizationTeam",
+        Req::CreateApp { .. } => "CreateApp",
+        Req::DeleteApp { .. } => "DeleteApp",
+        Req::SetAppEnabled { .. } => "SetAppEnabled",
+        Req::SetAppCredentialEnabled { .. } => "SetAppCredentialEnabled",
+        Req::RotateAppClientSecret { .. } => "RotateAppClientSecret",
+        Req::CreateAppClientAssertion { .. } => "CreateAppClientAssertion",
+        Req::DeleteAppClientAssertion { .. } => "DeleteAppClientAssertion",
+        Req::SetAppClientAssertionEnabled { .. } => "SetAppClientAssertionEnabled",
+        Req::AddAppVault { .. } => "AddAppVault",
+        Req::UpdateAppVault { .. } => "UpdateAppVault",
+        Req::RemoveAppVault { .. } => "RemoveAppVault",
+    }
+}
+
+/// Decodes a committed entry's payload bytes into an [`OrganizationRequest`].
+///
+/// Mirrors the decode shape used by
+/// [`RaftLogStore::apply_committed_entries`](crate::log_storage::RaftLogStore::apply_committed_entries):
+/// payloads are postcard-encoded
+/// [`RaftPayload<OrganizationRequest>`](RaftPayload) values; the wrapper
+/// metadata is discarded and only the inner request is returned, since the
+/// commit-pump stub neither stamps timestamps nor verifies state-root
+/// commitments.
+fn decode_vault_payload(
+    bytes: &[u8],
+) -> std::result::Result<OrganizationRequest, inferadb_ledger_types::CodecError> {
+    inferadb_ledger_types::decode::<RaftPayload<OrganizationRequest>>(bytes).map(|p| p.request)
 }
 
 /// Collected outcome of syncing one per-org group inside
@@ -4994,8 +5228,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_rehydrate_vault_groups_starts_non_deleted_vaults_only() {
-        use crate::log_storage::{AppliedState, VaultMeta};
         use inferadb_ledger_types::VaultSlug;
+
+        use crate::log_storage::{AppliedState, VaultMeta};
 
         let temp = TestDir::new();
         let config = create_test_config(&temp);
@@ -5120,8 +5355,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_rehydrate_vault_groups_is_idempotent() {
-        use crate::log_storage::{AppliedState, VaultMeta};
         use inferadb_ledger_types::VaultSlug;
+
+        use crate::log_storage::{AppliedState, VaultMeta};
 
         let temp = TestDir::new();
         let config = create_test_config(&temp);
@@ -5752,11 +5988,9 @@ mod tests {
         // Exercises the timeout branch of `sync_all_state_dbs`
         // structurally. Passing an effectively-zero timeout means one of
         // two paths runs to completion:
-        //   1. The per-region future resolves instantly — clean DBs +
-        //      no dirty pages make `sync_state` a near no-op, so the
-        //      future may beat the timeout.
-        //   2. The timeout fires first and the warn-arm runs, logging
-        //      the deadline-exceeded branch.
+        //   1. The per-region future resolves instantly — clean DBs + no dirty pages make
+        //      `sync_state` a near no-op, so the future may beat the timeout.
+        //   2. The timeout fires first and the warn-arm runs, logging the deadline-exceeded branch.
         // Either path is acceptable. The test asserts that the call
         // neither panics nor deadlocks regardless of which branch wins
         // the race.
@@ -6288,5 +6522,126 @@ mod tests {
 
         let group = manager.get_region_group(Region::US_EAST_VA).unwrap();
         assert!(!group.is_jobs_active());
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Vault-tier classification (P2c.1)
+    //
+    // Exercises the helpers driving the per-vault commit-pump stub:
+    // [`classify_vault_tier`], [`request_variant_name`], and
+    // [`decode_vault_payload`]. These three helpers are the foundation of
+    // the real per-vault apply path (P2c.2) and the eventual routing flip
+    // (P2c.3). Misclassification here lets either silently corrupt
+    // routing, so each variant family carries an explicit assertion.
+    // ────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_classify_vault_tier_write_is_vault_scoped() {
+        let req = OrganizationRequest::Write {
+            vault: VaultId::new(1),
+            transactions: vec![],
+            idempotency_key: [0u8; 16],
+            request_hash: 0,
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
+        };
+        assert_eq!(classify_vault_tier(&req), VaultTier::VaultScoped);
+        assert_eq!(request_variant_name(&req), "Write");
+    }
+
+    #[test]
+    fn test_classify_vault_tier_batch_write_is_vault_scoped() {
+        let req = OrganizationRequest::BatchWrite { requests: vec![] };
+        assert_eq!(classify_vault_tier(&req), VaultTier::VaultScoped);
+        assert_eq!(request_variant_name(&req), "BatchWrite");
+    }
+
+    #[test]
+    fn test_classify_vault_tier_ingest_external_events_is_vault_scoped() {
+        let req = OrganizationRequest::IngestExternalEvents {
+            source: "test".to_string(),
+            events: vec![],
+        };
+        assert_eq!(classify_vault_tier(&req), VaultTier::VaultScoped);
+        assert_eq!(request_variant_name(&req), "IngestExternalEvents");
+    }
+
+    #[test]
+    fn test_classify_vault_tier_create_vault_is_org_scoped() {
+        let req = OrganizationRequest::CreateVault {
+            organization: OrganizationId::new(1),
+            slug: inferadb_ledger_types::VaultSlug::new(2),
+            name: None,
+            retention_policy: None,
+        };
+        assert_eq!(classify_vault_tier(&req), VaultTier::OrgScoped);
+        assert_eq!(request_variant_name(&req), "CreateVault");
+    }
+
+    #[test]
+    fn test_classify_vault_tier_delete_vault_is_org_scoped() {
+        let req = OrganizationRequest::DeleteVault {
+            organization: OrganizationId::new(1),
+            vault: VaultId::new(2),
+        };
+        assert_eq!(classify_vault_tier(&req), VaultTier::OrgScoped);
+        assert_eq!(request_variant_name(&req), "DeleteVault");
+    }
+
+    #[test]
+    fn test_classify_vault_tier_create_team_is_org_scoped() {
+        let req = OrganizationRequest::CreateOrganizationTeam {
+            organization: OrganizationId::new(1),
+            slug: inferadb_ledger_types::TeamSlug::new(7),
+        };
+        assert_eq!(classify_vault_tier(&req), VaultTier::OrgScoped);
+        assert_eq!(request_variant_name(&req), "CreateOrganizationTeam");
+    }
+
+    #[test]
+    fn test_classify_vault_tier_create_invite_is_org_scoped() {
+        let req = OrganizationRequest::CreateOrganizationInvite {
+            organization: OrganizationId::new(1),
+            slug: inferadb_ledger_types::InviteSlug::new(9),
+            token_hash: [0u8; 32],
+            invitee_email_hmac: String::new(),
+            ttl_hours: 24,
+        };
+        assert_eq!(classify_vault_tier(&req), VaultTier::OrgScoped);
+        assert_eq!(request_variant_name(&req), "CreateOrganizationInvite");
+    }
+
+    #[test]
+    fn test_classify_vault_tier_create_app_is_org_scoped() {
+        let req = OrganizationRequest::CreateApp {
+            organization: OrganizationId::new(1),
+            slug: inferadb_ledger_types::AppSlug::new(11),
+        };
+        assert_eq!(classify_vault_tier(&req), VaultTier::OrgScoped);
+        assert_eq!(request_variant_name(&req), "CreateApp");
+    }
+
+    #[test]
+    fn test_decode_vault_payload_roundtrips_write() {
+        let original = OrganizationRequest::Write {
+            vault: VaultId::new(42),
+            transactions: vec![],
+            idempotency_key: [0u8; 16],
+            request_hash: 0,
+            organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
+            vault_slug: inferadb_ledger_types::VaultSlug::new(0),
+        };
+        let payload = RaftPayload::system(original.clone());
+        let bytes = inferadb_ledger_types::encode(&payload).expect("encode payload");
+        let decoded = decode_vault_payload(&bytes).expect("decode payload");
+        assert_eq!(decoded, original);
+        assert_eq!(classify_vault_tier(&decoded), VaultTier::VaultScoped);
+    }
+
+    #[test]
+    fn test_decode_vault_payload_rejects_garbage() {
+        let bytes: Vec<u8> = vec![0xff; 16];
+        let result = decode_vault_payload(&bytes);
+        assert!(result.is_err(), "garbage bytes must not decode as a RaftPayload");
     }
 }

@@ -1112,20 +1112,19 @@ mod tests {
         // control plane, which must be filtered out).
         for org in [0_i64, 1, 2] {
             let dir = region_dir.join(org.to_string()).join("state");
-            std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
+            std::fs::create_dir_all(&dir)
+                .unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
         }
         // Junk entries: non-numeric directory name (future `_meta/`
         // sibling), numeric directory without the `state/` marker, and
         // a plain file with a numeric name.
-        std::fs::create_dir_all(region_dir.join("not_a_number"))
-            .expect("create non-numeric entry");
+        std::fs::create_dir_all(region_dir.join("not_a_number")).expect("create non-numeric entry");
         std::fs::create_dir_all(region_dir.join("99")).expect("create malformed org 99");
         std::fs::write(region_dir.join("42"), b"file, not a directory")
             .expect("create file masquerading as org");
 
-        let discovered = mgr
-            .discover_existing_organizations(Region::US_EAST_VA)
-            .expect("scan must succeed");
+        let discovered =
+            mgr.discover_existing_organizations(Region::US_EAST_VA).expect("scan must succeed");
         assert_eq!(
             discovered,
             vec![OrganizationId::new(1), OrganizationId::new(2)],
@@ -1144,9 +1143,8 @@ mod tests {
         let global_dir = temp.path().join("global");
         std::fs::create_dir_all(global_dir.join("0").join("state")).expect("create global/0/state");
 
-        let discovered = mgr
-            .discover_existing_organizations(Region::GLOBAL)
-            .expect("scan must succeed");
+        let discovered =
+            mgr.discover_existing_organizations(Region::GLOBAL).expect("scan must succeed");
         assert!(
             discovered.is_empty(),
             "GLOBAL's system org (id 0) must not be returned by this helper"

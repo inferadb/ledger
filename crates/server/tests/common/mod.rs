@@ -1433,30 +1433,23 @@ impl TestCluster {
     ///
     /// This is the test-only equivalent of a whole-cluster restart:
     ///
-    ///   1. Every node's WAL is flushed via
-    ///      `ConsensusHandle::flush_for_shutdown` so `applied_durable ==
-    ///      last_committed` at the moment of shutdown. Combined with (2),
-    ///      this matches the production clean-shutdown contract.
-    ///   2. Every node's state DBs (state.db + raft.db, per region, per
-    ///      vault) are synced via `RaftManager::sync_all_state_dbs` — the
-    ///      same call `main.rs`'s `pre_shutdown` closure makes. Without
-    ///      this, `applied_durable` resets to 0 on restart and the full WAL
-    ///      replays, which is correct but defeats the point of a
-    ///      "graceful" restart.
-    ///   3. The server task for each node is signalled (`shutdown_tx.send(true)`)
-    ///      and awaited with a per-node timeout. Nodes that do not
-    ///      terminate cleanly within the timeout are abandoned; the
-    ///      subsequent restart will still observe their on-disk state
-    ///      because the WAL + DB syncs above already happened.
-    ///   4. Each node is re-bootstrapped via `bootstrap_node` against the
-    ///      same data_dir. Because the cluster_id file already exists,
-    ///      `bootstrap_node` takes the restart path, which rediscovers
-    ///      and restarts data regions via `discover_existing_regions`,
-    ///      rediscovers and rehydrates per-organization Raft groups via
-    ///      `discover_existing_organizations` +
-    ///      `rehydrate_organization_group` (Task #151), and rehydrates
-    ///      per-vault Raft groups inside `start_organization_group`
-    ///      (Task #146).
+    ///   1. Every node's WAL is flushed via `ConsensusHandle::flush_for_shutdown` so
+    ///      `applied_durable == last_committed` at the moment of shutdown. Combined with (2), this
+    ///      matches the production clean-shutdown contract.
+    ///   2. Every node's state DBs (state.db + raft.db, per region, per vault) are synced via
+    ///      `RaftManager::sync_all_state_dbs` — the same call `main.rs`'s `pre_shutdown` closure
+    ///      makes. Without this, `applied_durable` resets to 0 on restart and the full WAL replays,
+    ///      which is correct but defeats the point of a "graceful" restart.
+    ///   3. The server task for each node is signalled (`shutdown_tx.send(true)`) and awaited with
+    ///      a per-node timeout. Nodes that do not terminate cleanly within the timeout are
+    ///      abandoned; the subsequent restart will still observe their on-disk state because the
+    ///      WAL + DB syncs above already happened.
+    ///   4. Each node is re-bootstrapped via `bootstrap_node` against the same data_dir. Because
+    ///      the cluster_id file already exists, `bootstrap_node` takes the restart path, which
+    ///      rediscovers and restarts data regions via `discover_existing_regions`, rediscovers and
+    ///      rehydrates per-organization Raft groups via `discover_existing_organizations` +
+    ///      `rehydrate_organization_group` (Task #151), and rehydrates per-vault Raft groups inside
+    ///      `start_organization_group` (Task #146).
     ///
     /// The restart intentionally does NOT pre-populate
     /// `RaftManager::peer_addresses` — that map starts empty on each
@@ -1523,8 +1516,7 @@ impl TestCluster {
             // opens the same paths while the OLD engine still holds them,
             // and the NEW engine's election timers never fire (racy shared
             // state on the backing files).
-            let _ =
-                tokio::time::timeout(Duration::from_secs(15), node.manager.shutdown()).await;
+            let _ = tokio::time::timeout(Duration::from_secs(15), node.manager.shutdown()).await;
 
             if let Some(tx) = node._shutdown_tx.take() {
                 let _ = tx.send(true);
@@ -1669,8 +1661,7 @@ impl TestCluster {
         // `bootstrap_node` and there's no re-trigger hook.
         let voter_set: Vec<(u64, String)> =
             restarted.iter().map(|n| (n.id, n.addr.clone())).collect();
-        let bootstrap_node_id =
-            voter_set.iter().map(|(id, _)| *id).min().unwrap_or(0);
+        let bootstrap_node_id = voter_set.iter().map(|(id, _)| *id).min().unwrap_or(0);
         for node in &restarted {
             let mgr = node.manager.clone();
             let storage = inferadb_ledger_raft::RegionStorageManager::new(

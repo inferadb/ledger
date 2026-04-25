@@ -4,12 +4,10 @@
 //! through the real gRPC + Raft + apply pipeline. The earlier slices
 //! (P2b.2.a–P2b.2.f) landed:
 //!   * `RaftManager::start_vault_group` / `stop_vault_group`,
-//!   * `VaultCreationRequest` / `VaultDeletionRequest` signals from the
-//!     `CreateVault` / `DeleteVault` apply arms,
-//!   * the watcher task in `start_organization_group` that drives those
-//!     signals,
-//!   * rehydration of non-deleted vaults on `start_organization_group`
-//!     re-invocation,
+//!   * `VaultCreationRequest` / `VaultDeletionRequest` signals from the `CreateVault` /
+//!     `DeleteVault` apply arms,
+//!   * the watcher task in `start_organization_group` that drives those signals,
+//!   * rehydration of non-deleted vaults on `start_organization_group` re-invocation,
 //!   * per-vault raft.db fan-out in `sync_all_state_dbs`.
 //!
 //! Unit tests cover each piece in isolation. This file is the
@@ -107,10 +105,10 @@ async fn wait_for_vault_group_live_on_all_voters(
 ///   1. Build a 3-node cluster with 1 data region (`US_EAST_VA`).
 ///   2. Create an organization via the production gRPC + saga path.
 ///   3. Create a vault via the production gRPC path (`VaultService::create_vault`).
-///   4. Wait for the `CreateVault` → `VaultCreationRequest` → watcher →
-///      `start_vault_group` chain to fire on every voter.
-///   5. Assert every voter reports the same `(region, org_id, vault_id)`
-///      entry in `list_vault_groups()` and `has_vault_group(..) == true`.
+///   4. Wait for the `CreateVault` → `VaultCreationRequest` → watcher → `start_vault_group` chain
+///      to fire on every voter.
+///   5. Assert every voter reports the same `(region, org_id, vault_id)` entry in
+///      `list_vault_groups()` and `has_vault_group(..) == true`.
 #[tokio::test]
 async fn test_create_vault_brings_vault_group_live_on_all_voters() {
     let cluster = TestCluster::with_data_regions(3, 1).await;
@@ -200,10 +198,8 @@ async fn test_create_vault_brings_vault_group_live_on_all_voters() {
     // we created exactly one vault. Guards against rehydration fan-out
     // bugs that would multiplicatively spawn groups and against
     // duplicate VaultCreationRequest handling.
-    let vaults_for_org: Vec<(Region, OrganizationId, VaultId)> = leader_triples
-        .into_iter()
-        .filter(|(r, o, _)| *r == region && *o == org_id)
-        .collect();
+    let vaults_for_org: Vec<(Region, OrganizationId, VaultId)> =
+        leader_triples.into_iter().filter(|(r, o, _)| *r == region && *o == org_id).collect();
     assert_eq!(
         vaults_for_org.len(),
         1,
@@ -331,11 +327,9 @@ async fn delete_test_vault(
 /// two distinct vault groups, both live on every voter.
 ///
 /// Validates:
-///   * `VaultCreationRequest` watcher fan-out across multiple vaults in a
-///     single organization.
-///   * `start_vault_group` allocates a distinct `shard_id` per vault — the
-///     deterministic per-`(region, org, vault)` shard derivation must not
-///     alias.
+///   * `VaultCreationRequest` watcher fan-out across multiple vaults in a single organization.
+///   * `start_vault_group` allocates a distinct `shard_id` per vault — the deterministic
+///     per-`(region, org, vault)` shard derivation must not alias.
 ///   * `list_vault_groups()` reports exactly two entries on every voter.
 #[tokio::test]
 async fn test_create_multiple_vaults_in_one_org() {
@@ -461,14 +455,22 @@ async fn test_create_vault_in_second_org() {
 
     // Create one vault in each org.
     crate::common::create_test_vault(&leader.addr, org_a_slug).await.expect("create vault A");
-    let vault_id_a =
-        wait_for_vault_group_live_on_all_voters(&cluster, region, org_a_id, Duration::from_secs(15))
-            .await;
+    let vault_id_a = wait_for_vault_group_live_on_all_voters(
+        &cluster,
+        region,
+        org_a_id,
+        Duration::from_secs(15),
+    )
+    .await;
 
     crate::common::create_test_vault(&leader.addr, org_b_slug).await.expect("create vault B");
-    let vault_id_b =
-        wait_for_vault_group_live_on_all_voters(&cluster, region, org_b_id, Duration::from_secs(15))
-            .await;
+    let vault_id_b = wait_for_vault_group_live_on_all_voters(
+        &cluster,
+        region,
+        org_b_id,
+        Duration::from_secs(15),
+    )
+    .await;
 
     // Note: `VaultId` is allocated from a per-organization sequence, so the
     // first vault in every fresh org gets `VaultId(1)`. The cross-org
@@ -646,14 +648,12 @@ async fn test_delete_vault_tears_down_vault_group() {
 ///   1. Build a 3-node cluster with 1 data region.
 ///   2. Create an organization + a vault via the production gRPC path.
 ///   3. Wait for the vault group to be live on every voter.
-///   4. `cluster.graceful_restart()` — flushes WALs, syncs state DBs,
-///      stops each server, re-bootstraps every node against the same
-///      data_dir.
+///   4. `cluster.graceful_restart()` — flushes WALs, syncs state DBs, stops each server,
+///      re-bootstraps every node against the same data_dir.
 ///   5. Wait for the system region to re-elect a leader.
 ///   6. Wait for the per-org group to rehydrate on every voter.
-///   7. Wait for the per-vault group to rehydrate on every voter, with
-///      the SAME `(region, org_id, vault_id)` triple observed before the
-///      restart.
+///   7. Wait for the per-vault group to rehydrate on every voter, with the SAME `(region, org_id,
+///      vault_id)` triple observed before the restart.
 ///
 /// This is the end-to-end assertion on the rehydration chain — production
 /// code at `bootstrap.rs` (restart-path block) + `rehydrate_organization_group`
@@ -685,7 +685,9 @@ async fn test_vault_group_rehydrates_after_graceful_cluster_restart() {
             .await
             .expect("create organization pre-restart");
     let org_id_pre = resolve_org_id(leader, org_slug);
-    crate::common::create_test_vault(&leader.addr, org_slug).await.expect("create vault pre-restart");
+    crate::common::create_test_vault(&leader.addr, org_slug)
+        .await
+        .expect("create vault pre-restart");
 
     // Wait until every voter has the vault group registered — establishes
     // the "before" side of the restart assertion. Uses the same helper the
@@ -714,8 +716,7 @@ async fn test_vault_group_rehydrates_after_graceful_cluster_restart() {
             .nodes()
             .iter()
             .map(|n| {
-                let peers: Vec<(u64, String)> =
-                    n.manager.peer_addresses().iter_peers();
+                let peers: Vec<(u64, String)> = n.manager.peer_addresses().iter_peers();
                 format!(
                     "node {} addr={} leader={:?} term={} peers={:?}",
                     n.id,
