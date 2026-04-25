@@ -472,6 +472,16 @@ pub struct InnerGroup {
     pub(crate) consensus_transport: Option<crate::consensus_transport::GrpcConsensusTransport>,
     /// Events database.
     pub(crate) events_db: Option<Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>>,
+    /// Apply-phase event writer cloned from the org's `RaftLogStore`.
+    ///
+    /// `EventWriter` wraps `Arc<EventsDatabase>` + `EventConfig`, and `Clone`
+    /// produces an additional handle that emits into the same physical
+    /// `events.db`. Per-vault `RaftLogStore` instances clone this handle in
+    /// [`RaftManager::start_vault_group`] so vault apply lands events in the
+    /// shared org `events.db` (per-vault isolation is a separate slice). When
+    /// `None` (e.g. test fixtures with no events configuration), vault apply
+    /// also runs without an `event_writer` and apply skips event emission.
+    pub(crate) event_writer: Option<EventWriter<FileBackend>>,
     /// Last activity timestamp (for hibernation).
     pub(crate) last_activity: Arc<parking_lot::Mutex<std::time::Instant>>,
     /// Whether background jobs are currently running.
@@ -576,6 +586,19 @@ impl InnerGroup {
     /// Returns the events database.
     pub fn events_db(&self) -> Option<&Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>> {
         self.events_db.as_ref()
+    }
+
+    /// Returns the apply-phase event writer cloned from the org's
+    /// `RaftLogStore`, if events are configured for this group.
+    ///
+    /// Used by [`RaftManager::start_vault_group`] to share the org's writer
+    /// with the vault's `RaftLogStore` — both org and vault apply paths emit
+    /// into the same physical `events.db` until per-vault events isolation
+    /// lands as a separate slice. Returns `None` for groups started without
+    /// events configuration (e.g. some test fixtures), in which case vault
+    /// apply also runs without an `event_writer` and skips event emission.
+    pub fn event_writer(&self) -> Option<&EventWriter<FileBackend>> {
+        self.event_writer.as_ref()
     }
 
     /// Returns the batch writer handle.
@@ -1271,6 +1294,15 @@ pub struct InnerVaultGroup {
     /// this field is a parallel reference so the database stays live
     /// even after apply-task teardown.
     pub(crate) raft_db: Arc<Database<FileBackend>>,
+    /// Apply-phase event writer cloned from the parent
+    /// [`InnerGroup::event_writer`] at vault-group start. Held alongside
+    /// the writer attached to the vault's owned `RaftLogStore` so the
+    /// writer handle stays observable from the [`InnerVaultGroup`]
+    /// (e.g. for tests) after the log store is moved into the apply task.
+    /// `None` when the parent org has no events configured — in that case
+    /// the vault's `RaftLogStore` is also constructed without a writer
+    /// and apply skips event emission.
+    pub(crate) event_writer: Option<EventWriter<FileBackend>>,
 }
 
 impl InnerVaultGroup {
@@ -1356,6 +1388,17 @@ impl InnerVaultGroup {
     /// Returns the per-vault `raft.db` handle.
     pub fn raft_db(&self) -> &Arc<Database<FileBackend>> {
         &self.raft_db
+    }
+
+    /// Returns the apply-phase event writer wired into the vault's
+    /// `RaftLogStore`, if events are configured for the parent org.
+    ///
+    /// Cloned from the parent [`InnerGroup::event_writer`] at
+    /// vault-group start so the vault store and the org store both emit
+    /// into the same physical `events.db`. Returns `None` when the org
+    /// was started without events configuration.
+    pub fn event_writer(&self) -> Option<&EventWriter<FileBackend>> {
+        self.event_writer.as_ref()
     }
 
     /// Checks if this node is the leader for this vault group (delegated
@@ -1496,6 +1539,13 @@ impl VaultGroup {
     #[must_use]
     pub fn raft_db(&self) -> &Arc<Database<FileBackend>> {
         self.0.raft_db()
+    }
+
+    /// Returns the apply-phase event writer wired into the vault's
+    /// `RaftLogStore`, if events are configured for the parent org.
+    #[must_use]
+    pub fn event_writer(&self) -> Option<&EventWriter<FileBackend>> {
+        self.0.event_writer()
     }
 
     /// Checks if this node is the leader for this vault group (delegated
@@ -2000,6 +2050,7 @@ impl RaftManager {
             applied_index_rx,
             consensus_transport: None,
             events_db: None,
+            event_writer: None,
             last_activity: Arc::new(parking_lot::Mutex::new(std::time::Instant::now())),
             jobs_active: Arc::new(AtomicBool::new(false)),
             region_creation_rx: parking_lot::Mutex::new(None),
@@ -2506,20 +2557,23 @@ impl RaftManager {
         // - `leader_lease` — vault groups run delegated leadership; the parent org's lease is the
         //   authoritative read-validity window.
         // - `region_config` — region + node identity match the parent.
+        // - `event_writer` — the org's apply-phase writer is `Clone` and wraps `Arc<EventsDatabase>`
+        //   + `EventConfig`. Cloning the org's handle (when configured) lets vault apply emit into
+        //   the same physical `events.db` as org apply. A separate slice introduces per-vault
+        //   `events.db` files; until then, vault events tag the entry with the vault id and land
+        //   alongside org events. When the parent org has no event writer (e.g. test fixtures
+        //   without events configuration), the vault store also runs without one and apply skips
+        //   event emission.
         //
         // Not wired in this slice (acceptable; documented):
         //
-        // - `event_writer` — the org's writer was moved into the org's `RaftLogStore` and is
-        //   consumed by its apply worker; there is no shared accessor. Apply tolerates a missing
-        //   `event_writer` (events are skipped). A separate slice attaches a vault-side writer once
-        //   an `EventConfig` accessor is exposed on `InnerGroup`.
         // - `divergence_sender` — divergence detection compares against piggybacked commitments;
         //   the vault's chain starts at height 0 so there is nothing to compare yet. Wired
         //   alongside per-vault commitment piggyback in a later slice.
         // - `region_chain` pre-seed — left at the default `{height: 0, previous_hash: ZERO_HASH}`.
         //   The vault's chain is its own; pre-seeding from the parent's accumulated chain would
         //   interleave with writes still routing to the parent pre-flip.
-        let vault_log_store = RaftLogStore::<FileBackend>::open_for_vault(
+        let mut vault_log_store = RaftLogStore::<FileBackend>::open_for_vault(
             &vault_raft_db_path,
             organization_id,
             vault_id,
@@ -2540,6 +2594,20 @@ impl RaftManager {
             self.config.node_id,
         )
         .with_leader_lease(Arc::clone(org_inner.leader_lease()));
+
+        // Share the org's apply-phase event writer (when configured) so vault
+        // apply lands events in the same physical `events.db` as org apply.
+        // `EventWriter` is `Clone` (it wraps `Arc<EventsDatabase>` + a small
+        // `EventConfig`), so cloning produces an additional emitter handle
+        // backed by the same database. When the org has no writer, the vault
+        // store also runs without one and apply skips event emission. The
+        // cloned handle is also retained on `InnerVaultGroup::event_writer`
+        // for observability after `vault_log_store` moves into the apply
+        // task.
+        let vault_event_writer = org_inner.event_writer().cloned();
+        if let Some(writer) = vault_event_writer.clone() {
+            vault_log_store = vault_log_store.with_event_writer(writer);
+        }
 
         // Per-vault applied-state accessors, surfaced before the log store
         // is moved into the debug-stub worker task.
@@ -3212,6 +3280,7 @@ impl RaftManager {
             applied_index_rx: vault_applied_index_rx,
             cancellation: vault_cancel,
             raft_db: vault_raft_db,
+            event_writer: vault_event_writer,
         });
 
         {
@@ -3518,6 +3587,12 @@ impl RaftManager {
         let leader_lease = log_store.leader_lease().clone();
         let applied_index_rx = log_store.applied_index_watch();
         let raft_db = log_store.log_store_db();
+        // Capture a clone of the org's apply-phase event writer (if any)
+        // before `log_store` is moved into the apply worker. Per-vault
+        // `RaftLogStore` instances reuse this handle via
+        // `start_vault_group`, so vault apply emits into the same shared
+        // `events.db` as the org's own apply path.
+        let event_writer_for_inner = log_store.event_writer().cloned();
 
         // ────────────────────────────────────────────────────────────
         // Create consensus engine + apply worker. The consensus engine
@@ -3926,6 +4001,7 @@ impl RaftManager {
             applied_index_rx,
             consensus_transport: Some(consensus_transport_for_group),
             events_db: Some(events_db),
+            event_writer: event_writer_for_inner,
             last_activity: Arc::new(parking_lot::Mutex::new(std::time::Instant::now())),
             jobs_active: Arc::new(AtomicBool::new(jobs_running)),
             region_creation_rx: parking_lot::Mutex::new(region_creation_rx),
@@ -5598,6 +5674,102 @@ mod tests {
         assert!(
             vault.batch_handle().is_none(),
             "vault group must not have batch_handle when parent org has none",
+        );
+    }
+
+    /// P2c.5.b: when the parent organization is configured with an
+    /// [`EventConfig`], `start_vault_group` clones the org's apply-phase
+    /// [`EventWriter`] onto the vault's `RaftLogStore` so vault apply
+    /// emits into the same shared `events.db`. Without this wiring, vault
+    /// apply silently drops events.
+    #[tokio::test]
+    async fn test_start_vault_group_inherits_parent_event_writer() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let event_config = inferadb_ledger_types::events::EventConfig::default();
+        let org_id = OrganizationId::new(101);
+        let org_group = manager
+            .start_organization_group(
+                Region::GLOBAL,
+                org_id,
+                vec![(1, "127.0.0.1:50051".to_string())],
+                true,
+                Some(event_config),
+                None,
+            )
+            .await
+            .expect("start org group");
+
+        // Sanity: parent org has an event writer once events_config is supplied.
+        let org_writer = org_group.inner().event_writer().expect(
+            "parent org must have event_writer when events_config was supplied",
+        );
+        let org_events_db = Arc::clone(org_writer.events_db());
+
+        let vault = manager
+            .start_vault_group(Region::GLOBAL, org_id, VaultId::new(1))
+            .await
+            .expect("start vault group");
+
+        let vault_writer = vault
+            .event_writer()
+            .expect("vault group must inherit event_writer from parent org");
+
+        // Vault writer wraps the same physical events.db handle as the
+        // org's writer — both apply paths emit into the shared file.
+        assert!(
+            Arc::ptr_eq(&org_events_db, vault_writer.events_db()),
+            "vault event writer must share parent org's events.db handle",
+        );
+    }
+
+    /// P2c.5.b: when the parent organization started without an
+    /// [`EventConfig`] (test-fixture path), `start_vault_group` MUST
+    /// gracefully no-op — the vault's `RaftLogStore` is opened with no
+    /// `event_writer` and apply skips event emission, mirroring the
+    /// parent's behavior.
+    #[tokio::test]
+    async fn test_start_vault_group_without_parent_event_writer_yields_none() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+
+        let org_id = OrganizationId::new(102);
+        let org_group = manager
+            .start_organization_group(
+                Region::GLOBAL,
+                org_id,
+                vec![(1, "127.0.0.1:50051".to_string())],
+                true,
+                // No events_config on the parent org.
+                None,
+                None,
+            )
+            .await
+            .expect("start org group");
+
+        // Sanity: the parent org also has no event_writer (precondition).
+        assert!(
+            org_group.inner().event_writer().is_none(),
+            "parent org must not have event_writer when events_config was None",
+        );
+
+        let vault = manager
+            .start_vault_group(Region::GLOBAL, org_id, VaultId::new(1))
+            .await
+            .expect("start vault group");
+
+        assert!(
+            vault.event_writer().is_none(),
+            "vault group must not have event_writer when parent org has none",
         );
     }
 
