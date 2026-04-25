@@ -744,10 +744,12 @@ async fn test_delete_vault_tears_down_vault_group() {
 /// stubbed or bypassed.
 #[tokio::test]
 #[ignore = "blocked on cold-restart election convergence: HTTP/2 server keepalive (Task #167) \
-            is in place but voters still observe `term=1, leader=None` for the full 60s budget. \
-            Symptom: simultaneous whole-cluster restart leaves the consensus engines unable to \
-            START an election even after peer addresses re-populate. Follow-up tracked in \
-            tasks #152 and #153."]
+            and sender-side ack-timeout liveness probe (Task #153 / `peer_sender::ACK_TIMEOUT`) \
+            are both in place but voters still observe `term=1, leader=None` for the full 60s \
+            budget. Symptom: simultaneous whole-cluster restart leaves the consensus engines \
+            unable to even START an election — the term never advances past 1, ruling out ack \
+            delivery as the gap. Follow-up tracked in tasks #152 and #153 (election-timer / \
+            timer-tick on cold-restart path)."]
 async fn test_vault_group_rehydrates_after_graceful_cluster_restart() {
     // TCP transport is required for this test: on restart, peer addresses
     // must re-populate before the per-organization rehydration sweep runs,

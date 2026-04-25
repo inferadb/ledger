@@ -17,9 +17,9 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use inferadb_ledger_consensus::transport::OutboundMessage;
@@ -164,6 +164,56 @@ const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 /// Maximum reconnect backoff cap.
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
 
+/// Maximum time to wait for an ack on an outstanding send before declaring
+/// the bidi stream dead and forcing a reconnect.
+///
+/// Sized as a multiple of the typical Raft heartbeat round-trip plus
+/// handler latency: a healthy peer acks within tens of milliseconds, so
+/// a 5-second deadline is several orders of magnitude above the steady-state
+/// expectation. This catches the failure mode where HTTP/2 reports the
+/// stream as OPEN but the application-layer handler isn't actually polling
+/// the inbound side — the stream will sit forever otherwise, since our
+/// fire-and-forget acks don't drive any other timeout.
+const ACK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Period at which the drain loop wakes (when the queue is otherwise idle)
+/// to evaluate the ack-timeout condition. A 1-second tick keeps the worst-case
+/// detection latency at `ACK_TIMEOUT + 1s` while costing one timer wakeup
+/// per peer per second when there's no real traffic.
+const ACK_TIMEOUT_TICK: Duration = Duration::from_secs(1);
+
+/// Per-stream counters tracking inflight liveness. Shared between the drain
+/// loop (writer) and the ack-consumer task (reader) for a single bidi stream;
+/// constructed fresh on every reconnect so prior-stream activity doesn't
+/// influence the new stream's deadline.
+struct StreamLiveness {
+    /// Total acks observed on this stream's response side.
+    acks_received: AtomicU64,
+    /// Total successful `req_tx.send`s issued on this stream.
+    sends_issued: AtomicU64,
+    /// Monotonic-clock millis at which the most recent ack arrived (or, on a
+    /// fresh stream with no acks yet, the stream-open time). Used together
+    /// with `acks_received < sends_issued` to detect a stuck peer: outstanding
+    /// sends with no acks for `ACK_TIMEOUT` is treated as a dead stream.
+    last_ack_at_millis: AtomicU64,
+}
+
+impl StreamLiveness {
+    fn new(open_instant: Instant, base: Instant) -> Self {
+        Self {
+            acks_received: AtomicU64::new(0),
+            sends_issued: AtomicU64::new(0),
+            last_ack_at_millis: AtomicU64::new(millis_since(base, open_instant)),
+        }
+    }
+}
+
+/// Monotonic millisecond delta between `base` and `now`. Saturates at 0 if
+/// `now < base` (cannot happen with `Instant` semantics, but defensive).
+fn millis_since(base: Instant, now: Instant) -> u64 {
+    u64::try_from(now.saturating_duration_since(base).as_millis()).unwrap_or(u64::MAX)
+}
+
 /// Applies equal-jitter to a backoff value before sleeping. Breaks client
 /// synchronization when many peers reconnect after a shared upstream event
 /// (e.g. a server restart). The backoff progression itself remains
@@ -220,6 +270,30 @@ fn drop_queue(inner: &Arc<Inner>, reason: &'static str) {
         }
         crate::metrics::record_peer_send_queue_depth(inner.peer_id, 0);
     }
+}
+
+/// True iff the stream has outstanding sends that haven't been acknowledged
+/// for at least [`ACK_TIMEOUT`]. Returns `false` (no timeout) when the peer
+/// has acked everything we've sent — even if the stream has been idle for a
+/// long stretch — because there's no liveness signal to evaluate against
+/// without an outstanding send.
+///
+/// `stream_open_at` is the [`Instant`] the bidi stream opened; it's used as
+/// the `base` for the [`StreamLiveness::last_ack_at_millis`] atomic so the
+/// initial value (set at open time) means "no acks yet" and the deadline is
+/// measured from stream-open rather than from process start.
+fn ack_timed_out(liveness: &StreamLiveness, stream_open_at: Instant) -> bool {
+    let sends = liveness.sends_issued.load(Ordering::Relaxed);
+    let acks = liveness.acks_received.load(Ordering::Relaxed);
+    if acks >= sends {
+        // Either no sends yet, or every send has been acked — nothing to
+        // measure against.
+        return false;
+    }
+    let last_ack_millis = liveness.last_ack_at_millis.load(Ordering::Relaxed);
+    let now_millis = millis_since(stream_open_at, Instant::now());
+    let elapsed_millis = now_millis.saturating_sub(last_ack_millis);
+    elapsed_millis >= u64::try_from(ACK_TIMEOUT.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Wait for `d` or until shutdown is cancelled. Returns `true` if
@@ -286,17 +360,30 @@ async fn run_drain_loop(
         // Reset on each successful stream open.
         backoff = INITIAL_BACKOFF;
 
-        // Spawn the ack-consumer. It discards every response (fire-and-forget
-        // semantics) while keeping the HTTP/2 flow-control window open. When
-        // the server closes its half or any transport error occurs, the task
-        // exits — the JoinHandle::await below observes this and drives
-        // reconnect.
+        // Per-stream liveness counters. Reset on every reconnect so prior
+        // activity doesn't bias the new stream's ack-timeout deadline.
+        let stream_open_at = Instant::now();
+        let liveness = Arc::new(StreamLiveness::new(stream_open_at, stream_open_at));
+
+        // Spawn the ack-consumer. Successful acks bump
+        // `liveness.acks_received` and refresh `last_ack_at_millis` — the
+        // drain loop reads both fields to detect a stuck peer (HTTP/2 stream
+        // OPEN but server handler not polling). When the server closes its
+        // half or any transport error occurs, the task exits — the
+        // `JoinHandle::await` below observes this and drives reconnect.
         let ack_peer = inner.peer_id;
+        let ack_liveness = Arc::clone(&liveness);
+        let ack_base = stream_open_at;
         let ack_task = tokio::spawn(async move {
             let mut ack_stream = ack_stream;
             while let Some(result) = ack_stream.next().await {
                 match result {
-                    Ok(_) => {}, // discard
+                    Ok(_) => {
+                        ack_liveness.acks_received.fetch_add(1, Ordering::Relaxed);
+                        ack_liveness
+                            .last_ack_at_millis
+                            .store(millis_since(ack_base, Instant::now()), Ordering::Relaxed);
+                    },
                     Err(e) => {
                         tracing::debug!(
                             peer = ack_peer,
@@ -317,7 +404,8 @@ async fn run_drain_loop(
         let mut ack_consumed = false;
 
         // Inner drain loop. Exits on shutdown (outer loop exit), ack-task
-        // completion (reconnect), or write-side error (reconnect).
+        // completion (reconnect), write-side error (reconnect), or
+        // ack-timeout (sender-side liveness probe — see `ACK_TIMEOUT`).
         let stream_broken = loop {
             if inner.shutdown_token.is_cancelled() {
                 break false; // full shutdown
@@ -335,8 +423,13 @@ async fn run_drain_loop(
             if drained.is_empty() {
                 crate::metrics::record_peer_send_queue_depth(inner.peer_id, 0);
 
-                // Wait for either a push-notify, shutdown cancellation,
-                // or ack-task completion (stream broken).
+                // Wait for a push-notify, shutdown cancellation, ack-task
+                // completion (stream broken), or a periodic tick that lets
+                // us evaluate the ack-timeout deadline. The ack-timeout
+                // check is the sender-side liveness probe: if we have
+                // outstanding sends with no acks for `ACK_TIMEOUT`, the
+                // peer's stream task isn't actually polling and we should
+                // reconnect even though HTTP/2 still reports OPEN.
                 tokio::select! {
                     biased;
                     () = inner.shutdown_token.cancelled() => break false,
@@ -352,6 +445,21 @@ async fn run_drain_loop(
                             );
                         }
                         break true;
+                    }
+                    () = tokio::time::sleep(ACK_TIMEOUT_TICK) => {
+                        if ack_timed_out(&liveness, stream_open_at) {
+                            tracing::warn!(
+                                peer = inner.peer_id,
+                                region = %region,
+                                sends = liveness.sends_issued.load(Ordering::Relaxed),
+                                acks = liveness.acks_received.load(Ordering::Relaxed),
+                                timeout_ms = u64::try_from(ACK_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+                                "Consensus stream ack-timeout exceeded; reconnecting",
+                            );
+                            crate::metrics::record_peer_send_drop(inner.peer_id, "ack_timeout");
+                            break true;
+                        }
+                        continue;
                     }
                 }
             }
@@ -382,6 +490,7 @@ async fn run_drain_loop(
                     break;
                 }
 
+                liveness.sends_issued.fetch_add(1, Ordering::Relaxed);
                 crate::metrics::record_peer_send_latency(
                     inner.peer_id,
                     send_start.elapsed().as_secs_f64(),
@@ -389,6 +498,23 @@ async fn run_drain_loop(
             }
 
             if broke {
+                break true;
+            }
+
+            // Evaluate the ack-timeout after a busy batch too. A loop that
+            // keeps draining new pushes faster than `ACK_TIMEOUT_TICK` would
+            // otherwise never park on the `select!` arm above and never
+            // observe the deadline expiring.
+            if ack_timed_out(&liveness, stream_open_at) {
+                tracing::warn!(
+                    peer = inner.peer_id,
+                    region = %region,
+                    sends = liveness.sends_issued.load(Ordering::Relaxed),
+                    acks = liveness.acks_received.load(Ordering::Relaxed),
+                    timeout_ms = u64::try_from(ACK_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+                    "Consensus stream ack-timeout exceeded mid-drain; reconnecting",
+                );
+                crate::metrics::record_peer_send_drop(inner.peer_id, "ack_timeout");
                 break true;
             }
         };
@@ -557,5 +683,50 @@ mod tests {
             "task did not release its Arc<Inner>; strong_count = {}",
             weak_inner.strong_count()
         );
+    }
+
+    /// `ack_timed_out` must be false for a freshly opened stream with no
+    /// outstanding sends — there's nothing to be late on.
+    #[test]
+    fn ack_timeout_false_when_no_sends_outstanding() {
+        let stream_open_at = Instant::now();
+        let liveness = StreamLiveness::new(stream_open_at, stream_open_at);
+        assert!(!ack_timed_out(&liveness, stream_open_at));
+
+        // Same answer when sends == acks (everything has been acknowledged).
+        liveness.sends_issued.store(7, Ordering::Relaxed);
+        liveness.acks_received.store(7, Ordering::Relaxed);
+        assert!(!ack_timed_out(&liveness, stream_open_at));
+    }
+
+    /// With outstanding sends but a recent ack, the stream is healthy.
+    /// `last_ack_at_millis` is initialized at stream-open, so a stream
+    /// opened "just now" with one outstanding send still has time on the
+    /// clock before [`ACK_TIMEOUT`] elapses.
+    #[test]
+    fn ack_timeout_false_when_recent_ack() {
+        let stream_open_at = Instant::now();
+        let liveness = StreamLiveness::new(stream_open_at, stream_open_at);
+        liveness.sends_issued.store(3, Ordering::Relaxed);
+        liveness.acks_received.store(2, Ordering::Relaxed);
+        assert!(!ack_timed_out(&liveness, stream_open_at));
+    }
+
+    /// Outstanding sends + a [`StreamLiveness::last_ack_at_millis`] far in
+    /// the past triggers the ack-timeout.
+    #[test]
+    fn ack_timeout_true_when_stale_ack() {
+        let stream_open_at = Instant::now();
+        let liveness = StreamLiveness::new(stream_open_at, stream_open_at);
+        liveness.sends_issued.store(3, Ordering::Relaxed);
+        liveness.acks_received.store(1, Ordering::Relaxed);
+        // Force `last_ack_at_millis` to "stream open time" (0 ms since open),
+        // and let real time advance by ACK_TIMEOUT + slack. We can't time-warp
+        // the monotonic clock, so use a stream_open_at in the past instead.
+        let stream_open_at = stream_open_at - (ACK_TIMEOUT + Duration::from_secs(1));
+        let liveness = StreamLiveness::new(stream_open_at, stream_open_at);
+        liveness.sends_issued.store(3, Ordering::Relaxed);
+        liveness.acks_received.store(1, Ordering::Relaxed);
+        assert!(ack_timed_out(&liveness, stream_open_at));
     }
 }
