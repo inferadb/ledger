@@ -2237,30 +2237,33 @@ mod tests {
     ///
     /// Writes to the same vault must increment height consistently across nodes.
     #[tokio::test]
-    // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
-    // carries an `organization:` field — a single `RaftLogStore`
-    // owns writes for exactly one `OrganizationId`. Test rewrite
-    // (one store per org) pending; three_tier_consensus integration
-    // tests cover the new model end-to-end.
-    #[ignore]
     async fn test_deterministic_vault_heights() {
+        // Two replicas of the same per-organization Raft group apply identical
+        // writes; their vault heights must converge. Under one-store-per-org
+        // both stores carry the same `organization_id`.
         let dir_a = tempdir().expect("create temp dir a");
         let dir_b = tempdir().expect("create temp dir b");
 
+        let org_id = OrganizationId::new(1);
         let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.db"))
-            .expect("open store a");
+            .expect("open store a")
+            .with_organization_id(org_id);
         let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.db"))
-            .expect("open store b");
+            .expect("open store b")
+            .with_organization_id(org_id);
 
         let mut state_a = (*store_a.applied_state.load_full()).clone();
         let mut state_b = (*store_b.applied_state.load_full()).clone();
 
-        // Register active org on both nodes
+        // Register active org on both nodes (system-tier setup, mirrored on
+        // each replica so subsequent organization-tier writes see an Active
+        // org in local AppliedState).
         let org_slug = inferadb_ledger_types::OrganizationSlug::new(100);
         let org_id_a =
             create_active_organization(&store_a, &mut state_a, org_slug, Region::US_EAST_VA);
         let org_id_b =
             create_active_organization(&store_b, &mut state_b, org_slug, Region::US_EAST_VA);
+        assert_eq!(org_id_a, org_id, "first organization should land at id 1");
         assert_eq!(org_id_a, org_id_b, "Both stores should assign the same org ID");
 
         // Create vault on both nodes
@@ -2305,20 +2308,17 @@ mod tests {
     /// Real workloads have writes to multiple vaults interleaved. The state
     /// machine must handle this deterministically.
     #[tokio::test]
-    // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
-    // carries an `organization:` field — a single `RaftLogStore`
-    // owns writes for exactly one `OrganizationId`. Test rewrite
-    // (one store per org) pending; three_tier_consensus integration
-    // tests cover the new model end-to-end.
-    #[ignore]
     async fn test_deterministic_interleaved_operations() {
         let dir_a = tempdir().expect("create temp dir a");
         let dir_b = tempdir().expect("create temp dir b");
 
+        let org_id = OrganizationId::new(1);
         let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.db"))
-            .expect("open store a");
+            .expect("open store a")
+            .with_organization_id(org_id);
         let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.db"))
-            .expect("open store b");
+            .expect("open store b")
+            .with_organization_id(org_id);
 
         let mut state_a = (*store_a.applied_state.load_full()).clone();
         let mut state_b = (*store_b.applied_state.load_full()).clone();
@@ -2903,20 +2903,15 @@ mod tests {
     // timestamps from `RaftPayload.proposed_at` instead of local `Utc::now()`.
 
     #[tokio::test]
-    // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
-    // carries an `organization:` field — a single `RaftLogStore`
-    // owns writes for exactly one `OrganizationId`. Test rewrite
-    // (one store per org) pending; three_tier_consensus integration
-    // tests cover the new model end-to-end.
-    #[ignore]
     async fn test_apply_uses_proposed_at_not_utc_now() {
         // Critical test: apply with proposed_at set to year 2099 — if any code
         // path still calls Utc::now(), timestamps will be ~2026 instead of 2099.
         use chrono::{Datelike, TimeZone};
-        // openraft trait removed — tests use apply_committed_entries directly
 
         let dir = tempdir().expect("create temp dir");
-        let mut store = store_with_events(dir.path());
+        // setup_org_and_vault allocates from a fresh sequence counter, so the
+        // first organization lands at id 1 — match the store's owning org id.
+        let mut store = store_with_events_for_org(dir.path(), OrganizationId::new(1));
 
         // Set up org and vault
         {
@@ -3055,18 +3050,12 @@ mod tests {
     }
 
     #[tokio::test]
-    // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
-    // carries an `organization:` field — a single `RaftLogStore`
-    // owns writes for exactly one `OrganizationId`. Test rewrite
-    // (one store per org) pending; three_tier_consensus integration
-    // tests cover the new model end-to-end.
-    #[ignore]
     async fn test_two_state_machines_produce_identical_events() {
-        // Apply the same request on two independent state machines.
-        // With deterministic timestamps, resulting EventEntry records must be
-        // byte-identical.
+        // Apply the same request on two independent state machines representing
+        // two replicas of the same per-organization Raft group. Both stores
+        // are scoped to the same owning org id; with deterministic timestamps,
+        // the resulting EventEntry records must be byte-identical.
         use chrono::TimeZone;
-        // openraft trait removed — tests use apply_committed_entries directly
 
         let far_future = Utc.with_ymd_and_hms(2099, 3, 14, 15, 9, 26).unwrap();
 
@@ -3091,9 +3080,10 @@ mod tests {
             vault_slug: inferadb_ledger_types::VaultSlug::new(0),
         };
 
-        // Helper to create a store, set up state, and apply
+        // Helper to create a store scoped to the test's owning org id, set up
+        // state, and apply.
         let apply_on_fresh_store = |dir: &std::path::Path| {
-            let store = store_with_events(dir);
+            let store = store_with_events_for_org(dir, OrganizationId::new(1));
             {
                 let mut state = (*store.applied_state.load_full()).clone();
                 setup_org_and_vault(&mut state);
@@ -3787,55 +3777,72 @@ mod tests {
     }
 
     #[tokio::test]
-    // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
-    // carries an `organization:` field — a single `RaftLogStore`
-    // owns writes for exactly one `OrganizationId`. Test rewrite
-    // (one store per org) pending; three_tier_consensus integration
-    // tests cover the new model end-to-end.
-    #[ignore]
     async fn test_organization_storage_bytes_independent_organizations() {
-        let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("raft_log.db");
+        // Under one-store-per-org each organization's data plane is its own
+        // RaftLogStore. The invariant under test: a Write applied through
+        // org A's store charges A's storage_bytes only — never B's. With one
+        // store per org this is structural rather than runtime, but verifying
+        // the apply-time accounting per store is still load-bearing for the
+        // metrics that drive per-org quota enforcement.
+        let dir_a = tempdir().expect("create temp dir a");
+        let dir_b = tempdir().expect("create temp dir b");
 
-        let store = RaftLogStore::<FileBackend>::open(&path)
-            .expect("open store")
-            .with_organization_id(OrganizationId::new(1));
-        let mut state = (*store.applied_state.load_full()).clone();
+        let org_a = OrganizationId::new(1);
+        let org_b = OrganizationId::new(2);
 
-        // Create two organizations, each with a vault
-        create_active_organization(
-            &store,
-            &mut state,
-            inferadb_ledger_types::OrganizationSlug::new(0),
+        let store_a = RaftLogStore::<FileBackend>::open(dir_a.path().join("raft_log.db"))
+            .expect("open store a")
+            .with_organization_id(org_a);
+        let store_b = RaftLogStore::<FileBackend>::open(dir_b.path().join("raft_log.db"))
+            .expect("open store b")
+            .with_organization_id(org_b);
+
+        let mut state_a = (*store_a.applied_state.load_full()).clone();
+        let mut state_b = (*store_b.applied_state.load_full()).clone();
+
+        // Bring each store's local AppliedState up to "Active org with one
+        // vault". Each per-org Raft group only sees its own org metadata.
+        let org_a_actual = create_active_organization(
+            &store_a,
+            &mut state_a,
+            inferadb_ledger_types::OrganizationSlug::new(100),
             Region::US_EAST_VA,
         );
-        create_active_organization(
-            &store,
-            &mut state,
-            inferadb_ledger_types::OrganizationSlug::new(0),
+        // store_b's first CreateOrganization still allocates id 1 from its
+        // local sequence counter; bump the counter so the second store
+        // produces id 2 to match its `with_organization_id`.
+        state_b.sequences.organization = OrganizationId::new(2);
+        store_b.applied_state.store(Arc::new(state_b.clone()));
+        let org_b_actual = create_active_organization(
+            &store_b,
+            &mut state_b,
+            inferadb_ledger_types::OrganizationSlug::new(200),
             Region::US_EAST_VA,
         );
-        store.apply_org(
+        assert_eq!(org_a_actual, org_a);
+        assert_eq!(org_b_actual, org_b);
+
+        store_a.apply_org(
             &OrganizationRequest::CreateVault {
-                organization: OrganizationId::new(1),
+                organization: org_a,
                 slug: VaultSlug::new(1),
                 name: Some("v1".to_string()),
                 retention_policy: None,
             },
-            &mut state,
+            &mut state_a,
         );
-        store.apply_org(
+        store_b.apply_org(
             &OrganizationRequest::CreateVault {
-                organization: OrganizationId::new(2),
-                slug: VaultSlug::new(1),
+                organization: org_b,
+                slug: VaultSlug::new(2),
                 name: Some("v2".to_string()),
                 retention_policy: None,
             },
-            &mut state,
+            &mut state_b,
         );
 
-        // Write to organization 1: "aa" + "bb" = 4 bytes
-        let tx1 = inferadb_ledger_types::Transaction {
+        // Write to organization A: "aa" + "bb" = 4 bytes
+        let tx_a = inferadb_ledger_types::Transaction {
             id: [1u8; 16],
             client_id: ClientId::new("c"),
             sequence: 1,
@@ -3847,20 +3854,20 @@ mod tests {
             }],
             timestamp: chrono::Utc::now(),
         };
-        store.apply_org(
+        store_a.apply_org(
             &OrganizationRequest::Write {
                 vault: VaultId::new(1),
-                transactions: vec![tx1],
+                transactions: vec![tx_a],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
                 organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
-            &mut state,
+            &mut state_a,
         );
 
-        // Write to organization 2: "cccccc" + "dddddddd" = 14 bytes
-        let tx2 = inferadb_ledger_types::Transaction {
+        // Write to organization B: "cccccc" + "dddddddd" = 14 bytes
+        let tx_b = inferadb_ledger_types::Transaction {
             id: [2u8; 16],
             client_id: ClientId::new("c"),
             sequence: 2,
@@ -3872,20 +3879,30 @@ mod tests {
             }],
             timestamp: chrono::Utc::now(),
         };
-        store.apply_org(
+        store_b.apply_org(
             &OrganizationRequest::Write {
                 vault: VaultId::new(2),
-                transactions: vec![tx2],
+                transactions: vec![tx_b],
                 idempotency_key: [0u8; 16],
                 request_hash: 0,
                 organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
-            &mut state,
+            &mut state_b,
         );
 
-        assert_eq!(state.organization_storage_bytes[&OrganizationId::new(1)], 4);
-        assert_eq!(state.organization_storage_bytes[&OrganizationId::new(2)], 14);
+        // Each store's accounting touches its own org only.
+        assert_eq!(state_a.organization_storage_bytes[&org_a], 4);
+        assert_eq!(state_b.organization_storage_bytes[&org_b], 14);
+        // Cross-contamination check: neither state mentions the other org.
+        assert!(
+            !state_a.organization_storage_bytes.contains_key(&org_b),
+            "store_a must not record bytes for org_b"
+        );
+        assert!(
+            !state_b.organization_storage_bytes.contains_key(&org_a),
+            "store_b must not record bytes for org_a"
+        );
     }
 
     #[tokio::test]
@@ -4131,6 +4148,23 @@ mod tests {
         store.with_event_writer(writer)
     }
 
+    /// Helper: creates a RaftLogStore scoped to a specific `OrganizationId`,
+    /// with an EventWriter attached.
+    ///
+    /// Use this when a test needs cross-organization isolation and therefore
+    /// constructs more than one store: under the one-store-per-org model
+    /// each store carries exactly one owning `OrganizationId`, and any
+    /// `OrganizationRequest::Write` applied through it is implicitly for
+    /// that org (read from `RaftLogStore::organization_id()`). Tests that
+    /// don't issue `OrganizationRequest::Write` may use the org-agnostic
+    /// [`store_with_events`] instead.
+    fn store_with_events_for_org(
+        dir: &std::path::Path,
+        organization_id: OrganizationId,
+    ) -> RaftLogStore<FileBackend> {
+        store_with_events(dir).with_organization_id(organization_id)
+    }
+
     /// Helper: fixed timestamp for deterministic event tests.
     fn fixed_timestamp() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2025-01-15T12:00:00Z").expect("parse timestamp").to_utc()
@@ -4204,15 +4238,10 @@ mod tests {
     }
 
     #[test]
-    // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
-    // carries an `organization:` field — a single `RaftLogStore`
-    // owns writes for exactly one `OrganizationId`. Test rewrite
-    // (one store per org) pending; three_tier_consensus integration
-    // tests cover the new model end-to-end.
-    #[ignore]
     fn event_write_committed_has_correct_block_height() {
         let dir = tempdir().expect("create temp dir");
-        let store = store_with_events(dir.path());
+        // setup_org_and_vault allocates org id 1; scope the store accordingly.
+        let store = store_with_events_for_org(dir.path(), OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
         let (org_id, vault_id) = setup_org_and_vault(&mut state);
 
@@ -4397,20 +4426,17 @@ mod tests {
     }
 
     #[test]
-    // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
-    // carries an `organization:` field — a single `RaftLogStore`
-    // owns writes for exactly one `OrganizationId`. Test rewrite
-    // (one store per org) pending; three_tier_consensus integration
-    // tests cover the new model end-to-end.
-    #[ignore]
     fn event_writer_integration_persists_to_events_db() {
         let dir = tempdir().expect("create temp dir");
         let events_db = EventsDatabase::open(dir.path()).expect("open events db");
         let events_db_arc = Arc::new(events_db);
         let config = EventConfig::default();
         let writer = crate::event_writer::EventWriter::new(Arc::clone(&events_db_arc), config);
+        // setup_org_and_vault allocates org id 1 from a fresh sequence; scope
+        // the store to that owning organization so Write applies for org 1.
         let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
             .expect("open store")
+            .with_organization_id(OrganizationId::new(1))
             .with_event_writer(writer);
 
         let mut state = (*store.applied_state.load_full()).clone();
@@ -5381,15 +5407,9 @@ mod tests {
     }
 
     #[test]
-    // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
-    // carries an `organization:` field — a single `RaftLogStore`
-    // owns writes for exactly one `OrganizationId`. Test rewrite
-    // (one store per org) pending; three_tier_consensus integration
-    // tests cover the new model end-to-end.
-    #[ignore]
     fn event_batch_write_committed_emitted() {
         let dir = tempdir().expect("create temp dir");
-        let store = store_with_events(dir.path());
+        let store = store_with_events_for_org(dir.path(), OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
         let (org_id, vault_id) = setup_org_and_vault(&mut state);
 
@@ -5502,26 +5522,65 @@ mod tests {
     }
 
     #[test]
-    // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
-    // carries an `organization:` field — a single `RaftLogStore`
-    // owns writes for exactly one `OrganizationId`. Test rewrite
-    // (one store per org) pending; three_tier_consensus integration
-    // tests cover the new model end-to-end.
-    #[ignore]
     fn event_org_isolation_across_organizations() {
-        let dir = tempdir().expect("create temp dir");
-        let store = store_with_events(dir.path());
-        let mut state = (*store.applied_state.load_full()).clone();
+        // Under one-store-per-org, isolation is structural: each
+        // organization's writes flow through a distinct RaftLogStore. The
+        // invariant under test is that events emitted by store A only
+        // mention org A's id, and events emitted by store B only mention
+        // org B's id — there is no path for an apply on store A to attribute
+        // an event to org B.
+        let dir_a = tempdir().expect("create temp dir a");
+        let dir_b = tempdir().expect("create temp dir b");
 
-        // Create two organizations with vaults
-        let (org_a, vault_a) = setup_org_and_vault(&mut state);
+        let org_a = OrganizationId::new(1);
+        let org_b = OrganizationId::new(2);
+        let vault_a = VaultId::new(1);
+        let vault_b = VaultId::new(2);
 
-        // Create second org manually
-        let org_b = state.sequences.next_organization();
-        let vault_b = state.sequences.next_vault();
+        let store_a = store_with_events_for_org(dir_a.path(), org_a);
+        let store_b = store_with_events_for_org(dir_b.path(), org_b);
+
+        // Build each replica's local AppliedState. Each store sees only
+        // its own org metadata — that is the post-B.1 model.
+        let mut state_a = (*store_a.applied_state.load_full()).clone();
+        let org_a_slug = inferadb_ledger_types::OrganizationSlug::new(1000);
+        let vault_a_slug = VaultSlug::new(2000);
+        state_a.organizations.insert(
+            org_a,
+            OrganizationMeta {
+                organization: org_a,
+                slug: org_a_slug,
+                region: Region::GLOBAL,
+                status: OrganizationStatus::Active,
+                tier: OrganizationTier::Free,
+                pending_region: None,
+                storage_bytes: 0,
+            },
+        );
+        state_a.slug_index.insert(org_a_slug, org_a);
+        state_a.id_to_slug.insert(org_a, org_a_slug);
+        let key_a = (org_a, vault_a);
+        state_a.vault_heights.insert(key_a, 0);
+        state_a.vaults.insert(
+            key_a,
+            VaultMeta {
+                organization: org_a,
+                vault: vault_a,
+                slug: vault_a_slug,
+                name: Some("vault-a".to_string()),
+                deleted: false,
+                last_write_timestamp: 0,
+                retention_policy: BlockRetentionPolicy::default(),
+            },
+        );
+        state_a.vault_slug_index.insert(vault_a_slug, (org_a, vault_a));
+        state_a.vault_id_to_slug.insert((org_a, vault_a), vault_a_slug);
+        state_a.vault_health.insert(key_a, VaultHealthStatus::Healthy);
+
+        let mut state_b = (*store_b.applied_state.load_full()).clone();
         let org_b_slug = inferadb_ledger_types::OrganizationSlug::new(3000);
         let vault_b_slug = VaultSlug::new(4000);
-        state.organizations.insert(
+        state_b.organizations.insert(
             org_b,
             OrganizationMeta {
                 organization: org_b,
@@ -5533,11 +5592,11 @@ mod tests {
                 storage_bytes: 0,
             },
         );
-        state.slug_index.insert(org_b_slug, org_b);
-        state.id_to_slug.insert(org_b, org_b_slug);
+        state_b.slug_index.insert(org_b_slug, org_b);
+        state_b.id_to_slug.insert(org_b, org_b_slug);
         let key_b = (org_b, vault_b);
-        state.vault_heights.insert(key_b, 0);
-        state.vaults.insert(
+        state_b.vault_heights.insert(key_b, 0);
+        state_b.vaults.insert(
             key_b,
             VaultMeta {
                 organization: org_b,
@@ -5549,21 +5608,22 @@ mod tests {
                 retention_policy: BlockRetentionPolicy::default(),
             },
         );
-        state.vault_slug_index.insert(vault_b_slug, (org_b, vault_b));
-        state.vault_id_to_slug.insert((org_b, vault_b), vault_b_slug);
-        state.vault_health.insert(key_b, VaultHealthStatus::Healthy);
+        state_b.vault_slug_index.insert(vault_b_slug, (org_b, vault_b));
+        state_b.vault_id_to_slug.insert((org_b, vault_b), vault_b_slug);
+        state_b.vault_health.insert(key_b, VaultHealthStatus::Healthy);
 
         let ts = fixed_timestamp();
-        let mut all_events: Vec<EventEntry> = Vec::new();
-        let mut op_index = 0u32;
+        let mut events_a: Vec<EventEntry> = Vec::new();
+        let mut events_b: Vec<EventEntry> = Vec::new();
+        let mut op_index_a = 0u32;
+        let mut op_index_b = 0u32;
 
-        // Write to org A
-        store.apply_organization_request_with_events(
+        store_a.apply_organization_request_with_events(
             &simple_write_request(org_a, vault_a),
-            &mut state,
+            &mut state_a,
             ts,
-            &mut op_index,
-            &mut all_events,
+            &mut op_index_a,
+            &mut events_a,
             90,
             &mut PendingExternalWrites::default(),
             None,
@@ -5572,8 +5632,7 @@ mod tests {
             false,
         );
 
-        // Write to org B
-        store.apply_organization_request_with_events(
+        store_b.apply_organization_request_with_events(
             &OrganizationRequest::Write {
                 vault: vault_b,
                 transactions: vec![Transaction {
@@ -5594,10 +5653,10 @@ mod tests {
                 organization_slug: inferadb_ledger_types::OrganizationSlug::new(0),
                 vault_slug: inferadb_ledger_types::VaultSlug::new(0),
             },
-            &mut state,
+            &mut state_b,
             ts,
-            &mut op_index,
-            &mut all_events,
+            &mut op_index_b,
+            &mut events_b,
             90,
             &mut PendingExternalWrites::default(),
             None,
@@ -5606,21 +5665,22 @@ mod tests {
             false,
         );
 
-        // Verify org isolation: filter events by org_id
-        let org_a_events: Vec<_> =
-            all_events.iter().filter(|e| e.organization_id == org_a).collect();
-        let org_b_events: Vec<_> =
-            all_events.iter().filter(|e| e.organization_id == org_b).collect();
+        assert!(!events_a.is_empty(), "store_a should emit at least one event");
+        assert!(!events_b.is_empty(), "store_b should emit at least one event");
 
-        assert!(!org_a_events.is_empty(), "org A should have events");
-        assert!(!org_b_events.is_empty(), "org B should have events");
-
-        // No cross-contamination
-        for event in &org_a_events {
-            assert_eq!(event.organization_id, org_a, "org A event should belong to org A");
+        // No cross-contamination: each store's events carry only its own
+        // organization_id.
+        for event in &events_a {
+            assert_eq!(
+                event.organization_id, org_a,
+                "store_a must only emit events for org_a"
+            );
         }
-        for event in &org_b_events {
-            assert_eq!(event.organization_id, org_b, "org B event should belong to org B");
+        for event in &events_b {
+            assert_eq!(
+                event.organization_id, org_b,
+                "store_b must only emit events for org_b"
+            );
         }
     }
 
@@ -6609,6 +6669,21 @@ mod tests {
     fn store_with_archive(
         dir: &std::path::Path,
     ) -> (RaftLogStore<FileBackend>, Arc<inferadb_ledger_state::BlockArchive<FileBackend>>) {
+        store_with_archive_for_org(dir, OrganizationId::new(0))
+    }
+
+    /// Creates a store with a block archive wired up for verification tests,
+    /// scoped to a specific owning `OrganizationId`.
+    ///
+    /// Tests that issue `OrganizationRequest::Write` (which reads the owning
+    /// org from the store rather than the payload) should pass an
+    /// `OrganizationId` that matches the org id their `AppliedState` setup
+    /// allocates — typically `OrganizationId::new(1)` paired with
+    /// [`setup_org_and_vault`].
+    fn store_with_archive_for_org(
+        dir: &std::path::Path,
+        organization_id: OrganizationId,
+    ) -> (RaftLogStore<FileBackend>, Arc<inferadb_ledger_state::BlockArchive<FileBackend>>) {
         // Archive needs its own database (separate from raft log)
         let archive_db = Arc::new(
             inferadb_ledger_store::Database::create(dir.join("archive.db"))
@@ -6618,6 +6693,7 @@ mod tests {
 
         let store = RaftLogStore::<FileBackend>::open(dir.join("raft_log.db"))
             .expect("open store")
+            .with_organization_id(organization_id)
             .with_block_archive(Arc::clone(&archive));
 
         (store, archive)
@@ -6631,26 +6707,33 @@ mod tests {
         Arc<inferadb_ledger_state::BlockArchive<FileBackend>>,
         tokio::sync::mpsc::UnboundedReceiver<crate::types::StateRootDivergence>,
     ) {
-        let (store, archive) = store_with_archive(dir);
+        store_with_archive_and_divergence_for_org(dir, OrganizationId::new(0))
+    }
+
+    /// Org-scoped variant of [`store_with_archive_and_divergence`]. Use this
+    /// when a verification test issues `OrganizationRequest::Write` and the
+    /// test's `AppliedState` setup allocates a specific owning org id.
+    fn store_with_archive_and_divergence_for_org(
+        dir: &std::path::Path,
+        organization_id: OrganizationId,
+    ) -> (
+        RaftLogStore<FileBackend>,
+        Arc<inferadb_ledger_state::BlockArchive<FileBackend>>,
+        tokio::sync::mpsc::UnboundedReceiver<crate::types::StateRootDivergence>,
+    ) {
+        let (store, archive) = store_with_archive_for_org(dir, organization_id);
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let store = store.with_divergence_sender(sender);
         (store, archive, receiver)
     }
 
     #[tokio::test]
-    // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
-    // carries an `organization:` field — a single `RaftLogStore`
-    // owns writes for exactly one `OrganizationId`. Test rewrite
-    // (one store per org) pending; three_tier_consensus integration
-    // tests cover the new model end-to-end.
-    #[ignore]
     async fn test_apply_emits_commitments_to_buffer() {
         // When apply_to_state_machine processes a Write that creates vault entries,
         // it should buffer StateRootCommitments.
-        // openraft trait removed — tests use apply_committed_entries directly
 
         let dir = tempdir().expect("create temp dir");
-        let (mut store, _archive) = store_with_archive(dir.path());
+        let (mut store, _archive) = store_with_archive_for_org(dir.path(), OrganizationId::new(1));
 
         // Set up org and vault
         {
@@ -6852,20 +6935,13 @@ mod tests {
     }
 
     #[tokio::test]
-    // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
-    // carries an `organization:` field — a single `RaftLogStore`
-    // owns writes for exactly one `OrganizationId`. Test rewrite
-    // (one store per org) pending; three_tier_consensus integration
-    // tests cover the new model end-to-end.
-    #[ignore]
     async fn test_verify_commitment_mismatching_state_root_sends_divergence() {
         // Piggyback a commitment with a deliberately wrong state_root.
         // The verification should detect the mismatch and send a divergence event.
-        // openraft trait removed — tests use apply_committed_entries directly
 
         let dir = tempdir().expect("create temp dir");
         let (mut store, _archive, mut divergence_rx) =
-            store_with_archive_and_divergence(dir.path());
+            store_with_archive_and_divergence_for_org(dir.path(), OrganizationId::new(1));
 
         {
             let mut state = (*store.applied_state.load_full()).clone();
@@ -10992,16 +11068,14 @@ mod tests {
     // ========================================================================
 
     #[tokio::test]
-    // Obsolete under B.1.13: `OrganizationRequest::Write` no longer
-    // carries an `organization:` field — a single `RaftLogStore`
-    // owns writes for exactly one `OrganizationId`. Test rewrite
-    // (one store per org) pending; three_tier_consensus integration
-    // tests cover the new model end-to-end.
-    #[ignore]
     async fn test_write_to_deleted_org_rejected() {
         let dir = tempdir().expect("create temp dir");
-        let store =
-            RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db")).expect("open store");
+        // The first organization created from a fresh sequence counter lands
+        // at id 1; scope the store to that owning org so Write applies for
+        // the org we then delete.
+        let store = RaftLogStore::<FileBackend>::open(dir.path().join("raft_log.db"))
+            .expect("open store")
+            .with_organization_id(OrganizationId::new(1));
         let mut state = (*store.applied_state.load_full()).clone();
 
         let org_id = create_active_organization(
@@ -11010,6 +11084,7 @@ mod tests {
             inferadb_ledger_types::OrganizationSlug::new(100),
             Region::US_EAST_VA,
         );
+        assert_eq!(org_id, store.organization_id(), "store and AppliedState must agree on org id");
 
         // Delete the org
         store.apply_system(&SystemRequest::DeleteOrganization { organization: org_id }, &mut state);

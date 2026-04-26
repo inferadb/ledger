@@ -297,6 +297,52 @@ impl CrashableNode {
             "data region failed to elect self as leader within timeout"
         );
 
+        // === Restart parity: rehydrate per-organization Raft groups ===
+        //
+        // Mirrors `bootstrap.rs` lines 512-565 — production's restart
+        // sweep that re-opens persisted per-org groups. The production
+        // sweep relies on `peer_addresses` having been populated via
+        // `--join` seed discovery; the single-node test harness has no
+        // seeds, so `peer_addresses` is empty during the synchronous
+        // bootstrap window and `rehydrate_organization_group` skips with
+        // a warning. We replace it here with a single-voter rehydration
+        // (`(self_node, advertise_addr)`) that always succeeds — valid
+        // because `CrashableNode` is single-node by construction.
+        //
+        // Without this block, `bootstrap_org_and_vault` produces a per-org
+        // group on first start (driven by the `CreateOrganization` apply
+        // signal), but a subsequent crash + restart leaves the per-org
+        // group unregistered on the local `RaftManager`. Tests that
+        // resolve `route_organization` or `get_organization_group` post-
+        // restart then hit `RegionNotFound`.
+        for region in bootstrapped.manager.list_regions() {
+            if region == Region::GLOBAL {
+                continue;
+            }
+            let org_ids = bootstrapped
+                .manager
+                .storage_manager()
+                .discover_existing_organizations(region)
+                .expect("discover existing organizations");
+            for organization_id in org_ids {
+                let voters = vec![(handle.node_id(), config.advertise_addr())];
+                let _ = bootstrapped
+                    .manager
+                    .start_organization_group(
+                        region,
+                        organization_id,
+                        voters,
+                        true,
+                        Some(config.events.clone()),
+                        Some(inferadb_ledger_raft::batching::BatchWriterConfig::from(
+                            &config.batching,
+                        )),
+                    )
+                    .await
+                    .expect("rehydrate per-organization Raft group");
+            }
+        }
+
         // Spawn the server task drain helper — matches TestCluster.
         let bg = bootstrapped.server_handle;
         let server_handle = tokio::spawn(async move {
@@ -1208,14 +1254,6 @@ fn read_region_block(
 /// event_ids — is WAL-durable; `replay_crash_gap` re-runs the apply handler
 /// and re-writes the identical bytes via `EventStore::write`'s upsert
 /// semantics. Post-recovery the events must all be present with matching IDs.
-// Ignored: `scan_all_events` calls `get_organization_group(region, org)`
-// which returns `RegionNotFound` on the fresh crashable-node harness —
-// the per-org group isn't materialised on this single-node setup the
-// same way it is under `TestCluster`. Reproducible from the
-// pre-γ-migration HEAD, so unrelated to the vault-slug-index tuple
-// migration. Needs the per-org-group bootstrap wiring in the
-// CrashableNode path to match TestCluster before re-enabling.
-#[ignore]
 #[tokio::test]
 async fn test_crash_preserves_externally_ingested_events() {
     let temp = TestDir::new();
@@ -1310,14 +1348,6 @@ async fn test_crash_preserves_externally_ingested_events() {
 /// What the WAL *does* guarantee is that every vault entry committed
 /// pre-crash is re-materialized post-recovery and lands in *some* region
 /// block at a consistent `(vault_height -> region_height)` mapping.
-// Ignored post-B.1.13: writes now apply on the per-organization group (not
-// the data-region group), and the test's crash/replay path pre-dates per-org
-// group bootstrap on restart — after `CrashableNode::restart`, the per-org
-// WAL re-opens but the apply worker for that group is not yet wired to
-// re-emit historical vault heights through the same index the test asserts
-// against. Re-enabling requires restart-path per-org bootstrap work that is
-// out of scope for B.1.13.
-#[ignore]
 #[tokio::test]
 async fn test_blocks_db_idempotent_on_replay() {
     let temp = TestDir::new();
@@ -1391,10 +1421,16 @@ async fn test_blocks_db_idempotent_on_replay() {
     // (idempotency-by-height is the guard).
     let post_region_heights: std::collections::BTreeSet<u64> =
         post_vault_heights.values().copied().collect();
-    let region_group =
-        restarted.manager.get_region_group(Region::US_EAST_VA).expect("US_EAST_VA region running");
+    // Post-B.1.13: blocks live on the per-organization group, so the
+    // `VaultBlockIndex` we just collected resolves region_heights against
+    // that group's `blocks.db`. Decoding via the data-region group would
+    // probe the wrong archive and fail with "Block not found".
+    let org_group = restarted
+        .manager
+        .route_organization(org_id)
+        .expect("per-organization group registered post-restart");
     for rh in &post_region_heights {
-        region_group.block_archive().read_block(*rh).unwrap_or_else(|e| {
+        org_group.block_archive().read_block(*rh).unwrap_or_else(|e| {
             panic!("region_height {rh} referenced by VaultBlockIndex but not in blocks.db: {e}")
         });
     }
@@ -1482,9 +1518,6 @@ fn collect_region_heights(
 ///   event in both cases. The test asserts the action counts match; per-ID byte equality is
 ///   legitimately not guaranteed for apply-phase events under this load shape, and the WAL is the
 ///   source of truth regardless.
-// Ignored post-B.1.13: same reason as test_blocks_db_idempotent_on_replay —
-// per-organization group restart-path apply-re-emission is the gating work.
-#[ignore]
 #[tokio::test]
 async fn test_events_db_idempotent_on_replay() {
     use inferadb_ledger_types::events::{EventAction, EventEmission};
