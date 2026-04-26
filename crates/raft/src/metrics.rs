@@ -1822,6 +1822,8 @@ const BACKUP_LAST_HEIGHT: &str = "ledger_backup_last_height";
 const BACKUP_LAST_SIZE_BYTES: &str = "ledger_backup_last_size_bytes";
 const BACKUP_FAILURES_TOTAL: &str = "ledger_backup_failures_total";
 const BACKUP_PRE_ERASURE_COUNT: &str = "ledger_backup_pre_erasure_count";
+const RESTORE_TRASH_SWEPT_TOTAL: &str = "ledger_restore_trash_swept_total";
+const RESTORE_TRASH_SWEEP_FAILURES_TOTAL: &str = "ledger_restore_trash_sweep_failures_total";
 
 /// Records a successful backup: increments the created counter and updates the
 /// last-height and last-size gauges.
@@ -1847,6 +1849,22 @@ pub fn record_backup_failed() {
 pub fn set_backup_pre_erasure_count(region: &str, count: u64) {
     #[allow(clippy::cast_precision_loss)]
     gauge!(BACKUP_PRE_ERASURE_COUNT, fields::REGION => region.to_string()).set(count as f64);
+}
+
+/// Increments the counter for restore-trash entries swept by the periodic
+/// background job.
+///
+/// `count` is the number of timestamped trash directories removed in the most
+/// recent sweep cycle.
+pub fn record_restore_trash_swept(count: u64) {
+    counter!(RESTORE_TRASH_SWEPT_TOTAL).increment(count);
+}
+
+/// Increments the counter for restore-trash sweep failures.
+///
+/// One increment per failed sweep cycle.
+pub fn record_restore_trash_sweep_failed() {
+    counter!(RESTORE_TRASH_SWEEP_FAILURES_TOTAL).increment(1);
 }
 
 #[cfg(test)]

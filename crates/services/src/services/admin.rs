@@ -87,11 +87,23 @@ pub struct AdminService {
     #[builder(default)]
     hot_key_detector: Option<Arc<inferadb_ledger_raft::hot_key_detector::HotKeyDetector>>,
     /// Backup manager for backup and restore operations.
+    ///
+    /// Must be constructed via [`BackupManager::with_data_dir`] for the
+    /// archive-based RPC path; the legacy snapshot path is gone.
     #[builder(default)]
     backup_manager: Option<Arc<inferadb_ledger_raft::backup::BackupManager>>,
-    /// Snapshot manager for reading Raft snapshots during backup.
+    /// Region key manager — supplies the local node's RMK fingerprint for
+    /// stamping outgoing archives and validating incoming archives at
+    /// restore-stage time.
     #[builder(default)]
-    snapshot_manager: Option<Arc<inferadb_ledger_state::SnapshotManager>>,
+    key_manager: Option<Arc<dyn inferadb_ledger_store::crypto::RegionKeyManager>>,
+    /// Backup root directory — every archive lives at
+    /// `{backups_dir}/backup-{id}.tar.zst`. Mirrors the path the
+    /// [`backup_manager`] writes through; held here so [`restore_backup`]
+    /// can resolve a `backup_id` to an archive path without round-tripping
+    /// through the manager.
+    #[builder(default)]
+    backups_dir: Option<std::path::PathBuf>,
     /// Handler-phase event handle for recording denial events.
     #[builder(default)]
     event_handle:
@@ -170,15 +182,42 @@ impl AdminService {
         self
     }
 
-    /// Attaches the backup manager and snapshot manager for backup/restore operations.
+    /// Attaches the backup manager for the multi-DB archive
+    /// backup/restore RPCs.
+    ///
+    /// The legacy snapshot-based path is gone; the backup manager must
+    /// be constructed via
+    /// [`BackupManager::with_data_dir`](inferadb_ledger_raft::backup::BackupManager::with_data_dir)
+    /// so the archive path can enumerate per-org and per-vault DB
+    /// files. Pair this with [`Self::with_key_manager`] +
+    /// [`Self::with_backups_dir`] at server-bootstrap time.
     #[must_use]
     pub fn with_backup(
         mut self,
         backup_manager: Arc<inferadb_ledger_raft::backup::BackupManager>,
-        snapshot_manager: Arc<inferadb_ledger_state::SnapshotManager>,
     ) -> Self {
         self.backup_manager = Some(backup_manager);
-        self.snapshot_manager = Some(snapshot_manager);
+        self
+    }
+
+    /// Attaches the region key manager — required for the multi-DB
+    /// archive backup path so the manifest can stamp the local node's
+    /// RMK fingerprint on outgoing archives and pre-flight check
+    /// incoming archives at restore-stage time.
+    #[must_use]
+    pub fn with_key_manager(
+        mut self,
+        key_manager: Arc<dyn inferadb_ledger_store::crypto::RegionKeyManager>,
+    ) -> Self {
+        self.key_manager = Some(key_manager);
+        self
+    }
+
+    /// Attaches the backups root directory — used by [`restore_backup`] to
+    /// resolve a `backup_id` to an archive path on disk.
+    #[must_use]
+    pub fn with_backups_dir(mut self, backups_dir: std::path::PathBuf) -> Self {
+        self.backups_dir = Some(backups_dir);
         self
     }
 
@@ -2019,7 +2058,17 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         Ok(Response::new(GetConfigResponse { config_json }))
     }
 
-    /// Creates a point-in-time backup by snapshotting the current Raft state.
+    /// Creates a multi-DB archive backup of one organization.
+    ///
+    /// Captures the organization's full physical state — its per-org
+    /// `_meta.db` / `raft.db` / `blocks.db` / `events.db` plus every
+    /// per-vault `state.db` / `raft.db` / `blocks.db` / `events.db` — into
+    /// a single `tar.zst` archive at
+    /// `{backups_dir}/backup-{org_id}-{timestamp_micros}.tar.zst`.
+    ///
+    /// The manifest carries a SHA-256 fingerprint of the local node's
+    /// RMK so [`Self::restore_backup`] can pre-flight any incoming
+    /// archive against the local key material before unwrapping any DEK.
     async fn create_backup(
         &self,
         request: Request<CreateBackupRequest>,
@@ -2032,190 +2081,230 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             .as_ref()
             .ok_or_else(|| Status::failed_precondition("Backup is not configured on this node"))?;
 
+        let key_manager = self.key_manager.as_ref().ok_or_else(|| {
+            Status::failed_precondition(
+                "Key manager is not configured on this node — cannot stamp \
+                 RMK fingerprint on backup archive",
+            )
+        })?;
+
+        let raft_manager = self.raft_manager.as_ref().ok_or_else(|| {
+            Status::failed_precondition("Raft manager is not configured on this node")
+        })?;
+
+        // Resolve organization slug → internal id at the service boundary.
+        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let organization_id =
+            slug_resolver.extract_and_resolve(&req.organization).inspect_err(|status| {
+                ctx.set_error("OrganizationNotFound", status.message());
+            })?;
+        let organization_slug = slug_resolver.resolve_slug(organization_id)?;
+
         let tag = req.tag.unwrap_or_default();
 
-        let meta = if let Some(_base_backup_id) = req.base_backup_id {
-            // Slice 2c: page-level incremental backups operate on a single
-            // `Database`'s dirty bitmap. Under per-vault storage the user's
-            // data lives across many per-vault DBs, so a "give me one
-            // page-level diff" request no longer maps to a single source.
-            // The forward-looking design (per-vault tarball with per-vault
-            // dirty deltas) lands in a future phase. Until then the
-            // server explicitly rejects incremental backup requests so
-            // operators don't get a silently incomplete artefact.
-            ctx.set_error(
-                "Unimplemented",
-                "Incremental backups are unavailable under per-vault storage",
-            );
-            return Err(Status::unimplemented(
-                "Incremental backups are unavailable under per-vault storage. \
-                 Take a full backup (omit base_backup_id) instead.",
-            ));
-        } else {
-            // Full snapshot-based backup: build a state snapshot directly from
-            // the current StateLayer + AppliedState rather than going through
-            // openraft's snapshot mechanism (which produces an in-memory Raft
-            // snapshot, not a file-based state::Snapshot).
-            use std::collections::HashMap;
+        // The organization's home region governs which `{data_dir}/{region}/{org_id}/`
+        // tree the archive enumerates. The local node's region (the
+        // control-plane host) is *not* always the same — orgs are
+        // routed to their declared data region at creation time.
+        let region = raft_manager.get_organization_region(organization_id).ok_or_else(|| {
+            ctx.set_error("OrganizationNotPlaced", &organization_id.to_string());
+            Status::failed_precondition(format!(
+                "Organization {} has no region placement on file",
+                organization_id.value()
+            ))
+        })?;
 
-            use inferadb_ledger_state::{
-                NUM_BUCKETS, Snapshot, SnapshotChainParams, SnapshotStateData, VaultSnapshotMeta,
-            };
-            use inferadb_ledger_types::EMPTY_HASH;
+        // Compute the local RMK fingerprint up front — we stamp the
+        // manifest with this so a future restore on a node with a
+        // different RMK is rejected at the pre-flight check.
+        let rmk_fingerprint = key_manager.rmk_fingerprint(region).map_err(|e| {
+            ctx.set_error("RmkFingerprintError", &e.to_string());
+            error_classify::crypto_error(&e)
+        })?;
 
-            // `create_backup` takes a pre-built `Snapshot`; per its contract,
-            // the caller must sync every per-vault state DB first so the
-            // `StateLayer` reads below observe durable state.
-            //
-            // Slice 2c: enumerate vaults via `applied_state.all_vaults()` —
-            // the authoritative set of vaults that exist in the org —
-            // rather than `live_vault_dbs()` which only contains vaults
-            // that have been touched since startup. A backup must capture
-            // every vault that exists, including ones that have never had
-            // a write this boot. Touching `db_for(vault)` lazily opens the
-            // vault DB so the subsequent sync covers it.
-            let all_vaults = self.applied_state.all_vaults();
-            for (_org_id, vault_id) in all_vaults.keys() {
-                let db = self.state.db_for(*vault_id).map_err(|e| {
-                    ctx.set_error("BackupVaultOpenError", &e.to_string());
-                    error_classify::storage_error(&e)
-                })?;
-                db.sync_state().await.map_err(|e| {
-                    ctx.set_error("SyncStateError", &e.to_string());
-                    error_classify::storage_error(&e)
-                })?;
-            }
+        // Sync every per-vault state DB so the file bytes the archive
+        // captures are durable. The archive copies file bytes verbatim;
+        // un-synced pages remain in the page cache and would not appear
+        // in the tar stream.
+        let all_vaults = self.applied_state.all_vaults();
+        for (_org_id, vault_id) in all_vaults.keys() {
+            let db = self.state.db_for(*vault_id).map_err(|e| {
+                ctx.set_error("BackupVaultOpenError", &e.to_string());
+                error_classify::storage_error(&e)
+            })?;
+            db.sync_state().await.map_err(|e| {
+                ctx.set_error("SyncStateError", &e.to_string());
+                error_classify::storage_error(&e)
+            })?;
+        }
 
-            // B.1: per-org groups track their own region_height; GLOBAL's
-            // applied_state.region_height() stays at 0. Use the manager's
-            // aggregate max for backup versioning when available.
-            let region_height = self
-                .raft_manager
-                .as_ref()
-                .map_or_else(|| self.applied_state.region_height(), |m| m.max_region_height());
-
-            let mut vault_states = Vec::new();
-            let mut vault_entities = HashMap::new();
-
-            for (org_id, vault_id) in all_vaults.keys() {
-                let height = self.applied_state.vault_height(*org_id, *vault_id);
-
-                let bucket_roots =
-                    self.state.get_bucket_roots(*vault_id).unwrap_or([EMPTY_HASH; NUM_BUCKETS]);
-
-                let entities = self
-                    .state
-                    .list_entities(*vault_id, None, None, usize::MAX)
-                    .map_err(|e| error_classify::storage_error(&e))?;
-
-                let state_root = self
-                    .state
-                    .compute_state_root(*vault_id)
-                    .map_err(|e| error_classify::storage_error(&e))?;
-
-                vault_states.push(VaultSnapshotMeta::new(
-                    *vault_id,
-                    height,
-                    state_root,
-                    bucket_roots,
-                    entities.len() as u64,
-                ));
-
-                vault_entities.insert(*vault_id, entities);
-            }
-
-            let state_data = SnapshotStateData { vault_entities };
-            let snapshot = Snapshot::new(
-                inferadb_ledger_types::Region::GLOBAL,
-                region_height,
-                vault_states,
-                state_data,
-                SnapshotChainParams::default(),
+        // Resolve archive output path. The backup_id encodes
+        // `{org_id}-{timestamp_micros}` so list/restore can resolve a
+        // backup_id back to a path without a sidecar file.
+        let backups_dir = self.backups_dir.as_ref().ok_or_else(|| {
+            Status::failed_precondition(
+                "Backup destination directory is not configured on this node",
             )
-            .map_err(|e: inferadb_ledger_state::SnapshotError| {
-                ctx.set_error("SnapshotError", &e.to_string());
+        })?;
+        let timestamp_micros = chrono::Utc::now().timestamp_micros();
+        let backup_id = format!("{}-{}", organization_id.value(), timestamp_micros);
+        let archive_filename = format!("backup-{backup_id}.tar.zst");
+        let archive_path = backups_dir.join(&archive_filename);
+
+        // Build the archive. `create_archive` stamps the resolved
+        // organization slug and RMK fingerprint into the manifest
+        // before the tar stream is finalized, so the on-disk archive
+        // carries them durably (no post-hoc patching).
+        let manifest = backup_manager
+            .create_archive(
+                region,
+                organization_id,
+                organization_slug,
+                rmk_fingerprint,
+                &archive_path,
+            )
+            .await
+            .map_err(|e| {
+                ctx.set_error("BackupError", &e.to_string());
                 error_classify::storage_error(&e)
             })?;
 
-            backup_manager.create_backup(&snapshot, &tag).map_err(|e| {
-                ctx.set_error("BackupError", &e.to_string());
-                error_classify::storage_error(&e)
-            })?
-        };
+        let size_bytes = std::fs::metadata(&archive_path)
+            .map(|m| m.len())
+            .map_err(|e| error_classify::storage_error(&e))?;
 
-        ctx.set_block_height(meta.region_height);
         ctx.set_success();
+        inferadb_ledger_raft::metrics::record_backup_created(0, size_bytes);
 
-        inferadb_ledger_raft::metrics::record_backup_created(meta.region_height, meta.size_bytes);
-
-        // Emit BackupCreated handler-phase event
         ctx.record_event(
             EventAction::BackupCreated,
             EventOutcomeType::Success,
-            &[("backup_id", &meta.backup_id), ("tag", &tag)],
+            &[
+                ("backup_id", &backup_id),
+                ("tag", &tag),
+                ("organization_slug", &organization_slug.value().to_string()),
+            ],
         );
 
+        let manifest_proto = backup_manifest_to_proto(&manifest);
+
         Ok(Response::new(CreateBackupResponse {
-            backup_id: meta.backup_id,
-            region_height: meta.region_height,
-            backup_path: meta.backup_path,
-            size_bytes: meta.size_bytes,
-            checksum: Some(Hash { value: meta.checksum.to_vec() }),
+            backup_id,
+            backup_path: archive_path.display().to_string(),
+            size_bytes,
+            manifest: Some(manifest_proto),
         }))
     }
 
-    /// Lists available backups, optionally filtered by organization slug.
+    /// Lists available archive backups in the local backups directory.
+    ///
+    /// Iterates `{backups_dir}/backup-*.tar.zst`, opens each manifest
+    /// without extracting the rest of the archive, and returns a
+    /// summary entry per archive. Corrupt or unreadable archives are
+    /// skipped with a `WARN` log entry rather than failing the whole
+    /// list.
     async fn list_backups(
         &self,
         request: Request<ListBackupsRequest>,
     ) -> Result<Response<ListBackupsResponse>, Status> {
         let req = request.into_inner();
 
-        let backup_manager = self
-            .backup_manager
-            .as_ref()
-            .ok_or_else(|| Status::failed_precondition("Backup is not configured on this node"))?;
+        let backups_dir = self.backups_dir.as_ref().ok_or_else(|| {
+            Status::failed_precondition(
+                "Backup destination directory is not configured on this node",
+            )
+        })?;
 
-        let backups = backup_manager
-            .list_backups(req.limit as usize)
-            .map_err(|e| error_classify::storage_error(&e))?;
+        let mut entries: Vec<BackupInfo> = Vec::new();
 
-        let backup_infos: Vec<BackupInfo> = backups
-            .into_iter()
-            .map(|meta| {
-                let created_at = prost_types::Timestamp {
-                    seconds: meta.created_at.timestamp(),
-                    nanos: meta.created_at.timestamp_subsec_nanos() as i32,
+        if backups_dir.exists() {
+            for dir_entry in
+                std::fs::read_dir(backups_dir).map_err(|e| error_classify::storage_error(&e))?
+            {
+                let dir_entry = dir_entry.map_err(|e| error_classify::storage_error(&e))?;
+                let filename = dir_entry.file_name();
+                let name = filename.to_string_lossy();
+
+                let Some(rest) = name.strip_prefix("backup-") else {
+                    continue;
+                };
+                let Some(backup_id) = rest.strip_suffix(".tar.zst") else {
+                    continue;
                 };
 
-                let backup_type = match meta.backup_type {
-                    inferadb_ledger_raft::backup::BackupType::Full => 1,
-                    inferadb_ledger_raft::backup::BackupType::Incremental => 2,
+                let path = dir_entry.path();
+                let Ok(metadata) = std::fs::metadata(&path) else {
+                    continue;
+                };
+                let size_bytes = metadata.len();
+                let created_at =
+                    metadata.created().ok().or_else(|| metadata.modified().ok()).and_then(|st| {
+                        st.duration_since(std::time::UNIX_EPOCH).ok().map(|d| {
+                            prost_types::Timestamp {
+                                seconds: d.as_secs() as i64,
+                                nanos: i32::try_from(d.subsec_nanos()).unwrap_or(0),
+                            }
+                        })
+                    });
+
+                let manifest_proto = match std::fs::File::open(&path) {
+                    Ok(file) => match inferadb_ledger_raft::backup::archive::read_manifest(file) {
+                        Ok(manifest) => Some(backup_manifest_to_proto(&manifest)),
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %path.display(),
+                                error = %e,
+                                "Skipping backup with unreadable manifest"
+                            );
+                            None
+                        },
+                    },
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "Skipping backup whose archive cannot be opened"
+                        );
+                        None
+                    },
                 };
 
-                BackupInfo {
-                    backup_id: meta.backup_id,
-                    region_height: meta.region_height,
-                    backup_path: meta.backup_path,
-                    size_bytes: meta.size_bytes,
-                    created_at: Some(created_at),
-                    checksum: Some(Hash { value: meta.checksum.to_vec() }),
-                    chain_commitment_hash: Some(Hash {
-                        value: meta.chain_commitment_hash.to_vec(),
-                    }),
-                    schema_version: meta.schema_version,
-                    tag: meta.tag,
-                    backup_type,
-                    base_backup_id: meta.base_backup_id,
-                    page_count: meta.page_count,
-                }
-            })
-            .collect();
+                let tag = manifest_proto.as_ref().map(|_| String::new()).unwrap_or_default();
 
-        Ok(Response::new(ListBackupsResponse { backups: backup_infos }))
+                entries.push(BackupInfo {
+                    backup_id: backup_id.to_string(),
+                    backup_path: path.display().to_string(),
+                    size_bytes,
+                    created_at,
+                    tag,
+                    manifest: manifest_proto,
+                });
+            }
+        }
+
+        // Sort newest first by `created_at` (falling back to backup_id
+        // suffix for archives that lost their fs metadata).
+        entries.sort_by(|a, b| match (a.created_at.as_ref(), b.created_at.as_ref()) {
+            (Some(at), Some(bt)) => bt.seconds.cmp(&at.seconds).then(bt.nanos.cmp(&at.nanos)),
+            _ => b.backup_id.cmp(&a.backup_id),
+        });
+
+        if req.limit > 0 && entries.len() > req.limit as usize {
+            entries.truncate(req.limit as usize);
+        }
+
+        Ok(Response::new(ListBackupsResponse { backups: entries }))
     }
 
-    /// Restores state from a backup, requiring explicit confirmation.
+    /// Stages a multi-DB archive for offline restore.
+    ///
+    /// Resolves `backup_id` to `{backups_dir}/backup-{id}.tar.zst`,
+    /// pre-flights the archive against the local node's RMK
+    /// fingerprint, then unpacks it under
+    /// `{data_dir}/.restore-staging/`. The archive is *not* swapped onto
+    /// the live data directory by this RPC — operators run
+    /// `inferadb-ledger restore apply` after stopping the node to swap
+    /// the staged tree atomically.
     async fn restore_backup(
         &self,
         request: Request<RestoreBackupRequest>,
@@ -2226,91 +2315,88 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let mut ctx = self.make_request_context_unified("restore_backup", &request);
         let req = request.into_inner();
 
-        // Safety gate: require explicit confirmation
-        if !req.confirm {
-            return Err(Status::failed_precondition(
-                "Restore requires confirm=true. This operation will replace current region state with the backup.",
-            ));
-        }
-
         let backup_manager = self
             .backup_manager
             .as_ref()
             .ok_or_else(|| Status::failed_precondition("Backup is not configured on this node"))?;
 
-        // Verify the backup exists and is valid
-        let meta = backup_manager.get_metadata(&req.backup_id).map_err(|e| {
-            ctx.set_error("BackupNotFound", &e.to_string());
-            Status::not_found(format!("Backup not found: {e}"))
+        let key_manager = self.key_manager.as_ref().ok_or_else(|| {
+            Status::failed_precondition(
+                "Key manager is not configured on this node — cannot validate \
+                 backup archive RMK fingerprint",
+            )
         })?;
 
-        let (restored_height, message) = if meta.page_count.is_some() {
-            // Slice 2c: page-level backups were authored against a single
-            // monolithic state DB. Per-vault storage no longer maps onto
-            // that shape — restoring page bytes into one DB would only
-            // recover the system-vault subset of the cluster's data.
-            // Reject explicitly so operators don't end up with a
-            // partially-restored cluster.
-            ctx.set_error(
-                "Unimplemented",
-                "Page-level backup restore is unavailable under per-vault storage",
-            );
-            return Err(Status::unimplemented(
-                "Page-level backup restore is unavailable under per-vault storage. \
-                 Restore from a snapshot-based backup instead.",
-            ));
-        } else {
-            // Snapshot-based backup (existing behavior)
-            let snapshot = backup_manager.load_backup(&req.backup_id).map_err(|e| {
-                ctx.set_error("BackupLoadError", &e.to_string());
+        let backups_dir = self.backups_dir.as_ref().ok_or_else(|| {
+            Status::failed_precondition(
+                "Backup destination directory is not configured on this node",
+            )
+        })?;
+
+        // Resolve `backup_id` → archive path. The id is operator-supplied;
+        // validate it has no path separators or `..` segments before
+        // joining onto the backups directory.
+        if req.backup_id.is_empty()
+            || req.backup_id.contains('/')
+            || req.backup_id.contains('\\')
+            || req.backup_id.split('-').any(|seg| seg == "..")
+        {
+            ctx.set_error("InvalidBackupId", &req.backup_id);
+            return Err(Status::invalid_argument(format!("Invalid backup_id: {}", req.backup_id)));
+        }
+
+        let archive_path = backups_dir.join(format!("backup-{}.tar.zst", req.backup_id));
+        if !archive_path.exists() {
+            ctx.set_error("BackupNotFound", &archive_path.display().to_string());
+            return Err(Status::not_found(format!(
+                "Backup archive not found: {}",
+                archive_path.display()
+            )));
+        }
+
+        // Compute the local RMK fingerprint up front so the manager can
+        // pre-flight the manifest before staging any bytes. Restore
+        // requires the local node to hold a key for the manifest's
+        // region; we read the manifest cheaply first to find the right
+        // region, then ask the key manager for that region's
+        // fingerprint.
+        let preflight_file = std::fs::File::open(&archive_path).map_err(|e| {
+            ctx.set_error("ArchiveOpenError", &e.to_string());
+            error_classify::storage_error(&e)
+        })?;
+        let preflight_manifest =
+            inferadb_ledger_raft::backup::archive::read_manifest(preflight_file).map_err(|e| {
+                ctx.set_error("ManifestReadError", &e.to_string());
+                error_classify::storage_error(&e)
+            })?;
+        let region = preflight_manifest.region;
+        let local_fingerprint = key_manager.rmk_fingerprint(region).map_err(|e| {
+            ctx.set_error("RmkFingerprintError", &e.to_string());
+            error_classify::crypto_error(&e)
+        })?;
+
+        let staging_result = backup_manager
+            .stage_restore(&archive_path, Some(&local_fingerprint))
+            .await
+            .map_err(|e| {
+                ctx.set_error("StageRestoreError", &e.to_string());
                 error_classify::storage_error(&e)
             })?;
 
-            // Verify schema version compatibility
-            let current_schema_version = 2_u32; // SNAPSHOT_VERSION from state crate
-            if snapshot.header.version != current_schema_version {
-                ctx.set_error(
-                    "SchemaVersionMismatch",
-                    &format!(
-                        "backup version {} != server version {}",
-                        snapshot.header.version, current_schema_version
-                    ),
-                );
-                return Err(Status::failed_precondition(format!(
-                    "Schema version mismatch: backup has version {}, server expects version {}. \
-                     Cannot restore from incompatible backup.",
-                    snapshot.header.version, current_schema_version,
-                )));
-            }
+        let manifest_proto = backup_manifest_to_proto(&staging_result.manifest);
+        let staging_dir = staging_result.staging_dir.display().to_string();
 
-            let snapshot_manager = self.snapshot_manager.as_ref().ok_or_else(|| {
-                Status::failed_precondition("Snapshot manager is not available on this node")
-            })?;
-
-            snapshot_manager.save(&snapshot).map_err(|e| {
-                ctx.set_error("RestoreError", &e.to_string());
-                error_classify::storage_error(&e)
-            })?;
-
-            let height = snapshot.header.region_height;
-            let msg = format!(
-                "Backup {} (height {}) restored as snapshot. Restart the node to apply.",
-                meta.backup_id, height
-            );
-            (height, msg)
-        };
-
-        ctx.set_block_height(restored_height);
         ctx.set_success();
 
-        // Emit BackupRestored handler-phase event
+        // Emit BackupRestored handler-phase event — operators see the
+        // staged restore in the audit trail even before the offline swap.
         ctx.record_event(
             EventAction::BackupRestored,
             EventOutcomeType::Success,
-            &[("backup_id", &meta.backup_id)],
+            &[("backup_id", &req.backup_id), ("staging_dir", &staging_dir)],
         );
 
-        Ok(Response::new(RestoreBackupResponse { success: true, message, restored_height }))
+        Ok(Response::new(RestoreBackupResponse { staging_dir, manifest: Some(manifest_proto) }))
     }
 
     /// Transfers Raft leadership to a target node, or the best candidate if unspecified.
@@ -2843,6 +2929,47 @@ fn compute_vault_block_hash(entry: &VaultEntry) -> [u8; 32] {
 
 /// Persists a cluster ID to `{data_dir}/cluster_id`.
 ///
+/// Converts a domain [`inferadb_ledger_raft::backup::archive::BackupManifest`]
+/// into its proto wire representation for inclusion in
+/// [`CreateBackupResponse`] / [`RestoreBackupResponse`] / [`BackupInfo`].
+///
+/// The proto mirror is intentionally a flat copy — the conversion only
+/// re-shapes types (`Region` enum → i32, `OrganizationSlug` → message
+/// wrapper, `Vec<DbEntry>` → `Vec<BackupDbEntry>`). No validation logic
+/// lives here; a manifest that round-trips through this helper carries
+/// the same byte values as the on-disk JSON manifest member.
+fn backup_manifest_to_proto(
+    manifest: &inferadb_ledger_raft::backup::archive::BackupManifest,
+) -> inferadb_ledger_proto::proto::BackupManifest {
+    let proto_region: inferadb_ledger_proto::proto::Region = manifest.region.into();
+
+    let dbs = manifest
+        .dbs
+        .iter()
+        .map(|entry| inferadb_ledger_proto::proto::BackupDbEntry {
+            path: entry.path.clone(),
+            size_bytes: entry.size_bytes,
+            checksum: entry.checksum.clone(),
+        })
+        .collect();
+
+    inferadb_ledger_proto::proto::BackupManifest {
+        schema_version: manifest.schema_version,
+        format: manifest.format.clone(),
+        region: proto_region as i32,
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+            slug: manifest.organization_slug.value(),
+        }),
+        organization_id: manifest.organization_id.value(),
+        timestamp_micros: manifest.timestamp_micros,
+        rmk_fingerprint: manifest.rmk_fingerprint.clone(),
+        node_id_at_creation: manifest.node_id_at_creation,
+        dbs,
+        vault_count: manifest.vault_count,
+        created_by_app_version: manifest.created_by_app_version.clone(),
+    }
+}
+
 /// Thin wrapper matching the format used by the server crate's `cluster_id` module.
 /// Duplicated here because the services crate cannot depend on the server crate.
 fn write_cluster_id_to_disk(data_dir: &std::path::Path, cluster_id: u64) -> Result<(), Status> {

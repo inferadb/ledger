@@ -18,8 +18,8 @@ use inferadb_ledger_raft::{
     EventsGarbageCollector, HotKeyDetector, IntegrityScrubberJob, InviteMaintenanceJob,
     LearnerRefreshJob, OrganizationPurgeJob, OrphanCleanupJob, PostErasureCompactionJob,
     RaftManager, RaftManagerConfig, RateLimiter, RegionConfig, RegionStorageManager,
-    ResourceMetricsCollector, RuntimeConfigHandle, SagaOrchestrator, SagaOrchestratorHandle,
-    TokenMaintenanceJob, TtlGarbageCollector, event_writer::EventHandle,
+    ResourceMetricsCollector, RestoreTrashSweepJob, RuntimeConfigHandle, SagaOrchestrator,
+    SagaOrchestratorHandle, TokenMaintenanceJob, TtlGarbageCollector, event_writer::EventHandle,
     log_storage::AppliedStateAccessor,
 };
 use inferadb_ledger_services::LedgerServer;
@@ -129,6 +129,11 @@ pub struct BootstrappedNode {
     /// Automated backup background task handle (only active when backup is configured).
     #[allow(dead_code)] // retained to keep background task alive
     pub backup_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Restore-trash sweep background task handle. Periodically prunes
+    /// `{data_dir}/.restore-trash/` entries older than the configured
+    /// retention window (default 24 hours).
+    #[allow(dead_code)] // retained to keep background task alive
+    pub restore_trash_sweep_handle: tokio::task::JoinHandle<()>,
     /// Events garbage collector background task handle.
     #[allow(dead_code)] // retained to keep background task alive
     pub events_gc_handle: Option<tokio::task::JoinHandle<()>>,
@@ -646,15 +651,25 @@ pub async fn bootstrap_node(
     // writes into the same ArcSwap that every checkpointer re-reads on tick.
 
     // Create backup manager if configured.
+    //
+    // The multi-DB archive backup path needs both `data_dir` (so it can
+    // enumerate per-org and per-vault DB files on disk) and the local
+    // node ID (recorded in the manifest for diagnostics). The legacy
+    // snapshot path doesn't read either, but we wire them
+    // unconditionally now that the archive path is the only operator
+    // surface.
     let backup_manager = config
         .backup
         .as_ref()
         .map(|backup_config| {
-            BackupManager::new(backup_config).map(Arc::new).map_err(|e| BootstrapError::Config {
-                message: format!("failed to create backup manager: {e}"),
-            })
+            BackupManager::new(backup_config)
+                .map(|m| Arc::new(m.with_data_dir(data_dir.to_path_buf(), node_id)))
+                .map_err(|e| BootstrapError::Config {
+                    message: format!("failed to create backup manager: {e}"),
+                })
         })
         .transpose()?;
+    let backups_dir = config.backup.as_ref().map(|cfg| std::path::PathBuf::from(&cfg.destination));
 
     // Create handler-phase event handle for gRPC service denial recording.
     //
@@ -774,6 +789,15 @@ pub async fn bootstrap_node(
     } else {
         server
     };
+    // The multi-DB archive backup path needs the per-region key manager
+    // (for RMK fingerprint stamping) and the backups root directory.
+    // Both are wired unconditionally — operators with the snapshot-only
+    // historical config will still bootstrap, just without backup RPCs
+    // available.
+    let server =
+        if let Some(ref km) = key_manager { server.with_key_manager(km.clone()) } else { server };
+    let server =
+        if let Some(ref dir) = backups_dir { server.with_backups_dir(dir.clone()) } else { server };
 
     // Retain the saga cell so we can fill it after the saga orchestrator starts.
     let saga_cell = server.saga_cell();
@@ -822,7 +846,6 @@ pub async fn bootstrap_node(
             system_events_state_db: system_events_state_db.clone(),
             system_meta_db: Arc::clone(&system_meta_db),
             snapshot_manager,
-            snapshot_manager_for_backup,
             backup_manager,
             tiered_manager,
             demote_interval_secs,
@@ -849,6 +872,7 @@ pub async fn bootstrap_node(
             learner_refresh_handle: jobs.learner_refresh_handle,
             resource_metrics_handle: jobs.resource_metrics_handle,
             backup_handle: jobs.backup_handle,
+            restore_trash_sweep_handle: jobs.restore_trash_sweep_handle,
             events_gc_handle: jobs.events_gc_handle,
             saga_handle: jobs.saga_handle,
             saga_orchestrator_handle: jobs.saga_orchestrator_handle,
@@ -971,7 +995,6 @@ pub async fn bootstrap_node(
             system_events_state_db: system_events_state_db.clone(),
             system_meta_db: Arc::clone(&system_meta_db),
             snapshot_manager,
-            snapshot_manager_for_backup,
             backup_manager,
             tiered_manager,
             demote_interval_secs,
@@ -998,6 +1021,7 @@ pub async fn bootstrap_node(
             learner_refresh_handle: jobs.learner_refresh_handle,
             resource_metrics_handle: jobs.resource_metrics_handle,
             backup_handle: jobs.backup_handle,
+            restore_trash_sweep_handle: jobs.restore_trash_sweep_handle,
             events_gc_handle: jobs.events_gc_handle,
             saga_handle: jobs.saga_handle,
             saga_orchestrator_handle: jobs.saga_orchestrator_handle,
@@ -1228,7 +1252,6 @@ struct StartJobsInput<'a> {
     /// System region's `_meta.db` handle.
     system_meta_db: Arc<inferadb_ledger_store::Database<FileBackend>>,
     snapshot_manager: Arc<SnapshotManager>,
-    snapshot_manager_for_backup: Arc<SnapshotManager>,
     backup_manager: Option<Arc<BackupManager>>,
     tiered_manager: Option<Arc<TieredSnapshotManager>>,
     demote_interval_secs: u64,
@@ -1248,6 +1271,7 @@ struct StartJobsOutput {
     learner_refresh_handle: tokio::task::JoinHandle<()>,
     resource_metrics_handle: tokio::task::JoinHandle<()>,
     backup_handle: Option<tokio::task::JoinHandle<()>>,
+    restore_trash_sweep_handle: tokio::task::JoinHandle<()>,
     events_gc_handle: Option<tokio::task::JoinHandle<()>>,
     saga_handle: tokio::task::JoinHandle<()>,
     saga_orchestrator_handle: SagaOrchestratorHandle,
@@ -1327,14 +1351,16 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
         .start();
     tracing::info!("Started resource metrics collector");
 
-    let backup_handle = if let (Some(backup_config), Some(mgr)) =
-        (input.config.backup.as_ref(), input.backup_manager)
+    let backup_handle = if let (Some(backup_config), Some(mgr), Some(km)) =
+        (input.config.backup.as_ref(), input.backup_manager, input.key_manager.as_ref())
     {
         if backup_config.enabled {
             let job = BackupJob::builder()
                 .handle(input.handle.clone())
-                .snapshot_manager(input.snapshot_manager_for_backup)
                 .backup_manager(mgr)
+                .raft_manager(input.manager.clone())
+                .key_manager(km.clone())
+                .applied_state(Some(input.applied_state_accessor.clone()))
                 .interval(Duration::from_secs(backup_config.interval_secs))
                 .cancellation_token(coord.child_token("backup"))
                 .build();
@@ -1343,7 +1369,7 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
                 interval_secs = backup_config.interval_secs,
                 destination = %backup_config.destination,
                 retention = backup_config.retention_count,
-                "Started automated backup job"
+                "Started automated multi-DB backup job"
             );
             Some(handle)
         } else {
@@ -1351,8 +1377,28 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
             None
         }
     } else {
+        if input.config.backup.as_ref().is_some_and(|c| c.enabled) && input.key_manager.is_none() {
+            tracing::warn!(
+                "Backup configured but key_manager is unavailable; skipping automated backup job"
+            );
+        }
         None
     };
+
+    // Restore-trash sweeper. Always-on regardless of whether the backup
+    // job is enabled — `RestoreBackup` can run on any node, and any node
+    // can accumulate `.restore-trash/` entries that need pruning. The
+    // job is cheap (one readdir per hour), so we don't gate it on a
+    // config flag.
+    let restore_trash_sweep_handle = RestoreTrashSweepJob::builder()
+        .data_dir(input.data_dir.to_path_buf())
+        .cancellation_token(coord.child_token("restore-trash-sweep"))
+        .build()
+        .start();
+    tracing::info!(
+        data_dir = %input.data_dir.display(),
+        "Started restore-trash sweep job"
+    );
 
     let events_gc_handle = if input.config.events.enabled {
         let gc = EventsGarbageCollector::builder()
@@ -1496,6 +1542,7 @@ fn start_background_jobs(input: StartJobsInput<'_>) -> Result<StartJobsOutput, B
         learner_refresh_handle,
         resource_metrics_handle,
         backup_handle,
+        restore_trash_sweep_handle,
         events_gc_handle,
         saga_handle,
         saga_orchestrator_handle,

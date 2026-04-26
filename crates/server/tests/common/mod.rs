@@ -188,6 +188,18 @@ impl TestNode {
     pub fn is_system_leader(&self) -> bool {
         self.handle.current_leader() == Some(self.id)
     }
+
+    /// Returns the on-disk data directory of this node, if the test
+    /// fixture still owns the temp dir (it is taken away by
+    /// `graceful_restart`).
+    ///
+    /// Useful for tests that need to inspect on-disk state (e.g. the
+    /// per-vault `state.db` files an archive includes) outside the gRPC
+    /// surface.
+    #[allow(dead_code)]
+    pub fn data_dir(&self) -> Option<&std::path::Path> {
+        self._temp_dir.as_ref().map(|t| t.path())
+    }
 }
 
 /// Builds a Raft config with aggressive timeouts for fast test execution.

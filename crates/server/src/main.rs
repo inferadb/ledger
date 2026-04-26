@@ -31,7 +31,7 @@ mod shutdown;
 use std::{io::IsTerminal, net::SocketAddr};
 
 use clap::Parser;
-use config::{Cli, CliCommand, Config, ConfigAction, LogFormat};
+use config::{Cli, CliCommand, Config, ConfigAction, LogFormat, RestoreAction};
 use inferadb_ledger_raft::otel;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
@@ -108,6 +108,11 @@ async fn main() -> Result<(), ServerError> {
                     println!("Cluster initialized. cluster_id={}", resp.cluster_id);
                 }
                 return Ok(());
+            },
+            CliCommand::Restore { action } => match action {
+                RestoreAction::Apply { data_dir, staging_dir, region, organization_id } => {
+                    return handle_restore_apply(data_dir, staging_dir, region, organization_id);
+                },
             },
         }
     }
@@ -449,6 +454,57 @@ fn init_otel(config: &Config) -> Result<(), ServerError> {
             e
         ))))
     })
+}
+
+/// Runs the offline `restore apply` subcommand.
+///
+/// Resolves the live per-org tree under `data_dir`, swaps the staging
+/// tree onto it (moving the displaced live tree to
+/// `{data_dir}/.restore-trash/{ts}/{org_id}/`), and prints a summary +
+/// restart instructions to stderr. Refuses to run if the data
+/// directory's `.lock` file is held by another process — the operator
+/// must stop the node first.
+///
+/// Extracted into a free function so it remains unit-testable without
+/// going through `main`'s subcommand dispatch.
+fn handle_restore_apply(
+    data_dir: std::path::PathBuf,
+    staging_dir: std::path::PathBuf,
+    region: String,
+    organization_id: i64,
+) -> Result<(), ServerError> {
+    use std::str::FromStr;
+
+    let parsed_region = inferadb_ledger_types::Region::from_str(&region).map_err(|e| {
+        ServerError::Server(Box::new(std::io::Error::other(format!(
+            "invalid --region '{region}': {e}"
+        ))))
+    })?;
+    let parsed_org_id = inferadb_ledger_types::OrganizationId::new(organization_id);
+
+    let result = inferadb_ledger_raft::backup::apply_staged_restore(
+        &data_dir,
+        &staging_dir,
+        parsed_region,
+        parsed_org_id,
+    )
+    .map_err(|e| ServerError::Server(Box::new(std::io::Error::other(e.to_string()))))?;
+
+    eprintln!("restore apply: success");
+    eprintln!(
+        "  swapped {} files into {}",
+        result.files_swapped,
+        data_dir.join(parsed_region.as_str()).join(parsed_org_id.value().to_string()).display()
+    );
+    if result.trash_dir.as_os_str().is_empty() {
+        eprintln!("  no pre-existing live tree was displaced");
+    } else {
+        eprintln!("  displaced tree moved to {} (24h retention)", result.trash_dir.display());
+    }
+    eprintln!("  marker file: {}", data_dir.join(".restore-marker").display());
+    eprintln!();
+    eprintln!("Restart the node to bring the restored organization online.");
+    Ok(())
 }
 
 /// Initializes the Prometheus metrics exporter.

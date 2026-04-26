@@ -60,6 +60,41 @@ pub trait RegionKeyManager: Send + Sync {
     ///
     /// Performs a test wrap/unwrap cycle. Called by health checks.
     fn health_check(&self, region: Region) -> Result<()>;
+
+    /// Returns a stable opaque fingerprint of the current RMK material for
+    /// `region`.
+    ///
+    /// The fingerprint is the SHA-256 of the active RMK's raw bytes,
+    /// formatted as `"sha256:<hex>"`. Equality is the only meaningful
+    /// operation — the value never appears on the wire as anything other
+    /// than an opaque sentinel and is **not** a substitute for an
+    /// authentication tag.
+    ///
+    /// Multi-DB backup archives carry this value in the manifest
+    /// `rmk_fingerprint` field; restore performs a pre-flight check that
+    /// the local node's fingerprint equals the archive's fingerprint
+    /// before any envelope unwrap is attempted. A mismatch here
+    /// surfaces an `RmkFingerprintMismatch` error at staging time
+    /// (online, with rich diagnostics) instead of as a silent envelope
+    /// unwrap failure on first DB open after restart.
+    ///
+    /// The default implementation hashes `current_rmk(region).as_bytes()`;
+    /// implementations that store the RMK in a remote secrets manager
+    /// SHOULD override this with a precomputed digest if available so
+    /// the fingerprint can be served without round-tripping the secrets
+    /// backend on the hot path.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Error::Encryption`] surfaced by [`Self::current_rmk`]
+    /// (no active version, key file unreadable, secrets backend down,
+    /// etc).
+    fn rmk_fingerprint(&self, region: Region) -> Result<String> {
+        let rmk = self.current_rmk(region)?;
+        let digest = inferadb_ledger_types::hash::sha256(rmk.as_bytes());
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        Ok(format!("sha256:{hex}"))
+    }
 }
 
 /// Returns the set of regions a node must hold RMKs for.

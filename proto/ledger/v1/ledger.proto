@@ -2112,37 +2112,83 @@ message GetConfigResponse {
 // Backup & Restore Messages
 // -----------------------------------------------------------------------------
 
-// Backup type indicator.
-enum BackupType {
-  // Unspecified backup type.
-  BACKUP_TYPE_UNSPECIFIED = 0;
-  // Full backup containing all database pages.
-  BACKUP_TYPE_FULL = 1;
-  // Incremental backup containing only pages changed since the base backup.
-  BACKUP_TYPE_INCREMENTAL = 2;
+// Per-database entry inside a multi-DB backup archive.
+//
+// Mirrors the Rust `inferadb_ledger_raft::backup::archive::DbEntry` struct
+// the manifest carries inside `manifest.json`.
+message BackupDbEntry {
+  // Relative path within the archive (always uses forward slashes).
+  // Examples: "_meta.db", "blocks.db", "state/vault-7/state.db".
+  string path = 1;
+  // Total bytes of the database file (uncompressed).
+  uint64 size_bytes = 2;
+  // blake3 checksum formatted as "blake3:<hex>".
+  string checksum = 3;
 }
 
-// Create a consistent backup of region state.
+// Mirror of the multi-DB backup archive manifest.
+//
+// The manifest is the first member of the `.tar.zst` archive and
+// enumerates every database file the archive contains. This proto mirrors
+// the Rust `inferadb_ledger_raft::backup::archive::BackupManifest` struct
+// and is returned in `RestoreBackupResponse` so operators can confirm
+// archive contents before applying the staged restore.
+message BackupManifest {
+  // Manifest schema version. Currently always 1.
+  uint32 schema_version = 1;
+  // Format sentinel literal — protects against operators pointing the
+  // restore path at an unrelated `.tar.zst` archive.
+  string format = 2;
+  // Region the source organization lives in.
+  Region region = 3;
+  // External Snowflake slug for the organization at backup time.
+  OrganizationSlug organization = 4;
+  // Internal numeric organization ID at backup time. Diagnostic-only —
+  // operator-facing identifiers are the slug above.
+  int64 organization_id = 5;
+  // Backup creation timestamp (microseconds since Unix epoch).
+  int64 timestamp_micros = 6;
+  // Opaque fingerprint of the source node's RMK public material
+  // (sha256 with the "sha256:" prefix). Equality is the only operation.
+  string rmk_fingerprint = 7;
+  // Node ID that produced the archive.
+  uint64 node_id_at_creation = 8;
+  // Every database file packed into the archive, in archive order.
+  repeated BackupDbEntry dbs = 9;
+  // Number of per-vault subtrees enumerated in `dbs`.
+  uint32 vault_count = 10;
+  // Application version that built the archive.
+  string created_by_app_version = 11;
+}
+
+// Create a consistent multi-DB archive backup of one organization.
+//
+// The archive captures full physical state for the organization: its
+// per-org `_meta.db` / `raft.db` / `blocks.db` / `events.db`, plus every
+// per-vault `state.db` / `raft.db` / `blocks.db` / `events.db`. Restore
+// is per-organization — operators backing up many orgs iterate this RPC
+// once per org.
 message CreateBackupRequest {
   // Optional tag for identifying this backup (e.g., "pre-migration").
   optional string tag = 1;
-  // For incremental backup: ID of the base (full) backup.
-  // When provided, only pages changed since the base are included.
-  // Omit for a full backup.
-  optional string base_backup_id = 2;
+  // Organization to back up. Required — the archive is per-organization
+  // and must enumerate the org's DB files plus all of its vaults' DB
+  // files.
+  OrganizationSlug organization = 2;
 }
 
 message CreateBackupResponse {
-  // Unique backup identifier (timestamp-based).
+  // Unique backup identifier. Encodes the backup timestamp; operators
+  // pass this back to `RestoreBackup` to identify the archive on disk.
   string backup_id = 1;
-  // Region height at backup time.
-  uint64 region_height = 2;
-  // Path where the backup was written.
-  string backup_path = 3;
-  // Size of the backup in bytes.
-  uint64 size_bytes = 4;
-  // SHA-256 checksum of the backup file.
-  Hash checksum = 5;
+  // Path where the archive was written (`{backups_dir}/backup-{id}.tar.zst`).
+  string backup_path = 2;
+  // Compressed archive size in bytes.
+  uint64 size_bytes = 3;
+  // Manifest summary for operator review. Carries the same content the
+  // archive's `manifest.json` member carries — an operator can verify
+  // the manifest matches expectations before storing the artefact.
+  BackupManifest manifest = 4;
 }
 
 // List available backups.
@@ -2159,45 +2205,38 @@ message ListBackupsResponse {
 message BackupInfo {
   // Unique backup identifier.
   string backup_id = 1;
-  // Region height at backup time.
-  uint64 region_height = 2;
-  // Path where the backup is stored.
-  string backup_path = 3;
-  // Size in bytes.
-  uint64 size_bytes = 4;
+  // Path where the backup archive is stored.
+  string backup_path = 2;
+  // Compressed archive size in bytes.
+  uint64 size_bytes = 3;
   // When the backup was created.
-  google.protobuf.Timestamp created_at = 5;
-  // SHA-256 checksum for integrity verification.
-  Hash checksum = 6;
-  // Chain commitment at backup time (for integrity verification at restore).
-  Hash chain_commitment_hash = 7;
-  // Snapshot format version.
-  uint32 schema_version = 8;
+  google.protobuf.Timestamp created_at = 4;
   // Optional user-provided tag.
-  string tag = 9;
-  // Backup type (full or incremental).
-  BackupType backup_type = 10;
-  // For incremental backups, the ID of the base (full) backup.
-  optional string base_backup_id = 11;
-  // Number of pages in this backup.
-  optional uint64 page_count = 12;
+  string tag = 5;
+  // Manifest summary parsed from the archive.
+  BackupManifest manifest = 6;
 }
 
-// Restore state from a backup. Requires explicit confirmation.
+// Stage a backup archive for offline restore.
+//
+// Stages the archive into `{data_dir}/.restore-staging/` while the node
+// is running, then returns the staging directory path. The actual swap
+// requires a stop-restore-restart cycle: stop the node, run
+// `inferadb-ledger restore apply`, restart the node.
 message RestoreBackupRequest {
-  // Backup identifier to restore from.
+  // Backup identifier — resolves to `{backups_dir}/backup-{id}.tar.zst`
+  // on disk.
   string backup_id = 1;
-  // Must be true to proceed. Safety gate to prevent accidental restores.
-  bool confirm = 2;
 }
 
 message RestoreBackupResponse {
-  // Whether the restore succeeded.
-  bool success = 1;
-  // Human-readable result message.
-  string message = 2;
-  // Region height after restore.
-  uint64 restored_height = 3;
+  // Path to the staging directory the archive was unpacked into.
+  // Operator-facing; the offline `restore apply` CLI reads this path.
+  string staging_dir = 1;
+  // Manifest enumerated from the archive. Operator should confirm
+  // region, organization, timestamp, and DB list match expectations
+  // before running `restore apply`.
+  BackupManifest manifest = 2;
 }
 
 // -----------------------------------------------------------------------------

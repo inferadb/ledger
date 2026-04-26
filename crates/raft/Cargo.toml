@@ -87,6 +87,10 @@ opentelemetry-otlp = { workspace = true, optional = true }
 async-compression.workspace = true
 zstd.workspace = true
 
+# Archive format (multi-DB backup archive)
+tar.workspace = true
+blake3.workspace = true
+
 # Streaming
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util.workspace = true

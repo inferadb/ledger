@@ -607,6 +607,54 @@ pub enum CliCommand {
         #[arg(long = "host")]
         host: String,
     },
+    /// Restore-related offline operations (run with the node stopped).
+    Restore {
+        /// Restore action to perform.
+        #[command(subcommand)]
+        action: RestoreAction,
+    },
+}
+
+/// Restore subcommand actions.
+///
+/// The `apply` action is the offline half of the two-phase restore
+/// designed in `docs/superpowers/specs/2026-04-24-multi-db-backup-archive-format.md`:
+/// the online `RestoreBackup` RPC stages an archive into
+/// `{data_dir}/.restore-staging/...`, and `restore apply` swaps that
+/// staging tree onto the live data directory while the node is stopped.
+/// Run after `SIGTERM` has fully drained the node — the subcommand
+/// refuses to run if the data directory's `.lock` file is held by
+/// another process.
+#[derive(Debug, clap::Subcommand)]
+pub enum RestoreAction {
+    /// Swap a staged restore tree into the live data directory.
+    ///
+    /// Resolves `{data_dir}/{region}/{organization_id}/`, moves the
+    /// existing tree (if any) to `{data_dir}/.restore-trash/{ts}/{org_id}/`,
+    /// then renames `staging` onto the live path. Drops a
+    /// `{data_dir}/.restore-marker` JSON file so the operator can
+    /// confirm the swap before restarting the node.
+    Apply {
+        /// Root data directory of the (stopped) node.
+        #[arg(long = "data-dir")]
+        data_dir: PathBuf,
+        /// Staging directory produced by `RestoreBackup` RPC.
+        ///
+        /// Typically `{data_dir}/.restore-staging/{org_id}-{timestamp}`.
+        #[arg(long = "staging")]
+        staging_dir: PathBuf,
+        /// Region the restored organization lives in.
+        ///
+        /// Must match the `region` field of the archive's manifest.
+        /// Use the canonical region slug (e.g. `us-east-va`,
+        /// `de-central-frankfurt`).
+        #[arg(long = "region")]
+        region: String,
+        /// Internal organization ID to restore (matches the
+        /// archive manifest's `organization_id`).
+        #[arg(long = "organization-id")]
+        organization_id: i64,
+    },
 }
 
 /// Configuration subcommand actions.

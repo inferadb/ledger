@@ -161,7 +161,7 @@ pub use apply_worker::{OrganizationApplyWorker, RegionApplyWorker, SystemApplyWo
 #[doc(hidden)]
 pub use auto_recovery::AutoRecoveryJob;
 #[doc(hidden)]
-pub use backup::{BackupJob, BackupManager};
+pub use backup::{BackupJob, BackupManager, RestoreTrashSweepJob};
 #[doc(hidden)]
 pub use block_compaction::BlockCompactor;
 #[doc(hidden)]

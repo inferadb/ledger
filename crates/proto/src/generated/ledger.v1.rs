@@ -2513,35 +2513,104 @@ pub struct GetConfigResponse {
     #[prost(string, tag = "1")]
     pub config_json: ::prost::alloc::string::String,
 }
-/// Create a consistent backup of region state.
+/// Per-database entry inside a multi-DB backup archive.
+///
+/// Mirrors the Rust `inferadb_ledger_raft::backup::archive::DbEntry` struct
+/// the manifest carries inside `manifest.json`.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BackupDbEntry {
+    /// Relative path within the archive (always uses forward slashes).
+    /// Examples: "\_meta.db", "blocks.db", "state/vault-7/state.db".
+    #[prost(string, tag = "1")]
+    pub path: ::prost::alloc::string::String,
+    /// Total bytes of the database file (uncompressed).
+    #[prost(uint64, tag = "2")]
+    pub size_bytes: u64,
+    /// blake3 checksum formatted as "blake3:<hex>".
+    #[prost(string, tag = "3")]
+    pub checksum: ::prost::alloc::string::String,
+}
+/// Mirror of the multi-DB backup archive manifest.
+///
+/// The manifest is the first member of the `.tar.zst` archive and
+/// enumerates every database file the archive contains. This proto mirrors
+/// the Rust `inferadb_ledger_raft::backup::archive::BackupManifest` struct
+/// and is returned in `RestoreBackupResponse` so operators can confirm
+/// archive contents before applying the staged restore.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BackupManifest {
+    /// Manifest schema version. Currently always 1.
+    #[prost(uint32, tag = "1")]
+    pub schema_version: u32,
+    /// Format sentinel literal — protects against operators pointing the
+    /// restore path at an unrelated `.tar.zst` archive.
+    #[prost(string, tag = "2")]
+    pub format: ::prost::alloc::string::String,
+    /// Region the source organization lives in.
+    #[prost(enumeration = "Region", tag = "3")]
+    pub region: i32,
+    /// External Snowflake slug for the organization at backup time.
+    #[prost(message, optional, tag = "4")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    /// Internal numeric organization ID at backup time. Diagnostic-only —
+    /// operator-facing identifiers are the slug above.
+    #[prost(int64, tag = "5")]
+    pub organization_id: i64,
+    /// Backup creation timestamp (microseconds since Unix epoch).
+    #[prost(int64, tag = "6")]
+    pub timestamp_micros: i64,
+    /// Opaque fingerprint of the source node's RMK public material
+    /// (sha256 with the "sha256:" prefix). Equality is the only operation.
+    #[prost(string, tag = "7")]
+    pub rmk_fingerprint: ::prost::alloc::string::String,
+    /// Node ID that produced the archive.
+    #[prost(uint64, tag = "8")]
+    pub node_id_at_creation: u64,
+    /// Every database file packed into the archive, in archive order.
+    #[prost(message, repeated, tag = "9")]
+    pub dbs: ::prost::alloc::vec::Vec<BackupDbEntry>,
+    /// Number of per-vault subtrees enumerated in `dbs`.
+    #[prost(uint32, tag = "10")]
+    pub vault_count: u32,
+    /// Application version that built the archive.
+    #[prost(string, tag = "11")]
+    pub created_by_app_version: ::prost::alloc::string::String,
+}
+/// Create a consistent multi-DB archive backup of one organization.
+///
+/// The archive captures full physical state for the organization: its
+/// per-org `_meta.db` / `raft.db` / `blocks.db` / `events.db`, plus every
+/// per-vault `state.db` / `raft.db` / `blocks.db` / `events.db`. Restore
+/// is per-organization — operators backing up many orgs iterate this RPC
+/// once per org.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateBackupRequest {
     /// Optional tag for identifying this backup (e.g., "pre-migration").
     #[prost(string, optional, tag = "1")]
     pub tag: ::core::option::Option<::prost::alloc::string::String>,
-    /// For incremental backup: ID of the base (full) backup.
-    /// When provided, only pages changed since the base are included.
-    /// Omit for a full backup.
-    #[prost(string, optional, tag = "2")]
-    pub base_backup_id: ::core::option::Option<::prost::alloc::string::String>,
+    /// Organization to back up. Required — the archive is per-organization
+    /// and must enumerate the org's DB files plus all of its vaults' DB
+    /// files.
+    #[prost(message, optional, tag = "2")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateBackupResponse {
-    /// Unique backup identifier (timestamp-based).
+    /// Unique backup identifier. Encodes the backup timestamp; operators
+    /// pass this back to `RestoreBackup` to identify the archive on disk.
     #[prost(string, tag = "1")]
     pub backup_id: ::prost::alloc::string::String,
-    /// Region height at backup time.
-    #[prost(uint64, tag = "2")]
-    pub region_height: u64,
-    /// Path where the backup was written.
-    #[prost(string, tag = "3")]
+    /// Path where the archive was written (`{backups_dir}/backup-{id}.tar.zst`).
+    #[prost(string, tag = "2")]
     pub backup_path: ::prost::alloc::string::String,
-    /// Size of the backup in bytes.
-    #[prost(uint64, tag = "4")]
+    /// Compressed archive size in bytes.
+    #[prost(uint64, tag = "3")]
     pub size_bytes: u64,
-    /// SHA-256 checksum of the backup file.
-    #[prost(message, optional, tag = "5")]
-    pub checksum: ::core::option::Option<Hash>,
+    /// Manifest summary for operator review. Carries the same content the
+    /// archive's `manifest.json` member carries — an operator can verify
+    /// the manifest matches expectations before storing the artefact.
+    #[prost(message, optional, tag = "4")]
+    pub manifest: ::core::option::Option<BackupManifest>,
 }
 /// List available backups.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2556,66 +2625,51 @@ pub struct ListBackupsResponse {
     pub backups: ::prost::alloc::vec::Vec<BackupInfo>,
 }
 /// Metadata about an available backup.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BackupInfo {
     /// Unique backup identifier.
     #[prost(string, tag = "1")]
     pub backup_id: ::prost::alloc::string::String,
-    /// Region height at backup time.
-    #[prost(uint64, tag = "2")]
-    pub region_height: u64,
-    /// Path where the backup is stored.
-    #[prost(string, tag = "3")]
+    /// Path where the backup archive is stored.
+    #[prost(string, tag = "2")]
     pub backup_path: ::prost::alloc::string::String,
-    /// Size in bytes.
-    #[prost(uint64, tag = "4")]
+    /// Compressed archive size in bytes.
+    #[prost(uint64, tag = "3")]
     pub size_bytes: u64,
     /// When the backup was created.
-    #[prost(message, optional, tag = "5")]
+    #[prost(message, optional, tag = "4")]
     pub created_at: ::core::option::Option<::prost_types::Timestamp>,
-    /// SHA-256 checksum for integrity verification.
-    #[prost(message, optional, tag = "6")]
-    pub checksum: ::core::option::Option<Hash>,
-    /// Chain commitment at backup time (for integrity verification at restore).
-    #[prost(message, optional, tag = "7")]
-    pub chain_commitment_hash: ::core::option::Option<Hash>,
-    /// Snapshot format version.
-    #[prost(uint32, tag = "8")]
-    pub schema_version: u32,
     /// Optional user-provided tag.
-    #[prost(string, tag = "9")]
+    #[prost(string, tag = "5")]
     pub tag: ::prost::alloc::string::String,
-    /// Backup type (full or incremental).
-    #[prost(enumeration = "BackupType", tag = "10")]
-    pub backup_type: i32,
-    /// For incremental backups, the ID of the base (full) backup.
-    #[prost(string, optional, tag = "11")]
-    pub base_backup_id: ::core::option::Option<::prost::alloc::string::String>,
-    /// Number of pages in this backup.
-    #[prost(uint64, optional, tag = "12")]
-    pub page_count: ::core::option::Option<u64>,
+    /// Manifest summary parsed from the archive.
+    #[prost(message, optional, tag = "6")]
+    pub manifest: ::core::option::Option<BackupManifest>,
 }
-/// Restore state from a backup. Requires explicit confirmation.
+/// Stage a backup archive for offline restore.
+///
+/// Stages the archive into `{data_dir}/.restore-staging/` while the node
+/// is running, then returns the staging directory path. The actual swap
+/// requires a stop-restore-restart cycle: stop the node, run
+/// `inferadb-ledger restore apply`, restart the node.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RestoreBackupRequest {
-    /// Backup identifier to restore from.
+    /// Backup identifier — resolves to `{backups_dir}/backup-{id}.tar.zst`
+    /// on disk.
     #[prost(string, tag = "1")]
     pub backup_id: ::prost::alloc::string::String,
-    /// Must be true to proceed. Safety gate to prevent accidental restores.
-    #[prost(bool, tag = "2")]
-    pub confirm: bool,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RestoreBackupResponse {
-    /// Whether the restore succeeded.
-    #[prost(bool, tag = "1")]
-    pub success: bool,
-    /// Human-readable result message.
-    #[prost(string, tag = "2")]
-    pub message: ::prost::alloc::string::String,
-    /// Region height after restore.
-    #[prost(uint64, tag = "3")]
-    pub restored_height: u64,
+    /// Path to the staging directory the archive was unpacked into.
+    /// Operator-facing; the offline `restore apply` CLI reads this path.
+    #[prost(string, tag = "1")]
+    pub staging_dir: ::prost::alloc::string::String,
+    /// Manifest enumerated from the archive. Operator should confirm
+    /// region, organization, timestamp, and DB list match expectations
+    /// before running `restore apply`.
+    #[prost(message, optional, tag = "2")]
+    pub manifest: ::core::option::Option<BackupManifest>,
 }
 /// Request to join an existing cluster.
 /// The node provides its ID and address so the leader can add it to Raft.
@@ -4886,39 +4940,6 @@ impl TotpAlgorithm {
             "TOTP_ALGORITHM_SHA1" => Some(Self::Sha1),
             "TOTP_ALGORITHM_SHA256" => Some(Self::Sha256),
             "TOTP_ALGORITHM_SHA512" => Some(Self::Sha512),
-            _ => None,
-        }
-    }
-}
-/// Backup type indicator.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum BackupType {
-    /// Unspecified backup type.
-    Unspecified = 0,
-    /// Full backup containing all database pages.
-    Full = 1,
-    /// Incremental backup containing only pages changed since the base backup.
-    Incremental = 2,
-}
-impl BackupType {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "BACKUP_TYPE_UNSPECIFIED",
-            Self::Full => "BACKUP_TYPE_FULL",
-            Self::Incremental => "BACKUP_TYPE_INCREMENTAL",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "BACKUP_TYPE_UNSPECIFIED" => Some(Self::Unspecified),
-            "BACKUP_TYPE_FULL" => Some(Self::Full),
-            "BACKUP_TYPE_INCREMENTAL" => Some(Self::Incremental),
             _ => None,
         }
     }

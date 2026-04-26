@@ -128,9 +128,25 @@ pub struct LedgerServer {
     /// Backup manager for `CreateBackup`/`ListBackups`/`RestoreBackup` RPCs.
     #[builder(default)]
     backup_manager: Option<Arc<inferadb_ledger_raft::backup::BackupManager>>,
-    /// Snapshot manager for backup creation and restore operations.
+    /// Snapshot manager for the internal Raft snapshot-install path.
+    ///
+    /// Note: this is **no longer wired into `AdminService`** — the
+    /// operator-facing backup path moved to multi-DB archive format and
+    /// no longer routes through the logical-snapshot pipeline. The
+    /// field remains so callers that build snapshots elsewhere (e.g.
+    /// peer replication) can hold onto a manager via the bootstrap
+    /// path.
     #[builder(default)]
     snapshot_manager: Option<Arc<inferadb_ledger_state::SnapshotManager>>,
+    /// Region key manager — supplies the local node's RMK fingerprint
+    /// for stamping outgoing backup archives and validating incoming
+    /// archives at restore-stage time.
+    #[builder(default)]
+    key_manager: Option<Arc<dyn inferadb_ledger_store::crypto::RegionKeyManager>>,
+    /// Root directory backup archives are written to and restored from.
+    /// `{backups_dir}/backup-{id}.tar.zst`.
+    #[builder(default)]
+    backups_dir: Option<std::path::PathBuf>,
     /// Data directory for dependency health checks (disk writability).
     #[builder(default)]
     data_dir: Option<std::path::PathBuf>,
@@ -350,10 +366,22 @@ impl LedgerServer {
             admin_service
         };
         // Wire backup support into admin service for CreateBackup/ListBackups/RestoreBackup RPCs.
-        let admin_service = if let (Some(backup_mgr), Some(snap_mgr)) =
-            (self.backup_manager, self.snapshot_manager)
-        {
-            admin_service.with_backup(backup_mgr, snap_mgr)
+        // The snapshot-based logical-backup path was removed — the new
+        // archive path consumes only the BackupManager, plus the
+        // RegionKeyManager and backups directory wired via
+        // `with_key_manager` / `with_backups_dir` below.
+        let admin_service = if let Some(backup_mgr) = self.backup_manager {
+            admin_service.with_backup(backup_mgr)
+        } else {
+            admin_service
+        };
+        let admin_service = if let Some(km) = self.key_manager {
+            admin_service.with_key_manager(km)
+        } else {
+            admin_service
+        };
+        let admin_service = if let Some(dir) = self.backups_dir {
+            admin_service.with_backups_dir(dir)
         } else {
             admin_service
         };
@@ -725,7 +753,9 @@ impl LedgerServer {
     /// Attaches backup support (backup manager + snapshot manager).
     ///
     /// Enables `CreateBackup`, `ListBackups`, and `RestoreBackup` RPCs on the
-    /// admin service.
+    /// admin service. The snapshot manager is held so the internal
+    /// Raft snapshot-install path keeps working; it is no longer used
+    /// by the operator-facing backup RPCs.
     #[must_use]
     pub fn with_backup(
         mut self,
@@ -734,6 +764,31 @@ impl LedgerServer {
     ) -> Self {
         self.backup_manager = Some(backup_manager);
         self.snapshot_manager = Some(snapshot_manager);
+        self
+    }
+
+    /// Attaches the region key manager — required so the
+    /// multi-DB-archive backup path can stamp outgoing archives with
+    /// the local RMK fingerprint and pre-flight incoming archives at
+    /// restore-stage time.
+    #[must_use]
+    pub fn with_key_manager(
+        mut self,
+        key_manager: Arc<dyn inferadb_ledger_store::crypto::RegionKeyManager>,
+    ) -> Self {
+        self.key_manager = Some(key_manager);
+        self
+    }
+
+    /// Attaches the root directory backup archives live in.
+    ///
+    /// Mirrors the path the [`BackupManager`](inferadb_ledger_raft::backup::BackupManager)
+    /// writes through; held here so `restore_backup` can resolve a
+    /// `backup_id` to an archive path without round-tripping through
+    /// the manager.
+    #[must_use]
+    pub fn with_backups_dir(mut self, backups_dir: std::path::PathBuf) -> Self {
+        self.backups_dir = Some(backups_dir);
         self
     }
 }
