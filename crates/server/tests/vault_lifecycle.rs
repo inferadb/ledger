@@ -702,29 +702,15 @@ async fn test_delete_vault_tears_down_vault_group() {
 /// `VaultGroup` (Task #146's sweep inside `start_organization_group`) on
 /// every voter.
 ///
-/// STATUS: this test surfaces a production gap on simultaneous whole-cluster
-/// restart and does not converge deterministically without a production-side
-/// change. Specifically, after clean shutdown every node's
-/// `RaftManager::peer_addresses` starts empty on restart, because the
-/// `RegisterPeerAddress` Raft entries are already in `applied_durable`
-/// (no WAL replay fires). The restart seed-discovery task is best-effort
-/// and races bootstrap of the other nodes; under simultaneous restart it
-/// typically does not populate peers before the per-organization
-/// rehydration sweep runs inside `bootstrap_node`. The test-side
-/// workaround in [`TestCluster::graceful_restart`] explicitly injects
-/// peer addresses after all nodes are up, but the initial GLOBAL-region
-/// elections begun during the bootstrap window produce a split-candidate
-/// state with no transport to resolve via, and the consensus engine does
-/// not re-drive elections once the transport is registered. Fixing this
-/// properly requires either (a) making `rehydrate_organization_group`
-/// wait for a quorum-populated `peer_addresses` before running, or
-/// (b) adding a post-bootstrap re-kick of the rehydration sweep once the
-/// seed-discovery task completes. See task #149's escalation note.
-///
-/// The `#[ignore]` annotation documents that the test is not currently
-/// green; it is NOT hiding flakiness. Invoke explicitly with
-/// `cargo test ... -- --ignored` once a production fix lands and remove
-/// the annotation.
+/// Cold-restart election convergence (Task #172) closed the production gap
+/// that previously kept this test ignored: the three-phase shutdown sweep
+/// (vault → org → region) plus election-critical message preservation in
+/// `peer_sender::drop_queue` and HTTP/2 server keepalive (Task #167) now
+/// allow simultaneous whole-cluster restart to converge to a leader
+/// deterministically. The test runs on every CI invocation; if it starts
+/// to fail again, suspect regressions in the cold-restart election path,
+/// the persisted-membership rehydration in `RaftLogStore::open`, or the
+/// shutdown-sweep ordering in `GracefulShutdown`.
 ///
 /// Flow:
 ///   1. Build a 3-node cluster with 1 data region.
