@@ -356,6 +356,54 @@ impl RegionStorageManager {
         self.organization_dir(region, organization_id).join("raft.db")
     }
 
+    /// Composes the on-disk path of a vault's per-vault `blocks.db`
+    /// (`{data_dir}/{region}/{org_id}/state/vault-{vault_id}/blocks.db`).
+    /// Sibling of [`RegionStorage::vault_db_path`] (state.db) and the
+    /// per-vault `raft.db` composed inline by
+    /// [`RaftManager::start_vault_group`](crate::raft_manager::RaftManager::start_vault_group).
+    ///
+    /// Phase 4.1 of per-vault consensus: each vault owns its own Merkle
+    /// chain stored in its own `blocks.db`. Append-blocks land in the
+    /// per-vault file, so the vault's chain is genuinely scoped to its
+    /// own apply pipeline rather than sharing the parent organization's
+    /// chain.
+    pub fn vault_blocks_db_path(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+        vault_id: inferadb_ledger_types::VaultId,
+    ) -> PathBuf {
+        self.organization_dir(region, organization_id)
+            .join("state")
+            .join(format!("vault-{}", vault_id.value()))
+            .join("blocks.db")
+    }
+
+    /// Composes the on-disk path of a vault's per-vault `events.db`
+    /// (`{data_dir}/{region}/{org_id}/state/vault-{vault_id}/events.db`).
+    /// Sibling of [`Self::vault_blocks_db_path`] (blocks.db),
+    /// [`RegionStorage::vault_db_path`] (state.db), and the per-vault
+    /// `raft.db` composed inline by
+    /// [`RaftManager::start_vault_group`](crate::raft_manager::RaftManager::start_vault_group).
+    ///
+    /// Phase 4.2 of per-vault consensus: each vault owns its own
+    /// apply-phase audit log stored in its own `events.db`. Vault-scoped
+    /// emissions (Write, BatchWrite, IngestExternalEvents) land in the
+    /// per-vault file; org-scoped emissions (CreateVault,
+    /// AddOrganizationMember, etc.) continue to land in the parent
+    /// organization's `events.db`.
+    pub fn vault_events_db_path(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+        vault_id: inferadb_ledger_types::VaultId,
+    ) -> PathBuf {
+        self.organization_dir(region, organization_id)
+            .join("state")
+            .join(format!("vault-{}", vault_id.value()))
+            .join("events.db")
+    }
+
     /// Checks for legacy flat layout and returns an error if detected.
     ///
     /// A legacy flat layout has `state.db` directly in the data directory root.

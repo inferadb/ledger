@@ -351,11 +351,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             if last_tick_log.elapsed() >= Duration::from_millis(100) {
                 let next_deadline_ms = self.timers.next_deadline().map(|d| {
                     let now = self.clock.now();
-                    if d <= now {
-                        0i64
-                    } else {
-                        d.duration_since(now).as_millis() as i64
-                    }
+                    if d <= now { 0i64 } else { d.duration_since(now).as_millis() as i64 }
                 });
                 tracing::debug!(
                     shard_count = self.shards.len(),
@@ -367,7 +363,6 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                 );
                 last_tick_log = std::time::Instant::now();
             }
-
 
             let sleep_duration = self.timers.next_deadline().map(|d| {
                 let now = self.clock.now();
@@ -744,8 +739,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                 // wheel. If `pre_timer_count` and `post_timer_count` agree
                 // modulo +1 per scheduled-timer initial action, the wheel
                 // is intact.
-                let pre_existing_shard_ids: Vec<u64> =
-                    self.shards.keys().map(|id| id.0).collect();
+                let pre_existing_shard_ids: Vec<u64> = self.shards.keys().map(|id| id.0).collect();
                 tracing::debug!(
                     shard = shard_id.0,
                     pre_existing_shard_count = self.shards.len(),

@@ -288,6 +288,7 @@ pub struct EventFilter {
     outcome: Option<proto::EventOutcome>,
     emission_path: Option<proto::EventEmissionPath>,
     correlation_id: Option<String>,
+    vault: Option<VaultSlug>,
 }
 
 impl EventFilter {
@@ -373,6 +374,17 @@ impl EventFilter {
         self
     }
 
+    /// Filters to events emitted within a specific vault.
+    ///
+    /// When set, the query routes to that vault's per-vault events store
+    /// and skips org-level events. Without a vault filter, the query fans
+    /// out across the org-level store and every per-vault store under the
+    /// organization, merging by timestamp.
+    pub fn vault(mut self, vault: VaultSlug) -> Self {
+        self.vault = Some(vault);
+        self
+    }
+
     pub(crate) fn to_proto(&self) -> proto::EventFilter {
         proto::EventFilter {
             start_time: self.start_time.map(|dt| prost_types::Timestamp {
@@ -389,6 +401,7 @@ impl EventFilter {
             outcome: self.outcome.map_or(0, |o| o as i32),
             emission_path: self.emission_path.map_or(0, |e| e as i32),
             correlation_id: self.correlation_id.clone(),
+            vault: self.vault.map(|slug| proto::VaultSlug { slug: slug.value() }),
         }
     }
 }

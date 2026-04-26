@@ -738,12 +738,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
         let mut peers = Vec::new();
         for (key_bytes, value_bytes) in iter {
             let key_str = std::str::from_utf8(&key_bytes).map_err(|e| {
-                StoreError::msg(format!(
-                    "peer address key is not valid UTF-8: {e}"
-                ))
+                StoreError::msg(format!("peer address key is not valid UTF-8: {e}"))
             })?;
-            let Some(node_id_str) = key_str.strip_prefix(super::KEY_PEER_ADDRESS_PREFIX)
-            else {
+            let Some(node_id_str) = key_str.strip_prefix(super::KEY_PEER_ADDRESS_PREFIX) else {
                 continue;
             };
             let node_id: u64 = node_id_str.parse().map_err(|e| {
@@ -752,9 +749,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 ))
             })?;
             let address = String::from_utf8(value_bytes).map_err(|e| {
-                StoreError::msg(format!(
-                    "peer address value is not valid UTF-8: {e}"
-                ))
+                StoreError::msg(format!("peer address value is not valid UTF-8: {e}"))
             })?;
             peers.push((node_id, address));
         }
@@ -1062,8 +1057,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
         // (via `load_peer_addresses_into`) when the GLOBAL log store is
         // wired to its in-memory `PeerAddressMap` mirror.
         for (node_id, address) in &pending.peer_addresses {
-            let key =
-                format!("{}{}", super::KEY_PEER_ADDRESS_PREFIX, node_id);
+            let key = format!("{}{}", super::KEY_PEER_ADDRESS_PREFIX, node_id);
             write_txn
                 .insert::<tables::RaftState>(&key, &address.as_bytes().to_vec())
                 .map_err(|e| to_storage_error(&e))?;
@@ -2539,10 +2533,7 @@ mod tests {
         {
             let store = RaftLogStore::<FileBackend>::open(&log_path).unwrap();
 
-            let state = AppliedState {
-                sequences: SequenceCounters::new(),
-                ..Default::default()
-            };
+            let state = AppliedState { sequences: SequenceCounters::new(), ..Default::default() };
             let mut pending = PendingExternalWrites::default();
             pending.peer_addresses.push((42, "10.0.0.1:50051".to_string()));
             pending.peer_addresses.push((43, "10.0.0.2:50051".to_string()));
@@ -2563,10 +2554,7 @@ mod tests {
         peers.sort_by_key(|(id, _)| *id);
         assert_eq!(
             peers,
-            vec![
-                (42, "10.0.0.1:50051".to_string()),
-                (43, "10.0.0.2:50051".to_string()),
-            ],
+            vec![(42, "10.0.0.1:50051".to_string()), (43, "10.0.0.2:50051".to_string()),],
             "rehydration must restore every persisted (node_id, address) pair",
         );
     }

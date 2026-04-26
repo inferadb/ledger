@@ -12,17 +12,19 @@
 //! `RaftLogStore`), `blocks.db` (historical block archive, owned by
 //! `BlockArchive`), and `events.db` (audit events, owned by
 //! `EventsDatabase` — optional: some regions are configured without events).
-//! Per-vault consensus adds **two more** lazy handles per live vault:
-//! the per-vault `state.db` (enumerated by `StateLayer::live_vault_dbs()`)
-//! and the per-vault `raft.db` (snapshotted via the `vault_raft_dbs_fn`
-//! closure threaded in from `RaftManager`). All of these receive
-//! `commit_in_memory` commits on every applied batch, so the checkpointer
-//! syncs them concurrently on every fire. Missing the per-org or per-vault
-//! raft.db sync would cause `applied_durable = 0` to be read on clean-
-//! shutdown restart (`KEY_APPLIED_STATE` never reaches disk), forcing a
-//! full WAL replay — see the follow-up in the commit-durability audit.
-//! Missing blocks.db or events.db would leave their dirty pages
-//! accumulating unbounded in memory between ticks.
+//! Per-vault consensus adds **three more** lazy handles per live vault:
+//! the per-vault `state.db` (enumerated by `StateLayer::live_vault_dbs()`),
+//! the per-vault `raft.db` (snapshotted via the `vault_raft_dbs_fn`
+//! closure threaded in from `RaftManager`), and the per-vault `blocks.db`
+//! (snapshotted via `vault_blocks_dbs_fn`, Phase 4.1.a). All of these
+//! receive `commit_in_memory` commits on every applied batch, so the
+//! checkpointer syncs them concurrently on every fire. Missing the
+//! per-org or per-vault raft.db sync would cause `applied_durable = 0`
+//! to be read on clean-shutdown restart (`KEY_APPLIED_STATE` never reaches
+//! disk), forcing a full WAL replay — see the follow-up in the commit-
+//! durability audit. Missing per-org or per-vault blocks.db or events.db
+//! would leave their dirty pages accumulating unbounded in memory between
+//! ticks.
 //!
 //! Fire policy (any one triggers a checkpoint):
 //!
@@ -77,7 +79,38 @@ use crate::{metrics, runtime_config::RuntimeConfigHandle};
 /// type parameter on the parent `RaftManager`'s internal map shape; the
 /// caller (in `raft_manager::start_background_jobs`) is the only place
 /// that knows how to filter `vault_groups` by region + organization.
-pub type VaultRaftDbsFn =
+pub type VaultRaftDbsFn = Arc<dyn Fn() -> Vec<(VaultId, Arc<Database<FileBackend>>)> + Send + Sync>;
+
+/// Snapshot accessor for the per-vault `blocks.db` handles owned by the
+/// parent [`RaftManager`]'s `vault_groups` map, scoped to the `(region,
+/// organization_id)` this checkpointer instance binds to.
+///
+/// Mirrors [`VaultRaftDbsFn`] for the per-vault block archive (Phase 4.1.a):
+/// each vault now owns its own Merkle chain backed by a dedicated
+/// `blocks.db` file, so apply-phase `BlockArchive::append_block` calls land
+/// in per-vault `Database<FileBackend>` page caches via `commit_in_memory`.
+/// The checkpointer must fan out [`Database::sync_state`] to those handles
+/// on every tick or dirty pages would accumulate unbounded between flushes.
+pub type VaultBlocksDbsFn =
+    Arc<dyn Fn() -> Vec<(VaultId, Arc<Database<FileBackend>>)> + Send + Sync>;
+
+/// Snapshot accessor for the per-vault `events.db` handles owned by the
+/// parent [`RaftManager`]'s `vault_groups` map, scoped to the `(region,
+/// organization_id)` this checkpointer instance binds to.
+///
+/// Mirrors [`VaultBlocksDbsFn`] for the per-vault apply-phase audit log
+/// (Phase 4.2): each vault now owns its own `events.db` file, so
+/// apply-phase [`EventWriter::write_events`](crate::event_writer::EventWriter::write_events)
+/// lands vault-scoped emissions in per-vault `Database<FileBackend>`
+/// page caches via `commit_in_memory`. The checkpointer must fan out
+/// [`Database::sync_state`] to those handles on every tick or dirty
+/// pages would accumulate unbounded between flushes — the same
+/// invariant the per-org `events.db` already obeys via the `events_db`
+/// field. Vaults whose parent org has no event writer contribute
+/// nothing because
+/// [`RaftManager::start_vault_group`](crate::raft_manager::RaftManager::start_vault_group) inherits
+/// "no events" from the parent org and skips per-vault DB construction.
+pub type VaultEventsDbsFn =
     Arc<dyn Fn() -> Vec<(VaultId, Arc<Database<FileBackend>>)> + Send + Sync>;
 
 /// Floor on the internal poll cadence so sub-50ms `interval_ms` settings do
@@ -168,6 +201,36 @@ pub struct StateCheckpointer {
     /// per dirty-page sample (`max_dirty_pages`). Vaults materialised
     /// mid-tick are simply picked up on the next tick.
     vault_raft_dbs_fn: VaultRaftDbsFn,
+    /// Snapshot accessor for the per-vault `blocks.db` handles bound to
+    /// this checkpointer's `(region, organization_id)` scope.
+    ///
+    /// Phase 4.1.a flipped each vault's Merkle chain from sharing the
+    /// parent organization's `blocks.db` to owning its own
+    /// `blocks.db` under
+    /// `{data_dir}/{region}/{org_id}/state/vault-{vault_id}/`.
+    /// `BlockArchive::append_block` lands in the per-vault page cache via
+    /// `commit_in_memory`, so the checkpointer must include each vault's
+    /// `blocks.db` in the Phase A fan-out and the dirty-page sample.
+    /// Without per-tick coverage, vault chain pages accumulate unbounded
+    /// between flushes (mirrors the per-vault `raft.db` justification).
+    vault_blocks_dbs_fn: VaultBlocksDbsFn,
+    /// Snapshot accessor for the per-vault `events.db` handles bound to
+    /// this checkpointer's `(region, organization_id)` scope.
+    ///
+    /// Phase 4.2 flipped each vault's apply-phase audit log from
+    /// sharing the parent organization's `events.db` to owning its own
+    /// `events.db` under
+    /// `{data_dir}/{region}/{org_id}/state/vault-{vault_id}/`.
+    /// [`EventWriter::write_events`](crate::event_writer::EventWriter::write_events)
+    /// lands vault-scoped emissions in the per-vault page cache via
+    /// `commit_in_memory`, so the checkpointer must include each
+    /// vault's `events.db` in the Phase A fan-out and the dirty-page
+    /// sample (mirrors the per-vault `blocks.db` justification).
+    /// Vaults whose parent org has no event writer contribute nothing
+    /// — [`RaftManager::start_vault_group`](crate::raft_manager::RaftManager::start_vault_group)
+    /// inherits "no events" from the parent org and never opens the
+    /// per-vault DB.
+    vault_events_dbs_fn: VaultEventsDbsFn,
     /// Live runtime-config handle. Re-read on every wake-up so live
     /// `UpdateConfig` RPCs take effect on the next tick.
     runtime_config: RuntimeConfigHandle,
@@ -218,6 +281,8 @@ impl StateCheckpointer {
         events_db: Option<Arc<Database<FileBackend>>>,
         meta_db: Arc<Database<FileBackend>>,
         vault_raft_dbs_fn: VaultRaftDbsFn,
+        vault_blocks_dbs_fn: VaultBlocksDbsFn,
+        vault_events_dbs_fn: VaultEventsDbsFn,
         runtime_config: RuntimeConfigHandle,
         applied_rx: watch::Receiver<u64>,
         cancellation_token: CancellationToken,
@@ -232,6 +297,8 @@ impl StateCheckpointer {
             events_db,
             meta_db,
             vault_raft_dbs_fn,
+            vault_blocks_dbs_fn,
+            vault_events_dbs_fn,
             runtime_config,
             applied_rx,
             cancellation_token,
@@ -321,12 +388,29 @@ impl StateCheckpointer {
             .map(|(_, db)| db.cache_dirty_page_count() as u64)
             .max()
             .unwrap_or(0);
+        let vault_blocks_max = (self.vault_blocks_dbs_fn)()
+            .iter()
+            .map(|(_, db)| db.cache_dirty_page_count() as u64)
+            .max()
+            .unwrap_or(0);
+        let vault_events_max = (self.vault_events_dbs_fn)()
+            .iter()
+            .map(|(_, db)| db.cache_dirty_page_count() as u64)
+            .max()
+            .unwrap_or(0);
         let raft = self.raft_db.cache_dirty_page_count() as u64;
         let blocks = self.blocks_db.cache_dirty_page_count() as u64;
         let events =
             self.events_db.as_ref().map(|db| db.cache_dirty_page_count() as u64).unwrap_or(0);
         let meta = self.meta_db.cache_dirty_page_count() as u64;
-        vault_state_max.max(vault_raft_max).max(raft).max(blocks).max(events).max(meta)
+        vault_state_max
+            .max(vault_raft_max)
+            .max(vault_blocks_max)
+            .max(vault_events_max)
+            .max(raft)
+            .max(blocks)
+            .max(events)
+            .max(meta)
     }
 
     /// Executes a single checkpoint. On success, advances the trigger
@@ -387,6 +471,8 @@ impl StateCheckpointer {
         // gap (Task #145 covers the shutdown-side equivalent).
         let vault_dbs = self.state_layer.live_vault_dbs();
         let vault_raft_dbs = (self.vault_raft_dbs_fn)();
+        let vault_blocks_dbs = (self.vault_blocks_dbs_fn)();
+        let vault_events_dbs = (self.vault_events_dbs_fn)();
 
         // Launch every Phase A sync as an independent future, then
         // `join_all` them. A per-vault sync failure in the vault fan-
@@ -399,6 +485,12 @@ impl StateCheckpointer {
         let vault_raft_syncs = futures::future::join_all(
             vault_raft_dbs.iter().map(|(_, db)| Arc::clone(db).sync_state()),
         );
+        let vault_blocks_syncs = futures::future::join_all(
+            vault_blocks_dbs.iter().map(|(_, db)| Arc::clone(db).sync_state()),
+        );
+        let vault_events_syncs = futures::future::join_all(
+            vault_events_dbs.iter().map(|(_, db)| Arc::clone(db).sync_state()),
+        );
         let raft_fut = Arc::clone(&self.raft_db).sync_state();
         let blocks_fut = Arc::clone(&self.blocks_db).sync_state();
         let events_db_for_sync = self.events_db.as_ref().map(Arc::clone);
@@ -406,8 +498,23 @@ impl StateCheckpointer {
             if let Some(ev) = events_db_for_sync { Some(ev.sync_state().await) } else { None }
         };
 
-        let (vault_results, vault_raft_results, raft_result, blocks_result, events_result) =
-            tokio::join!(vault_syncs, vault_raft_syncs, raft_fut, blocks_fut, events_fut);
+        let (
+            vault_results,
+            vault_raft_results,
+            vault_blocks_results,
+            vault_events_results,
+            raft_result,
+            blocks_result,
+            events_result,
+        ) = tokio::join!(
+            vault_syncs,
+            vault_raft_syncs,
+            vault_blocks_syncs,
+            vault_events_syncs,
+            raft_fut,
+            blocks_fut,
+            events_fut
+        );
 
         // Phase B: sync meta.db **after** Phase A entity DBs have
         // resolved. This is the strict-ordering invariant — the
@@ -420,8 +527,12 @@ impl StateCheckpointer {
 
         let vault_all_ok = vault_results.iter().all(|r| r.is_ok());
         let vault_raft_all_ok = vault_raft_results.iter().all(|r| r.is_ok());
+        let vault_blocks_all_ok = vault_blocks_results.iter().all(|r| r.is_ok());
+        let vault_events_all_ok = vault_events_results.iter().all(|r| r.is_ok());
         let all_ok = vault_all_ok
             && vault_raft_all_ok
+            && vault_blocks_all_ok
+            && vault_events_all_ok
             && raft_result.is_ok()
             && blocks_result.is_ok()
             && events_result.as_ref().is_none_or(|r| r.is_ok())
@@ -455,6 +566,36 @@ impl StateCheckpointer {
                     vault_id = vault_id.value(),
                     region = %self.region,
                     "state checkpoint sync failed for vault raft.db; leaving accumulators untouched so the next tick retries"
+                );
+            }
+        }
+        // Per-vault blocks.db failures share the `db = "blocks"` label
+        // with the per-org blocks.db; the `vault_id` field disambiguates
+        // (mirrors the per-vault raft.db labeling above).
+        for ((vault_id, _db), res) in vault_blocks_dbs.iter().zip(vault_blocks_results.iter()) {
+            if let Err(e) = res {
+                warn!(
+                    error = %e,
+                    trigger,
+                    db = "blocks",
+                    vault_id = vault_id.value(),
+                    region = %self.region,
+                    "state checkpoint sync failed for vault blocks.db; leaving accumulators untouched so the next tick retries"
+                );
+            }
+        }
+        // Per-vault events.db failures share the `db = "events"` label
+        // with the per-org events.db; the `vault_id` field disambiguates
+        // (mirrors the per-vault blocks.db labeling above).
+        for ((vault_id, _db), res) in vault_events_dbs.iter().zip(vault_events_results.iter()) {
+            if let Err(e) = res {
+                warn!(
+                    error = %e,
+                    trigger,
+                    db = "events",
+                    vault_id = vault_id.value(),
+                    region = %self.region,
+                    "state checkpoint sync failed for vault events.db; leaving accumulators untouched so the next tick retries"
                 );
             }
         }
@@ -539,9 +680,11 @@ impl StateCheckpointer {
                 dirty_pages,
                 vault_count = vault_dbs.len(),
                 vault_raft_count = vault_raft_dbs.len(),
+                vault_blocks_count = vault_blocks_dbs.len(),
+                vault_events_count = vault_events_dbs.len(),
                 events_enabled = self.events_db.is_some(),
                 region = %self.region,
-                "state checkpoint complete (every live vault state.db + every live vault raft.db + raft.db + blocks.db + events.db if enabled, then meta.db)"
+                "state checkpoint complete (every live vault state.db + every live vault raft.db + every live vault blocks.db + every live vault events.db + raft.db + blocks.db + events.db if enabled, then meta.db)"
             );
         } else {
             metrics::record_state_checkpoint(
@@ -726,6 +869,42 @@ mod tests {
         applied: u64,
         vault_raft_dbs: Vec<(VaultId, Arc<Database<FileBackend>>)>,
     ) -> (StateCheckpointer, RuntimeConfigHandle, CancellationToken, watch::Sender<u64>) {
+        new_checkpointer_with_vault_dbs(dbs, cfg, applied, vault_raft_dbs, Vec::new())
+    }
+
+    /// Same as [`new_checkpointer_with_vault_raft_dbs`] but also accepts
+    /// per-vault `blocks.db` handles (Phase 4.1.a). Defaults from both
+    /// helpers above pass empty lists, matching test fixtures that don't
+    /// exercise the per-vault fan-outs.
+    fn new_checkpointer_with_vault_dbs(
+        dbs: &TestDbs,
+        cfg: CheckpointConfig,
+        applied: u64,
+        vault_raft_dbs: Vec<(VaultId, Arc<Database<FileBackend>>)>,
+        vault_blocks_dbs: Vec<(VaultId, Arc<Database<FileBackend>>)>,
+    ) -> (StateCheckpointer, RuntimeConfigHandle, CancellationToken, watch::Sender<u64>) {
+        new_checkpointer_with_all_vault_dbs(
+            dbs,
+            cfg,
+            applied,
+            vault_raft_dbs,
+            vault_blocks_dbs,
+            Vec::new(),
+        )
+    }
+
+    /// Same as [`new_checkpointer_with_vault_dbs`] but also accepts
+    /// per-vault `events.db` handles (Phase 4.2). Defaults from the
+    /// other helpers pass an empty list, matching test fixtures that
+    /// don't exercise the per-vault events fan-out.
+    fn new_checkpointer_with_all_vault_dbs(
+        dbs: &TestDbs,
+        cfg: CheckpointConfig,
+        applied: u64,
+        vault_raft_dbs: Vec<(VaultId, Arc<Database<FileBackend>>)>,
+        vault_blocks_dbs: Vec<(VaultId, Arc<Database<FileBackend>>)>,
+        vault_events_dbs: Vec<(VaultId, Arc<Database<FileBackend>>)>,
+    ) -> (StateCheckpointer, RuntimeConfigHandle, CancellationToken, watch::Sender<u64>) {
         let runtime_config = RuntimeConfigHandle::new(RuntimeConfig {
             state_checkpoint: Some(cfg),
             ..RuntimeConfig::default()
@@ -742,6 +921,12 @@ mod tests {
         let vault_raft_dbs_fn: VaultRaftDbsFn = Arc::new(move || {
             vault_raft_dbs.iter().map(|(vid, db)| (*vid, Arc::clone(db))).collect()
         });
+        let vault_blocks_dbs_fn: VaultBlocksDbsFn = Arc::new(move || {
+            vault_blocks_dbs.iter().map(|(vid, db)| (*vid, Arc::clone(db))).collect()
+        });
+        let vault_events_dbs_fn: VaultEventsDbsFn = Arc::new(move || {
+            vault_events_dbs.iter().map(|(vid, db)| (*vid, Arc::clone(db))).collect()
+        });
         let cp = StateCheckpointer::from_config(
             state_layer,
             Arc::clone(&dbs.raft),
@@ -749,6 +934,8 @@ mod tests {
             dbs.events.as_ref().map(Arc::clone),
             Arc::clone(&dbs.meta),
             vault_raft_dbs_fn,
+            vault_blocks_dbs_fn,
+            vault_events_dbs_fn,
             runtime_config.clone(),
             rx,
             token.clone(),
@@ -1088,6 +1275,8 @@ mod tests {
             .expect("build shared StateLayer for checkpointer test"),
         );
         let vault_raft_dbs_fn: VaultRaftDbsFn = Arc::new(Vec::new);
+        let vault_blocks_dbs_fn: VaultBlocksDbsFn = Arc::new(Vec::new);
+        let vault_events_dbs_fn: VaultEventsDbsFn = Arc::new(Vec::new);
         let cp = StateCheckpointer::from_config(
             state_layer,
             Arc::clone(&dbs.raft),
@@ -1095,6 +1284,8 @@ mod tests {
             dbs.events.as_ref().map(Arc::clone),
             Arc::clone(&dbs.meta),
             vault_raft_dbs_fn,
+            vault_blocks_dbs_fn,
+            vault_events_dbs_fn,
             runtime_config,
             rx,
             token,
@@ -1451,11 +1642,7 @@ mod tests {
             Arc::new(PlRwLock::new(Vec::new()));
         let inventory_for_fn = Arc::clone(&inventory);
         let vault_raft_dbs_fn: VaultRaftDbsFn = Arc::new(move || {
-            inventory_for_fn
-                .read()
-                .iter()
-                .map(|(vid, db)| (*vid, Arc::clone(db)))
-                .collect()
+            inventory_for_fn.read().iter().map(|(vid, db)| (*vid, Arc::clone(db))).collect()
         });
 
         let runtime_config = RuntimeConfigHandle::new(RuntimeConfig {
@@ -1478,6 +1665,8 @@ mod tests {
             )
             .expect("build shared StateLayer for checkpointer test"),
         );
+        let vault_blocks_dbs_fn: VaultBlocksDbsFn = Arc::new(Vec::new);
+        let vault_events_dbs_fn: VaultEventsDbsFn = Arc::new(Vec::new);
         let cp = StateCheckpointer::from_config(
             state_layer,
             Arc::clone(&dbs.raft),
@@ -1485,6 +1674,8 @@ mod tests {
             dbs.events.as_ref().map(Arc::clone),
             Arc::clone(&dbs.meta),
             vault_raft_dbs_fn,
+            vault_blocks_dbs_fn,
+            vault_events_dbs_fn,
             runtime_config,
             rx,
             token,

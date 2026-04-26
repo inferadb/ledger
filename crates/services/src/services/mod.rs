@@ -40,7 +40,7 @@ mod write;
 pub use admin::AdminService;
 pub use app::AppService;
 pub use discovery::DiscoveryService;
-pub use events::EventsService;
+pub use events::{EventsService, VaultEventSource, VaultEventSources};
 pub use health::HealthService;
 pub use invitation::InvitationService;
 pub use organization::OrganizationService;

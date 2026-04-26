@@ -5671,16 +5671,10 @@ mod tests {
         // No cross-contamination: each store's events carry only its own
         // organization_id.
         for event in &events_a {
-            assert_eq!(
-                event.organization_id, org_a,
-                "store_a must only emit events for org_a"
-            );
+            assert_eq!(event.organization_id, org_a, "store_a must only emit events for org_a");
         }
         for event in &events_b {
-            assert_eq!(
-                event.organization_id, org_b,
-                "store_b must only emit events for org_b"
-            );
+            assert_eq!(event.organization_id, org_b, "store_b must only emit events for org_b");
         }
     }
 

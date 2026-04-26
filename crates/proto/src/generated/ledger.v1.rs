@@ -3620,6 +3620,12 @@ pub struct EventFilter {
     /// Filter by business correlation ID.
     #[prost(string, optional, tag = "8")]
     pub correlation_id: ::core::option::Option<::prost::alloc::string::String>,
+    /// Filter by vault. When set, the query routes to that vault's per-vault
+    /// events store and skips the org-level events store. When unset, the
+    /// query fans out across the org's events store and every per-vault
+    /// events store under that organization, merging by timestamp.
+    #[prost(message, optional, tag = "9")]
+    pub vault: ::core::option::Option<VaultSlug>,
 }
 /// List events for an organization with filtering and pagination.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

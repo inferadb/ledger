@@ -27,7 +27,7 @@ use inferadb_ledger_raft::{
 use inferadb_ledger_state::{EventStore, EventsDatabase};
 use inferadb_ledger_store::StorageBackend;
 use inferadb_ledger_types::{
-    OrganizationSlug, VaultId, VaultSlug,
+    OrganizationId, OrganizationSlug, VaultId, VaultSlug,
     events::{EventAction, EventConfig, EventEmission, EventEntry, EventOutcome, EventScope},
 };
 use tonic::{Request, Response, Status};
@@ -45,6 +45,31 @@ const MAX_LIMIT: usize = 1000;
 /// Maximum number of entries to scan in `CountEvents` to prevent
 /// unbounded scans on large datasets.
 const COUNT_SCAN_LIMIT: usize = 100_000;
+
+/// Resolver for per-vault `EventsDatabase` handles owned by the local node.
+///
+/// `ListEvents` fans out across the org-level events store and every
+/// per-vault events store registered for the target organization. The
+/// resolver returns one entry per local vault, plus its `(org_id, vault_id)`
+/// for cursor disambiguation. The org-level events store is supplied
+/// separately via the service's `events_db` field.
+///
+/// In production this is wired from
+/// [`RaftManager::list_vault_groups`](inferadb_ledger_raft::raft_manager::RaftManager::list_vault_groups);
+/// tests inject in-memory handles directly.
+pub type VaultEventSources<B> =
+    Arc<dyn Fn(OrganizationId) -> Vec<VaultEventSource<B>> + Send + Sync>;
+
+/// One per-vault events source returned by [`VaultEventSources`].
+///
+/// `events_db` is the vault's own events store; `vault_id` identifies the
+/// vault within its parent organization.
+pub struct VaultEventSource<B: StorageBackend> {
+    /// Vault identifier within its parent organization.
+    pub vault_id: VaultId,
+    /// The vault's events database handle.
+    pub events_db: EventsDatabase<B>,
+}
 
 /// Events query and ingestion service.
 ///
@@ -89,6 +114,13 @@ pub struct EventsService<B: StorageBackend> {
     /// Multi-Raft manager, used to resolve an organization to its REGIONAL
     /// Raft group for `IngestExternalEvents` proposal routing.
     manager: Option<Arc<RaftManager>>,
+
+    /// Resolver for per-vault events stores registered on the local node.
+    ///
+    /// Powers [`list_events`](Self::list_events) fan-out across the
+    /// org-level and per-vault events stores. When unset, `ListEvents`
+    /// reads only the org-level store (`events_db`).
+    vault_event_sources: Option<VaultEventSources<B>>,
 
     /// Maximum time to wait for an `IngestExternalEvents` Raft proposal to commit.
     #[builder(default = Duration::from_secs(30))]
@@ -143,6 +175,9 @@ fn compute_filter_hash(filter: &Option<proto::EventFilter>) -> [u8; 8] {
         }
         if let Some(cid) = &f.correlation_id {
             params.push_str(&format!("correlation:{cid},"));
+        }
+        if let Some(vault) = &f.vault {
+            params.push_str(&format!("vault:{},", vault.slug));
         }
     }
     PageTokenCodec::compute_query_hash(params.as_bytes())
@@ -215,6 +250,24 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
     /// Lists events with pagination and optional filtering by action, type, or time range.
     ///
     /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
+    ///
+    /// ## Fan-out
+    ///
+    /// Events for an organization live in two kinds of stores:
+    ///
+    /// 1. The **org-level** events store ([`Self::events_db`]) — written by apply paths that emit
+    ///    org-scoped events (e.g. `CreateVault`, `AddOrganizationMember`).
+    /// 2. **Per-vault** events stores — one per vault registered on this node, written by apply
+    ///    paths that emit vault-scoped events (e.g. `Write`, `IngestEvents`).
+    ///
+    /// When [`EventFilter::vault`](proto::EventFilter::vault) is set the
+    /// query routes to that vault's per-vault store and skips the org-level
+    /// store. Otherwise it fans out across the org-level store and every
+    /// per-vault store registered for the organization, merges by
+    /// `(timestamp_ns, event_id)`, and slices to the requested page size.
+    /// Pagination uses a global cursor (the storage key includes
+    /// `org_id || timestamp_ns || event_hash` so a single cursor advances
+    /// every source consistently).
     async fn list_events(
         &self,
         request: Request<proto::ListEventsRequest>,
@@ -233,7 +286,9 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
         let start_ns = timestamp_to_ns(&req.filter.as_ref().and_then(|f| f.start_time), 0);
         let end_ns = timestamp_to_ns(&req.filter.as_ref().and_then(|f| f.end_time), u64::MAX);
 
-        // Compute query hash for token validation
+        // Compute query hash for token validation. Includes the vault filter
+        // so a switch from "all vaults" to a specific vault rejects a stale
+        // page token.
         let query_hash = compute_filter_hash(&req.filter);
 
         // Decode and validate page token if provided
@@ -252,51 +307,133 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
             Some(token.last_key)
         };
 
-        // Read from events database
-        let txn = self.events_db.read().map_err(|e| error_classify::storage_error(&e))?;
+        // Build the list of events stores to read from.
+        //
+        // Vault-filtered queries route to a single per-vault store (Case A);
+        // org-scoped queries fan out across the org-level store and every
+        // per-vault store registered for the organization (Case B). When no
+        // `vault_event_sources` resolver is wired (test fixtures, legacy
+        // single-store deployments), the handler reads only the org-level
+        // store — the existing org-level results are preserved.
+        let sources: Vec<EventsDatabase<B>> = match (
+            req.filter.as_ref().and_then(|f| f.vault.as_ref()),
+            self.vault_event_sources.as_ref(),
+        ) {
+            (Some(vault_proto), Some(resolver_fn)) => {
+                let vault_slug = SlugResolver::extract_vault_slug(&Some(*vault_proto))?;
+                let (owning_org, vault_id) = resolver.resolve_vault_pair(vault_slug)?;
+                if owning_org != org_id {
+                    return Err(Status::not_found(format!(
+                        "Vault {} does not belong to organization {}",
+                        vault_slug.value(),
+                        org_id.value(),
+                    )));
+                }
+                let mut entries = resolver_fn(org_id);
+                let matched = entries.iter().position(|s| s.vault_id == vault_id);
+                match matched {
+                    Some(idx) => vec![entries.swap_remove(idx).events_db],
+                    None => {
+                        // Vault is not registered on this node. Returning an
+                        // empty page (rather than 404) matches the read-path
+                        // contract: any node may serve `ListEvents`, but only
+                        // nodes hosting the vault group's per-vault events.db
+                        // can return its events. The SDK's region-leader cache
+                        // will redirect callers to the right node.
+                        Vec::new()
+                    },
+                }
+            },
+            (Some(_vault_proto), None) => {
+                // Vault filter set but no fan-out resolver wired. The legacy
+                // single-store path cannot honour a vault filter.
+                return Err(Status::failed_precondition(
+                    "vault filter is unsupported on this deployment",
+                ));
+            },
+            (None, Some(resolver_fn)) => {
+                let mut all = Vec::with_capacity(8);
+                all.push(self.events_db.clone());
+                for src in resolver_fn(org_id) {
+                    all.push(src.events_db);
+                }
+                all
+            },
+            (None, None) => vec![self.events_db.clone()],
+        };
 
-        // We need to over-fetch because in-memory filtering may discard some entries.
-        // Fetch in batches until we have enough matching entries or run out.
-        let mut result_entries = Vec::with_capacity(limit);
-        let mut cursor = resume_key.clone();
-        let mut has_more = false;
+        // Read from every source. We over-fetch each source by `limit + 1`
+        // entries past the cursor — enough to populate one full output page
+        // after merge + filter, with one extra entry to detect "more
+        // available". Per-source over-fetch beyond `limit` would only matter
+        // if a single source dominates the merged output; in the common case
+        // (events sprinkled across sources) this bound is loose enough.
+        let mut merged: Vec<EventEntry> = Vec::with_capacity(limit.saturating_add(8));
+        let mut any_source_has_more = false;
         let batch_size = limit.saturating_mul(4).max(256);
 
-        loop {
-            let (batch, next_cursor) =
-                EventStore::list(&txn, org_id, start_ns, end_ns, batch_size, cursor.as_deref())
-                    .map_err(|e| error_classify::storage_error(&e))?;
+        for source in &sources {
+            let txn = source.read().map_err(|e| error_classify::storage_error(&e))?;
+            let mut cursor = resume_key.clone();
+            let mut filtered_from_source = 0usize;
+            let mut source_exhausted = true;
 
-            if batch.is_empty() {
-                break;
-            }
+            loop {
+                let (batch, next_cursor) =
+                    EventStore::list(&txn, org_id, start_ns, end_ns, batch_size, cursor.as_deref())
+                        .map_err(|e| error_classify::storage_error(&e))?;
 
-            for entry in batch {
-                if result_entries.len() >= limit {
-                    has_more = true;
+                if batch.is_empty() {
                     break;
                 }
-                if matches_filter(&entry, &req.filter) {
-                    result_entries.push(entry);
+
+                for entry in batch {
+                    if matches_filter(&entry, &req.filter) {
+                        merged.push(entry);
+                        filtered_from_source += 1;
+                    }
                 }
+
+                // Stop once this source has produced enough post-filter
+                // entries to be sure it can't displace any of the first
+                // `limit` events in the merged output. If the source still
+                // has more rows after that, we don't know whether they'd
+                // change the merge order, so we mark "more available".
+                if filtered_from_source >= limit {
+                    source_exhausted = next_cursor.is_none();
+                    break;
+                }
+
+                if next_cursor.is_none() {
+                    break;
+                }
+                cursor = next_cursor;
             }
 
-            if result_entries.len() >= limit || next_cursor.is_none() {
-                if result_entries.len() >= limit {
-                    has_more = true;
-                }
-                break;
+            if !source_exhausted {
+                any_source_has_more = true;
             }
-
-            cursor = next_cursor;
         }
 
-        // Truncate to limit if we collected more
-        result_entries.truncate(limit);
+        // Sort merged entries by storage-key order, which is
+        // `(org_id, timestamp_ns, event_hash)`. All events share the same
+        // org_id within a single query, so this is effectively a
+        // chronological sort with a stable tie-breaker on `event_hash`.
+        merged.sort_by(|a, b| {
+            let a_ts = a.timestamp.timestamp_nanos_opt().unwrap_or(i64::MAX) as u64;
+            let b_ts = b.timestamp.timestamp_nanos_opt().unwrap_or(i64::MAX) as u64;
+            (a_ts, seahash::hash(&a.event_id)).cmp(&(b_ts, seahash::hash(&b.event_id)))
+        });
 
-        // Build next page token from the last returned entry
+        let has_more = merged.len() > limit || any_source_has_more;
+        merged.truncate(limit);
+
+        // Build next page token from the last returned entry. Per-source
+        // `EventStore::list` accepts the same cursor unchanged because the
+        // storage key incorporates `org_id || timestamp_ns || event_hash`,
+        // and every source for this query shares the same `org_id`.
         let next_page_token = if has_more {
-            result_entries.last().map(|entry| {
+            merged.last().map(|entry| {
                 let ts_ns = entry.timestamp.timestamp_nanos_opt().unwrap_or_else(|| {
                     tracing::warn!(timestamp = ?entry.timestamp, "Timestamp nanos overflow — using max sentinel");
                     i64::MAX
@@ -315,14 +452,14 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
         };
 
         // Convert domain entries to proto
-        let entries: Vec<proto::EventEntry> =
-            result_entries.iter().map(proto::EventEntry::from).collect();
+        let entries: Vec<proto::EventEntry> = merged.iter().map(proto::EventEntry::from).collect();
 
         tracing::info!(
             service = "EventsService",
             method = "ListEvents",
             org_id = org_id.value(),
             returned = entries.len(),
+            sources = sources.len(),
             has_more = has_more,
             "Events query completed"
         );
@@ -1519,6 +1656,396 @@ mod tests {
         });
         let err = service.list_events(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    // --- Fan-out tests (cross-vault aggregation) ---
+    //
+    // Phase 4.4: vault-scoped events live in per-vault events.db files; the
+    // org's events.db only carries org-scoped events. `ListEvents` must fan
+    // out across the org-level and per-vault stores when no vault filter is
+    // set, and route to a single per-vault store when a filter is set.
+
+    /// Builds a service wired with two per-vault events.db instances plus the
+    /// org-level events.db. Returns the service alongside the three databases
+    /// so tests can write directly into the appropriate store. The vault slugs
+    /// `(11, 22)` resolve to `(VaultId(11), VaultId(22))` under organization
+    /// id `1` (slug `100`).
+    fn make_fanout_service() -> (
+        EventsService<InMemoryBackend>,
+        EventsDatabase<InMemoryBackend>,
+        EventsDatabase<InMemoryBackend>,
+        EventsDatabase<InMemoryBackend>,
+    ) {
+        let org_events_db = EventsDatabase::open_in_memory().expect("open");
+        let vault_a_db = EventsDatabase::open_in_memory().expect("open");
+        let vault_b_db = EventsDatabase::open_in_memory().expect("open");
+
+        let mut state = AppliedState::default();
+        state
+            .slug_index
+            .insert(inferadb_ledger_types::OrganizationSlug::new(100), OrganizationId::new(1));
+        state
+            .id_to_slug
+            .insert(OrganizationId::new(1), inferadb_ledger_types::OrganizationSlug::new(100));
+        // Vault A: slug 11 -> VaultId 11
+        state.vault_slug_index.insert(
+            inferadb_ledger_types::VaultSlug::new(11),
+            (OrganizationId::new(1), inferadb_ledger_types::VaultId::new(11)),
+        );
+        state.vault_id_to_slug.insert(
+            (OrganizationId::new(1), inferadb_ledger_types::VaultId::new(11)),
+            inferadb_ledger_types::VaultSlug::new(11),
+        );
+        // Vault B: slug 22 -> VaultId 22
+        state.vault_slug_index.insert(
+            inferadb_ledger_types::VaultSlug::new(22),
+            (OrganizationId::new(1), inferadb_ledger_types::VaultId::new(22)),
+        );
+        state.vault_id_to_slug.insert(
+            (OrganizationId::new(1), inferadb_ledger_types::VaultId::new(22)),
+            inferadb_ledger_types::VaultSlug::new(22),
+        );
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
+
+        let vault_a_clone = vault_a_db.clone();
+        let vault_b_clone = vault_b_db.clone();
+        let resolver: VaultEventSources<InMemoryBackend> = Arc::new(move |org| {
+            if org == OrganizationId::new(1) {
+                vec![
+                    VaultEventSource {
+                        vault_id: inferadb_ledger_types::VaultId::new(11),
+                        events_db: vault_a_clone.clone(),
+                    },
+                    VaultEventSource {
+                        vault_id: inferadb_ledger_types::VaultId::new(22),
+                        events_db: vault_b_clone.clone(),
+                    },
+                ]
+            } else {
+                Vec::new()
+            }
+        });
+
+        let service = EventsService::builder()
+            .events_db(org_events_db.clone())
+            .applied_state(accessor)
+            .page_token_codec(PageTokenCodec::with_random_key())
+            .vault_event_sources(resolver)
+            .build();
+
+        (service, org_events_db, vault_a_db, vault_b_db)
+    }
+
+    fn write_to_db(events_db: &EventsDatabase<InMemoryBackend>, entries: &[EventEntry]) {
+        let mut txn = events_db.write().expect("write txn");
+        for entry in entries {
+            EventStore::write(&mut txn, entry).expect("write");
+        }
+        txn.commit().expect("commit");
+    }
+
+    #[tokio::test]
+    async fn list_events_fanout_no_vault_filter_merges_all_sources() {
+        let (service, org_db, vault_a_db, vault_b_db) = make_fanout_service();
+
+        // Org-level: single event at t=1
+        write_to_db(&org_db, &[make_entry(1, [1u8; 16], 1_700_000_001, EventAction::VaultCreated)]);
+        // Vault A: events at t=2 and t=4
+        write_to_db(
+            &vault_a_db,
+            &[
+                make_entry(1, [2u8; 16], 1_700_000_002, EventAction::WriteCommitted),
+                make_entry(1, [4u8; 16], 1_700_000_004, EventAction::WriteCommitted),
+            ],
+        );
+        // Vault B: events at t=3 and t=5
+        write_to_db(
+            &vault_b_db,
+            &[
+                make_entry(1, [3u8; 16], 1_700_000_003, EventAction::WriteCommitted),
+                make_entry(1, [5u8; 16], 1_700_000_005, EventAction::WriteCommitted),
+            ],
+        );
+
+        let req = Request::new(proto::ListEventsRequest {
+            organization: Some(proto::OrganizationSlug { slug: 100 }),
+            filter: None,
+            limit: 100,
+            page_token: String::new(),
+            caller: None,
+        });
+        let resp = service.list_events(req).await.unwrap();
+        let entries = &resp.get_ref().entries;
+
+        assert_eq!(entries.len(), 5, "all 5 events from 3 sources should merge");
+        // Verify chronological ordering (1, 2, 3, 4, 5).
+        let timestamps: Vec<i64> =
+            entries.iter().map(|e| e.timestamp.as_ref().expect("ts").seconds).collect();
+        assert_eq!(
+            timestamps,
+            vec![1_700_000_001, 1_700_000_002, 1_700_000_003, 1_700_000_004, 1_700_000_005]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_events_fanout_vault_filter_routes_to_single_vault() {
+        let (service, org_db, vault_a_db, vault_b_db) = make_fanout_service();
+
+        write_to_db(&org_db, &[make_entry(1, [1u8; 16], 1_700_000_001, EventAction::VaultCreated)]);
+        write_to_db(
+            &vault_a_db,
+            &[
+                make_entry(1, [10u8; 16], 1_700_000_010, EventAction::WriteCommitted),
+                make_entry(1, [11u8; 16], 1_700_000_011, EventAction::WriteCommitted),
+            ],
+        );
+        write_to_db(
+            &vault_b_db,
+            &[make_entry(1, [20u8; 16], 1_700_000_020, EventAction::WriteCommitted)],
+        );
+
+        // Filter on Vault A (slug 11): expect exactly the two vault A events.
+        let req = Request::new(proto::ListEventsRequest {
+            organization: Some(proto::OrganizationSlug { slug: 100 }),
+            filter: Some(proto::EventFilter {
+                vault: Some(proto::VaultSlug { slug: 11 }),
+                ..Default::default()
+            }),
+            limit: 100,
+            page_token: String::new(),
+            caller: None,
+        });
+        let resp = service.list_events(req).await.unwrap();
+        let entries = &resp.get_ref().entries;
+        assert_eq!(entries.len(), 2);
+        let timestamps: Vec<i64> =
+            entries.iter().map(|e| e.timestamp.as_ref().expect("ts").seconds).collect();
+        assert_eq!(timestamps, vec![1_700_000_010, 1_700_000_011]);
+
+        // Filter on Vault B (slug 22): expect only the single vault B event.
+        let req = Request::new(proto::ListEventsRequest {
+            organization: Some(proto::OrganizationSlug { slug: 100 }),
+            filter: Some(proto::EventFilter {
+                vault: Some(proto::VaultSlug { slug: 22 }),
+                ..Default::default()
+            }),
+            limit: 100,
+            page_token: String::new(),
+            caller: None,
+        });
+        let resp = service.list_events(req).await.unwrap();
+        let entries = &resp.get_ref().entries;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].timestamp.as_ref().expect("ts").seconds, 1_700_000_020);
+    }
+
+    #[tokio::test]
+    async fn list_events_fanout_pagination_across_sources() {
+        // 12 events spread across vault A (4), vault B (4), org-level (4),
+        // interleaved by timestamp. With page_size = 5 we expect three pages
+        // covering all 12 entries with no duplicates and chronological order.
+        let (service, org_db, vault_a_db, vault_b_db) = make_fanout_service();
+
+        let mut org_entries = Vec::new();
+        let mut vault_a_entries = Vec::new();
+        let mut vault_b_entries = Vec::new();
+        for i in 0..12u8 {
+            let entry =
+                make_entry(1, [i; 16], 1_700_000_000 + i64::from(i), EventAction::WriteCommitted);
+            match i % 3 {
+                0 => org_entries.push(entry),
+                1 => vault_a_entries.push(entry),
+                _ => vault_b_entries.push(entry),
+            }
+        }
+        write_to_db(&org_db, &org_entries);
+        write_to_db(&vault_a_db, &vault_a_entries);
+        write_to_db(&vault_b_db, &vault_b_entries);
+
+        let mut all_seen: Vec<i64> = Vec::new();
+        let mut page_token = String::new();
+        let mut pages = 0usize;
+        loop {
+            let req = Request::new(proto::ListEventsRequest {
+                organization: Some(proto::OrganizationSlug { slug: 100 }),
+                filter: None,
+                limit: 5,
+                page_token: page_token.clone(),
+                caller: None,
+            });
+            let resp = service.list_events(req).await.unwrap();
+            for e in &resp.get_ref().entries {
+                all_seen.push(e.timestamp.as_ref().expect("ts").seconds);
+            }
+            pages += 1;
+            page_token = resp.get_ref().next_page_token.clone();
+            if page_token.is_empty() || pages > 10 {
+                break;
+            }
+        }
+
+        assert!(pages <= 3, "expected at most 3 pages, got {pages}");
+        assert_eq!(all_seen.len(), 12, "every event observed exactly once");
+        // Strictly ascending timestamps prove no duplicates and chronological order.
+        let mut sorted = all_seen.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted, all_seen);
+    }
+
+    #[tokio::test]
+    async fn list_events_fanout_unknown_vault_returns_empty() {
+        let (_service, _org_db, vault_a_db, _vault_b_db) = make_fanout_service();
+
+        // Seed vault A so we know the request path is reachable, but query
+        // for a vault not registered on this node (slug 99 does not appear
+        // in the resolver's output).
+        write_to_db(
+            &vault_a_db,
+            &[make_entry(1, [1u8; 16], 1_700_000_001, EventAction::WriteCommitted)],
+        );
+
+        // Add an unknown slug to applied state so resolver returns Ok, but
+        // the vault is not in our `vault_event_sources` resolver.
+        let mut state = AppliedState::default();
+        state
+            .slug_index
+            .insert(inferadb_ledger_types::OrganizationSlug::new(100), OrganizationId::new(1));
+        state
+            .id_to_slug
+            .insert(OrganizationId::new(1), inferadb_ledger_types::OrganizationSlug::new(100));
+        state.vault_slug_index.insert(
+            inferadb_ledger_types::VaultSlug::new(99),
+            (OrganizationId::new(1), inferadb_ledger_types::VaultId::new(99)),
+        );
+        state.vault_id_to_slug.insert(
+            (OrganizationId::new(1), inferadb_ledger_types::VaultId::new(99)),
+            inferadb_ledger_types::VaultSlug::new(99),
+        );
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
+        let vault_a_clone = vault_a_db.clone();
+        let resolver: VaultEventSources<InMemoryBackend> = Arc::new(move |_org| {
+            // Resolver returns vault 11 but request asks for vault 99.
+            vec![VaultEventSource {
+                vault_id: inferadb_ledger_types::VaultId::new(11),
+                events_db: vault_a_clone.clone(),
+            }]
+        });
+        let service = EventsService::builder()
+            .events_db(EventsDatabase::open_in_memory().expect("open"))
+            .applied_state(accessor)
+            .page_token_codec(PageTokenCodec::with_random_key())
+            .vault_event_sources(resolver)
+            .build();
+
+        let req = Request::new(proto::ListEventsRequest {
+            organization: Some(proto::OrganizationSlug { slug: 100 }),
+            filter: Some(proto::EventFilter {
+                vault: Some(proto::VaultSlug { slug: 99 }),
+                ..Default::default()
+            }),
+            limit: 100,
+            page_token: String::new(),
+            caller: None,
+        });
+        let resp = service.list_events(req).await.unwrap();
+        assert_eq!(resp.get_ref().entries.len(), 0);
+        assert!(resp.get_ref().next_page_token.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_events_fanout_vault_filter_cross_org_rejected() {
+        // Build a fan-out service for org 1, then ask for a vault that
+        // belongs to org 2. The handler must reject with NotFound rather
+        // than silently returning org 1's events.
+        let (service, _org_db, _a, _b) = make_fanout_service();
+
+        // Manually inject a vault slug that resolves to a different org via
+        // a fresh service with an extended applied state.
+        let mut state = AppliedState::default();
+        state
+            .slug_index
+            .insert(inferadb_ledger_types::OrganizationSlug::new(100), OrganizationId::new(1));
+        state
+            .id_to_slug
+            .insert(OrganizationId::new(1), inferadb_ledger_types::OrganizationSlug::new(100));
+        // Vault 77 belongs to org 7 (different org).
+        state.vault_slug_index.insert(
+            inferadb_ledger_types::VaultSlug::new(77),
+            (OrganizationId::new(7), inferadb_ledger_types::VaultId::new(77)),
+        );
+        let accessor = AppliedStateAccessor::new_for_test(Arc::new(ArcSwap::from_pointee(state)));
+        let resolver: VaultEventSources<InMemoryBackend> = Arc::new(|_org| Vec::new());
+        let cross_service = EventsService::builder()
+            .events_db(EventsDatabase::open_in_memory().expect("open"))
+            .applied_state(accessor)
+            .page_token_codec(PageTokenCodec::with_random_key())
+            .vault_event_sources(resolver)
+            .build();
+
+        let req = Request::new(proto::ListEventsRequest {
+            organization: Some(proto::OrganizationSlug { slug: 100 }),
+            filter: Some(proto::EventFilter {
+                vault: Some(proto::VaultSlug { slug: 77 }),
+                ..Default::default()
+            }),
+            limit: 100,
+            page_token: String::new(),
+            caller: None,
+        });
+        let err = cross_service.list_events(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+
+        // Original fanout service unaffected.
+        let req = Request::new(proto::ListEventsRequest {
+            organization: Some(proto::OrganizationSlug { slug: 100 }),
+            filter: None,
+            limit: 100,
+            page_token: String::new(),
+            caller: None,
+        });
+        let resp = service.list_events(req).await.unwrap();
+        assert_eq!(resp.get_ref().entries.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn list_events_fanout_filters_apply_after_merge() {
+        // Filters (action, principal, etc.) must apply to every source —
+        // a vault-scoped event matching the filter must appear, and an
+        // org-scoped event not matching must not.
+        let (service, org_db, vault_a_db, _vault_b_db) = make_fanout_service();
+
+        write_to_db(
+            &org_db,
+            &[
+                make_entry(1, [1u8; 16], 1_700_000_001, EventAction::VaultCreated),
+                make_entry(1, [2u8; 16], 1_700_000_002, EventAction::WriteCommitted),
+            ],
+        );
+        write_to_db(
+            &vault_a_db,
+            &[
+                make_entry(1, [3u8; 16], 1_700_000_003, EventAction::WriteCommitted),
+                make_entry(1, [4u8; 16], 1_700_000_004, EventAction::VaultCreated),
+            ],
+        );
+
+        let req = Request::new(proto::ListEventsRequest {
+            organization: Some(proto::OrganizationSlug { slug: 100 }),
+            filter: Some(proto::EventFilter {
+                actions: vec!["write_committed".to_string()],
+                ..Default::default()
+            }),
+            limit: 100,
+            page_token: String::new(),
+            caller: None,
+        });
+        let resp = service.list_events(req).await.unwrap();
+        let entries = &resp.get_ref().entries;
+        assert_eq!(entries.len(), 2);
+        for e in entries {
+            assert_eq!(e.action, "write_committed");
+        }
     }
 
     // --- GetEvent tests ---

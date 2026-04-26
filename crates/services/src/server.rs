@@ -559,6 +559,37 @@ impl LedgerServer {
                 (None, None, None)
             };
 
+            // Resolver for per-vault events stores. `ListEvents` fans out
+            // across the org-level store and every per-vault store
+            // registered for the target organization. The resolver walks
+            // the manager's vault-group registry and returns the local
+            // node's events.db handle for each `(region, org_id, *)`
+            // triple — vault groups not hosted on this node are filtered
+            // out implicitly because they are absent from `vault_groups`.
+            let manager_for_sources = self.manager.clone();
+            let vault_event_sources: crate::services::VaultEventSources<FileBackend> =
+                Arc::new(move |target_org| {
+                    let mut out = Vec::new();
+                    for (region, org_id, vault_id) in manager_for_sources.list_vault_groups() {
+                        if org_id != target_org {
+                            continue;
+                        }
+                        let Ok(group) =
+                            manager_for_sources.get_vault_group(region, org_id, vault_id)
+                        else {
+                            continue;
+                        };
+                        let Some(writer) = group.event_writer() else {
+                            continue;
+                        };
+                        out.push(crate::services::VaultEventSource {
+                            vault_id,
+                            events_db: (**writer.events_db()).clone(),
+                        });
+                    }
+                    out
+                });
+
             let events_service = EventsService::builder()
                 .events_db(events_db)
                 .applied_state(system.applied_state().clone())
@@ -571,6 +602,7 @@ impl LedgerServer {
                 // Route IngestEvents through REGIONAL Raft.
                 .proposer(events_proposer.clone())
                 .manager(self.manager.clone())
+                .vault_event_sources(vault_event_sources)
                 .proposal_timeout(self.proposal_timeout)
                 .build();
             router = router.add_service(EventsServiceServer::with_interceptor(

@@ -3254,6 +3254,11 @@ message EventFilter {
   EventEmissionPath emission_path = 7;
   // Filter by business correlation ID.
   optional string correlation_id = 8;
+  // Filter by vault. When set, the query routes to that vault's per-vault
+  // events store and skips the org-level events store. When unset, the
+  // query fans out across the org's events store and every per-vault
+  // events store under that organization, merging by timestamp.
+  optional VaultSlug vault = 9;
 }
 
 // List events for an organization with filtering and pagination.

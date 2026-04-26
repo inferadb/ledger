@@ -131,8 +131,7 @@ impl ConsensusEngine {
         // polled it (e.g., the JoinHandle was dropped on a `?` early
         // return higher up the call stack). If we see both but no
         // subsequent "tick" logs, the task is alive but blocked.
-        let initial_spawn_shard_ids: Vec<u64> =
-            state_receivers.keys().map(|id| id.0).collect();
+        let initial_spawn_shard_ids: Vec<u64> = state_receivers.keys().map(|id| id.0).collect();
         tracing::debug!(
             shard_count = state_receivers.len(),
             shard_ids = ?initial_spawn_shard_ids,

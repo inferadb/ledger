@@ -207,6 +207,17 @@ impl ReadService {
     /// Resolves organization and vault IDs from a request using the region resolver.
     ///
     /// Returns `(organization_id, vault_id, region_context)`.
+    ///
+    /// Phase 4.1.a: when a vault group is live for the resolved
+    /// `(region, organization_id, vault_id)` triple, the returned
+    /// [`RegionContext::block_archive`] is swapped from the parent
+    /// organization's archive to the vault's own per-vault archive
+    /// (`{data_dir}/{region}/{org_id}/state/vault-{vault_id}/blocks.db`).
+    /// Vault apply now appends blocks to the per-vault archive, so read
+    /// paths must look up against the same handle. When no vault group
+    /// is registered (manager unavailable or vault not yet started on
+    /// this node) the parent org's archive is preserved — callers see
+    /// `BlockNotFound` rather than a stale-routing failure.
     fn resolve_org_vault(
         &self,
         organization: &Option<inferadb_ledger_proto::proto::OrganizationSlug>,
@@ -215,9 +226,15 @@ impl ReadService {
         let system = self.resolver.system_region()?;
         let organization_id =
             SlugResolver::new(system.applied_state.clone()).extract_and_resolve(organization)?;
-        let region = self.resolver.resolve(organization_id)?;
+        let mut region = self.resolver.resolve(organization_id)?;
         // Vault slug indexes are in GLOBAL applied state, not the data region's.
         let vault_id = SlugResolver::new(system.applied_state).extract_and_resolve_vault(vault)?;
+        if let Some(manager) = &self.manager
+            && let Ok(vault_group) =
+                manager.get_vault_group(region.region, organization_id, vault_id)
+        {
+            region.block_archive = Arc::clone(vault_group.block_archive());
+        }
         Ok((organization_id, vault_id, region))
     }
 

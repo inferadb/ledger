@@ -87,7 +87,7 @@ use crate::{
     metrics,
     region_storage::RegionStorageManager,
     runtime_config::RuntimeConfigHandle,
-    state_checkpointer::{StateCheckpointer, VaultRaftDbsFn},
+    state_checkpointer::{StateCheckpointer, VaultBlocksDbsFn, VaultEventsDbsFn, VaultRaftDbsFn},
     ttl_gc::TtlGarbageCollector,
     types::{LedgerNodeId, LedgerResponse, OrganizationRequest, RaftPayload},
 };
@@ -474,13 +474,18 @@ pub struct InnerGroup {
     pub(crate) events_db: Option<Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>>,
     /// Apply-phase event writer cloned from the org's `RaftLogStore`.
     ///
-    /// `EventWriter` wraps `Arc<EventsDatabase>` + `EventConfig`, and `Clone`
-    /// produces an additional handle that emits into the same physical
-    /// `events.db`. Per-vault `RaftLogStore` instances clone this handle in
-    /// [`RaftManager::start_vault_group`] so vault apply lands events in the
-    /// shared org `events.db` (per-vault isolation is a separate slice). When
-    /// `None` (e.g. test fixtures with no events configuration), vault apply
-    /// also runs without an `event_writer` and apply skips event emission.
+    /// `EventWriter` wraps `Arc<EventsDatabase>` + `EventConfig`. This
+    /// handle is bound to the org-level `events.db` and receives
+    /// org-scoped emissions (CreateVault, AddOrganizationMember, team /
+    /// invitation / app lifecycle, etc.). Phase 4.2 of per-vault
+    /// consensus split vault-scoped emissions off into per-vault
+    /// `events.db` files: [`RaftManager::start_vault_group`] opens a
+    /// fresh writer over each vault's own `events.db` and wires it into
+    /// the vault's `RaftLogStore`. The org's writer reads `EventConfig`
+    /// from this field to seed the per-vault writer's scope flags / TTL.
+    /// When `None` (e.g. test fixtures with no events configuration),
+    /// vault apply also runs without an `event_writer` and apply skips
+    /// event emission.
     pub(crate) event_writer: Option<EventWriter<FileBackend>>,
     /// Last activity timestamp (for hibernation).
     pub(crate) last_activity: Arc<parking_lot::Mutex<std::time::Instant>>,
@@ -591,12 +596,14 @@ impl InnerGroup {
     /// Returns the apply-phase event writer cloned from the org's
     /// `RaftLogStore`, if events are configured for this group.
     ///
-    /// Used by [`RaftManager::start_vault_group`] to share the org's writer
-    /// with the vault's `RaftLogStore` — both org and vault apply paths emit
-    /// into the same physical `events.db` until per-vault events isolation
-    /// lands as a separate slice. Returns `None` for groups started without
-    /// events configuration (e.g. some test fixtures), in which case vault
-    /// apply also runs without an `event_writer` and skips event emission.
+    /// Bound to the org-level `events.db`. Phase 4.2 of per-vault
+    /// consensus split vault-scoped emissions off to per-vault
+    /// `events.db` files; this writer continues to receive org-scoped
+    /// emissions only. [`RaftManager::start_vault_group`] reads this
+    /// field's [`EventConfig`] to seed each vault's per-vault writer.
+    /// Returns `None` for groups started without events configuration
+    /// (e.g. some test fixtures), in which case vault apply also runs
+    /// without an `event_writer` and skips event emission.
     pub fn event_writer(&self) -> Option<&EventWriter<FileBackend>> {
         self.event_writer.as_ref()
     }
@@ -1249,7 +1256,12 @@ pub struct InnerVaultGroup {
     /// apply workers write through the same accessor the org uses for
     /// metadata reads.
     pub(crate) state: Arc<StateLayer<FileBackend>>,
-    /// Per-vault block archive — the vault's own Merkle chain.
+    /// Per-vault block archive — the vault's own Merkle chain, backed by
+    /// its own `blocks.db` file at
+    /// `{data_dir}/{region}/{org_id}/state/vault-{vault_id}/blocks.db`
+    /// (Phase 4.1.a). Each vault's chain starts fresh at
+    /// `{ height: 0, previous_hash: ZERO_HASH }` (hard cutover; new
+    /// installs only).
     pub(crate) block_archive: Arc<BlockArchive<FileBackend>>,
     /// Accessor for applied state.
     pub(crate) applied_state: AppliedStateAccessor,
@@ -1294,14 +1306,26 @@ pub struct InnerVaultGroup {
     /// this field is a parallel reference so the database stays live
     /// even after apply-task teardown.
     pub(crate) raft_db: Arc<Database<FileBackend>>,
-    /// Apply-phase event writer cloned from the parent
-    /// [`InnerGroup::event_writer`] at vault-group start. Held alongside
-    /// the writer attached to the vault's owned `RaftLogStore` so the
-    /// writer handle stays observable from the [`InnerVaultGroup`]
-    /// (e.g. for tests) after the log store is moved into the apply task.
-    /// `None` when the parent org has no events configured — in that case
-    /// the vault's `RaftLogStore` is also constructed without a writer
-    /// and apply skips event emission.
+    /// Apply-phase event writer bound to this vault's per-vault
+    /// `events.db` at
+    /// `{data_dir}/{region}/{org_id}/state/vault-{vault_id}/events.db`.
+    /// Held alongside the writer attached to the vault's owned
+    /// `RaftLogStore` so the writer handle stays observable from the
+    /// [`InnerVaultGroup`] (e.g. for tests) after the log store is
+    /// moved into the apply task.
+    ///
+    /// Phase 4.2 of per-vault consensus: vault-scoped emissions
+    /// (Write, BatchWrite, IngestExternalEvents) land in this writer.
+    /// Org-scoped emissions (CreateVault, AddOrganizationMember, etc.)
+    /// continue to land in the parent organization's writer
+    /// ([`InnerGroup::event_writer`]). The vault writer inherits its
+    /// `EventConfig` from the parent org's writer at
+    /// [`RaftManager::start_vault_group`] time so scope flags / TTL
+    /// stay aligned.
+    ///
+    /// `None` when the parent org has no events configured — in that
+    /// case the vault's `RaftLogStore` is also constructed without a
+    /// writer and apply skips event emission.
     pub(crate) event_writer: Option<EventWriter<FileBackend>>,
 }
 
@@ -2534,6 +2558,40 @@ impl RaftManager {
         })?;
         let vault_raft_db_path = vault_dir.join("raft.db");
 
+        // Phase 4.1.a: open / create the per-vault `blocks.db` and wrap
+        // it in its own [`BlockArchive`]. Each vault now owns its own
+        // Merkle chain — `append_block` lands in the per-vault file
+        // rather than sharing the parent organization's chain. The chain
+        // starts fresh: `RaftLogStore::open_for_vault` seeds
+        // `region_chain` with `{ height: 0, previous_hash: ZERO_HASH }`
+        // by default, which is now correct for per-vault semantics
+        // (hard cutover; new installs only).
+        //
+        // Mirrors the per-org construction in `open_region_storage`:
+        // existing files reopen via `Database::open`; brand-new files
+        // are created with `ORGANIZATION_PAGE_SIZE` so vault DBs share
+        // the same Raft-batch-sized pages as the rest of the per-org
+        // store.
+        let vault_blocks_db_path =
+            self.storage_manager.vault_blocks_db_path(region, organization_id, vault_id);
+        let vault_blocks_db = if vault_blocks_db_path.exists() {
+            Database::<FileBackend>::open(&vault_blocks_db_path)
+        } else {
+            let blocks_db_config = inferadb_ledger_store::DatabaseConfig {
+                page_size: crate::region_storage::ORGANIZATION_PAGE_SIZE,
+                ..Default::default()
+            };
+            Database::<FileBackend>::create_with_config(&vault_blocks_db_path, blocks_db_config)
+        }
+        .map_err(|e| RaftManagerError::Storage {
+            region,
+            message: format!(
+                "failed to open vault blocks.db at {}: {e}",
+                vault_blocks_db_path.display()
+            ),
+        })?;
+        let vault_block_archive = Arc::new(BlockArchive::new(Arc::new(vault_blocks_db)));
+
         // Open the per-vault Raft log store. `open_for_vault` stamps the
         // store's residency identity (organization_id + vault_id) at
         // construction time so downstream apply workers can't accidentally
@@ -2543,27 +2601,28 @@ impl RaftManager {
         // chain used by the org-side store in `open_region_storage`. Apply
         // executes against these handles, so a bare store would silently
         // drop entity writes (no `state_layer`), record no blocks (no
-        // `block_archive`), and emit no real-time announcements. The
-        // resources below are shared with the parent org rather than
-        // per-vault:
+        // `block_archive`), and emit no real-time announcements. Per-
+        // vault vs. shared:
         //
         // - `state_layer` — the org's `StateLayer` already materialises per-vault `state.db`
         //   databases via its lazy factory (P2b.0). Sharing the accessor lets vault apply land
         //   entity writes in the correct per-vault database without duplicating the layer.
-        // - `block_archive` — vault writes append to the org's chain. A per-vault Merkle chain is a
-        //   separate slice; until then, vault-shard `RegionBlock`s land in the org's `blocks.db`.
+        // - `block_archive` — **per-vault** (Phase 4.1.a). Vault writes append to the vault's own
+        //   chain in its own `blocks.db`; the parent organization's `blocks.db` is no longer
+        //   touched by vault apply.
         // - `block_announcements` — broadcast through the org's channel so subscribers see
         //   vault-shard commits alongside org-shard commits.
         // - `leader_lease` — vault groups run delegated leadership; the parent org's lease is the
         //   authoritative read-validity window.
         // - `region_config` — region + node identity match the parent.
-        // - `event_writer` — the org's apply-phase writer is `Clone` and wraps `Arc<EventsDatabase>`
-        //   + `EventConfig`. Cloning the org's handle (when configured) lets vault apply emit into
-        //   the same physical `events.db` as org apply. A separate slice introduces per-vault
-        //   `events.db` files; until then, vault events tag the entry with the vault id and land
-        //   alongside org events. When the parent org has no event writer (e.g. test fixtures
-        //   without events configuration), the vault store also runs without one and apply skips
-        //   event emission.
+        // - `event_writer` — **per-vault** (Phase 4.2). Each vault opens its own `events.db` under
+        //   `{data_dir}/{region}/{org_id}/state/vault-{vault_id}/events.db` and wraps it in a fresh
+        //   [`EventWriter`]. Vault apply lands vault-scoped emissions in the per-vault file; the
+        //   parent organization's `events.db` is no longer touched by vault apply. The per-vault
+        //   writer inherits its [`EventConfig`] from the parent org's writer at construction time
+        //   so scope flags / TTL stay aligned. When the parent org has no event writer (e.g. test
+        //   fixtures without events configuration), the vault store also runs without one and apply
+        //   skips event emission.
         //
         // Not wired in this slice (acceptable; documented):
         //
@@ -2571,8 +2630,8 @@ impl RaftManager {
         //   the vault's chain starts at height 0 so there is nothing to compare yet. Wired
         //   alongside per-vault commitment piggyback in a later slice.
         // - `region_chain` pre-seed — left at the default `{height: 0, previous_hash: ZERO_HASH}`.
-        //   The vault's chain is its own; pre-seeding from the parent's accumulated chain would
-        //   interleave with writes still routing to the parent pre-flip.
+        //   With a per-vault `BlockArchive`, the default is now the correct fresh-chain semantic
+        //   (the vault's chain is genuinely its own); no pre-seeding needed.
         let mut vault_log_store = RaftLogStore::<FileBackend>::open_for_vault(
             &vault_raft_db_path,
             organization_id,
@@ -2586,7 +2645,7 @@ impl RaftManager {
             ),
         })?
         .with_state_layer(Arc::clone(org_inner.state()))
-        .with_block_archive(Arc::clone(org_inner.block_archive()))
+        .with_block_archive(Arc::clone(&vault_block_archive))
         .with_block_announcements(org_inner.block_announcements().clone())
         .with_region_config(
             region,
@@ -2595,16 +2654,46 @@ impl RaftManager {
         )
         .with_leader_lease(Arc::clone(org_inner.leader_lease()));
 
-        // Share the org's apply-phase event writer (when configured) so vault
-        // apply lands events in the same physical `events.db` as org apply.
-        // `EventWriter` is `Clone` (it wraps `Arc<EventsDatabase>` + a small
-        // `EventConfig`), so cloning produces an additional emitter handle
-        // backed by the same database. When the org has no writer, the vault
-        // store also runs without one and apply skips event emission. The
-        // cloned handle is also retained on `InnerVaultGroup::event_writer`
-        // for observability after `vault_log_store` moves into the apply
-        // task.
-        let vault_event_writer = org_inner.event_writer().cloned();
+        // Phase 4.2: open / create the per-vault `events.db` and wrap it
+        // in a fresh per-vault [`EventWriter`]. Each vault now owns its
+        // own apply-phase audit log under
+        // `{data_dir}/{region}/{org_id}/state/vault-{vault_id}/events.db`
+        // — vault-scoped emissions (Write, BatchWrite,
+        // IngestExternalEvents) land in the per-vault file rather than
+        // sharing the parent organization's `events.db`. Org-scoped
+        // emissions (CreateVault, AddOrganizationMember, etc.) continue
+        // to apply through the parent organization's apply pipeline and
+        // land in the org's `events.db` (the org's `RaftLogStore` retains
+        // its own writer; this slice does not touch that wiring).
+        //
+        // Inheritance rule: when the parent org has no `event_writer`
+        // (e.g. test fixtures without `events_config`), the vault also
+        // runs without one and apply skips event emission — preserving
+        // the pre-Phase-4.2 inheritance semantics. When the org *does*
+        // have a writer, we open a fresh per-vault `events.db` and reuse
+        // the org's `EventConfig` so scope flags and TTL match.
+        //
+        // `EventsDatabase::open` joins `events.db` to its `data_dir`
+        // argument, so passing `vault_dir` materialises the file at
+        // `{vault_dir}/events.db` — the same path returned by
+        // [`RegionStorageManager::vault_events_db_path`]. Keeping the
+        // join inside `EventsDatabase::open` mirrors the per-org
+        // construction in `open_region_storage`.
+        let vault_event_writer = if let Some(org_writer) = org_inner.event_writer() {
+            let vault_events_db = inferadb_ledger_state::EventsDatabase::<FileBackend>::open(
+                &vault_dir,
+            )
+            .map_err(|e| RaftManagerError::Storage {
+                region,
+                message: format!(
+                    "failed to open vault events.db at {}: {e}",
+                    vault_dir.join("events.db").display()
+                ),
+            })?;
+            Some(EventWriter::new(Arc::new(vault_events_db), org_writer.config().clone()))
+        } else {
+            None
+        };
         if let Some(writer) = vault_event_writer.clone() {
             vault_log_store = vault_log_store.with_event_writer(writer);
         }
@@ -3270,7 +3359,7 @@ impl RaftManager {
             shard_id,
             handle: vault_handle,
             state: Arc::clone(org_inner.state()),
-            block_archive: Arc::clone(org_inner.block_archive()),
+            block_archive: vault_block_archive,
             applied_state: vault_applied_state,
             vault_applied_state: vault_applied_state_swap,
             block_announcements: org_inner.block_announcements().clone(),
@@ -4159,26 +4248,57 @@ impl RaftManager {
         let blocks_db_for_scrub = Arc::clone(&blocks_db);
         let events_db_for_scrub = events_db.as_ref().map(Arc::clone);
         let meta_db_for_scrub = Arc::clone(&meta_db);
-        // Closure that snapshots the per-vault `raft.db` handles owned
-        // by every `InnerVaultGroup` whose key matches this
-        // checkpointer's `(region, organization_id)` scope. The
-        // checkpointer invokes the closure once per tick (Task #170)
-        // so vaults started or stopped between ticks are picked up
-        // automatically — mirroring the per-vault state.db enumeration
-        // that goes through `StateLayer::live_vault_dbs()`. The
-        // shutdown-side equivalent is built inline in
-        // [`Self::sync_all_state_dbs`] (Task #145).
-        let vault_groups_for_checkpointer = Arc::clone(&self.vault_groups);
+        // Closures that snapshot the per-vault `raft.db`, `blocks.db`,
+        // and `events.db` handles owned by every `InnerVaultGroup`
+        // whose key matches this checkpointer's `(region,
+        // organization_id)` scope. The checkpointer invokes all three
+        // closures once per tick (Task #170 for raft.db; Phase 4.1.a
+        // for blocks.db; Phase 4.2 for events.db) so vaults started or
+        // stopped between ticks are picked up automatically — mirroring
+        // the per-vault state.db enumeration that goes through
+        // `StateLayer::live_vault_dbs()`. The shutdown-side equivalent
+        // is built inline in [`Self::sync_all_state_dbs`] (Task #145 for
+        // raft.db; Phase 4.1.a for blocks.db; Phase 4.2 for events.db).
+        let vault_groups_for_raft = Arc::clone(&self.vault_groups);
+        let vault_groups_for_blocks = Arc::clone(&self.vault_groups);
+        let vault_groups_for_events = Arc::clone(&self.vault_groups);
         let region_for_checkpointer = region;
         let organization_id_for_checkpointer = organization_id;
         let vault_raft_dbs_fn: VaultRaftDbsFn = Arc::new(move || {
-            vault_groups_for_checkpointer
+            vault_groups_for_raft
                 .read()
                 .iter()
                 .filter(|((r, o, _), _)| {
                     *r == region_for_checkpointer && *o == organization_id_for_checkpointer
                 })
                 .map(|((_, _, vid), inner)| (*vid, Arc::clone(inner.raft_db())))
+                .collect()
+        });
+        let vault_blocks_dbs_fn: VaultBlocksDbsFn = Arc::new(move || {
+            vault_groups_for_blocks
+                .read()
+                .iter()
+                .filter(|((r, o, _), _)| {
+                    *r == region_for_checkpointer && *o == organization_id_for_checkpointer
+                })
+                .map(|((_, _, vid), inner)| (*vid, Arc::clone(inner.block_archive().db())))
+                .collect()
+        });
+        // Per-vault `events.db` handles. A vault contributes a handle
+        // only when its parent org has an `event_writer` configured —
+        // [`RaftManager::start_vault_group`] inherits "no events" from
+        // the parent and skips per-vault DB construction in that case,
+        // so vaults without an event writer simply filter out here.
+        let vault_events_dbs_fn: VaultEventsDbsFn = Arc::new(move || {
+            vault_groups_for_events
+                .read()
+                .iter()
+                .filter(|((r, o, _), _)| {
+                    *r == region_for_checkpointer && *o == organization_id_for_checkpointer
+                })
+                .filter_map(|((_, _, vid), inner)| {
+                    inner.event_writer().map(|ew| (*vid, Arc::clone(ew.events_db().db())))
+                })
                 .collect()
         });
         let state_checkpointer = StateCheckpointer::from_config(
@@ -4188,6 +4308,8 @@ impl RaftManager {
             events_db,
             meta_db,
             vault_raft_dbs_fn,
+            vault_blocks_dbs_fn,
+            vault_events_dbs_fn,
             runtime_config,
             applied_index_rx,
             parent_token.child_token(),
@@ -4557,23 +4679,20 @@ impl RaftManager {
     ///
     /// Tear-down ordering is load-bearing:
     ///
-    /// 1. **Per-vault groups** first. Each vault registers a shard on
-    ///    its parent organization's [`ConsensusEngine`] and a sender on
-    ///    that org's [`CommitDispatcher`](crate::commit_dispatcher::CommitDispatcher).
-    ///    Tearing down the parent engine before deregistering the vault
-    ///    leaves stale dispatcher entries pointing at dropped channels.
-    /// 2. **Per-organization groups** next (those with `org_id != 0`).
-    ///    Each org owns its own [`ConsensusEngine`] and
-    ///    [`GrpcConsensusTransport`]. Dropping the transport cancels its
-    ///    `PeerSender` drain tasks, closing any open `Replicate` streams.
-    ///    **Without this step the H2 streams persist across a graceful
-    ///    restart**, leaving the shared
-    ///    [`NodeConnectionRegistry`](crate::node_registry::NodeConnectionRegistry)
-    ///    channel in a state where the next `client.replicate()` call
-    ///    blocks until KeepAliveTimedOut — see Task #172.
-    /// 3. **Region (control-plane) groups** last via [`Self::stop_region`].
-    ///    These hold the system / data-region control-plane state and
-    ///    have always been stopped here.
+    /// 1. **Per-vault groups** first. Each vault registers a shard on its parent organization's
+    ///    [`ConsensusEngine`] and a sender on that org's
+    ///    [`CommitDispatcher`](crate::commit_dispatcher::CommitDispatcher). Tearing down the parent
+    ///    engine before deregistering the vault leaves stale dispatcher entries pointing at dropped
+    ///    channels.
+    /// 2. **Per-organization groups** next (those with `org_id != 0`). Each org owns its own
+    ///    [`ConsensusEngine`] and [`GrpcConsensusTransport`]. Dropping the transport cancels its
+    ///    `PeerSender` drain tasks, closing any open `Replicate` streams. **Without this step the
+    ///    H2 streams persist across a graceful restart**, leaving the shared
+    ///    [`NodeConnectionRegistry`](crate::node_registry::NodeConnectionRegistry) channel in a
+    ///    state where the next `client.replicate()` call blocks until KeepAliveTimedOut — see Task
+    ///    #172.
+    /// 3. **Region (control-plane) groups** last via [`Self::stop_region`]. These hold the system /
+    ///    data-region control-plane state and have always been stopped here.
     ///
     /// Errors per group are logged and the sweep continues — one group's
     /// failure must not block the remaining tear-down.
@@ -4681,9 +4800,9 @@ impl RaftManager {
         info!(
             regions = regions.len(),
             per_region_timeout_ms = per_region_timeout.as_millis() as u64,
-            "sync_all_state_dbs: forcing final state.db + raft.db + blocks.db + events.db \
-             (if configured) then meta.db sync across all per-org groups in every region \
-             (strict ordering)"
+            "sync_all_state_dbs: forcing final per-org state.db + raft.db + blocks.db + \
+             events.db (if configured) then meta.db, plus per-vault raft.db + blocks.db + \
+             events.db, across all per-org groups in every region (strict ordering)"
         );
 
         for region in regions {
@@ -4704,21 +4823,41 @@ impl RaftManager {
                 );
                 continue;
             }
-            // Per-vault raft.dbs for this region. Every
-            // [`VaultGroup`](VaultGroup) opens its own `raft.db` under
+            // Per-vault raft.dbs, per-vault blocks.dbs, and per-vault
+            // events.dbs for this region. Every [`VaultGroup`](VaultGroup)
+            // opens its own `raft.db` (Task #170), its own `blocks.db`
+            // (Phase 4.1.a), and its own `events.db` (Phase 4.2) under
             // `{data_dir}/{region}/{org_id}/state/vault-{vault_id}/`; the
             // shutdown sweep must sync each one so applied-state metadata
-            // on the per-vault `raft.db` reaches disk alongside the
-            // vault's `state.db`. The per-vault fan-out is independent of
-            // the per-org fan-out — it covers vaults across every parent
-            // org in this region in a single `join_all`.
-            let vault_raft_dbs: Vec<(VaultId, Arc<Database<FileBackend>>)> = self
-                .vault_groups
-                .read()
-                .iter()
-                .filter(|((r, ..), _)| *r == region)
-                .map(|((_, _, vid), inner)| (*vid, Arc::clone(inner.raft_db())))
-                .collect();
+            // on the per-vault `raft.db`, dirty Merkle-chain pages on the
+            // per-vault `blocks.db`, and dirty audit-log pages on the
+            // per-vault `events.db` all reach disk alongside the vault's
+            // `state.db`. All three per-vault fan-outs are independent of
+            // the per-org fan-out — each covers vaults across every
+            // parent org in this region in a single `join_all`.
+            // Snapshotted under the same read of `vault_groups` so the
+            // lists stay in lock-step (a vault that materialises mid-
+            // sweep is picked up on the next call). A vault contributes
+            // an `events.db` handle only when its parent org has events
+            // configured; vaults under a no-events org simply filter
+            // out, mirroring the per-org `events.db` `Option` shape.
+            let (vault_raft_dbs, vault_blocks_dbs, vault_events_dbs) = {
+                let groups = self.vault_groups.read();
+                let mut raft: Vec<(VaultId, Arc<Database<FileBackend>>)> = Vec::new();
+                let mut blocks: Vec<(VaultId, Arc<Database<FileBackend>>)> = Vec::new();
+                let mut events: Vec<(VaultId, Arc<Database<FileBackend>>)> = Vec::new();
+                for ((r, _, vid), inner) in groups.iter() {
+                    if *r != region {
+                        continue;
+                    }
+                    raft.push((*vid, Arc::clone(inner.raft_db())));
+                    blocks.push((*vid, Arc::clone(inner.block_archive().db())));
+                    if let Some(ew) = inner.event_writer() {
+                        events.push((*vid, Arc::clone(ew.events_db().db())));
+                    }
+                }
+                (raft, blocks, events)
+            };
 
             // Build one sync future per org group. Each future performs
             // that org's strict two-phase ordering:
@@ -4774,22 +4913,34 @@ impl RaftManager {
                 }
             });
 
-            // Fan out per-vault raft.db syncs in parallel with the per-org
-            // fan-out. Zipping results with the snapshot gives each log
-            // line access to its vault id + handle for
+            // Fan out per-vault raft.db, per-vault blocks.db, and
+            // per-vault events.db syncs in parallel with the per-org
+            // fan-out. Zipping results with the snapshots gives each
+            // log line access to its vault id + handle for
             // `last_synced_snapshot_id`.
             let vault_raft_futs = futures::future::join_all(
                 vault_raft_dbs.iter().map(|(_, db)| Arc::clone(db).sync_state()),
             );
+            let vault_blocks_futs = futures::future::join_all(
+                vault_blocks_dbs.iter().map(|(_, db)| Arc::clone(db).sync_state()),
+            );
+            let vault_events_futs = futures::future::join_all(
+                vault_events_dbs.iter().map(|(_, db)| Arc::clone(db).sync_state()),
+            );
 
             let org_futs_joined = futures::future::join_all(org_futs);
             let timeout_outcome = tokio::time::timeout(per_region_timeout, async move {
-                tokio::join!(org_futs_joined, vault_raft_futs)
+                tokio::join!(org_futs_joined, vault_raft_futs, vault_blocks_futs, vault_events_futs)
             })
             .await;
 
             match timeout_outcome {
-                Ok((org_outcomes, vault_raft_results)) => {
+                Ok((
+                    org_outcomes,
+                    vault_raft_results,
+                    vault_blocks_results,
+                    vault_events_results,
+                )) => {
                     for outcome in &org_outcomes {
                         log_org_sync_outcome(region, outcome);
                     }
@@ -4813,6 +4964,46 @@ impl RaftManager {
                             ),
                         }
                     }
+                    for ((vault_id, db), result) in
+                        vault_blocks_dbs.iter().zip(vault_blocks_results.iter())
+                    {
+                        match result {
+                            Ok(()) => info!(
+                                region = region.as_str(),
+                                db = "blocks",
+                                vault_id = vault_id.value(),
+                                last_synced_snapshot_id = db.last_synced_snapshot_id(),
+                                "sync_all_state_dbs: final per-vault blocks-DB sync complete"
+                            ),
+                            Err(e) => warn!(
+                                region = region.as_str(),
+                                db = "blocks",
+                                vault_id = vault_id.value(),
+                                error = %e,
+                                "sync_all_state_dbs: final per-vault blocks-DB sync failed; crash gap narrowed but not zero"
+                            ),
+                        }
+                    }
+                    for ((vault_id, db), result) in
+                        vault_events_dbs.iter().zip(vault_events_results.iter())
+                    {
+                        match result {
+                            Ok(()) => info!(
+                                region = region.as_str(),
+                                db = "events",
+                                vault_id = vault_id.value(),
+                                last_synced_snapshot_id = db.last_synced_snapshot_id(),
+                                "sync_all_state_dbs: final per-vault events-DB sync complete"
+                            ),
+                            Err(e) => warn!(
+                                region = region.as_str(),
+                                db = "events",
+                                vault_id = vault_id.value(),
+                                error = %e,
+                                "sync_all_state_dbs: final per-vault events-DB sync failed; crash gap narrowed but not zero"
+                            ),
+                        }
+                    }
                 },
                 Err(_) => {
                     let org_ids: Vec<i64> = org_groups.iter().map(|(oid, _)| oid.value()).collect();
@@ -4821,8 +5012,8 @@ impl RaftManager {
                         timeout_ms = per_region_timeout.as_millis() as u64,
                         org_ids = ?org_ids,
                         "sync_all_state_dbs: final state-DB sync (per-org state + raft + blocks + \
-                         events then meta, plus per-vault raft) timed out; continuing with \
-                         remaining regions"
+                         events then meta, plus per-vault raft + per-vault blocks + per-vault \
+                         events) timed out; continuing with remaining regions"
                     );
                 },
             }
@@ -5657,6 +5848,73 @@ mod tests {
         assert_eq!(fetched.vault_id(), vault_id);
     }
 
+    /// Phase 4.1.a: each vault must own its own [`BlockArchive`] backed
+    /// by its own `blocks.db` file at
+    /// `{data_dir}/{region}/{org_id}/state/vault-{vault_id}/blocks.db`.
+    /// Sharing the parent organization's archive (the pre-Phase-4.1.a
+    /// shape) means vault writes interleave with each other on the org
+    /// chain — this regression-tests the fresh per-vault chain semantics
+    /// by asserting Arc identity inequality + on-disk file presence.
+    #[tokio::test]
+    async fn test_start_vault_group_constructs_per_vault_block_archive() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+        let manager = test_manager(config);
+
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+        let org_id = OrganizationId::new(151);
+        manager
+            .start_organization_group(
+                Region::GLOBAL,
+                org_id,
+                vec![(1, "127.0.0.1:50051".to_string())],
+                true,
+                None,
+                None,
+            )
+            .await
+            .expect("start org group");
+
+        let org_group = manager.get_organization_group(Region::GLOBAL, org_id).expect("org group");
+        let org_archive = Arc::clone(org_group.block_archive());
+
+        let vault_id = VaultId::new(909);
+        let vault_group = manager
+            .start_vault_group(Region::GLOBAL, org_id, vault_id)
+            .await
+            .expect("start vault group");
+
+        // Per-vault BlockArchive must NOT be the same Arc as the parent
+        // organization's archive — sharing the Arc was the pre-Phase-4.1.a
+        // shape (Option B from P2c.2.1).
+        let vault_archive = vault_group.block_archive();
+        assert!(
+            !Arc::ptr_eq(&org_archive, vault_archive),
+            "vault BlockArchive Arc must differ from parent org's after Phase 4.1.a",
+        );
+        // The underlying blocks.db handle must also be distinct.
+        assert!(
+            !Arc::ptr_eq(org_archive.db(), vault_archive.db()),
+            "vault blocks.db Database Arc must differ from parent org's after Phase 4.1.a",
+        );
+
+        // The on-disk per-vault `blocks.db` file must exist at the
+        // composed path.
+        let expected_path = temp
+            .path()
+            .join("global")
+            .join(org_id.value().to_string())
+            .join("state")
+            .join(format!("vault-{}", vault_id.value()))
+            .join("blocks.db");
+        assert!(
+            expected_path.exists(),
+            "per-vault blocks.db must be created at {}",
+            expected_path.display(),
+        );
+    }
+
     #[tokio::test]
     async fn test_start_vault_group_rejects_double_start() {
         let temp = TestDir::new();
@@ -5868,13 +6126,17 @@ mod tests {
         );
     }
 
-    /// P2c.5.b: when the parent organization is configured with an
-    /// [`EventConfig`], `start_vault_group` clones the org's apply-phase
-    /// [`EventWriter`] onto the vault's `RaftLogStore` so vault apply
-    /// emits into the same shared `events.db`. Without this wiring, vault
-    /// apply silently drops events.
+    /// Phase 4.2: when the parent organization is configured with an
+    /// [`EventConfig`], `start_vault_group` opens a fresh per-vault
+    /// `events.db` under
+    /// `{data_dir}/{region}/{org_id}/state/vault-{vault_id}/events.db`
+    /// and wraps it in its own [`EventWriter`]. The vault's writer
+    /// MUST NOT share an `events.db` handle with the parent
+    /// organization's writer — vault-scoped apply emissions land in
+    /// the per-vault file, isolated from org-scoped emissions which
+    /// continue to land in the parent's `events.db`.
     #[tokio::test]
-    async fn test_start_vault_group_inherits_parent_event_writer() {
+    async fn test_start_vault_group_constructs_per_vault_event_writer() {
         let temp = TestDir::new();
         let config = create_test_config(&temp);
         let manager = test_manager(config);
@@ -5897,25 +6159,49 @@ mod tests {
             .expect("start org group");
 
         // Sanity: parent org has an event writer once events_config is supplied.
-        let org_writer = org_group.inner().event_writer().expect(
-            "parent org must have event_writer when events_config was supplied",
-        );
+        let org_writer = org_group
+            .inner()
+            .event_writer()
+            .expect("parent org must have event_writer when events_config was supplied");
         let org_events_db = Arc::clone(org_writer.events_db());
 
+        let vault_id = VaultId::new(1);
         let vault = manager
-            .start_vault_group(Region::GLOBAL, org_id, VaultId::new(1))
+            .start_vault_group(Region::GLOBAL, org_id, vault_id)
             .await
             .expect("start vault group");
 
-        let vault_writer = vault
-            .event_writer()
-            .expect("vault group must inherit event_writer from parent org");
+        let vault_writer = vault.event_writer().expect(
+            "vault group must construct its own event_writer when parent org has events configured",
+        );
 
-        // Vault writer wraps the same physical events.db handle as the
-        // org's writer — both apply paths emit into the shared file.
+        // Phase 4.2: vault writer MUST NOT share the parent org's
+        // events.db handle. Each vault owns a dedicated file.
         assert!(
-            Arc::ptr_eq(&org_events_db, vault_writer.events_db()),
-            "vault event writer must share parent org's events.db handle",
+            !Arc::ptr_eq(&org_events_db, vault_writer.events_db()),
+            "vault event writer must NOT share parent org's events.db handle after Phase 4.2",
+        );
+        // The underlying database handle must also be distinct (extra
+        // sanity — the EventsDatabase wrapper around an Arc<Database>
+        // could, in principle, point at the same DB).
+        assert!(
+            !Arc::ptr_eq(org_events_db.db(), vault_writer.events_db().db()),
+            "vault events.db Database Arc must differ from parent org's after Phase 4.2",
+        );
+
+        // The on-disk per-vault `events.db` file must exist at the
+        // composed path.
+        let expected_path = temp
+            .path()
+            .join("global")
+            .join(org_id.value().to_string())
+            .join("state")
+            .join(format!("vault-{}", vault_id.value()))
+            .join("events.db");
+        assert!(
+            expected_path.exists(),
+            "per-vault events.db must be created at {}",
+            expected_path.display(),
         );
     }
 

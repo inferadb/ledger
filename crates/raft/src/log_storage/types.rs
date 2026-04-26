@@ -347,16 +347,8 @@ impl VaultAppliedState {
             last_applied: full.last_applied,
             membership: full.membership.clone(),
             vault_height: full.vault_heights.get(&key).copied().unwrap_or(0),
-            vault_health: full
-                .vault_health
-                .get(&key)
-                .cloned()
-                .unwrap_or_default(),
-            previous_vault_hash: full
-                .previous_vault_hashes
-                .get(&key)
-                .copied()
-                .unwrap_or_default(),
+            vault_health: full.vault_health.get(&key).cloned().unwrap_or_default(),
+            previous_vault_hash: full.previous_vault_hashes.get(&key).copied().unwrap_or_default(),
             client_sequences: full
                 .client_sequences
                 .iter()
