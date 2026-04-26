@@ -4468,10 +4468,160 @@ impl RaftManager {
         Ok(())
     }
 
-    /// Stops all region groups.
-    pub async fn shutdown(&self) {
-        let regions: Vec<Region> = self.list_regions();
+    /// Stops a per-organization group.
+    ///
+    /// Mirrors [`Self::stop_region`] but operates on a per-organization
+    /// data-plane group keyed by `(region, organization_id)` where
+    /// `organization_id != OrganizationId::new(0)`. Cancels the org's
+    /// background jobs, requests its consensus engine reactor to shut
+    /// down (which drops the engine's [`GrpcConsensusTransport`] —
+    /// dropping in turn cancels every per-peer
+    /// [`PeerSender`](crate::consensus_transport::peer_sender::PeerSender)
+    /// drain task tied to that transport), removes the entry from
+    /// `self.regions`, and closes the organization's storage.
+    ///
+    /// This method is **load-bearing for graceful restart**: without it,
+    /// per-organization engines never exit during [`Self::shutdown`],
+    /// leaving their bidirectional gRPC `Replicate` streams attached to
+    /// the shared [`NodeConnectionRegistry`](crate::node_registry::NodeConnectionRegistry)
+    /// channel. Subsequent restarts re-use the channel through fresh
+    /// transports and observe the channel's H2 state in a stuck condition
+    /// — new `client.replicate()` calls block until KeepAliveTimedOut.
+    /// See Task #172.
+    ///
+    /// Per-vault groups under this org should be stopped via
+    /// [`Self::stop_vault_group`] **before** calling this — vault groups
+    /// register shards on the org's engine, and tearing the engine down
+    /// while shards are live skips dispatcher cleanup. [`Self::shutdown`]
+    /// orders the sweep correctly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RaftManagerError::RegionNotFound`] if no group with the
+    /// given `(region, organization_id)` is currently active.
+    pub async fn stop_organization_group(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+    ) -> Result<()> {
+        let org_group = {
+            let mut regions = self.regions.write();
+            regions
+                .remove(&(region, organization_id))
+                .ok_or(RaftManagerError::RegionNotFound { region })?
+        };
 
+        // Abort background jobs first.
+        {
+            let mut jobs = org_group.background_jobs.lock();
+            jobs.cancel();
+            debug!(
+                region = region.as_str(),
+                organization_id = organization_id.value(),
+                "Aborted per-organization background jobs"
+            );
+        }
+
+        // Shut down the consensus engine reactor for this organization.
+        // The engine owns the `GrpcConsensusTransport`; on reactor exit
+        // the transport's per-peer `PeerSender` drain tasks are cancelled
+        // via their `Drop` impl (cancels `shutdown_token`, aborts the
+        // task), which closes any in-flight `client.replicate()` stream
+        // open against the shared `NodeConnectionRegistry` channel.
+        let handle = org_group.handle().clone();
+        tokio::spawn(async move {
+            handle.request_shutdown().await;
+        });
+
+        // Close organization storage.
+        if let Err(e) = self.storage_manager.close_organization(region, organization_id) {
+            warn!(
+                region = region.as_str(),
+                organization_id = organization_id.value(),
+                error = %e,
+                "Error closing organization storage during per-org group stop"
+            );
+        }
+
+        info!(
+            region = region.as_str(),
+            organization_id = organization_id.value(),
+            "Per-organization group stopped"
+        );
+        Ok(())
+    }
+
+    /// Stops every active group on this manager — per-vault groups,
+    /// per-organization groups, and finally the region (control-plane)
+    /// groups themselves.
+    ///
+    /// Tear-down ordering is load-bearing:
+    ///
+    /// 1. **Per-vault groups** first. Each vault registers a shard on
+    ///    its parent organization's [`ConsensusEngine`] and a sender on
+    ///    that org's [`CommitDispatcher`](crate::commit_dispatcher::CommitDispatcher).
+    ///    Tearing down the parent engine before deregistering the vault
+    ///    leaves stale dispatcher entries pointing at dropped channels.
+    /// 2. **Per-organization groups** next (those with `org_id != 0`).
+    ///    Each org owns its own [`ConsensusEngine`] and
+    ///    [`GrpcConsensusTransport`]. Dropping the transport cancels its
+    ///    `PeerSender` drain tasks, closing any open `Replicate` streams.
+    ///    **Without this step the H2 streams persist across a graceful
+    ///    restart**, leaving the shared
+    ///    [`NodeConnectionRegistry`](crate::node_registry::NodeConnectionRegistry)
+    ///    channel in a state where the next `client.replicate()` call
+    ///    blocks until KeepAliveTimedOut — see Task #172.
+    /// 3. **Region (control-plane) groups** last via [`Self::stop_region`].
+    ///    These hold the system / data-region control-plane state and
+    ///    have always been stopped here.
+    ///
+    /// Errors per group are logged and the sweep continues — one group's
+    /// failure must not block the remaining tear-down.
+    pub async fn shutdown(&self) {
+        // Phase 1 — per-vault groups. Snapshot the keys under the read
+        // lock, drop the lock before awaiting `stop_vault_group` which
+        // re-acquires the same lock for write. Sequential rather than
+        // concurrent: the dispatcher / engine handoff in `stop_vault_group`
+        // is per-organization-engine-serialized anyway, and parallel
+        // teardown buys nothing during shutdown.
+        let vault_keys: Vec<(Region, OrganizationId, VaultId)> =
+            self.vault_groups.read().keys().copied().collect();
+        for (region, organization_id, vault_id) in vault_keys {
+            if let Err(e) = self.stop_vault_group(region, organization_id, vault_id).await {
+                warn!(
+                    region = region.as_str(),
+                    organization_id = organization_id.value(),
+                    vault_id = vault_id.value(),
+                    error = %e,
+                    "Error stopping vault group during shutdown"
+                );
+            }
+        }
+
+        // Phase 2 — per-organization groups (org_id != 0). Region groups
+        // (org_id == 0) are deferred to phase 3 so the existing
+        // `stop_region` codepath handles them with its existing log
+        // line and storage-close call site.
+        let org_keys: Vec<(Region, OrganizationId)> = self
+            .regions
+            .read()
+            .keys()
+            .copied()
+            .filter(|(_, oid)| *oid != OrganizationId::new(0))
+            .collect();
+        for (region, organization_id) in org_keys {
+            if let Err(e) = self.stop_organization_group(region, organization_id).await {
+                warn!(
+                    region = region.as_str(),
+                    organization_id = organization_id.value(),
+                    error = %e,
+                    "Error stopping per-organization group during shutdown"
+                );
+            }
+        }
+
+        // Phase 3 — region (control-plane) groups.
+        let regions: Vec<Region> = self.list_regions();
         for region in regions {
             if let Err(e) = self.stop_region(region).await {
                 warn!(region = region.as_str(), error = %e, "Error stopping region during shutdown");

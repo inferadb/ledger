@@ -743,20 +743,6 @@ async fn test_delete_vault_tears_down_vault_group() {
 /// compose correctly through a real restart. No production code path is
 /// stubbed or bypassed.
 #[tokio::test]
-#[ignore = "Task #172 Fix (i) — preserving election-critical messages in peer_sender::drop_queue \
-            on stream-open/stream-broken landed (consensus/src/message.rs adds \
-            Message::is_election_critical; raft/src/consensus_transport/peer_sender.rs::drop_queue \
-            now retains PreVote/Vote variants and only drops heartbeats/AppendEntries/snapshots/ \
-            TimeoutNow). The fix is structurally correct and meets the Raft semantic the diagnosis \
-            calls for, but does not, on its own, close the cold-restart convergence gap. Two runs \
-            post-fix: (1) terms split (node1=1 voted_for=self, nodes2/3=2 voted_for=None), \
-            (2) all three stuck at term=1 leader=None. Diagnosis: Part (ii) — the underlying 5s \
-            stream-death root cause from idle-keepalive lapse — remains unfixed, so the queued \
-            (now-preserved) PreVote requests still cannot drain because the bidi stream itself \
-            never re-establishes durably enough for the peers to ack within the election window. \
-            Fix (i) is necessary but not sufficient. Next slice: Part (ii) — investigate idle \
-            keepalive lapse / HTTP/2 stream-death root cause that prevents the freshly opened \
-            stream from staying live long enough to complete the election round-trip."]
 async fn test_vault_group_rehydrates_after_graceful_cluster_restart() {
     // TCP transport is required for this test: on restart, peer addresses
     // must re-populate before the per-organization rehydration sweep runs,
