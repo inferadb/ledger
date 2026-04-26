@@ -45,6 +45,14 @@ const KEY_COMMITTED: &str = "committed";
 const KEY_LAST_PURGED: &str = "last_purged";
 const KEY_APPLIED_STATE: &str = "applied_state";
 
+/// Key prefix for per-node persisted peer addresses in the `RaftState`
+/// table. Each `RegisterPeerAddress` entry applied on the GLOBAL log
+/// store writes one record under `{KEY_PEER_ADDRESS_PREFIX}{node_id}`
+/// so that on restart the in-memory `PeerAddressMap` can be repopulated
+/// before any data region's consensus engine starts and tries to send
+/// PreVote / AppendEntries to its persisted voter set.
+const KEY_PEER_ADDRESS_PREFIX: &str = "peer_address:";
+
 // ============================================================================
 // Region Chain State (Lock Consolidated)
 // ============================================================================

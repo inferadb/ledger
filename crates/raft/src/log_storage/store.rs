@@ -665,9 +665,100 @@ impl<B: StorageBackend> RaftLogStore<B> {
     ///
     /// When set, `RegisterPeerAddress` entries applied on the GLOBAL log store
     /// store the address so all nodes can route to the new peer.
+    ///
+    /// On attach, any addresses persisted in the `RaftState` table under the
+    /// `peer_address:` key prefix are eagerly loaded into the provided map.
+    /// This rehydrates the in-memory mirror across restarts so the
+    /// per-region transport-construction loop in
+    /// `RaftManager::start_region` (the persisted-membership backstop) can
+    /// look up addresses for every voter without waiting on `--join` seed
+    /// rediscovery, which is best-effort and races bootstrap on
+    /// simultaneous whole-cluster restart.
     pub fn with_peer_addresses(mut self, addresses: crate::PeerAddressMap) -> Self {
+        // Load any persisted entries before publishing the map. Errors are
+        // logged and ignored — losing a rehydrated entry degrades to the
+        // pre-fix behavior (transport waits on seed discovery), not data
+        // loss, and the apply path will rewrite the entry on the next
+        // `RegisterPeerAddress` proposal.
+        match self.load_peer_addresses_from_disk() {
+            Ok(loaded) if !loaded.is_empty() => {
+                let count = loaded.len();
+                addresses.insert_many(loaded);
+                tracing::info!(
+                    region = self.region.as_str(),
+                    peer_count = count,
+                    "Rehydrated persisted peer addresses into in-memory PeerAddressMap",
+                );
+            },
+            Ok(_) => {
+                // Fresh database or no peer addresses persisted yet — normal
+                // on first boot, before any `RegisterPeerAddress` apply has
+                // landed.
+            },
+            Err(e) => {
+                tracing::warn!(
+                    region = self.region.as_str(),
+                    error = %e,
+                    "Failed to rehydrate persisted peer addresses; \
+                     transport will rely on seed discovery / live announces",
+                );
+            },
+        }
         self.peer_addresses = Some(addresses);
         self
+    }
+
+    /// Reads all persisted peer-address records from the `RaftState`
+    /// metadata table.
+    ///
+    /// Records are stored under keys of the form
+    /// `peer_address:{node_id}` with the address as a UTF-8 byte string;
+    /// see [`flush_external_writes`](Self::flush_external_writes) for
+    /// the write side. Used by [`with_peer_addresses`](Self::with_peer_addresses)
+    /// to rehydrate the in-memory `PeerAddressMap` across restarts.
+    fn load_peer_addresses_from_disk(&self) -> Result<Vec<(u64, String)>, StoreError> {
+        let read_txn = self.db.read().map_err(|e| to_storage_error(&e))?;
+
+        // Range scan covers every key with the `peer_address:` prefix.
+        // The next ASCII character after `:` (0x3A) is `;` (0x3B), giving
+        // a tight half-open range around the family.
+        let start = super::KEY_PEER_ADDRESS_PREFIX.to_string();
+        let end = format!(
+            "{}{}",
+            super::KEY_PEER_ADDRESS_PREFIX
+                .strip_suffix(':')
+                .unwrap_or(super::KEY_PEER_ADDRESS_PREFIX),
+            ';'
+        );
+
+        let iter = read_txn
+            .range::<tables::RaftState>(Some(&start), Some(&end))
+            .map_err(|e| to_storage_error(&e))?;
+
+        let mut peers = Vec::new();
+        for (key_bytes, value_bytes) in iter {
+            let key_str = std::str::from_utf8(&key_bytes).map_err(|e| {
+                StoreError::msg(format!(
+                    "peer address key is not valid UTF-8: {e}"
+                ))
+            })?;
+            let Some(node_id_str) = key_str.strip_prefix(super::KEY_PEER_ADDRESS_PREFIX)
+            else {
+                continue;
+            };
+            let node_id: u64 = node_id_str.parse().map_err(|e| {
+                StoreError::msg(format!(
+                    "peer address key {key_str:?} has non-numeric node_id suffix: {e}"
+                ))
+            })?;
+            let address = String::from_utf8(value_bytes).map_err(|e| {
+                StoreError::msg(format!(
+                    "peer address value is not valid UTF-8: {e}"
+                ))
+            })?;
+            peers.push((node_id, address));
+        }
+        Ok(peers)
     }
 
     /// Drains all buffered state root commitments.
@@ -963,6 +1054,18 @@ impl<B: StorageBackend> RaftLogStore<B> {
         for slug in &pending.app_slug_index_deleted {
             write_txn
                 .delete::<tables::AppSlugIndex>(&slug.value())
+                .map_err(|e| to_storage_error(&e))?;
+        }
+
+        // Peer address registrations: store under `peer_address:{node_id}`
+        // in the RaftState metadata table. Read back on `RaftLogStore::open`
+        // (via `load_peer_addresses_into`) when the GLOBAL log store is
+        // wired to its in-memory `PeerAddressMap` mirror.
+        for (node_id, address) in &pending.peer_addresses {
+            let key =
+                format!("{}{}", super::KEY_PEER_ADDRESS_PREFIX, node_id);
+            write_txn
+                .insert::<tables::RaftState>(&key, &address.as_bytes().to_vec())
                 .map_err(|e| to_storage_error(&e))?;
         }
 
@@ -2419,5 +2522,52 @@ mod tests {
         // And the vote is readable after the call.
         let read_back = store.read_vote().await.unwrap();
         assert_eq!(read_back, Some(vote));
+    }
+
+    /// Persisted peer addresses survive a `RaftLogStore::open` and rehydrate
+    /// into the in-memory `PeerAddressMap` when `with_peer_addresses` is
+    /// called. This is the durability contract for Task #153 — without it,
+    /// a graceful whole-cluster restart leaves data-region transports with
+    /// no peers registered and PreVote / RequestVote messages silently drop.
+    #[tokio::test]
+    async fn peer_addresses_persist_across_restart_and_rehydrate_on_attach() {
+        let dir = tempdir().unwrap();
+        let log_path = dir.path().join("raft.db");
+
+        // Phase 1: open the store, simulate the apply path persisting two
+        // peer addresses via `save_state_core` + `flush_external_writes`.
+        {
+            let store = RaftLogStore::<FileBackend>::open(&log_path).unwrap();
+
+            let state = AppliedState {
+                sequences: SequenceCounters::new(),
+                ..Default::default()
+            };
+            let mut pending = PendingExternalWrites::default();
+            pending.peer_addresses.push((42, "10.0.0.1:50051".to_string()));
+            pending.peer_addresses.push((43, "10.0.0.2:50051".to_string()));
+
+            store.save_state_core(&state, &pending).unwrap();
+
+            // Force durability so the next `open` sees the writes.
+            store.db.clone().sync_state().await.unwrap();
+        }
+
+        // Phase 2: re-open the store, attach an empty `PeerAddressMap`, and
+        // confirm both addresses appear.
+        let store = RaftLogStore::<FileBackend>::open(&log_path).unwrap();
+        let map = crate::PeerAddressMap::new();
+        let _store = store.with_peer_addresses(map.clone());
+
+        let mut peers = map.iter_peers();
+        peers.sort_by_key(|(id, _)| *id);
+        assert_eq!(
+            peers,
+            vec![
+                (42, "10.0.0.1:50051".to_string()),
+                (43, "10.0.0.2:50051".to_string()),
+            ],
+            "rehydration must restore every persisted (node_id, address) pair",
+        );
     }
 }

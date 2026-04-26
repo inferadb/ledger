@@ -314,6 +314,18 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
     /// would stall commit dispatch, outbound-message sends, and leadership
     /// timers under sustained catch-up traffic.
     pub async fn run(&mut self) {
+        // DIAG (Task #153): record reactor entry so we can tell `tokio::spawn`
+        // succeeded vs. the future being dropped immediately. Listed shard ids
+        // help disambiguate the data-region engine (single shard, org_id=0)
+        // from per-org engines (org shard + any vaults added via AddShard).
+        let initial_shard_ids: Vec<u64> = self.shards.keys().map(|id| id.0).collect();
+        tracing::debug!(
+            shard_count = self.shards.len(),
+            timer_count = self.timers.len(),
+            shard_ids = ?initial_shard_ids,
+            "reactor: Reactor::run started",
+        );
+
         let mut flush_ticker = tokio::time::interval(self.flush_interval);
         flush_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Consume the immediate first tick; the wall-clock guard below takes
@@ -326,7 +338,37 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
         // on the tokio runtime's wall-clock timeline.
         let mut last_flush = std::time::Instant::now();
 
+        // DIAG (Task #153): rate-limit the per-iteration tick log so we don't
+        // drown the test trace under steady-state load.
+        let mut last_tick_log = std::time::Instant::now();
+
         loop {
+            // DIAG (Task #153): periodic tick log proves the reactor task is
+            // alive and progressing through the select loop. Logging on a
+            // 100ms cadence keeps the output readable across the 60s test
+            // budget while still detecting the "task dead/blocked" failure
+            // mode within a single GLOBAL-region election timeout window.
+            if last_tick_log.elapsed() >= Duration::from_millis(100) {
+                let next_deadline_ms = self.timers.next_deadline().map(|d| {
+                    let now = self.clock.now();
+                    if d <= now {
+                        0i64
+                    } else {
+                        d.duration_since(now).as_millis() as i64
+                    }
+                });
+                tracing::debug!(
+                    shard_count = self.shards.len(),
+                    timer_count = self.timers.len(),
+                    next_deadline_ms = ?next_deadline_ms,
+                    pending_responses = self.pending_responses.len(),
+                    pending_commits = self.pending_commits.len(),
+                    "reactor: tick",
+                );
+                last_tick_log = std::time::Instant::now();
+            }
+
+
             let sleep_duration = self.timers.next_deadline().map(|d| {
                 let now = self.clock.now();
                 if d <= now { Duration::ZERO } else { d.duration_since(now) }
@@ -402,6 +444,16 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             }
 
             if exit {
+                // DIAG (Task #153): record reactor exit so we can tell
+                // whether the run task ended cleanly (Shutdown event /
+                // closed channel) vs. silently panicked. Hypothesis C
+                // ("data-region reactor task dead post-restart") would
+                // show this firing unexpectedly early.
+                tracing::debug!(
+                    shard_count = self.shards.len(),
+                    timer_count = self.timers.len(),
+                    "reactor: Reactor::run exiting",
+                );
                 break;
             }
         }
@@ -685,6 +737,22 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                 vec![]
             },
             ReactorEvent::AddShard { boxed_shard, shard_id, state_tx } => {
+                // DIAG (Task #153 hypothesis A): record reactor state before
+                // and after the AddShard registration so we can verify that
+                // adding (e.g.) per-vault shards does NOT clobber timer
+                // entries for the existing region/org shards already in the
+                // wheel. If `pre_timer_count` and `post_timer_count` agree
+                // modulo +1 per scheduled-timer initial action, the wheel
+                // is intact.
+                let pre_existing_shard_ids: Vec<u64> =
+                    self.shards.keys().map(|id| id.0).collect();
+                tracing::debug!(
+                    shard = shard_id.0,
+                    pre_existing_shard_count = self.shards.len(),
+                    pre_existing_timer_count = self.timers.len(),
+                    pre_existing_shard_ids = ?pre_existing_shard_ids,
+                    "reactor: AddShard handling start",
+                );
                 // Duplicate-registration guard. A duplicate is a caller
                 // bug — ignore and drop `state_tx` so the caller's receiver
                 // observes a closed channel.
@@ -734,6 +802,13 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                 self.state_watchers.insert(shard_id, state_tx);
                 // Process initial actions (schedules election timer).
                 self.process_actions(actions);
+                // DIAG (Task #153 hypothesis A): post-registration snapshot.
+                tracing::debug!(
+                    shard = shard_id.0,
+                    post_shard_count = self.shards.len(),
+                    post_timer_count = self.timers.len(),
+                    "reactor: AddShard handling complete",
+                );
                 tracing::info!(shard = shard_id.0, "AddShard: registered at runtime");
                 vec![shard_id]
             },
@@ -811,17 +886,59 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
         let mut affected = Vec::new();
         let mut shards_to_remove = Vec::new();
 
-        while let Some((shard_id, kind, _deadline)) = self.timers.poll_expired(now) {
+        while let Some((shard_id, kind, deadline)) = self.timers.poll_expired(now) {
+            // DIAG (Task #153): every timer that actually fires gets logged
+            // here. If election timers for the data-region shards never
+            // appear post-restart we have ruled in hypothesis C (reactor
+            // task dead) or D (deadline corruption). If they fire but
+            // produce no actions / no messages, the bug is downstream of
+            // the wheel (`Shard::handle_election_timeout` or transport).
+            let lateness_ms = now.duration_since(deadline).as_millis() as u64;
+            tracing::debug!(
+                shard = shard_id.0,
+                kind = ?kind,
+                lateness_ms,
+                "reactor: timer fired",
+            );
             if let Some(shard) = self.shards.get_mut(&shard_id) {
                 let actions = match kind {
                     TimerKind::Election => {
                         if shard.is_failed() {
                             Vec::new()
                         } else {
+                            // DIAG (Task #153): capture pre-call shard state
+                            // so we can correlate post-call action counts
+                            // with the path taken inside
+                            // `handle_election_timeout`. Hypothesis check: if
+                            // the data-region shard is somehow in Delegated
+                            // mode, only `ScheduleTimer` (1 action) will be
+                            // produced; `start_pre_vote` produces N+1
+                            // actions (N voter peers + 1 timer reset).
+                            let pre_state = shard.state_snapshot();
+                            let pre_is_voter = shard.membership().is_voter(shard.local_node_id());
                             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 shard.handle_election_timeout()
                             })) {
-                                Ok(actions) => actions,
+                                Ok(actions) => {
+                                    let send_count = actions
+                                        .iter()
+                                        .filter(|a| matches!(a, Action::Send { .. }))
+                                        .count();
+                                    let schedule_count = actions
+                                        .iter()
+                                        .filter(|a| matches!(a, Action::ScheduleTimer { .. }))
+                                        .count();
+                                    tracing::debug!(
+                                        shard = shard_id.0,
+                                        action_count = actions.len(),
+                                        send_count,
+                                        schedule_count,
+                                        pre_state = ?pre_state,
+                                        pre_is_voter,
+                                        "reactor: handle_election_timeout returned",
+                                    );
+                                    actions
+                                },
                                 Err(payload) => {
                                     let msg = panic_message(&payload);
                                     tracing::error!(shard = shard_id.0, panic = %msg, "ConsensusState panicked — marking as Failed");
@@ -1023,6 +1140,25 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                     self.pending_commits.push((shard, up_to));
                 },
                 Action::ScheduleTimer { shard, kind, deadline } => {
+                    // DIAG (Task #153): every timer scheduled or rescheduled
+                    // is logged with its deadline relative to `clock.now()`.
+                    // Hypothesis D ("election_deadline corruption — Time::MAX
+                    // or far-future") would surface here as an absurd
+                    // `deadline_ms_from_now`. A negative value means the
+                    // timer was scheduled for the past (already-expired) and
+                    // should fire on the next iteration.
+                    let now = self.clock.now();
+                    let deadline_ms_from_now: i64 = if deadline >= now {
+                        deadline.duration_since(now).as_millis() as i64
+                    } else {
+                        -(now.duration_since(deadline).as_millis() as i64)
+                    };
+                    tracing::debug!(
+                        shard = shard.0,
+                        kind = ?kind,
+                        deadline_ms_from_now,
+                        "reactor: timer scheduled",
+                    );
                     self.timers.schedule(shard, kind, deadline);
                 },
                 Action::RenewLease { .. } => {

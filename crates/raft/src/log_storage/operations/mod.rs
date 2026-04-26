@@ -1941,6 +1941,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         if let Some(ref peer_addresses) = self.peer_addresses {
                             peer_addresses.insert(*node_id, address.clone());
                         }
+                        // Persist the address into the GLOBAL `RaftState`
+                        // metadata table so it survives clean shutdown
+                        // (where `applied_durable == last_committed` and
+                        // no WAL replay re-fires this apply arm). Read back
+                        // by `RaftLogStore::with_peer_addresses` on restart
+                        // before any data region's transport-construction
+                        // backstop runs.
+                        pending.peer_addresses.push((*node_id, address.clone()));
                         // Trigger immediate transport channel reconciliation by
                         // sending an AddPeerTransport signal through the region
                         // creation channel. Sentinel: Region::GLOBAL with empty

@@ -124,6 +124,20 @@ impl ConsensusEngine {
             state_receivers.insert(id, state_rx);
         }
 
+        // DIAG (Task #153): record that we are about to spawn the reactor
+        // task. Pairing this with the "Reactor::run started" log inside
+        // `Reactor::run` discriminates hypothesis C: if we see "spawning"
+        // but never see "started", the future was dropped before tokio
+        // polled it (e.g., the JoinHandle was dropped on a `?` early
+        // return higher up the call stack). If we see both but no
+        // subsequent "tick" logs, the task is alive but blocked.
+        let initial_spawn_shard_ids: Vec<u64> =
+            state_receivers.keys().map(|id| id.0).collect();
+        tracing::debug!(
+            shard_count = state_receivers.len(),
+            shard_ids = ?initial_spawn_shard_ids,
+            "reactor: spawning Reactor::run task",
+        );
         let reactor_handle = tokio::spawn(async move {
             reactor.run().await;
         });

@@ -743,19 +743,24 @@ async fn test_delete_vault_tears_down_vault_group() {
 /// compose correctly through a real restart. No production code path is
 /// stubbed or bypassed.
 #[tokio::test]
-#[ignore = "Task #153 — Fix A (pre-register persisted-membership peers) closes the early \
-            silent-drop in `start_region`, but cold-restart election convergence remains broken. \
-            Trace observation 2026-04-25 (3/3 fail, ~144s wall time): post-restart the per-org \
-            and per-vault delegated child shards happily replicate AppendEntries with the \
-            pre-restart leader still asserting leadership, while the parent REGION groups \
-            (GLOBAL `shard_id=5500327960291946835`, us-east-va `shard_id=3569755914963517415`) \
-            send and receive ZERO messages — no PreVoteRequest, no RequestVote, no AppendEntries, \
-            no incoming traffic — for the entire 60s budget. Election timer on the region groups \
-            either never fires post-restart, or fires but the messages never reach \
-            `peer_sender::run_drain_loop`. Term stays at 1 (one run advanced two voters to term=2 \
-            via PreVote, but never elected). Distinct from the silent-drop bug Fix A targeted: \
-            messages are never produced at the engine level. Next step is to instrument \
-            `Reactor::tick`/election-timer firing and `Shard::on_tick` for the region shards."]
+#[ignore = "Task #153 partial — Part 1 (peer-address persistence in raft.db + rehydration on \
+            RaftLogStore::open) and Part 2 (rate-limited warn on send_batch silent-drop) landed \
+            2026-04-25. Trace from this run with diagnostic tracing init confirms Part 1 works: \
+            'Rehydrated persisted peer addresses into in-memory PeerAddressMap region=global \
+            peer_count=2' fires on every restarted node before any data-region transport \
+            construction; 'Using persisted membership for consensus shard region=global \
+            voters={3 nodes}' shows the persisted-membership backstop sees all peers; node \
+            snapshots post-restart show term advances on a subset of nodes (e.g. node 1 stays \
+            at term=1 with voted_for=Some(self), nodes 2/3 advance to term=2). PreVote IS \
+            flowing now — the silent-drop site is no longer reached. The remaining gap is a \
+            separate election-convergence issue: even with all peers registered and PreVote \
+            succeeding, a 3-node cluster does not converge to a single leader within the 60s \
+            test budget. Possible follow-ups: (a) leader-lease semantics on restart causing \
+            stale leader retention on the pre-restart leader, (b) split-vote reproduction at \
+            higher rate than expected because of synchronized election timers across nodes, \
+            (c) inbound vs outbound transport asymmetry on the persisted-leader node. \
+            Convergence triage is out of scope for this fix slice; the test stays #[ignore] \
+            with a refined diagnosis until the convergence path is investigated separately."]
 async fn test_vault_group_rehydrates_after_graceful_cluster_restart() {
     // TCP transport is required for this test: on restart, peer addresses
     // must re-populate before the per-organization rehydration sweep runs,

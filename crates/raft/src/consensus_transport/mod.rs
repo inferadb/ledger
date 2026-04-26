@@ -8,14 +8,45 @@
 
 mod peer_sender;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-use inferadb_ledger_consensus::transport::{NetworkTransport, OutboundMessage};
-use parking_lot::RwLock;
+use inferadb_ledger_consensus::{
+    Message,
+    transport::{NetworkTransport, OutboundMessage},
+};
+use parking_lot::{Mutex, RwLock};
 use tonic::transport::Channel;
 
 use self::peer_sender::PeerSender;
 use crate::{node_registry::NodeConnectionRegistry, types::LedgerNodeId};
+
+/// Throttle interval for "no peer registered" warnings emitted by
+/// [`GrpcConsensusTransport::send_batch`]. One warn is logged per
+/// `(target_node, region, message_kind)` triple per interval; further
+/// silent-drops within the same window are suppressed to keep production
+/// logs from drowning while still surfacing the symptom promptly.
+const SILENT_DROP_WARN_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Returns a short label identifying a [`Message`] variant. Used in
+/// telemetry and the silent-drop warn log so the dropped message kind is
+/// observable without dumping the full payload.
+fn message_kind_name(msg: &Message) -> &'static str {
+    match msg {
+        Message::PreVoteRequest { .. } => "PreVoteRequest",
+        Message::PreVoteResponse { .. } => "PreVoteResponse",
+        Message::VoteRequest { .. } => "VoteRequest",
+        Message::VoteResponse { .. } => "VoteResponse",
+        Message::AppendEntries { .. } => "AppendEntries",
+        Message::AppendEntriesResponse { .. } => "AppendEntriesResponse",
+        Message::InstallSnapshot { .. } => "InstallSnapshot",
+        Message::InstallSnapshotResponse { .. } => "InstallSnapshotResponse",
+        Message::TimeoutNow => "TimeoutNow",
+    }
+}
 
 /// gRPC-based network transport for consensus messages.
 ///
@@ -32,6 +63,10 @@ pub struct GrpcConsensusTransport {
     local_address: Arc<RwLock<String>>,
     region: inferadb_ledger_types::Region,
     registry: Arc<NodeConnectionRegistry>,
+    /// Throttle state for the silent-drop warn in [`Self::send_batch`].
+    /// Keyed by `(target_node, message_kind)`; the region is implicit
+    /// per transport instance.
+    silent_drop_warns: Arc<Mutex<HashMap<(u64, &'static str), Instant>>>,
 }
 
 impl GrpcConsensusTransport {
@@ -50,6 +85,7 @@ impl GrpcConsensusTransport {
             local_address: Arc::new(RwLock::new(String::new())),
             region,
             registry,
+            silent_drop_warns: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -128,8 +164,44 @@ impl NetworkTransport for GrpcConsensusTransport {
             if let Some(sender) = senders.get(&msg.to.0) {
                 // Push returns a PushOutcome that metrics already record.
                 let _ = sender.push(msg);
+                continue;
             }
-            // Missing peer: silently dropped (same as pre-refactor behavior).
+            // No peer registered for the target node — drop the message.
+            //
+            // This is the silent-drop site that masked Task #153: a
+            // restart with empty `peer_addresses` left every data-region
+            // engine's `senders` map empty for its persisted voters, and
+            // every PreVoteRequest emitted by `handle_election_timeout`
+            // landed here without leaving any production-log trace.
+            //
+            // Emit a rate-limited warn so the symptom is observable
+            // without drowning logs under sustained drop rates. Drops
+            // are still expected during normal cluster lifecycle (a
+            // node coming up before peers register, a node leaving
+            // before membership change applies), so the throttle keeps
+            // the log volume bounded while preserving visibility.
+            let kind = message_kind_name(&msg.msg);
+            let key = (msg.to.0, kind);
+            let now = Instant::now();
+            let should_warn = {
+                let mut warns = self.silent_drop_warns.lock();
+                let allow = warns
+                    .get(&key)
+                    .is_none_or(|prev| now.duration_since(*prev) >= SILENT_DROP_WARN_INTERVAL);
+                if allow {
+                    warns.insert(key, now);
+                }
+                allow
+            };
+            if should_warn {
+                tracing::warn!(
+                    target_node = msg.to.0,
+                    region = self.region.as_str(),
+                    shard_id = msg.shard.0,
+                    message_kind = kind,
+                    "consensus transport: dropped message — no peer registered for target node",
+                );
+            }
         }
     }
 

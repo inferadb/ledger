@@ -693,6 +693,16 @@ pub struct PendingExternalWrites {
     pub app_slug_index: Vec<(AppSlug, (OrganizationId, AppId))>,
     /// `AppSlugIndex` table deletes (on app deletion).
     pub app_slug_index_deleted: Vec<AppSlug>,
+    /// Peer address registrations to persist into the `RaftState` table.
+    ///
+    /// Written under the `peer_address:{node_id}` key prefix as a side
+    /// effect of applying [`SystemRequest::RegisterPeerAddress`]. The
+    /// in-memory `PeerAddressMap` mirror is updated synchronously inside
+    /// the apply arm; this Vec drives the durable mirror so that on
+    /// restart the addresses can be repopulated before any data region's
+    /// consensus engine starts and tries to send PreVote / AppendEntries
+    /// to its persisted voter set.
+    pub peer_addresses: Vec<(u64, String)>,
 }
 
 impl PendingExternalWrites {
@@ -723,6 +733,7 @@ impl PendingExternalWrites {
             && self.team_slug_index_deleted.is_empty()
             && self.app_slug_index.is_empty()
             && self.app_slug_index_deleted.is_empty()
+            && self.peer_addresses.is_empty()
     }
 
     /// Encodes a composite key for vault-scoped tables (`VaultHeights`,
