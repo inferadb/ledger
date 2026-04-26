@@ -272,24 +272,48 @@ fn build_consensus_request(
     }
 }
 
-/// Discards every queued message, attributing each to `reason` in drop metrics.
-/// Called when we have no live stream to deliver on — Raft will retransmit
-/// on the next heartbeat.
+/// Discards queued messages that the heartbeat timer will retransmit, while
+/// preserving election-critical messages (PreVote / Vote requests and
+/// responses) across the reconnect window.
+///
+/// Heartbeats and `AppendEntries` can be dropped safely because the leader's
+/// heartbeat timer re-emits them every cycle — a transient stream failure
+/// costs at most one heartbeat interval of replication latency.
+/// Election-critical messages, by contrast, are emitted only when the
+/// election timer fires (~hundreds of ms apart) and have no heartbeat-style
+/// retransmit. Dropping them on every reconnect creates a liveness gap where
+/// each election attempt's messages are discarded before the stream comes
+/// back up, so the cluster never converges on a leader.
+///
+/// Called when we have no live stream to deliver on. Each dropped message is
+/// attributed to `reason` in drop metrics; retained election-critical
+/// messages stay in the queue and ship as soon as the next stream is open.
 fn drop_queue(inner: &Arc<Inner>, reason: &'static str) {
-    let dropped = {
+    let (dropped, retained) = {
         let mut q = inner.queue.lock();
-        let n = q.len();
-        q.clear();
-        inner.depth.store(0, Ordering::Relaxed);
-        n
+        let initial = q.len();
+        q.retain(|msg| msg.msg.is_election_critical());
+        let retained = q.len();
+        let dropped = initial - retained;
+        inner.depth.store(retained, Ordering::Relaxed);
+        (dropped, retained)
     };
     if dropped > 0 {
         inner.dropped_count.fetch_add(dropped, Ordering::Relaxed);
         for _ in 0..dropped {
             crate::metrics::record_peer_send_drop(inner.peer_id, reason);
         }
-        crate::metrics::record_peer_send_queue_depth(inner.peer_id, 0);
     }
+    if dropped > 0 || retained > 0 {
+        tracing::debug!(
+            peer = inner.peer_id,
+            reason,
+            dropped,
+            retained,
+            "peer_sender: drop_queue retained election-critical messages",
+        );
+    }
+    crate::metrics::record_peer_send_queue_depth(inner.peer_id, retained);
 }
 
 /// True iff the stream has outstanding sends that haven't been acknowledged

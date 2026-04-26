@@ -98,3 +98,34 @@ pub enum Message {
     /// Leader tells a follower to immediately start an election (leadership transfer).
     TimeoutNow,
 }
+
+impl Message {
+    /// Returns true if this message is election-critical and not on a
+    /// retransmission timer. Such messages must be preserved across
+    /// transport reconnects — Raft will not re-emit them until the next
+    /// election timeout fires (~500ms), and dropping them creates a
+    /// liveness gap where elections cannot converge.
+    ///
+    /// Heartbeats and `AppendEntries` are NOT election-critical because
+    /// the heartbeat timer re-emits them periodically; dropping them
+    /// across a reconnect window is benign. `InstallSnapshot` is also
+    /// driven by the leader's replication state and re-issued on the
+    /// next heartbeat tick when a follower still lags. `TimeoutNow` is
+    /// a leadership-transfer trigger — if it is dropped the source
+    /// leader simply retains leadership, which is a degraded mode but
+    /// not a liveness gap, so it is treated as non-critical to keep the
+    /// preserved set tight to the election round-trip.
+    pub fn is_election_critical(&self) -> bool {
+        match self {
+            Message::PreVoteRequest { .. }
+            | Message::PreVoteResponse { .. }
+            | Message::VoteRequest { .. }
+            | Message::VoteResponse { .. } => true,
+            Message::AppendEntries { .. }
+            | Message::AppendEntriesResponse { .. }
+            | Message::InstallSnapshot { .. }
+            | Message::InstallSnapshotResponse { .. }
+            | Message::TimeoutNow => false,
+        }
+    }
+}

@@ -743,24 +743,20 @@ async fn test_delete_vault_tears_down_vault_group() {
 /// compose correctly through a real restart. No production code path is
 /// stubbed or bypassed.
 #[tokio::test]
-#[ignore = "Task #153 partial — Part 1 (peer-address persistence in raft.db + rehydration on \
-            RaftLogStore::open) and Part 2 (rate-limited warn on send_batch silent-drop) landed \
-            2026-04-25. Trace from this run with diagnostic tracing init confirms Part 1 works: \
-            'Rehydrated persisted peer addresses into in-memory PeerAddressMap region=global \
-            peer_count=2' fires on every restarted node before any data-region transport \
-            construction; 'Using persisted membership for consensus shard region=global \
-            voters={3 nodes}' shows the persisted-membership backstop sees all peers; node \
-            snapshots post-restart show term advances on a subset of nodes (e.g. node 1 stays \
-            at term=1 with voted_for=Some(self), nodes 2/3 advance to term=2). PreVote IS \
-            flowing now — the silent-drop site is no longer reached. The remaining gap is a \
-            separate election-convergence issue: even with all peers registered and PreVote \
-            succeeding, a 3-node cluster does not converge to a single leader within the 60s \
-            test budget. Possible follow-ups: (a) leader-lease semantics on restart causing \
-            stale leader retention on the pre-restart leader, (b) split-vote reproduction at \
-            higher rate than expected because of synchronized election timers across nodes, \
-            (c) inbound vs outbound transport asymmetry on the persisted-leader node. \
-            Convergence triage is out of scope for this fix slice; the test stays #[ignore] \
-            with a refined diagnosis until the convergence path is investigated separately."]
+#[ignore = "Task #172 Fix (i) — preserving election-critical messages in peer_sender::drop_queue \
+            on stream-open/stream-broken landed (consensus/src/message.rs adds \
+            Message::is_election_critical; raft/src/consensus_transport/peer_sender.rs::drop_queue \
+            now retains PreVote/Vote variants and only drops heartbeats/AppendEntries/snapshots/ \
+            TimeoutNow). The fix is structurally correct and meets the Raft semantic the diagnosis \
+            calls for, but does not, on its own, close the cold-restart convergence gap. Two runs \
+            post-fix: (1) terms split (node1=1 voted_for=self, nodes2/3=2 voted_for=None), \
+            (2) all three stuck at term=1 leader=None. Diagnosis: Part (ii) — the underlying 5s \
+            stream-death root cause from idle-keepalive lapse — remains unfixed, so the queued \
+            (now-preserved) PreVote requests still cannot drain because the bidi stream itself \
+            never re-establishes durably enough for the peers to ack within the election window. \
+            Fix (i) is necessary but not sufficient. Next slice: Part (ii) — investigate idle \
+            keepalive lapse / HTTP/2 stream-death root cause that prevents the freshly opened \
+            stream from staying live long enough to complete the election round-trip."]
 async fn test_vault_group_rehydrates_after_graceful_cluster_restart() {
     // TCP transport is required for this test: on restart, peer addresses
     // must re-populate before the per-organization rehydration sweep runs,
