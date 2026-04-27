@@ -997,9 +997,12 @@ list_entities() {
     local result
     result=$(grpcurl -plaintext -d "$request" "$addr" ledger.v1.ReadService/ListEntities 2>&1) || true
 
-    # Extract entities: key + base64-decoded value
+    # Extract entities: key + base64-decoded value. Skip internal `_audit:`
+    # entries — their values are postcard-encoded protobuf with non-UTF-8
+    # bytes that break locale-aware sort, and the comparison only cares
+    # about user-visible data anyway.
     local entities
-    entities=$(echo "$result" | jq -r '.entities[]? | .key + "=" + .value' 2>/dev/null || true)
+    entities=$(echo "$result" | jq -r '.entities[]? | select(.key | startswith("_") | not) | .key + "=" + .value' 2>/dev/null || true)
     if [[ -n "$entities" ]]; then
       # Decode base64 values
       while IFS='=' read -r key value_b64; do
@@ -1015,7 +1018,10 @@ list_entities() {
     fi
   done
 
-  echo -n "$all_entities" | sort
+  # `LC_ALL=C` forces byte-wise comparison so any residual non-UTF-8 in
+  # decoded values doesn't make sort silently drop output under a
+  # multi-byte locale.
+  echo -n "$all_entities" | LC_ALL=C sort
 }
 
 # Get the tip (block height + state root) from a node.

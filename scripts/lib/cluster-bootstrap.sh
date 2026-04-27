@@ -263,11 +263,18 @@ provision_region() {
 
   local node_count=${#CLUSTER_PIDS[@]}
   local base_port
-  # First listening port from the exported $CLUSTER_ENDPOINTS, e.g. "http://127.0.0.1:50051".
-  base_port=$(echo "$CLUSTER_ENDPOINTS" | sed -n 's@.*://[^:]*:\([0-9]*\).*@\1@p' | head -1)
+  # Extract the FIRST endpoint's port from the exported $CLUSTER_ENDPOINTS
+  # (e.g. "http://127.0.0.1:50051,http://127.0.0.1:50052,..."). The previous
+  # `sed -n 's@.*://[^:]*:\([0-9]*\).*@\1@p'` regex was greedy on `.*://` and
+  # silently captured the LAST endpoint's port — fine on a single-endpoint
+  # string but broken when called after `bootstrap_cluster` exports a
+  # comma-separated list, leaving `provision_region` looping over ports
+  # past the cluster's range. Split on comma first, then on the last `:`.
+  base_port=$(echo "$CLUSTER_ENDPOINTS" | cut -d, -f1 | sed 's@.*:@@')
   [[ -z "$base_port" ]] && { log_error "provision_region: cannot derive base port"; return 1; }
 
   local attempt
+  local last_result=""
   for attempt in $(seq 1 "$max_attempts"); do
     local i
     for ((i=0; i<node_count; i++)); do
@@ -277,6 +284,7 @@ provision_region() {
         -d "{\"region\": $region}" \
         "$addr" \
         ledger.v1.AdminService/ProvisionRegion 2>&1) || true
+      last_result="$result"
       if echo "$result" | jq -e '.region' &>/dev/null; then
         log_success "Data region $region provisioned (attempt $attempt)"
         return 0
@@ -286,6 +294,7 @@ provision_region() {
   done
 
   log_error "provision_region: failed after $max_attempts attempts (region=$region)"
+  log_error "Last response: $last_result"
   return 1
 }
 

@@ -66,6 +66,13 @@ async fn create_sdk_client(endpoints: &[String], client_id: &str) -> LedgerClien
     let config = ClientConfig::builder()
         .servers(ServerSource::from_static(endpoints.iter().cloned()))
         .client_id(client_id)
+        // Setting `preferred_region` activates the SDK's region-leader cache
+        // so `NotLeader` + `LeaderHint` responses route subsequent retries
+        // to the actual data-region leader instead of round-robining
+        // across endpoints. Without this, multi-tier consensus tests where
+        // GLOBAL leader and region leader live on different nodes loop on
+        // not-leader rejections until the retry budget is exhausted.
+        .preferred_region(inferadb_ledger_types::Region::US_EAST_VA)
         .timeout(Duration::from_secs(10))
         .connect_timeout(Duration::from_secs(5))
         .retry_policy(
@@ -86,6 +93,10 @@ async fn create_single_endpoint_client(endpoint: &str, client_id: &str) -> Ledge
     let config = ClientConfig::builder()
         .servers(ServerSource::from_static([endpoint.to_string()]))
         .client_id(client_id)
+        // See comment on `create_sdk_client` — preferred_region is required
+        // for the SDK to honor `NotLeader` + `LeaderHint` redirects under
+        // multi-tier consensus.
+        .preferred_region(inferadb_ledger_types::Region::US_EAST_VA)
         .timeout(Duration::from_secs(10))
         .connect_timeout(Duration::from_secs(5))
         .retry_policy(
@@ -173,33 +184,75 @@ async fn setup_user_and_org(endpoints: &[String]) -> (UserSlug, OrganizationSlug
         other => panic!("expected OnboardingSession (NewUser), got {:?}", other),
     };
 
-    // 4. Complete registration — creates user + organization atomically
+    // 4. Complete registration — creates user + organization atomically.
+    //
+    // `complete_registration` submits a saga that runs on the GLOBAL leader.
+    // Under multi-tier consensus the GLOBAL leader can differ from the
+    // regional (data-region) leader served the verification flow above —
+    // iterate endpoints until we hit the GLOBAL leader so the saga
+    // submission lands on the right node. The handler returns
+    // `Unavailable` ("Not the GLOBAL leader") on non-GLOBAL-leader nodes.
     let org_name = format!("test-org-{}", uuid::Uuid::new_v4());
-    let reg_resp = user_client
-        .complete_registration(inferadb_ledger_proto::proto::CompleteRegistrationRequest {
-            onboarding_token,
-            email,
-            region: 10,
-            name: "E2E Test User".to_string(),
-            organization_name: org_name,
-        })
-        .await
-        .expect("complete registration");
-    let reg = reg_resp.into_inner();
+    let mut reg = None;
+    for _attempt in 0..30 {
+        for ep in endpoints {
+            let mut client = match UserServiceClient::connect(ep.clone()).await {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            match client
+                .complete_registration(
+                    inferadb_ledger_proto::proto::CompleteRegistrationRequest {
+                        onboarding_token: onboarding_token.clone(),
+                        email: email.clone(),
+                        region: 10,
+                        name: "E2E Test User".to_string(),
+                        organization_name: org_name.clone(),
+                    },
+                )
+                .await
+            {
+                Ok(resp) => {
+                    reg = Some(resp.into_inner());
+                    break;
+                },
+                Err(e)
+                    if e.code() == tonic::Code::Unavailable
+                        || e.code() == tonic::Code::Internal =>
+                {
+                    // Not the GLOBAL leader — try next endpoint.
+                    continue;
+                },
+                Err(e) => panic!("complete registration: {e}"),
+            }
+        }
+        if reg.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let reg = reg.expect("complete registration: all endpoints failed after 30 attempts");
     let user_slug = UserSlug::new(
         reg.user.expect("user in registration response").slug.expect("user slug").slug,
     );
     let org_slug =
         OrganizationSlug::new(reg.organization.expect("org slug in registration response").slug);
 
-    // 5. Create vault — retry for async provisioning saga
+    // 5. Create vault — retry for async provisioning saga AND for the
+    // brief window after `complete_registration` where the per-org Raft
+    // group is still bootstrapping / adopting leadership from the parent
+    // region. Under multi-tier consensus the per-org group's adoption
+    // races with the immediate `create_vault` call, so the early
+    // not-leader rejection is expected for the first few attempts.
     let client = create_sdk_client(endpoints, "setup-client").await;
     for attempt in 0..60 {
         match client.create_vault(user_slug, org_slug).await {
             Ok(info) => return (user_slug, org_slug, info.vault),
             Err(e)
                 if (format!("{e}").contains("not found")
-                    || format!("{e}").contains("provisioned"))
+                    || format!("{e}").contains("provisioned")
+                    || format!("{e}").contains("Not the leader")
+                    || format!("{e}").contains("not active on this node"))
                     && attempt < 59 =>
             {
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -500,10 +553,27 @@ async fn test_watch_blocks_stream_setup() {
     let (user, ns_id, vault) = setup_user_and_org(&endpoints).await;
     let client = create_sdk_client(&endpoints, "stream-client").await;
 
-    // Start watching blocks from height 1 (genesis)
-    let stream_result = client.watch_blocks(user, ns_id, vault, 1).await;
+    // Start watching blocks from height 1 (genesis). Retry while the
+    // SDK's region-leader cache settles after `setup_user_and_org` —
+    // streaming RPCs don't go through the same retry-with-leader-cache
+    // path as unary RPCs, so the first connect can land on a non-leader
+    // node and immediately surface `Not the leader for this region`.
+    let mut last_err = None;
+    let mut stream_result = Err(inferadb_ledger_sdk::SdkError::Shutdown);
+    for _ in 0..30 {
+        stream_result = client.watch_blocks(user, ns_id, vault, 1).await;
+        if stream_result.is_ok() {
+            break;
+        }
+        last_err = stream_result.as_ref().err().map(|e| format!("{e}"));
+        if last_err.as_deref().is_some_and(|s| s.contains("Not the leader")) {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            continue;
+        }
+        break;
+    }
 
-    assert!(stream_result.is_ok(), "watch_blocks should succeed: {:?}", stream_result.err());
+    assert!(stream_result.is_ok(), "watch_blocks should succeed: {:?}", last_err);
 }
 
 // ============================================================================
@@ -530,15 +600,28 @@ async fn test_data_persistence_across_sessions() {
         }
     } // Client dropped
 
-    // Second client session — read previously written data
+    // Second client session — read previously written data. The SDK's
+    // default consistency for `read` is EVENTUAL, which can serve from a
+    // follower whose per-vault apply pipeline hasn't yet caught up to
+    // the writes from the first session — especially because the first
+    // client was dropped between sessions, so the second client picks a
+    // potentially-cold connection. Poll on each key for a few cycles
+    // until convergence.
     {
         let client = create_sdk_client(&endpoints, "reader-session-2").await;
 
         for i in 0..5 {
             let key = format!("persist:{}", i);
             let expected = format!("data-{}", i).into_bytes();
-            let read_result =
-                client.read(user, ns_id, Some(vault), &key, None, None).await.expect("read");
+            let mut read_result = None;
+            for _ in 0..30 {
+                read_result =
+                    client.read(user, ns_id, Some(vault), &key, None, None).await.expect("read");
+                if read_result.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
             assert_eq!(read_result, Some(expected), "should read {}", key);
         }
 
