@@ -2239,10 +2239,12 @@ impl RaftManager {
 
         // Activate delegated leadership: the new org ConsensusState does not run
         // its own elections (LeadershipMode::Delegated). Its leader is
-        // adopted from the data-region group's elected leader. Bootstrap
-        // a one-time adoption now (in case the region already has a
-        // leader), then spawn a watcher that re-adopts on every region
-        // leader change.
+        // adopted from the data-region group's elected leader. The watcher
+        // task re-adopts the parent's leader on every change AND on initial
+        // entry — the latter closes the race where the parent acquires a
+        // leader between the bootstrap-time read and the watcher's
+        // subscription, which `state_rx().clone()` marks as "already seen"
+        // (so `changed()` would not fire until the next change).
         //
         // The read-guard must be dropped before the first `.await` below
         // (`adopt_leader`). Taking the lookup result in its own let-binding
@@ -2251,14 +2253,20 @@ impl RaftManager {
         if let Some(region_inner) = region_inner_opt {
             let region_handle = region_inner.handle().clone();
             let org_handle = org_inner.handle().clone();
-            let initial_state = region_handle.shard_state();
-            if let Some(leader) = initial_state.leader {
-                let _ = org_handle.adopt_leader(leader, initial_state.term).await;
-            }
-            // Spawn watcher: subscribe to data-region's leader/term and
-            // re-adopt on every change. Exits when the engine drops.
             let mut state_rx = region_handle.state_rx().clone();
             tokio::spawn(async move {
+                // Initial adoption: re-read the parent's current state
+                // and adopt without waiting for a change. Idempotent —
+                // `ConsensusState::adopt_leader` is a no-op when the
+                // shard is already in (term, leader). Closes two races:
+                //   1. Parent acquired a leader before this task started.
+                //   2. The cloned `state_rx` marks the current value as
+                //      "seen", so `changed()` would not fire on the
+                //      already-current leader.
+                let snap = state_rx.borrow_and_update().clone();
+                if let Some(leader) = snap.leader {
+                    let _ = org_handle.adopt_leader(leader, snap.term).await;
+                }
                 while state_rx.changed().await.is_ok() {
                     let snap = state_rx.borrow().clone();
                     if let Some(leader) = snap.leader

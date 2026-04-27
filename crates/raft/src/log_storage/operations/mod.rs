@@ -2895,6 +2895,30 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             user_orgs.insert(organization_id);
                             state.user_org_index.insert(user_id, user_orgs);
 
+                            // Signal the per-organization Raft group bootstrap.
+                            // Mirrors the `CreateOrganization` apply arm: the
+                            // group is started at provision time (status =
+                            // Provisioning), not at activation, so it has time
+                            // to come up and adopt leadership from the parent
+                            // region group before any user-facing RPC arrives.
+                            // Firing only at `ActivateOnboardingUser` would
+                            // race the immediate `CreateVault` that the SDK
+                            // issues right after `complete_registration`
+                            // returns — the per-org group's reactor would not
+                            // yet have processed the `AdoptLeader` event when
+                            // the first proposal arrives, returning
+                            // `Not the leader for organization X`.
+                            if let Some(ref sender) = self.organization_creation_sender
+                                && sender.send((*region, organization_id)).is_err()
+                            {
+                                tracing::error!(
+                                    region = region.as_str(),
+                                    organization_id = organization_id.value(),
+                                    "Organization handler channel closed — \
+                                     CreateOnboardingUser signal dropped"
+                                );
+                            }
+
                             LedgerResponse::OnboardingUserCreated { user_id, organization_id }
                         } else {
                             LedgerResponse::Error {
@@ -3207,23 +3231,13 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 state.user_slug_index.insert(*user_slug, *user_id);
                             }
 
-                            // Signal the per-organization Raft group bootstrap.
-                            // Mirrors the `CreateOrganization` apply arm — without
-                            // this signal, organizations created via the onboarding
-                            // saga never get a per-org group started, and any
-                            // subsequent `CreateVault` (or other per-org write)
-                            // returns `NotLeader for organization X`.
-                            if let Ok(Some(registry)) = sys.get_organization(*organization_id)
-                                && let Some(ref sender) = self.organization_creation_sender
-                                && sender.send((registry.region, *organization_id)).is_err()
-                            {
-                                tracing::error!(
-                                    region = registry.region.as_str(),
-                                    organization_id = organization_id.value(),
-                                    "Organization handler channel closed — \
-                                     ActivateOnboardingUser signal dropped"
-                                );
-                            }
+                            // Note: the per-organization Raft group bootstrap is
+                            // signalled at `CreateOnboardingUser` (saga step 0,
+                            // status=Provisioning) so the group has time to
+                            // come up and adopt leadership before user-facing
+                            // RPCs arrive. By the time we reach `ActivateOnboardingUser`,
+                            // the group is already running — we only flip status
+                            // to Active here.
 
                             LedgerResponse::OnboardingUserActivated
                         } else {
