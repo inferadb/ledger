@@ -845,41 +845,7 @@ async fn test_snapshot_forces_sync() {
 }
 
 // ============================================================================
-// Test 6: Block archive is idempotent across replay
-// ============================================================================
-
-/// Per the design doc, writes that produce `RegionBlock`s must have
-/// idempotent `append_block` so replay after a crash doesn't
-/// duplicate blocks. The block-producing path is
-/// `OrganizationRequest::Write { vault, transactions, ... }`,
-/// which requires the org and vault to exist and be active in
-/// GLOBAL state.
-///
-/// This test is SKIPPED at the integration level — setting up a
-/// real org+vault outside the saga requires replicating ~80 lines
-/// of bootstrap code that lives in `setup_user` + `create_test_vault`
-/// + regional saga step execution. The block-archive idempotency
-/// invariant is already covered by the unit tests:
-/// `append_block_idempotent_by_height` and
-/// `append_block_rejects_divergent_block_at_same_height` in
-/// `crates/state/src/block_archive.rs`. Those tests exercise the
-/// same invariant the design doc calls out (identical bytes on
-/// replay, rejected on divergent bytes).
-///
-/// Followup: the property-test candidate here is "replay
-/// any committed prefix, then replay an overlapping prefix, and
-/// assert the block archive state is a function of the WAL tail
-/// only." That's a deterministic simulation-level assertion and
-/// belongs with the other simulation scenarios.
-#[tokio::test]
-#[ignore = "covered by state::block_archive::append_block_idempotent_by_height unit test; \
-            integration-level requires full saga/vault setup — see test body for followup"]
-async fn test_block_archive_idempotent_on_replay() {
-    // Intentionally left as a doc placeholder. See #[ignore] reason.
-}
-
-// ============================================================================
-// Test 7: Graceful shutdown makes synced == applied on every region
+// Test 6: Graceful shutdown makes synced == applied on every region
 // ============================================================================
 
 /// Strengthens Test 1: not only does the next restart replay zero
@@ -1242,7 +1208,7 @@ fn read_region_block(
 }
 
 // ----------------------------------------------------------------------------
-// Test 8: external ingest is crash-recoverable
+// Test 7: external ingest is crash-recoverable
 // ----------------------------------------------------------------------------
 
 /// `IngestEvents` routes through Raft: the RPC
@@ -1329,7 +1295,7 @@ async fn test_crash_preserves_externally_ingested_events() {
 }
 
 // ----------------------------------------------------------------------------
-// Test 9: blocks.db is idempotent on replay
+// Test 8: blocks.db is idempotent on replay
 // ----------------------------------------------------------------------------
 
 /// `BlockArchive::append_block` uses `commit_in_memory`, so the apply
@@ -1491,7 +1457,7 @@ fn collect_region_heights(
 }
 
 // ----------------------------------------------------------------------------
-// Test 10: events.db is idempotent on replay
+// Test 9: events.db is idempotent on replay
 // ----------------------------------------------------------------------------
 
 /// The apply-path `EventWriter::write_events` uses `commit_in_memory`, and
@@ -1642,16 +1608,16 @@ async fn test_events_db_idempotent_on_replay() {
 // § "Testing strategy" for the intended scenarios.
 //
 // The three tests below cover the visible-contract corners of that change:
-//   * Test 11 — crash before flush: events enqueued within the flush window are lost on SIGKILL
+//   * Test 10 — crash before flush: events enqueued within the flush window are lost on SIGKILL
 //     (the durability window the batching change introduces).
-//   * Test 12 — graceful shutdown: Phase 5b drains the queue; zero events lost on a clean exit.
-//   * Test 13 — time-triggered flush: with the flusher left on its default cadence, events emitted
+//   * Test 11 — graceful shutdown: Phase 5b drains the queue; zero events lost on a clean exit.
+//   * Test 12 — time-triggered flush: with the flusher left on its default cadence, events emitted
 //     pre-crash ARE preserved if we wait longer than the flush interval before crashing. This
 //     bounds the "lost on crash" window to exactly `flush_interval_ms`, exactly as the contract
 //     promises.
 
 // ----------------------------------------------------------------------------
-// Test 11: handler-phase events enqueued within the flush window are lost on crash
+// Test 10: handler-phase events enqueued within the flush window are lost on crash
 // ----------------------------------------------------------------------------
 
 /// Documents the durability contract: a SIGKILL between a successful RPC
@@ -1743,10 +1709,10 @@ async fn test_handler_events_lost_within_flush_window_on_crash() {
 }
 
 // ----------------------------------------------------------------------------
-// Test 12: handler-phase events survive graceful shutdown
+// Test 11: handler-phase events survive graceful shutdown
 // ----------------------------------------------------------------------------
 
-/// The positive flipside of Test 11: on a graceful shutdown, Phase 5b
+/// The positive flipside of Test 10: on a graceful shutdown, Phase 5b
 /// (`EventHandle::flush_for_shutdown`) drains the queue via
 /// `commit_in_memory`, then Phase 5c (`RaftManager::sync_all_state_dbs`)
 /// runs `sync_state` on events.db so every queued event is durable before
@@ -1804,12 +1770,12 @@ async fn test_handler_events_preserved_across_graceful_shutdown() {
 }
 
 // ----------------------------------------------------------------------------
-// Test 13: handler-phase events are durable after the StateCheckpointer tick
+// Test 12: handler-phase events are durable after the StateCheckpointer tick
 // ----------------------------------------------------------------------------
 
 /// Bounds the "lost on crash" window from above: handler-phase events that
 /// have been flushed AND checkpointed MUST be durable even on an unclean
-/// crash. Test 11 proves events are lost within the flush window; this test
+/// crash. Test 10 proves events are lost within the flush window; this test
 /// proves they are safe OUTSIDE the checkpoint window. Together they pin
 /// the durability contract to "at most `checkpoint_interval_ms`
 /// of handler-phase events lost on crash".
@@ -1907,10 +1873,10 @@ async fn test_handler_events_durable_after_checkpoint_interval() {
 }
 
 // ----------------------------------------------------------------------------
-// Test 14: handler-phase events lost on crash within the checkpoint window
+// Test 13: handler-phase events lost on crash within the checkpoint window
 // ----------------------------------------------------------------------------
 
-/// Companion to Test 11: even after the flusher commits a batch
+/// Companion to Test 10: even after the flusher commits a batch
 /// (`commit_in_memory`), an unclean crash BEFORE the StateCheckpointer's
 /// next tick loses every event in that batch. The durability contract is
 /// "events are durable within `checkpoint_interval_ms` of the last

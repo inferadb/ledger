@@ -3207,6 +3207,24 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 state.user_slug_index.insert(*user_slug, *user_id);
                             }
 
+                            // Signal the per-organization Raft group bootstrap.
+                            // Mirrors the `CreateOrganization` apply arm — without
+                            // this signal, organizations created via the onboarding
+                            // saga never get a per-org group started, and any
+                            // subsequent `CreateVault` (or other per-org write)
+                            // returns `NotLeader for organization X`.
+                            if let Ok(Some(registry)) = sys.get_organization(*organization_id)
+                                && let Some(ref sender) = self.organization_creation_sender
+                                && sender.send((registry.region, *organization_id)).is_err()
+                            {
+                                tracing::error!(
+                                    region = registry.region.as_str(),
+                                    organization_id = organization_id.value(),
+                                    "Organization handler channel closed — \
+                                     ActivateOnboardingUser signal dropped"
+                                );
+                            }
+
                             LedgerResponse::OnboardingUserActivated
                         } else {
                             LedgerResponse::Error {

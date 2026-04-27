@@ -2886,18 +2886,98 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             Status::unavailable("Region provisioning not available on single-region nodes")
         })?;
 
-        // The local node ID lives on `self.handle.node_id()` (populated for
-        // every node). The optional `self.node_id` builder field is for
-        // tracing-context wiring only and is not always set, so prefer the
-        // handle accessor here.
-        let node_id = self.handle.node_id();
-        let addr = self.advertise_addr.clone();
-        let region_config =
-            inferadb_ledger_raft::raft_manager::RegionConfig::data(region, vec![(node_id, addr)]);
-        let (_group, created) = manager.ensure_data_region(region_config).await.map_err(|e| {
-            ctx.set_error("Internal", &format!("{e}"));
-            error_classify::raft_error(&e)
-        })?;
+        // Idempotency fast path: if the region already exists locally, the
+        // CreateDataRegion entry was already proposed (and applied on this
+        // node). Return success without re-proposing — the apply path is
+        // a no-op for an already-running region but the propose-and-wait
+        // handshake here would still pay a Raft round-trip.
+        if manager.get_region_group(region).is_ok() {
+            tracing::info!(
+                region = region.as_str(),
+                created = false,
+                elapsed_ms = start.elapsed().as_millis() as u64,
+                "provision_region completed (already provisioned)"
+            );
+            let proto_region: ProtoRegion = region.into();
+            return Ok(Response::new(ProvisionRegionResponse {
+                created: false,
+                region: proto_region.into(),
+            }));
+        }
+
+        // Propose CreateDataRegion through GLOBAL Raft so every node
+        // (leader and followers) starts the data region group locally via
+        // its apply-side region-creation handler. Without this, only the
+        // node receiving the RPC starts the region group; followers
+        // remain unaware. Subsequent membership changes (DR scheduler
+        // adding peers as voters) then promote nodes that have no local
+        // region group, leaving regional proposals unable to reach
+        // quorum.
+        //
+        // Initial members is the full GLOBAL voter set so apply-time
+        // peer-transport setup runs on every node. The DR scheduler
+        // refines membership as nodes' health states require.
+        let initial_members: Vec<(u64, String)> = manager
+            .system_region()
+            .map_err(|e| {
+                ctx.set_error("Internal", &format!("system region not available: {e}"));
+                Status::unavailable(format!("system region not available: {e}"))
+            })?
+            .handle()
+            .shard_state()
+            .voters
+            .iter()
+            .filter_map(|n| {
+                let id = n.0;
+                manager.peer_addresses().get(id).map(|addr| (id, addr))
+            })
+            .collect();
+
+        if initial_members.is_empty() {
+            ctx.set_error("Internal", "no GLOBAL voters with known addresses");
+            return Err(Status::failed_precondition(
+                "Cannot provision region: no GLOBAL voters with registered peer addresses",
+            ));
+        }
+
+        let req = inferadb_ledger_raft::types::SystemRequest::CreateDataRegion {
+            region,
+            initial_members,
+        };
+        let response = self
+            .handle
+            .propose_and_wait(
+                inferadb_ledger_raft::types::RaftPayload::system(req),
+                std::time::Duration::from_secs(10),
+            )
+            .await
+            .map_err(|e| {
+                ctx.set_error("Internal", &format!("CreateDataRegion propose failed: {e}"));
+                error_classify::raft_error(&e)
+            })?;
+
+        let created = matches!(
+            response,
+            inferadb_ledger_raft::types::LedgerResponse::DataRegionCreated { .. }
+        );
+
+        // Wait for the local node's region-creation handler to spin up
+        // the region group. The apply-side signal is fire-and-forget;
+        // returning here before the local group is registered would let
+        // a follow-on RPC against this same node race the handler.
+        let local_ready_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if manager.get_region_group(region).is_ok() {
+                break;
+            }
+            if tokio::time::Instant::now() >= local_ready_deadline {
+                ctx.set_error("Internal", "local region group did not start within 5s");
+                return Err(Status::deadline_exceeded(
+                    "Region created in cluster state but local group did not start within 5s",
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
 
         tracing::info!(
             region = region.as_str(),
