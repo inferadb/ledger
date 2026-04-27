@@ -231,6 +231,15 @@ pub struct LedgerServer {
     /// UDS simultaneously.
     #[builder(default)]
     socket: Option<std::path::PathBuf>,
+    /// HTTP/2 transport tuning (flow-control windows, max concurrent streams).
+    ///
+    /// Applied to `tonic::transport::Server::builder()` at startup so the
+    /// values bind for the lifetime of the process. Defaults raise the
+    /// per-stream window to 2 MiB and the per-connection window to 8 MiB —
+    /// the tonic / hyper defaults of 64 KiB stall multiplexed traffic on
+    /// loopback once 256+ concurrent streams share a connection.
+    #[builder(default)]
+    http2_config: inferadb_ledger_types::config::Http2Config,
 }
 
 impl LedgerServer {
@@ -505,6 +514,21 @@ impl LedgerServer {
             .http2_keepalive_interval(Some(Duration::from_secs(20)))
             .http2_keepalive_timeout(Some(Duration::from_secs(5)))
             .tcp_keepalive(Some(Duration::from_secs(60)))
+            // HTTP/2 flow-control windows. The tonic / hyper defaults of 64 KiB
+            // per stream and per connection saturate immediately when many
+            // concurrent streams share a multiplexed connection, capping
+            // throughput at ~10k ops/s on loopback regardless of CPU or fsync
+            // headroom. Raising the per-connection window to 8 MiB and the
+            // per-stream window to 2 MiB removes that wall. `max_concurrent_streams`
+            // caps per-connection stream concurrency at 2048 by default — high
+            // enough for 256+ concurrent SDK tasks with multiple in-flight RPCs
+            // each, low enough to bound memory under hostile clients. Note the
+            // tonic 0.14 method names are NOT prefixed with `http2_`; they are
+            // `initial_stream_window_size` / `initial_connection_window_size` /
+            // `max_concurrent_streams`.
+            .initial_stream_window_size(Some(self.http2_config.initial_stream_window_bytes))
+            .initial_connection_window_size(Some(self.http2_config.initial_connection_window_bytes))
+            .max_concurrent_streams(Some(self.http2_config.max_concurrent_streams))
             // Track in-flight requests for connection draining during shutdown.
             // Outermost layer so it counts every request, including those rejected
             // by concurrency limits or load shedding.

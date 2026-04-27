@@ -87,7 +87,7 @@ bootstrap_cluster "$BASE_PORT" "$NODE_COUNT" "$DATA_ROOT" "$SETTLE_TIME"
 # GLOBAL region. Provision us-east-va so user-facing RPCs (onboarding, write,
 # read) apply through the regional Raft group instead of returning
 # `ProposalError: Region us-east-va is not active on this node`.
-provision_region 10
+provision_region us-east-va false
 sleep 3
 
 # ---------------------------------------------------------------------------

@@ -244,6 +244,35 @@ pub enum UserDirectoryStatus {
     Provisioning,
 }
 
+/// Authoritative directory record for a provisioned data region.
+///
+/// Persisted in GLOBAL state under `_dir:region:{name}`. Every node consults
+/// this directory on bootstrap to decide which regions to start locally —
+/// unprotected regions auto-join, protected regions require explicit
+/// opt-in (`--region <name>`). Contains no PII.
+///
+/// `voters` and `learners` carry `LedgerNodeId` (`u64`) values to match the
+/// consensus engine's wire-level node identifiers (the same shape used by
+/// `RegionMembershipReport` and `SystemRequest::CreateDataRegion::initial_members`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegionDirectoryEntry {
+    /// Region name slug (e.g. `"us-east-va"`). Matches the `_dir:region:{name}`
+    /// key suffix.
+    pub name: String,
+    /// Whether nodes must explicitly opt-in (`--region <name>`) to join this
+    /// region. `false` for the auto-join default.
+    pub protected: bool,
+    /// Configuration epoch. Monotonically increasing on each membership
+    /// change; stale reports with a lower epoch are ignored.
+    pub conf_epoch: u64,
+    /// Current Raft group voters (`LedgerNodeId`).
+    pub voters: Vec<u64>,
+    /// Current Raft group learners (`LedgerNodeId`).
+    pub learners: Vec<u64>,
+    /// Wall-clock creation timestamp.
+    pub created_at: DateTime<Utc>,
+}
+
 /// Non-PII user directory record in the GLOBAL control plane.
 ///
 /// Enables any node to resolve a [`UserId`] to its data region without

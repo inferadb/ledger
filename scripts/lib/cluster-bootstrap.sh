@@ -242,14 +242,24 @@ bootstrap_cluster() {
 # explicitly provisioned first.
 #
 # Args:
-#   1: region_enum_value (e.g. 10 for REGION_US_EAST_VA)
-#   2: max_attempts      (default 30)
+#   1: region_name  (e.g. "us-east-va")
+#   2: protected    ("true" or "false")
+#   3: max_attempts (default 30)
 #
 # Tries each listening cluster port on each attempt — `ProvisionRegion` is
 # idempotent (`created = false` on a no-op) and can be served by any node.
 provision_region() {
   local region=$1
-  local max_attempts=${2:-30}
+  local protected=$2
+  local max_attempts=${3:-30}
+  if [[ -z "$region" ]]; then
+    log_error "provision_region: region name is required (e.g. us-east-va)"
+    return 1
+  fi
+  if [[ "$protected" != "true" && "$protected" != "false" ]]; then
+    log_error "provision_region: protected must be 'true' or 'false' (got: '$protected')"
+    return 1
+  fi
   if ! command -v grpcurl &>/dev/null; then
     log_error "grpcurl is required for provision_region (install: brew install grpcurl)"
     return 1
@@ -279,11 +289,11 @@ provision_region() {
       local addr="127.0.0.1:$((base_port + i))"
       local result
       result=$(grpcurl -plaintext \
-        -d "{\"region\": $region}" \
+        -d "{\"name\": \"$region\", \"protected\": $protected}" \
         "$addr" \
         ledger.v1.AdminService/ProvisionRegion 2>&1) || true
       last_result="$result"
-      if echo "$result" | jq -e '.region' &>/dev/null; then
+      if echo "$result" | jq -e '.name' &>/dev/null; then
         log_success "Data region $region provisioned (attempt $attempt)"
         return 0
       fi

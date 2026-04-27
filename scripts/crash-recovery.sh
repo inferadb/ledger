@@ -465,7 +465,7 @@ run_scenario() {
   # Data regions are no longer auto-created at boot. Provision us-east-va
   # explicitly via `AdminService::ProvisionRegion` before any user-facing
   # RPCs (which apply through the regional Raft group).
-  provision_region 10 || return 1
+  provision_region us-east-va false || return 1
 
   # Settle so every voter has applied the region creation.
   sleep 3

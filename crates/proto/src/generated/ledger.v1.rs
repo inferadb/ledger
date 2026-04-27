@@ -4304,20 +4304,54 @@ pub struct MigrateExistingUsersResponse {
     pub elapsed_secs: f64,
 }
 /// Eagerly provision a Raft group for a region.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProvisionRegionRequest {
-    /// Region to provision.
-    #[prost(enumeration = "Region", tag = "1")]
-    pub region: i32,
+    /// Region name slug (e.g. `"us-east-va"`). Lower-case ASCII letters,
+    /// digits, and hyphens. The reserved `"global"` slug is rejected — the
+    /// GLOBAL control plane is bootstrapped implicitly on cluster init.
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    /// Whether nodes must explicitly opt-in (`--region <name>`) to join this
+    /// region. Unprotected regions are auto-joined by every cluster member.
+    #[prost(bool, tag = "2")]
+    pub protected: bool,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProvisionRegionResponse {
     /// Whether the region was newly created (false if already active).
     #[prost(bool, tag = "1")]
     pub created: bool,
-    /// Region that was provisioned.
-    #[prost(enumeration = "Region", tag = "2")]
-    pub region: i32,
+    /// Region name slug that was provisioned.
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+}
+/// Region directory entry persisted in GLOBAL state under
+/// `_dir:region:{name}`. Authoritative record of every provisioned region;
+/// every node consults this directory on bootstrap to decide which regions
+/// to start locally.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RegionDirectoryEntry {
+    /// Region name slug (e.g. `"us-east-va"`). Matches the `_dir:region:{name}`
+    /// key.
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    /// Whether nodes must explicitly opt-in (`--region <name>`) to join this
+    /// region. Unprotected regions are auto-joined by every cluster member.
+    #[prost(bool, tag = "2")]
+    pub protected: bool,
+    /// Configuration epoch. Monotonically increasing on each membership
+    /// change; stale reports with a lower epoch are ignored.
+    #[prost(uint64, tag = "3")]
+    pub conf_epoch: u64,
+    /// Current Raft group voters.
+    #[prost(uint64, repeated, tag = "4")]
+    pub voters: ::prost::alloc::vec::Vec<u64>,
+    /// Current Raft group learners.
+    #[prost(uint64, repeated, tag = "5")]
+    pub learners: ::prost::alloc::vec::Vec<u64>,
+    /// Wall-clock creation timestamp.
+    #[prost(message, optional, tag = "6")]
+    pub created_at: ::core::option::Option<::prost_types::Timestamp>,
 }
 /// Geographic region for data residency. Each Raft consensus group maps 1:1 to
 /// a region. Organizations declare a region governing where their data is stored.

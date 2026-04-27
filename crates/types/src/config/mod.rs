@@ -29,6 +29,8 @@ mod resilience;
 mod runtime;
 /// Storage backend and cache configuration.
 mod storage;
+/// Transport-layer (HTTP/2) tuning for the gRPC server and SDK client.
+mod transport;
 
 pub use encryption::*;
 pub use jwt::*;
@@ -40,6 +42,7 @@ pub use resilience::*;
 pub use runtime::*;
 use snafu::Snafu;
 pub use storage::*;
+pub use transport::*;
 
 /// Configuration validation error.
 ///

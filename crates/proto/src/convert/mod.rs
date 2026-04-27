@@ -42,6 +42,6 @@ pub use domain::{
     proto_timestamp_to_datetime, vault_entry_to_proto_block,
 };
 pub use statuses::{
-    invitation_status_from_i32, region_from_i32, signing_key_scope_from_i32, user_role_from_i32,
-    user_status_from_i32, validate_signing_key_status,
+    invitation_status_from_i32, region_from_i32, region_from_str, signing_key_scope_from_i32,
+    user_role_from_i32, user_status_from_i32, validate_signing_key_status,
 };

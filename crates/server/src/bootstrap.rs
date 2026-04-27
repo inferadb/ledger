@@ -777,6 +777,7 @@ pub async fn bootstrap_node(
         .init_sender(init_tx.clone())
         .cluster_id(cluster_id)
         .peer_liveness(Some(peer_liveness.clone()))
+        .http2_config(config.http2.clone())
         .build();
 
     // Wire backup support post-construction.

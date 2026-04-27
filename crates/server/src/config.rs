@@ -222,6 +222,20 @@ pub struct Config {
     #[builder(default)]
     pub batching: inferadb_ledger_types::config::BatchConfig,
 
+    // === HTTP/2 Transport ===
+    /// HTTP/2 transport tuning for the gRPC server (flow-control windows,
+    /// max concurrent streams).
+    ///
+    /// Restart-only: applied to the `tonic::transport::Server` builder at
+    /// startup. Defaults (2 MiB stream window, 8 MiB connection window,
+    /// 2048 max concurrent streams) are tuned for high-concurrency RPC
+    /// workloads. The matching client-side knobs live on the SDK
+    /// `ClientConfig`; both ends should be raised together to take effect.
+    #[arg(skip)]
+    #[serde(default)]
+    #[builder(default)]
+    pub http2: inferadb_ledger_types::config::Http2Config,
+
     // === Logging ===
     /// Logging configuration for comprehensive request logging.
     ///
@@ -397,6 +411,7 @@ impl Default for Config {
             timeout_secs: default_timeout_secs(),
             raft: None,
             batching: inferadb_ledger_types::config::BatchConfig::default(),
+            http2: inferadb_ledger_types::config::Http2Config::default(),
             logging: LoggingConfig::default(),
             backup: None,
             events: inferadb_ledger_types::events::EventConfig::default(),

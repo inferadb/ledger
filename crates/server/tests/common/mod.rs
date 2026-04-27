@@ -1151,7 +1151,7 @@ impl TestCluster {
         let initial_members: Vec<(u64, String)> =
             self.nodes.iter().map(|n| (n.id, n.addr.clone())).collect();
 
-        let req = SystemRequest::CreateDataRegion { region, initial_members };
+        let req = SystemRequest::CreateDataRegion { region, protected: false, initial_members };
         let resp = leader
             .handle
             .propose_and_wait(RaftPayload::system(req), Duration::from_secs(10))

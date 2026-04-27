@@ -872,12 +872,18 @@ pub enum SystemRequest {
 
     /// Creates a data region on all cluster nodes.
     ///
-    /// Proposed to the GLOBAL Raft group. Each node's apply handler sends the
-    /// region through a channel so the `RaftManager` can start the local
-    /// region group, ensuring cluster-wide consensus on region creation.
+    /// Proposed to the GLOBAL Raft group. Each node's apply handler writes
+    /// a `_dir:region:{name}` directory entry into GLOBAL state and sends
+    /// the region through a channel so the `RaftManager` can start the
+    /// local region group, ensuring cluster-wide consensus on region
+    /// creation.
     CreateDataRegion {
         /// The region to create.
         region: Region,
+        /// Whether nodes must explicitly opt-in (`--region <name>`) to join
+        /// this region. Unprotected regions are auto-joined by every cluster
+        /// member; protected regions require explicit opt-in.
+        protected: bool,
         /// Initial members for the region's Raft group.
         /// Carried in the Raft entry so all nodes use the same membership.
         initial_members: Vec<(u64, String)>,

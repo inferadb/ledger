@@ -16,9 +16,9 @@ use inferadb_ledger_state::{
         AuditRecord, ClientAssertionEntry, EmailHashEntry, KeyTier, OnboardingAccount,
         OrganizationMember, OrganizationMemberRole, OrganizationProfile, OrganizationRegistry,
         OrganizationStatus, OrganizationTier, PendingEmailVerification, ProvisioningReservation,
-        RefreshToken, SYSTEM_VAULT_ID, SigningKey, SigningKeyStatus, SystemError, SystemKeys,
-        SystemOrganizationService, Team, TeamMember, User, UserDirectoryEntry, UserDirectoryStatus,
-        UserEmail, write_audit_record,
+        RefreshToken, RegionDirectoryEntry, SYSTEM_VAULT_ID, SigningKey, SigningKeyStatus,
+        SystemError, SystemKeys, SystemOrganizationService, Team, TeamMember, User,
+        UserDirectoryEntry, UserDirectoryStatus, UserEmail, write_audit_record,
     },
 };
 use inferadb_ledger_store::StorageBackend;
@@ -1922,7 +1922,45 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         }
                         LedgerResponse::Empty
                     },
-                    SystemRequest::CreateDataRegion { region, initial_members } => {
+                    SystemRequest::CreateDataRegion { region, protected, initial_members } => {
+                        // Persist the region's directory entry in GLOBAL state under
+                        // `_dir:region:{name}`. Authoritative record for every node;
+                        // bootstrap consults this directory to decide which regions
+                        // to start locally (auto-join unprotected, opt-in protected).
+                        if let Some(ref sl) = self.state_layer {
+                            let key = SystemKeys::region_directory_entry(region.as_str());
+                            if let Err(msg) = SystemKeys::validate_key_tier(&key, KeyTier::Global) {
+                                tracing::error!(
+                                    region = region.as_str(),
+                                    error = %msg,
+                                    "CreateDataRegion: region directory key failed tier validation"
+                                );
+                            } else {
+                                let entry = RegionDirectoryEntry {
+                                    name: region.as_str().to_owned(),
+                                    protected: *protected,
+                                    conf_epoch: 0,
+                                    voters: initial_members.iter().map(|(id, _)| *id).collect(),
+                                    learners: Vec::new(),
+                                    created_at: block_timestamp,
+                                };
+                                let value = encode(&entry).unwrap_or_default();
+                                let ops = vec![Operation::SetEntity {
+                                    key,
+                                    value,
+                                    condition: None,
+                                    expires_at: None,
+                                }];
+                                if let Err(e) = sl.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0) {
+                                    tracing::error!(
+                                        region = region.as_str(),
+                                        error = %e,
+                                        "CreateDataRegion: failed to persist region directory entry"
+                                    );
+                                }
+                            }
+                        }
+
                         // Signal the region creation handler to start this region locally.
                         // Each node runs this apply handler independently, ensuring all
                         // nodes create the region through Raft consensus.

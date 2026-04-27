@@ -17,11 +17,10 @@ use inferadb_ledger_proto::proto::{
     GetRewrapStatusResponse, Hash, IntegrityIssue, JoinClusterRequest, JoinClusterResponse,
     LeaveClusterRequest, LeaveClusterResponse, ListBackupsRequest, ListBackupsResponse,
     MigrateExistingUsersRequest, MigrateExistingUsersResponse, ProvisionRegionRequest,
-    ProvisionRegionResponse, RecoverVaultRequest, RecoverVaultResponse, Region as ProtoRegion,
-    RestoreBackupRequest, RestoreBackupResponse, RotateBlindingKeyRequest,
-    RotateBlindingKeyResponse, RotateRegionKeyRequest, RotateRegionKeyResponse,
-    TransferLeadershipRequest, TransferLeadershipResponse, UpdateConfigRequest,
-    UpdateConfigResponse, VaultHealthProto,
+    ProvisionRegionResponse, RecoverVaultRequest, RecoverVaultResponse, RestoreBackupRequest,
+    RestoreBackupResponse, RotateBlindingKeyRequest, RotateBlindingKeyResponse,
+    RotateRegionKeyRequest, RotateRegionKeyResponse, TransferLeadershipRequest,
+    TransferLeadershipResponse, UpdateConfigRequest, UpdateConfigResponse, VaultHealthProto,
 };
 use inferadb_ledger_raft::{
     ConsensusHandle, HandleError, NodeStatus,
@@ -2897,7 +2896,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let mut ctx = self.make_request_context_unified("provision_region", &request);
         let req = request.into_inner();
 
-        let region = inferadb_ledger_proto::convert::region_from_i32(req.region)?;
+        let protected = req.protected;
+        let region = inferadb_ledger_proto::convert::region_from_str(&req.name)?;
 
         if region == inferadb_ledger_types::Region::GLOBAL {
             ctx.set_error("InvalidArgument", "GLOBAL region cannot be provisioned");
@@ -2918,14 +2918,14 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         if manager.get_region_group(region).is_ok() {
             tracing::info!(
                 region = region.as_str(),
+                protected,
                 created = false,
                 elapsed_ms = start.elapsed().as_millis() as u64,
                 "provision_region completed (already provisioned)"
             );
-            let proto_region: ProtoRegion = region.into();
             return Ok(Response::new(ProvisionRegionResponse {
                 created: false,
-                region: proto_region.into(),
+                name: region.as_str().to_owned(),
             }));
         }
 
@@ -2966,6 +2966,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
 
         let req = inferadb_ledger_raft::types::SystemRequest::CreateDataRegion {
             region,
+            protected,
             initial_members,
         };
         let response = self
@@ -3005,13 +3006,13 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
 
         tracing::info!(
             region = region.as_str(),
+            protected,
             created,
             elapsed_ms = start.elapsed().as_millis() as u64,
             "provision_region completed"
         );
 
-        let proto_region: ProtoRegion = region.into();
-        Ok(Response::new(ProvisionRegionResponse { created, region: proto_region.into() }))
+        Ok(Response::new(ProvisionRegionResponse { created, name: region.as_str().to_owned() }))
     }
 }
 

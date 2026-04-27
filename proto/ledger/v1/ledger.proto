@@ -3849,14 +3849,41 @@ message MigrateExistingUsersResponse {
 
 // Eagerly provision a Raft group for a region.
 message ProvisionRegionRequest {
-  // Region to provision.
-  Region region = 1;
+  // Region name slug (e.g. `"us-east-va"`). Lower-case ASCII letters,
+  // digits, and hyphens. The reserved `"global"` slug is rejected — the
+  // GLOBAL control plane is bootstrapped implicitly on cluster init.
+  string name = 1;
+  // Whether nodes must explicitly opt-in (`--region <name>`) to join this
+  // region. Unprotected regions are auto-joined by every cluster member.
+  bool protected = 2;
 }
 
 message ProvisionRegionResponse {
   // Whether the region was newly created (false if already active).
   bool created = 1;
-  // Region that was provisioned.
-  Region region = 2;
+  // Region name slug that was provisioned.
+  string name = 2;
+}
+
+// Region directory entry persisted in GLOBAL state under
+// `_dir:region:{name}`. Authoritative record of every provisioned region;
+// every node consults this directory on bootstrap to decide which regions
+// to start locally.
+message RegionDirectoryEntry {
+  // Region name slug (e.g. `"us-east-va"`). Matches the `_dir:region:{name}`
+  // key.
+  string name = 1;
+  // Whether nodes must explicitly opt-in (`--region <name>`) to join this
+  // region. Unprotected regions are auto-joined by every cluster member.
+  bool protected = 2;
+  // Configuration epoch. Monotonically increasing on each membership
+  // change; stale reports with a lower epoch are ignored.
+  uint64 conf_epoch = 3;
+  // Current Raft group voters.
+  repeated uint64 voters = 4;
+  // Current Raft group learners.
+  repeated uint64 learners = 5;
+  // Wall-clock creation timestamp.
+  google.protobuf.Timestamp created_at = 6;
 }
 

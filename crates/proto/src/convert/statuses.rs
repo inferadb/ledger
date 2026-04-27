@@ -497,8 +497,8 @@ pub fn region_from_i32(value: i32) -> Result<inferadb_ledger_types::Region, Stat
 /// [`Region`](inferadb_ledger_types::Region) type. Returns
 /// [`Status::invalid_argument`] for empty or malformed slugs.
 ///
-/// Used by service handlers that accept region names as `string` fields.
-#[allow(dead_code)]
+/// Used by service handlers that accept region names as `string` fields
+/// (e.g. `AdminService::ProvisionRegion`).
 pub fn region_from_str(value: &str) -> Result<inferadb_ledger_types::Region, Status> {
     use std::str::FromStr;
     inferadb_ledger_types::Region::from_str(value)

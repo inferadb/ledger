@@ -338,23 +338,23 @@ echo "==> running init subcommand"
 # Brief settle before we start firing SDK traffic.
 sleep 2
 
-# Provision the us-east-va data region (REGION_US_EAST_VA = 10). The
-# profile harness routes every preset's setup flow through this region,
-# so without this provision step every workload aborts with
-# `Region us-east-va is not active on this node`. Data regions are
-# created via cluster consensus on `AdminService::ProvisionRegion` —
-# `init` alone bootstraps only the system region. We hand grpcurl the
-# proto descriptors directly via `-import-path` / `-proto` defensively;
-# the server also serves gRPC reflection unconditionally.
-echo "==> provisioning data region us-east-va (region=10)"
+# Provision the us-east-va data region. The profile harness routes every
+# preset's setup flow through this region, so without this provision step
+# every workload aborts with `Region us-east-va is not active on this node`.
+# Data regions are created via cluster consensus on
+# `AdminService::ProvisionRegion` — `init` alone bootstraps only the system
+# region. We hand grpcurl the proto descriptors directly via `-import-path`
+# / `-proto` defensively; the server also serves gRPC reflection
+# unconditionally.
+echo "==> provisioning data region us-east-va"
 if command -v grpcurl >/dev/null 2>&1; then
     PR_RESULT=$(grpcurl -plaintext \
         -import-path "$ROOT_DIR/proto" \
         -proto ledger/v1/ledger.proto \
-        -d '{"region": 10}' \
+        -d '{"name": "us-east-va", "protected": false}' \
         "127.0.0.1:${PORT}" \
         ledger.v1.AdminService/ProvisionRegion 2>&1) || true
-    if ! echo "$PR_RESULT" | grep -q '"region"'; then
+    if ! echo "$PR_RESULT" | grep -q '"name"'; then
         echo "error: ProvisionRegion failed; response:" >&2
         echo "$PR_RESULT" >&2
         tail -30 "$DATA_DIR/server.log" >&2 || true

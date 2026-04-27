@@ -22,6 +22,26 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default connection timeout (5 seconds).
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Default HTTP/2 initial stream window size in bytes (2 MiB).
+///
+/// The tonic / hyper default is 64 KiB, which stalls each stream on every
+/// 64 KiB of unacked data — fine for large payloads but cripples small-RPC
+/// throughput when many concurrent streams share a single multiplexed
+/// connection. 2 MiB lifts that ceiling without exposing the client to
+/// memory-pressure attacks (the value is a per-stream upper bound, not a
+/// preallocation).
+const DEFAULT_HTTP2_INITIAL_STREAM_WINDOW_BYTES: u32 = 2 * 1024 * 1024;
+
+/// Default HTTP/2 initial connection window size in bytes (8 MiB).
+///
+/// Connection-level flow control is shared by all in-flight streams. The
+/// 64 KiB default saturates immediately under 256-concurrent-stream load —
+/// every 64 KiB of cumulative throughput stalls until the peer emits a
+/// `WINDOW_UPDATE` frame. 8 MiB gives multiplexed traffic enough headroom
+/// that the per-stream window becomes the binding constraint, not the
+/// connection.
+const DEFAULT_HTTP2_INITIAL_CONNECTION_WINDOW_BYTES: u32 = 8 * 1024 * 1024;
+
 /// Configuration for the Ledger SDK client.
 ///
 /// Constructed via [`ClientConfig::builder()`](ClientConfig::builder) which validates all fields at
@@ -94,6 +114,21 @@ pub struct ClientConfig {
     ///     .unwrap();
     /// ```
     pub(crate) preferred_region: Option<Region>,
+
+    /// HTTP/2 per-stream initial flow-control window, in bytes.
+    ///
+    /// Default: 2 MiB. Must be >= 65,535 (RFC 9113 minimum). Raising this
+    /// above the 64 KiB default removes the per-stream stall that otherwise
+    /// caps small-RPC throughput on a multiplexed connection.
+    pub(crate) http2_initial_stream_window_bytes: u32,
+
+    /// HTTP/2 per-connection initial flow-control window, in bytes.
+    ///
+    /// Default: 8 MiB. Must be >= `http2_initial_stream_window_bytes`. The
+    /// connection window is shared across all streams; with 256 concurrent
+    /// streams sharing one connection, the 64 KiB default saturates after
+    /// the first round-trip's worth of data.
+    pub(crate) http2_initial_connection_window_bytes: u32,
 }
 
 #[bon]
@@ -158,6 +193,10 @@ impl ClientConfig {
         preferred_region: Option<Region>,
         #[builder(default = Duration::from_secs(30))] region_leader_soft_ttl: Duration,
         #[builder(default = Duration::from_secs(120))] region_leader_hard_ttl: Duration,
+        #[builder(default = DEFAULT_HTTP2_INITIAL_STREAM_WINDOW_BYTES)]
+        http2_initial_stream_window_bytes: u32,
+        #[builder(default = DEFAULT_HTTP2_INITIAL_CONNECTION_WINDOW_BYTES)]
+        http2_initial_connection_window_bytes: u32,
     ) -> Result<Self> {
         // Validate static endpoints
         if let ServerSource::Static(ref endpoints) = servers {
@@ -187,6 +226,23 @@ impl ClientConfig {
                 message: "region_leader_hard_ttl must be >= region_leader_soft_ttl".to_owned(),
             });
         }
+        // RFC 9113 §6.9.2 minimum SETTINGS_INITIAL_WINDOW_SIZE.
+        if http2_initial_stream_window_bytes < 65_535 {
+            return Err(SdkError::Config {
+                message: format!(
+                    "http2_initial_stream_window_bytes must be >= 65535 (RFC 9113), got {}",
+                    http2_initial_stream_window_bytes
+                ),
+            });
+        }
+        if http2_initial_connection_window_bytes < http2_initial_stream_window_bytes {
+            return Err(SdkError::Config {
+                message: format!(
+                    "http2_initial_connection_window_bytes ({}) must be >= http2_initial_stream_window_bytes ({})",
+                    http2_initial_connection_window_bytes, http2_initial_stream_window_bytes
+                ),
+            });
+        }
 
         Ok(Self {
             servers,
@@ -203,6 +259,8 @@ impl ClientConfig {
             preferred_region,
             region_leader_soft_ttl,
             region_leader_hard_ttl,
+            http2_initial_stream_window_bytes,
+            http2_initial_connection_window_bytes,
         })
     }
 }
@@ -294,6 +352,20 @@ impl ClientConfig {
     #[must_use]
     pub fn region_leader_hard_ttl(&self) -> Duration {
         self.region_leader_hard_ttl
+    }
+
+    /// Returns the configured HTTP/2 per-stream initial flow-control window
+    /// in bytes.
+    #[must_use]
+    pub fn http2_initial_stream_window_bytes(&self) -> u32 {
+        self.http2_initial_stream_window_bytes
+    }
+
+    /// Returns the configured HTTP/2 per-connection initial flow-control
+    /// window in bytes.
+    #[must_use]
+    pub fn http2_initial_connection_window_bytes(&self) -> u32 {
+        self.http2_initial_connection_window_bytes
     }
 }
 

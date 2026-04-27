@@ -126,6 +126,7 @@ impl SystemKeys {
         // -- _dir: Directory routing (GLOBAL) --
         key_entry!(DIR_PREFIX, Global, Directory),
         key_entry!(USER_DIRECTORY_PREFIX, Global, Directory),
+        key_entry!(REGION_DIRECTORY_PREFIX, Global, Directory),
         key_entry!(ORG_REGISTRY_PREFIX, Global, Directory),
         // -- _idx: Secondary indexes (GLOBAL) --
         key_entry!(USER_SLUG_INDEX_PREFIX, Global, Index),
@@ -299,6 +300,24 @@ impl SystemKeys {
     /// Returns `None` if the key doesn't match `_dir:user:{id}`.
     pub fn parse_user_directory_key(key: &str) -> Option<UserId> {
         key.strip_prefix(Self::USER_DIRECTORY_PREFIX).and_then(|id| id.parse().ok())
+    }
+
+    /// Primary key for a region directory entry in the GLOBAL control plane.
+    ///
+    /// Pattern: `_dir:region:{name}` → postcard-serialized
+    /// [`RegionDirectoryEntry`](crate::system::RegionDirectoryEntry).
+    ///
+    /// Authoritative record of every provisioned region. Every node consults
+    /// this directory on bootstrap to decide which regions to start locally.
+    pub fn region_directory_entry(name: &str) -> String {
+        format!("_dir:region:{name}")
+    }
+
+    /// Parses a region name from a region directory key.
+    ///
+    /// Returns `None` if the key doesn't match `_dir:region:{name}`.
+    pub fn parse_region_directory_key(key: &str) -> Option<&str> {
+        key.strip_prefix(Self::REGION_DIRECTORY_PREFIX)
     }
 
     /// Index key for user slug → user ID lookup in the GLOBAL control plane.
@@ -788,6 +807,12 @@ impl SystemKeys {
 
     /// Prefix for all user directory entries in the GLOBAL control plane.
     pub const USER_DIRECTORY_PREFIX: &'static str = "_dir:user:";
+
+    /// Prefix for region directory entries in the GLOBAL control plane.
+    ///
+    /// Pattern: `_dir:region:{name}` → postcard-serialized
+    /// [`RegionDirectoryEntry`](crate::system::RegionDirectoryEntry).
+    pub const REGION_DIRECTORY_PREFIX: &'static str = "_dir:region:";
 
     /// Prefix for all directory entries (`_dir:` namespace).
     pub const DIR_PREFIX: &'static str = "_dir:";
@@ -1984,7 +2009,7 @@ mod tests {
     /// a new constant, preventing silent omissions.
     #[test]
     fn test_key_registry_completeness() {
-        const EXPECTED_COUNT: usize = 66;
+        const EXPECTED_COUNT: usize = 67;
         assert_eq!(
             SystemKeys::KEY_REGISTRY.len(),
             EXPECTED_COUNT,

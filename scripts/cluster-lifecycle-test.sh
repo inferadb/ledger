@@ -1285,10 +1285,10 @@ for _attempt in $(seq 1 30); do
       continue
     fi
     PROVISION_RESULT=$(grpcurl -plaintext \
-      -d '{"region": 10}' \
+      -d '{"name": "us-east-va", "protected": false}' \
       "127.0.0.1:$port" \
       ledger.v1.AdminService/ProvisionRegion 2>&1) || true
-    if echo "$PROVISION_RESULT" | jq -e '.region' &>/dev/null; then
+    if echo "$PROVISION_RESULT" | jq -e '.name' &>/dev/null; then
       PROVISION_OK=true
       break 2
     fi

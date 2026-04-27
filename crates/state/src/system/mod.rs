@@ -45,8 +45,8 @@ pub use types::{
     ErasureAuditRecord, MigrationSummary, MtlsCredential, NodeInfo, NodeRole, OnboardingAccount,
     OrgShredKey, Organization, OrganizationMember, OrganizationProfile, OrganizationRegistry,
     OrganizationStatus, OrganizationTier, PendingEmailVerification, ProvisioningReservation,
-    RefreshToken, SigningKey, Team, TeamMember, TeamMemberRole, User, UserDirectoryEntry,
-    UserDirectoryStatus, UserEmail, UserMigrationEntry, UserShredKey,
+    RefreshToken, RegionDirectoryEntry, SigningKey, Team, TeamMember, TeamMemberRole, User,
+    UserDirectoryEntry, UserDirectoryStatus, UserEmail, UserMigrationEntry, UserShredKey,
 };
 
 #[cfg(test)]

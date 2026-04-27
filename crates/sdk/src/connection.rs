@@ -291,7 +291,21 @@ impl ConnectionPool {
             .tcp_keepalive(Some(TCP_KEEPALIVE_INTERVAL))
             .http2_keep_alive_interval(HTTP2_KEEPALIVE_INTERVAL)
             .keep_alive_timeout(HTTP2_KEEPALIVE_TIMEOUT)
-            .keep_alive_while_idle(true);
+            .keep_alive_while_idle(true)
+            // HTTP/2 flow-control windows. Tonic 0.14 / hyper 1.x default to
+            // 64 KiB stream + connection windows; with all 256 concurrent SDK
+            // tasks sharing one underlying connection, those defaults cap
+            // throughput at ~10k ops/s for small RPCs because the connection
+            // window saturates after the first ~64 KiB and every subsequent
+            // send waits on a `WINDOW_UPDATE` round-trip. Raising both windows
+            // lets multiplexed traffic flow without per-stream stalls. The
+            // server-side equivalents live on `Http2Config` in the types crate
+            // and must be raised in lockstep — each side's window only governs
+            // its own receive direction.
+            .initial_stream_window_size(Some(self.config.http2_initial_stream_window_bytes()))
+            .initial_connection_window_size(Some(
+                self.config.http2_initial_connection_window_bytes(),
+            ));
 
         // Apply TLS configuration if present
         let endpoint = if let Some(ref tls_config) = self.config.tls {

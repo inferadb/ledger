@@ -271,6 +271,6 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for MockAd
         self.state.check_injection().await?;
 
         let req = request.into_inner();
-        Ok(Response::new(proto::ProvisionRegionResponse { created: true, region: req.region }))
+        Ok(Response::new(proto::ProvisionRegionResponse { created: true, name: req.name }))
     }
 }
