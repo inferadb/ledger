@@ -204,7 +204,6 @@ start_node() {
     --listen "127.0.0.1:$port" \
     --data "$node_data" \
     "${join_args[@]+"${join_args[@]}"}" \
-    --enable-grpc-reflection \
     --email-blinding-key "$blinding_key" \
     --log-format text \
     > "$DATA_ROOT/node$node_num.log" 2>&1 &

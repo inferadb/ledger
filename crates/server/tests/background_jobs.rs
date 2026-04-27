@@ -239,8 +239,7 @@ async fn test_vault_health_tracking() {
     // the GLOBAL leader (`leader_ep`), so a vault_client pinned to a
     // single node would `panic!("create vault: ...")` on
     // `Not the leader for region us-east-va`.
-    let endpoints: Vec<String> =
-        cluster.endpoints().iter().map(|s| s.to_string()).collect();
+    let endpoints: Vec<String> = cluster.endpoints().iter().map(|s| s.to_string()).collect();
     let vault =
         crate::common::create_vault_with_retry_endpoints(&endpoints, organization, user_slug).await;
     assert!(vault.value() > 0, "vault should have valid ID");
@@ -382,8 +381,7 @@ async fn test_concurrent_background_jobs() {
 
     // Iterate cluster endpoints for vault creation — under multi-tier
     // consensus, the data-region leader can differ from the GLOBAL leader.
-    let endpoints: Vec<String> =
-        cluster.endpoints().iter().map(|s| s.to_string()).collect();
+    let endpoints: Vec<String> = cluster.endpoints().iter().map(|s| s.to_string()).collect();
     let _vault =
         crate::common::create_vault_with_retry_endpoints(&endpoints, organization, user_slug).await;
 

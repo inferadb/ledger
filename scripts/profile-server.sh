@@ -39,8 +39,9 @@
 
 set -euo pipefail
 
-# Repo root for resolving proto descriptors when invoking grpcurl against
-# the profile-mode server (which doesn't enable reflection).
+# Repo root for resolving proto descriptors when invoking grpcurl. The server
+# always serves gRPC reflection, so `-import-path`/`-proto` is defensive — it
+# keeps the script working even if reflection is unreachable for any reason.
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 MODE="${1:-}"
@@ -342,9 +343,9 @@ sleep 2
 # so without this provision step every workload aborts with
 # `Region us-east-va is not active on this node`. Data regions are
 # created via cluster consensus on `AdminService::ProvisionRegion` —
-# `init` alone bootstraps only the system region. The profile-mode
-# server binary doesn't enable gRPC reflection, so we hand grpcurl the
-# proto descriptors directly via `-import-path` / `-proto`.
+# `init` alone bootstraps only the system region. We hand grpcurl the
+# proto descriptors directly via `-import-path` / `-proto` defensively;
+# the server also serves gRPC reflection unconditionally.
 echo "==> provisioning data region us-east-va (region=10)"
 if command -v grpcurl >/dev/null 2>&1; then
     PR_RESULT=$(grpcurl -plaintext \

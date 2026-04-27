@@ -158,7 +158,6 @@ bootstrap_cluster() {
       RUST_LOG=info "$LEDGER_BINARY" \
         --listen "127.0.0.1:$port" \
         --data "$node_data" \
-        --enable-grpc-reflection \
         --email-blinding-key "$blinding_key" \
         --log-format text \
         > "$data_root/node$i.log" 2>&1 &
@@ -167,7 +166,6 @@ bootstrap_cluster() {
         --listen "127.0.0.1:$port" \
         --data "$node_data" \
         --join "$first_addr" \
-        --enable-grpc-reflection \
         --email-blinding-key "$blinding_key" \
         --log-format text \
         > "$data_root/node$i.log" 2>&1 &

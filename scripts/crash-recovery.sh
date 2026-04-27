@@ -334,7 +334,6 @@ restart_node() {
     --listen "127.0.0.1:$port" \
     --data "$node_data" \
     --join "$first_addr" \
-    --enable-grpc-reflection \
     --email-blinding-key "$blinding_key" \
     --log-format text \
     > "$DATA_ROOT/node$node_num.restart.log" 2>&1 &

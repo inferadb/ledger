@@ -771,7 +771,6 @@ pub async fn bootstrap_node(
         .token_service(token_service_config)
         .proposal_timeout(proposal_timeout)
         .health_check_config(config.health_check.clone())
-        .enable_grpc_reflection(config.enable_grpc_reflection)
         .email_blinding_key(email_blinding_key)
         .peer_addresses(Some(peer_addresses))
         .consensus_transport(consensus_transport.clone())

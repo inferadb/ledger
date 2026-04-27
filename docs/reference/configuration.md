@@ -319,8 +319,7 @@ inferadb-ledger \
   --region us-east-va \
   --advertise node3:50051 \
   --concurrent 100 \
-  --timeout 30 \
-  --enable-grpc-reflection
+  --timeout 30
 ```
 
 ## Storage Configuration

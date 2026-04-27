@@ -177,13 +177,6 @@ pub struct LedgerServer {
     /// is rejected with `RESOURCE_EXHAUSTED` when the limit is reached.
     #[builder(default = 1000)]
     max_watch_streams: usize,
-    /// Enables gRPC server reflection.
-    ///
-    /// When true, tools like `grpcurl` can discover services without
-    /// requiring proto files on the client side. Disabled by default
-    /// in production to reduce the attack surface.
-    #[builder(default = false)]
-    enable_grpc_reflection: bool,
     /// HMAC key for privacy-preserving email uniqueness enforcement.
     ///
     /// When present, onboarding RPCs (email verification, registration) are
@@ -549,15 +542,12 @@ impl LedgerServer {
             .add_service(SystemDiscoveryServiceServer::new(discovery_service))
             .add_service(RaftServiceServer::new(raft_service));
 
-        // gRPC reflection allows tools like grpcurl to discover services
+        // gRPC reflection lets tools like grpcurl discover services
         // without requiring proto files on the client side.
-        // Disabled by default to reduce attack surface in production.
-        if self.enable_grpc_reflection {
-            let reflection_service = tonic_reflection::server::Builder::configure()
-                .register_encoded_file_descriptor_set(inferadb_ledger_proto::FILE_DESCRIPTOR_SET)
-                .build_v1()?;
-            router = router.add_service(reflection_service);
-        }
+        let reflection_service = tonic_reflection::server::Builder::configure()
+            .register_encoded_file_descriptor_set(inferadb_ledger_proto::FILE_DESCRIPTOR_SET)
+            .build_v1()?;
+        router = router.add_service(reflection_service);
 
         // Register TokenService if JWT support is configured
         if let Some(token_svc) = token_service {
