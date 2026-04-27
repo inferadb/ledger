@@ -39,6 +39,10 @@
 
 set -euo pipefail
 
+# Repo root for resolving proto descriptors when invoking grpcurl against
+# the profile-mode server (which doesn't enable reflection).
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
 MODE="${1:-}"
 WORKLOAD="${2:-throughput-writes}"
 DURATION="${3:-60}"
@@ -332,6 +336,34 @@ echo "==> running init subcommand"
 }
 # Brief settle before we start firing SDK traffic.
 sleep 2
+
+# Provision the us-east-va data region (REGION_US_EAST_VA = 10). The
+# profile harness routes every preset's setup flow through this region,
+# so without this provision step every workload aborts with
+# `Region us-east-va is not active on this node`. Data regions are
+# created via cluster consensus on `AdminService::ProvisionRegion` —
+# `init` alone bootstraps only the system region. The profile-mode
+# server binary doesn't enable gRPC reflection, so we hand grpcurl the
+# proto descriptors directly via `-import-path` / `-proto`.
+echo "==> provisioning data region us-east-va (region=10)"
+if command -v grpcurl >/dev/null 2>&1; then
+    PR_RESULT=$(grpcurl -plaintext \
+        -import-path "$ROOT_DIR/proto" \
+        -proto ledger/v1/ledger.proto \
+        -d '{"region": 10}' \
+        "127.0.0.1:${PORT}" \
+        ledger.v1.AdminService/ProvisionRegion 2>&1) || true
+    if ! echo "$PR_RESULT" | grep -q '"region"'; then
+        echo "error: ProvisionRegion failed; response:" >&2
+        echo "$PR_RESULT" >&2
+        tail -30 "$DATA_DIR/server.log" >&2 || true
+        exit 1
+    fi
+    sleep 2
+else
+    echo "error: grpcurl required to provision us-east-va" >&2
+    exit 1
+fi
 
 # Optional experiment knob: disable the StateCheckpointer via UpdateConfig so
 # apply-path fsyncs aren't contending with checkpoint fsyncs. One-off used for
