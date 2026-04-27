@@ -155,6 +155,76 @@ pub trait ProposalService: Send + Sync {
     }
 }
 
+/// Forwards a GLOBAL Raft proposal to the actual GLOBAL leader via the
+/// internal `RegionalProposal` RPC.
+///
+/// Used as a `NotLeader` recovery path inside [`RaftProposalService::propose_bytes`]
+/// so multi-tier writes (e.g. `CreateVault`'s per-org propose followed by a
+/// GLOBAL `RegisterVaultDirectoryEntry`) succeed when the gRPC handler runs
+/// on a node that is the per-org leader but not the GLOBAL leader. The
+/// receiving handler ([`crate::services::raft::RaftService::regional_proposal`])
+/// authenticates the caller via the cluster peer-address map and proposes
+/// the bytes against its local GLOBAL group.
+///
+/// Returns a `tonic::Status` mirroring what a local propose would have
+/// produced — the calling gRPC handler is unaware whether the proposal
+/// committed locally or through a forwarded round-trip.
+async fn forward_global_proposal(
+    manager: Option<&Arc<RaftManager>>,
+    handle: &Arc<ConsensusHandle>,
+    bytes: Vec<u8>,
+    timeout: Duration,
+) -> Result<LedgerResponse, Status> {
+    let Some(manager) = manager else {
+        // Single-region setup with no manager wired — fall back to the
+        // original NotLeader semantics so the SDK can retry on a leader
+        // it discovers via `ResolveRegionLeader` / `WatchLeader`.
+        return Err(consensus_error_to_status(
+            inferadb_ledger_consensus::ConsensusError::NotLeader,
+        ));
+    };
+
+    let leader_id = handle.current_leader().ok_or_else(|| {
+        Status::unavailable("GLOBAL proposal: no known leader to forward to")
+    })?;
+    let leader_addr = manager.peer_addresses().get(leader_id).ok_or_else(|| {
+        Status::unavailable(format!(
+            "GLOBAL proposal: no address for leader {leader_id} in peer registry"
+        ))
+    })?;
+
+    let peer = manager
+        .registry()
+        .get_or_register(leader_id, &leader_addr)
+        .await
+        .map_err(|e| Status::unavailable(format!("register GLOBAL leader peer: {e}")))?;
+    let mut client = peer.raft_client();
+
+    let proto_global: inferadb_ledger_proto::proto::Region = Region::GLOBAL.into();
+    let rpc_request = tonic::Request::new(inferadb_ledger_proto::proto::RegionalProposalRequest {
+        region: Some(proto_global as i32),
+        request_payload: bytes,
+        caller: 0,
+        timeout_ms: u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX),
+    });
+
+    let result = client
+        .regional_proposal(rpc_request)
+        .await
+        .map_err(|e| Status::unavailable(format!("forward GLOBAL proposal: {e}")))?;
+    let result = result.into_inner();
+
+    if result.status_code != 0 {
+        return Err(Status::new(
+            tonic::Code::from_i32(result.status_code),
+            result.error_message,
+        ));
+    }
+
+    inferadb_ledger_types::decode::<LedgerResponse>(&result.response_payload)
+        .map_err(|e| Status::internal(format!("decode forwarded GLOBAL response: {e}")))
+}
+
 /// Converts a [`ConsensusError`](inferadb_ledger_consensus::ConsensusError) into
 /// the appropriate [`tonic::Status`] using the error's structured `grpc_code()`.
 pub(crate) fn consensus_error_to_status(err: inferadb_ledger_consensus::ConsensusError) -> Status {
@@ -197,8 +267,27 @@ impl ProposalService for RaftProposalService {
         bytes: Vec<u8>,
         timeout: Duration,
     ) -> Result<LedgerResponse, Status> {
-        match self.handle.propose_bytes_and_wait(bytes, timeout).await {
+        match self.handle.propose_bytes_and_wait(bytes.clone(), timeout).await {
             Ok(response) => Ok(response),
+            Err(HandleError::Consensus { source, .. })
+                if source.to_string().contains("Not the leader") =>
+            {
+                // Multi-tier leader coordination: a gRPC handler can run on
+                // a node that is the per-org leader for step (a) but NOT the
+                // GLOBAL leader for step (b) (e.g., `CreateVault`'s two-phase
+                // write — per-org propose followed by GLOBAL slug-index
+                // register). Without forwarding, step (b) returns
+                // `NotLeader` and the SDK retries on the GLOBAL-leader node,
+                // which then can't satisfy step (a) (it is not the per-org
+                // leader). The two-phase write would never converge if
+                // GLOBAL leader and per-org leader are different nodes.
+                //
+                // Forward the GLOBAL proposal to the actual GLOBAL leader
+                // via the existing server-to-server `RegionalProposal` RPC
+                // (which routes to `(GLOBAL, OrganizationId(0))` when the
+                // request `region` field is GLOBAL).
+                forward_global_proposal(self.manager.as_ref(), &self.handle, bytes, timeout).await
+            },
             Err(HandleError::Consensus { source, .. }) => Err(consensus_error_to_status(source)),
             Err(HandleError::Timeout { .. }) => {
                 inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
