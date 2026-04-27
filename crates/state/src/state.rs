@@ -441,7 +441,7 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Returns every vault DB that has been materialised for this
     /// organization.
     ///
-    /// Used by [`crate::super::StateCheckpointer`] and
+    /// Used by `StateCheckpointer` (in the raft crate) and
     /// `RaftManager::sync_all_state_dbs` to fan out strict-ordered fsync
     /// Phase A (vault state DBs + raft.db + blocks.db + events.db
     /// concurrent) across every live vault before Phase B syncs meta.db.
@@ -478,7 +478,7 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Stored in the meta.db coordinator database (post–Slice 1) with a raw
     /// byte key. A byte-identical sentinel previously lived in state.db under
     /// the Entities table; legacy detection refuses to boot when that
-    /// artefact is still present (see [`detect_legacy_sentinel`]).
+    /// artefact is still present (see `detect_legacy_sentinel`).
     pub const LAST_APPLIED_KEY: &'static [u8] = b"_meta:last_applied";
 
     /// Builds the sentinel key for a per-vault Raft group.

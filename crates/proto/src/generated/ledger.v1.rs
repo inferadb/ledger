@@ -2526,7 +2526,7 @@ pub struct BackupDbEntry {
     /// Total bytes of the database file (uncompressed).
     #[prost(uint64, tag = "2")]
     pub size_bytes: u64,
-    /// blake3 checksum formatted as "blake3:<hex>".
+    /// blake3 checksum formatted as "blake3:HEXVALUE".
     #[prost(string, tag = "3")]
     pub checksum: ::prost::alloc::string::String,
 }

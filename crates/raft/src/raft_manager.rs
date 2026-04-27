@@ -287,10 +287,10 @@ pub struct RegionConfig {
     ///
     /// When `true`, the consensus shard is constructed with
     /// [`inferadb_ledger_consensus::LeadershipMode::Delegated`]: it never
-    /// initiates elections, and its leader is set externally via
-    /// [`crate::raft_manager::RaftManager::adopt_organization_leader`]
-    /// driven by the data-region group's elected leader (the B.1
-    /// unified-leadership model).
+    /// initiates elections, and its leader is set externally by
+    /// `RaftManager`'s per-organization leadership watcher (driven by the
+    /// data-region group's elected leader — the B.1 unified-leadership
+    /// model).
     ///
     /// `false` (default) keeps the standard self-electing Raft behavior
     /// for the data-region and system groups.
@@ -1590,6 +1590,13 @@ impl VaultGroup {
 
 /// Manager for multiple Raft region groups.
 ///
+/// Concrete map type backing [`RaftManager::vault_groups`]. Keyed by the
+/// `(region, organization_id, vault_id)` triple since vault groups are
+/// owned by per-organization shards but discoverable across the whole
+/// node — pulled into a type alias to satisfy clippy's
+/// `type_complexity` lint on the field declaration.
+type VaultGroupMap = Arc<RwLock<HashMap<(Region, OrganizationId, VaultId), Arc<InnerVaultGroup>>>>;
+
 /// Coordinates the lifecycle of multiple independent Raft consensus groups,
 /// each handling a subset of organizations. Uses FileBackend for production storage.
 /// Delegates per-region database lifecycle to [`RegionStorageManager`].
@@ -1614,7 +1621,7 @@ pub struct RaftManager {
     /// [`inferadb_ledger_consensus::LeadershipMode::Delegated`] — its
     /// leader is adopted from the parent `OrganizationGroup` rather than
     /// elected independently.
-    vault_groups: Arc<RwLock<HashMap<(Region, OrganizationId, VaultId), Arc<InnerVaultGroup>>>>,
+    vault_groups: VaultGroupMap,
     /// Shared peer address map (node ID → network address).
     ///
     /// Populated from `initial_members` during region startup and updated
@@ -1654,6 +1661,31 @@ pub struct RaftManager {
     /// without parsing tracing output; production callers may also read
     /// this to surface recovery statistics via an admin RPC in the future.
     recovery_stats: RwLock<HashMap<Region, RecoveryStats>>,
+}
+
+/// Membership delta to cascade from a data-region group down to its
+/// per-organization and per-vault child shards. Used by
+/// [`RaftManager::cascade_membership_to_children`] so the DR scheduler
+/// (`crates/server/src/dr_scheduler.rs`) and the `LeaveCluster` admin RPC
+/// (`crates/services/src/services/admin.rs`) share one cascade
+/// implementation. Per multi-tier consensus (root rule 14), per-org and
+/// per-vault shards adopt the parent region's leader but maintain
+/// *independent* Raft membership state — without an explicit cascade,
+/// late-joining voters never receive AppendEntries for child shards,
+/// and decommissioned voters linger as quorum-blocking ghosts after
+/// their parent removal. Per-vault groups share the parent org's
+/// transport (root rule 17), so cascade only registers the new peer on
+/// per-org transports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CascadeMembershipAction {
+    /// Add `node_id` as a learner to every child shard in `region`.
+    AddLearner,
+    /// Promote `node_id` from learner to voter on every child shard. If
+    /// the node is not yet a learner on a given child, an
+    /// `AddLearner` is issued first.
+    PromoteVoter,
+    /// Remove `node_id` from every child shard in `region`.
+    Remove,
 }
 
 impl RaftManager {
@@ -1934,6 +1966,81 @@ impl RaftManager {
         vault_id: VaultId,
     ) -> bool {
         self.vault_groups.read().contains_key(&(region, organization_id, vault_id))
+    }
+
+    /// Cascades a data-region membership change to every per-organization
+    /// and per-vault child shard in the same region. See
+    /// [`CascadeMembershipAction`] for the invariants this preserves.
+    ///
+    /// Each child-shard proposal is fire-and-forget with a 3 s timeout —
+    /// the next reconciliation cycle on the placement controller (or the
+    /// next `LeaveCluster` retry) will catch up if a propose attempt
+    /// times out. The function is idempotent: skips children where the
+    /// target is already in the desired role.
+    ///
+    /// Only proposes against shards where this node currently holds the
+    /// leader role; under delegated leadership the per-org / per-vault
+    /// leader is whoever leads the parent region group, so the same
+    /// process that just executed the parent change is also the right
+    /// proposer for every child.
+    pub async fn cascade_membership_to_children(
+        &self,
+        region: Region,
+        node_id: u64,
+        action: CascadeMembershipAction,
+    ) {
+        use inferadb_ledger_consensus::types::NodeId;
+        let target = NodeId(node_id);
+
+        let org_shards: Vec<OrganizationId> = self
+            .list_organization_groups()
+            .into_iter()
+            .filter_map(|(r, oid)| (r == region && oid != OrganizationId::new(0)).then_some(oid))
+            .collect();
+
+        for org_id in org_shards {
+            let Ok(org_group) = self.get_organization_group(region, org_id) else { continue };
+            if !org_group.handle().is_leader() {
+                continue;
+            }
+            apply_cascade_action(
+                action,
+                self,
+                org_group.handle(),
+                org_group.consensus_transport(),
+                target,
+                node_id,
+                region,
+                org_id,
+                None,
+            )
+            .await;
+        }
+
+        let vault_shards: Vec<(OrganizationId, VaultId)> = self
+            .list_vault_groups()
+            .into_iter()
+            .filter_map(|(r, oid, vid)| (r == region).then_some((oid, vid)))
+            .collect();
+
+        for (org_id, vault_id) in vault_shards {
+            let Ok(vault_group) = self.get_vault_group(region, org_id, vault_id) else { continue };
+            if !vault_group.handle().is_leader() {
+                continue;
+            }
+            apply_cascade_action(
+                action,
+                self,
+                vault_group.handle(),
+                None, // vault groups share parent org's transport (root rule 17)
+                target,
+                node_id,
+                region,
+                org_id,
+                Some(vault_id),
+            )
+            .await;
+        }
     }
 
     /// Iterates every `(organization_id, vault_id, vault_height)` tuple across
@@ -2260,9 +2367,8 @@ impl RaftManager {
                 // `ConsensusState::adopt_leader` is a no-op when the
                 // shard is already in (term, leader). Closes two races:
                 //   1. Parent acquired a leader before this task started.
-                //   2. The cloned `state_rx` marks the current value as
-                //      "seen", so `changed()` would not fire on the
-                //      already-current leader.
+                //   2. The cloned `state_rx` marks the current value as "seen", so `changed()`
+                //      would not fire on the already-current leader.
                 let snap = state_rx.borrow_and_update().clone();
                 if let Some(leader) = snap.leader {
                     let _ = org_handle.adopt_leader(leader, snap.term).await;
@@ -5559,6 +5665,174 @@ impl SystemStateReader {
     }
 }
 
+/// Single-shard cascade application used by
+/// [`RaftManager::cascade_membership_to_children`]. Idempotent against
+/// the shard's current membership; failures are logged but never abort
+/// the cascade.
+#[allow(clippy::too_many_arguments)]
+async fn apply_cascade_action(
+    action: CascadeMembershipAction,
+    manager: &RaftManager,
+    handle: &Arc<crate::ConsensusHandle>,
+    transport: Option<&crate::consensus_transport::GrpcConsensusTransport>,
+    target: inferadb_ledger_consensus::types::NodeId,
+    node_id: u64,
+    region: Region,
+    organization_id: OrganizationId,
+    vault_id: Option<VaultId>,
+) {
+    let log_target = || {
+        format!(
+            "region={} org={} vault={:?}",
+            region.as_str(),
+            organization_id.value(),
+            vault_id.map(|v| v.value()),
+        )
+    };
+
+    match action {
+        CascadeMembershipAction::AddLearner => {
+            let state = handle.shard_state();
+            if state.voters.contains(&target) || state.learners.contains(&target) {
+                return;
+            }
+            if let Some(t) = transport
+                && let Some(addr) = manager.peer_addresses().get(node_id)
+                && let Err(e) = t.set_peer_via_registry(node_id, &addr).await
+            {
+                warn!(
+                    node_id, addr = %addr, error = %e,
+                    "Cascade: failed to register learner transport on child shard ({})",
+                    log_target(),
+                );
+            }
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                handle.add_learner(node_id, false),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    info!(node_id, "Cascade: added learner to child shard ({})", log_target());
+                },
+                Ok(Err(e)) => {
+                    let msg = e.to_string();
+                    if !msg.contains("no-op") && !msg.contains("not the leader") {
+                        warn!(
+                            node_id, error = %e,
+                            "Cascade: add_learner failed on child shard ({})",
+                            log_target(),
+                        );
+                    }
+                },
+                Err(_) => {
+                    warn!(
+                        node_id,
+                        "Cascade: add_learner timed out on child shard ({})",
+                        log_target()
+                    );
+                },
+            }
+        },
+        CascadeMembershipAction::PromoteVoter => {
+            let state = handle.shard_state();
+            if state.voters.contains(&target) {
+                return;
+            }
+            if !state.learners.contains(&target) {
+                if let Some(t) = transport
+                    && let Some(addr) = manager.peer_addresses().get(node_id)
+                {
+                    let _ = t.set_peer_via_registry(node_id, &addr).await;
+                }
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    handle.add_learner(node_id, false),
+                )
+                .await;
+            }
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                handle.promote_voter(node_id),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    info!(node_id, "Cascade: promoted voter on child shard ({})", log_target());
+                },
+                Ok(Err(e)) => {
+                    let msg = e.to_string();
+                    if !msg.contains("no-op") && !msg.contains("not the leader") {
+                        warn!(
+                            node_id, error = %e,
+                            "Cascade: promote_voter failed on child shard ({})",
+                            log_target(),
+                        );
+                    }
+                },
+                Err(_) => {
+                    warn!(
+                        node_id,
+                        "Cascade: promote_voter timed out on child shard ({})",
+                        log_target()
+                    );
+                },
+            }
+        },
+        CascadeMembershipAction::Remove => {
+            let state = handle.shard_state();
+            if !state.voters.contains(&target) && !state.learners.contains(&target) {
+                return;
+            }
+            // Retry on "already undergoing a configuration change" — the
+            // child shard's membership state machine may still be
+            // resolving an earlier proposal (its own previous cascade
+            // op or an explicit DR scheduler op). The cascade must not
+            // give up, otherwise dead voters linger as quorum-blocking
+            // ghosts after their parent removal.
+            for attempt in 0..10u32 {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    handle.remove_node(node_id),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {
+                        info!(node_id, "Cascade: removed node from child shard ({})", log_target());
+                        return;
+                    },
+                    Ok(Err(e)) if e.to_string().contains("already undergoing") => {
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            150 * u64::from(attempt + 1),
+                        ))
+                        .await;
+                    },
+                    Ok(Err(e)) if e.to_string().contains("no-op") => return,
+                    Ok(Err(e)) => {
+                        let msg = e.to_string();
+                        if !msg.contains("not the leader") {
+                            warn!(
+                                node_id, error = %e,
+                                "Cascade: remove_node failed on child shard ({})",
+                                log_target(),
+                            );
+                        }
+                        return;
+                    },
+                    Err(_) => {
+                        warn!(
+                            node_id,
+                            "Cascade: remove_node timed out on child shard ({})",
+                            log_target()
+                        );
+                        return;
+                    },
+                }
+            }
+        },
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -6473,13 +6747,14 @@ mod tests {
             "test sanity: vault must adopt parent leader before propose",
         );
 
-        // Initial state: default-constructed at start_vault_group time
-        // (P2c.0). `last_applied` must be `None` until the first apply.
-        let initial = vault.vault_applied_state().load();
-        assert!(
-            initial.last_applied.is_none(),
-            "fresh vault_applied_state must have no applied LogId before any apply",
-        );
+        // Snapshot initial last_applied. Under the multi-tier
+        // adopt_leader change, the vault's delegated leader appends a
+        // no-op on adoption (see `ConsensusState::adopt_leader`), so
+        // `last_applied` may already be `Some(noop_index)` by the
+        // time we observe it here. The invariant we care about is
+        // monotonic advancement after our explicit propose, not the
+        // initial pristine value.
+        let initial_index = vault.vault_applied_state().load().last_applied.map(|id| id.index);
 
         // Drive an empty Normal entry through the vault's apply
         // pipeline. The fan-out test above covers the response path;
@@ -6517,6 +6792,14 @@ mod tests {
             after.last_applied.is_some(),
             "vault_applied_state must advance after propose+apply — projection regression",
         );
+        if let Some(initial) = initial_index {
+            assert!(
+                after.last_applied.is_some_and(|id| id.index > initial),
+                "vault_applied_state.last_applied must increment after our propose \
+                 (initial={initial}, after={:?})",
+                after.last_applied,
+            );
+        }
     }
 
     #[tokio::test]

@@ -9,7 +9,7 @@
 //! # Public API
 //!
 //! The stable public API surface consists of:
-//! - [`trace_context`] — distributed tracing propagation helpers
+//! - `trace_context` — distributed tracing propagation helpers
 //! - [`metrics`] — Prometheus metric constants and recording helpers
 //!
 //! All other modules and re-exports are server-internal infrastructure

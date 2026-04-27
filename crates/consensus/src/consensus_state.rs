@@ -231,14 +231,29 @@ impl<C: Clock + Clone, R: RngSource> ConsensusState<C, R> {
         self.leader_id = Some(leader);
         if leader == self.node_id {
             // Local node is the new leader. Initialize per-peer match-index
-            // tracking and schedule heartbeats so followers learn about the
-            // leadership through standard AppendEntries flow. Skip the
-            // standard new-leader no-op entry: under unified leadership,
-            // term advancement comes from the data-region group's
-            // election, and the no-op pattern (forcing a quorum ack to
-            // resolve term-T-1 commits) is satisfied by the data-region
-            // group's own no-op entry on its term transition.
+            // tracking, append the standard new-leader no-op entry
+            // (Raft §5.4.2), schedule heartbeats, and broadcast.
+            //
+            // Earlier revisions skipped the no-op under the assumption
+            // that the parent data-region group's own no-op satisfied
+            // the §4.1 safety property. That reasoning is flawed:
+            // `last_committed_term` is checked against this shard's
+            // own log, not the parent's, so the per-org / per-vault
+            // shard's `handle_membership_change` would reject every
+            // proposal with `LeaderNotReady` until some unrelated
+            // proposal landed. The DR scheduler's membership cascade
+            // (`RaftManager::cascade_membership_to_children`) hit this
+            // immediately after every leader transfer — surfaced by
+            // the lifecycle Phase 5 regression where vault group
+            // removal failed with "Leader has not yet committed an
+            // entry in its current term". Appending a no-op here is
+            // cheap (single empty entry per term transition) and
+            // restores the §4.1 invariant per shard.
             self.state = NodeState::Leader;
+            // `next` is the index peers should next receive — the no-op
+            // appended below sits at `log.len() + 1`, so peer next-index
+            // matches that and the no-op is included in the first
+            // AppendEntries broadcast (mirrors `become_leader`).
             let next = self.log.len() as u64 + 1;
             self.peer_states = self
                 .membership
@@ -250,13 +265,21 @@ impl<C: Clock + Clone, R: RngSource> ConsensusState<C, R> {
                     self.membership.learners.iter().map(|&id| PeerState::learner(id, next, false)),
                 )
                 .collect();
-            self.self_match_index = self.log.len() as u64;
+
+            let noop = self.append_entry(Vec::new());
+            self.self_match_index = noop.index;
+            actions.push(Action::PersistEntries { shard: self.id, entries: vec![noop] });
+
             actions.push(Action::ScheduleTimer {
                 shard: self.id,
                 kind: TimerKind::Heartbeat,
                 deadline: self.clock.now() + self.config.heartbeat_interval,
             });
             actions.extend(self.send_append_entries_to_all());
+            // Single-node delegated shards (rare in production but
+            // exercised by test fixtures): self-match already satisfies
+            // quorum, so advance commit immediately.
+            self.try_advance_commit(&mut actions);
         } else {
             self.state = NodeState::Follower;
         }

@@ -162,7 +162,7 @@ cleanup() {
   done
 
   if [[ -d "$DATA_ROOT" ]]; then
-    if [[ $exit_code -ne 0 ]]; then
+    if [[ $exit_code -ne 0 || -n "${PRESERVE_DATA_ROOT:-}" ]]; then
       log_info "Preserving data directory for debugging: $DATA_ROOT"
     else
       rm -rf "$DATA_ROOT"
@@ -463,8 +463,12 @@ leave_cluster() {
       continue
     fi
 
-    # Retryable: prior membership change still committing
-    if echo "$result" | grep -q "already undergoing a configuration change"; then
+    # Retryable: prior membership change still committing.
+    # Two error spellings exist — "already undergoing a configuration
+    # change" (older snafu display) and "Membership change already in
+    # progress" (current consensus crate). Match both so the script
+    # retries instead of silently dropping the removal.
+    if echo "$result" | grep -qE "already undergoing a configuration change|Membership change already in progress"; then
       attempts=$((attempts + 1))
       log_info "    Membership change in progress, retrying ($attempts/$max_attempts)..."
       sleep 1

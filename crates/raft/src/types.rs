@@ -1235,7 +1235,7 @@ pub enum RegionRequest {
 pub enum OrganizationRequest {
     /// Writes transactions to a vault. The owning organization is implied
     /// by the Raft group the entry lands in — apply handlers read it
-    /// from [`RaftLogStore::organization_id`] rather than carrying it
+    /// from `RaftLogStore::organization_id` rather than carrying it
     /// in the payload.
     ///
     /// `organization_slug` / `vault_slug` carry the external Snowflake slugs

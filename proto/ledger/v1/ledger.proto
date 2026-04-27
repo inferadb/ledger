@@ -2122,7 +2122,7 @@ message BackupDbEntry {
   string path = 1;
   // Total bytes of the database file (uncompressed).
   uint64 size_bytes = 2;
-  // blake3 checksum formatted as "blake3:<hex>".
+  // blake3 checksum formatted as "blake3:HEXVALUE".
   string checksum = 3;
 }
 

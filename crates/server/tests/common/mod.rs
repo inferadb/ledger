@@ -2537,7 +2537,12 @@ pub async fn setup_org_with_admin(
 
 /// Creates a vault with retry — the organization may still be provisioning.
 ///
-/// Retries on "not found" and "provisioned" errors for up to 30 seconds.
+/// Retries on "not found", "provisioned", "provisioning", and "Not the
+/// leader" errors. The pinned-client variant is sufficient when the
+/// caller already knows it has the regional leader; tests that don't
+/// should prefer [`create_vault_with_retry_endpoints`] which iterates
+/// every cluster endpoint per attempt to absorb GLOBAL-vs-region leader
+/// splits under multi-tier consensus.
 pub async fn create_vault_with_retry(
     vault_client: &mut inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient<
         tonic::transport::Channel,
@@ -2570,7 +2575,8 @@ pub async fn create_vault_with_retry(
             Err(e)
                 if (e.message().contains("not found")
                     || e.message().contains("provisioned")
-                    || e.message().contains("provisioning"))
+                    || e.message().contains("provisioning")
+                    || e.message().contains("Not the leader"))
                     && attempt < 59 =>
             {
                 tokio::time::sleep(Duration::from_millis(500)).await;
@@ -2579,6 +2585,61 @@ pub async fn create_vault_with_retry(
         }
     }
     panic!("create vault timed out after 60 attempts");
+}
+
+/// Multi-endpoint variant of [`create_vault_with_retry`]. Iterates every
+/// endpoint in `endpoints` per attempt, so a GLOBAL-vs-regional leader
+/// split (the common pattern after `setup_user_and_org` lands the
+/// initial flow on the GLOBAL leader while the data-region leader is on
+/// a different node) absorbs cleanly without panicking. Use this from
+/// `external` integration tests where the caller has the cluster's
+/// endpoint list available.
+pub async fn create_vault_with_retry_endpoints(
+    endpoints: &[String],
+    organization: inferadb_ledger_types::OrganizationSlug,
+    caller_slug: u64,
+) -> inferadb_ledger_types::VaultSlug {
+    let vault_slug =
+        inferadb_ledger_types::snowflake::generate_vault_slug().expect("generate vault slug");
+    for _attempt in 0..60 {
+        for ep in endpoints {
+            let mut vault_client = match inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient::connect(ep.to_string()).await {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let request = inferadb_ledger_proto::proto::CreateVaultRequest {
+                organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                    slug: organization.value(),
+                }),
+                replication_factor: 0,
+                initial_nodes: vec![],
+                retention_policy: None,
+                caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: caller_slug }),
+                slug: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug.value() }),
+            };
+            match vault_client.create_vault(request).await {
+                Ok(response) => {
+                    return response
+                        .into_inner()
+                        .vault
+                        .map(|v| inferadb_ledger_types::VaultSlug::new(v.slug))
+                        .expect("vault slug in response");
+                },
+                Err(e)
+                    if e.message().contains("not found")
+                        || e.message().contains("provisioned")
+                        || e.message().contains("provisioning")
+                        || e.message().contains("Not the leader")
+                        || e.code() == tonic::Code::Unavailable =>
+                {
+                    continue;
+                },
+                Err(e) => panic!("create vault: {e}"),
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    panic!("create vault timed out after 60 attempts (all endpoints)");
 }
 
 // ============================================================================

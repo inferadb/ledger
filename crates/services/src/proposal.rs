@@ -184,9 +184,9 @@ async fn forward_global_proposal(
         ));
     };
 
-    let leader_id = handle.current_leader().ok_or_else(|| {
-        Status::unavailable("GLOBAL proposal: no known leader to forward to")
-    })?;
+    let leader_id = handle
+        .current_leader()
+        .ok_or_else(|| Status::unavailable("GLOBAL proposal: no known leader to forward to"))?;
     let leader_addr = manager.peer_addresses().get(leader_id).ok_or_else(|| {
         Status::unavailable(format!(
             "GLOBAL proposal: no address for leader {leader_id} in peer registry"
@@ -215,10 +215,7 @@ async fn forward_global_proposal(
     let result = result.into_inner();
 
     if result.status_code != 0 {
-        return Err(Status::new(
-            tonic::Code::from_i32(result.status_code),
-            result.error_message,
-        ));
+        return Err(Status::new(tonic::Code::from_i32(result.status_code), result.error_message));
     }
 
     inferadb_ledger_types::decode::<LedgerResponse>(&result.response_payload)

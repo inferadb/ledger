@@ -66,7 +66,7 @@ use tracing::{debug, info, warn};
 use crate::{metrics, runtime_config::RuntimeConfigHandle};
 
 /// Snapshot accessor for the per-vault `raft.db` handles owned by the parent
-/// [`RaftManager`]'s `vault_groups` map, scoped to the `(region,
+/// `RaftManager`'s `vault_groups` map, scoped to the `(region,
 /// organization_id)` this checkpointer instance binds to.
 ///
 /// Invoked once per tick — both inside `max_dirty_pages` (for the
@@ -82,7 +82,7 @@ use crate::{metrics, runtime_config::RuntimeConfigHandle};
 pub type VaultRaftDbsFn = Arc<dyn Fn() -> Vec<(VaultId, Arc<Database<FileBackend>>)> + Send + Sync>;
 
 /// Snapshot accessor for the per-vault `blocks.db` handles owned by the
-/// parent [`RaftManager`]'s `vault_groups` map, scoped to the `(region,
+/// parent `RaftManager`'s `vault_groups` map, scoped to the `(region,
 /// organization_id)` this checkpointer instance binds to.
 ///
 /// Mirrors [`VaultRaftDbsFn`] for the per-vault block archive (Phase 4.1.a):
@@ -95,7 +95,7 @@ pub type VaultBlocksDbsFn =
     Arc<dyn Fn() -> Vec<(VaultId, Arc<Database<FileBackend>>)> + Send + Sync>;
 
 /// Snapshot accessor for the per-vault `events.db` handles owned by the
-/// parent [`RaftManager`]'s `vault_groups` map, scoped to the `(region,
+/// parent `RaftManager`'s `vault_groups` map, scoped to the `(region,
 /// organization_id)` this checkpointer instance binds to.
 ///
 /// Mirrors [`VaultBlocksDbsFn`] for the per-vault apply-phase audit log
@@ -1638,8 +1638,8 @@ mod tests {
 
         // Shared inventory: starts empty, then gains one entry to
         // simulate a `start_vault_group` insert mid-test.
-        let inventory: Arc<PlRwLock<Vec<(VaultId, Arc<Database<FileBackend>>)>>> =
-            Arc::new(PlRwLock::new(Vec::new()));
+        type VaultRaftInventory = Arc<PlRwLock<Vec<(VaultId, Arc<Database<FileBackend>>)>>>;
+        let inventory: VaultRaftInventory = Arc::new(PlRwLock::new(Vec::new()));
         let inventory_for_fn = Arc::clone(&inventory);
         let vault_raft_dbs_fn: VaultRaftDbsFn = Arc::new(move || {
             inventory_for_fn.read().iter().map(|(vid, db)| (*vid, Arc::clone(db))).collect()

@@ -1027,7 +1027,7 @@ fn enforce_node_stopped(data_dir: &Path) -> Result<()> {
 /// 1. Skip if not the leader for the region's control-plane group.
 /// 2. Determine the set of organizations to back up — by default every org with a per-org group
 ///    running on this node, optionally filtered to an explicit list passed in
-///    [`Self::organizations`].
+///    `Self::organizations`.
 /// 3. Compute the local node's RMK fingerprint once and reuse it across every per-org archive built
 ///    this cycle.
 /// 4. Call [`BackupManager::create_archive`] per organization. Failures are logged and counted in
@@ -1220,8 +1220,8 @@ impl BackupJob {
 /// pruning, every restore on a given node leaks the displaced tree
 /// indefinitely.
 ///
-/// This job ticks at [`Self::interval`] (default 1 hour) and calls
-/// [`sweep_restore_trash`] with [`Self::retention`] (default 24 hours).
+/// This job ticks at `Self::interval` (default 1 hour) and calls
+/// [`sweep_restore_trash`] with `Self::retention` (default 24 hours).
 /// The sweeper is conservative: it only removes entries whose directory
 /// name parses as a microsecond timestamp older than `now - retention`;
 /// hand-named directories an operator dropped in for forensic reasons

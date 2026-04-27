@@ -707,10 +707,7 @@ pub async fn bootstrap_node(
         });
 
     // Create rate limiter and hot key detector.
-    let rl = config
-        .rate_limit
-        .clone()
-        .unwrap_or_else(inferadb_ledger_types::config::RateLimitConfig::default);
+    let rl = config.rate_limit.clone().unwrap_or_default();
     let rate_limiter = Arc::new(RateLimiter::new(
         rl.client_burst,
         rl.client_rate,

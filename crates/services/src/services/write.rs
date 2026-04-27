@@ -390,6 +390,7 @@ impl WriteService {
     /// emitted `VaultEntry` at apply time (γ Phase 3a) so the
     /// block-announcement formatter can read them directly without
     /// consulting per-region `AppliedState` slug maps.
+    #[allow(clippy::too_many_arguments)]
     fn operations_to_request(
         &self,
         organization: OrganizationId,

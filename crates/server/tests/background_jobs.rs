@@ -21,7 +21,7 @@ use inferadb_ledger_types::OrganizationSlug;
 
 use crate::common::{
     ExternalCluster, create_health_client_from_url, create_organization_client_from_url,
-    create_user_client_from_url, create_vault_client_from_url,
+    create_user_client_from_url,
 };
 
 /// Skip macro: returns early if no external cluster is available.
@@ -91,35 +91,89 @@ async fn setup_user_and_org(cluster: &ExternalCluster) -> (OrganizationSlug, u64
         "initiate email verification: all endpoints failed after 30 attempts"
     );
 
-    let endpoint = &working_endpoint;
-    let mut user_client =
-        create_user_client_from_url(endpoint).await.expect("connect to user service");
+    // Phase 2: Verify email code → get onboarding token. Iterate
+    // endpoints — under multi-tier consensus the GLOBAL leader (which
+    // serves the email-code flow) can differ from the data-region
+    // leader that handled phase 1.
+    let mut onboarding_token = String::new();
+    'outer_verify: for _attempt in 0..30 {
+        for ep in cluster.endpoints() {
+            let mut client = match create_user_client_from_url(ep).await {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            match client
+                .verify_email_code(proto::VerifyEmailCodeRequest {
+                    email: email.clone(),
+                    code: code.clone(),
+                    region,
+                })
+                .await
+            {
+                Ok(resp) => {
+                    let inner = resp.into_inner();
+                    match inner.result.expect("verify should return result") {
+                        proto::verify_email_code_response::Result::NewUser(session) => {
+                            onboarding_token = session.onboarding_token;
+                            break 'outer_verify;
+                        },
+                        other => panic!("expected NewUser result, got {other:?}"),
+                    }
+                },
+                Err(e)
+                    if e.code() == tonic::Code::Unavailable
+                        || e.code() == tonic::Code::Internal =>
+                {
+                    continue;
+                },
+                Err(e) => panic!("verify email code: {e}"),
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(!onboarding_token.is_empty(), "verify email code: all endpoints failed");
 
-    // Phase 2: Verify email code → get onboarding token
-    let verify_resp = user_client
-        .verify_email_code(proto::VerifyEmailCodeRequest { email: email.clone(), code, region })
-        .await
-        .expect("verify email code")
-        .into_inner();
-
-    let onboarding_token = match verify_resp.result.expect("verify should return result") {
-        proto::verify_email_code_response::Result::NewUser(session) => session.onboarding_token,
-        other => panic!("expected NewUser result, got {other:?}"),
-    };
-
-    // Phase 3: Complete registration → creates user + organization
+    // Phase 3: Complete registration → creates user + organization. Saga
+    // runs on the GLOBAL leader, which can differ from the per-region
+    // leader, so iterate endpoints again.
     let org_name = format!("test-org-{}", uuid::Uuid::new_v4());
-    let reg_resp = user_client
-        .complete_registration(proto::CompleteRegistrationRequest {
-            onboarding_token,
-            email,
-            region,
-            name: "Test Admin".to_string(),
-            organization_name: org_name,
-        })
-        .await
-        .expect("complete registration")
-        .into_inner();
+    let mut reg_resp = None;
+    for _attempt in 0..30 {
+        for ep in cluster.endpoints() {
+            let mut client = match create_user_client_from_url(ep).await {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            match client
+                .complete_registration(proto::CompleteRegistrationRequest {
+                    onboarding_token: onboarding_token.clone(),
+                    email: email.clone(),
+                    region,
+                    name: "Test Admin".to_string(),
+                    organization_name: org_name.clone(),
+                })
+                .await
+            {
+                Ok(resp) => {
+                    reg_resp = Some(resp.into_inner());
+                    break;
+                },
+                Err(e)
+                    if e.code() == tonic::Code::Unavailable
+                        || e.code() == tonic::Code::Internal =>
+                {
+                    continue;
+                },
+                Err(e) => panic!("complete registration: {e}"),
+            }
+        }
+        if reg_resp.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let reg_resp = reg_resp.expect("complete registration: all endpoints failed");
+    let _ = working_endpoint; // unused after the iteration refactor
 
     let org_slug = reg_resp.organization.expect("org slug in response").slug;
     let user_slug = reg_resp.user.expect("user in response").slug.expect("user slug").slug;
@@ -176,15 +230,19 @@ async fn test_vault_health_tracking() {
     let cluster = require_cluster!();
 
     let leader_ep = cluster.wait_for_leader(Duration::from_secs(10)).await;
-    let mut vault_client =
-        create_vault_client_from_url(&leader_ep).await.expect("connect to vault");
 
     // Create user + organization via onboarding flow
     let (organization, user_slug) = setup_user_and_org(&cluster).await;
 
-    // Create vault (retries until org provisioning completes)
+    // Create vault by iterating cluster endpoints — under multi-tier
+    // consensus, the data-region leader for us-east-va can differ from
+    // the GLOBAL leader (`leader_ep`), so a vault_client pinned to a
+    // single node would `panic!("create vault: ...")` on
+    // `Not the leader for region us-east-va`.
+    let endpoints: Vec<String> =
+        cluster.endpoints().iter().map(|s| s.to_string()).collect();
     let vault =
-        crate::common::create_vault_with_retry(&mut vault_client, organization, user_slug).await;
+        crate::common::create_vault_with_retry_endpoints(&endpoints, organization, user_slug).await;
     assert!(vault.value() > 0, "vault should have valid ID");
 
     // Wait for auto-recovery job to potentially scan the new vault
@@ -317,17 +375,17 @@ async fn test_learner_cache_initialization() {
 async fn test_concurrent_background_jobs() {
     let cluster = require_cluster!();
 
-    let leader_ep = cluster.wait_for_leader(Duration::from_secs(10)).await;
-
-    // Create some activity to exercise background jobs
-    let mut vault_client =
-        create_vault_client_from_url(&leader_ep).await.expect("connect to vault");
+    let _leader_ep = cluster.wait_for_leader(Duration::from_secs(10)).await;
 
     // Create user + organization via onboarding flow
     let (organization, user_slug) = setup_user_and_org(&cluster).await;
 
+    // Iterate cluster endpoints for vault creation — under multi-tier
+    // consensus, the data-region leader can differ from the GLOBAL leader.
+    let endpoints: Vec<String> =
+        cluster.endpoints().iter().map(|s| s.to_string()).collect();
     let _vault =
-        crate::common::create_vault_with_retry(&mut vault_client, organization, user_slug).await;
+        crate::common::create_vault_with_retry_endpoints(&endpoints, organization, user_slug).await;
 
     // Let background jobs run
     tokio::time::sleep(Duration::from_secs(1)).await;

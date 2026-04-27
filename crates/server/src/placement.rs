@@ -211,10 +211,22 @@ impl PlacementController {
 /// leader transfer elections fail (VoteRequest can't reach peers).
 pub async fn reconcile_transport_channels(manager: &RaftManager) {
     let peer_addrs = manager.peer_addresses().iter_peers();
-    let regions = manager.list_regions();
 
-    for region in regions {
-        let Ok(group) = manager.get_region_group(region) else { continue };
+    // Iterate every (Region, OrganizationId) pair. Region-control-plane
+    // groups live at OrganizationId(0); per-org groups live at oid != 0
+    // (root rule 15). Each per-org group has its own
+    // `GrpcConsensusTransport`, so peer-channel registration must run
+    // for both — otherwise per-org leader transfer / membership change
+    // proposals can't reach late-joining voters. Per-vault groups share
+    // the parent org's transport (root rule 17), so they're covered by
+    // the per-org pass.
+    for (region, organization_id) in manager.list_organization_groups() {
+        let group_opt = if organization_id == inferadb_ledger_types::OrganizationId::new(0) {
+            manager.get_region_group(region).map(|g| g.inner().clone()).ok()
+        } else {
+            manager.get_organization_group(region, organization_id).map(|g| g.inner().clone()).ok()
+        };
+        let Some(group) = group_opt else { continue };
         let Some(transport) = group.consensus_transport() else { continue };
         let known_peers = transport.peers();
         let local_node = group.handle().node_id();
@@ -227,6 +239,7 @@ pub async fn reconcile_transport_channels(manager: &RaftManager) {
                 tracing::warn!(
                     node_id,
                     region = %region.as_str(),
+                    organization_id = organization_id.value(),
                     error = %e,
                     "Failed to register transport channel for peer"
                 );

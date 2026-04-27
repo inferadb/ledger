@@ -688,7 +688,7 @@ pub struct PendingExternalWrites {
     /// Peer address registrations to persist into the `RaftState` table.
     ///
     /// Written under the `peer_address:{node_id}` key prefix as a side
-    /// effect of applying [`SystemRequest::RegisterPeerAddress`]. The
+    /// effect of applying `SystemRequest::RegisterPeerAddress`. The
     /// in-memory `PeerAddressMap` mirror is updated synchronously inside
     /// the apply arm; this Vec drives the durable mirror so that on
     /// restart the addresses can be repopulated before any data region's

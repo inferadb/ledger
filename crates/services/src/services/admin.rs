@@ -1019,6 +1019,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 }
 
                 // Other-removal: remove directly with retry.
+                let mut data_region_removed = false;
                 for attempt in 0..10u32 {
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(3),
@@ -1032,6 +1033,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                                 node_id = req.node_id,
                                 "Removed departing node from data region"
                             );
+                            data_region_removed = true;
                             break;
                         },
                         Ok(Err(e)) if e.to_string().contains("already undergoing") => {
@@ -1040,9 +1042,31 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                             ))
                             .await;
                         },
-                        Ok(Err(e)) if e.to_string().contains("no-op") => break,
+                        Ok(Err(e)) if e.to_string().contains("no-op") => {
+                            data_region_removed = true;
+                            break;
+                        },
                         _ => break,
                     }
+                }
+
+                // Cascade the removal to every per-organization and per-vault
+                // group in this region — they share the parent's elected
+                // leader (delegated leadership, root rule 14) but maintain
+                // independent membership state. Without this cascade,
+                // departing voters linger in child shards as quorum-blocking
+                // ghosts the moment they're killed. Surfaced as the
+                // lifecycle Phase 5 "Raft proposal timed out" regression
+                // when the original three voters died and only the
+                // late-joining node survived.
+                if data_region_removed {
+                    manager
+                        .cascade_membership_to_children(
+                            region,
+                            req.node_id,
+                            inferadb_ledger_raft::raft_manager::CascadeMembershipAction::Remove,
+                        )
+                        .await;
                 }
             }
 

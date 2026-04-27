@@ -201,15 +201,13 @@ async fn setup_user_and_org(endpoints: &[String]) -> (UserSlug, OrganizationSlug
                 Err(_) => continue,
             };
             match client
-                .complete_registration(
-                    inferadb_ledger_proto::proto::CompleteRegistrationRequest {
-                        onboarding_token: onboarding_token.clone(),
-                        email: email.clone(),
-                        region: 10,
-                        name: "E2E Test User".to_string(),
-                        organization_name: org_name.clone(),
-                    },
-                )
+                .complete_registration(inferadb_ledger_proto::proto::CompleteRegistrationRequest {
+                    onboarding_token: onboarding_token.clone(),
+                    email: email.clone(),
+                    region: 10,
+                    name: "E2E Test User".to_string(),
+                    organization_name: org_name.clone(),
+                })
                 .await
             {
                 Ok(resp) => {

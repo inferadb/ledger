@@ -277,14 +277,36 @@ impl DiscoveryService {
     /// Returns the leader's endpoint URL, the current Raft term, and a
     /// recommended cache TTL in seconds. Currently all regions share a
     /// single Raft group, so the resolved leader is the same regardless
-    /// of region; the region parameter is validated and reserved for
-    /// future multi-Raft routing.
+    /// Resolves the leader endpoint for a specific region by looking up the
+    /// region's `RegionGroup` on the local `RaftManager`. Falls back to the
+    /// embedded GLOBAL handle (`self.handle`) when no manager is wired
+    /// (single-region setups) or when the requested region is not yet
+    /// registered locally — that fallback preserves the SDK's bootstrap
+    /// path on a fresh node before data regions have come up.
+    ///
+    /// Per multi-tier consensus, GLOBAL leader and region leader can live
+    /// on different nodes; routing by `self.handle` returned the GLOBAL
+    /// leader for every region, so the SDK's region-leader cache was
+    /// repeatedly populated with the GLOBAL endpoint and writes to a
+    /// data region looped on `Not the leader for this region` until the
+    /// retry budget exhausted.
     fn resolve_region_leader_impl(
         &self,
-        _region: inferadb_ledger_types::Region,
+        region: inferadb_ledger_types::Region,
     ) -> std::result::Result<(String, u64, u32), Status> {
-        let state = self.handle.shard_state();
-        let current_term = self.handle.current_term();
+        let (state, current_term, organization_id) = if let Some(manager) = &self.raft_manager
+            && region != inferadb_ledger_types::Region::GLOBAL
+            && let Ok(region_group) = manager.get_region_group(region)
+        {
+            let handle = region_group.handle();
+            (handle.shard_state(), handle.current_term(), handle.organization_id().value() as u64)
+        } else {
+            (
+                self.handle.shard_state(),
+                self.handle.current_term(),
+                self.handle.organization_id().value() as u64,
+            )
+        };
 
         let leader_id = state.leader.ok_or_else(|| {
             super::metadata::status_with_not_leader_hint(
@@ -292,7 +314,7 @@ impl DiscoveryService {
                 None,
                 None,
                 Some(current_term),
-                Some(self.handle.organization_id().value() as u64),
+                Some(organization_id),
             )
         })?;
 
@@ -498,12 +520,27 @@ impl SystemDiscoveryService for DiscoveryService {
 
         // Validate region — reject unrecognized values.
         let proto_region = ProtoRegion::try_from(req.region).unwrap_or(ProtoRegion::Unspecified);
-        let _region = inferadb_ledger_types::Region::try_from(proto_region)?;
+        let region = inferadb_ledger_types::Region::try_from(proto_region)?;
 
-        // Currently all regions share a single consensus handle. The region
-        // parameter is validated and reserved for future multi-Raft routing,
-        // mirroring `resolve_region_leader`.
-        let mut state_rx = self.handle.state_watch();
+        // Subscribe to the requested region's leader watch — not the GLOBAL
+        // group's. Under multi-tier consensus the GLOBAL leader and the
+        // data-region leader can live on different nodes; subscribing to
+        // GLOBAL would feed the SDK's region-leader cache the GLOBAL
+        // endpoint and override hints applied via `apply_region_leader_hint`,
+        // making `Not the leader for this region` retries unrecoverable
+        // until the retry budget exhausted.
+        //
+        // Falls back to the embedded GLOBAL handle when no `RaftManager`
+        // is wired (single-region setups) or when the requested region is
+        // not yet registered locally.
+        let mut state_rx = if let Some(manager) = &self.raft_manager
+            && region != inferadb_ledger_types::Region::GLOBAL
+            && let Ok(region_group) = manager.get_region_group(region)
+        {
+            region_group.handle().state_watch()
+        } else {
+            self.handle.state_watch()
+        };
         let peer_addresses = self.peer_addresses.clone();
 
         // Bounded channel — if the client cannot keep up we drop the stream

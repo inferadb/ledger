@@ -197,6 +197,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_system_request_with_events(
         &self,
         request: &SystemRequest,
@@ -5041,6 +5042,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_region_request_with_events(
         &self,
         request: &RegionRequest,
@@ -5161,6 +5163,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_organization_request_with_events(
         &self,
         request: &OrganizationRequest,
@@ -5580,7 +5583,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                 // prior flip attempts — don't do it here; stamp the entry
                 // instead.
                 let vault_entry = VaultEntry {
-                    organization: organization,
+                    organization,
                     vault: *vault,
                     vault_height: new_height,
                     previous_vault_hash,
