@@ -23,80 +23,10 @@ use std::time::Duration;
 use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{OrganizationId, OrganizationSlug, Region, VaultId, VaultSlug};
 
-use crate::common::{TestCluster, TestNode, create_vault_client, create_write_client};
-
-/// Resolves an external `OrganizationSlug` to its internal `OrganizationId`
-/// via the GLOBAL applied-state accessor. Panics if the slug is not yet
-/// indexed — callers must have awaited organization activation.
-fn resolve_org_id(node: &TestNode, slug: OrganizationSlug) -> OrganizationId {
-    node.manager
-        .system_region()
-        .expect("system region running")
-        .applied_state()
-        .resolve_slug_to_id(slug)
-        .expect("organization slug resolves after CreateOrganization commits")
-}
-
-/// Polls every node until the cluster agrees on a single registered
-/// `(region, org_id, *)` triple, or `timeout` elapses. Returns the
-/// `VaultId` every node observes.
-///
-/// This is the primary vault-live assertion and it intentionally
-/// does NOT depend on the GLOBAL vault-slug index — the index write
-/// (`SystemRequest::RegisterVaultDirectoryEntry`) is a separate propose
-/// from the per-org `CreateVault` and their apply order on followers
-/// is not coupled to the vault group start. The test contract —
-/// "`CreateVault` brings a vault group live on every voter" — is
-/// observable directly on `RaftManager::list_vault_groups`.
-async fn wait_for_vault_group_live_on_all_voters(
-    cluster: &TestCluster,
-    region: Region,
-    org_id: OrganizationId,
-    timeout: Duration,
-) -> VaultId {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        // Snapshot per-node triples filtered to (region, org_id).
-        let per_node: Vec<Vec<VaultId>> = cluster
-            .nodes()
-            .iter()
-            .map(|n| {
-                n.manager
-                    .list_vault_groups()
-                    .into_iter()
-                    .filter(|(r, o, _)| *r == region && *o == org_id)
-                    .map(|(_, _, v)| v)
-                    .collect()
-            })
-            .collect();
-
-        // Every node must report a single VaultId and every node must
-        // agree on the SAME VaultId. That is the "vault group is live
-        // on all voters" contract.
-        if let Some(first) = per_node.first()
-            && first.len() == 1
-            && per_node.iter().all(|ids| ids == first)
-        {
-            return first[0];
-        }
-
-        if tokio::time::Instant::now() >= deadline {
-            let rendered: Vec<String> = cluster
-                .nodes()
-                .iter()
-                .zip(per_node.iter())
-                .map(|(n, ids)| format!("node {}: {:?}", n.id, ids))
-                .collect();
-            panic!(
-                "vault group for (region={region:?}, org_id={org_id:?}) did not converge across \
-                 voters within {timeout:?}. per-node state: [{}]",
-                rendered.join(" | "),
-            );
-        }
-
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
+use crate::common::{
+    TestCluster, create_vault_client, create_write_client, resolve_org_id,
+    wait_for_vault_group_live_on_all_voters, wait_for_vault_group_removed_on_all_voters,
+};
 
 /// Primary test: `CreateVault` must bring a per-vault `VaultGroup` live
 /// on every voter in the organization via the real apply pipeline.
@@ -345,41 +275,6 @@ async fn wait_for_vault_set_on_all_voters(
                 "vault set for (region={region:?}, org_id={org_id:?}) did not converge to \
                  {expected_count} entries within {timeout:?}. per-node state: [{}]",
                 rendered.join(" | "),
-            );
-        }
-
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
-/// Polls every node until NO voter reports `(region, org_id, vault_id)` in
-/// its `list_vault_groups()`. Used by the delete test to assert that the
-/// `VaultDeletionRequest` → watcher → `stop_vault_group` chain has fired
-/// and torn down the vault group on every voter.
-async fn wait_for_vault_group_removed_on_all_voters(
-    cluster: &TestCluster,
-    region: Region,
-    org_id: OrganizationId,
-    vault_id: VaultId,
-    timeout: Duration,
-) {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        let still_present: Vec<u64> = cluster
-            .nodes()
-            .iter()
-            .filter(|n| n.manager.has_vault_group(region, org_id, vault_id))
-            .map(|n| n.id)
-            .collect();
-
-        if still_present.is_empty() {
-            return;
-        }
-
-        if tokio::time::Instant::now() >= deadline {
-            panic!(
-                "vault group (region={region:?}, org_id={org_id:?}, vault_id={vault_id:?}) was \
-                 not torn down on all voters within {timeout:?}. still present on: {still_present:?}",
             );
         }
 

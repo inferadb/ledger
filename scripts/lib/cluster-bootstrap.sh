@@ -237,6 +237,58 @@ bootstrap_cluster() {
   log_info "Cluster endpoints: $CLUSTER_ENDPOINTS"
 }
 
+# Provision a data region via `AdminService::ProvisionRegion`. Data regions
+# are no longer auto-created at boot — `init` only brings up the GLOBAL
+# region. Any RPC that writes to a data region (`InitiateEmailVerification`,
+# `CompleteRegistration`, `Write`, etc.) requires the region to be
+# explicitly provisioned first.
+#
+# Args:
+#   1: region_enum_value (e.g. 10 for REGION_US_EAST_VA)
+#   2: max_attempts      (default 30)
+#
+# Tries each listening cluster port on each attempt — `ProvisionRegion` is
+# idempotent (`created = false` on a no-op) and can be served by any node.
+provision_region() {
+  local region=$1
+  local max_attempts=${2:-30}
+  if ! command -v grpcurl &>/dev/null; then
+    log_error "grpcurl is required for provision_region (install: brew install grpcurl)"
+    return 1
+  fi
+  if ! command -v jq &>/dev/null; then
+    log_error "jq is required for provision_region (install: brew install jq)"
+    return 1
+  fi
+
+  local node_count=${#CLUSTER_PIDS[@]}
+  local base_port
+  # First listening port from the exported $CLUSTER_ENDPOINTS, e.g. "http://127.0.0.1:50051".
+  base_port=$(echo "$CLUSTER_ENDPOINTS" | sed -n 's@.*://[^:]*:\([0-9]*\).*@\1@p' | head -1)
+  [[ -z "$base_port" ]] && { log_error "provision_region: cannot derive base port"; return 1; }
+
+  local attempt
+  for attempt in $(seq 1 "$max_attempts"); do
+    local i
+    for ((i=0; i<node_count; i++)); do
+      local addr="127.0.0.1:$((base_port + i))"
+      local result
+      result=$(grpcurl -plaintext \
+        -d "{\"region\": $region}" \
+        "$addr" \
+        ledger.v1.AdminService/ProvisionRegion 2>&1) || true
+      if echo "$result" | jq -e '.region' &>/dev/null; then
+        log_success "Data region $region provisioned (attempt $attempt)"
+        return 0
+      fi
+    done
+    sleep 1
+  done
+
+  log_error "provision_region: failed after $max_attempts attempts (region=$region)"
+  return 1
+}
+
 # Tail the last N lines of each node's log.
 # Args: data_root node_count lines
 dump_node_logs() {

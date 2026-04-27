@@ -95,19 +95,14 @@ pub struct ConsensusState<C: Clock, R: RngSource> {
 /// is responsible for ensuring that adopted leaders actually have a quorum
 /// — typically by deriving them from another shard whose Raft elections
 /// already established quorum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum LeadershipMode {
     /// Standard Raft elections.
+    #[default]
     SelfElect,
     /// Leader is asserted externally via [`ConsensusState::adopt_leader`].
     /// Election timeouts no-op.
     Delegated,
-}
-
-impl Default for LeadershipMode {
-    fn default() -> Self {
-        Self::SelfElect
-    }
 }
 
 impl<C: Clock + Clone, R: RngSource> ConsensusState<C, R> {

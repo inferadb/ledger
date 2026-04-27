@@ -456,6 +456,8 @@ async fn read_index_from_leader(
     let resp = client
         .committed_index(inferadb_ledger_proto::proto::CommittedIndexRequest {
             region: String::new(),
+            organization: None,
+            vault: None,
         })
         .await
         .ok()?;

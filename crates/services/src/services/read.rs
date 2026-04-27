@@ -203,6 +203,43 @@ impl Stream for StreamGuard {
     }
 }
 
+/// Selects the apply-index watch a follower must wait on for a
+/// LINEARIZABLE read, based on whether the request carried vault scope.
+///
+/// The watch MUST come from the same Raft group whose committed index
+/// the leader returned. When the RPC carried vault scope (`vault_scoped`
+/// is `true`), the leader returned the per-vault group's committed index
+/// — falling back to the org-scoped watch is a silent correctness
+/// violation: the org watch advances on org-group apply, not vault
+/// apply, so [`inferadb_ledger_raft::wait_for_apply`] would either time
+/// out or release at the wrong index when the org watch coincidentally
+/// surpasses the vault's committed index.
+///
+/// When the per-vault watch is missing on this follower (e.g. the vault
+/// group is still spinning up locally), returns
+/// [`Status::unavailable`] so the SDK retries / redirects rather than
+/// picking a wrong watch.
+///
+/// Extracted as a free function so the branch matrix can be covered by
+/// direct unit tests without standing up a leader to drive
+/// [`ReadService::follower_read_index`] end-to-end.
+fn select_read_index_watch<'a>(
+    vault_scoped: bool,
+    vault_applied_index_rx: Option<&'a tokio::sync::watch::Receiver<u64>>,
+    applied_index_rx: Option<&'a tokio::sync::watch::Receiver<u64>>,
+) -> Result<&'a tokio::sync::watch::Receiver<u64>, Status> {
+    match (vault_scoped, vault_applied_index_rx, applied_index_rx) {
+        (true, Some(rx), _) => Ok(rx),
+        (true, None, _) => {
+            Err(Status::unavailable("Vault group not yet live on this follower; retry"))
+        },
+        (false, _, Some(rx)) => Ok(rx),
+        (false, _, None) => {
+            Err(Status::internal("Applied index watch not available for this region"))
+        },
+    }
+}
+
 impl ReadService {
     /// Resolves organization and vault IDs from a request using the region resolver.
     ///
@@ -233,7 +270,15 @@ impl ReadService {
             && let Ok(vault_group) =
                 manager.get_vault_group(region.region, organization_id, vault_id)
         {
+            // Block archive is only required for the read path — vault
+            // entity reads must hit the per-vault archive, not the org's.
+            // Kept explicit at the call site so the helper stays minimal
+            // and the write-side `attach_vault_group` callers don't pull
+            // in archive lookup they don't need.
             region.block_archive = Arc::clone(vault_group.block_archive());
+            // Pair `vault_applied_state` with `vault_applied_index_rx` —
+            // see `RegionContext::attach_vault_group` for the invariant.
+            region.attach_vault_group(&vault_group);
         }
         Ok((organization_id, vault_id, region))
     }
@@ -302,11 +347,20 @@ impl ReadService {
     ///
     /// `grpc_deadline` is the remaining time from the `grpc-timeout` header, used to bound
     /// the `CommittedIndex` RPC on the follower path.
+    ///
+    /// `organization` and `vault` are the original request slugs. When both
+    /// are `Some`, the follower path scopes the `CommittedIndex` RPC and the
+    /// apply wait to the per-vault Raft group; when both are `None`, the path
+    /// falls back to the org-scoped region group. Mixing one with the other
+    /// is a bug — the leader rejects partial vault scope with
+    /// `InvalidArgument`.
     async fn resolve_read_consistency(
         &self,
         ctx: &RegionContext,
         consistency: i32,
         grpc_deadline: Option<Duration>,
+        organization: Option<inferadb_ledger_proto::proto::OrganizationSlug>,
+        vault: Option<inferadb_ledger_proto::proto::VaultSlug>,
     ) -> Result<(), Status> {
         let consistency =
             ReadConsistency::try_from(consistency).unwrap_or(ReadConsistency::Unspecified);
@@ -321,7 +375,7 @@ impl ReadService {
                     Ok(())
                 } else {
                     // Follower path — ReadIndex protocol
-                    self.follower_read_index(ctx, grpc_deadline).await
+                    self.follower_read_index(ctx, grpc_deadline, organization, vault).await
                 }
             },
         }
@@ -335,10 +389,21 @@ impl ReadService {
     /// 3. Wait for this node's applied index to reach that committed index.
     ///
     /// The `grpc_deadline` comes from the `grpc-timeout` header on the incoming request.
+    ///
+    /// When `organization` and `vault` are both `Some`, the RPC carries vault
+    /// scope so the leader returns the per-vault Raft group's committed index
+    /// and term, and the wait happens on the per-vault apply watch
+    /// ([`RegionContext::vault_applied_index_rx`]); per-vault apply progresses
+    /// independently of the parent region group, so waiting on the org-scoped
+    /// watch can release the read before vault entity writes land. When both
+    /// are `None`, the RPC carries no vault scope and the wait falls back to
+    /// [`RegionContext::applied_index_rx`].
     async fn follower_read_index(
         &self,
         ctx: &RegionContext,
         grpc_deadline: Option<Duration>,
+        organization: Option<inferadb_ledger_proto::proto::OrganizationSlug>,
+        vault: Option<inferadb_ledger_proto::proto::VaultSlug>,
     ) -> Result<(), Status> {
         use inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient;
 
@@ -355,9 +420,39 @@ impl ReadService {
         let channel = self.leader_channel_for_read_index(ctx).await?;
         let mut client = RaftServiceClient::new(channel);
 
+        // Vault scope is all-or-nothing on the wire — the leader rejects
+        // partial scope. The follower must enforce the same paired-or-empty
+        // contract, otherwise a partial-scope bug elsewhere would silently
+        // degrade to an org-scoped read while the leader would have rejected
+        // the same request. Returning `internal` here surfaces the bug
+        // loudly during integration tests; if this fires in production it
+        // means a caller built a partial `(Some, None)` / `(None, Some)`
+        // pair, which is a code defect not a runtime condition.
+        let vault_scope = match (organization, vault) {
+            (Some(org), Some(v)) => Some((org, v)),
+            (None, None) => None,
+            _ => {
+                return Err(Status::internal(
+                    "partial vault scope passed to follower_read_index — bug",
+                ));
+            },
+        };
+        let (organization_field, vault_field) = match vault_scope {
+            Some((org, v)) => (Some(org), Some(v)),
+            None => (None, None),
+        };
+
+        // Pass the resolved region's string identifier on the wire so the
+        // leader's handler looks up the right group. Empty string is the
+        // legacy "GLOBAL" shorthand and silently misroutes a vault-scoped
+        // request when the vault is hosted in a non-GLOBAL data region —
+        // the leader's `get_vault_group(GLOBAL, org, vault)` returns
+        // `NotFound` even though the vault is live in (e.g.) US_EAST_VA.
         let rpc_future =
             client.committed_index(inferadb_ledger_proto::proto::CommittedIndexRequest {
-                region: String::new(),
+                region: ctx.region.as_str().to_string(),
+                organization: organization_field,
+                vault: vault_field,
             });
 
         let response = tokio::time::timeout(timeout, rpc_future)
@@ -372,10 +467,15 @@ impl ReadService {
 
         let committed_index = response.into_inner().committed_index;
 
-        let watch = ctx
-            .applied_index_rx
-            .as_ref()
-            .ok_or_else(|| Status::internal("Applied index watch not available for this region"))?;
+        // Choose the watch to wait on. Selection logic is extracted into
+        // [`select_read_index_watch`] so the all-important tier-discipline
+        // contract (vault-scoped RPC ⇒ wait on vault watch only) can be
+        // covered by direct unit tests without standing up a full leader.
+        let watch = select_read_index_watch(
+            vault_field.is_some(),
+            ctx.vault_applied_index_rx.as_ref(),
+            ctx.applied_index_rx.as_ref(),
+        )?;
 
         // Use remaining deadline for wait_for_apply, accounting for time
         // already spent in the CommittedIndex RPC. Falls back to 5s default
@@ -804,7 +904,15 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         ctx.set_include_proof(false);
 
         // Check consistency requirements (may execute ReadIndex protocol on followers)
-        if let Err(e) = self.resolve_read_consistency(&region, req.consistency, grpc_deadline).await
+        if let Err(e) = self
+            .resolve_read_consistency(
+                &region,
+                req.consistency,
+                grpc_deadline,
+                req.organization,
+                req.vault,
+            )
+            .await
         {
             ctx.set_error("consistency_error", e.message());
             return Err(e);
@@ -814,7 +922,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         ctx.set_target(organization, vault);
 
         // Check vault health - diverged vaults cannot be read
-        let health = region.applied_state.vault_health(organization_id, vault_id);
+        let health = region.vault_health(organization_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
             let msg = format!(
                 "Vault {}:{} has diverged at height {}",
@@ -860,7 +968,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         ctx.set_success();
 
         // Get current block height for this vault
-        let block_height = region.applied_state.vault_height(organization_id, vault_id);
+        let block_height = region.vault_height(organization_id, vault_id);
         ctx.set_block_height(block_height);
 
         Ok(Response::new(ReadResponse { value: entity.map(|e| e.value), block_height }))
@@ -928,7 +1036,15 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         ctx.set_include_proof(false);
 
         // Check consistency requirements (may execute ReadIndex protocol on followers)
-        if let Err(e) = self.resolve_read_consistency(&region, req.consistency, grpc_deadline).await
+        if let Err(e) = self
+            .resolve_read_consistency(
+                &region,
+                req.consistency,
+                grpc_deadline,
+                req.organization,
+                req.vault,
+            )
+            .await
         {
             ctx.set_error("consistency_error", e.message());
             return Err(e);
@@ -946,7 +1062,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         ctx.set_target(organization, vault);
 
         // Check vault health - diverged vaults cannot be read
-        let health = region.applied_state.vault_health(organization_id, vault_id);
+        let health = region.vault_health(organization_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
             let msg = format!(
                 "Vault {}:{} has diverged at height {}",
@@ -1014,7 +1130,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         ctx.set_success();
 
         // Get current block height for this vault
-        let block_height = region.applied_state.vault_height(organization_id, vault_id);
+        let block_height = region.vault_height(organization_id, vault_id);
         ctx.set_block_height(block_height);
 
         Ok(Response::new(BatchReadResponse { results, block_height }))
@@ -1083,7 +1199,13 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         // On the leader, serve directly. On followers, use ReadIndex protocol
         // to wait for local state to catch up to the leader's committed index.
         if let Err(e) = self
-            .resolve_read_consistency(&region, ReadConsistency::Linearizable as i32, grpc_deadline)
+            .resolve_read_consistency(
+                &region,
+                ReadConsistency::Linearizable as i32,
+                grpc_deadline,
+                req.organization,
+                req.vault,
+            )
             .await
         {
             ctx.set_error("consistency_error", e.message());
@@ -1091,7 +1213,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         }
 
         // Check vault health - diverged vaults cannot be read
-        let health = region.applied_state.vault_health(organization_id, vault_id);
+        let health = region.vault_health(organization_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
             let msg = format!(
                 "Vault {}:{} has diverged at height {}",
@@ -1125,7 +1247,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         ctx.set_bytes_read(value_size);
 
         // Get current block height for this vault
-        let block_height = region.applied_state.vault_height(organization_id, vault_id);
+        let block_height = region.vault_height(organization_id, vault_id);
         ctx.set_block_height(block_height);
 
         // Fetch block header from archive
@@ -1243,7 +1365,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         let archive = &region.block_archive;
 
         // Check that requested height doesn't exceed current tip
-        let tip_height = region.applied_state.vault_height(organization_id, vault_id);
+        let tip_height = region.vault_height(organization_id, vault_id);
         if req.at_height > tip_height {
             let msg =
                 format!("Requested height {} exceeds current tip {}", req.at_height, tip_height);
@@ -1449,7 +1571,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         }
 
         // Get current tip for this vault
-        let current_tip = region.applied_state.vault_height(organization_id, vault_id);
+        let current_tip = region.vault_height(organization_id, vault_id);
 
         // Subscribe to broadcast BEFORE reading historical blocks
         // This ensures we don't miss any blocks committed between reading history and subscribing
@@ -1706,7 +1828,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         }
 
         // Get current tip for this vault
-        let current_tip = region.applied_state.vault_height(organization_id, vault_id);
+        let current_tip = region.vault_height(organization_id, vault_id);
 
         Ok(Response::new(GetBlockRangeResponse { blocks, current_tip }))
     }
@@ -1746,7 +1868,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 
         let height = if vault_id.value() != 0 {
             // Specific vault requested
-            region.applied_state.vault_height(organization_id, vault_id)
+            region.vault_height(organization_id, vault_id)
         } else if organization_id.value() != 0 {
             // Organization requested - return max height across all vaults in organization
             region.applied_state.org_max_vault_height(organization_id)
@@ -1802,8 +1924,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         // Server-assigned sequences: Query the persistent AppliedState directly
         // The idempotency cache no longer tracks sequence numbers by sequence;
         // it uses idempotency keys instead.
-        let last_committed_sequence =
-            region.applied_state.client_sequence(organization_id, vault_id, client_id);
+        let last_committed_sequence = region.client_sequence(organization_id, vault_id, client_id);
 
         Ok(Response::new(GetClientStateResponse { last_committed_sequence }))
     }
@@ -1843,7 +1964,14 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         // the ReadIndex protocol.
 
         // Check consistency requirements (may execute ReadIndex protocol on followers)
-        self.resolve_read_consistency(&region, req.consistency, grpc_deadline).await?;
+        self.resolve_read_consistency(
+            &region,
+            req.consistency,
+            grpc_deadline,
+            req.organization,
+            req.vault,
+        )
+        .await?;
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
         // Compute query hash from all filter parameters for token validation
@@ -1856,7 +1984,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         let query_hash = PageTokenCodec::compute_query_hash(query_params.as_bytes());
 
         // Get current block height for consistent pagination
-        let block_height = region.applied_state.vault_height(organization_id, vault_id);
+        let block_height = region.vault_height(organization_id, vault_id);
 
         // Decode and validate page token if provided
         let (resume_key, at_height) = if req.page_token.is_empty() {
@@ -2031,7 +2159,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                 ctx.set_error("slug_resolve", e.message());
                 status_with_correlation(e, &ctx.request_id(), ctx.trace_id())
             })?;
-        let region = self.resolver.resolve(organization_id).map_err(|e| {
+        let mut region = self.resolver.resolve(organization_id).map_err(|e| {
             ctx.set_error("resolve_region", e.message());
             status_with_correlation(e, &ctx.request_id(), ctx.trace_id())
         })?;
@@ -2041,6 +2169,22 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
                 ctx.set_error("slug_resolve_vault", e.message());
                 status_with_correlation(e, &ctx.request_id(), ctx.trace_id())
             })?;
+        // Per-vault apply records `vault_heights`, `vault_health`, and
+        // `client_sequences` in the per-vault Raft group's
+        // `AppliedState`; the parent org's accessor never sees those
+        // writes. Attach the per-vault accessor when the vault group is
+        // live so `region.vault_height` / `region.vault_health` route
+        // through it. Mirrors `ReadService::resolve_org_vault`.
+        if let Some(manager) = &self.manager
+            && let Ok(vault_group) =
+                manager.get_vault_group(region.region, organization_id, vault_id)
+        {
+            // Block archive swap is read-path-only; see `resolve_org_vault`.
+            region.block_archive = Arc::clone(vault_group.block_archive());
+            // Pair `vault_applied_state` with `vault_applied_index_rx` —
+            // see `RegionContext::attach_vault_group` for the invariant.
+            region.attach_vault_group(&vault_group);
+        }
 
         // Populate canonical log line with caller + target identity.
         ctx.set_caller(domain.caller.value());
@@ -2071,15 +2215,24 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 
         // Enforce consistency. On followers + Linearizable, this blocks on
         // ReadIndex; on leaders, it's a lease check; on Eventual, a no-op.
-        if let Err(e) =
-            self.resolve_read_consistency(&region, domain.consistency as i32, grpc_deadline).await
+        if let Err(e) = self
+            .resolve_read_consistency(
+                &region,
+                domain.consistency as i32,
+                grpc_deadline,
+                Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                    slug: domain.organization.value(),
+                }),
+                Some(inferadb_ledger_proto::proto::VaultSlug { slug: domain.vault.value() }),
+            )
+            .await
         {
             ctx.set_error("consistency_error", e.message());
             return Err(status_with_correlation(e, &ctx.request_id(), ctx.trace_id()));
         }
 
         // Reject reads against diverged vaults.
-        let health = region.applied_state.vault_health(organization_id, vault_id);
+        let health = region.vault_health(organization_id, vault_id);
         if let VaultHealthStatus::Diverged { at_height, .. } = &health {
             let msg = format!(
                 "Vault {}:{} has diverged at height {}",
@@ -2107,7 +2260,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
 
         // Source the current applied block height the same way `list_relationships`
         // does, so the response carries a meaningful `checked_at_height`.
-        let block_height = region.applied_state.vault_height(organization_id, vault_id);
+        let block_height = region.vault_height(organization_id, vault_id);
         ctx.set_block_height(block_height);
         ctx.set_found(exists);
 
@@ -2157,7 +2310,14 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         // the ReadIndex protocol.
 
         // Check consistency requirements (may execute ReadIndex protocol on followers)
-        self.resolve_read_consistency(&region, req.consistency, grpc_deadline).await?;
+        self.resolve_read_consistency(
+            &region,
+            req.consistency,
+            grpc_deadline,
+            req.organization,
+            req.vault,
+        )
+        .await?;
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
         // Compute query hash from filter parameters for token validation
@@ -2165,7 +2325,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         let query_hash = PageTokenCodec::compute_query_hash(query_params.as_bytes());
 
         // Get current block height for consistent pagination
-        let block_height = region.applied_state.vault_height(organization_id, vault_id);
+        let block_height = region.vault_height(organization_id, vault_id);
 
         // Decode and validate page token if provided
         let (resume_key, at_height) = if req.page_token.is_empty() {
@@ -2260,7 +2420,14 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         // the ReadIndex protocol.
 
         // Check consistency requirements (may execute ReadIndex protocol on followers)
-        self.resolve_read_consistency(&region, req.consistency, grpc_deadline).await?;
+        self.resolve_read_consistency(
+            &region,
+            req.consistency,
+            grpc_deadline,
+            req.organization,
+            req.vault,
+        )
+        .await?;
 
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
         let prefix = if req.key_prefix.is_empty() { None } else { Some(req.key_prefix.as_str()) };
@@ -2285,7 +2452,7 @@ impl inferadb_ledger_proto::proto::read_service_server::ReadService for ReadServ
         // Get current block height for consistent pagination
         let block_height = if vault_id.value() != 0 {
             // Specific vault requested - use its height
-            region.applied_state.vault_height(organization_id, vault_id)
+            region.vault_height(organization_id, vault_id)
         } else {
             // Organization-level entities - use max height across all vaults in organization
             region.applied_state.org_max_vault_height(organization_id)
@@ -2520,5 +2687,70 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("invalid character"), "message: {}", err.message());
         assert!(err.message().contains("relation"), "message: {}", err.message());
+    }
+
+    // ── select_read_index_watch ─────────────────────────────────────────────
+    //
+    // The follower-side LINEARIZABLE read watch-selection is the single
+    // tier-discipline boundary between vault-scoped and org-scoped reads.
+    // Any divergence from "vault scope on the wire ⇒ wait on vault watch
+    // only" is a silent correctness violation, so each branch of the
+    // match has an explicit covering test.
+
+    #[test]
+    fn select_read_index_watch_vault_scoped_with_vault_watch_returns_vault() {
+        let (_org_tx, org_rx) = tokio::sync::watch::channel::<u64>(7);
+        let (_vault_tx, vault_rx) = tokio::sync::watch::channel::<u64>(42);
+        let watch = select_read_index_watch(true, Some(&vault_rx), Some(&org_rx))
+            .expect("vault-scoped + vault watch present should pick vault watch");
+        // Borrow the value to confirm we got the vault watch back, not
+        // the org watch — `*vault_rx.borrow() == 42` distinguishes them.
+        assert_eq!(*watch.borrow(), 42);
+    }
+
+    /// The bug this whole change exists to fix: when the request carried
+    /// vault scope but the per-vault watch is missing on this follower
+    /// (e.g. vault group still spinning up locally), the previous code
+    /// silently fell back to the org watch. The leader had returned the
+    /// vault group's committed index — waiting on the org watch can
+    /// release the read at the wrong index. The fix returns
+    /// `Status::unavailable` so the SDK retries / redirects.
+    #[test]
+    fn select_read_index_watch_vault_scoped_without_vault_watch_returns_unavailable() {
+        let (_org_tx, org_rx) = tokio::sync::watch::channel::<u64>(7);
+        let err = select_read_index_watch(true, None, Some(&org_rx))
+            .expect_err("vault-scoped + missing vault watch must return Unavailable");
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+        assert!(err.message().contains("Vault group not yet live"), "message: {}", err.message());
+    }
+
+    #[test]
+    fn select_read_index_watch_org_scoped_uses_applied_index_rx() {
+        let (_org_tx, org_rx) = tokio::sync::watch::channel::<u64>(7);
+        let watch = select_read_index_watch(false, None, Some(&org_rx))
+            .expect("org-scoped + org watch present should pick org watch");
+        assert_eq!(*watch.borrow(), 7);
+    }
+
+    /// Org-scoped read may also coincidentally have a vault watch
+    /// attached if `RegionContext` was constructed by a sibling helper —
+    /// the selection MUST still pick the org watch when the request is
+    /// org-scoped, because the leader returned the org group's
+    /// committed index in that case.
+    #[test]
+    fn select_read_index_watch_org_scoped_ignores_vault_watch_when_present() {
+        let (_org_tx, org_rx) = tokio::sync::watch::channel::<u64>(7);
+        let (_vault_tx, vault_rx) = tokio::sync::watch::channel::<u64>(42);
+        let watch = select_read_index_watch(false, Some(&vault_rx), Some(&org_rx))
+            .expect("org-scoped should pick org watch even when vault watch is present");
+        assert_eq!(*watch.borrow(), 7);
+    }
+
+    #[test]
+    fn select_read_index_watch_org_scoped_without_org_watch_returns_internal() {
+        let err = select_read_index_watch(false, None, None)
+            .expect_err("org-scoped + no org watch is an internal error");
+        assert_eq!(err.code(), tonic::Code::Internal);
+        assert!(err.message().contains("Applied index watch"), "message: {}", err.message());
     }
 }

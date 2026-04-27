@@ -973,6 +973,14 @@ impl TestCluster {
     /// `applied_index` for a shard with no traffic is `0`; we skip that
     /// case (an idle shard is "synced" by definition since there is
     /// nothing to apply yet).
+    ///
+    /// Per-vault consensus: vault entity writes route through per-vault
+    /// Raft shards, NOT the parent organization shard. Convergence on the
+    /// org shard alone returns `true` while vault apply pipelines are still
+    /// catching up — producing stale follower reads in tests. Iterates
+    /// every `(region, organization_id, vault_id)` triple registered on the
+    /// reference node and compares `applied_index_watch` across all nodes
+    /// for each.
     fn data_regions_synced(&self) -> bool {
         // Derive the set of actually-started data regions from the reference
         // node's manager rather than a fixed count. Data regions may be
@@ -1002,6 +1010,43 @@ impl TestCluster {
                 let first = indices[0];
                 if first == 0 {
                     // Idle shard: no writes yet. Treat as synced.
+                    continue;
+                }
+                if !indices.iter().all(|&i| i == first) {
+                    return false;
+                }
+            }
+
+            // Vault shards register on the parent org's `ConsensusEngine`
+            // and run their own apply pipelines. Wait for every locally-
+            // registered vault group to converge across nodes — entity
+            // writes commit through vault shards, so org-shard convergence
+            // alone is insufficient.
+            let vault_triples: Vec<(
+                inferadb_ledger_types::OrganizationId,
+                inferadb_ledger_types::VaultId,
+            )> = reference_node
+                .manager
+                .list_vault_groups()
+                .into_iter()
+                .filter(|(r, ..)| *r == dr)
+                .map(|(_, o, v)| (o, v))
+                .collect();
+            for (organization_id, vault_id) in vault_triples {
+                let mut indices = Vec::new();
+                for node in &self.nodes {
+                    if let Ok(vg) = node.manager.get_vault_group(dr, organization_id, vault_id) {
+                        indices.push(*vg.applied_index_watch().borrow());
+                    }
+                }
+                if indices.len() < self.nodes.len() {
+                    // A node is missing this vault group — not yet
+                    // converged on registration.
+                    return false;
+                }
+                let first = indices[0];
+                if first == 0 {
+                    // Idle vault: no writes yet. Treat as synced.
                     continue;
                 }
                 if !indices.iter().all(|&i| i == first) {
@@ -2534,4 +2579,232 @@ pub async fn create_vault_with_retry(
         }
     }
     panic!("create vault timed out after 60 attempts");
+}
+
+// ============================================================================
+// Vault group convergence helpers
+// ============================================================================
+//
+// `VaultService::create_vault` waits for the local watcher to call
+// `start_vault_group` before returning, so a write issued immediately
+// after `create_test_vault` against the same leader observes the vault
+// group registered. Tests that need to read or write through followers
+// (or otherwise depend on the per-vault group being live on every voter)
+// still need a cross-voter convergence wait — followers run their own
+// watcher tasks after applying the entry, and the producer RPC only
+// awaits the local node's registration.
+//
+// `wait_for_vault_group_live_on_all_voters` is the cross-voter wait;
+// `wait_for_vault_group_removed_on_all_voters` is the symmetric teardown
+// helper for delete tests, which still need to observe the
+// `VaultDeletionRequest` → watcher → `stop_vault_group` chain on every
+// voter.
+
+/// Polls every node until the cluster agrees on a single registered
+/// `(region, org_id, *)` triple, or `timeout` elapses. Returns the
+/// `VaultId` every node observes.
+///
+/// This intentionally does NOT depend on the GLOBAL vault-slug index —
+/// the index write (`SystemRequest::RegisterVaultDirectoryEntry`) is a
+/// separate propose from the per-org `CreateVault` and their apply
+/// order on followers is not coupled to the vault group start. The
+/// "vault group is live on every voter" contract is observable directly
+/// on `RaftManager::list_vault_groups`.
+pub async fn wait_for_vault_group_live_on_all_voters(
+    cluster: &TestCluster,
+    region: inferadb_ledger_types::Region,
+    org_id: inferadb_ledger_types::OrganizationId,
+    timeout: Duration,
+) -> inferadb_ledger_types::VaultId {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let per_node: Vec<Vec<inferadb_ledger_types::VaultId>> = cluster
+            .nodes()
+            .iter()
+            .map(|n| {
+                n.manager
+                    .list_vault_groups()
+                    .into_iter()
+                    .filter(|(r, o, _)| *r == region && *o == org_id)
+                    .map(|(_, _, v)| v)
+                    .collect()
+            })
+            .collect();
+
+        if let Some(first) = per_node.first()
+            && first.len() == 1
+            && per_node.iter().all(|ids| ids == first)
+        {
+            return first[0];
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            let rendered: Vec<String> = cluster
+                .nodes()
+                .iter()
+                .zip(per_node.iter())
+                .map(|(n, ids)| format!("node {}: {:?}", n.id, ids))
+                .collect();
+            panic!(
+                "vault group for (region={region:?}, org_id={org_id:?}) did not converge across \
+                 voters within {timeout:?}. per-node state: [{}]",
+                rendered.join(" | "),
+            );
+        }
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Polls every node until NO voter reports `(region, org_id, vault_id)`
+/// in its `list_vault_groups()`. Used by delete tests to assert that the
+/// `VaultDeletionRequest` → watcher → `stop_vault_group` chain has fired
+/// and torn down the vault group on every voter.
+pub async fn wait_for_vault_group_removed_on_all_voters(
+    cluster: &TestCluster,
+    region: inferadb_ledger_types::Region,
+    org_id: inferadb_ledger_types::OrganizationId,
+    vault_id: inferadb_ledger_types::VaultId,
+    timeout: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let still_present: Vec<u64> = cluster
+            .nodes()
+            .iter()
+            .filter(|n| n.manager.has_vault_group(region, org_id, vault_id))
+            .map(|n| n.id)
+            .collect();
+
+        if still_present.is_empty() {
+            return;
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "vault group (region={region:?}, org_id={org_id:?}, vault_id={vault_id:?}) was \
+                 not torn down on all voters within {timeout:?}. still present on: \
+                 {still_present:?}",
+            );
+        }
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Resolves an external `OrganizationSlug` to its internal
+/// `OrganizationId` via the GLOBAL applied-state accessor. Panics if the
+/// slug is not yet indexed — callers must have awaited organization
+/// activation (e.g. via `create_test_organization` which polls until
+/// status == Active).
+pub fn resolve_org_id(
+    node: &TestNode,
+    slug: inferadb_ledger_types::OrganizationSlug,
+) -> inferadb_ledger_types::OrganizationId {
+    node.manager
+        .system_region()
+        .expect("system region running")
+        .applied_state()
+        .resolve_slug_to_id(slug)
+        .expect("organization slug resolves after CreateOrganization commits")
+}
+
+/// Polls until every voter has at least one vault group registered for
+/// `org_id`, in the same `(region, org_id, *)` triple, and every voter
+/// agrees on the set of triples.
+///
+/// The region the organization landed in is auto-discovered from the
+/// reference node's `RaftManager` via `get_organization_region` — this
+/// avoids forcing every test to know up front which region a multi-region
+/// `CreateOrganization` will place the org into. Returns the discovered
+/// region alongside the converged vault id (when the test created exactly
+/// one vault for `org_id`).
+///
+/// `VaultService::create_vault` already waits for the local node's
+/// `start_vault_group` to land before returning, so this helper is
+/// redundant for tests that operate against the same leader the
+/// `create_test_vault` call landed on. Use it for tests that issue
+/// reads or writes through a follower after creating a vault — the
+/// follower's watcher fires asynchronously after its apply, and the
+/// producer RPC does not await follower convergence.
+pub async fn wait_for_org_vault_group_live(
+    cluster: &TestCluster,
+    org_slug: inferadb_ledger_types::OrganizationSlug,
+    timeout: Duration,
+) -> (inferadb_ledger_types::Region, inferadb_ledger_types::VaultId) {
+    let reference = &cluster.nodes()[0];
+    let org_id = resolve_org_id(reference, org_slug);
+    let region = reference
+        .manager
+        .get_organization_region(org_id)
+        .expect("organization is registered on at least one node after activation");
+    let vault_id = wait_for_vault_group_live_on_all_voters(cluster, region, org_id, timeout).await;
+    (region, vault_id)
+}
+
+/// Polls until every voter reports exactly `expected_count` vault groups
+/// for the organization identified by `org_slug`, with the same set of
+/// `VaultId`s on every node. Returns the converged set sorted ascending,
+/// alongside the discovered region.
+///
+/// Use when a test creates multiple vaults under the same organization
+/// and needs all of them live on every voter — for example, when reads
+/// or writes need to land on followers. Tests that only use the leader
+/// the `create_test_vault` call landed on do not need this wait:
+/// `VaultService::create_vault` already awaits each vault group's local
+/// registration before returning.
+pub async fn wait_for_org_vault_groups_live(
+    cluster: &TestCluster,
+    org_slug: inferadb_ledger_types::OrganizationSlug,
+    expected_count: usize,
+    timeout: Duration,
+) -> (inferadb_ledger_types::Region, Vec<inferadb_ledger_types::VaultId>) {
+    let reference = &cluster.nodes()[0];
+    let org_id = resolve_org_id(reference, org_slug);
+    let region = reference
+        .manager
+        .get_organization_region(org_id)
+        .expect("organization is registered on at least one node after activation");
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let per_node: Vec<Vec<inferadb_ledger_types::VaultId>> = cluster
+            .nodes()
+            .iter()
+            .map(|n| {
+                let mut ids: Vec<inferadb_ledger_types::VaultId> = n
+                    .manager
+                    .list_vault_groups()
+                    .into_iter()
+                    .filter(|(r, o, _)| *r == region && *o == org_id)
+                    .map(|(_, _, v)| v)
+                    .collect();
+                ids.sort();
+                ids
+            })
+            .collect();
+
+        if let Some(first) = per_node.first()
+            && first.len() == expected_count
+            && per_node.iter().all(|ids| ids == first)
+        {
+            return (region, first.clone());
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            let rendered: Vec<String> = cluster
+                .nodes()
+                .iter()
+                .zip(per_node.iter())
+                .map(|(n, ids)| format!("node {}: {:?}", n.id, ids))
+                .collect();
+            panic!(
+                "vault set for (region={region:?}, org_id={org_id:?}) did not converge to \
+                 {expected_count} entries within {timeout:?}. per-node state: [{}]",
+                rendered.join(" | "),
+            );
+        }
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }

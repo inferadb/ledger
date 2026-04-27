@@ -472,13 +472,42 @@ impl<B: StorageBackend> StateLayer<B> {
     // gymnastics, and is trivially safe — the caller's local Arc outlives
     // the txn by construction.
 
-    /// Sentinel key for crash-recovery atomicity.
+    /// Sentinel key for crash-recovery atomicity (organization-scoped Raft
+    /// group — the parent org's `OrganizationGroup`).
     ///
     /// Stored in the meta.db coordinator database (post–Slice 1) with a raw
     /// byte key. A byte-identical sentinel previously lived in state.db under
     /// the Entities table; legacy detection refuses to boot when that
     /// artefact is still present (see [`detect_legacy_sentinel`]).
     pub const LAST_APPLIED_KEY: &'static [u8] = b"_meta:last_applied";
+
+    /// Builds the sentinel key for a per-vault Raft group.
+    ///
+    /// Per-vault Raft groups have independent log indices that are not
+    /// comparable with the parent organization's log indices, so each
+    /// vault's apply pipeline records its sentinel under its own key.
+    /// Sharing a single `LAST_APPLIED_KEY` across the org and every vault
+    /// of the same organization (they share `meta.db`) caused vault apply
+    /// pipelines to skip-replay against the wrong group's last-applied
+    /// log id, silently dropping every write past the highest sibling
+    /// index.
+    fn last_applied_key_for_vault(vault: VaultId) -> Vec<u8> {
+        let mut key = Vec::with_capacity(Self::LAST_APPLIED_KEY.len() + 8 + 8);
+        key.extend_from_slice(Self::LAST_APPLIED_KEY);
+        key.extend_from_slice(b":vault:");
+        key.extend_from_slice(vault.value().to_be_bytes().as_slice());
+        key
+    }
+
+    /// Returns the sentinel key for the given Raft-group scope. `None`
+    /// scope refers to the parent organization's group; `Some(vault)`
+    /// refers to a per-vault group.
+    fn last_applied_key_bytes(scope: Option<VaultId>) -> Vec<u8> {
+        match scope {
+            None => Self::LAST_APPLIED_KEY.to_vec(),
+            Some(vault) => Self::last_applied_key_for_vault(vault),
+        }
+    }
 
     /// Returns a reference to the underlying meta database for diagnostics
     /// and durability-lifecycle wiring (checkpointer fan-out, shutdown
@@ -489,6 +518,13 @@ impl<B: StorageBackend> StateLayer<B> {
 
     /// Persists a Raft log ID sentinel to the meta database in its own
     /// write transaction.
+    ///
+    /// `scope` selects the Raft group the sentinel belongs to: `None` for
+    /// the parent organization's group, `Some(vault)` for a per-vault
+    /// group. Each Raft group keeps its own sentinel because per-vault
+    /// log indices are not comparable to the parent organization's log
+    /// indices — sharing a single key allowed one group's apply pipeline
+    /// to skip-replay against another group's last-applied log id.
     ///
     /// Under Slice 1 of per-vault consensus the sentinel is no longer
     /// bundled into the entity-data write transaction. The apply path
@@ -507,27 +543,31 @@ impl<B: StorageBackend> StateLayer<B> {
     ///
     /// Returns [`StateError::Store`] if the meta-db write transaction
     /// cannot be opened, the sentinel insert fails, or the commit fails.
-    pub fn persist_last_applied_meta(&self, log_id_bytes: &[u8]) -> Result<()> {
+    pub fn persist_last_applied_meta(
+        &self,
+        scope: Option<VaultId>,
+        log_id_bytes: &[u8],
+    ) -> Result<()> {
         let mut txn = self.meta_db.write().context(StoreSnafu)?;
-        txn.insert_raw(
-            inferadb_ledger_store::tables::TableId::Entities,
-            Self::LAST_APPLIED_KEY,
-            log_id_bytes,
-        )
-        .context(StoreSnafu)?;
+        let key = Self::last_applied_key_bytes(scope);
+        txn.insert_raw(inferadb_ledger_store::tables::TableId::Entities, &key, log_id_bytes)
+            .context(StoreSnafu)?;
         txn.commit_in_memory().context(StoreSnafu)
     }
 
-    /// Reads the last-applied Raft log ID sentinel from the meta database.
+    /// Reads the last-applied Raft log ID sentinel for the given scope
+    /// from the meta database.
     ///
-    /// Returns `None` on first boot (no sentinel written yet).
+    /// `scope` selects the Raft group: `None` for the parent organization's
+    /// group, `Some(vault)` for a per-vault group. Returns `None` on first
+    /// boot (no sentinel written yet for this scope).
     ///
     /// # Errors
     ///
     /// Returns [`StateError::Store`] if the read transaction fails.
-    pub fn read_last_applied(&self) -> Result<Option<Vec<u8>>> {
+    pub fn read_last_applied(&self, scope: Option<VaultId>) -> Result<Option<Vec<u8>>> {
         let txn = self.meta_db.read().context(StoreSnafu)?;
-        let key = Self::LAST_APPLIED_KEY.to_vec();
+        let key = Self::last_applied_key_bytes(scope);
         txn.get::<inferadb_ledger_store::tables::Entities>(&key).context(StoreSnafu)
     }
 
@@ -2387,7 +2427,7 @@ mod tests {
     #[test]
     fn test_read_last_applied_returns_none_on_fresh_db() {
         let state = create_test_state();
-        let result = state.read_last_applied().unwrap();
+        let result = state.read_last_applied(None).unwrap();
         assert!(result.is_none(), "fresh database should have no sentinel");
     }
 
@@ -2399,10 +2439,10 @@ mod tests {
         // Persist sentinel through the meta-db helper (Slice 1 cleave: the
         // sentinel lives in its own database, committed in a separate txn
         // after the state.db apply).
-        state.persist_last_applied_meta(log_id_bytes).unwrap();
+        state.persist_last_applied_meta(None, log_id_bytes).unwrap();
 
         // Read it back
-        let result = state.read_last_applied().unwrap();
+        let result = state.read_last_applied(None).unwrap();
         assert_eq!(result.as_deref(), Some(log_id_bytes.as_slice()));
     }
 
@@ -2410,10 +2450,10 @@ mod tests {
     fn test_sentinel_overwrites_on_update() {
         let state = create_test_state();
 
-        state.persist_last_applied_meta(b"log_id_1").unwrap();
-        state.persist_last_applied_meta(b"log_id_2").unwrap();
+        state.persist_last_applied_meta(None, b"log_id_1").unwrap();
+        state.persist_last_applied_meta(None, b"log_id_2").unwrap();
 
-        let result = state.read_last_applied().unwrap();
+        let result = state.read_last_applied(None).unwrap();
         assert_eq!(result.as_deref(), Some(b"log_id_2".as_slice()));
     }
 
@@ -2447,11 +2487,14 @@ mod tests {
         drop(db);
 
         // Step 2: sentinel → meta.db.
-        state.persist_last_applied_meta(b"log_id_100").unwrap();
+        state.persist_last_applied_meta(None, b"log_id_100").unwrap();
 
         let entity = state.get_entity(vault, b"key1").unwrap();
         assert!(entity.is_some());
-        assert_eq!(state.read_last_applied().unwrap().as_deref(), Some(b"log_id_100".as_slice()));
+        assert_eq!(
+            state.read_last_applied(None).unwrap().as_deref(),
+            Some(b"log_id_100".as_slice())
+        );
     }
 
     /// Crash-between-commits model: step 1 succeeded (entity data is in
@@ -2489,7 +2532,7 @@ mod tests {
         let entity = state.get_entity(vault, b"key1").unwrap();
         assert!(entity.is_some(), "step 1's entity data persists");
         assert!(
-            state.read_last_applied().unwrap().is_none(),
+            state.read_last_applied(None).unwrap().is_none(),
             "step 2 never ran — the sentinel must not have advanced"
         );
     }
@@ -2502,7 +2545,7 @@ mod tests {
         let state = create_test_state();
         let vault = VaultId::new(1);
 
-        state.persist_last_applied_meta(b"sentinel_value").unwrap();
+        state.persist_last_applied_meta(None, b"sentinel_value").unwrap();
 
         // Write an entity with a key that starts with _meta:. The
         // `state_layer.apply_operations` path uses a vault-scoped storage
@@ -2521,7 +2564,7 @@ mod tests {
             )
             .unwrap();
 
-        let sentinel = state.read_last_applied().unwrap();
+        let sentinel = state.read_last_applied(None).unwrap();
         assert_eq!(sentinel.as_deref(), Some(b"sentinel_value".as_slice()));
 
         let entity = state.get_entity(vault, b"_meta:last_applied").unwrap();
@@ -2558,7 +2601,7 @@ mod tests {
 
         // meta.db is pristine — the sentinel hasn't been written through
         // the new API.
-        assert!(state.read_last_applied().unwrap().is_none());
+        assert!(state.read_last_applied(None).unwrap().is_none());
     }
 
     #[test]

@@ -181,8 +181,6 @@ trap cleanup EXIT
 # Cluster management functions
 # ---------------------------------------------------------------------------
 
-# Start a node with coordinated bootstrap (--cluster N).
-# Args: node_number cluster_size
 # Start a node (first node or with --join seed).
 # Args: node_number [seed_address]
 # If seed_address is provided, passes --join. Otherwise starts without seeds.
@@ -695,12 +693,31 @@ create_org() {
   log_step "Created organization '$name' (slug: $ORG_SLUG) with admin user (slug: $USER_SLUG)"
 }
 
+# Generate a non-zero u64 Snowflake-shaped slug suitable for client-supplied vault IDs.
+# Uses /dev/urandom for entropy and clears the high bit so the value fits in a signed
+# i64 representation when round-tripped through tooling that interprets uint64 as JSON
+# numbers. The exact bit layout doesn't matter — the server accepts any non-zero u64.
+generate_snowflake_slug() {
+  local raw
+  raw=$(od -An -N8 -tu8 < /dev/urandom | tr -d ' \n')
+  if [[ -z "$raw" || "$raw" == "0" ]]; then
+    raw=1
+  fi
+  echo $(( (raw & 0x7FFFFFFFFFFFFFFF) | 1 ))
+}
+
 # Create a vault. Sets VAULT_SLUG.
 # Retries because the organization may still be provisioning after creation.
 # Also retries across all nodes on NotLeader (redirect-only routing model).
 # Args: leader_node_number
 create_vault() {
   local node_num=$1
+
+  # CreateVaultRequest requires a client-supplied Snowflake slug. Generate it
+  # once and reuse it across retries so the per-org idempotency check returns
+  # the existing vault rather than allocating duplicates.
+  local client_slug
+  client_slug=$(generate_snowflake_slug)
 
   local attempt=0
   local max_attempts=30
@@ -720,7 +737,7 @@ create_vault() {
       local addr="127.0.0.1:$port"
       local result
       result=$(grpcurl -plaintext \
-        -d "{\"organization\": {\"slug\": \"$ORG_SLUG\"}, \"caller\": {\"slug\": \"$USER_SLUG\"}}" \
+        -d "{\"organization\": {\"slug\": \"$ORG_SLUG\"}, \"caller\": {\"slug\": \"$USER_SLUG\"}, \"slug\": {\"slug\": \"$client_slug\"}}" \
         "$addr" \
         ledger.v1.VaultService/CreateVault 2>&1) || true
 
@@ -1244,6 +1261,40 @@ if [[ -z "$LEADER" ]]; then
   exit 1
 fi
 log_success "Leader is node $LEADER"
+
+# Provision the data region used by onboarding flows. Data regions are no
+# longer auto-created at boot — `init` only brings up the GLOBAL region, and
+# any RPC that writes to a data region (`InitiateEmailVerification`,
+# `CompleteRegistration`, etc.) requires the region to be explicitly
+# provisioned via `AdminService::ProvisionRegion`. The retry loop tolerates
+# transient `Unavailable` errors while the GLOBAL leader settles.
+log_step "Provisioning data region us-east-va via AdminService::ProvisionRegion..."
+PROVISION_OK=false
+for _attempt in $(seq 1 30); do
+  for port in $(seq "$BASE_PORT" $((BASE_PORT + 9))); do
+    if ! nc -z 127.0.0.1 "$port" 2>/dev/null; then
+      continue
+    fi
+    PROVISION_RESULT=$(grpcurl -plaintext \
+      -d '{"region": 10}' \
+      "127.0.0.1:$port" \
+      ledger.v1.AdminService/ProvisionRegion 2>&1) || true
+    if echo "$PROVISION_RESULT" | jq -e '.region' &>/dev/null; then
+      PROVISION_OK=true
+      break 2
+    fi
+  done
+  sleep 1
+done
+if [[ "$PROVISION_OK" != "true" ]]; then
+  log_error "Failed to provision us-east-va data region"
+  exit 1
+fi
+log_success "Data region us-east-va provisioned"
+
+# Brief settle so every voter has applied the region creation before we
+# start firing user-facing RPCs (which apply through the new region).
+sleep 3
 
 # Create organization and vault
 create_org "$LEADER" "lifecycle-test-org"

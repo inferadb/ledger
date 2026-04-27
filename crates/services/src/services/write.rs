@@ -528,9 +528,24 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         // Local processing: resolve vault slug via GLOBAL applied state.
         // Vault slug indexes are maintained in the GLOBAL Raft group (CreateVault
         // is a GLOBAL operation), not in the data region's applied state.
-        let region = self.resolver.resolve(organization_id)?;
+        let mut region = self.resolver.resolve(organization_id)?;
         let vault_id = SlugResolver::new(system.applied_state.clone())
             .extract_and_resolve_vault(&req.vault)?;
+
+        // Per-vault apply records `ClientSequenceEntry` and vault height
+        // updates in the per-vault Raft group's `AppliedState`; the
+        // org-scoped accessor never sees those writes. Attach the
+        // per-vault accessor when the vault group is live so the
+        // cross-failover idempotency check below routes through it.
+        // `attach_vault_group` pairs `vault_applied_state` with
+        // `vault_applied_index_rx` — see [`RegionContext::attach_vault_group`]
+        // for the invariant.
+        if let Some(manager) = &self.manager
+            && let Ok(vault_group) =
+                manager.get_vault_group(region.region, organization_id, vault_id)
+        {
+            region.attach_vault_group(&vault_group);
+        }
 
         // Reject on followers — clients use the NotLeader hint to retry
         // against the within-region leader directly.
@@ -799,7 +814,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                 ctx.set_idempotency_hit(false);
                 {
                     use inferadb_ledger_raft::log_storage::IdempotencyCheckResult as ReplicatedCheck;
-                    match region.applied_state.client_idempotency_check(
+                    match region.client_idempotency_check(
                         organization_id,
                         vault_id,
                         &client_id,
@@ -1292,9 +1307,24 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         // Local processing: resolve vault slug via GLOBAL applied state.
         // Vault slug indexes are maintained in the GLOBAL Raft group (CreateVault
         // is a GLOBAL operation), not in the data region's applied state.
-        let region = self.resolver.resolve(organization_id)?;
+        let mut region = self.resolver.resolve(organization_id)?;
         let vault_id = SlugResolver::new(system.applied_state.clone())
             .extract_and_resolve_vault(&req.vault)?;
+
+        // Per-vault apply records `ClientSequenceEntry` and vault height
+        // updates in the per-vault Raft group's `AppliedState`; the
+        // org-scoped accessor never sees those writes. Attach the
+        // per-vault accessor when the vault group is live so the
+        // cross-failover idempotency check below routes through it.
+        // `attach_vault_group` pairs `vault_applied_state` with
+        // `vault_applied_index_rx` — see [`RegionContext::attach_vault_group`]
+        // for the invariant.
+        if let Some(manager) = &self.manager
+            && let Ok(vault_group) =
+                manager.get_vault_group(region.region, organization_id, vault_id)
+        {
+            region.attach_vault_group(&vault_group);
+        }
 
         // Reject on followers — clients use the NotLeader hint to retry
         // against the within-region leader directly.
@@ -1582,7 +1612,7 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                 ctx.set_idempotency_hit(false);
                 {
                     use inferadb_ledger_raft::log_storage::IdempotencyCheckResult as ReplicatedCheck;
-                    match region.applied_state.client_idempotency_check(
+                    match region.client_idempotency_check(
                         organization_id,
                         vault_id,
                         &client_id,

@@ -2886,9 +2886,11 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             Status::unavailable("Region provisioning not available on single-region nodes")
         })?;
 
-        let node_id = self.node_id.ok_or_else(|| {
-            Status::failed_precondition("Node ID not configured for region provisioning")
-        })?;
+        // The local node ID lives on `self.handle.node_id()` (populated for
+        // every node). The optional `self.node_id` builder field is for
+        // tracing-context wiring only and is not always set, so prefer the
+        // handle accessor here.
+        let node_id = self.handle.node_id();
         let addr = self.advertise_addr.clone();
         let region_config =
             inferadb_ledger_raft::raft_manager::RegionConfig::data(region, vec![(node_id, addr)]);

@@ -236,7 +236,8 @@ fn test_minority_cannot_elect_leader() {
             .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
             .expect("connect to node3");
 
-        let read_req = CommittedIndexRequest { region: String::new() };
+        let read_req =
+            CommittedIndexRequest { region: String::new(), organization: None, vault: None };
         client3.committed_index(read_req).await.expect("majority should still be operational");
 
         // Repair partition
@@ -362,7 +363,8 @@ fn test_write_fails_in_minority_partition() {
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
-            let req = CommittedIndexRequest { region: String::new() };
+            let req =
+                CommittedIndexRequest { region: String::new(), organization: None, vault: None };
             let resp = client.committed_index(req).await;
             assert!(resp.is_ok(), "committed_index before partition should succeed");
         }
@@ -377,7 +379,8 @@ fn test_write_fails_in_minority_partition() {
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
-            let req = CommittedIndexRequest { region: String::new() };
+            let req =
+                CommittedIndexRequest { region: String::new(), organization: None, vault: None };
             let resp = client.committed_index(req).await;
             assert!(resp.is_err(), "committed_index during partition should fail");
         }
@@ -392,7 +395,8 @@ fn test_write_fails_in_minority_partition() {
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
-            let req = CommittedIndexRequest { region: String::new() };
+            let req =
+                CommittedIndexRequest { region: String::new(), organization: None, vault: None };
             let resp = client.committed_index(req).await;
             assert!(resp.is_ok(), "committed_index after heal should succeed");
         }
@@ -498,7 +502,8 @@ fn test_consistency_after_partition_heals() {
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
-            let req = CommittedIndexRequest { region: String::new() };
+            let req =
+                CommittedIndexRequest { region: String::new(), organization: None, vault: None };
             client.committed_index(req).await.expect("initial probe");
         }
 
@@ -513,7 +518,8 @@ fn test_consistency_after_partition_heals() {
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect");
 
-            let req = CommittedIndexRequest { region: String::new() };
+            let req =
+                CommittedIndexRequest { region: String::new(), organization: None, vault: None };
             client.committed_index(req).await.expect("probe during partition");
         }
 
@@ -529,7 +535,8 @@ fn test_consistency_after_partition_heals() {
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect after heal");
 
-            let req = CommittedIndexRequest { region: String::new() };
+            let req =
+                CommittedIndexRequest { region: String::new(), organization: None, vault: None };
             client
                 .committed_index(req)
                 .await
@@ -643,7 +650,8 @@ fn test_network_delay_request_completion() {
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect to fast node");
 
-            let req = CommittedIndexRequest { region: String::new() };
+            let req =
+                CommittedIndexRequest { region: String::new(), organization: None, vault: None };
             client.committed_index(req).await.expect("fast node should respond");
         }
 
@@ -654,7 +662,8 @@ fn test_network_delay_request_completion() {
                 .map(inferadb_ledger_proto::proto::raft_service_client::RaftServiceClient::new)
                 .expect("connect to slow node");
 
-            let req = CommittedIndexRequest { region: String::new() };
+            let req =
+                CommittedIndexRequest { region: String::new(), organization: None, vault: None };
             client.committed_index(req).await.expect("slow node should eventually respond");
         }
 

@@ -4057,6 +4057,16 @@ pub struct CommittedIndexRequest {
     /// Region for multi-region routing (defaults to GLOBAL).
     #[prost(string, tag = "1")]
     pub region: ::prost::alloc::string::String,
+    /// Optional vault scope. When both organization and vault are set, the
+    /// leader returns the per-vault Raft group's committed index and term
+    /// instead of the region group's. Used by the follower-side LINEARIZABLE
+    /// read protocol to wait on the correct apply pointer for per-vault
+    /// entity reads — per-vault apply advances the vault group's
+    /// applied/commit indices independently of the parent region group.
+    #[prost(message, optional, tag = "2")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "3")]
+    pub vault: ::core::option::Option<VaultSlug>,
 }
 /// CommittedIndex response: leader returns its committed index and term.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]

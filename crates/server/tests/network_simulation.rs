@@ -151,7 +151,8 @@ fn test_network_partition_blocks_communication() {
             let mut client3 = create_raft_client("node3").await.expect("connect to node3");
 
             // Send committed_index requests to all nodes
-            let req = CommittedIndexRequest { region: String::new() };
+            let req =
+                CommittedIndexRequest { region: String::new(), organization: None, vault: None };
 
             client1
                 .committed_index(req.clone())
@@ -179,7 +180,11 @@ fn test_network_partition_blocks_communication() {
             let result = create_raft_client("node3").await;
             match result {
                 Ok(mut client) => {
-                    let req = CommittedIndexRequest { region: String::new() };
+                    let req = CommittedIndexRequest {
+                        region: String::new(),
+                        organization: None,
+                        vault: None,
+                    };
                     let read_result = client.committed_index(req).await;
                     // The connection or RPC should fail due to partition
                     assert!(
@@ -196,7 +201,8 @@ fn test_network_partition_blocks_communication() {
             let mut client1 = create_raft_client("node1").await.expect("connect to node1");
             let mut client2 = create_raft_client("node2").await.expect("connect to node2");
 
-            let req = CommittedIndexRequest { region: String::new() };
+            let req =
+                CommittedIndexRequest { region: String::new(), organization: None, vault: None };
             client1
                 .committed_index(req.clone())
                 .await
@@ -218,7 +224,8 @@ fn test_network_partition_blocks_communication() {
 
             let mut client3 =
                 create_raft_client("node3").await.expect("connect to node3 after heal");
-            let req = CommittedIndexRequest { region: String::new() };
+            let req =
+                CommittedIndexRequest { region: String::new(), organization: None, vault: None };
             client3
                 .committed_index(req)
                 .await
@@ -337,7 +344,11 @@ fn test_majority_partition_continues_operating() {
         async fn send_committed_index(host: &str) -> bool {
             match create_raft_client(host).await {
                 Ok(mut client) => {
-                    let req = CommittedIndexRequest { region: String::new() };
+                    let req = CommittedIndexRequest {
+                        region: String::new(),
+                        organization: None,
+                        vault: None,
+                    };
                     client.committed_index(req).await.is_ok()
                 },
                 Err(_) => false,
@@ -428,7 +439,8 @@ fn test_message_hold_and_release() {
         // First, verify connection works
         {
             let mut client = create_raft_client("node1").await.expect("connect");
-            let req = CommittedIndexRequest { region: String::new() };
+            let req =
+                CommittedIndexRequest { region: String::new(), organization: None, vault: None };
             let resp = client.committed_index(req).await;
             assert!(resp.is_ok(), "initial request should succeed");
         }
@@ -440,7 +452,11 @@ fn test_message_hold_and_release() {
         let partition_result: Result<(), ()> = async {
             match create_raft_client("node1").await {
                 Ok(mut client) => {
-                    let req = CommittedIndexRequest { region: String::new() };
+                    let req = CommittedIndexRequest {
+                        region: String::new(),
+                        organization: None,
+                        vault: None,
+                    };
                     client.committed_index(req).await.map(|_| ()).map_err(|_| ())
                 },
                 Err(_) => Err(()),
@@ -457,7 +473,8 @@ fn test_message_hold_and_release() {
         // Requests should succeed after repair
         {
             let mut client = create_raft_client("node1").await.expect("reconnect");
-            let req = CommittedIndexRequest { region: String::new() };
+            let req =
+                CommittedIndexRequest { region: String::new(), organization: None, vault: None };
             let resp = client.committed_index(req).await;
             assert!(resp.is_ok(), "request after repair should succeed");
         }
@@ -546,7 +563,11 @@ fn test_intermittent_connectivity() {
             let result: Result<(), ()> = async {
                 match create_raft_client("node1").await {
                     Ok(mut client) => {
-                        let req = CommittedIndexRequest { region: String::new() };
+                        let req = CommittedIndexRequest {
+                            region: String::new(),
+                            organization: None,
+                            vault: None,
+                        };
                         client.committed_index(req).await.map(|_| ()).map_err(|_| ())
                     },
                     Err(_) => Err(()),
@@ -577,7 +598,11 @@ fn test_intermittent_connectivity() {
         let final_result: Result<(), ()> = async {
             match create_raft_client("node1").await {
                 Ok(mut client) => {
-                    let req = CommittedIndexRequest { region: String::new() };
+                    let req = CommittedIndexRequest {
+                        region: String::new(),
+                        organization: None,
+                        vault: None,
+                    };
                     client.committed_index(req).await.map(|_| ()).map_err(|_| ())
                 },
                 Err(_) => Err(()),
@@ -645,7 +670,8 @@ fn test_asymmetric_partition() {
             let mut c1 = create_raft_client("node1").await.expect("connect node1");
             let mut c2 = create_raft_client("node2").await.expect("connect node2");
 
-            let req = CommittedIndexRequest { region: String::new() };
+            let req =
+                CommittedIndexRequest { region: String::new(), organization: None, vault: None };
 
             c1.committed_index(req.clone()).await.expect("committed_index to node1");
             c2.committed_index(req).await.expect("committed_index to node2");
@@ -660,7 +686,11 @@ fn test_asymmetric_partition() {
         let n1_result = create_raft_client("node1").await;
         match n1_result {
             Ok(mut client) => {
-                let req = CommittedIndexRequest { region: String::new() };
+                let req = CommittedIndexRequest {
+                    region: String::new(),
+                    organization: None,
+                    vault: None,
+                };
                 assert!(client.committed_index(req).await.is_err(), "node1 should be unreachable");
             },
             Err(_) => {
@@ -670,7 +700,7 @@ fn test_asymmetric_partition() {
 
         // node2 should still be reachable
         let mut c2 = create_raft_client("node2").await.expect("connect node2");
-        let req = CommittedIndexRequest { region: String::new() };
+        let req = CommittedIndexRequest { region: String::new(), organization: None, vault: None };
         c2.committed_index(req).await.expect("node2 should still be reachable");
 
         // Repair and verify node1 is reachable again
@@ -678,7 +708,7 @@ fn test_asymmetric_partition() {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let mut c1 = create_raft_client("node1").await.expect("reconnect node1 after repair");
-        let req = CommittedIndexRequest { region: String::new() };
+        let req = CommittedIndexRequest { region: String::new(), organization: None, vault: None };
         c1.committed_index(req).await.expect("node1 should be reachable after repair");
 
         Ok(())
@@ -712,7 +742,8 @@ fn test_connection_timeout_handling() {
         // Verify node is reachable first
         {
             let mut client = create_raft_client("node1").await.expect("connect");
-            let req = CommittedIndexRequest { region: String::new() };
+            let req =
+                CommittedIndexRequest { region: String::new(), organization: None, vault: None };
             client.committed_index(req).await.expect("initial committed_index");
         }
 
@@ -725,7 +756,11 @@ fn test_connection_timeout_handling() {
             let client_result = create_raft_client("node1").await;
             match client_result {
                 Ok(mut client) => {
-                    let req = CommittedIndexRequest { region: String::new() };
+                    let req = CommittedIndexRequest {
+                        region: String::new(),
+                        organization: None,
+                        vault: None,
+                    };
                     client.committed_index(req).await
                 },
                 Err(e) => Err(tonic::Status::unavailable(format!("Connection failed: {}", e))),
@@ -753,7 +788,11 @@ fn test_connection_timeout_handling() {
             tokio::time::timeout(Duration::from_millis(500), async {
                 match create_raft_client("node1").await {
                     Ok(mut client) => {
-                        let req = CommittedIndexRequest { region: String::new() };
+                        let req = CommittedIndexRequest {
+                            region: String::new(),
+                            organization: None,
+                            vault: None,
+                        };
                         client.committed_index(req).await
                     },
                     Err(e) => Err(tonic::Status::unavailable(format!("Connection failed: {}", e))),

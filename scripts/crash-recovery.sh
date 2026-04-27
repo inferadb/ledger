@@ -156,6 +156,13 @@ create_org_and_vault() {
 
   # Retry vault creation across all nodes — the org may still be provisioning
   # and CreateVault is a GLOBAL operation that requires the GLOBAL leader.
+  #
+  # CreateVaultRequest requires a client-supplied Snowflake slug; reuse the same
+  # slug across retries so the per-org idempotency check returns the existing
+  # vault instead of allocating a new one.
+  local client_slug
+  client_slug=$(generate_snowflake_slug)
+
   local attempt2=0
   while [[ $attempt2 -lt 30 ]]; do
     local i
@@ -164,7 +171,7 @@ create_org_and_vault() {
       addr=$(node_addr "$i")
       local result
       result=$(grpcurl -plaintext \
-        -d "{\"organization\": {\"slug\": \"$ORG_SLUG\"}, \"caller\": {\"slug\": \"$USER_SLUG\"}}" \
+        -d "{\"organization\": {\"slug\": \"$ORG_SLUG\"}, \"caller\": {\"slug\": \"$USER_SLUG\"}, \"slug\": {\"slug\": \"$client_slug\"}}" \
         "$addr" \
         ledger.v1.VaultService/CreateVault 2>&1 || true)
       VAULT_SLUG=$(echo "$result" | jq -r '.vault.slug // empty' 2>/dev/null || true)
@@ -175,6 +182,21 @@ create_org_and_vault() {
   done
   log_error "CreateVault timed out"
   return 1
+}
+
+# Generate a non-zero u64 Snowflake-shaped slug suitable for client-supplied vault IDs.
+# Uses /dev/urandom for entropy and clears the high bit so the value fits in a signed
+# i64 representation when round-tripped through tooling that interprets uint64 as JSON
+# numbers. The exact bit layout doesn't matter — the server accepts any non-zero u64.
+generate_snowflake_slug() {
+  local raw
+  # Read 8 bytes, format as decimal, mask off the high bit to keep the value < 2^63.
+  raw=$(od -An -N8 -tu8 < /dev/urandom | tr -d ' \n')
+  if [[ -z "$raw" || "$raw" == "0" ]]; then
+    raw=1
+  fi
+  # Mask high bit (bash arithmetic operates on 64-bit signed integers).
+  echo $(( (raw & 0x7FFFFFFFFFFFFFFF) | 1 ))
 }
 
 # Write a single entity. Tries the given node first; on failure, tries all
@@ -440,6 +462,14 @@ run_scenario() {
   leader=$(find_leader)
   [[ -z "$leader" ]] && { log_error "No leader found after bootstrap"; return 1; }
   log_info "Initial leader: node $leader"
+
+  # Data regions are no longer auto-created at boot. Provision us-east-va
+  # explicitly via `AdminService::ProvisionRegion` before any user-facing
+  # RPCs (which apply through the regional Raft group).
+  provision_region 10 || return 1
+
+  # Settle so every voter has applied the region creation.
+  sleep 3
 
   create_org_and_vault
 

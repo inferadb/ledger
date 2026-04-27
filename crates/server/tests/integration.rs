@@ -21,6 +21,7 @@ mod get_node_info;
 mod invitation;
 mod isolation;
 mod leader_failover;
+mod linearizable_follower_per_vault;
 mod multi_region;
 mod network_simulation;
 mod onboarding;

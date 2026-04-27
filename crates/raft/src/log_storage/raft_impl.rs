@@ -465,11 +465,17 @@ impl RaftLogStore {
         let term = entries.last().map_or(0, |e| e.term);
 
         // Read atomicity sentinel from state layer to detect entries that were
-        // already committed before a crash.
+        // already committed before a crash. The sentinel is scoped to the
+        // Raft group this log store owns — `vault_id == None` for the
+        // parent organization's group, `Some(vault)` for a per-vault
+        // group. Per-vault log indices are not comparable to the parent
+        // org's log indices, so each Raft group records its own sentinel
+        // under a distinct meta.db key (see `StateLayer::read_last_applied`).
+        let sentinel_scope = self.vault_id;
         let state_layer_sentinel: Option<LogId> = self
             .state_layer
             .as_ref()
-            .and_then(|sl| match sl.read_last_applied() {
+            .and_then(|sl| match sl.read_last_applied(sentinel_scope) {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to read atomicity sentinel, all entries will be applied");

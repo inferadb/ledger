@@ -139,6 +139,42 @@ impl inferadb_ledger_proto::proto::vault_service_server::VaultService for VaultS
 
         match response {
             LedgerResponse::VaultCreated { vault: vault_id, slug } => {
+                // The per-org `CreateVault` apply arm signals the vault-
+                // lifecycle watcher (`start_organization_group`) via an
+                // mpsc channel; the watcher then calls
+                // `RaftManager::start_vault_group` to register the per-
+                // vault Raft shard locally. That dispatch is asynchronous
+                // — the apply returns before the watcher runs — so a
+                // client write issued immediately after `CreateVault`
+                // returns can race the registration and hit "Vault is not
+                // active on this node" on the same leader that just
+                // committed the entry. Wait for the local registration
+                // before responding so the leader's view of the vault is
+                // ready by the time the client sees success. Followers
+                // converge through their own watcher tasks; cross-voter
+                // convergence is not required for this RPC's contract.
+                if let Some(ref manager) = self.ctx.manager {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    loop {
+                        if manager
+                            .get_vault_group(org_meta.region, organization_id, vault_id)
+                            .is_ok()
+                        {
+                            break;
+                        }
+                        if std::time::Instant::now() >= deadline {
+                            ctx.set_error(
+                                "Internal",
+                                "Vault group registration timed out on local node",
+                            );
+                            return Err(Status::internal(
+                                "Vault group registration timed out on local node",
+                            ));
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                    }
+                }
+
                 // Step (b): register the slug-index entry on GLOBAL so the
                 // vault can be resolved by external slug. Must complete
                 // before returning success — if it fails, the client sees

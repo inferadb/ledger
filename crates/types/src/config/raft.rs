@@ -334,8 +334,10 @@ pub struct BatchConfig {
     #[schemars(with = "String")]
     pub batch_timeout: Duration,
     /// Maximum number of batches allowed in-flight concurrently at the
-    /// BatchWriter level. Values > 1 pipeline batches through Raft (propose
-    /// + commit + apply + response) so that a new batch can form while
+    /// BatchWriter level.
+    ///
+    /// Values greater than 1 pipeline batches through Raft (propose,
+    /// commit, apply, response) so that a new batch can form while
     /// earlier batches are still applying. Raft preserves log ordering
     /// regardless of in-flight count. Default: 8.
     ///

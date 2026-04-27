@@ -59,7 +59,7 @@ fn sync_barrier_apple(file: &File) -> io::Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::disallowed_methods)]
 mod tests {
     use std::io::Write;
 

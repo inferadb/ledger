@@ -99,6 +99,84 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
                 .map_err(|_| Status::invalid_argument(format!("invalid region: {}", req.region)))?
         };
 
+        // Vault scope must be all-or-nothing. Mixing them is an internal
+        // protocol error — the follower always sends both or neither.
+        // Reject explicitly so a future caller bug doesn't silently fall
+        // back to the region-group path with vault scope ignored.
+        let vault_scope = match (req.organization, req.vault) {
+            (Some(org), Some(vault)) => Some((org, vault)),
+            (None, None) => None,
+            _ => {
+                return Err(Status::invalid_argument(
+                    "organization and vault must both be set or both omitted",
+                ));
+            },
+        };
+
+        // Per-vault scope: resolve slugs against the GLOBAL applied state,
+        // look up the per-vault Raft group, and return its handle's
+        // committed index + term. Vault groups in `LeadershipMode::Delegated`
+        // adopt the parent region's leader, but their handle still tracks
+        // the vault shard's own term and commit index — the indices the
+        // follower must wait on for vault-scoped LINEARIZABLE reads.
+        if let Some((org_slug_proto, vault_slug_proto)) = vault_scope {
+            let system_state = self
+                .manager
+                .system_region()
+                .map_err(|e| Status::unavailable(format!("System region not available: {}", e)))?
+                .applied_state()
+                .clone();
+            let resolver = super::slug_resolver::SlugResolver::new(system_state);
+            let organization_id = resolver.extract_and_resolve(&Some(org_slug_proto))?;
+            let vault_id = resolver.extract_and_resolve_vault(&Some(vault_slug_proto))?;
+
+            let vault_group =
+                self.manager.get_vault_group(region, organization_id, vault_id).map_err(|_| {
+                    Status::not_found(format!(
+                        "vault group not found in region {} for organization {} vault {}",
+                        region.as_str(),
+                        organization_id,
+                        vault_id,
+                    ))
+                })?;
+            let handle = vault_group.handle();
+
+            // Leader-check is per-shard: vault groups in delegated mode share
+            // the org's leader id, but the handle still owns the per-shard
+            // term and leader_id needed to build a correct redirect hint.
+            if !handle.is_leader() {
+                return Err(super::metadata::not_leader_status_from_handle(
+                    handle.as_ref(),
+                    Some(self.manager.peer_addresses()),
+                    "Not the leader",
+                ));
+            }
+
+            // Fast path: valid lease means we're still the leader without
+            // a quorum check. Vault groups expose their own lease.
+            if vault_group.leader_lease().is_valid() {
+                return Ok(Response::new(CommittedIndexResponse {
+                    committed_index: handle.commit_index(),
+                    leader_term: handle.current_term(),
+                }));
+            }
+
+            // Slow path: lease expired. Confirm leadership via the engine's
+            // read_index, which performs a quorum heartbeat round on the
+            // vault shard.
+            let committed_index = handle.engine_read_index().await.map_err(|e| {
+                Status::unavailable(format!("CommittedIndex quorum check failed: {e}"))
+            })?;
+
+            return Ok(Response::new(CommittedIndexResponse {
+                committed_index,
+                leader_term: handle.current_term(),
+            }));
+        }
+
+        // Region scope (no vault scope provided): the legacy region-group
+        // path. Used by org-scoped reads that wait on the region's own
+        // applied-index watch.
         let group = self
             .manager
             .get_region_group(region)

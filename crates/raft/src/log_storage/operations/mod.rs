@@ -4605,9 +4605,14 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 // between step 1 and step 2 leaves the
                                 // sentinel un-advanced — WAL replay
                                 // re-drives the idempotent apply on next
-                                // boot.
+                                // boot. The sentinel is scoped to this
+                                // Raft group (`vault_id` selects per-vault
+                                // vs. organization scope) — per-vault log
+                                // indices are not comparable to the parent
+                                // org's log indices.
                                 if let Some(lid_bytes) = log_id_bytes
-                                    && let Err(e) = state_layer.persist_last_applied_meta(lid_bytes)
+                                    && let Err(e) = state_layer
+                                        .persist_last_applied_meta(self.vault_id, lid_bytes)
                                 {
                                     return (
                                         LedgerResponse::Error {
@@ -5396,9 +5401,15 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         // no double-apply because CAS conditions see the
                         // prior-run results, and
                         // `replay_crash_gap`'s state-sentinel gate still
-                        // holds.
+                        // holds. The sentinel is scoped to this Raft
+                        // group (`self.vault_id` selects per-vault vs.
+                        // organization scope): per-vault Raft groups have
+                        // independent log indices that are not comparable
+                        // to the parent org's log indices, so each group
+                        // owns its own meta.db sentinel key.
                         if let Some(lid_bytes) = log_id_bytes
-                            && let Err(e) = state_layer.persist_last_applied_meta(lid_bytes)
+                            && let Err(e) =
+                                state_layer.persist_last_applied_meta(self.vault_id, lid_bytes)
                         {
                             return (
                                 LedgerResponse::Error {

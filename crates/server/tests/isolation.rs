@@ -551,7 +551,7 @@ async fn test_isolation_across_replicas() {
         .await
         .expect("write to vault B");
 
-    // Wait for replication (global + data region)
+    // Wait for replication (global + data region + per-vault shards).
     let synced = cluster.wait_for_sync(Duration::from_secs(5)).await;
     assert!(synced, "cluster should sync");
 

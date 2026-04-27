@@ -12,9 +12,12 @@
 
 use std::time::Duration;
 
-use inferadb_ledger_types::{OrganizationId, OrganizationSlug, Region, VaultId, VaultSlug};
+use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
-use crate::common::{TestCluster, TestNode, create_read_client, create_write_client};
+use crate::common::{
+    TestCluster, TestNode, create_read_client, create_write_client, resolve_org_id,
+    wait_for_vault_group_live_on_all_voters,
+};
 
 // ============================================================================
 // Test Helpers
@@ -36,74 +39,6 @@ async fn create_vault(
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
     crate::common::create_test_vault(addr, organization).await
-}
-
-/// Resolves an external `OrganizationSlug` to its internal `OrganizationId`
-/// via the GLOBAL applied-state accessor. Panics if the slug is not yet
-/// indexed — callers must have awaited organization activation.
-fn resolve_org_id(node: &TestNode, slug: OrganizationSlug) -> OrganizationId {
-    node.manager
-        .system_region()
-        .expect("system region running")
-        .applied_state()
-        .resolve_slug_to_id(slug)
-        .expect("organization slug resolves after CreateOrganization commits")
-}
-
-/// Polls every node until the cluster agrees on a single registered
-/// `(region, org_id, *)` triple, or `timeout` elapses. Returns the
-/// `VaultId` every node observes.
-///
-/// Mirrors the helper of the same name in `vault_lifecycle.rs`. Inlined
-/// here because the apply-phase `CreateVault` arm fires the per-vault
-/// `start_vault_group` watcher fire-and-forget — the gRPC response
-/// returns when Raft commits, but the local watcher registration is
-/// asynchronous, so an immediate write can race the registration and
-/// hit "Vault is not active on this node".
-async fn wait_for_vault_group_live_on_all_voters(
-    cluster: &TestCluster,
-    region: Region,
-    org_id: OrganizationId,
-    timeout: Duration,
-) -> VaultId {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        let per_node: Vec<Vec<VaultId>> = cluster
-            .nodes()
-            .iter()
-            .map(|n| {
-                n.manager
-                    .list_vault_groups()
-                    .into_iter()
-                    .filter(|(r, o, _)| *r == region && *o == org_id)
-                    .map(|(_, _, v)| v)
-                    .collect()
-            })
-            .collect();
-
-        if let Some(first) = per_node.first()
-            && first.len() == 1
-            && per_node.iter().all(|ids| ids == first)
-        {
-            return first[0];
-        }
-
-        if tokio::time::Instant::now() >= deadline {
-            let rendered: Vec<String> = cluster
-                .nodes()
-                .iter()
-                .zip(per_node.iter())
-                .map(|(n, ids)| format!("node {}: {:?}", n.id, ids))
-                .collect();
-            panic!(
-                "vault group for (region={region:?}, org_id={org_id:?}) did not converge across \
-                 voters within {timeout:?}. per-node state: [{}]",
-                rendered.join(" | "),
-            );
-        }
-
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
 }
 
 // ============================================================================

@@ -83,6 +83,13 @@ trap cleanup_cluster EXIT
 build_ledger_binary "$PROFILE"
 bootstrap_cluster "$BASE_PORT" "$NODE_COUNT" "$DATA_ROOT" "$SETTLE_TIME"
 
+# Data regions are no longer auto-created at boot — `init` only brings up the
+# GLOBAL region. Provision us-east-va so user-facing RPCs (onboarding, write,
+# read) apply through the regional Raft group instead of returning
+# `ProposalError: Region us-east-va is not active on this node`.
+provision_region 10
+sleep 3
+
 # ---------------------------------------------------------------------------
 # Run tests
 # ---------------------------------------------------------------------------
