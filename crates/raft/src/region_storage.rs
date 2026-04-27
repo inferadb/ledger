@@ -655,10 +655,15 @@ impl RegionStorageManager {
                 Ok(name) => name,
                 Err(_) => continue,
             };
+            // Skip the reserved top-level directories used by other subsystems
+            // (snapshots, keys, node_id metadata, the GLOBAL control plane).
+            // After the dynamic-region migration, `Region::from_str` accepts
+            // any kebab-case string — without this guard, accidentally-named
+            // directories would be misidentified as regions.
+            if matches!(dir_name.as_str(), "snapshots" | "keys" | "node_id" | "global") {
+                continue;
+            }
             // Try to parse directory name as a Region (kebab-case).
-            // Skips top-level directories like `global`, `snapshots`,
-            // `keys`, `node_id` (`global` would also fail to parse as a
-            // data Region; the `region != GLOBAL` guard is defensive).
             if let Ok(region) = dir_name.parse::<Region>()
                 && region != Region::GLOBAL
             {

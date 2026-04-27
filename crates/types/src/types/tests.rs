@@ -443,9 +443,16 @@ fn region_display_from_str_roundtrip() {
 
 #[test]
 fn region_from_str_invalid() {
-    let err = "not-a-region".parse::<Region>().unwrap_err();
-    assert_eq!(err.input, "not-a-region");
-    assert_eq!(format!("{err}"), "unknown region: not-a-region");
+    // After the dynamic-region migration, any well-formed kebab-case slug is
+    // accepted. Empty strings, malformed slugs (uppercase, leading hyphen,
+    // invalid characters) are rejected.
+    let err = "".parse::<Region>().unwrap_err();
+    assert_eq!(err.input, "");
+    assert_eq!(format!("{err}"), "invalid region: ");
+    assert!("-leading".parse::<Region>().is_err());
+    assert!("trailing-".parse::<Region>().is_err());
+    assert!("Bad_Underscore".parse::<Region>().is_err());
+    assert!("space here".parse::<Region>().is_err());
 }
 
 #[test]

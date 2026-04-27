@@ -394,36 +394,48 @@ impl TryFrom<proto::EventEntry> for EventEntry {
 // =============================================================================
 
 /// Converts a domain [`Region`](inferadb_ledger_types::Region) to its protobuf
-/// representation. Infallible — every domain region has a proto counterpart.
+/// representation, using the well-known slug → proto-variant mapping.
+///
+/// Domain regions whose slug does not correspond to a known proto enum variant
+/// (i.e. dynamically registered custom regions) map to
+/// [`proto::Region::Unspecified`]. Callers that must round-trip arbitrary
+/// region names should serialize the slug string directly rather than using
+/// the deprecated proto enum.
 impl From<inferadb_ledger_types::Region> for proto::Region {
     fn from(region: inferadb_ledger_types::Region) -> Self {
-        use inferadb_ledger_types::Region as D;
-        match region {
-            D::GLOBAL => proto::Region::Global,
-            D::US_EAST_VA => proto::Region::UsEastVa,
-            D::US_WEST_OR => proto::Region::UsWestOr,
-            D::CA_CENTRAL_QC => proto::Region::CaCentralQc,
-            D::BR_SOUTHEAST_SP => proto::Region::BrSoutheastSp,
-            D::IE_EAST_DUBLIN => proto::Region::IeEastDublin,
-            D::FR_NORTH_PARIS => proto::Region::FrNorthParis,
-            D::DE_CENTRAL_FRANKFURT => proto::Region::DeCentralFrankfurt,
-            D::SE_EAST_STOCKHOLM => proto::Region::SeEastStockholm,
-            D::IT_NORTH_MILAN => proto::Region::ItNorthMilan,
-            D::UK_SOUTH_LONDON => proto::Region::UkSouthLondon,
-            D::SA_CENTRAL_RIYADH => proto::Region::SaCentralRiyadh,
-            D::BH_CENTRAL_MANAMA => proto::Region::BhCentralManama,
-            D::AE_CENTRAL_DUBAI => proto::Region::AeCentralDubai,
-            D::IL_CENTRAL_TEL_AVIV => proto::Region::IlCentralTelAviv,
-            D::ZA_SOUTH_CAPE_TOWN => proto::Region::ZaSouthCapeTown,
-            D::NG_WEST_LAGOS => proto::Region::NgWestLagos,
-            D::SG_CENTRAL_SINGAPORE => proto::Region::SgCentralSingapore,
-            D::AU_EAST_SYDNEY => proto::Region::AuEastSydney,
-            D::ID_WEST_JAKARTA => proto::Region::IdWestJakarta,
-            D::JP_EAST_TOKYO => proto::Region::JpEastTokyo,
-            D::KR_CENTRAL_SEOUL => proto::Region::KrCentralSeoul,
-            D::IN_WEST_MUMBAI => proto::Region::InWestMumbai,
-            D::VN_SOUTH_HCMC => proto::Region::VnSouthHcmc,
-            D::CN_NORTH_BEIJING => proto::Region::CnNorthBeijing,
+        proto::Region::from(&region)
+    }
+}
+
+impl From<&inferadb_ledger_types::Region> for proto::Region {
+    fn from(region: &inferadb_ledger_types::Region) -> Self {
+        match region.as_str() {
+            "global" => proto::Region::Global,
+            "us-east-va" => proto::Region::UsEastVa,
+            "us-west-or" => proto::Region::UsWestOr,
+            "ca-central-qc" => proto::Region::CaCentralQc,
+            "br-southeast-sp" => proto::Region::BrSoutheastSp,
+            "ie-east-dublin" => proto::Region::IeEastDublin,
+            "fr-north-paris" => proto::Region::FrNorthParis,
+            "de-central-frankfurt" => proto::Region::DeCentralFrankfurt,
+            "se-east-stockholm" => proto::Region::SeEastStockholm,
+            "it-north-milan" => proto::Region::ItNorthMilan,
+            "uk-south-london" => proto::Region::UkSouthLondon,
+            "sa-central-riyadh" => proto::Region::SaCentralRiyadh,
+            "bh-central-manama" => proto::Region::BhCentralManama,
+            "ae-central-dubai" => proto::Region::AeCentralDubai,
+            "il-central-tel-aviv" => proto::Region::IlCentralTelAviv,
+            "za-south-cape-town" => proto::Region::ZaSouthCapeTown,
+            "ng-west-lagos" => proto::Region::NgWestLagos,
+            "sg-central-singapore" => proto::Region::SgCentralSingapore,
+            "au-east-sydney" => proto::Region::AuEastSydney,
+            "id-west-jakarta" => proto::Region::IdWestJakarta,
+            "jp-east-tokyo" => proto::Region::JpEastTokyo,
+            "kr-central-seoul" => proto::Region::KrCentralSeoul,
+            "in-west-mumbai" => proto::Region::InWestMumbai,
+            "vn-south-hcmc" => proto::Region::VnSouthHcmc,
+            "cn-north-beijing" => proto::Region::CnNorthBeijing,
+            _ => proto::Region::Unspecified,
         }
     }
 }
@@ -471,11 +483,64 @@ impl TryFrom<proto::Region> for inferadb_ledger_types::Region {
 /// Converts a raw `i32` proto enum value to a domain [`Region`](inferadb_ledger_types::Region).
 ///
 /// Combines prost's `proto::Region::try_from(i32)` validation with the
-/// `Unspecified` rejection from `TryFrom<proto::Region>`.
+/// `Unspecified` rejection from `TryFrom<proto::Region>`. Retained for
+/// backward compatibility while persisted state and wire messages still encode
+/// regions as `enum Region`. New call sites should prefer parsing from a
+/// region slug string instead.
 pub fn region_from_i32(value: i32) -> Result<inferadb_ledger_types::Region, Status> {
     let proto_region = proto::Region::try_from(value)
         .map_err(|_| Status::invalid_argument(format!("unknown region value: {value}")))?;
     inferadb_ledger_types::Region::try_from(proto_region)
+}
+
+/// Converts a region slug string (e.g. `"us-east-va"`) into the domain
+/// [`Region`](inferadb_ledger_types::Region) type. Returns
+/// [`Status::invalid_argument`] for empty or malformed slugs.
+///
+/// Used by service handlers that accept region names as `string` fields.
+#[allow(dead_code)]
+pub fn region_from_str(value: &str) -> Result<inferadb_ledger_types::Region, Status> {
+    use std::str::FromStr;
+    inferadb_ledger_types::Region::from_str(value)
+        .map_err(|err| Status::invalid_argument(format!("invalid region: {err}")))
+}
+
+/// Maps a legacy proto `enum Region` integer (as historically persisted on
+/// disk) to its slug string, or `None` if the integer is not a known variant.
+///
+/// Used by the serde compatibility layer when loading state that pre-dates the
+/// dynamic-region migration.
+#[allow(dead_code)]
+pub fn region_slug_from_legacy_i32(value: i32) -> Option<&'static str> {
+    let proto_region = proto::Region::try_from(value).ok()?;
+    Some(match proto_region {
+        proto::Region::Unspecified => return None,
+        proto::Region::Global => "global",
+        proto::Region::UsEastVa => "us-east-va",
+        proto::Region::UsWestOr => "us-west-or",
+        proto::Region::CaCentralQc => "ca-central-qc",
+        proto::Region::BrSoutheastSp => "br-southeast-sp",
+        proto::Region::IeEastDublin => "ie-east-dublin",
+        proto::Region::FrNorthParis => "fr-north-paris",
+        proto::Region::DeCentralFrankfurt => "de-central-frankfurt",
+        proto::Region::SeEastStockholm => "se-east-stockholm",
+        proto::Region::ItNorthMilan => "it-north-milan",
+        proto::Region::UkSouthLondon => "uk-south-london",
+        proto::Region::SaCentralRiyadh => "sa-central-riyadh",
+        proto::Region::BhCentralManama => "bh-central-manama",
+        proto::Region::AeCentralDubai => "ae-central-dubai",
+        proto::Region::IlCentralTelAviv => "il-central-tel-aviv",
+        proto::Region::ZaSouthCapeTown => "za-south-cape-town",
+        proto::Region::NgWestLagos => "ng-west-lagos",
+        proto::Region::SgCentralSingapore => "sg-central-singapore",
+        proto::Region::AuEastSydney => "au-east-sydney",
+        proto::Region::IdWestJakarta => "id-west-jakarta",
+        proto::Region::JpEastTokyo => "jp-east-tokyo",
+        proto::Region::KrCentralSeoul => "kr-central-seoul",
+        proto::Region::InWestMumbai => "in-west-mumbai",
+        proto::Region::VnSouthHcmc => "vn-south-hcmc",
+        proto::Region::CnNorthBeijing => "cn-north-beijing",
+    })
 }
 
 // =============================================================================

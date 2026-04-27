@@ -1,129 +1,235 @@
-//! Geographic region type for data residency.
+//! Region identifier for data residency.
+//!
+//! Regions are arbitrary string identifiers registered dynamically in GLOBAL
+//! Raft state. The hardcoded enum has been replaced with a newtype struct so
+//! that operators can provision custom regions without code changes.
+//!
+//! `Region::GLOBAL` is hardcoded as a special case — it always exists, is
+//! never protected, and represents the cluster control plane.
+//!
+//! Compile-time helper constants (`Region::US_EAST_VA`, `Region::IE_EAST_DUBLIN`,
+//! ...) preserve the well-known region names from the previous enum encoding.
+//! These constants share the exact slug strings that were emitted by the prior
+//! `serde(rename = ...)` attributes, so persisted state and wire formats remain
+//! compatible.
+//!
+//! Internally a `Region` is a `&'static str`. Dynamically registered region
+//! names are interned (leaked into the static heap) so the type stays `Copy`.
+//! The intern set is bounded in practice by the number of distinct region
+//! names ever observed by a node — typically a small handful.
 
-use std::fmt;
+use std::{
+    collections::HashSet,
+    fmt,
+    str::FromStr,
+    sync::{Mutex, OnceLock},
+};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Geographic/jurisdictional region for data residency.
+/// Geographic / jurisdictional region for data residency.
 ///
-/// Each variant maps to a data residency jurisdiction. The enum is exhaustive —
-/// adding a region is a code change, not a runtime operation — providing
-/// compile-time guarantees that every match arm handles every region.
-///
-/// `Region` is the horizontal scaling unit: each region maps 1:1 to a Raft
-/// consensus group.
+/// Regions are dynamic string identifiers. `Region::GLOBAL` is always present
+/// and represents the cluster control plane (non-PII metadata replicated
+/// everywhere). Other regions are registered through the region directory
+/// (`_dir:region:{name}` in GLOBAL state).
 ///
 /// # Display
 ///
-/// Formats as lowercase with hyphens: `us-east-va`, `ie-east-dublin`, `global`.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    PartialOrd,
-    Ord,
-    Serialize,
-    Deserialize,
-    schemars::JsonSchema
-)]
-#[allow(non_camel_case_types)]
-pub enum Region {
-    /// Global control plane. Replicated to all nodes in all regions.
-    /// Stores non-PII metadata only (org registry, node discovery, sequences).
-    #[serde(rename = "global")]
-    GLOBAL,
+/// Formats as the underlying lowercase-hyphenated slug
+/// (e.g. `us-east-va`, `ie-east-dublin`, `global`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Region(&'static str);
+
+/// Process-wide intern set for dynamically constructed region names.
+fn intern_set() -> &'static Mutex<HashSet<&'static str>> {
+    static SET: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    SET.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Returns a `'static` slice for `name`, interning by leaking on first observation.
+///
+/// SAFETY: a poisoned mutex here means another thread leaked while interning;
+/// recovering the inner data is safe because the intern set is monotonic
+/// (insert-only, no observable invariants beyond presence).
+fn intern(name: &str) -> &'static str {
+    let mut set = match intern_set().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(existing) = set.get(name) {
+        return existing;
+    }
+    let leaked: &'static str = Box::leak(name.to_owned().into_boxed_str());
+    set.insert(leaked);
+    leaked
+}
+
+impl Region {
+    /// The cluster control-plane region. Always present, never protected.
+    pub const GLOBAL: Region = Region("global");
 
     // ── North America ──────────────────────────────────────────────
     /// US East Coast, Virginia. No federal data residency requirement.
-    #[serde(rename = "us-east-va")]
-    US_EAST_VA,
+    pub const US_EAST_VA: Region = Region("us-east-va");
     /// US West Coast, Oregon. No federal data residency requirement.
-    #[serde(rename = "us-west-or")]
-    US_WEST_OR,
+    pub const US_WEST_OR: Region = Region("us-west-or");
     /// Canada Central, Quebec (Montreal). PIPEDA + provincial privacy laws.
-    #[serde(rename = "ca-central-qc")]
-    CA_CENTRAL_QC,
+    pub const CA_CENTRAL_QC: Region = Region("ca-central-qc");
 
     // ── South America ──────────────────────────────────────────────
     /// Brazil Southeast, São Paulo. LGPD.
-    #[serde(rename = "br-southeast-sp")]
-    BR_SOUTHEAST_SP,
+    pub const BR_SOUTHEAST_SP: Region = Region("br-southeast-sp");
 
     // ── Europe (EU/EEA — GDPR) ────────────────────────────────────
     /// Ireland East, Dublin. GDPR.
-    #[serde(rename = "ie-east-dublin")]
-    IE_EAST_DUBLIN,
+    pub const IE_EAST_DUBLIN: Region = Region("ie-east-dublin");
     /// France North, Paris. GDPR.
-    #[serde(rename = "fr-north-paris")]
-    FR_NORTH_PARIS,
+    pub const FR_NORTH_PARIS: Region = Region("fr-north-paris");
     /// Germany Central, Frankfurt. GDPR.
-    #[serde(rename = "de-central-frankfurt")]
-    DE_CENTRAL_FRANKFURT,
+    pub const DE_CENTRAL_FRANKFURT: Region = Region("de-central-frankfurt");
     /// Sweden East, Stockholm. GDPR.
-    #[serde(rename = "se-east-stockholm")]
-    SE_EAST_STOCKHOLM,
+    pub const SE_EAST_STOCKHOLM: Region = Region("se-east-stockholm");
     /// Italy North, Milan. GDPR.
-    #[serde(rename = "it-north-milan")]
-    IT_NORTH_MILAN,
+    pub const IT_NORTH_MILAN: Region = Region("it-north-milan");
 
     // ── United Kingdom ─────────────────────────────────────────────
     /// United Kingdom South, London. UK GDPR (post-Brexit, separate jurisdiction).
-    #[serde(rename = "uk-south-london")]
-    UK_SOUTH_LONDON,
+    pub const UK_SOUTH_LONDON: Region = Region("uk-south-london");
 
     // ── Middle East & Africa ───────────────────────────────────────
     /// Saudi Arabia Central, Riyadh. PDPL (mandatory in-country processing).
-    #[serde(rename = "sa-central-riyadh")]
-    SA_CENTRAL_RIYADH,
+    pub const SA_CENTRAL_RIYADH: Region = Region("sa-central-riyadh");
     /// Bahrain Central, Manama. Bahrain PDPA.
-    #[serde(rename = "bh-central-manama")]
-    BH_CENTRAL_MANAMA,
+    pub const BH_CENTRAL_MANAMA: Region = Region("bh-central-manama");
     /// UAE Central, Dubai. UAE PDPL.
-    #[serde(rename = "ae-central-dubai")]
-    AE_CENTRAL_DUBAI,
+    pub const AE_CENTRAL_DUBAI: Region = Region("ae-central-dubai");
     /// Israel Central, Tel Aviv. Privacy Protection Law.
-    #[serde(rename = "il-central-tel-aviv")]
-    IL_CENTRAL_TEL_AVIV,
+    pub const IL_CENTRAL_TEL_AVIV: Region = Region("il-central-tel-aviv");
     /// South Africa South, Cape Town. POPIA.
-    #[serde(rename = "za-south-cape-town")]
-    ZA_SOUTH_CAPE_TOWN,
+    pub const ZA_SOUTH_CAPE_TOWN: Region = Region("za-south-cape-town");
     /// Nigeria West, Lagos. NDPA 2023 + NITDA.
-    #[serde(rename = "ng-west-lagos")]
-    NG_WEST_LAGOS,
+    pub const NG_WEST_LAGOS: Region = Region("ng-west-lagos");
 
     // ── Asia Pacific ───────────────────────────────────────────────
     /// Singapore Central. PDPA.
-    #[serde(rename = "sg-central-singapore")]
-    SG_CENTRAL_SINGAPORE,
+    pub const SG_CENTRAL_SINGAPORE: Region = Region("sg-central-singapore");
     /// Australia East, Sydney. Australian Privacy Act.
-    #[serde(rename = "au-east-sydney")]
-    AU_EAST_SYDNEY,
+    pub const AU_EAST_SYDNEY: Region = Region("au-east-sydney");
     /// Indonesia West, Jakarta. PDP Law (mandatory local storage).
-    #[serde(rename = "id-west-jakarta")]
-    ID_WEST_JAKARTA,
+    pub const ID_WEST_JAKARTA: Region = Region("id-west-jakarta");
     /// Japan East, Tokyo. APPI.
-    #[serde(rename = "jp-east-tokyo")]
-    JP_EAST_TOKYO,
+    pub const JP_EAST_TOKYO: Region = Region("jp-east-tokyo");
     /// South Korea Central, Seoul. PIPA.
-    #[serde(rename = "kr-central-seoul")]
-    KR_CENTRAL_SEOUL,
+    pub const KR_CENTRAL_SEOUL: Region = Region("kr-central-seoul");
     /// India West, Mumbai. DPDPA 2023.
-    #[serde(rename = "in-west-mumbai")]
-    IN_WEST_MUMBAI,
+    pub const IN_WEST_MUMBAI: Region = Region("in-west-mumbai");
     /// Vietnam South, Ho Chi Minh City. Cybersecurity Law + Decree 53/2022.
-    #[serde(rename = "vn-south-hcmc")]
-    VN_SOUTH_HCMC,
+    pub const VN_SOUTH_HCMC: Region = Region("vn-south-hcmc");
 
     // ── China ──────────────────────────────────────────────────────
     /// China North, Beijing. PIPL (mandatory in-country storage).
-    #[serde(rename = "cn-north-beijing")]
-    CN_NORTH_BEIJING,
+    pub const CN_NORTH_BEIJING: Region = Region("cn-north-beijing");
+
+    /// Constructs a region from a `'static` slug. Intended for compile-time
+    /// constants. Use [`Region::new_owned`] for runtime-allocated names.
+    pub const fn new(name: &'static str) -> Self {
+        Region(name)
+    }
+
+    /// Constructs a region by interning a runtime-allocated name into the
+    /// process-wide static heap. The intern set is bounded in practice by the
+    /// number of distinct regions registered on a node.
+    pub fn new_owned(name: impl AsRef<str>) -> Self {
+        let n = name.as_ref();
+        // Fast path: a bounded set of well-known constants short-circuits the
+        // intern lock.
+        if let Some(slug) = WELL_KNOWN_SLUGS.iter().copied().find(|s| *s == n) {
+            return Region(slug);
+        }
+        Region(intern(n))
+    }
+
+    /// Slug for this region (e.g. `"us-east-va"`).
+    ///
+    /// Single source of truth for the wire / on-disk representation.
+    pub const fn as_str(&self) -> &'static str {
+        self.0
+    }
+
+    /// Whether this is the cluster control-plane region.
+    pub fn is_global(&self) -> bool {
+        self.0 == "global"
+    }
+
+    /// Whether this region requires data residency enforcement.
+    ///
+    /// Returns `false` for `GLOBAL`, `US_EAST_VA`, and `US_WEST_OR` (no federal
+    /// data residency law). Returns `true` for every other named region —
+    /// including dynamically registered ones (default-deny) so that custom
+    /// regions inherit the safe behaviour until the registry is consulted.
+    ///
+    /// Production callers that need authoritative residency policy must consult
+    /// the region directory (`RegionDirectoryEntry`) in GLOBAL state. This
+    /// method preserves the prior hardcoded behaviour so that the migration to
+    /// registry-driven lookups can land incrementally.
+    #[inline]
+    pub fn requires_residency(&self) -> bool {
+        !matches!(self.0, "global" | "us-east-va" | "us-west-or")
+    }
+
+    /// Soft-delete retention period, in days, for this region.
+    ///
+    /// EU / EEA / UK regions use a 30-day window (GDPR / UK GDPR). All other
+    /// regions, including dynamically registered ones, default to 90 days.
+    pub fn retention_days(&self) -> u32 {
+        match self.0 {
+            "ie-east-dublin"
+            | "fr-north-paris"
+            | "de-central-frankfurt"
+            | "se-east-stockholm"
+            | "it-north-milan"
+            | "uk-south-london" => 30,
+            _ => 90,
+        }
+    }
 }
 
-/// All `Region` variants in definition order.
+/// Compile-time list of well-known region slugs. Used by [`Region::new_owned`]
+/// to short-circuit the intern lock for the common case.
+const WELL_KNOWN_SLUGS: &[&str] = &[
+    "global",
+    "us-east-va",
+    "us-west-or",
+    "ca-central-qc",
+    "br-southeast-sp",
+    "ie-east-dublin",
+    "fr-north-paris",
+    "de-central-frankfurt",
+    "se-east-stockholm",
+    "it-north-milan",
+    "uk-south-london",
+    "sa-central-riyadh",
+    "bh-central-manama",
+    "ae-central-dubai",
+    "il-central-tel-aviv",
+    "za-south-cape-town",
+    "ng-west-lagos",
+    "sg-central-singapore",
+    "au-east-sydney",
+    "id-west-jakarta",
+    "jp-east-tokyo",
+    "kr-central-seoul",
+    "in-west-mumbai",
+    "vn-south-hcmc",
+    "cn-north-beijing",
+];
+
+/// All well-known compile-time region constants in definition order.
+///
+/// This is a transitional convenience for callers that previously iterated the
+/// `Region` enum. New code should consult the region directory (GLOBAL state)
+/// instead — that is the authoritative list once dynamic registration lands.
 pub const ALL_REGIONS: [Region; 25] = [
     Region::GLOBAL,
     Region::US_EAST_VA,
@@ -152,79 +258,9 @@ pub const ALL_REGIONS: [Region; 25] = [
     Region::CN_NORTH_BEIJING,
 ];
 
-impl Region {
-    /// Lowercase hyphenated string for this region.
-    ///
-    /// Single source of truth for the string representation. Used by
-    /// `Display`, `FromStr`, and serde rename attributes.
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::GLOBAL => "global",
-            Self::US_EAST_VA => "us-east-va",
-            Self::US_WEST_OR => "us-west-or",
-            Self::CA_CENTRAL_QC => "ca-central-qc",
-            Self::BR_SOUTHEAST_SP => "br-southeast-sp",
-            Self::IE_EAST_DUBLIN => "ie-east-dublin",
-            Self::FR_NORTH_PARIS => "fr-north-paris",
-            Self::DE_CENTRAL_FRANKFURT => "de-central-frankfurt",
-            Self::SE_EAST_STOCKHOLM => "se-east-stockholm",
-            Self::IT_NORTH_MILAN => "it-north-milan",
-            Self::UK_SOUTH_LONDON => "uk-south-london",
-            Self::SA_CENTRAL_RIYADH => "sa-central-riyadh",
-            Self::BH_CENTRAL_MANAMA => "bh-central-manama",
-            Self::AE_CENTRAL_DUBAI => "ae-central-dubai",
-            Self::IL_CENTRAL_TEL_AVIV => "il-central-tel-aviv",
-            Self::ZA_SOUTH_CAPE_TOWN => "za-south-cape-town",
-            Self::NG_WEST_LAGOS => "ng-west-lagos",
-            Self::SG_CENTRAL_SINGAPORE => "sg-central-singapore",
-            Self::AU_EAST_SYDNEY => "au-east-sydney",
-            Self::ID_WEST_JAKARTA => "id-west-jakarta",
-            Self::JP_EAST_TOKYO => "jp-east-tokyo",
-            Self::KR_CENTRAL_SEOUL => "kr-central-seoul",
-            Self::IN_WEST_MUMBAI => "in-west-mumbai",
-            Self::VN_SOUTH_HCMC => "vn-south-hcmc",
-            Self::CN_NORTH_BEIJING => "cn-north-beijing",
-        }
-    }
-
-    /// Whether this region requires data residency enforcement.
-    ///
-    /// Returns `true` for all regions except `GLOBAL`, `US_EAST_VA`, and
-    /// `US_WEST_OR`. Protected regions restrict Raft group membership to nodes
-    /// tagged with the same region.
-    ///
-    /// US regions are non-protected by design — no US federal data residency law
-    /// comparable to GDPR exists. PII for US-region users replicates to all nodes.
-    /// See `docs/architecture/data-residency.md` for operational guidance.
-    #[inline]
-    pub const fn requires_residency(&self) -> bool {
-        !matches!(self, Self::GLOBAL | Self::US_EAST_VA | Self::US_WEST_OR)
-    }
-
-    /// Soft-delete retention period in days for this region.
-    ///
-    /// After a user is soft-deleted, their data is retained for this many days
-    /// before permanent erasure. EU/GDPR regions use shorter retention periods
-    /// to comply with data protection regulations.
-    pub const fn retention_days(&self) -> u32 {
-        match self {
-            // EU/EEA regions: 30-day retention (GDPR compliance)
-            Self::IE_EAST_DUBLIN
-            | Self::FR_NORTH_PARIS
-            | Self::DE_CENTRAL_FRANKFURT
-            | Self::SE_EAST_STOCKHOLM
-            | Self::IT_NORTH_MILAN => 30,
-            // UK: 30-day retention (UK GDPR)
-            Self::UK_SOUTH_LONDON => 30,
-            // All other regions: 90-day default
-            _ => 90,
-        }
-    }
-}
-
 impl fmt::Display for Region {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        f.write_str(self.0)
     }
 }
 
@@ -237,20 +273,49 @@ pub struct RegionParseError {
 
 impl fmt::Display for RegionParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "unknown region: {}", self.input)
+        write!(f, "invalid region: {}", self.input)
     }
 }
 
 impl std::error::Error for RegionParseError {}
 
-impl std::str::FromStr for Region {
+impl FromStr for Region {
     type Err = RegionParseError;
 
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        ALL_REGIONS
-            .iter()
-            .find(|r| r.as_str() == s)
-            .copied()
-            .ok_or_else(|| RegionParseError { input: s.to_owned() })
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.is_empty() {
+            return Err(RegionParseError { input: s.to_owned() });
+        }
+        // Validate slug shape: lowercase ASCII letters, digits, hyphen.
+        if !s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+            return Err(RegionParseError { input: s.to_owned() });
+        }
+        if s.starts_with('-') || s.ends_with('-') {
+            return Err(RegionParseError { input: s.to_owned() });
+        }
+        Ok(Region::new_owned(s))
+    }
+}
+
+impl Serialize for Region {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Region {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Region::from_str(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+impl schemars::JsonSchema for Region {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("Region")
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        String::json_schema(generator)
     }
 }

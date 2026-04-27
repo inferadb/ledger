@@ -1054,7 +1054,11 @@ mod tests {
             ("GLOBAL_V1", Some((Region::GLOBAL, 1))),
             ("GLOBAL_V0", Some((Region::GLOBAL, 0))),
             ("GLOBAL_V999", Some((Region::GLOBAL, 999))),
-            ("INVALID_REGION_V1", None),
+            // After the dynamic-region migration, any well-formed kebab-case
+            // slug parses as a Region. INVALID_REGION → "invalid-region" is
+            // accepted; only structurally malformed env-var suffixes (no _V
+            // marker, non-numeric version) are rejected.
+            ("INVALID_REGION_V1", Some((Region::new_owned("invalid-region"), 1))),
             ("US_EAST_VA", None),
             ("GLOBAL_Vabc", None),
         ];
