@@ -176,37 +176,46 @@ async fn test_follower_state_consistency() {
 
     let mut client = create_write_client(&leader.addr).await.expect("connect to leader");
 
-    // Submit a batch of writes (alpha only)
-    let batch_request = inferadb_ledger_proto::proto::BatchWriteRequest {
-        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "batch-test".to_string() }),
-        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: org_alpha.value(),
-        }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_alpha.value() }),
-        operations: (0..10)
-            .map(|i| inferadb_ledger_proto::proto::BatchWriteOperation {
-                operations: vec![inferadb_ledger_proto::proto::Operation {
-                    op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
-                        inferadb_ledger_proto::proto::SetEntity {
-                            key: format!("batch-key-{}", i),
-                            value: format!("batch-value-{}", i).into_bytes(),
-                            expires_at: None,
-                            condition: None,
-                        },
-                    )),
-                }],
-            })
-            .collect(),
-        include_tx_proofs: false,
-        caller: None,
-    };
-
-    let response = client.batch_write(batch_request).await.expect("batch write should succeed");
-
-    match response.into_inner().result {
-        Some(inferadb_ledger_proto::proto::batch_write_response::Result::Success(_)) => {},
-        _ => panic!("batch write should succeed"),
+    // Submit per-vault writes sequentially (alpha only). A5 migrated this
+    // from `BatchWrite` to per-op `Write` after Phase 6 of the per-vault
+    // consensus migration deprecated cross-vault batches.
+    let mut last_height: u64 = 0;
+    for i in 0..10 {
+        let request = inferadb_ledger_proto::proto::WriteRequest {
+            client_id: Some(inferadb_ledger_proto::proto::ClientId {
+                id: "batch-test".to_string(),
+            }),
+            idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
+            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                slug: org_alpha.value(),
+            }),
+            vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_alpha.value() }),
+            operations: vec![inferadb_ledger_proto::proto::Operation {
+                op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                    inferadb_ledger_proto::proto::SetEntity {
+                        key: format!("batch-key-{}", i),
+                        value: format!("batch-value-{}", i).into_bytes(),
+                        expires_at: None,
+                        condition: None,
+                    },
+                )),
+            }],
+            include_tx_proof: false,
+            caller: None,
+        };
+        let response = client.write(request).await.expect("write should succeed");
+        match response.into_inner().result {
+            Some(inferadb_ledger_proto::proto::write_response::Result::Success(s)) => {
+                assert!(
+                    s.block_height > last_height,
+                    "block height must be monotonically increasing: got {} after {}",
+                    s.block_height,
+                    last_height
+                );
+                last_height = s.block_height;
+            },
+            _ => panic!("write should succeed"),
+        }
     }
 
     // Wait for sync

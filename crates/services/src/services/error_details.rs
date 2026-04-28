@@ -24,6 +24,16 @@ pub(crate) const LEADER_TERM_KEY: &str = "leader_term";
 /// `RegionLeaderCache` keys on. Data-region groups emit `"0"`; per-
 /// organization groups emit the organization's id.
 pub(crate) const LEADER_SHARD_KEY: &str = "leader_shard";
+/// `ErrorDetails.context` key for the vault id the leader is for
+/// (numeric string; absent when the rejecting shard is not vault-scoped).
+///
+/// Per-vault Raft groups under the per-organization group (Phase 6 of the
+/// per-vault consensus rollout) emit the vault's internal id here so the
+/// SDK's `VaultLeaderCache` can key on `(region, organization_id, vault_id)`
+/// rather than just `(region, organization_id)`. Region- and org-scoped
+/// rejections omit this key — its absence signals "no vault-level routing
+/// applies" and the SDK falls back to the org-level cache entry.
+pub(crate) const LEADER_VAULT_KEY: &str = "leader_vault";
 
 /// Builds an [`ErrorDetails`] proto message from error attributes.
 ///
@@ -57,14 +67,19 @@ pub(crate) fn build_error_details(
 /// - `leader_endpoint` — full URI (e.g. `"http://10.0.2.5:5000"`)
 /// - `leader_term` — numeric string (u64)
 /// - `leader_shard` — numeric string (organization id; `"0"` for the data-region group)
+/// - `leader_vault` — numeric string (vault id; absent when the rejecting shard is not
+///   vault-scoped)
 ///
 /// Any argument may be `None` when the server has no information for that
-/// field; the key is simply omitted.
+/// field; the key is simply omitted. A missing `leader_vault` key is the
+/// signal to legacy SDKs (and the org-level cache path) that the rejection
+/// is not vault-scoped.
 pub(crate) fn build_not_leader_details(
     leader_id: Option<u64>,
     leader_endpoint: Option<&str>,
     leader_term: Option<u64>,
     leader_shard: Option<u64>,
+    leader_vault: Option<u64>,
 ) -> proto::ErrorDetails {
     let mut context = HashMap::new();
     if let Some(id) = leader_id {
@@ -78,6 +93,9 @@ pub(crate) fn build_not_leader_details(
     }
     if let Some(shard) = leader_shard {
         context.insert(LEADER_SHARD_KEY.to_owned(), shard.to_string());
+    }
+    if let Some(vault) = leader_vault {
+        context.insert(LEADER_VAULT_KEY.to_owned(), vault.to_string());
     }
 
     proto::ErrorDetails {
@@ -177,50 +195,78 @@ mod tests {
 
     #[test]
     fn build_not_leader_details_all_fields() {
-        let details =
-            build_not_leader_details(Some(42), Some("http://10.0.2.5:5000"), Some(7), Some(5));
+        let details = build_not_leader_details(
+            Some(42),
+            Some("http://10.0.2.5:5000"),
+            Some(7),
+            Some(5),
+            Some(99),
+        );
         assert_eq!(details.error_code, "2000"); // ConsensusNotLeader
         assert!(details.is_retryable);
         assert_eq!(details.context.get("leader_id").unwrap(), "42");
         assert_eq!(details.context.get("leader_endpoint").unwrap(), "http://10.0.2.5:5000");
         assert_eq!(details.context.get("leader_term").unwrap(), "7");
         assert_eq!(details.context.get("leader_shard").unwrap(), "5");
+        assert_eq!(details.context.get("leader_vault").unwrap(), "99");
         assert!(details.suggested_action.as_deref().unwrap().contains("leader"));
     }
 
     #[test]
     fn build_not_leader_details_partial_fields() {
-        let details = build_not_leader_details(Some(42), None, None, None);
+        let details = build_not_leader_details(Some(42), None, None, None, None);
         assert!(details.context.contains_key("leader_id"));
         assert!(!details.context.contains_key("leader_endpoint"));
         assert!(!details.context.contains_key("leader_term"));
         assert!(!details.context.contains_key("leader_shard"));
+        assert!(!details.context.contains_key("leader_vault"));
     }
 
     #[test]
     fn build_not_leader_details_no_hints() {
-        let details = build_not_leader_details(None, None, None, None);
+        let details = build_not_leader_details(None, None, None, None, None);
         assert!(details.context.is_empty());
         assert!(details.is_retryable);
     }
 
     #[test]
     fn build_not_leader_details_empty_endpoint_omitted() {
-        let details = build_not_leader_details(Some(42), Some(""), Some(7), Some(0));
+        let details = build_not_leader_details(Some(42), Some(""), Some(7), Some(0), None);
         assert!(!details.context.contains_key("leader_endpoint"));
         assert!(details.context.contains_key("leader_id"));
         assert!(details.context.contains_key("leader_term"));
         assert_eq!(details.context.get("leader_shard").unwrap(), "0");
+        assert!(!details.context.contains_key("leader_vault"));
+    }
+
+    #[test]
+    fn build_not_leader_details_omits_vault_when_none() {
+        // Region- and org-scoped rejections must NOT emit the leader_vault
+        // key — its absence is the signal to the SDK that no vault-level
+        // routing applies.
+        let details =
+            build_not_leader_details(Some(1), Some("http://x:5000"), Some(3), Some(12), None);
+        assert!(!details.context.contains_key("leader_vault"));
+        assert_eq!(details.context.get("leader_shard").unwrap(), "12");
+    }
+
+    #[test]
+    fn build_not_leader_details_emits_vault_when_some() {
+        let details =
+            build_not_leader_details(Some(1), Some("http://x:5000"), Some(3), Some(12), Some(77));
+        assert_eq!(details.context.get("leader_vault").unwrap(), "77");
     }
 
     #[test]
     fn build_not_leader_details_encode_decode() {
-        let details = build_not_leader_details(Some(1), Some("http://x:5000"), Some(3), Some(12));
+        let details =
+            build_not_leader_details(Some(1), Some("http://x:5000"), Some(3), Some(12), Some(45));
         let encoded = details.encode_to_vec();
         let decoded = proto::ErrorDetails::decode(encoded.as_slice()).unwrap();
         assert_eq!(decoded.context.get("leader_id").unwrap(), "1");
         assert_eq!(decoded.context.get("leader_endpoint").unwrap(), "http://x:5000");
         assert_eq!(decoded.context.get("leader_term").unwrap(), "3");
         assert_eq!(decoded.context.get("leader_shard").unwrap(), "12");
+        assert_eq!(decoded.context.get("leader_vault").unwrap(), "45");
     }
 }

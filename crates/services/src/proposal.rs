@@ -9,7 +9,7 @@ use std::{sync::Arc, time::Duration};
 use inferadb_ledger_raft::{
     ConsensusHandle, HandleError,
     raft_manager::RaftManager,
-    types::{LedgerResponse, RaftPayload},
+    types::{LedgerResponse, OrganizationRequest, RaftPayload},
 };
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
@@ -136,6 +136,43 @@ pub trait ProposalService: Send + Sync {
         organization: OrganizationId,
         vault_id: VaultId,
         bytes: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<LedgerResponse, Status>;
+
+    /// Proposes a typed `OrganizationRequest` to a specific vault's per-vault
+    /// Raft shard, automatically piggybacking any pending state-root
+    /// commitments accumulated on the vault group.
+    ///
+    /// This is the typed sibling of [`Self::propose_to_vault_bytes`] used by
+    /// `WriteService` and other handlers that need to integrate with the
+    /// per-vault [`BatchWriterHandle`](inferadb_ledger_raft::BatchWriterHandle)
+    /// (when present) and with the per-vault `commitment_buffer`. The bytes
+    /// method does not — events ingestion does not piggyback commitments and
+    /// has no batch handle — so the two methods coexist.
+    ///
+    /// Routing rules:
+    /// - When the vault group exposes a [`BatchWriterHandle`], the request is handed to that batch
+    ///   writer; it drains the commitment buffer and constructs the `RaftPayload` itself (see
+    ///   `start_vault_group`'s `submit_fn` in `raft_manager.rs`). This preserves the per-fsync
+    ///   amortization that keeps multi-vault throughput intact.
+    /// - Otherwise, the call site path drains `vault_group.commitment_buffer()`, constructs a
+    ///   one-shot `RaftPayload` (with `caller` and the drained commitments), and proposes through
+    ///   `vault_group.handle().propose_and_wait`.
+    ///
+    /// Returns:
+    /// - `UNAVAILABLE` (with `LeaderHint` `ErrorDetails`) when the vault group is not registered on
+    ///   this node, or when the local node is not the leader for the vault.
+    /// - `DEADLINE_EXCEEDED` on Raft proposal timeout (also stamps the
+    ///   `record_raft_proposal_timeout` metric).
+    /// - The classified `tonic::Status` for any other consensus error (mirroring
+    ///   `classify_raft_error`).
+    async fn propose_organization_request_to_vault(
+        &self,
+        region: Region,
+        organization: OrganizationId,
+        vault_id: VaultId,
+        request: OrganizationRequest,
+        caller: u64,
         timeout: Duration,
     ) -> Result<LedgerResponse, Status>;
 
@@ -330,6 +367,7 @@ impl ProposalService for RaftProposalService {
                 region_group.handle().as_ref(),
                 Some(manager.peer_addresses()),
                 format!("Not the leader for region {region}"),
+                None,
             ));
         }
 
@@ -345,6 +383,7 @@ impl ProposalService for RaftProposalService {
                     region_group.handle().as_ref(),
                     Some(manager.peer_addresses()),
                     format!("Not the leader for region {region} (lost leadership mid-propose)"),
+                    None,
                 ))
             },
             Err(HandleError::Consensus { source, .. }) => Err(consensus_error_to_status(source)),
@@ -383,6 +422,7 @@ impl ProposalService for RaftProposalService {
                 org_group.handle().as_ref(),
                 Some(manager.peer_addresses()),
                 format!("Not the leader for organization {organization} in region {region}"),
+                None,
             ));
         }
 
@@ -397,6 +437,7 @@ impl ProposalService for RaftProposalService {
                     format!(
                         "Not the leader for organization {organization} in region {region} (lost leadership mid-propose)"
                     ),
+                    None,
                 ))
             },
             Err(HandleError::Consensus { source, .. }) => Err(consensus_error_to_status(source)),
@@ -431,6 +472,8 @@ impl ProposalService for RaftProposalService {
                 ))
             })?;
 
+        // VaultId is i64 (Snowflake-positive); cast preserves the value.
+        let vault_hint = Some(vault_id.value() as u64);
         if !vault_group.handle().is_leader() {
             return Err(super::services::metadata::not_leader_status_from_handle(
                 vault_group.handle().as_ref(),
@@ -439,6 +482,7 @@ impl ProposalService for RaftProposalService {
                     "Not the leader for vault {vault_id} (organization {organization}) in \
                      region {region}"
                 ),
+                vault_hint,
             ));
         }
 
@@ -454,6 +498,7 @@ impl ProposalService for RaftProposalService {
                         "Not the leader for vault {vault_id} (organization {organization}) \
                          in region {region} (lost leadership mid-propose)"
                     ),
+                    vault_hint,
                 ))
             },
             Err(HandleError::Consensus { source, .. }) => Err(consensus_error_to_status(source)),
@@ -466,6 +511,117 @@ impl ProposalService for RaftProposalService {
                 )))
             },
             Err(e) => Err(Status::internal(e.to_string())),
+        }
+    }
+
+    async fn propose_organization_request_to_vault(
+        &self,
+        region: Region,
+        organization: OrganizationId,
+        vault_id: VaultId,
+        request: OrganizationRequest,
+        caller: u64,
+        timeout: Duration,
+    ) -> Result<LedgerResponse, Status> {
+        let manager = self.manager.as_ref().ok_or_else(|| {
+            Status::failed_precondition("Per-vault proposals require RaftManager configuration")
+        })?;
+
+        let vault_group =
+            manager.get_vault_group(region, organization, vault_id).map_err(|_| {
+                Status::unavailable(format!(
+                    "Vault {vault_id} (organization {organization}) is not active on this \
+                     node in region {region}"
+                ))
+            })?;
+
+        // VaultId is i64 (Snowflake-positive); cast preserves the value.
+        let vault_hint = Some(vault_id.value() as u64);
+        if !vault_group.handle().is_leader() {
+            return Err(super::services::metadata::not_leader_status_from_handle(
+                vault_group.handle().as_ref(),
+                Some(manager.peer_addresses()),
+                format!(
+                    "Not the leader for vault {vault_id} (organization {organization}) in \
+                     region {region}"
+                ),
+                vault_hint,
+            ));
+        }
+
+        inferadb_ledger_raft::metrics::record_raft_proposal();
+
+        // Prefer the per-vault batch writer when present so concurrent writes
+        // to the same vault amortize the WAL fsync cost. The batch writer's
+        // `submit_fn` (in `raft_manager.rs::start_vault_group`) drains the
+        // commitment buffer and constructs the `RaftPayload` itself — we
+        // simply hand it the typed request and await the batched result.
+        if let Some(batch_handle) = vault_group.batch_handle() {
+            let receiver = batch_handle.submit(request);
+            return match tokio::time::timeout(timeout, receiver).await {
+                Ok(Ok(Ok(response))) => Ok(response),
+                Ok(Ok(Err(batch_err))) => {
+                    let message = batch_err.to_string();
+                    Err(inferadb_ledger_raft::error::classify_raft_error(&message))
+                },
+                Ok(Err(_dropped)) => Err(inferadb_ledger_raft::error::classify_raft_error(
+                    "Batch writer dropped response",
+                )),
+                Err(_elapsed) => {
+                    inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
+                    Err(Status::deadline_exceeded(format!(
+                        "Raft proposal timed out after {}ms",
+                        timeout.as_millis()
+                    )))
+                },
+            };
+        }
+
+        // Fallback: direct propose through the vault's consensus handle.
+        // Drain the commitment buffer and wrap the request in a one-shot
+        // `RaftPayload` — same shape the batch writer's `submit_fn` produces,
+        // but unbatched.
+        let commitments = std::mem::take(
+            &mut *vault_group.commitment_buffer().lock().unwrap_or_else(|e| e.into_inner()),
+        );
+        let payload = RaftPayload {
+            request,
+            proposed_at: chrono::Utc::now(),
+            caller,
+            state_root_commitments: commitments,
+        };
+
+        match vault_group.handle().propose_and_wait(payload, timeout).await {
+            Ok(response) => Ok(response),
+            Err(HandleError::Consensus { source, .. })
+                if source.to_string().contains("Not the leader") =>
+            {
+                Err(super::services::metadata::not_leader_status_from_handle(
+                    vault_group.handle().as_ref(),
+                    Some(manager.peer_addresses()),
+                    format!(
+                        "Not the leader for vault {vault_id} (organization {organization}) \
+                         in region {region} (lost leadership mid-propose)"
+                    ),
+                    vault_hint,
+                ))
+            },
+            Err(HandleError::Consensus { source, .. }) => {
+                let message = source.to_string();
+                Err(inferadb_ledger_raft::error::classify_raft_error(&message))
+            },
+            Err(HandleError::Timeout { .. }) => {
+                inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
+                Err(Status::deadline_exceeded(format!(
+                    "Vault Raft proposal timed out after {}ms (vault: {vault_id}, org: \
+                     {organization}, region: {region})",
+                    timeout.as_millis()
+                )))
+            },
+            Err(e) => {
+                let message = e.to_string();
+                Err(inferadb_ledger_raft::error::classify_raft_error(&message))
+            },
         }
     }
 
@@ -502,7 +658,7 @@ pub(crate) mod mock {
 
     use std::{collections::VecDeque, sync::Arc, time::Duration};
 
-    use inferadb_ledger_raft::types::{LedgerResponse, RaftPayload};
+    use inferadb_ledger_raft::types::{LedgerResponse, OrganizationRequest, RaftPayload};
     use inferadb_ledger_state::StateLayer;
     use inferadb_ledger_store::FileBackend;
     use inferadb_ledger_types::{OrganizationId, Region, VaultId};
@@ -522,6 +678,7 @@ pub(crate) mod mock {
         regional_responses: Mutex<VecDeque<Result<LedgerResponse, Status>>>,
         organization_responses: Mutex<VecDeque<Result<LedgerResponse, Status>>>,
         vault_responses: Mutex<VecDeque<Result<LedgerResponse, Status>>>,
+        typed_vault_responses: Mutex<VecDeque<Result<LedgerResponse, Status>>>,
         /// Captured global proposals as raw `postcard(RaftPayload<R>)` bytes.
         proposals: Mutex<Vec<Vec<u8>>>,
         /// Captured regional proposals as raw bytes with (region, bytes).
@@ -530,6 +687,10 @@ pub(crate) mod mock {
         organization_proposals: Mutex<Vec<(Region, OrganizationId, Vec<u8>)>>,
         /// Captured vault proposals as raw bytes with (region, organization_id, vault_id, bytes).
         vault_proposals: Mutex<Vec<(Region, OrganizationId, VaultId, Vec<u8>)>>,
+        /// Captured typed-vault proposals (used by the typed
+        /// `propose_organization_request_to_vault` API).
+        typed_vault_proposals:
+            Mutex<Vec<(Region, OrganizationId, VaultId, OrganizationRequest, u64)>>,
         regional_state_layer: Mutex<Option<Arc<StateLayer<FileBackend>>>>,
     }
 
@@ -541,10 +702,12 @@ pub(crate) mod mock {
                 regional_responses: Mutex::new(VecDeque::new()),
                 organization_responses: Mutex::new(VecDeque::new()),
                 vault_responses: Mutex::new(VecDeque::new()),
+                typed_vault_responses: Mutex::new(VecDeque::new()),
                 proposals: Mutex::new(Vec::new()),
                 regional_proposals: Mutex::new(Vec::new()),
                 organization_proposals: Mutex::new(Vec::new()),
                 vault_proposals: Mutex::new(Vec::new()),
+                typed_vault_proposals: Mutex::new(Vec::new()),
                 regional_state_layer: Mutex::new(None),
             }
         }
@@ -570,6 +733,13 @@ pub(crate) mod mock {
         #[allow(dead_code)]
         pub(crate) fn enqueue_vault(&self, response: Result<LedgerResponse, Status>) {
             self.vault_responses.lock().push_back(response);
+        }
+
+        /// Enqueues a response for the next
+        /// `propose_organization_request_to_vault()` call.
+        #[allow(dead_code)]
+        pub(crate) fn enqueue_typed_vault(&self, response: Result<LedgerResponse, Status>) {
+            self.typed_vault_responses.lock().push_back(response);
         }
 
         /// Sets the state layer returned by `regional_state()`.
@@ -605,6 +775,15 @@ pub(crate) mod mock {
             &self,
         ) -> Vec<(Region, OrganizationId, VaultId, Vec<u8>)> {
             self.vault_proposals.lock().clone()
+        }
+
+        /// Returns the typed vault proposals captured from
+        /// `propose_organization_request_to_vault()` calls.
+        #[allow(dead_code)]
+        pub(crate) fn typed_vault_proposals(
+            &self,
+        ) -> Vec<(Region, OrganizationId, VaultId, OrganizationRequest, u64)> {
+            self.typed_vault_proposals.lock().clone()
         }
 
         /// Decodes captured `propose_bytes` calls into typed `RaftPayload<R>`.
@@ -723,6 +902,28 @@ pub(crate) mod mock {
                 .lock()
                 .pop_front()
                 .unwrap_or_else(|| Err(Status::internal("no mock vault response enqueued")))
+        }
+
+        async fn propose_organization_request_to_vault(
+            &self,
+            region: Region,
+            organization: OrganizationId,
+            vault_id: VaultId,
+            request: OrganizationRequest,
+            caller: u64,
+            _timeout: Duration,
+        ) -> Result<LedgerResponse, Status> {
+            self.typed_vault_proposals.lock().push((
+                region,
+                organization,
+                vault_id,
+                request,
+                caller,
+            ));
+            self.typed_vault_responses
+                .lock()
+                .pop_front()
+                .unwrap_or_else(|| Err(Status::internal("no mock typed-vault response enqueued")))
         }
 
         fn regional_state(&self, region: Region) -> Result<Arc<StateLayer<FileBackend>>, Status> {
@@ -927,5 +1128,64 @@ mod tests {
     async fn raft_metrics_returns_some() {
         let (svc, _manager, _temp) = create_raft_proposal_service().await;
         assert!(svc.raft_metrics().is_some());
+    }
+
+    #[tokio::test]
+    async fn propose_organization_request_to_vault_unknown_vault_returns_unavailable() {
+        let (svc, _manager, _temp) = create_raft_proposal_service().await;
+
+        // No vault group registered for an arbitrary (region, org, vault) tuple
+        // — should return UNAVAILABLE so the SDK can reconnect.
+        let request = inferadb_ledger_raft::types::OrganizationRequest::IngestExternalEvents {
+            source: String::new(),
+            events: Vec::new(),
+        };
+        let err = svc
+            .propose_organization_request_to_vault(
+                Region::GLOBAL,
+                inferadb_ledger_types::OrganizationId::new(99),
+                inferadb_ledger_types::VaultId::new(7),
+                request,
+                0,
+                Duration::from_millis(200),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn propose_organization_request_to_vault_without_manager_returns_failed_precondition() {
+        let temp = TestDir::new();
+        let node_id = 1u64;
+        let config = RaftManagerConfig::new(temp.path().to_path_buf(), node_id, Region::GLOBAL);
+        let manager = Arc::new(RaftManager::new(
+            config,
+            Arc::new(inferadb_ledger_raft::node_registry::NodeConnectionRegistry::new()),
+        ));
+        let region_config =
+            RegionConfig::system(node_id, "127.0.0.1:0".to_string()).without_background_jobs();
+        let system = manager.start_system_region(region_config).await.expect("start system region");
+
+        let svc = RaftProposalService::new(system.handle().clone(), None);
+
+        let request = inferadb_ledger_raft::types::OrganizationRequest::IngestExternalEvents {
+            source: String::new(),
+            events: Vec::new(),
+        };
+        let err = svc
+            .propose_organization_request_to_vault(
+                Region::US_EAST_VA,
+                inferadb_ledger_types::OrganizationId::new(1),
+                inferadb_ledger_types::VaultId::new(1),
+                request,
+                0,
+                Duration::from_millis(200),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     }
 }

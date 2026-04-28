@@ -75,6 +75,12 @@ pub enum ErrorCode {
     /// Vault routing changed between slug resolution and proposal submission.
     /// Maps to `FAILED_PRECONDITION`.
     StaleRouting,
+
+    /// RPC, message, or feature is deprecated and the server refuses to handle it.
+    /// Used by the per-vault consensus migration to reject cross-vault `BatchWrite`
+    /// requests; clients are expected to issue per-vault `Write` calls instead.
+    /// Maps to `FAILED_PRECONDITION`.
+    Deprecated,
 }
 
 impl ErrorCode {
@@ -94,7 +100,7 @@ impl ErrorCode {
             },
             Self::InvitationEmailMismatch => "NOT_FOUND",
             Self::InvitationAlreadyMember | Self::InvitationDuplicatePending => "ALREADY_EXISTS",
-            Self::StaleRouting => "FAILED_PRECONDITION",
+            Self::StaleRouting | Self::Deprecated => "FAILED_PRECONDITION",
         }
     }
 }
@@ -129,6 +135,7 @@ mod tests {
             (ErrorCode::InvitationAlreadyMember, "ALREADY_EXISTS"),
             (ErrorCode::InvitationDuplicatePending, "ALREADY_EXISTS"),
             (ErrorCode::StaleRouting, "FAILED_PRECONDITION"),
+            (ErrorCode::Deprecated, "FAILED_PRECONDITION"),
         ];
         for (code, expected) in cases {
             assert_eq!(code.grpc_code_name(), expected, "mismatch for {code:?}");

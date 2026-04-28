@@ -384,7 +384,7 @@ pub(crate) fn error_code_to_status(code: ErrorCode, message: String) -> Status {
         ErrorCode::InvitationAlreadyMember | ErrorCode::InvitationDuplicatePending => {
             Status::already_exists(message)
         },
-        ErrorCode::StaleRouting => Status::failed_precondition(message),
+        ErrorCode::StaleRouting | ErrorCode::Deprecated => Status::failed_precondition(message),
     }
 }
 

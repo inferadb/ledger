@@ -1687,6 +1687,7 @@ impl proto::user_service_server::UserService for UserService {
                 global.handle(),
                 Some(manager.peer_addresses()),
                 "Not the GLOBAL leader — registration saga must run on the leader",
+                None,
             ));
         }
 

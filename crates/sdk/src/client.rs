@@ -78,6 +78,44 @@ macro_rules! connected_client {
     }};
 }
 
+/// Acquires a channel for a vault-scoped request, consulting the per-vault
+/// leader cache before falling back to region- / gateway-routing.
+///
+/// Phase 6 wire-in (task A5/B): when the caller knows the request is
+/// targeted at a specific `(organization, vault)` pair, the cache is
+/// consulted first. On hit, the channel routes directly to the cached
+/// leader endpoint; on miss, the call falls through to
+/// [`ConnectionPool::get_channel`] (region cache → gateway).
+///
+/// Per the SDK's slug-keyed cache rollout (see [`crate::vault_resolver`]),
+/// the cache key is constructed from `(OrganizationSlug, VaultSlug)` cast
+/// into the internal `(OrganizationId, VaultId)` newtypes — both are
+/// numeric wrappers and the cast preserves the slug value. Server-side
+/// hints carry internal IDs, not slugs, so cache population from hints
+/// remains best-effort during this phase; the wire-in path itself is
+/// always exercised on every vault-scoped RPC.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! connected_client_for_vault {
+    ($pool:expr, $create_fn:ident, $org_slug:expr, $vault_slug:expr) => {{
+        // OrganizationSlug/VaultSlug are u64; OrganizationId/VaultId are i64.
+        // Snowflake-derived slugs are positive so the cast preserves value.
+        #[allow(clippy::cast_possible_wrap)]
+        let org_id = ::inferadb_ledger_types::OrganizationId::new($org_slug.value() as i64);
+        #[allow(clippy::cast_possible_wrap)]
+        let vault_id = ::inferadb_ledger_types::VaultId::new($vault_slug.value() as i64);
+        let channel = $pool.select_for_vault(org_id, vault_id).await?;
+        Self::$create_fn(
+            channel,
+            $pool.compression_enabled(),
+            $crate::tracing::TraceContextInterceptor::with_timeout(
+                $pool.config().trace(),
+                $pool.config().timeout(),
+            ),
+        )
+    }};
+}
+
 /// High-level client for interacting with the Ledger service.
 ///
 /// `LedgerClient` orchestrates:

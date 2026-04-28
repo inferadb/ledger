@@ -114,6 +114,7 @@ mod streaming;
 pub mod token;
 mod tracing;
 mod types;
+pub mod vault_resolver;
 
 // Public API exports
 pub use builders::{BatchReadBuilder, RelationshipQueryBuilder, WriteBuilder};
@@ -180,3 +181,4 @@ pub use types::{
         MerkleSibling, Transaction, VerifyOpts,
     },
 };
+pub use vault_resolver::{LeaderEntry as VaultLeaderEntry, VaultLeaderCache};

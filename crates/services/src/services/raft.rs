@@ -149,6 +149,8 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
                     handle.as_ref(),
                     Some(self.manager.peer_addresses()),
                     "Not the leader",
+                    // VaultId is i64 (Snowflake-positive); cast preserves value.
+                    Some(vault_id.value() as u64),
                 ));
             }
 
@@ -190,6 +192,7 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
                 handle.as_ref(),
                 Some(self.manager.peer_addresses()),
                 "Not the leader",
+                None,
             ));
         }
 

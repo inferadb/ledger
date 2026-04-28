@@ -1197,6 +1197,18 @@ mod tests {
             response
         }
 
+        async fn propose_organization_request_to_vault(
+            &self,
+            _region: Region,
+            _organization: OrganizationId,
+            _vault_id: inferadb_ledger_types::VaultId,
+            _request: OrganizationRequest,
+            _caller: u64,
+            _timeout: Duration,
+        ) -> Result<LedgerResponse, Status> {
+            Err(Status::unimplemented("TestIngestProposer does not support typed vault proposals"))
+        }
+
         fn regional_state(
             &self,
             _region: Region,

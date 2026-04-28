@@ -246,8 +246,8 @@ async fn test_snapshot_with_deleted_entities() {
 // Failover Tests
 // =============================================================================
 
-/// Verifies that a write committed on leader A survives leadership transfer
-/// and is readable from the new leader.
+/// Verifies that writes committed on leader A survive leadership transfer
+/// and are readable from the new leader.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_leader_failover_mid_batch_no_data_loss() {
@@ -259,7 +259,7 @@ async fn test_leader_failover_mid_batch_no_data_loss() {
     let leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    // ORG-ISOLATION: alpha receives the batch, beta must stay empty.
+    // ORG-ISOLATION: alpha receives the writes, beta must stay empty.
     let org_alpha =
         create_organization(&leader.addr, "failover-ns-a", leader).await.expect("create org alpha");
     let vault_alpha = create_vault(&leader.addr, org_alpha).await.expect("create vault alpha");
@@ -267,33 +267,23 @@ async fn test_leader_failover_mid_batch_no_data_loss() {
         create_organization(&leader.addr, "failover-ns-b", leader).await.expect("create org beta");
     let vault_beta = create_vault(&leader.addr, org_beta).await.expect("create vault beta");
 
-    // Write a batch of entities (alpha only).
-    let mut write_client = create_write_client(&leader.addr).await.expect("connect");
-    let batch_request = proto::BatchWriteRequest {
-        client_id: Some(proto::ClientId { id: "failover-batch".to_string() }),
-        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        organization: Some(proto::OrganizationSlug { slug: org_alpha.value() }),
-        vault: Some(proto::VaultSlug { slug: vault_alpha.value() }),
-        operations: (0..50)
-            .map(|i| proto::BatchWriteOperation {
-                operations: vec![proto::Operation {
-                    op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
-                        key: format!("fail-key-{}", i),
-                        value: format!("fail-value-{}", i).into_bytes(),
-                        expires_at: None,
-                        condition: None,
-                    })),
-                }],
-            })
-            .collect(),
-        include_tx_proofs: false,
-        caller: None,
-    };
-
-    let response = write_client.batch_write(batch_request).await.expect("batch write");
-    match response.into_inner().result {
-        Some(proto::batch_write_response::Result::Success(_)) => {},
-        other => panic!("batch write should succeed, got: {:?}", other),
+    // Write 50 entities sequentially (alpha only). A5 migrated this from
+    // `BatchWrite` to per-op `Write` after Phase 6 of the per-vault
+    // consensus migration deprecated cross-vault batches. The atomicity
+    // invariant is sacrificed (each `Write` is its own Raft proposal) but
+    // the durability + replication contract still holds — every committed
+    // entry must survive failover and be readable from a follower.
+    for i in 0..50 {
+        write_entity(
+            &leader.addr,
+            org_alpha,
+            vault_alpha,
+            &format!("fail-key-{}", i),
+            format!("fail-value-{}", i).as_bytes(),
+            "failover-batch",
+        )
+        .await
+        .expect("write should succeed");
     }
 
     // Wait for replication (global + data region + per-org groups).

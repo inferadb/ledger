@@ -175,7 +175,17 @@ impl LedgerClient {
         self.with_metrics(
             "read",
             with_retry_cancellable(&retry_policy, &token, Some(pool), "read", || async {
-                let mut client = crate::connected_client!(pool, create_read_client);
+                let mut client = match vault {
+                    Some(v) => {
+                        crate::connected_client_for_vault!(
+                            pool,
+                            create_read_client,
+                            organization,
+                            v
+                        )
+                    },
+                    None => crate::connected_client!(pool, create_read_client),
+                };
 
                 let request = proto::ReadRequest {
                     organization: Some(proto::OrganizationSlug { slug: organization.value() }),
@@ -213,7 +223,17 @@ impl LedgerClient {
         self.with_metrics(
             "batch_read",
             with_retry_cancellable(&retry_policy, &token, Some(pool), "batch_read", || async {
-                let mut client = crate::connected_client!(pool, create_read_client);
+                let mut client = match vault {
+                    Some(v) => {
+                        crate::connected_client_for_vault!(
+                            pool,
+                            create_read_client,
+                            organization,
+                            v
+                        )
+                    },
+                    None => crate::connected_client!(pool, create_read_client),
+                };
 
                 let request = proto::BatchReadRequest {
                     organization: Some(proto::OrganizationSlug { slug: organization.value() }),
@@ -379,7 +399,15 @@ impl LedgerClient {
                 let cid = client_id.clone();
                 let key_bytes = idempotency_key_bytes.clone();
                 async move {
-                    let mut write_client = crate::connected_client!(pool, create_write_client);
+                    let mut write_client = match vault {
+                        Some(v) => crate::connected_client_for_vault!(
+                            pool,
+                            create_write_client,
+                            organization,
+                            v
+                        ),
+                        None => crate::connected_client!(pool, create_write_client),
+                    };
 
                     let request = proto::WriteRequest {
                         organization: Some(proto::OrganizationSlug { slug: organization.value() }),

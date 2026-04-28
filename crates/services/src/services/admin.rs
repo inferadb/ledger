@@ -1842,6 +1842,7 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 self.handle.as_ref(),
                 self.peer_addresses.as_ref(),
                 msg,
+                None,
             ));
         }
 

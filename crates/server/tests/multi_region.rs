@@ -173,9 +173,14 @@ async fn test_multi_region_organization_isolation() {
     assert_eq!(val_b, Some(b"value-b".to_vec()), "ns B should have its own value");
 }
 
-/// Tests batch writes through the multi-region service.
+/// Tests sequential per-vault writes through the multi-region service.
 ///
-/// Verifies that BatchWrite routes correctly and applies atomically.
+/// Originally exercised `BatchWrite`; A5 migrated this to per-vault `Write`
+/// after Phase 6 of the per-vault consensus migration deprecated cross-vault
+/// batches. The atomicity invariant is sacrificed (each `Write` is its own
+/// Raft proposal) but the read-after-write contract still holds — both keys
+/// must be readable after the loop completes, and block heights must be
+/// strictly monotonic in commit order.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_region_batch_write() {
     let cluster = TestCluster::with_data_regions(1, 2).await;
@@ -190,52 +195,19 @@ async fn test_multi_region_batch_write() {
         create_organization(&node.addr, "ms-batch", node).await.expect("create organization");
     let vault = create_vault(&node.addr, ns_id).await.expect("create vault");
 
-    // Submit a batch write with multiple operations
-    let mut client = create_write_client(&node.addr).await.expect("connect");
+    // Submit per-vault writes sequentially. The block height must strictly
+    // increase across calls because each `Write` is its own Raft proposal.
+    let entries: &[(&str, &[u8])] =
+        &[("batch-key-1", b"batch-val-1"), ("batch-key-2", b"batch-val-2")];
 
-    let request = inferadb_ledger_proto::proto::BatchWriteRequest {
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: ns_id.value() }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
-        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: "batch-client".to_string() }),
-        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        operations: vec![inferadb_ledger_proto::proto::BatchWriteOperation {
-            operations: vec![
-                inferadb_ledger_proto::proto::Operation {
-                    op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
-                        inferadb_ledger_proto::proto::SetEntity {
-                            key: "batch-key-1".to_string(),
-                            value: b"batch-val-1".to_vec(),
-                            expires_at: None,
-                            condition: None,
-                        },
-                    )),
-                },
-                inferadb_ledger_proto::proto::Operation {
-                    op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
-                        inferadb_ledger_proto::proto::SetEntity {
-                            key: "batch-key-2".to_string(),
-                            value: b"batch-val-2".to_vec(),
-                            expires_at: None,
-                            condition: None,
-                        },
-                    )),
-                },
-            ],
-        }],
-        include_tx_proofs: false,
-        caller: None,
-    };
-
-    let response = client.batch_write(request).await.expect("batch write").into_inner();
-    match response.result {
-        Some(inferadb_ledger_proto::proto::batch_write_response::Result::Success(s)) => {
-            assert!(s.block_height > 0, "batch should produce a block");
-            assert!(s.tx_id.is_some(), "batch should have a tx_id");
-        },
-        Some(inferadb_ledger_proto::proto::batch_write_response::Result::Error(e)) => {
-            panic!("batch write failed: {:?}", e);
-        },
-        None => panic!("no result in batch write response"),
+    let mut last_block_height: u64 = 0;
+    for (key, value) in entries {
+        let height = write_entity(&node.addr, ns_id, vault, key, value).await.expect("write");
+        assert!(
+            height > last_block_height,
+            "block height should be monotonically increasing: got {height} after {last_block_height}"
+        );
+        last_block_height = height;
     }
 
     // Verify both keys are readable
@@ -246,6 +218,100 @@ async fn test_multi_region_batch_write() {
 
     assert_eq!(val1, Some(b"batch-val-1".to_vec()), "first batch key should be readable");
     assert_eq!(val2, Some(b"batch-val-2".to_vec()), "second batch key should be readable");
+}
+
+/// Asserts that `BatchWrite` is rejected with a structured deprecation error.
+///
+/// Phase 6 of the per-vault consensus migration deprecated cross-vault
+/// `BatchWrite`. The server must reject every request, regardless of
+/// content, with `FAILED_PRECONDITION` and an `ErrorDetails` payload
+/// carrying:
+/// - `error_code` = `DiagnosticCode::AppDeprecated` (3209) as a string
+/// - `is_retryable` = false
+/// - `suggested_action` = "Use per-vault Write calls instead"
+/// - `context.docs` pointing at the migration doc
+///
+/// Validates the structural contract the SDK relies on to surface a
+/// non-retryable, actionable error rather than blindly retrying. The SDK
+/// migration to per-vault `Write` is tracked separately (task A5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_batch_write_returns_deprecation_error() {
+    use inferadb_ledger_types::DiagnosticCode;
+    use prost::Message as _;
+
+    let cluster = TestCluster::with_data_regions(1, 2).await;
+    assert!(
+        cluster.wait_for_leaders(Duration::from_secs(10)).await,
+        "all regions should elect leaders"
+    );
+
+    let node = cluster.any_node();
+    let ns_id =
+        create_organization(&node.addr, "ms-deprecated", node).await.expect("create organization");
+    let vault = create_vault(&node.addr, ns_id).await.expect("create vault");
+
+    let mut client = create_write_client(&node.addr).await.expect("connect");
+
+    let request = inferadb_ledger_proto::proto::BatchWriteRequest {
+        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: ns_id.value() }),
+        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
+        client_id: Some(inferadb_ledger_proto::proto::ClientId {
+            id: "deprecation-client".to_string(),
+        }),
+        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
+        operations: vec![inferadb_ledger_proto::proto::BatchWriteOperation {
+            operations: vec![inferadb_ledger_proto::proto::Operation {
+                op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
+                    inferadb_ledger_proto::proto::SetEntity {
+                        key: "should-be-rejected".to_string(),
+                        value: b"unused".to_vec(),
+                        expires_at: None,
+                        condition: None,
+                    },
+                )),
+            }],
+        }],
+        include_tx_proofs: false,
+        caller: None,
+    };
+
+    let status =
+        client.batch_write(request).await.expect_err("BatchWrite must be rejected as deprecated");
+    assert_eq!(
+        status.code(),
+        tonic::Code::FailedPrecondition,
+        "deprecation must surface as FAILED_PRECONDITION, got: {status:?}"
+    );
+    assert!(
+        status.message().contains("deprecated"),
+        "status message should call out deprecation, got: {:?}",
+        status.message()
+    );
+
+    // ErrorDetails must be present and structurally correct.
+    let details_bytes = status.details();
+    assert!(
+        !details_bytes.is_empty(),
+        "deprecation status must carry ErrorDetails for SDK consumption"
+    );
+    let details = inferadb_ledger_proto::proto::ErrorDetails::decode(details_bytes)
+        .expect("decode ErrorDetails");
+    assert_eq!(
+        details.error_code,
+        DiagnosticCode::AppDeprecated.as_u16().to_string(),
+        "ErrorDetails.error_code must be AppDeprecated (3209)"
+    );
+    assert!(!details.is_retryable, "deprecation is not retryable");
+    assert_eq!(
+        details.suggested_action.as_deref(),
+        Some("Use per-vault Write calls instead"),
+        "ErrorDetails must guide clients to per-vault Write"
+    );
+    assert_eq!(
+        details.context.get("docs").map(String::as_str),
+        Some("docs/architecture/per-vault-consensus.md"),
+        "ErrorDetails.context must include docs pointer"
+    );
 }
 
 /// Tests idempotency across multi-region writes.
@@ -481,10 +547,13 @@ async fn test_write_forwarding_local_region_all_nodes() {
     assert_eq!(value, Some(b"fwd-val-0".to_vec()));
 }
 
-/// Tests batch write through the forwarding-enabled write service.
+/// Tests sequential per-vault writes through the forwarding-enabled write service.
 ///
-/// Verifies that `batch_write()` with the forwarding-enabled
-/// `RegionResolverService` works correctly for local regions.
+/// Originally exercised `BatchWrite` against a non-leader; A5 migrated this
+/// to per-vault `Write` after Phase 6 of the per-vault consensus migration
+/// deprecated cross-vault batches. Each `Write` may itself be forwarded /
+/// redirected to the per-vault leader; the test asserts the entries are
+/// readable after the writes commit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_batch_write_forwarding_local_region() {
     let cluster = TestCluster::with_data_regions(1, 2).await;
@@ -499,54 +568,13 @@ async fn test_batch_write_forwarding_local_region() {
         .expect("create organization");
     let vault = create_vault(&node.addr, ns_id).await.expect("create vault");
 
-    // Send batch write through the forwarding-enabled resolver
-    let mut client = create_write_client(&node.addr).await.expect("connect");
+    let entries: &[(&str, &[u8])] =
+        &[("batch-fwd-1", b"batch-fwd-val-1"), ("batch-fwd-2", b"batch-fwd-val-2")];
 
-    let request = inferadb_ledger_proto::proto::BatchWriteRequest {
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: ns_id.value() }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
-        client_id: Some(inferadb_ledger_proto::proto::ClientId {
-            id: "batch-fwd-client".to_string(),
-        }),
-        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        operations: vec![inferadb_ledger_proto::proto::BatchWriteOperation {
-            operations: vec![
-                inferadb_ledger_proto::proto::Operation {
-                    op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
-                        inferadb_ledger_proto::proto::SetEntity {
-                            key: "batch-fwd-1".to_string(),
-                            value: b"batch-fwd-val-1".to_vec(),
-                            expires_at: None,
-                            condition: None,
-                        },
-                    )),
-                },
-                inferadb_ledger_proto::proto::Operation {
-                    op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
-                        inferadb_ledger_proto::proto::SetEntity {
-                            key: "batch-fwd-2".to_string(),
-                            value: b"batch-fwd-val-2".to_vec(),
-                            expires_at: None,
-                            condition: None,
-                        },
-                    )),
-                },
-            ],
-        }],
-        include_tx_proofs: false,
-        caller: None,
-    };
-
-    let response =
-        client.batch_write(request).await.expect("batch write to non-leader").into_inner();
-    match response.result {
-        Some(inferadb_ledger_proto::proto::batch_write_response::Result::Success(s)) => {
-            assert!(s.block_height > 0, "batch should produce a block");
-        },
-        Some(inferadb_ledger_proto::proto::batch_write_response::Result::Error(e)) => {
-            panic!("batch write failed: {:?}", e);
-        },
-        None => panic!("no result in batch write response"),
+    for (key, value) in entries {
+        let height =
+            write_entity(&node.addr, ns_id, vault, key, value).await.expect("write to non-leader");
+        assert!(height > 0, "write should produce a block");
     }
 
     // Verify readable

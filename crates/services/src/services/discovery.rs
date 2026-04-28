@@ -315,6 +315,8 @@ impl DiscoveryService {
                 None,
                 Some(current_term),
                 Some(organization_id),
+                // Region-scoped resolver — no per-vault hint.
+                None,
             )
         })?;
 

@@ -122,6 +122,13 @@ pub enum DiagnosticCode {
     /// missing block archive entry. The client can request the proof separately
     /// or treat the write as committed without cryptographic proof.
     AppProofUnavailable = 3208,
+    /// Request targets a deprecated RPC, message, or feature that the server
+    /// refuses to handle.
+    ///
+    /// Emitted by the per-vault consensus migration when a client sends a
+    /// cross-vault `BatchWrite` request: the server rejects loudly and the
+    /// client must issue per-vault `Write` calls instead.
+    AppDeprecated = 3209,
 }
 
 impl DiagnosticCode {
@@ -169,6 +176,7 @@ impl DiagnosticCode {
             3106 => Some(Self::AppOrganizationMigrating),
             3107 => Some(Self::AppUserMigrating),
             3208 => Some(Self::AppProofUnavailable),
+            3209 => Some(Self::AppDeprecated),
             _ => None,
         }
     }
@@ -301,6 +309,9 @@ impl DiagnosticCode {
             },
             Self::AppProofUnavailable => {
                 "The write committed successfully. The proof was unavailable at response time due to a block archive timing issue. No retry is needed for the write itself."
+            },
+            Self::AppDeprecated => {
+                "The requested RPC or message is deprecated. Migrate to the documented replacement; this error is not retryable."
             },
         }
     }
@@ -868,6 +879,7 @@ mod tests {
             DiagnosticCode::AppInsufficientRegionNodes,
             DiagnosticCode::AppInvalidRegionAssignment,
             DiagnosticCode::AppProofUnavailable,
+            DiagnosticCode::AppDeprecated,
         ]
     }
 
@@ -974,6 +986,7 @@ mod tests {
             (DiagnosticCode::AppInsufficientRegionNodes, false),
             (DiagnosticCode::AppInvalidRegionAssignment, false),
             (DiagnosticCode::AppProofUnavailable, false),
+            (DiagnosticCode::AppDeprecated, false),
         ];
         for (code, expected) in &cases {
             assert_eq!(code.is_retryable(), *expected, "{code:?}");

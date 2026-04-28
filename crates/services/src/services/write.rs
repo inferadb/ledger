@@ -9,11 +9,10 @@
 use std::{fmt::Write, sync::Arc, time::Duration};
 
 use inferadb_ledger_proto::proto::{
-    BatchWriteRequest, BatchWriteResponse, BatchWriteSuccess, TxId, WriteError, WriteErrorCode,
-    WriteRequest, WriteResponse, WriteSuccess,
+    BatchWriteRequest, BatchWriteResponse, TxId, WriteError, WriteErrorCode, WriteRequest,
+    WriteResponse, WriteSuccess,
 };
 use inferadb_ledger_raft::{
-    error::classify_raft_error,
     event_writer::EventEmitter,
     idempotency::IdempotencyCache,
     logging::{OperationType, RequestContext, Sampler},
@@ -44,6 +43,10 @@ pub struct WriteService {
     /// Raft manager for creating forward clients when needed.
     #[builder(default)]
     manager: Option<Arc<RaftManager>>,
+    /// Typed proposal service used to route per-vault writes through the
+    /// shared `ProposalService` abstraction (consolidates the two inline
+    /// vault-routing blocks in `write` and `batch_write`).
+    proposal_service: Arc<dyn crate::proposal::ProposalService>,
     /// Idempotency cache for duplicate detection.
     idempotency: Arc<IdempotencyCache>,
     /// Per-organization rate limiter.
@@ -549,13 +552,16 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         }
 
         // Reject on followers — clients use the NotLeader hint to retry
-        // against the within-region leader directly.
+        // against the within-region leader directly. The leader check is
+        // on the region/org handle (vaults inherit leadership in
+        // `Delegated` mode), so the hint is region-scoped — no vault hint.
         if !region.handle.is_leader() {
             return Err(status_with_correlation(
                 super::metadata::not_leader_status_from_handle(
                     region.handle.as_ref(),
                     self.peer_addresses.as_ref(),
                     "Not the leader for this region",
+                    None,
                 ),
                 &ctx.request_id(),
                 ctx.trace_id(),
@@ -953,129 +959,40 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         // apply pipeline runs the vault-scoped tier-validation gate (P2c.1)
         // and advances the per-vault `last_applied` counter.
         //
-        // Per task #164 (option (a)): prefer the per-vault batch writer
-        // when the vault group has one — it coalesces concurrent writes to
-        // the same vault into a single fsync, restoring the throughput
-        // amortization that the org-side `batch_handle` used to provide
-        // before the vault-shard routing flip. When the vault group has no
-        // batch handle (e.g. the parent org started without batching
-        // configured — test fixtures typically omit it), fall back to a
-        // direct propose through `vault_group.handle()`.
-        let manager = self.manager.as_ref().ok_or_else(|| {
-            status_with_correlation(
-                Status::internal("Vault-scoped writes require RaftManager configuration"),
-                &ctx.request_id(),
-                ctx.trace_id(),
-            )
-        })?;
-        let vault_group =
-            manager.get_vault_group(region.region, organization_id, vault_id).map_err(|_| {
-                status_with_correlation(
-                    Status::unavailable(format!(
-                        "Vault {vault_id} (organization {organization_id}) is not active on this \
-                         node in region {}; retry so the SDK can reconnect",
-                        region.region,
-                    )),
-                    &ctx.request_id(),
-                    ctx.trace_id(),
-                )
-            })?;
-
-        // Re-check leadership against the vault shard specifically.
-        // Delegated leadership means `vault_group.handle().is_leader()`
-        // mirrors the parent org's leader; the check here narrows the
-        // NotLeader hint to the vault shard's view in case the parent's
-        // leader flipped between the earlier check and now.
-        if !vault_group.handle().is_leader() {
-            return Err(status_with_correlation(
-                super::metadata::not_leader_status_from_handle(
-                    vault_group.handle().as_ref(),
-                    self.peer_addresses.as_ref(),
-                    "Not the leader for this vault",
-                ),
-                &ctx.request_id(),
-                ctx.trace_id(),
-            ));
-        }
-
-        metrics::record_raft_proposal();
+        // Per task #164 (option (a)): the typed
+        // `propose_organization_request_to_vault` helper handles the
+        // batch-writer-vs-direct-propose split internally — it prefers the
+        // per-vault batch writer when present (so concurrent writes
+        // amortize the WAL fsync cost) and falls back to a direct propose
+        // through `vault_group.handle()` otherwise. Both paths drain the
+        // per-vault `commitment_buffer` automatically. Errors come back as
+        // raw `tonic::Status` so the gRPC handler can wrap them with
+        // `status_with_correlation` and stamp the canonical-log-line
+        // outcome locally.
         ctx.start_raft_timer();
         ctx.set_batch_info(false, 1);
-        let response = if let Some(batch_handle) = vault_group.batch_handle() {
-            // Batched path: hand the request to the per-vault batch
-            // writer. The writer drains its commitment buffer and wraps
-            // the request in `OrganizationRequest::BatchWrite { requests }`
-            // before proposing — see `start_vault_group`'s `submit_fn`.
-            let receiver = batch_handle.submit(ledger_request);
-            let result = match tokio::time::timeout(timeout, receiver).await {
-                Ok(Ok(Ok(response))) => Ok(response),
-                Ok(Ok(Err(batch_err))) => Err(batch_err.to_string()),
-                Ok(Err(_dropped)) => Err("Batch writer dropped response".to_string()),
-                Err(_elapsed) => {
-                    ctx.end_raft_timer();
+        let response = match self
+            .proposal_service
+            .propose_organization_request_to_vault(
+                region.region,
+                organization_id,
+                vault_id,
+                ledger_request,
+                ctx.caller_or_zero(),
+                timeout,
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(status) => {
+                ctx.end_raft_timer();
+                if status.code() == tonic::Code::DeadlineExceeded {
                     ctx.set_error("ProposalTimeout", "Raft proposal timed out");
-                    metrics::record_raft_proposal_timeout();
-                    return Err(status_with_correlation(
-                        Status::deadline_exceeded(format!(
-                            "Raft proposal timed out after {}ms",
-                            timeout.as_millis()
-                        )),
-                        &ctx.request_id(),
-                        ctx.trace_id(),
-                    ));
-                },
-            };
-            match result {
-                Ok(r) => r,
-                Err(message) => {
-                    ctx.end_raft_timer();
-                    ctx.set_error("RaftError", &message);
-                    return Err(status_with_correlation(
-                        classify_raft_error(&message),
-                        &ctx.request_id(),
-                        ctx.trace_id(),
-                    ));
-                },
-            }
-        } else {
-            // Fallback: direct propose through the vault's consensus
-            // handle. Drains the per-vault commitment buffer and wraps
-            // the request in a one-shot `RaftPayload` — same shape the
-            // batch writer's `submit_fn` produces, but unbatched.
-            let commitments = std::mem::take(
-                &mut *vault_group.commitment_buffer().lock().unwrap_or_else(|e| e.into_inner()),
-            );
-            let payload = inferadb_ledger_raft::types::RaftPayload {
-                request: ledger_request,
-                proposed_at: chrono::Utc::now(),
-                caller: ctx.caller_or_zero(),
-                state_root_commitments: commitments,
-            };
-            match vault_group.handle().propose_and_wait(payload, timeout).await {
-                Ok(result) => result,
-                Err(inferadb_ledger_raft::HandleError::Timeout { .. }) => {
-                    ctx.end_raft_timer();
-                    ctx.set_error("ProposalTimeout", "Raft proposal timed out");
-                    metrics::record_raft_proposal_timeout();
-                    return Err(status_with_correlation(
-                        Status::deadline_exceeded(format!(
-                            "Raft proposal timed out after {}ms",
-                            timeout.as_millis()
-                        )),
-                        &ctx.request_id(),
-                        ctx.trace_id(),
-                    ));
-                },
-                Err(e) => {
-                    ctx.end_raft_timer();
-                    ctx.set_error("RaftError", &e.to_string());
-                    return Err(status_with_correlation(
-                        classify_raft_error(&e.to_string()),
-                        &ctx.request_id(),
-                        ctx.trace_id(),
-                    ));
-                },
-            }
+                } else {
+                    ctx.set_error("RaftError", status.message());
+                }
+                return Err(status_with_correlation(status, &ctx.request_id(), ctx.trace_id()));
+            },
         };
         ctx.end_raft_timer();
 
@@ -1203,25 +1120,41 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         }
     }
 
-    /// Processes multiple write transactions atomically as a single batch.
+    /// Rejects cross-vault `BatchWrite` requests with a structured deprecation
+    /// error.
     ///
-    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
-    /// In multi-region deployments, requests are routed to the correct region
-    /// based on organization, with cross-region forwarding when needed.
+    /// Phase 6 of the per-vault consensus migration deprecates `BatchWrite`:
+    /// every vault is its own Raft group, and a single Raft proposal can no
+    /// longer atomically span multiple vaults. Clients must issue per-vault
+    /// `Write` calls instead. The SDK migration is tracked separately; the
+    /// server's job here is to reject loudly and tell the client exactly
+    /// where to go next.
+    ///
+    /// The response carries a structured `ErrorDetails`:
+    /// - `error_code` = `DiagnosticCode::AppDeprecated` (3209)
+    /// - `is_retryable` = false (clients must change behaviour, not retry)
+    /// - `suggested_action` = "Use per-vault Write calls instead"
+    /// - `context.docs` = path to the migration doc
+    ///
+    /// The status code is `FAILED_PRECONDITION`: the request is well-formed,
+    /// but the server's preconditions for accepting it (RPC not deprecated)
+    /// are not met. SDKs that decode `ErrorDetails` get explicit non-
+    /// retryability + a forward path; SDKs that don't still see the human-
+    /// readable status message.
     async fn batch_write(
         &self,
         request: Request<BatchWriteRequest>,
     ) -> Result<Response<BatchWriteResponse>, Status> {
-        // Reject requests with insufficient remaining deadline
-        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
-        // Reject if node is draining
-        super::helpers::check_not_draining(self.health_state.as_ref())?;
+        use std::collections::HashMap;
 
-        // Build unified request context before consuming the request body.
-        // from_request extracts transport metadata and trace context from gRPC headers.
+        use inferadb_ledger_types::DiagnosticCode;
+        use prost::Message;
+
+        // Build the request context so the deprecation rejection still emits
+        // a canonical log line (operation, error code, request id, trace id)
+        // — the same observability shape every other write rejection has.
         let event_handle: Option<Arc<dyn EventEmitter>> =
             self.event_handle.as_ref().map(|h| Arc::new(h.clone()) as _);
-        let grpc_metadata = request.metadata().clone();
         let mut ctx =
             RequestContext::from_request("WriteService", "batch_write", &request, event_handle);
         ctx.set_operation_type(OperationType::Write);
@@ -1232,765 +1165,28 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
             ctx.set_node_id(node_id);
         }
 
-        let req = request.into_inner();
-
-        // Extract client ID
-        let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
-
-        // Resolve organization slug → internal ID via system region
-        let system = self.resolver.system_region()?;
-        let organization_id = SlugResolver::new(system.applied_state.clone())
-            .extract_and_resolve(&req.organization)?;
-
-        // Set organization slug on context for event emission in early-exit paths.
-        ctx.set_organization(req.organization.as_ref().map_or(0, |n| n.slug));
-
-        // Reject writes to organizations undergoing migration
-        self.check_not_migrating(&system, organization_id)?;
-
-        // Check for cross-region forwarding — if the organization is on a remote
-        // region, run pre-flight checks and forward the raw request.
-        if self.resolver.supports_forwarding()
-            && let ResolveResult::Redirect(remote) =
-                self.resolver.resolve_with_redirect(organization_id)?
-        {
-            // Flatten operations for pre-flight validation
-            let all_operations: Vec<inferadb_ledger_proto::proto::Operation> =
-                req.operations.iter().flat_map(|group| group.operations.clone()).collect();
-
-            // Pre-flight: validation on originating node
-            if let Err(status) = self.validate_operations(&all_operations) {
-                ctx.record_event(
-                    inferadb_ledger_types::events::EventAction::RequestValidationFailed,
-                    inferadb_ledger_types::events::EventOutcome::Denied {
-                        reason: status.message().to_string(),
-                    },
-                    &[],
-                );
-                return Err(status);
-            }
-
-            // Pre-flight: rate limit on originating node
-            if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
-                ctx.record_event(
-                    inferadb_ledger_types::events::EventAction::RequestRateLimited,
-                    inferadb_ledger_types::events::EventOutcome::Denied {
-                        reason: "rate_limited".to_string(),
-                    },
-                    &[],
-                );
-                return Err(status_with_correlation(status, &ctx.request_id(), ctx.trace_id()));
-            }
-
-            // Redirect cross-region batch writes — clients reconnect against the
-            // remote region's leader using the hint attached to the NotLeader status.
-            let source_region =
-                self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
-            debug!(
-                organization_id = organization_id.value(),
-                target_region = remote.region.as_str(),
-                source_region,
-                "Redirecting batch_write to remote region"
-            );
-            return Err(status_with_correlation(
-                super::metadata::not_leader_remote_region(
-                    &remote,
-                    "Organization hosted by a remote region; reconnect to that region",
-                ),
-                &ctx.request_id(),
-                ctx.trace_id(),
-            ));
-        }
-
-        // Ensure GLOBAL state is replicated before resolving vault slugs.
-        super::helpers::ensure_global_consistency(self.manager.as_deref()).await;
-
-        // Local processing: resolve vault slug via GLOBAL applied state.
-        // Vault slug indexes are maintained in the GLOBAL Raft group (CreateVault
-        // is a GLOBAL operation), not in the data region's applied state.
-        let mut region = self.resolver.resolve(organization_id)?;
-        let vault_id = SlugResolver::new(system.applied_state.clone())
-            .extract_and_resolve_vault(&req.vault)?;
-
-        // Per-vault apply records `ClientSequenceEntry` and vault height
-        // updates in the per-vault Raft group's `AppliedState`; the
-        // org-scoped accessor never sees those writes. Attach the
-        // per-vault accessor when the vault group is live so the
-        // cross-failover idempotency check below routes through it.
-        // `attach_vault_group` pairs `vault_applied_state` with
-        // `vault_applied_index_rx` — see [`RegionContext::attach_vault_group`]
-        // for the invariant.
-        if let Some(manager) = &self.manager
-            && let Ok(vault_group) =
-                manager.get_vault_group(region.region, organization_id, vault_id)
-        {
-            region.attach_vault_group(&vault_group);
-        }
-
-        // Reject on followers — clients use the NotLeader hint to retry
-        // against the within-region leader directly.
-        if !region.handle.is_leader() {
-            return Err(status_with_correlation(
-                super::metadata::not_leader_status_from_handle(
-                    region.handle.as_ref(),
-                    self.peer_addresses.as_ref(),
-                    "Not the leader for this region",
-                ),
-                &ctx.request_id(),
-                ctx.trace_id(),
-            ));
-        }
-
-        // Extract caller identity for canonical log line
-        super::helpers::extract_caller(&mut ctx, &req.caller);
-
-        // Parse idempotency key (must be exactly 16 bytes for UUID)
-        let idempotency_key: [u8; 16] =
-            req.idempotency_key.as_slice().try_into().map_err(|_| {
-                Status::invalid_argument("idempotency_key must be exactly 16 bytes")
-            })?;
-
-        // Populate logging context with request metadata
-        ctx.set_client_info(&client_id, 0);
-        let organization = req.organization.as_ref().map_or(0, |n| n.slug);
-        let vault = req.vault.as_ref().map_or(0, |v| v.slug);
-        ctx.set_target(organization, vault);
-
-        // Flatten all operations from all groups
-        let all_operations: Vec<inferadb_ledger_proto::proto::Operation> =
-            req.operations.iter().flat_map(|group| group.operations.clone()).collect();
-
-        // Validate all operations before any processing
-        if let Err(status) = self.validate_operations(&all_operations) {
-            ctx.record_event(
-                inferadb_ledger_types::events::EventAction::RequestValidationFailed,
-                inferadb_ledger_types::events::EventOutcome::Denied {
-                    reason: status.message().to_string(),
-                },
-                &[],
-            );
-            return Err(status);
-        }
-
-        let batch_size = all_operations.len();
-
-        // Compute request hash for payload comparison (detects key reuse with different payload)
-        let request_hash = seahash::hash(&super::helpers::hash_operations(&all_operations));
-
-        // Populate write operation fields
-        let operation_types = Self::extract_operation_types(&all_operations);
-        ctx.set_write_operation(batch_size, operation_types, req.include_tx_proofs);
-        ctx.set_batch_info(false, batch_size);
-        ctx.set_bytes_written(Self::estimate_operations_bytes(&all_operations));
-
-        // Serialize concurrent requests with the same idempotency key.
-        // See the write() handler for detailed rationale.
-        use inferadb_ledger_raft::idempotency::{
-            IdempotencyCheckResult, IdempotencyKey, InFlightStatus,
-        };
-        let _inflight_guard = loop {
-            let inflight_key =
-                IdempotencyKey::new(organization_id, vault_id, client_id.as_str(), idempotency_key);
-            match self.idempotency.try_acquire_inflight(inflight_key) {
-                InFlightStatus::Acquired(guard) => break guard,
-                InFlightStatus::Waiting(notify) => {
-                    // Register the waiter synchronously before any yield point.
-                    // tokio::sync::Notify::notify_waiters() does not store a permit
-                    // for future .notified() calls; a waiter that registers after
-                    // notify_waiters() fires would miss the wakeup. The acquirer
-                    // inserts the cached result BEFORE releasing, so a late waiter's
-                    // cache re-check is always safe.
-                    let notified = notify.notified();
-                    tokio::pin!(notified);
-                    notified.as_mut().enable();
-
-                    // Short-circuit: if notify_waiters() already fired before we
-                    // registered, the cache is populated and we can return immediately.
-                    match self.idempotency.check(
-                        organization_id,
-                        vault_id,
-                        &client_id,
-                        idempotency_key,
-                        request_hash,
-                    ) {
-                        IdempotencyCheckResult::Duplicate(cached) => {
-                            ctx.set_idempotency_hit(true);
-                            ctx.set_cached();
-                            if let Some(ref header) = cached.block_header
-                                && let Some(ref state_root) = header.state_root
-                            {
-                                ctx.set_state_root(&Self::bytes_to_hex(&state_root.value));
-                            }
-                            ctx.set_block_height(cached.block_height);
-                            metrics::record_idempotency_operation("coalesced_fast");
-                            metrics::record_idempotency_operation("hit");
-                            return Ok(response_with_correlation(
-                                BatchWriteResponse {
-                                    result: Some(
-                                        inferadb_ledger_proto::proto::batch_write_response::Result::Success(
-                                            BatchWriteSuccess {
-                                                tx_id: cached.tx_id,
-                                                block_height: cached.block_height,
-                                                block_header: cached.block_header,
-                                                tx_proof: cached.tx_proof,
-                                                assigned_sequence: cached.assigned_sequence,
-                                            },
-                                        ),
-                                    ),
-                                },
-                                &ctx.request_id(),
-                                ctx.trace_id(),
-                            ));
-                        },
-                        IdempotencyCheckResult::KeyReused => {
-                            ctx.set_error(
-                                "IdempotencyKeyReused",
-                                "Idempotency key reused with different payload",
-                            );
-                            return Ok(response_with_correlation(
-                                BatchWriteResponse {
-                                    result: Some(
-                                        inferadb_ledger_proto::proto::batch_write_response::Result::Error(
-                                            WriteError {
-                                                code: WriteErrorCode::IdempotencyKeyReused.into(),
-                                                key: String::new(),
-                                                current_version: None,
-                                                current_value: None,
-                                                message:
-                                                    "Idempotency key was already used with a different request payload"
-                                                        .to_string(),
-                                                committed_tx_id: None,
-                                                committed_block_height: None,
-                                                assigned_sequence: None,
-                                            },
-                                        ),
-                                    ),
-                                },
-                                &ctx.request_id(),
-                                ctx.trace_id(),
-                            ));
-                        },
-                        IdempotencyCheckResult::NewRequest => {
-                            // Acquirer is still in-flight (or crashed mid-insert).
-                            // Wait on the notification, then re-check.
-                            notified.await;
-                            metrics::record_idempotency_operation("coalesced");
-
-                            match self.idempotency.check(
-                                organization_id,
-                                vault_id,
-                                &client_id,
-                                idempotency_key,
-                                request_hash,
-                            ) {
-                                IdempotencyCheckResult::Duplicate(cached) => {
-                                    ctx.set_idempotency_hit(true);
-                                    ctx.set_cached();
-                                    if let Some(ref header) = cached.block_header
-                                        && let Some(ref state_root) = header.state_root
-                                    {
-                                        ctx.set_state_root(&Self::bytes_to_hex(&state_root.value));
-                                    }
-                                    ctx.set_block_height(cached.block_height);
-                                    metrics::record_idempotency_operation("hit");
-                                    return Ok(response_with_correlation(
-                                        BatchWriteResponse {
-                                            result: Some(
-                                                inferadb_ledger_proto::proto::batch_write_response::Result::Success(
-                                                    BatchWriteSuccess {
-                                                        tx_id: cached.tx_id,
-                                                        block_height: cached.block_height,
-                                                        block_header: cached.block_header,
-                                                        tx_proof: cached.tx_proof,
-                                                        assigned_sequence: cached.assigned_sequence,
-                                                    },
-                                                ),
-                                            ),
-                                        },
-                                        &ctx.request_id(),
-                                        ctx.trace_id(),
-                                    ));
-                                },
-                                IdempotencyCheckResult::KeyReused => {
-                                    ctx.set_error(
-                                        "IdempotencyKeyReused",
-                                        "Idempotency key reused with different payload",
-                                    );
-                                    return Ok(response_with_correlation(
-                                        BatchWriteResponse {
-                                            result: Some(
-                                                inferadb_ledger_proto::proto::batch_write_response::Result::Error(
-                                                    WriteError {
-                                                        code: WriteErrorCode::IdempotencyKeyReused
-                                                            .into(),
-                                                        key: String::new(),
-                                                        current_version: None,
-                                                        current_value: None,
-                                                        message:
-                                                            "Idempotency key was already used with a different request payload"
-                                                                .to_string(),
-                                                        committed_tx_id: None,
-                                                        committed_block_height: None,
-                                                        assigned_sequence: None,
-                                                    },
-                                                ),
-                                            ),
-                                        },
-                                        &ctx.request_id(),
-                                        ctx.trace_id(),
-                                    ));
-                                },
-                                IdempotencyCheckResult::NewRequest => {
-                                    // Acquirer released its guard without inserting
-                                    // (crash path). Retry the outer loop.
-                                    continue;
-                                },
-                            }
-                        },
-                    }
-                },
-            }
-        };
-
-        // Check idempotency cache for duplicate (fast path — moka hit)
-        match self.idempotency.check(
-            organization_id,
-            vault_id,
-            &client_id,
-            idempotency_key,
-            request_hash,
-        ) {
-            IdempotencyCheckResult::Duplicate(cached) => {
-                ctx.set_idempotency_hit(true);
-                ctx.set_cached();
-                if let Some(ref header) = cached.block_header
-                    && let Some(ref state_root) = header.state_root
-                {
-                    ctx.set_state_root(&Self::bytes_to_hex(&state_root.value));
-                }
-                ctx.set_block_height(cached.block_height);
-                metrics::record_idempotency_operation("hit");
-                return Ok(response_with_correlation(
-                    BatchWriteResponse {
-                        result: Some(
-                            inferadb_ledger_proto::proto::batch_write_response::Result::Success(
-                                BatchWriteSuccess {
-                                    tx_id: cached.tx_id,
-                                    block_height: cached.block_height,
-                                    block_header: cached.block_header,
-                                    tx_proof: cached.tx_proof,
-                                    assigned_sequence: cached.assigned_sequence,
-                                },
-                            ),
-                        ),
-                    },
-                    &ctx.request_id(),
-                    ctx.trace_id(),
-                ));
-            },
-            IdempotencyCheckResult::KeyReused => {
-                ctx.set_error(
-                    "IdempotencyKeyReused",
-                    "Idempotency key reused with different payload",
-                );
-                return Ok(response_with_correlation(BatchWriteResponse {
-                    result: Some(inferadb_ledger_proto::proto::batch_write_response::Result::Error(WriteError {
-                        code: WriteErrorCode::IdempotencyKeyReused.into(),
-                        key: String::new(),
-                        current_version: None,
-                        current_value: None,
-                        message:
-                            "Idempotency key was already used with a different request payload"
-                                .to_string(),
-                        committed_tx_id: None,
-                        committed_block_height: None,
-                        assigned_sequence: None,
-                    })),
-                }, &ctx.request_id(), ctx.trace_id()));
-            },
-            IdempotencyCheckResult::NewRequest => {
-                // Moka miss — check replicated state for cross-failover dedup
-                ctx.set_idempotency_hit(false);
-                {
-                    use inferadb_ledger_raft::log_storage::IdempotencyCheckResult as ReplicatedCheck;
-                    match region.client_idempotency_check(
-                        organization_id,
-                        vault_id,
-                        &client_id,
-                        &idempotency_key,
-                        request_hash,
-                    ) {
-                        ReplicatedCheck::AlreadyCommitted { sequence } => {
-                            metrics::record_idempotency_operation("hit");
-                            return Ok(response_with_correlation(
-                                BatchWriteResponse {
-                                    result: Some(
-                                        inferadb_ledger_proto::proto::batch_write_response::Result::Error(
-                                            WriteError {
-                                                code: WriteErrorCode::AlreadyCommitted.into(),
-                                                key: String::new(),
-                                                current_version: None,
-                                                current_value: None,
-                                                message: "Request already committed (cross-failover dedup)".to_string(),
-                                                committed_tx_id: None,
-                                                committed_block_height: None,
-                                                assigned_sequence: Some(sequence),
-                                            },
-                                        ),
-                                    ),
-                                },
-                                &ctx.request_id(),
-                                ctx.trace_id(),
-                            ));
-                        },
-                        ReplicatedCheck::KeyReused => {
-                            ctx.set_error(
-                                "IdempotencyKeyReused",
-                                "Idempotency key reused with different payload (cross-failover)",
-                            );
-                            return Ok(response_with_correlation(
-                                BatchWriteResponse {
-                                    result: Some(
-                                        inferadb_ledger_proto::proto::batch_write_response::Result::Error(
-                                            WriteError {
-                                                code: WriteErrorCode::IdempotencyKeyReused.into(),
-                                                key: String::new(),
-                                                current_version: None,
-                                                current_value: None,
-                                                message: "Idempotency key was already used with a different request payload".to_string(),
-                                                committed_tx_id: None,
-                                                committed_block_height: None,
-                                                assigned_sequence: None,
-                                            },
-                                        ),
-                                    ),
-                                },
-                                &ctx.request_id(),
-                                ctx.trace_id(),
-                            ));
-                        },
-                        ReplicatedCheck::Miss => {},
-                    }
-                }
-                metrics::record_idempotency_operation("miss");
-            },
-        }
-
-        // Check rate limits (backpressure, organization, client)
-        if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
-            ctx.set_rate_limited();
-            ctx.record_event(
-                inferadb_ledger_types::events::EventAction::RequestRateLimited,
-                inferadb_ledger_types::events::EventOutcome::Denied {
-                    reason: "rate_limited".to_string(),
-                },
-                &[],
-            );
-            return Err(status_with_correlation(status, &ctx.request_id(), ctx.trace_id()));
-        }
-
-        // Track key access frequency for hot key detection.
-        self.record_hot_keys(vault_id, &all_operations);
-
-        // Server-assigned sequences: no gap check needed
-
-        // γ Phase 3a: carry external slugs through to apply-time stamping
-        // on `VaultEntry` (see the `write` path above for rationale).
-        let organization_slug = inferadb_ledger_types::OrganizationSlug::new(
-            req.organization.as_ref().map_or(0, |o| o.slug),
+        ctx.set_error(
+            "Deprecated",
+            "BatchWrite is deprecated; issue per-vault Write calls instead",
         );
-        let vault_slug =
-            inferadb_ledger_types::VaultSlug::new(req.vault.as_ref().map_or(0, |v| v.slug));
 
-        let ledger_request = self.operations_to_request(
-            organization_id,
-            Some(vault_id),
-            &all_operations,
-            &client_id,
-            idempotency_key,
-            request_hash,
-            organization_slug,
-            vault_slug,
-        )?;
-
-        // Re-validate vault slug before proposal submission.
-        // Between the initial resolution and now (leader check, rate limiting,
-        // idempotency check), the GLOBAL state may have changed (e.g., vault
-        // migrated to a different shard during region migration). A mismatch
-        // means the request would be routed to a stale shard.
-        let revalidated_vault_id = SlugResolver::new(system.applied_state.clone())
-            .extract_and_resolve_vault(&req.vault)?;
-        if revalidated_vault_id != vault_id {
-            warn!(
-                vault_id = vault_id.value(),
-                revalidated_vault_id = revalidated_vault_id.value(),
-                "Vault routing changed during batch_write processing"
-            );
-            return Err(status_with_correlation(
-                super::helpers::error_code_to_status(
-                    inferadb_ledger_types::ErrorCode::StaleRouting,
-                    "Stale routing: vault routing changed during request processing. Retry."
-                        .to_string(),
-                ),
-                &ctx.request_id(),
-                ctx.trace_id(),
-            ));
-        }
-
-        // Compute effective timeout: min(proposal_timeout, grpc_deadline)
-        let grpc_deadline =
-            inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-        let timeout =
-            inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
-
-        // P2c.3.b.2 / P2c.3.b.4: route the proposal to the vault's per-vault
-        // Raft shard, not the parent organization shard. See `write()`
-        // above for the full rationale; this is the BatchWrite twin of the
-        // same flip.
-        //
-        // Per task #164: prefer the per-vault batch writer when present so
-        // concurrent BatchWrites against the same vault still amortize
-        // WAL fsync cost. Fall back to direct propose when the vault
-        // group has no batch handle (parent org started without batching
-        // configured).
-        let manager = self.manager.as_ref().ok_or_else(|| {
-            status_with_correlation(
-                Status::internal("Vault-scoped writes require RaftManager configuration"),
-                &ctx.request_id(),
-                ctx.trace_id(),
-            )
-        })?;
-        let vault_group =
-            manager.get_vault_group(region.region, organization_id, vault_id).map_err(|_| {
-                status_with_correlation(
-                    Status::unavailable(format!(
-                        "Vault {vault_id} (organization {organization_id}) is not active on this \
-                         node in region {}; retry so the SDK can reconnect",
-                        region.region,
-                    )),
-                    &ctx.request_id(),
-                    ctx.trace_id(),
-                )
-            })?;
-
-        if !vault_group.handle().is_leader() {
-            return Err(status_with_correlation(
-                super::metadata::not_leader_status_from_handle(
-                    vault_group.handle().as_ref(),
-                    self.peer_addresses.as_ref(),
-                    "Not the leader for this vault",
-                ),
-                &ctx.request_id(),
-                ctx.trace_id(),
-            ));
-        }
-
-        metrics::record_raft_proposal();
-        ctx.start_raft_timer();
-        let response = if let Some(batch_handle) = vault_group.batch_handle() {
-            let receiver = batch_handle.submit(ledger_request);
-            let result = match tokio::time::timeout(timeout, receiver).await {
-                Ok(Ok(Ok(response))) => Ok(response),
-                Ok(Ok(Err(batch_err))) => Err(batch_err.to_string()),
-                Ok(Err(_dropped)) => Err("Batch writer dropped response".to_string()),
-                Err(_elapsed) => {
-                    ctx.end_raft_timer();
-                    ctx.set_error("ProposalTimeout", "Raft proposal timed out");
-                    metrics::record_raft_proposal_timeout();
-                    return Err(status_with_correlation(
-                        Status::deadline_exceeded(format!(
-                            "Raft proposal timed out after {}ms",
-                            timeout.as_millis()
-                        )),
-                        &ctx.request_id(),
-                        ctx.trace_id(),
-                    ));
-                },
-            };
-            match result {
-                Ok(r) => r,
-                Err(message) => {
-                    ctx.end_raft_timer();
-                    ctx.set_error("RaftError", &message);
-                    return Err(status_with_correlation(
-                        classify_raft_error(&message),
-                        &ctx.request_id(),
-                        ctx.trace_id(),
-                    ));
-                },
-            }
-        } else {
-            let commitments = std::mem::take(
-                &mut *vault_group.commitment_buffer().lock().unwrap_or_else(|e| e.into_inner()),
-            );
-            let payload = inferadb_ledger_raft::types::RaftPayload {
-                request: ledger_request,
-                proposed_at: chrono::Utc::now(),
-                caller: ctx.caller_or_zero(),
-                state_root_commitments: commitments,
-            };
-            match vault_group.handle().propose_and_wait(payload, timeout).await {
-                Ok(result) => result,
-                Err(inferadb_ledger_raft::HandleError::Timeout { .. }) => {
-                    ctx.end_raft_timer();
-                    ctx.set_error("ProposalTimeout", "Raft proposal timed out");
-                    metrics::record_raft_proposal_timeout();
-                    return Err(status_with_correlation(
-                        Status::deadline_exceeded(format!(
-                            "Raft proposal timed out after {}ms",
-                            timeout.as_millis()
-                        )),
-                        &ctx.request_id(),
-                        ctx.trace_id(),
-                    ));
-                },
-                Err(e) => {
-                    ctx.end_raft_timer();
-                    ctx.set_error("RaftError", &e.to_string());
-                    return Err(status_with_correlation(
-                        classify_raft_error(&e.to_string()),
-                        &ctx.request_id(),
-                        ctx.trace_id(),
-                    ));
-                },
-            }
-        };
-        ctx.end_raft_timer();
-
-        match response {
-            LedgerResponse::Write { block_height, block_hash, assigned_sequence } => {
-                // Generate proof and block header if requested
-                let (block_header, tx_proof, proof_error_reason) = if req.include_tx_proofs {
-                    self.generate_write_proof(organization_id, vault_id, block_height)
-                } else {
-                    (None, None, None)
-                };
-
-                let success = WriteSuccess {
-                    tx_id: Some(TxId { id: Uuid::new_v4().as_bytes().to_vec() }),
-                    block_height,
-                    block_header: block_header.clone(),
-                    tx_proof,
-                    assigned_sequence,
-                };
-
-                // Cache the result for idempotency
-                self.idempotency.insert(
-                    organization_id,
-                    vault_id,
-                    client_id.clone(),
-                    idempotency_key,
-                    request_hash,
-                    success.clone(),
-                );
-                metrics::set_idempotency_cache_size(self.idempotency.len());
-
-                // Set success outcome with block info
-                ctx.set_success();
-                ctx.set_block_height(block_height);
-                ctx.set_block_hash(&Self::bytes_to_hex(&block_hash));
-                if let Some(ref header) = block_header
-                    && let Some(ref state_root) = header.state_root
-                {
-                    ctx.set_state_root(&Self::bytes_to_hex(&state_root.value));
-                }
-
-                let elapsed = ctx.elapsed_secs();
-                metrics::record_organization_latency(organization_id, "write", elapsed);
-
-                let mut response = response_with_correlation(
-                    BatchWriteResponse {
-                        result: Some(
-                            inferadb_ledger_proto::proto::batch_write_response::Result::Success(
-                                BatchWriteSuccess {
-                                    tx_id: success.tx_id,
-                                    block_height: success.block_height,
-                                    block_header: success.block_header,
-                                    tx_proof: success.tx_proof,
-                                    assigned_sequence: success.assigned_sequence,
-                                },
-                            ),
-                        ),
-                    },
-                    &ctx.request_id(),
-                    ctx.trace_id(),
-                );
-                if let Some(reason) = proof_error_reason
-                    && let Ok(val) = tonic::metadata::MetadataValue::try_from(reason)
-                {
-                    response.metadata_mut().insert("x-proof-unavailable-reason", val);
-                }
-                Ok(response)
-            },
-            LedgerResponse::Error { code, message } => {
-                ctx.set_error(code.grpc_code_name(), &message);
-
-                Ok(response_with_correlation(
-                    BatchWriteResponse {
-                        result: Some(
-                            inferadb_ledger_proto::proto::batch_write_response::Result::Error(
-                                WriteError {
-                                    code: WriteErrorCode::Unspecified.into(),
-                                    key: String::new(),
-                                    current_version: None,
-                                    current_value: None,
-                                    message,
-                                    committed_tx_id: None,
-                                    committed_block_height: None,
-                                    assigned_sequence: None,
-                                },
-                            ),
-                        ),
-                    },
-                    &ctx.request_id(),
-                    ctx.trace_id(),
-                ))
-            },
-            LedgerResponse::PreconditionFailed {
-                key,
-                current_version,
-                current_value,
-                failed_condition,
-            } => {
-                // Return current state for client-side conflict resolution
-                // Key exists if we have a current_version (which is the version when entity was
-                // last modified)
-                let key_exists = current_version.is_some();
-                let error_code =
-                    Self::map_condition_to_error_code(failed_condition.as_ref(), key_exists);
-
-                ctx.set_precondition_failed(Some(&key));
-
-                Ok(response_with_correlation(
-                    BatchWriteResponse {
-                        result: Some(
-                            inferadb_ledger_proto::proto::batch_write_response::Result::Error(
-                                WriteError {
-                                    code: error_code.into(),
-                                    key,
-                                    current_version,
-                                    current_value,
-                                    message: "Precondition failed".to_string(),
-                                    committed_tx_id: None,
-                                    committed_block_height: None,
-                                    assigned_sequence: None,
-                                },
-                            ),
-                        ),
-                    },
-                    &ctx.request_id(),
-                    ctx.trace_id(),
-                ))
-            },
-            _ => {
-                ctx.set_error("UnexpectedResponse", "Unexpected response type");
-                Err(status_with_correlation(
-                    Status::internal("Unexpected response type"),
-                    &ctx.request_id(),
-                    ctx.trace_id(),
-                ))
-            },
-        }
+        let mut context = HashMap::new();
+        context.insert("docs".to_owned(), "docs/architecture/per-vault-consensus.md".to_owned());
+        let details = super::error_details::build_error_details(
+            DiagnosticCode::AppDeprecated.as_u16(),
+            false,
+            None,
+            context,
+            Some("Use per-vault Write calls instead"),
+        );
+        let status = Status::with_details(
+            tonic::Code::FailedPrecondition,
+            "BatchWriteRequest is deprecated as of Phase 6 of the per-vault consensus \
+             migration. Issue per-vault Write calls instead. \
+             See docs/architecture/per-vault-consensus.md.",
+            details.encode_to_vec().into(),
+        );
+        Err(status_with_correlation(status, &ctx.request_id(), ctx.trace_id()))
     }
 }
 

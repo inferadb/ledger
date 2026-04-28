@@ -350,8 +350,10 @@ impl StressMetrics {
 
 /// Writes worker that sends write requests to the leader.
 ///
-/// Uses `BatchWrite` RPC when batch_size > 1 to amortize Raft consensus overhead
-/// across multiple operations. This is the key to achieving high throughput.
+/// Issues `batch_size` sequential per-vault `Write` RPCs per outer loop
+/// iteration. The legacy `BatchWrite` RPC is deprecated as of Phase 6 of the
+/// per-vault consensus migration (A5); throughput now relies on the Raft
+/// `BatchWriter` to coalesce concurrent in-flight proposals.
 async fn write_worker(
     worker_id: usize,
     leader_addr: String,
@@ -402,116 +404,12 @@ async fn write_worker(
 
         let start = Instant::now();
 
-        // Use BatchWrite RPC when batch_size > 1 for better throughput.
-        // BatchWrite sends multiple operations in a single Raft log entry,
-        // amortizing the consensus overhead (~16-30ms) across all operations.
-        if batch_size > 1 {
-            // Build BatchWriteRequest with operations grouped
-            let operations: Vec<inferadb_ledger_proto::proto::BatchWriteOperation> =
-                keys_and_values
-                    .iter()
-                    .map(|(key, value)| inferadb_ledger_proto::proto::BatchWriteOperation {
-                        operations: vec![inferadb_ledger_proto::proto::Operation {
-                            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
-                                inferadb_ledger_proto::proto::SetEntity {
-                                    key: key.clone(),
-                                    value: value.clone(),
-                                    expires_at: None,
-                                    condition: None,
-                                },
-                            )),
-                        }],
-                    })
-                    .collect();
-
-            let request = inferadb_ledger_proto::proto::BatchWriteRequest {
-                organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                    slug: config.organization.value(),
-                }),
-                vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: config.vault.value() }),
-                client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.clone() }),
-                idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-                operations,
-                include_tx_proofs: false,
-                caller: None,
-            };
-
-            match client.batch_write(request).await {
-                Ok(response) => {
-                    let latency = start.elapsed();
-                    let inner = response.into_inner();
-                    match inner.result {
-                        Some(
-                            inferadb_ledger_proto::proto::batch_write_response::Result::Success(_),
-                        ) => {
-                            // Record all operations in the batch with amortized latency.
-                            // The batch latency divided by batch_size gives per-operation latency.
-                            let per_op_latency =
-                                Duration::from_nanos(latency.as_nanos() as u64 / batch_size as u64);
-                            for (key, value) in keys_and_values {
-                                if config.track_write_locations {
-                                    metrics.record_write_with_location(
-                                        per_op_latency,
-                                        key,
-                                        value,
-                                        config.organization,
-                                        config.vault,
-                                    );
-                                } else {
-                                    metrics.record_write(per_op_latency, key, value);
-                                }
-                            }
-                            consecutive_errors = 0;
-                        },
-                        Some(
-                            inferadb_ledger_proto::proto::batch_write_response::Result::Error(_e),
-                        ) => {
-                            for _ in 0..batch_size {
-                                metrics.record_write_error();
-                            }
-                            consecutive_errors += 1;
-                        },
-                        None => {
-                            for _ in 0..batch_size {
-                                metrics.record_write_error();
-                            }
-                            consecutive_errors += 1;
-                        },
-                    }
-                },
-                Err(e) => {
-                    let error_msg = e.to_string();
-
-                    // Check if this is a forwarding error and extract the leader address
-                    if let Some(leader_addr) = extract_leader_addr_from_error(&error_msg) {
-                        // Don't count forwarding as error - just reconnect to leader
-                        if current_addr != leader_addr {
-                            current_addr = leader_addr;
-                            let ch = crate::common::connect_channel(&current_addr);
-                            client = inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::new(ch);
-                        }
-                        // Retry immediately without counting as error
-                        continue;
-                    }
-
-                    // Other errors are real errors
-                    for _ in 0..batch_size {
-                        metrics.record_write_error();
-                    }
-                    consecutive_errors += 1;
-                    if consecutive_errors <= 3 {
-                        eprintln!("Write worker {} batch error: {}", worker_id, e);
-                    }
-                    let ch = crate::common::connect_channel(&current_addr);
-                    client =
-                        inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::new(
-                            ch,
-                        );
-                },
-            }
-        } else {
-            // Single-operation write uses regular Write RPC
-            let (key, value) = keys_and_values.into_iter().next().unwrap();
+        // BatchWrite is deprecated as of Phase 6 of the per-vault consensus
+        // migration (A5). Every operation now goes through a per-vault `Write`
+        // RPC. When `batch_size > 1`, the worker issues `batch_size` sequential
+        // `Write` calls and records per-op latency directly.
+        for (key, value) in keys_and_values {
+            let op_start = Instant::now();
             let request = inferadb_ledger_proto::proto::WriteRequest {
                 client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.clone() }),
                 idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
@@ -535,7 +433,7 @@ async fn write_worker(
 
             match client.write(request).await {
                 Ok(response) => {
-                    let latency = start.elapsed();
+                    let latency = op_start.elapsed();
                     let inner = response.into_inner();
                     match inner.result {
                         Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {
@@ -591,6 +489,9 @@ async fn write_worker(
                 },
             }
         }
+        // Suppress the now-unused `start` variable used to time the whole
+        // batch under the legacy `BatchWrite` path.
+        let _ = start;
 
         batch_counter += 1;
     }

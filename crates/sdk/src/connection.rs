@@ -75,6 +75,13 @@ pub struct ConnectionPool {
     /// Region leader cache for preferred-region routing.
     region_cache: Option<Arc<crate::region_resolver::RegionLeaderCache>>,
 
+    /// Per-`(organization, vault)` leader cache for fine-grained routing.
+    ///
+    /// Always present, even when no `preferred_region` is configured —
+    /// vault-scoped hints carry their own routing information independent
+    /// of region selection. Capacity comes from `ClientConfig::vault_cache_capacity`.
+    vault_cache: Arc<crate::vault_resolver::VaultLeaderCache>,
+
     /// Gateway channel kept alive as fallback for region resolution.
     gateway_channel: Arc<RwLock<Option<Channel>>>,
 
@@ -125,6 +132,11 @@ impl ConnectionPool {
             cache
         });
 
+        let vault_cache = Arc::new(crate::vault_resolver::VaultLeaderCache::with_capacity(
+            config.vault_cache_capacity(),
+        ));
+        vault_cache.set_metrics(Arc::clone(config.metrics()));
+
         Self {
             channel: Arc::new(RwLock::new(None)),
             config,
@@ -132,6 +144,7 @@ impl ConnectionPool {
             selector: ServerSelector::new(),
             circuit_breaker,
             region_cache,
+            vault_cache,
             gateway_channel: Arc::new(RwLock::new(None)),
             leader_watcher: Arc::new(parking_lot::Mutex::new(None)),
         }
@@ -156,6 +169,11 @@ impl ConnectionPool {
             cache
         });
 
+        let vault_cache = Arc::new(crate::vault_resolver::VaultLeaderCache::with_capacity(
+            config.vault_cache_capacity(),
+        ));
+        vault_cache.set_metrics(Arc::clone(config.metrics()));
+
         Self {
             channel: Arc::new(RwLock::new(None)),
             config,
@@ -163,6 +181,7 @@ impl ConnectionPool {
             selector,
             circuit_breaker,
             region_cache,
+            vault_cache,
             gateway_channel: Arc::new(RwLock::new(None)),
             leader_watcher: Arc::new(parking_lot::Mutex::new(None)),
         }
@@ -499,16 +518,55 @@ impl ConnectionPool {
     }
 
     /// On a `NotLeader`-like error, applies the server-provided leader hint
-    /// (if any) to the regional cache. Falls back to invalidating the cache
-    /// when the server provided no hint.
+    /// (if any) to the appropriate cache layer.
+    ///
+    /// Dispatch order:
+    ///
+    /// - `vault_id` present on the hint → update the per-vault cache. This is the Phase 6 path: the
+    ///   per-org Raft group rejected the request because the vault's delegated leader is elsewhere.
+    /// - `vault_id` absent → fall through to the region cache (legacy path). Region- and org-scoped
+    ///   rejections, or rejections from servers that pre-date the vault hint, are routed here.
+    ///
+    /// When the hint carries no usable endpoint, the corresponding cache
+    /// entry is invalidated instead so the next attempt cold-resolves.
     ///
     /// Called by the retry loop before attempting a retry so the next attempt
     /// targets the newly-known leader without a separate resolve round-trip.
     pub fn apply_region_leader_hint_or_invalidate(&self, err: &SdkError) {
+        let hint = err.server_error_details().and_then(|d| d.leader_hint());
+
+        // Vault-scoped path: the hint identifies a specific (org, vault).
+        if let Some(ref h) = hint
+            && let (Some(org_raw), Some(vault_raw)) = (h.organization_id, h.vault_id)
+        {
+            #[allow(clippy::cast_possible_wrap)]
+            let org = inferadb_ledger_types::OrganizationId::new(org_raw as i64);
+            #[allow(clippy::cast_possible_wrap)]
+            let vault = inferadb_ledger_types::VaultId::new(vault_raw as i64);
+            if h.leader_endpoint.is_some() {
+                self.vault_cache.apply_hint(org, vault, h);
+                *self.channel.write() = None;
+                // Use a label that captures the vault-routing axis. The
+                // existing `redirect_retry` metric is keyed by region; for
+                // per-vault redirects we synthesize a region-like label
+                // when no preferred region is set.
+                let label = self
+                    .region_cache
+                    .as_ref()
+                    .map_or_else(|| format!("vault:{vault_raw}"), |c| c.region().to_string());
+                self.config.metrics().redirect_retry(&label);
+                return;
+            }
+            // Hint had vault context but no endpoint — purge the entry.
+            self.vault_cache.invalidate(org, vault);
+            *self.channel.write() = None;
+            return;
+        }
+
+        // Region-scoped path: existing behavior.
         let Some(ref cache) = self.region_cache else {
             return;
         };
-        let hint = err.server_error_details().and_then(|d| d.leader_hint());
         match hint {
             Some(ref h) if h.leader_endpoint.is_some() => {
                 cache.apply_hint(h);
@@ -522,6 +580,64 @@ impl ConnectionPool {
                 *self.channel.write() = None;
             },
         }
+    }
+
+    /// Returns a reference to the per-vault leader cache.
+    ///
+    /// Always present — every `ConnectionPool` carries a vault cache so
+    /// vault-scoped routing works whether or not a `preferred_region` is
+    /// configured.
+    #[must_use]
+    pub fn vault_cache(&self) -> &Arc<crate::vault_resolver::VaultLeaderCache> {
+        &self.vault_cache
+    }
+
+    /// Selects a channel for a vault-scoped request, consulting the
+    /// per-vault leader cache first.
+    ///
+    /// Resolution order:
+    ///
+    /// 1. Vault cache hit → connect directly to the cached leader endpoint.
+    /// 2. Vault cache miss → fall through to the region-aware path (`get_channel`), which itself
+    ///    falls back to gateway resolution.
+    ///
+    /// During the gradual rollout described in the SDK CLAUDE.md, the vault
+    /// cache is empty until a `NotLeader` hint populates it. This means the
+    /// first vault-scoped request still goes through the region path; the
+    /// second and subsequent requests benefit from the cached vault leader.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same error classes as [`Self::get_channel`]: connection,
+    /// circuit-open, configuration, and transport errors propagate directly.
+    pub async fn select_for_vault(
+        &self,
+        organization: inferadb_ledger_types::OrganizationId,
+        vault: inferadb_ledger_types::VaultId,
+    ) -> Result<Channel> {
+        // Check circuit breaker before doing anything.
+        if let Some(ref cb) = self.circuit_breaker {
+            let endpoint = self.current_endpoint();
+            cb.check(&endpoint)?;
+        }
+
+        if let Some(endpoint) = self.vault_cache.cached_endpoint(organization, vault) {
+            // Reuse the existing pool channel only when its endpoint matches
+            // the vault leader. The single cached channel is shared across
+            // calls; if a different vault routed to a different endpoint
+            // last, we need a fresh connection.
+            let cached_channel = self.channel.read().clone();
+            if let Some(channel) = cached_channel
+                && self.current_endpoint() == endpoint.as_ref()
+            {
+                return Ok(channel);
+            }
+            let channel = self.connect_to_endpoint(endpoint.as_ref()).await?;
+            return Ok(channel);
+        }
+
+        // Cache miss — fall through to the existing region/gateway path.
+        self.get_channel().await
     }
 
     /// Returns the currently cached region leader endpoint, if any.
@@ -542,6 +658,7 @@ impl ConnectionPool {
                 leader_endpoint: Some(endpoint.to_owned()),
                 term: Some(1),
                 organization_id: None,
+                vault_id: None,
             };
             cache.apply_hint(&hint);
         }
@@ -1194,5 +1311,292 @@ mod tests {
         // Dynamic endpoints are set but empty
         let dynamic = pool.dynamic_endpoints.read();
         assert!(dynamic.as_ref().unwrap().is_empty());
+    }
+
+    // =========================================================================
+    // Vault cache dispatch tests
+    // =========================================================================
+
+    #[test]
+    fn apply_hint_with_vault_id_routes_to_vault_cache() {
+        use inferadb_ledger_types::{OrganizationId, Region, VaultId};
+        use tonic::Code;
+
+        use crate::error::ServerErrorDetails;
+
+        // Region cache present, vault cache present.
+        let config = test_config_with_region(Region::US_EAST_VA);
+        let pool = ConnectionPool::new(config);
+
+        // Hint carries leader_shard (org id) AND leader_vault — must route
+        // to the vault cache, NOT the region cache.
+        let details = ServerErrorDetails {
+            error_code: "2000".into(),
+            is_retryable: true,
+            retry_after_ms: None,
+            context: std::collections::HashMap::from([
+                ("leader_id".to_owned(), "11".to_owned()),
+                ("leader_endpoint".to_owned(), "http://vault-leader:5000".to_owned()),
+                ("leader_term".to_owned(), "9".to_owned()),
+                ("leader_shard".to_owned(), "42".to_owned()),
+                ("leader_vault".to_owned(), "7".to_owned()),
+            ]),
+            suggested_action: None,
+        };
+        let err = SdkError::Rpc {
+            code: Code::Unavailable,
+            message: "not leader".into(),
+            request_id: None,
+            trace_id: None,
+            error_details: Some(Box::new(details)),
+        };
+
+        pool.apply_region_leader_hint_or_invalidate(&err);
+
+        // The vault cache should now hold the endpoint, keyed by (42, 7).
+        let entry = pool
+            .vault_cache()
+            .lookup(OrganizationId::new(42), VaultId::new(7))
+            .expect("vault cache populated");
+        assert_eq!(entry.leader_endpoint.as_deref(), Some("http://vault-leader:5000"));
+        assert_eq!(entry.term, Some(9));
+
+        // The region cache must be UNTOUCHED — vault-scoped hints don't
+        // overwrite region cache state.
+        assert!(
+            pool.region_cached_endpoint().is_none(),
+            "region cache must not be populated by a vault-scoped hint",
+        );
+    }
+
+    #[test]
+    fn apply_hint_without_vault_id_routes_to_region_cache() {
+        use inferadb_ledger_types::Region;
+        use tonic::Code;
+
+        use crate::error::ServerErrorDetails;
+
+        let config = test_config_with_region(Region::US_EAST_VA);
+        let pool = ConnectionPool::new(config);
+
+        // Region-scoped hint: no leader_vault key.
+        let details = ServerErrorDetails {
+            error_code: "2000".into(),
+            is_retryable: true,
+            retry_after_ms: None,
+            context: std::collections::HashMap::from([
+                ("leader_id".to_owned(), "11".to_owned()),
+                ("leader_endpoint".to_owned(), "http://region-leader:5000".to_owned()),
+                ("leader_term".to_owned(), "9".to_owned()),
+            ]),
+            suggested_action: None,
+        };
+        let err = SdkError::Rpc {
+            code: Code::Unavailable,
+            message: "not leader".into(),
+            request_id: None,
+            trace_id: None,
+            error_details: Some(Box::new(details)),
+        };
+
+        pool.apply_region_leader_hint_or_invalidate(&err);
+
+        assert_eq!(
+            pool.region_cached_endpoint().as_deref(),
+            Some("http://region-leader:5000"),
+            "region cache should populate on hintless vault scope",
+        );
+        assert!(pool.vault_cache().is_empty(), "vault cache must remain empty");
+    }
+
+    #[test]
+    fn vault_hint_term_gating_drops_older_hint() {
+        use inferadb_ledger_types::{OrganizationId, Region, VaultId};
+        use tonic::Code;
+
+        use crate::error::ServerErrorDetails;
+
+        let config = test_config_with_region(Region::US_EAST_VA);
+        let pool = ConnectionPool::new(config);
+
+        let make_err = |endpoint: &str, term: u64| {
+            let details = ServerErrorDetails {
+                error_code: "2000".into(),
+                is_retryable: true,
+                retry_after_ms: None,
+                context: std::collections::HashMap::from([
+                    ("leader_endpoint".to_owned(), endpoint.to_owned()),
+                    ("leader_term".to_owned(), term.to_string()),
+                    ("leader_shard".to_owned(), "1".to_owned()),
+                    ("leader_vault".to_owned(), "1".to_owned()),
+                ]),
+                suggested_action: None,
+            };
+            SdkError::Rpc {
+                code: Code::Unavailable,
+                message: "not leader".into(),
+                request_id: None,
+                trace_id: None,
+                error_details: Some(Box::new(details)),
+            }
+        };
+
+        // Newer term first, then older term — older must be rejected.
+        pool.apply_region_leader_hint_or_invalidate(&make_err("http://A:5000", 9));
+        pool.apply_region_leader_hint_or_invalidate(&make_err("http://B:5000", 5));
+
+        let entry =
+            pool.vault_cache().lookup(OrganizationId::new(1), VaultId::new(1)).expect("populated");
+        assert_eq!(
+            entry.leader_endpoint.as_deref(),
+            Some("http://A:5000"),
+            "older-term hint must be rejected (CLAUDE.md SDK rule 6)",
+        );
+    }
+
+    #[test]
+    fn vault_hint_works_without_preferred_region() {
+        use inferadb_ledger_types::{OrganizationId, VaultId};
+        use tonic::Code;
+
+        use crate::error::ServerErrorDetails;
+
+        // Pool without preferred_region — the vault cache is still wired.
+        let config = test_config_without_region();
+        let pool = ConnectionPool::new(config);
+
+        let details = ServerErrorDetails {
+            error_code: "2000".into(),
+            is_retryable: true,
+            retry_after_ms: None,
+            context: std::collections::HashMap::from([
+                ("leader_endpoint".to_owned(), "http://vault-leader:5000".to_owned()),
+                ("leader_term".to_owned(), "3".to_owned()),
+                ("leader_shard".to_owned(), "1".to_owned()),
+                ("leader_vault".to_owned(), "2".to_owned()),
+            ]),
+            suggested_action: None,
+        };
+        let err = SdkError::Rpc {
+            code: Code::Unavailable,
+            message: "not leader".into(),
+            request_id: None,
+            trace_id: None,
+            error_details: Some(Box::new(details)),
+        };
+
+        // Must not panic and must populate the vault cache.
+        pool.apply_region_leader_hint_or_invalidate(&err);
+
+        let entry = pool
+            .vault_cache()
+            .lookup(OrganizationId::new(1), VaultId::new(2))
+            .expect("vault cache populated even without region cache");
+        assert_eq!(entry.leader_endpoint.as_deref(), Some("http://vault-leader:5000"));
+    }
+
+    #[test]
+    fn vault_hint_without_endpoint_invalidates_entry() {
+        use inferadb_ledger_types::{OrganizationId, Region, VaultId};
+        use tonic::Code;
+
+        use crate::error::ServerErrorDetails;
+
+        let config = test_config_with_region(Region::US_EAST_VA);
+        let pool = ConnectionPool::new(config);
+
+        // Seed the vault cache.
+        let seed = ServerErrorDetails {
+            error_code: "2000".into(),
+            is_retryable: true,
+            retry_after_ms: None,
+            context: std::collections::HashMap::from([
+                ("leader_endpoint".to_owned(), "http://A:5000".to_owned()),
+                ("leader_term".to_owned(), "5".to_owned()),
+                ("leader_shard".to_owned(), "1".to_owned()),
+                ("leader_vault".to_owned(), "1".to_owned()),
+            ]),
+            suggested_action: None,
+        };
+        pool.apply_region_leader_hint_or_invalidate(&SdkError::Rpc {
+            code: Code::Unavailable,
+            message: "x".into(),
+            request_id: None,
+            trace_id: None,
+            error_details: Some(Box::new(seed)),
+        });
+        assert!(pool.vault_cache().lookup(OrganizationId::new(1), VaultId::new(1)).is_some());
+
+        // Now an empty-endpoint hint with vault context — must invalidate.
+        let purge = ServerErrorDetails {
+            error_code: "2000".into(),
+            is_retryable: true,
+            retry_after_ms: None,
+            context: std::collections::HashMap::from([
+                ("leader_shard".to_owned(), "1".to_owned()),
+                ("leader_vault".to_owned(), "1".to_owned()),
+            ]),
+            suggested_action: None,
+        };
+        pool.apply_region_leader_hint_or_invalidate(&SdkError::Rpc {
+            code: Code::Unavailable,
+            message: "x".into(),
+            request_id: None,
+            trace_id: None,
+            error_details: Some(Box::new(purge)),
+        });
+
+        assert!(
+            pool.vault_cache().lookup(OrganizationId::new(1), VaultId::new(1)).is_none(),
+            "endpoint-less vault hint must invalidate the entry",
+        );
+    }
+
+    #[test]
+    fn select_for_vault_falls_through_on_cache_miss() {
+        use inferadb_ledger_types::{OrganizationId, VaultId};
+
+        // No preferred region, no preseeded vault cache, dummy endpoint.
+        // We can't await connect successfully, but the call must reach the
+        // fallback path without panicking — use an unreachable endpoint
+        // and expect a Connection or Timeout error rather than success.
+        let config = ClientConfig::builder()
+            .servers(ServerSource::from_static(["http://127.0.0.1:1"]))
+            .client_id("test-client")
+            .connect_timeout(Duration::from_millis(50))
+            .build()
+            .expect("valid config");
+        let pool = ConnectionPool::new(config);
+
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let result = pool.select_for_vault(OrganizationId::new(1), VaultId::new(1)).await;
+            assert!(result.is_err(), "fallback to unreachable endpoint should fail");
+        });
+    }
+
+    #[test]
+    fn vault_cache_is_always_present() {
+        // Without preferred_region, the region cache is None but the vault
+        // cache must still be wired so vault-scoped routing works.
+        let config = test_config_without_region();
+        let pool = ConnectionPool::new(config);
+        assert!(pool.region_cache.is_none(), "no preferred region → no region cache");
+        assert_eq!(
+            pool.vault_cache().capacity(),
+            crate::vault_resolver::DEFAULT_VAULT_CACHE_CAPACITY,
+        );
+    }
+
+    #[test]
+    fn vault_cache_capacity_respects_config() {
+        let config = ClientConfig::builder()
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
+            .client_id("test-client")
+            .vault_cache_capacity(42)
+            .build()
+            .expect("valid config");
+        let pool = ConnectionPool::new(config);
+        assert_eq!(pool.vault_cache().capacity(), 42);
     }
 }

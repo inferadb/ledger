@@ -723,6 +723,7 @@ mod tests {
             leader_endpoint: Some("http://10.0.2.5:5000".to_owned()),
             term: Some(7),
             organization_id: None,
+            vault_id: None,
         };
         cache.apply_hint(&hint);
         assert_eq!(cache.cached_endpoint().as_deref(), Some("http://10.0.2.5:5000"));
@@ -737,6 +738,7 @@ mod tests {
             leader_endpoint: None,
             term: Some(7),
             organization_id: None,
+            vault_id: None,
         };
         cache.apply_hint(&hint);
         assert!(cache.cached_endpoint().is_none());
@@ -760,6 +762,7 @@ mod tests {
             leader_endpoint: Some("http://new:5000".to_owned()),
             term: None,
             organization_id: None,
+            vault_id: None,
         };
         cache.apply_hint(&hint);
 
@@ -943,6 +946,7 @@ mod tests {
             leader_endpoint: Some("http://B:5000".to_owned()),
             term: None,
             organization_id: None,
+            vault_id: None,
         });
 
         assert_eq!(metrics.get("flap", "us-east-va"), 0);
@@ -1014,6 +1018,7 @@ mod tests {
             leader_endpoint: Some("http://same:5000".to_owned()),
             term: Some(5),
             organization_id: None,
+            vault_id: None,
         };
         cache.apply_hint(&hint);
         assert_eq!(cache.cached_endpoint().as_deref(), Some("http://same:5000"));
@@ -1029,6 +1034,7 @@ mod tests {
             leader_endpoint: Some("http://new:5000".to_owned()),
             term: Some(7),
             organization_id: None,
+            vault_id: None,
         };
         cache.apply_hint(&hint);
         assert_eq!(cache.cached_endpoint().as_deref(), Some("http://new:5000"));
@@ -1046,6 +1052,7 @@ mod tests {
             leader_endpoint: Some("http://stale:5000".to_owned()),
             term: Some(5),
             organization_id: None,
+            vault_id: None,
         };
         cache.apply_hint(&hint);
         assert_eq!(cache.cached_endpoint().as_deref(), Some("http://old:5000"));
@@ -1072,6 +1079,7 @@ mod tests {
             leader_endpoint: Some("http://first:5000".to_owned()),
             term: None,
             organization_id: None,
+            vault_id: None,
         };
         cache.apply_hint(&hint);
         assert_eq!(cache.cached_endpoint().as_deref(), Some("http://first:5000"));
@@ -1102,6 +1110,7 @@ mod tests {
             leader_endpoint: Some("http://untrusted:5000".to_owned()),
             term: None,
             organization_id: None,
+            vault_id: None,
         };
         cache.apply_hint(&hint);
         assert_eq!(cache.cached_endpoint().as_deref(), Some("http://old:5000"));

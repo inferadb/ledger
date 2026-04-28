@@ -330,11 +330,15 @@ impl ReadService {
 
     /// Returns a `NotLeader` `Status` for a follower-served read, populated with
     /// the within-region leader's identity and endpoint when known.
+    ///
+    /// Region-scoped: passes `None` for the vault hint so the SDK falls back
+    /// to the org-level cache entry.
     fn not_leader_within_region(&self, ctx: &RegionContext, message: &str) -> Status {
         super::metadata::not_leader_status_from_handle(
             ctx.handle.as_ref(),
             self.peer_addresses.as_ref(),
             message,
+            None,
         )
     }
 
@@ -512,6 +516,7 @@ impl ReadService {
                 handle.as_ref(),
                 self.peer_addresses.as_ref(),
                 "No leader available",
+                None,
             )
         })?;
 
@@ -525,6 +530,7 @@ impl ReadService {
                     handle.as_ref(),
                     self.peer_addresses.as_ref(),
                     "Leader address not found in peer registry",
+                    None,
                 )
             })?;
 

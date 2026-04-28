@@ -1963,6 +1963,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "parking_lot",
+ "prost",
  "rand 0.10.0",
  "schemars",
  "seahash",

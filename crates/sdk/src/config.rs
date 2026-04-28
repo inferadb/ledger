@@ -129,6 +129,15 @@ pub struct ClientConfig {
     /// streams sharing one connection, the 64 KiB default saturates after
     /// the first round-trip's worth of data.
     pub(crate) http2_initial_connection_window_bytes: u32,
+
+    /// Maximum number of `(organization_id, vault_id)` entries the per-vault
+    /// leader cache will hold before evicting the least-recently-used entry.
+    ///
+    /// Default: 10,000. Tune up for clients that fan out across many vaults
+    /// per organization; tune down for memory-constrained embedded clients.
+    /// A capacity of zero disables the per-vault cache (every vault-scoped
+    /// hint falls through to the region cache).
+    pub(crate) vault_cache_capacity: usize,
 }
 
 #[bon]
@@ -197,6 +206,8 @@ impl ClientConfig {
         http2_initial_stream_window_bytes: u32,
         #[builder(default = DEFAULT_HTTP2_INITIAL_CONNECTION_WINDOW_BYTES)]
         http2_initial_connection_window_bytes: u32,
+        #[builder(default = crate::vault_resolver::DEFAULT_VAULT_CACHE_CAPACITY)]
+        vault_cache_capacity: usize,
     ) -> Result<Self> {
         // Validate static endpoints
         if let ServerSource::Static(ref endpoints) = servers {
@@ -261,6 +272,7 @@ impl ClientConfig {
             region_leader_hard_ttl,
             http2_initial_stream_window_bytes,
             http2_initial_connection_window_bytes,
+            vault_cache_capacity,
         })
     }
 }
@@ -366,6 +378,12 @@ impl ClientConfig {
     #[must_use]
     pub fn http2_initial_connection_window_bytes(&self) -> u32 {
         self.http2_initial_connection_window_bytes
+    }
+
+    /// Returns the configured per-vault leader cache capacity.
+    #[must_use]
+    pub fn vault_cache_capacity(&self) -> usize {
+        self.vault_cache_capacity
     }
 }
 

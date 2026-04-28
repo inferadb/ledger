@@ -86,6 +86,8 @@ inferadb-ledger-sdk.workspace = true
 futures.workspace = true
 uuid.workspace = true
 serial_test = { workspace = true }
+# Decoding ErrorDetails proto in deprecation tests.
+prost.workspace = true
 
 # Network simulation testing
 turmoil.workspace = true

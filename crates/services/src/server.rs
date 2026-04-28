@@ -310,11 +310,18 @@ impl LedgerServer {
             .registry(Some(self.manager.registry()))
             .build();
 
+        // Build the shared `ProposalService` early so both `WriteService` and
+        // the downstream `ServiceContext` can hold the same `Arc`. Both paths
+        // route per-vault proposals through `propose_organization_request_to_vault`.
+        let proposer: Arc<dyn crate::proposal::ProposalService> =
+            Arc::new(RaftProposalService::new(system.handle().clone(), Some(self.manager.clone())));
+
         // Create write service using the resolver. Batch writers are per-region
         // (created by RaftManager::start_region), not constructed here.
         let mut write_service = WriteService::builder()
             .resolver(resolver.clone())
             .manager(Some(self.manager.clone()))
+            .proposal_service(proposer.clone())
             .idempotency(self.idempotency.clone())
             .proposal_timeout(self.proposal_timeout)
             .peer_addresses(self.peer_addresses.clone())
@@ -410,11 +417,11 @@ impl LedgerServer {
 
         // Build shared service context for Organization, Vault, User, and App services.
         // All four share the same proposal path, state, applied_state, and config —
-        // ServiceContext consolidates these into a single clonable struct.
-        let proposer: Arc<dyn crate::proposal::ProposalService> =
-            Arc::new(RaftProposalService::new(system.handle().clone(), Some(self.manager.clone())));
+        // ServiceContext consolidates these into a single clonable struct. The
+        // `proposer` was already constructed above so `WriteService` and the
+        // service context share a single `Arc<dyn ProposalService>`.
         let svc_ctx = ServiceContext {
-            proposer,
+            proposer: proposer.clone(),
             state: system.state().clone(),
             applied_state: system.applied_state().clone(),
             sampler: None,

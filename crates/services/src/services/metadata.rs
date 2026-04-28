@@ -71,18 +71,25 @@ pub(crate) fn status_with_correlation(
 /// Prefer this over `Status::unavailable(message)` for any not-leader rejection
 /// so the client can update its region leader cache directly from the error
 /// path, without issuing a separate `ResolveRegionLeader` RPC.
+///
+/// `leader_vault` is `Some(_)` only for vault-scoped rejections (per-vault
+/// Raft groups). Region- and org-scoped rejections pass `None`; the SDK
+/// uses the absence of the `leader_vault` key as the signal to fall back
+/// to the org-level cache entry.
 pub(crate) fn status_with_not_leader_hint(
     message: impl Into<String>,
     leader_id: Option<u64>,
     leader_endpoint: Option<&str>,
     leader_term: Option<u64>,
     leader_shard: Option<u64>,
+    leader_vault: Option<u64>,
 ) -> Status {
     let details = super::error_details::build_not_leader_details(
         leader_id,
         leader_endpoint,
         leader_term,
         leader_shard,
+        leader_vault,
     );
     let encoded = details.encode_to_vec();
     Status::with_details(tonic::Code::Unavailable, message, encoded.into())
@@ -95,10 +102,16 @@ pub(crate) fn status_with_not_leader_hint(
 /// call site has a [`inferadb_ledger_raft::ConsensusHandle`] and peer map in
 /// scope — consolidates the leader-state extraction boilerplate so all
 /// not-leader rejections populate the same hint shape.
+///
+/// Region- and org-scoped call sites pass `None` for `leader_vault`. Vault-
+/// scoped call sites (per-vault Raft groups) pass `Some(vault_id_as_u64)`
+/// so the SDK can key its `VaultLeaderCache` on `(region, organization_id,
+/// vault_id)` rather than just `(region, organization_id)`.
 pub(crate) fn not_leader_status_from_handle(
     handle: &inferadb_ledger_raft::ConsensusHandle,
     peer_addresses: Option<&inferadb_ledger_raft::PeerAddressMap>,
     message: impl Into<String>,
+    leader_vault: Option<u64>,
 ) -> Status {
     let shard_state = handle.shard_state();
     let term = handle.current_term();
@@ -114,6 +127,7 @@ pub(crate) fn not_leader_status_from_handle(
         leader_endpoint.as_deref(),
         Some(term),
         Some(leader_organization),
+        leader_vault,
     )
 }
 
@@ -134,7 +148,15 @@ pub(crate) fn not_leader_remote_region(
     // (each `(region, shard)` is its own Raft group). The SDK's
     // `RegionLeaderCache` falls back to `ResolveRegionLeader` /
     // `WatchLeader` against an in-region node to learn shard leaders.
-    status_with_not_leader_hint(message, None, redirect.routing.leader_hint.as_deref(), None, None)
+    // The vault hint is also absent for the same reason.
+    status_with_not_leader_hint(
+        message,
+        None,
+        redirect.routing.leader_hint.as_deref(),
+        None,
+        None,
+        None,
+    )
 }
 
 /// Prepends `http://` if the address has no URI scheme.
@@ -299,11 +321,12 @@ mod tests {
     #[test]
     fn status_with_not_leader_hint_populates_details() {
         let status = status_with_not_leader_hint(
-            "not leader for region us-east-va shard 5",
+            "not leader for region us-east-va shard 5 vault 99",
             Some(42),
             Some("http://10.0.2.5:5000"),
             Some(7),
             Some(5),
+            Some(99),
         );
         assert_eq!(status.code(), tonic::Code::Unavailable);
 
@@ -313,17 +336,31 @@ mod tests {
         assert_eq!(details.context.get("leader_endpoint").unwrap(), "http://10.0.2.5:5000");
         assert_eq!(details.context.get("leader_term").unwrap(), "7");
         assert_eq!(details.context.get("leader_shard").unwrap(), "5");
+        assert_eq!(details.context.get("leader_vault").unwrap(), "99");
     }
 
     #[test]
     fn status_with_not_leader_hint_survives_correlation() {
-        let status = status_with_not_leader_hint("not leader", Some(1), None, None, Some(0));
+        let status = status_with_not_leader_hint("not leader", Some(1), None, None, Some(0), None);
         let request_id = uuid::Uuid::new_v4();
         let enriched = status_with_correlation(status, &request_id, "trace");
 
         let details = proto::ErrorDetails::decode(enriched.details()).unwrap();
         assert_eq!(details.context.get("leader_id").unwrap(), "1");
         assert_eq!(details.context.get("leader_shard").unwrap(), "0");
+        assert!(!details.context.contains_key("leader_vault"));
+    }
+
+    #[test]
+    fn status_with_not_leader_hint_omits_vault_when_none() {
+        // Region- and org-scoped rejections pass leader_vault = None;
+        // the resulting ErrorDetails MUST omit the leader_vault key so the
+        // SDK falls back to its org-level cache.
+        let status =
+            status_with_not_leader_hint("not leader", Some(1), None, Some(2), Some(3), None);
+        let details = proto::ErrorDetails::decode(status.details()).unwrap();
+        assert!(!details.context.contains_key("leader_vault"));
+        assert_eq!(details.context.get("leader_shard").unwrap(), "3");
     }
 
     #[test]

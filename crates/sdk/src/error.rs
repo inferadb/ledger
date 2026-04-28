@@ -161,17 +161,34 @@ pub struct LeaderHint {
     /// the resolved cache leader does not match the requested
     /// organization.
     pub organization_id: Option<u64>,
+    /// Vault id the leader is for, if known.
+    ///
+    /// Set only when the rejection came from a per-vault Raft group; the
+    /// region- / org-level call sites omit this field. The forthcoming
+    /// `VaultLeaderCache` keys on `(region, organization_id, vault_id)`
+    /// — a `Some` value here is the trigger to update the per-vault
+    /// cache; a `None` value means the cache update should fall back to
+    /// the org-level entry.
+    ///
+    /// Backward-compat: legacy servers that pre-date this field (or
+    /// rejections from non-vault scopes) leave this `None`. The SDK's
+    /// existing region-level retry path remains correct in both cases.
+    pub vault_id: Option<u64>,
 }
 
 impl ServerErrorDetails {
     /// Extracts a leader hint from the `context` map if any of the well-known
-    /// keys (`leader_id`, `leader_endpoint`, `leader_term`, `leader_shard`)
-    /// are present and parseable.
+    /// keys (`leader_id`, `leader_endpoint`, `leader_term`, `leader_shard`,
+    /// `leader_vault`) are present and parseable.
     ///
     /// Empty-string endpoints are treated as absent to prevent dialing an
     /// empty URI.
     ///
-    /// Returns `None` when no hint fields are present or parseable.
+    /// Returns `None` when no hint fields are present or parseable. A missing
+    /// `leader_vault` key (the common case for region- and org-scoped
+    /// rejections, and for legacy servers that pre-date the field) leaves
+    /// `vault_id = None` — the SDK falls back to its org-level cache entry
+    /// in that case.
     #[must_use]
     pub fn leader_hint(&self) -> Option<LeaderHint> {
         let leader_id = self.context.get("leader_id").and_then(|s| s.parse().ok());
@@ -179,15 +196,17 @@ impl ServerErrorDetails {
             self.context.get("leader_endpoint").filter(|s| !s.is_empty()).cloned();
         let term = self.context.get("leader_term").and_then(|s| s.parse().ok());
         let organization_id = self.context.get("leader_shard").and_then(|s| s.parse().ok());
+        let vault_id = self.context.get("leader_vault").and_then(|s| s.parse().ok());
 
         if leader_id.is_none()
             && leader_endpoint.is_none()
             && term.is_none()
             && organization_id.is_none()
+            && vault_id.is_none()
         {
             return None;
         }
-        Some(LeaderHint { leader_id, leader_endpoint, term, organization_id })
+        Some(LeaderHint { leader_id, leader_endpoint, term, organization_id, vault_id })
     }
 }
 
@@ -1438,6 +1457,8 @@ mod tests {
                 ("leader_id".to_owned(), "42".to_owned()),
                 ("leader_endpoint".to_owned(), "http://10.0.2.5:5000".to_owned()),
                 ("leader_term".to_owned(), "7".to_owned()),
+                ("leader_shard".to_owned(), "5".to_owned()),
+                ("leader_vault".to_owned(), "99".to_owned()),
             ]),
             suggested_action: None,
         };
@@ -1445,6 +1466,69 @@ mod tests {
         assert_eq!(hint.leader_id, Some(42));
         assert_eq!(hint.leader_endpoint.as_deref(), Some("http://10.0.2.5:5000"));
         assert_eq!(hint.term, Some(7));
+        assert_eq!(hint.organization_id, Some(5));
+        assert_eq!(hint.vault_id, Some(99));
+    }
+
+    #[test]
+    fn server_error_details_leader_hint_vault_absent_means_none() {
+        // Legacy servers (pre-vault hint) and region/org-scoped rejections
+        // omit the leader_vault key. The hint still parses, with vault_id = None.
+        let details = ServerErrorDetails {
+            error_code: "2000".into(),
+            is_retryable: true,
+            retry_after_ms: None,
+            context: std::collections::HashMap::from([
+                ("leader_id".to_owned(), "42".to_owned()),
+                ("leader_endpoint".to_owned(), "http://10.0.2.5:5000".to_owned()),
+                ("leader_term".to_owned(), "7".to_owned()),
+                ("leader_shard".to_owned(), "5".to_owned()),
+            ]),
+            suggested_action: None,
+        };
+        let hint = details.leader_hint().unwrap();
+        assert_eq!(hint.leader_id, Some(42));
+        assert_eq!(hint.organization_id, Some(5));
+        assert_eq!(hint.vault_id, None);
+    }
+
+    #[test]
+    fn server_error_details_leader_hint_only_vault() {
+        // A hint with only the vault key still triggers a Some result —
+        // even minimal vault-only updates are propagated.
+        let details = ServerErrorDetails {
+            error_code: "2000".into(),
+            is_retryable: true,
+            retry_after_ms: None,
+            context: std::collections::HashMap::from([(
+                "leader_vault".to_owned(),
+                "77".to_owned(),
+            )]),
+            suggested_action: None,
+        };
+        let hint = details.leader_hint().unwrap();
+        assert_eq!(hint.vault_id, Some(77));
+        assert_eq!(hint.leader_id, None);
+        assert_eq!(hint.leader_endpoint, None);
+        assert_eq!(hint.term, None);
+        assert_eq!(hint.organization_id, None);
+    }
+
+    #[test]
+    fn server_error_details_leader_hint_malformed_vault_ignored() {
+        let details = ServerErrorDetails {
+            error_code: "2000".into(),
+            is_retryable: true,
+            retry_after_ms: None,
+            context: std::collections::HashMap::from([
+                ("leader_id".to_owned(), "1".to_owned()),
+                ("leader_vault".to_owned(), "not-a-number".to_owned()),
+            ]),
+            suggested_action: None,
+        };
+        let hint = details.leader_hint().unwrap();
+        assert_eq!(hint.leader_id, Some(1));
+        assert_eq!(hint.vault_id, None);
     }
 
     #[test]
@@ -1460,6 +1544,7 @@ mod tests {
         assert_eq!(hint.leader_id, Some(42));
         assert_eq!(hint.leader_endpoint, None);
         assert_eq!(hint.term, None);
+        assert_eq!(hint.vault_id, None);
     }
 
     #[test]
