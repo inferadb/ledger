@@ -262,6 +262,36 @@ pub struct RaftManagerConfig {
     /// value has no observable effect until M3 wires the watcher.
     #[builder(default = crate::membership_queue::DEFAULT_MAX_CONCURRENT_SNAPSHOT_PRODUCING)]
     pub max_concurrent_snapshot_producing: usize,
+
+    /// Whether to use parallel shared-WAL replay for new-voter catch-up
+    /// (Phase 5 / M4 of the centralised membership plan).
+    ///
+    /// When `true`, a node added as a voter to an organization with N
+    /// vault groups will receive a single shared-WAL snapshot from the
+    /// organization's leader and replay it locally — fanning out per-vault
+    /// apply tasks via
+    /// [`replay_shared_wal_for_org`](crate::log_storage::replay_shared_wal_for_org)
+    /// instead of running N concurrent per-vault `InstallSnapshot` RPCs.
+    /// When `false`, the legacy per-vault snapshot path is used.
+    ///
+    /// Default `true` — the legacy path is the snapshot storm the
+    /// primitive exists to eliminate. M4 ships the primitive only; the
+    /// production wire-in (replacing
+    /// [`RaftManager::start_vault_group`]'s bootstrap path with a
+    /// shared-WAL replay) is a follow-up. With `true` set today the
+    /// behaviour is unchanged (no callers wired); flipping to `false`
+    /// would only have an effect once the wire-in lands and would force
+    /// callers back onto the legacy path.
+    #[builder(default = true)]
+    pub enable_parallel_wal_replay: bool,
+
+    /// Maximum number of vault apply tasks that may run concurrently when
+    /// [`Self::enable_parallel_wal_replay`] is active. Forwarded into
+    /// [`crate::log_storage::ParallelReplayConfig::max_concurrent`].
+    /// Default
+    /// [`crate::log_storage::DEFAULT_MAX_CONCURRENT_REPLAY`].
+    #[builder(default = crate::log_storage::DEFAULT_MAX_CONCURRENT_REPLAY)]
+    pub parallel_wal_replay_max_concurrent: usize,
 }
 
 impl RaftManagerConfig {

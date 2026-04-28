@@ -23,6 +23,7 @@
 
 mod accessor;
 pub mod operations;
+pub mod parallel_replay;
 mod raft_impl;
 mod store;
 mod types;
@@ -30,6 +31,10 @@ mod types;
 pub use accessor::*;
 use inferadb_ledger_types::Hash;
 pub use operations::ApplyableRequest;
+pub use parallel_replay::{
+    DEFAULT_MAX_CONCURRENT_REPLAY, ParallelReplayConfig, ParallelReplayError, ParallelReplayStats,
+    VaultApplyFn, replay_shared_wal_for_org,
+};
 pub use raft_impl::{LedgerSnapshotBuilder, RecoveryStats};
 pub use store::*;
 pub use types::*;
