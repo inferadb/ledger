@@ -273,4 +273,42 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for MockAd
         let req = request.into_inner();
         Ok(Response::new(proto::ProvisionRegionResponse { created: true, name: req.name }))
     }
+
+    async fn set_region_residency(
+        &self,
+        request: Request<proto::SetRegionResidencyRequest>,
+    ) -> Result<Response<proto::SetRegionResidencyResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        Ok(Response::new(proto::SetRegionResidencyResponse {
+            name: req.name,
+            requires_residency: req.requires_residency,
+            retention_days: req.retention_days,
+        }))
+    }
+
+    async fn admin_list_vaults(
+        &self,
+        _request: Request<proto::AdminListVaultsRequest>,
+    ) -> Result<Response<proto::AdminListVaultsResponse>, Status> {
+        Ok(Response::new(proto::AdminListVaultsResponse { vaults: Vec::new() }))
+    }
+
+    async fn show_vault(
+        &self,
+        _request: Request<proto::ShowVaultRequest>,
+    ) -> Result<Response<proto::ShowVaultResponse>, Status> {
+        Err(Status::unimplemented("ShowVault not supported in mock"))
+    }
+
+    async fn repair_vault(
+        &self,
+        _request: Request<proto::RepairVaultRequest>,
+    ) -> Result<Response<proto::RepairVaultResponse>, Status> {
+        Ok(Response::new(proto::RepairVaultResponse {
+            status: "noop".to_string(),
+            message: "Mock — repair is a no-op".to_string(),
+        }))
+    }
 }

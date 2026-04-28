@@ -76,6 +76,14 @@ pub(crate) fn status_with_correlation(
 /// Raft groups). Region- and org-scoped rejections pass `None`; the SDK
 /// uses the absence of the `leader_vault` key as the signal to fall back
 /// to the org-level cache entry.
+///
+/// `leader_organization_slug` and `leader_vault_slug` carry the external
+/// Snowflake slugs (u64) when the rejecting handler had them in scope —
+/// vault-scoped gRPC handlers do; raft-internal call sites typically don't.
+/// The SDK keys its `VaultLeaderCache` on `(OrganizationSlug, VaultSlug)`,
+/// so absent slugs cause the SDK to fall through to the region path
+/// (legacy server compat).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn status_with_not_leader_hint(
     message: impl Into<String>,
     leader_id: Option<u64>,
@@ -83,6 +91,8 @@ pub(crate) fn status_with_not_leader_hint(
     leader_term: Option<u64>,
     leader_shard: Option<u64>,
     leader_vault: Option<u64>,
+    leader_organization_slug: Option<u64>,
+    leader_vault_slug: Option<u64>,
 ) -> Status {
     let details = super::error_details::build_not_leader_details(
         leader_id,
@@ -90,6 +100,8 @@ pub(crate) fn status_with_not_leader_hint(
         leader_term,
         leader_shard,
         leader_vault,
+        leader_organization_slug,
+        leader_vault_slug,
     );
     let encoded = details.encode_to_vec();
     Status::with_details(tonic::Code::Unavailable, message, encoded.into())
@@ -107,11 +119,20 @@ pub(crate) fn status_with_not_leader_hint(
 /// scoped call sites (per-vault Raft groups) pass `Some(vault_id_as_u64)`
 /// so the SDK can key its `VaultLeaderCache` on `(region, organization_id,
 /// vault_id)` rather than just `(region, organization_id)`.
+///
+/// `leader_organization_slug` and `leader_vault_slug` are the external
+/// Snowflake slugs (u64). The SDK's `VaultLeaderCache` keys on
+/// `(OrganizationSlug, VaultSlug)` — the identifier space the SDK actually
+/// has at hand. Vault-scoped gRPC handlers pass them through from the
+/// inbound request; raft-internal call sites that lack slug context pass
+/// `None`/`None` and the SDK falls through to the region path.
 pub(crate) fn not_leader_status_from_handle(
     handle: &inferadb_ledger_raft::ConsensusHandle,
     peer_addresses: Option<&inferadb_ledger_raft::PeerAddressMap>,
     message: impl Into<String>,
     leader_vault: Option<u64>,
+    leader_organization_slug: Option<u64>,
+    leader_vault_slug: Option<u64>,
 ) -> Status {
     let shard_state = handle.shard_state();
     let term = handle.current_term();
@@ -128,6 +149,8 @@ pub(crate) fn not_leader_status_from_handle(
         Some(term),
         Some(leader_organization),
         leader_vault,
+        leader_organization_slug,
+        leader_vault_slug,
     )
 }
 
@@ -153,6 +176,8 @@ pub(crate) fn not_leader_remote_region(
         message,
         None,
         redirect.routing.leader_hint.as_deref(),
+        None,
+        None,
         None,
         None,
         None,
@@ -327,6 +352,8 @@ mod tests {
             Some(7),
             Some(5),
             Some(99),
+            Some(123),
+            Some(456),
         );
         assert_eq!(status.code(), tonic::Code::Unavailable);
 
@@ -337,11 +364,22 @@ mod tests {
         assert_eq!(details.context.get("leader_term").unwrap(), "7");
         assert_eq!(details.context.get("leader_shard").unwrap(), "5");
         assert_eq!(details.context.get("leader_vault").unwrap(), "99");
+        assert_eq!(details.context.get("leader_organization_slug").unwrap(), "123");
+        assert_eq!(details.context.get("leader_vault_slug").unwrap(), "456");
     }
 
     #[test]
     fn status_with_not_leader_hint_survives_correlation() {
-        let status = status_with_not_leader_hint("not leader", Some(1), None, None, Some(0), None);
+        let status = status_with_not_leader_hint(
+            "not leader",
+            Some(1),
+            None,
+            None,
+            Some(0),
+            None,
+            None,
+            None,
+        );
         let request_id = uuid::Uuid::new_v4();
         let enriched = status_with_correlation(status, &request_id, "trace");
 
@@ -356,10 +394,19 @@ mod tests {
         // Region- and org-scoped rejections pass leader_vault = None;
         // the resulting ErrorDetails MUST omit the leader_vault key so the
         // SDK falls back to its org-level cache.
-        let status =
-            status_with_not_leader_hint("not leader", Some(1), None, Some(2), Some(3), None);
+        let status = status_with_not_leader_hint(
+            "not leader",
+            Some(1),
+            None,
+            Some(2),
+            Some(3),
+            None,
+            None,
+            None,
+        );
         let details = proto::ErrorDetails::decode(status.details()).unwrap();
         assert!(!details.context.contains_key("leader_vault"));
+        assert!(!details.context.contains_key("leader_vault_slug"));
         assert_eq!(details.context.get("leader_shard").unwrap(), "3");
     }
 

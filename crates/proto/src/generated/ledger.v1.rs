@@ -952,95 +952,6 @@ pub struct ErrorDetails {
     #[prost(string, optional, tag = "5")]
     pub suggested_action: ::core::option::Option<::prost::alloc::string::String>,
 }
-/// Batch write with all-or-nothing atomicity.
-///
-/// Semantics:
-///
-/// * All writes are committed in a SINGLE block (shared block_height in response)
-/// * Writes are applied in ARRAY ORDER (writes\[0\] before writes\[1\], etc.)
-/// * If ANY write's condition fails (e.g., CAS mismatch), the ENTIRE batch fails
-/// * On failure, no writes are applied—the vault state is unchanged
-///
-/// Idempotency: Uses BATCH-LEVEL client_id/idempotency_key (not per-write).
-/// The entire batch is the idempotency unit—retry with same (client_id, idempotency_key)
-/// returns the original result. Per-write values in operations\[\] are IGNORED.
-///
-/// Use cases:
-///
-/// * Multi-key transactions requiring atomic commit
-/// * Ordered operations where later writes depend on earlier writes' effects
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct BatchWriteRequest {
-    #[prost(message, optional, tag = "1")]
-    pub organization: ::core::option::Option<OrganizationSlug>,
-    /// All writes target same vault scope
-    #[prost(message, optional, tag = "2")]
-    pub vault: ::core::option::Option<VaultSlug>,
-    /// Batch-level idempotency (per-write client_id ignored)
-    #[prost(message, optional, tag = "3")]
-    pub client_id: ::core::option::Option<ClientId>,
-    /// 16-byte UUID for idempotent retries (server rejects reuse with different payload)
-    #[prost(bytes = "vec", tag = "4")]
-    pub idempotency_key: ::prost::alloc::vec::Vec<u8>,
-    /// Operations in this batch
-    #[prost(message, repeated, tag = "5")]
-    pub operations: ::prost::alloc::vec::Vec<BatchWriteOperation>,
-    /// Request block_header + tx_proofs in response for verification
-    #[prost(bool, tag = "6")]
-    pub include_tx_proofs: bool,
-    /// Identity of the user performing this operation.
-    #[prost(message, optional, tag = "7")]
-    pub caller: ::core::option::Option<UserSlug>,
-}
-/// Logical grouping of operations within a BatchWriteRequest.
-/// Purpose: Allows expressing ordered operation groups within an atomic batch.
-/// Processing: Groups are processed in array order (operations\[0\], then operations\[1\], etc.)
-/// All groups share the batch's organization, vault, client_id, and idempotency_key.
-/// Atomicity: The ENTIRE batch is atomic—if any operation fails, no changes are applied.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct BatchWriteOperation {
-    /// Operations in this group
-    #[prost(message, repeated, tag = "1")]
-    pub operations: ::prost::alloc::vec::Vec<Operation>,
-}
-/// Response for batch write.
-/// All-or-nothing: either all writes succeed or none are applied.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct BatchWriteResponse {
-    #[prost(oneof = "batch_write_response::Result", tags = "1, 2")]
-    pub result: ::core::option::Option<batch_write_response::Result>,
-}
-/// Nested message and enum types in `BatchWriteResponse`.
-pub mod batch_write_response {
-    #[derive(Clone, PartialEq, ::prost::Oneof)]
-    pub enum Result {
-        #[prost(message, tag = "1")]
-        Success(super::BatchWriteSuccess),
-        /// First failing write; no writes applied
-        #[prost(message, tag = "2")]
-        Error(super::WriteError),
-    }
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct BatchWriteSuccess {
-    /// Single transaction ID for entire batch
-    #[prost(message, optional, tag = "1")]
-    pub tx_id: ::core::option::Option<TxId>,
-    /// Block containing this transaction
-    #[prost(uint64, tag = "2")]
-    pub block_height: u64,
-    /// For client-side verification (optional):
-    ///
-    /// Contains tx_merkle_root for proof verification
-    #[prost(message, optional, tag = "3")]
-    pub block_header: ::core::option::Option<BlockHeader>,
-    /// Proof this tx is in block
-    #[prost(message, optional, tag = "4")]
-    pub tx_proof: ::core::option::Option<MerkleProof>,
-    /// Server-assigned sequence number for this batch
-    #[prost(uint64, tag = "5")]
-    pub assigned_sequence: u64,
-}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeploySchemaRequest {
     #[prost(message, optional, tag = "1")]
@@ -1206,9 +1117,9 @@ pub struct CreateOrganizationRequest {
     /// Human-readable name (e.g., "acme_corp")
     #[prost(string, tag = "1")]
     pub name: ::prost::alloc::string::String,
-    /// Data residency region (required)
-    #[prost(enumeration = "Region", tag = "2")]
-    pub region: i32,
+    /// Data residency region slug (required, e.g. "us-east-va")
+    #[prost(string, tag = "2")]
+    pub region: ::prost::alloc::string::String,
     /// Billing tier (Free if not specified)
     #[prost(enumeration = "OrganizationTier", optional, tag = "3")]
     pub tier: ::core::option::Option<i32>,
@@ -1232,9 +1143,9 @@ pub struct CreateOrganizationResponse {
     pub slug: ::core::option::Option<OrganizationSlug>,
     #[prost(string, tag = "2")]
     pub name: ::prost::alloc::string::String,
-    /// Data residency region
-    #[prost(enumeration = "Region", tag = "3")]
-    pub region: i32,
+    /// Data residency region slug
+    #[prost(string, tag = "3")]
+    pub region: ::prost::alloc::string::String,
     /// Nodes in the region's Raft group
     #[prost(message, repeated, tag = "4")]
     pub member_nodes: ::prost::alloc::vec::Vec<NodeId>,
@@ -1288,9 +1199,9 @@ pub struct GetOrganizationResponse {
     pub slug: ::core::option::Option<OrganizationSlug>,
     #[prost(string, tag = "2")]
     pub name: ::prost::alloc::string::String,
-    /// Data residency region
-    #[prost(enumeration = "Region", tag = "3")]
-    pub region: i32,
+    /// Data residency region slug
+    #[prost(string, tag = "3")]
+    pub region: ::prost::alloc::string::String,
     /// Nodes in the region's Raft group
     #[prost(message, repeated, tag = "4")]
     pub member_nodes: ::prost::alloc::vec::Vec<NodeId>,
@@ -1341,12 +1252,12 @@ pub struct ListOrganizationsResponse {
 }
 /// Migrate organization to a different region.
 /// Protected → non-protected requires acknowledge_residency_downgrade = true.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct MigrateOrganizationRequest {
     #[prost(message, optional, tag = "1")]
     pub slug: ::core::option::Option<OrganizationSlug>,
-    #[prost(enumeration = "Region", tag = "2")]
-    pub target_region: i32,
+    #[prost(string, tag = "2")]
+    pub target_region: ::prost::alloc::string::String,
     #[prost(bool, tag = "3")]
     pub acknowledge_residency_downgrade: bool,
     /// Identity of the user performing this operation.
@@ -1355,14 +1266,14 @@ pub struct MigrateOrganizationRequest {
 }
 /// Migration response with source/target region and current status.
 /// Status will be MIGRATING while the saga is in progress.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct MigrateOrganizationResponse {
     #[prost(message, optional, tag = "1")]
     pub slug: ::core::option::Option<OrganizationSlug>,
-    #[prost(enumeration = "Region", tag = "2")]
-    pub source_region: i32,
-    #[prost(enumeration = "Region", tag = "3")]
-    pub target_region: i32,
+    #[prost(string, tag = "2")]
+    pub source_region: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub target_region: ::prost::alloc::string::String,
     #[prost(enumeration = "OrganizationStatus", tag = "4")]
     pub status: i32,
 }
@@ -1386,8 +1297,8 @@ pub struct UpdateOrganizationResponse {
     pub slug: ::core::option::Option<OrganizationSlug>,
     #[prost(string, tag = "2")]
     pub name: ::prost::alloc::string::String,
-    #[prost(enumeration = "Region", tag = "3")]
-    pub region: i32,
+    #[prost(string, tag = "3")]
+    pub region: ::prost::alloc::string::String,
     #[prost(message, repeated, tag = "4")]
     pub member_nodes: ::prost::alloc::vec::Vec<NodeId>,
     #[prost(enumeration = "OrganizationStatus", tag = "5")]
@@ -1628,12 +1539,12 @@ pub struct UpdateTeamMemberRoleResponse {
     pub team: ::core::option::Option<OrganizationTeam>,
 }
 /// Request to migrate a user's PII to a different region.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct MigrateUserRegionRequest {
     #[prost(message, optional, tag = "1")]
     pub slug: ::core::option::Option<UserSlug>,
-    #[prost(enumeration = "Region", tag = "2")]
-    pub target_region: i32,
+    #[prost(string, tag = "2")]
+    pub target_region: ::prost::alloc::string::String,
     /// Identity of the user performing this operation.
     #[prost(message, optional, tag = "3")]
     pub caller: ::core::option::Option<UserSlug>,
@@ -1643,10 +1554,10 @@ pub struct MigrateUserRegionRequest {
 pub struct MigrateUserRegionResponse {
     #[prost(message, optional, tag = "1")]
     pub slug: ::core::option::Option<UserSlug>,
-    #[prost(enumeration = "Region", tag = "2")]
-    pub source_region: i32,
-    #[prost(enumeration = "Region", tag = "3")]
-    pub target_region: i32,
+    #[prost(string, tag = "2")]
+    pub source_region: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub target_region: ::prost::alloc::string::String,
     /// User directory status will be MIGRATING while the saga is in progress.
     #[prost(string, tag = "4")]
     pub directory_status: ::prost::alloc::string::String,
@@ -1912,9 +1823,9 @@ pub struct CreateUserRequest {
     /// Primary email address (normalized to lowercase)
     #[prost(string, tag = "2")]
     pub email: ::prost::alloc::string::String,
-    /// Region for PII storage
-    #[prost(enumeration = "Region", tag = "3")]
-    pub region: i32,
+    /// Region slug for PII storage (e.g. "us-east-va")
+    #[prost(string, tag = "3")]
+    pub region: ::prost::alloc::string::String,
     /// Default: USER
     #[prost(enumeration = "UserRole", optional, tag = "4")]
     pub role: ::core::option::Option<i32>,
@@ -2001,9 +1912,9 @@ pub struct ListUsersRequest {
     /// Default: 100, Max: 1000
     #[prost(uint32, tag = "2")]
     pub page_size: u32,
-    /// Filter by region
-    #[prost(enumeration = "Region", optional, tag = "3")]
-    pub region: ::core::option::Option<i32>,
+    /// Filter by region slug
+    #[prost(string, optional, tag = "3")]
+    pub region: ::core::option::Option<::prost::alloc::string::String>,
     /// Identity of the user performing this operation.
     #[prost(message, optional, tag = "4")]
     pub caller: ::core::option::Option<UserSlug>,
@@ -2137,9 +2048,9 @@ pub struct InitiateEmailVerificationRequest {
     /// Plaintext email address
     #[prost(string, tag = "1")]
     pub email: ::prost::alloc::string::String,
-    /// Data residency region for this email
-    #[prost(enumeration = "Region", tag = "2")]
-    pub region: i32,
+    /// Data residency region slug for this email
+    #[prost(string, tag = "2")]
+    pub region: ::prost::alloc::string::String,
 }
 /// The verification code to send to the user's email.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2157,9 +2068,9 @@ pub struct VerifyEmailCodeRequest {
     /// Code from the email
     #[prost(string, tag = "2")]
     pub code: ::prost::alloc::string::String,
-    /// Same region used in initiation
-    #[prost(enumeration = "Region", tag = "3")]
-    pub region: i32,
+    /// Same region slug used in initiation
+    #[prost(string, tag = "3")]
+    pub region: ::prost::alloc::string::String,
 }
 /// Result is either a session for an existing user, an onboarding token
 /// for a new user who must complete registration, or a TOTP challenge
@@ -2205,9 +2116,9 @@ pub struct CompleteRegistrationRequest {
     /// Same email used in verification
     #[prost(string, tag = "2")]
     pub email: ::prost::alloc::string::String,
-    /// Same region used in verification
-    #[prost(enumeration = "Region", tag = "3")]
-    pub region: i32,
+    /// Same region slug used in verification
+    #[prost(string, tag = "3")]
+    pub region: ::prost::alloc::string::String,
     /// User display name (PII, regional)
     #[prost(string, tag = "4")]
     pub name: ::prost::alloc::string::String,
@@ -2546,9 +2457,9 @@ pub struct BackupManifest {
     /// restore path at an unrelated `.tar.zst` archive.
     #[prost(string, tag = "2")]
     pub format: ::prost::alloc::string::String,
-    /// Region the source organization lives in.
-    #[prost(enumeration = "Region", tag = "3")]
-    pub region: i32,
+    /// Region slug the source organization lives in.
+    #[prost(string, tag = "3")]
+    pub region: ::prost::alloc::string::String,
     /// External Snowflake slug for the organization at backup time.
     #[prost(message, optional, tag = "4")]
     pub organization: ::core::option::Option<OrganizationSlug>,
@@ -3923,9 +3834,9 @@ pub struct NodeInfo {
     /// For voter election ordering
     #[prost(message, optional, tag = "6")]
     pub joined_at: ::core::option::Option<::prost_types::Timestamp>,
-    /// Geographic region this node belongs to
-    #[prost(enumeration = "Region", tag = "7")]
-    pub region: i32,
+    /// Geographic region slug this node belongs to
+    #[prost(string, tag = "7")]
+    pub region: ::prost::alloc::string::String,
 }
 /// Routing entry: organization → region assignment
 /// Note: leader_hint is computed dynamically from Raft state, not stored here
@@ -3936,9 +3847,9 @@ pub struct OrganizationRegistry {
     /// Human-readable organization name
     #[prost(string, tag = "2")]
     pub name: ::prost::alloc::string::String,
-    /// Data residency region (Raft group)
-    #[prost(enumeration = "Region", tag = "3")]
-    pub region: i32,
+    /// Data residency region slug (Raft group)
+    #[prost(string, tag = "3")]
+    pub region: ::prost::alloc::string::String,
     /// Nodes in the region's Raft group
     #[prost(message, repeated, tag = "4")]
     pub members: ::prost::alloc::vec::Vec<NodeId>,
@@ -3952,11 +3863,11 @@ pub struct OrganizationRegistry {
     pub created_at: ::core::option::Option<::prost_types::Timestamp>,
 }
 /// Region leader resolution for SDK direct-connect optimization.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ResolveRegionLeaderRequest {
-    /// Target data residency region
-    #[prost(enumeration = "Region", tag = "1")]
-    pub region: i32,
+    /// Target data residency region slug
+    #[prost(string, tag = "1")]
+    pub region: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ResolveRegionLeaderResponse {
@@ -3970,10 +3881,10 @@ pub struct ResolveRegionLeaderResponse {
     #[prost(uint32, tag = "3")]
     pub ttl_seconds: u32,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WatchLeaderRequest {
-    #[prost(enumeration = "Region", tag = "1")]
-    pub region: i32,
+    #[prost(string, tag = "1")]
+    pub region: ::prost::alloc::string::String,
 }
 /// Server-pushed leader update. Sent once immediately on stream open (current
 /// state, or empty if unknown), then on each leader change.
@@ -4086,9 +3997,9 @@ pub struct ConsensusEnvelope {
     /// Node ID of the sender.
     #[prost(uint64, tag = "2")]
     pub from_node: u64,
-    /// Region the shard belongs to.
-    #[prost(enumeration = "Region", optional, tag = "3")]
-    pub region: ::core::option::Option<i32>,
+    /// Region slug the shard belongs to.
+    #[prost(string, optional, tag = "3")]
+    pub region: ::core::option::Option<::prost::alloc::string::String>,
     /// Postcard-serialized consensus Message (the inner protocol payload).
     #[prost(bytes = "vec", tag = "4")]
     pub payload: ::prost::alloc::vec::Vec<u8>,
@@ -4110,9 +4021,9 @@ pub struct ConsensusAck {}
 /// Request submitting a regional proposal to the data region leader.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RegionalProposalRequest {
-    /// Target data region.
-    #[prost(enumeration = "Region", optional, tag = "1")]
-    pub region: ::core::option::Option<i32>,
+    /// Target data region slug.
+    #[prost(string, optional, tag = "1")]
+    pub region: ::core::option::Option<::prost::alloc::string::String>,
     /// Postcard-serialized `RaftPayload<R>` where `R` is the tier-specific
     /// request type (`SystemRequest` / `RegionRequest` / `OrganizationRequest`).
     /// The receiving node decodes based on the target group's tier.
@@ -4254,7 +4165,7 @@ pub struct GetRewrapStatusResponse {
 }
 /// Erase a user's PII via crypto-shredding.
 /// Forward-only finalization — irreversible by design.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct EraseUserRequest {
     /// User slug (Snowflake ID) to erase. The server resolves this to an
     /// internal user ID.
@@ -4263,9 +4174,9 @@ pub struct EraseUserRequest {
     /// Identity of the user performing this operation.
     #[prost(message, optional, tag = "2")]
     pub caller: ::core::option::Option<UserSlug>,
-    /// Region where the user's PII resides.
-    #[prost(enumeration = "Region", tag = "3")]
-    pub region: i32,
+    /// Region slug where the user's PII resides.
+    #[prost(string, tag = "3")]
+    pub region: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct EraseUserResponse {
@@ -4277,9 +4188,9 @@ pub struct EraseUserResponse {
 /// structure. Explicit admin action for pre-release data migration.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct MigrateExistingUsersRequest {
-    /// Default region for users without an assigned region.
-    #[prost(enumeration = "Region", tag = "1")]
-    pub default_region: i32,
+    /// Default region slug for users without an assigned region.
+    #[prost(string, tag = "1")]
+    pub default_region: ::prost::alloc::string::String,
     /// Hex-encoded email blinding key for HMAC computation.
     /// The key stays in the handler and never enters the Raft log.
     #[prost(string, tag = "2")]
@@ -4315,6 +4226,19 @@ pub struct ProvisionRegionRequest {
     /// region. Unprotected regions are auto-joined by every cluster member.
     #[prost(bool, tag = "2")]
     pub protected: bool,
+    /// Whether PII / state for this region must stay in-region. The
+    /// authoritative source for the residency contract for `name`. Defaults
+    /// to `true` (default-deny) on the server side when omitted by the client
+    /// — operators provisioning a non-protected US-style region MUST set
+    /// this to `false` explicitly.
+    #[prost(bool, tag = "3")]
+    pub requires_residency: bool,
+    /// Soft-delete retention period, in days, for entities homed in this
+    /// region. 30 for GDPR / UK GDPR jurisdictions; 90 elsewhere; operators
+    /// are responsible for matching the regional regulatory contract.
+    /// Server defaults to 90 when omitted.
+    #[prost(uint32, tag = "4")]
+    pub retention_days: u32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProvisionRegionResponse {
@@ -4352,113 +4276,176 @@ pub struct RegionDirectoryEntry {
     /// Wall-clock creation timestamp.
     #[prost(message, optional, tag = "6")]
     pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// Whether PII / state for this region must stay in-region. The
+    /// authoritative source for the residency contract — replaces the prior
+    /// hardcoded `Region::requires_residency()` lookup.
+    #[prost(bool, tag = "7")]
+    pub requires_residency: bool,
+    /// Soft-delete retention period, in days, for entities homed in this
+    /// region. The authoritative source for retention — replaces the prior
+    /// hardcoded `Region::retention_days()` lookup.
+    #[prost(uint32, tag = "8")]
+    pub retention_days: u32,
 }
-/// Geographic region for data residency. Each Raft consensus group maps 1:1 to
-/// a region. Organizations declare a region governing where their data is stored.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum Region {
-    Unspecified = 0,
-    Global = 1,
-    /// North America (10-19)
-    UsEastVa = 10,
-    UsWestOr = 11,
-    CaCentralQc = 12,
-    /// South America (20-29)
-    BrSoutheastSp = 20,
-    /// Europe — EU/EEA (30-39)
-    IeEastDublin = 30,
-    FrNorthParis = 31,
-    DeCentralFrankfurt = 32,
-    SeEastStockholm = 33,
-    ItNorthMilan = 34,
-    /// United Kingdom (40-49)
-    UkSouthLondon = 40,
-    /// Middle East & Africa (50-59)
-    SaCentralRiyadh = 50,
-    BhCentralManama = 51,
-    AeCentralDubai = 52,
-    IlCentralTelAviv = 53,
-    ZaSouthCapeTown = 54,
-    NgWestLagos = 55,
-    /// Asia Pacific (60-69)
-    SgCentralSingapore = 60,
-    AuEastSydney = 61,
-    IdWestJakarta = 62,
-    JpEastTokyo = 63,
-    KrCentralSeoul = 64,
-    InWestMumbai = 65,
-    VnSouthHcmc = 66,
-    /// China (70-79)
-    CnNorthBeijing = 70,
+/// Update the residency contract for an existing region. Idempotent — the
+/// directory entry is rewritten with the supplied flags and the next
+/// retention sweep / residency check observes the new values.
+///
+/// Migration path for clusters upgraded across the R6 boundary: pre-R6
+/// `RegionDirectoryEntry` entries decode without `requires_residency` /
+/// `retention_days`, so they pick up disciplined defaults
+/// (`requires_residency=true`, `retention_days=90`). EU operators MUST
+/// call `SetRegionResidency` with `retention_days=30` after the upgrade
+/// to re-establish GDPR's 30-day retention contract.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetRegionResidencyRequest {
+    /// Region name slug (e.g. `"us-east-va"`). The `"global"` slug is
+    /// rejected — the control plane is never subject to residency rules.
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    /// New `requires_residency` value for the region directory entry.
+    #[prost(bool, tag = "2")]
+    pub requires_residency: bool,
+    /// New `retention_days` value for the region directory entry.
+    #[prost(uint32, tag = "3")]
+    pub retention_days: u32,
 }
-impl Region {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "REGION_UNSPECIFIED",
-            Self::Global => "REGION_GLOBAL",
-            Self::UsEastVa => "REGION_US_EAST_VA",
-            Self::UsWestOr => "REGION_US_WEST_OR",
-            Self::CaCentralQc => "REGION_CA_CENTRAL_QC",
-            Self::BrSoutheastSp => "REGION_BR_SOUTHEAST_SP",
-            Self::IeEastDublin => "REGION_IE_EAST_DUBLIN",
-            Self::FrNorthParis => "REGION_FR_NORTH_PARIS",
-            Self::DeCentralFrankfurt => "REGION_DE_CENTRAL_FRANKFURT",
-            Self::SeEastStockholm => "REGION_SE_EAST_STOCKHOLM",
-            Self::ItNorthMilan => "REGION_IT_NORTH_MILAN",
-            Self::UkSouthLondon => "REGION_UK_SOUTH_LONDON",
-            Self::SaCentralRiyadh => "REGION_SA_CENTRAL_RIYADH",
-            Self::BhCentralManama => "REGION_BH_CENTRAL_MANAMA",
-            Self::AeCentralDubai => "REGION_AE_CENTRAL_DUBAI",
-            Self::IlCentralTelAviv => "REGION_IL_CENTRAL_TEL_AVIV",
-            Self::ZaSouthCapeTown => "REGION_ZA_SOUTH_CAPE_TOWN",
-            Self::NgWestLagos => "REGION_NG_WEST_LAGOS",
-            Self::SgCentralSingapore => "REGION_SG_CENTRAL_SINGAPORE",
-            Self::AuEastSydney => "REGION_AU_EAST_SYDNEY",
-            Self::IdWestJakarta => "REGION_ID_WEST_JAKARTA",
-            Self::JpEastTokyo => "REGION_JP_EAST_TOKYO",
-            Self::KrCentralSeoul => "REGION_KR_CENTRAL_SEOUL",
-            Self::InWestMumbai => "REGION_IN_WEST_MUMBAI",
-            Self::VnSouthHcmc => "REGION_VN_SOUTH_HCMC",
-            Self::CnNorthBeijing => "REGION_CN_NORTH_BEIJING",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "REGION_UNSPECIFIED" => Some(Self::Unspecified),
-            "REGION_GLOBAL" => Some(Self::Global),
-            "REGION_US_EAST_VA" => Some(Self::UsEastVa),
-            "REGION_US_WEST_OR" => Some(Self::UsWestOr),
-            "REGION_CA_CENTRAL_QC" => Some(Self::CaCentralQc),
-            "REGION_BR_SOUTHEAST_SP" => Some(Self::BrSoutheastSp),
-            "REGION_IE_EAST_DUBLIN" => Some(Self::IeEastDublin),
-            "REGION_FR_NORTH_PARIS" => Some(Self::FrNorthParis),
-            "REGION_DE_CENTRAL_FRANKFURT" => Some(Self::DeCentralFrankfurt),
-            "REGION_SE_EAST_STOCKHOLM" => Some(Self::SeEastStockholm),
-            "REGION_IT_NORTH_MILAN" => Some(Self::ItNorthMilan),
-            "REGION_UK_SOUTH_LONDON" => Some(Self::UkSouthLondon),
-            "REGION_SA_CENTRAL_RIYADH" => Some(Self::SaCentralRiyadh),
-            "REGION_BH_CENTRAL_MANAMA" => Some(Self::BhCentralManama),
-            "REGION_AE_CENTRAL_DUBAI" => Some(Self::AeCentralDubai),
-            "REGION_IL_CENTRAL_TEL_AVIV" => Some(Self::IlCentralTelAviv),
-            "REGION_ZA_SOUTH_CAPE_TOWN" => Some(Self::ZaSouthCapeTown),
-            "REGION_NG_WEST_LAGOS" => Some(Self::NgWestLagos),
-            "REGION_SG_CENTRAL_SINGAPORE" => Some(Self::SgCentralSingapore),
-            "REGION_AU_EAST_SYDNEY" => Some(Self::AuEastSydney),
-            "REGION_ID_WEST_JAKARTA" => Some(Self::IdWestJakarta),
-            "REGION_JP_EAST_TOKYO" => Some(Self::JpEastTokyo),
-            "REGION_KR_CENTRAL_SEOUL" => Some(Self::KrCentralSeoul),
-            "REGION_IN_WEST_MUMBAI" => Some(Self::InWestMumbai),
-            "REGION_VN_SOUTH_HCMC" => Some(Self::VnSouthHcmc),
-            "REGION_CN_NORTH_BEIJING" => Some(Self::CnNorthBeijing),
-            _ => None,
-        }
-    }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetRegionResidencyResponse {
+    /// Region name slug echoed back for the client.
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    /// Updated `requires_residency` value.
+    #[prost(bool, tag = "2")]
+    pub requires_residency: bool,
+    /// Updated `retention_days` value.
+    #[prost(uint32, tag = "3")]
+    pub retention_days: u32,
+}
+/// Per-vault summary returned by `AdminListVaults` and embedded in
+/// `ShowVaultResponse`. Captures the operator-relevant view of a
+/// per-vault Raft group: lifecycle state, leader, voter / learner
+/// counts, apply progress, and the last-observed activity timestamp.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AdminVaultInfo {
+    /// External vault slug.
+    #[prost(message, optional, tag = "1")]
+    pub slug: ::core::option::Option<VaultSlug>,
+    /// Lifecycle state — one of "active" | "dormant" | "stalled". Mirrors
+    /// the `org_active_vault_count{status=...}` metric label.
+    #[prost(string, tag = "2")]
+    pub status: ::prost::alloc::string::String,
+    /// Current leader's node id, or 0 if leadership has not been
+    /// established yet on this node's view of the group.
+    #[prost(uint64, tag = "3")]
+    pub leader_node_id: u64,
+    /// Total voter count in the vault group's current membership.
+    #[prost(uint64, tag = "4")]
+    pub voter_count: u64,
+    /// Total learner count in the vault group's current membership.
+    #[prost(uint64, tag = "5")]
+    pub learner_count: u64,
+    /// Highest log index applied to this vault's state machine (0 if no
+    /// entries have been applied yet — fresh vault).
+    #[prost(uint64, tag = "6")]
+    pub last_applied_index: u64,
+    /// Wall-clock timestamp of the last observed activity on this vault
+    /// (request, leader adoption, or membership change). Absent when the
+    /// vault has never observed activity since process start.
+    #[prost(message, optional, tag = "7")]
+    pub last_activity: ::core::option::Option<::prost_types::Timestamp>,
+}
+/// Request: list all per-vault Raft groups in an organization with
+/// their lifecycle state, leadership, and apply progress.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AdminListVaultsRequest {
+    /// Organization to inspect. Required.
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AdminListVaultsResponse {
+    /// One entry per vault group registered on the responding node.
+    /// Empty if the org has no vaults or if this node is not a voter for
+    /// the org's region.
+    #[prost(message, repeated, tag = "1")]
+    pub vaults: ::prost::alloc::vec::Vec<AdminVaultInfo>,
+}
+/// Request: detailed status for a single vault.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ShowVaultRequest {
+    /// Owning organization. Required.
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    /// Vault to inspect. Required.
+    #[prost(message, optional, tag = "2")]
+    pub vault: ::core::option::Option<VaultSlug>,
+}
+/// Detailed per-vault status. Includes the summary embedded in
+/// `AdminListVaults` plus full membership, internal IDs, and
+/// hibernation-specific timestamps.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ShowVaultResponse {
+    /// Summary view shared with `AdminListVaults`.
+    #[prost(message, optional, tag = "1")]
+    pub info: ::core::option::Option<AdminVaultInfo>,
+    /// Region the vault lives in (matches the org's region).
+    #[prost(string, tag = "2")]
+    pub region: ::prost::alloc::string::String,
+    /// Internal organization ID (operator-facing; not exposed to
+    /// SDK clients). Useful for cross-referencing logs / metrics that
+    /// emit `organization_id`.
+    #[prost(uint64, tag = "3")]
+    pub organization_id: u64,
+    /// Internal vault ID (operator-facing; not exposed to SDK clients).
+    #[prost(uint64, tag = "4")]
+    pub vault_id: u64,
+    /// Full voter set in the vault group's current membership.
+    #[prost(uint64, repeated, tag = "5")]
+    pub voters: ::prost::alloc::vec::Vec<u64>,
+    /// Full learner set in the vault group's current membership.
+    #[prost(uint64, repeated, tag = "6")]
+    pub learners: ::prost::alloc::vec::Vec<u64>,
+    /// Configuration epoch of the vault group's membership. Increments
+    /// on every committed membership change.
+    #[prost(uint64, tag = "7")]
+    pub conf_epoch: u64,
+    /// Raw lifecycle enum value — same as `info.status` but explicit
+    /// for tools that want the unparsed value.
+    #[prost(string, tag = "8")]
+    pub lifecycle_state: ::prost::alloc::string::String,
+    /// Wall-clock timestamp of the last observed activity. Absent when
+    /// the vault has never observed activity since process start.
+    #[prost(message, optional, tag = "9")]
+    pub last_activity_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// Wall-clock timestamp at which an in-flight membership change
+    /// started. Absent when no membership change is pending. Used by
+    /// operators to investigate stalled membership transitions.
+    #[prost(message, optional, tag = "10")]
+    pub pending_membership_started_at: ::core::option::Option<::prost_types::Timestamp>,
+}
+/// Request: trigger an operator-initiated vault repair.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RepairVaultRequest {
+    /// Owning organization. Required.
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    /// Vault to repair. Required.
+    #[prost(message, optional, tag = "2")]
+    pub vault: ::core::option::Option<VaultSlug>,
+}
+/// Response from `RepairVault`. The `status` field is one of
+/// "triggered" (repair scheduled), "noop" (no action taken — vault
+/// already healthy or repair API unavailable), or "error" (repair
+/// could not be initiated).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RepairVaultResponse {
+    /// Status outcome — see message-level docs for the value vocabulary.
+    #[prost(string, tag = "1")]
+    pub status: ::prost::alloc::string::String,
+    /// Human-readable message explaining the outcome.
+    #[prost(string, tag = "2")]
+    pub message: ::prost::alloc::string::String,
 }
 /// User account status (lifecycle state machine)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
@@ -6625,31 +6612,6 @@ pub mod write_service_client {
                 .insert(GrpcMethod::new("ledger.v1.WriteService", "Write"));
             self.inner.unary(req, path, codec).await
         }
-        /// Submit multiple transactions in a batch
-        pub async fn batch_write(
-            &mut self,
-            request: impl tonic::IntoRequest<super::BatchWriteRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::BatchWriteResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ledger.v1.WriteService/BatchWrite",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("ledger.v1.WriteService", "BatchWrite"));
-            self.inner.unary(req, path, codec).await
-        }
     }
 }
 /// Generated server implementations.
@@ -6670,14 +6632,6 @@ pub mod write_service_server {
             &self,
             request: tonic::Request<super::WriteRequest>,
         ) -> std::result::Result<tonic::Response<super::WriteResponse>, tonic::Status>;
-        /// Submit multiple transactions in a batch
-        async fn batch_write(
-            &self,
-            request: tonic::Request<super::BatchWriteRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::BatchWriteResponse>,
-            tonic::Status,
-        >;
     }
     #[derive(Debug)]
     pub struct WriteServiceServer<T> {
@@ -6784,51 +6738,6 @@ pub mod write_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = WriteSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/ledger.v1.WriteService/BatchWrite" => {
-                    #[allow(non_camel_case_types)]
-                    struct BatchWriteSvc<T: WriteService>(pub Arc<T>);
-                    impl<
-                        T: WriteService,
-                    > tonic::server::UnaryService<super::BatchWriteRequest>
-                    for BatchWriteSvc<T> {
-                        type Response = super::BatchWriteResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::BatchWriteRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as WriteService>::batch_write(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = BatchWriteSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -10728,6 +10637,124 @@ pub mod admin_service_client {
                 .insert(GrpcMethod::new("ledger.v1.AdminService", "ProvisionRegion"));
             self.inner.unary(req, path, codec).await
         }
+        /// Update the residency / retention contract for an existing region.
+        /// The authoritative source for `requires_residency` and `retention_days`
+        /// is the GLOBAL region directory; this RPC rewrites the directory entry.
+        /// Required when upgrading clusters across the R6 boundary — pre-R6
+        /// entries fall back to disciplined defaults
+        /// (`requires_residency=true, retention_days=90`); EU operators MUST
+        /// call this RPC with `retention_days=30` to restore the GDPR contract.
+        pub async fn set_region_residency(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SetRegionResidencyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetRegionResidencyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AdminService/SetRegionResidency",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AdminService", "SetRegionResidency"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Lists all per-vault Raft groups for an organization with their
+        /// lifecycle state, leadership, voter count, and last applied index.
+        /// Read-only; used by `ledger vaults list <org-slug>` for operator
+        /// inspection. Returns one entry per vault registered on this node;
+        /// operators should hit a region voter for the org for an authoritative
+        /// view.
+        pub async fn admin_list_vaults(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AdminListVaultsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AdminListVaultsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AdminService/AdminListVaults",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AdminService", "AdminListVaults"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Returns detailed status for a single vault: voters, learners,
+        /// hibernation lifecycle state, last-activity / pending-membership
+        /// timestamps, conf epoch. Used by `ledger vaults show`.
+        pub async fn show_vault(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ShowVaultRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ShowVaultResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AdminService/ShowVault",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AdminService", "ShowVault"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Operator-triggered vault repair. Today this is a stub: it logs an
+        /// operator intent to repair and returns "noop" because the underlying
+        /// consensus engine does not yet expose a "force snapshot install" or
+        /// "force re-replication" entrypoint. Future work will wire the actual
+        /// repair semantics (`docs/superpowers/completed/2026-04-23-per-vault-consensus.md`
+        /// Phase 7).
+        pub async fn repair_vault(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RepairVaultRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RepairVaultResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AdminService/RepairVault",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ledger.v1.AdminService", "RepairVault"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -10962,6 +10989,56 @@ pub mod admin_service_server {
             request: tonic::Request<super::ProvisionRegionRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ProvisionRegionResponse>,
+            tonic::Status,
+        >;
+        /// Update the residency / retention contract for an existing region.
+        /// The authoritative source for `requires_residency` and `retention_days`
+        /// is the GLOBAL region directory; this RPC rewrites the directory entry.
+        /// Required when upgrading clusters across the R6 boundary — pre-R6
+        /// entries fall back to disciplined defaults
+        /// (`requires_residency=true, retention_days=90`); EU operators MUST
+        /// call this RPC with `retention_days=30` to restore the GDPR contract.
+        async fn set_region_residency(
+            &self,
+            request: tonic::Request<super::SetRegionResidencyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetRegionResidencyResponse>,
+            tonic::Status,
+        >;
+        /// Lists all per-vault Raft groups for an organization with their
+        /// lifecycle state, leadership, voter count, and last applied index.
+        /// Read-only; used by `ledger vaults list <org-slug>` for operator
+        /// inspection. Returns one entry per vault registered on this node;
+        /// operators should hit a region voter for the org for an authoritative
+        /// view.
+        async fn admin_list_vaults(
+            &self,
+            request: tonic::Request<super::AdminListVaultsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AdminListVaultsResponse>,
+            tonic::Status,
+        >;
+        /// Returns detailed status for a single vault: voters, learners,
+        /// hibernation lifecycle state, last-activity / pending-membership
+        /// timestamps, conf epoch. Used by `ledger vaults show`.
+        async fn show_vault(
+            &self,
+            request: tonic::Request<super::ShowVaultRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ShowVaultResponse>,
+            tonic::Status,
+        >;
+        /// Operator-triggered vault repair. Today this is a stub: it logs an
+        /// operator intent to repair and returns "noop" because the underlying
+        /// consensus engine does not yet expose a "force snapshot install" or
+        /// "force re-replication" entrypoint. Future work will wire the actual
+        /// repair semantics (`docs/superpowers/completed/2026-04-23-per-vault-consensus.md`
+        /// Phase 7).
+        async fn repair_vault(
+            &self,
+            request: tonic::Request<super::RepairVaultRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RepairVaultResponse>,
             tonic::Status,
         >;
     }
@@ -12124,6 +12201,188 @@ pub mod admin_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = ProvisionRegionSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AdminService/SetRegionResidency" => {
+                    #[allow(non_camel_case_types)]
+                    struct SetRegionResidencySvc<T: AdminService>(pub Arc<T>);
+                    impl<
+                        T: AdminService,
+                    > tonic::server::UnaryService<super::SetRegionResidencyRequest>
+                    for SetRegionResidencySvc<T> {
+                        type Response = super::SetRegionResidencyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SetRegionResidencyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdminService>::set_region_residency(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SetRegionResidencySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AdminService/AdminListVaults" => {
+                    #[allow(non_camel_case_types)]
+                    struct AdminListVaultsSvc<T: AdminService>(pub Arc<T>);
+                    impl<
+                        T: AdminService,
+                    > tonic::server::UnaryService<super::AdminListVaultsRequest>
+                    for AdminListVaultsSvc<T> {
+                        type Response = super::AdminListVaultsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::AdminListVaultsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdminService>::admin_list_vaults(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = AdminListVaultsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AdminService/ShowVault" => {
+                    #[allow(non_camel_case_types)]
+                    struct ShowVaultSvc<T: AdminService>(pub Arc<T>);
+                    impl<
+                        T: AdminService,
+                    > tonic::server::UnaryService<super::ShowVaultRequest>
+                    for ShowVaultSvc<T> {
+                        type Response = super::ShowVaultResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ShowVaultRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdminService>::show_vault(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ShowVaultSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AdminService/RepairVault" => {
+                    #[allow(non_camel_case_types)]
+                    struct RepairVaultSvc<T: AdminService>(pub Arc<T>);
+                    impl<
+                        T: AdminService,
+                    > tonic::server::UnaryService<super::RepairVaultRequest>
+                    for RepairVaultSvc<T> {
+                        type Response = super::RepairVaultResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RepairVaultRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AdminService>::repair_vault(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RepairVaultSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

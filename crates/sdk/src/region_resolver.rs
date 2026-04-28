@@ -25,7 +25,7 @@ use tonic::transport::Channel;
 
 use crate::{
     error::{Result, SdkError},
-    proto_util::region_to_proto_i32,
+    proto_util::region_to_proto_string,
 };
 
 /// Internal cached leader entry.
@@ -318,7 +318,7 @@ impl RegionLeaderCache {
 
         let response = client
             .resolve_region_leader(proto::ResolveRegionLeaderRequest {
-                region: region_to_proto_i32(self.region),
+                region: region_to_proto_string(self.region),
             })
             .await
             .map_err(SdkError::from)?;
@@ -447,7 +447,7 @@ pub(crate) fn spawn_leader_watcher(
     tokio::spawn(async move {
         let mut backoff = WATCHER_INITIAL_BACKOFF;
         let label = cache.region_label();
-        let region_proto = region_to_proto_i32(cache.region());
+        let region_proto = region_to_proto_string(cache.region());
 
         loop {
             if cancel.is_cancelled() {
@@ -458,7 +458,7 @@ pub(crate) fn spawn_leader_watcher(
                 proto::system_discovery_service_client::SystemDiscoveryServiceClient::new(
                     gateway.clone(),
                 );
-            let request = proto::WatchLeaderRequest { region: region_proto };
+            let request = proto::WatchLeaderRequest { region: region_proto.clone() };
 
             let stream_result = tokio::select! {
                 _ = cancel.cancelled() => return,
@@ -724,6 +724,8 @@ mod tests {
             term: Some(7),
             organization_id: None,
             vault_id: None,
+            organization_slug: None,
+            vault_slug: None,
         };
         cache.apply_hint(&hint);
         assert_eq!(cache.cached_endpoint().as_deref(), Some("http://10.0.2.5:5000"));
@@ -739,6 +741,8 @@ mod tests {
             term: Some(7),
             organization_id: None,
             vault_id: None,
+            organization_slug: None,
+            vault_slug: None,
         };
         cache.apply_hint(&hint);
         assert!(cache.cached_endpoint().is_none());
@@ -763,6 +767,8 @@ mod tests {
             term: None,
             organization_id: None,
             vault_id: None,
+            organization_slug: None,
+            vault_slug: None,
         };
         cache.apply_hint(&hint);
 
@@ -947,6 +953,8 @@ mod tests {
             term: None,
             organization_id: None,
             vault_id: None,
+            organization_slug: None,
+            vault_slug: None,
         });
 
         assert_eq!(metrics.get("flap", "us-east-va"), 0);
@@ -1019,6 +1027,8 @@ mod tests {
             term: Some(5),
             organization_id: None,
             vault_id: None,
+            organization_slug: None,
+            vault_slug: None,
         };
         cache.apply_hint(&hint);
         assert_eq!(cache.cached_endpoint().as_deref(), Some("http://same:5000"));
@@ -1035,6 +1045,8 @@ mod tests {
             term: Some(7),
             organization_id: None,
             vault_id: None,
+            organization_slug: None,
+            vault_slug: None,
         };
         cache.apply_hint(&hint);
         assert_eq!(cache.cached_endpoint().as_deref(), Some("http://new:5000"));
@@ -1053,6 +1065,8 @@ mod tests {
             term: Some(5),
             organization_id: None,
             vault_id: None,
+            organization_slug: None,
+            vault_slug: None,
         };
         cache.apply_hint(&hint);
         assert_eq!(cache.cached_endpoint().as_deref(), Some("http://old:5000"));
@@ -1080,6 +1094,8 @@ mod tests {
             term: None,
             organization_id: None,
             vault_id: None,
+            organization_slug: None,
+            vault_slug: None,
         };
         cache.apply_hint(&hint);
         assert_eq!(cache.cached_endpoint().as_deref(), Some("http://first:5000"));
@@ -1111,6 +1127,8 @@ mod tests {
             term: None,
             organization_id: None,
             vault_id: None,
+            organization_slug: None,
+            vault_slug: None,
         };
         cache.apply_hint(&hint);
         assert_eq!(cache.cached_endpoint().as_deref(), Some("http://old:5000"));

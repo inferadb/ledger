@@ -37,7 +37,7 @@ use std::{
     time::Instant,
 };
 
-use inferadb_ledger_types::{OrganizationId, VaultId};
+use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 use parking_lot::RwLock;
 
 use crate::error::LeaderHint;
@@ -67,7 +67,16 @@ struct Slot {
     last_accessed: AtomicU64,
 }
 
-/// Per-vault leader cache keyed by `(organization_id, vault_id)`.
+/// Per-vault leader cache keyed by `(OrganizationSlug, VaultSlug)`.
+///
+/// The cache is keyed by external **Snowflake slugs**, not internal IDs —
+/// the SDK only ever has slugs in hand (the request types take slugs and
+/// the gRPC wire carries `{Entity}Slug { slug: u64 }`). Slug→ID translation
+/// lives server-side in `crates/services/src/services/slug_resolver.rs`;
+/// the SDK never crosses that boundary. The server emits both `leader_*`
+/// (internal IDs) and `leader_*_slug` (external slugs) keys in
+/// `ErrorDetails` so the cache can populate from a `NotLeader` hint
+/// directly.
 ///
 /// Thread-safe: the inner map is guarded by a `parking_lot::RwLock` so
 /// concurrent readers do not block each other. Writes (insertions, hint
@@ -76,16 +85,18 @@ struct Slot {
 /// ```no_run
 /// # use inferadb_ledger_sdk::vault_resolver::VaultLeaderCache;
 /// # use inferadb_ledger_sdk::LeaderHint;
-/// # use inferadb_ledger_types::{OrganizationId, VaultId};
+/// # use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 /// let cache = VaultLeaderCache::with_capacity(1_000);
-/// let org = OrganizationId::new(42);
-/// let vault = VaultId::new(7);
+/// let org = OrganizationSlug::new(42);
+/// let vault = VaultSlug::new(7);
 /// let hint = LeaderHint {
 ///     leader_id: Some(3),
 ///     leader_endpoint: Some("http://10.0.2.5:5000".to_owned()),
 ///     term: Some(11),
 ///     organization_id: Some(42),
 ///     vault_id: Some(7),
+///     organization_slug: Some(42),
+///     vault_slug: Some(7),
 /// };
 /// cache.apply_hint(org, vault, &hint);
 /// let entry = cache.lookup(org, vault).expect("populated");
@@ -93,7 +104,7 @@ struct Slot {
 /// ```
 #[derive(Debug)]
 pub struct VaultLeaderCache {
-    inner: RwLock<std::collections::HashMap<(OrganizationId, VaultId), Slot>>,
+    inner: RwLock<std::collections::HashMap<(OrganizationSlug, VaultSlug), Slot>>,
     /// Maximum number of entries before LRU eviction kicks in.
     capacity: usize,
     /// Monotonic counter bumped on every access. Wrapping is benign — the
@@ -154,7 +165,7 @@ impl VaultLeaderCache {
     /// the read lock plus a single relaxed atomic write — concurrent readers
     /// for different keys never serialize.
     #[must_use]
-    pub fn lookup(&self, organization: OrganizationId, vault: VaultId) -> Option<LeaderEntry> {
+    pub fn lookup(&self, organization: OrganizationSlug, vault: VaultSlug) -> Option<LeaderEntry> {
         let guard = self.inner.read();
         let slot = guard.get(&(organization, vault))?;
         slot.last_accessed.store(self.next_access(), Ordering::Relaxed);
@@ -166,8 +177,8 @@ impl VaultLeaderCache {
     #[must_use]
     pub fn cached_endpoint(
         &self,
-        organization: OrganizationId,
-        vault: VaultId,
+        organization: OrganizationSlug,
+        vault: VaultSlug,
     ) -> Option<Arc<str>> {
         self.lookup(organization, vault).and_then(|e| e.leader_endpoint)
     }
@@ -178,7 +189,7 @@ impl VaultLeaderCache {
     /// for the same `(organization, vault)` pair is dropped. The metrics
     /// sink is notified so operators can observe how often stale hints are
     /// being rejected.
-    pub fn apply_hint(&self, organization: OrganizationId, vault: VaultId, hint: &LeaderHint) {
+    pub fn apply_hint(&self, organization: OrganizationSlug, vault: VaultSlug, hint: &LeaderHint) {
         // Hints without an endpoint are useless — they can't be dialed.
         // Match `RegionLeaderCache::apply_hint` semantics here.
         let Some(endpoint) = hint.leader_endpoint.as_deref() else {
@@ -228,7 +239,7 @@ impl VaultLeaderCache {
 
     /// Removes the cached entry for `(organization, vault)`. No-op when the
     /// entry is absent.
-    pub fn invalidate(&self, organization: OrganizationId, vault: VaultId) {
+    pub fn invalidate(&self, organization: OrganizationSlug, vault: VaultSlug) {
         self.inner.write().remove(&(organization, vault));
     }
 
@@ -268,11 +279,11 @@ impl Default for VaultLeaderCache {
 mod tests {
     use super::*;
 
-    fn org(v: i64) -> OrganizationId {
-        OrganizationId::new(v)
+    fn org(v: u64) -> OrganizationSlug {
+        OrganizationSlug::new(v)
     }
-    fn vault(v: i64) -> VaultId {
-        VaultId::new(v)
+    fn vault(v: u64) -> VaultSlug {
+        VaultSlug::new(v)
     }
 
     fn hint(endpoint: &str, term: Option<u64>) -> LeaderHint {
@@ -282,6 +293,8 @@ mod tests {
             term,
             organization_id: None,
             vault_id: None,
+            organization_slug: None,
+            vault_slug: None,
         }
     }
 
@@ -311,6 +324,8 @@ mod tests {
             term: Some(7),
             organization_id: None,
             vault_id: None,
+            organization_slug: None,
+            vault_slug: None,
         };
         cache.apply_hint(org(1), vault(2), &h);
         assert!(cache.lookup(org(1), vault(2)).is_none());
@@ -491,6 +506,31 @@ mod tests {
         cache.apply_hint(org(1), vault(1), &hint("http://leader:5000", Some(1)));
         let ep = cache.cached_endpoint(org(1), vault(1)).expect("populated");
         assert_eq!(ep.as_ref(), "http://leader:5000");
+    }
+
+    #[test]
+    fn slug_keyed_hint_round_trips_through_cache() {
+        // The cache is keyed on (OrganizationSlug, VaultSlug). A LeaderHint
+        // carrying the new `*_slug` fields populates and looks up
+        // successfully — this is the bug fix's happy path.
+        let cache = VaultLeaderCache::new();
+        let h = LeaderHint {
+            leader_id: Some(3),
+            leader_endpoint: Some("http://leader:5000".to_owned()),
+            term: Some(11),
+            organization_id: Some(42),
+            vault_id: Some(7),
+            organization_slug: Some(1234),
+            vault_slug: Some(5678),
+        };
+        // Note: apply_hint uses the (org_slug, vault_slug) parameters directly
+        // — the hint's `organization_slug`/`vault_slug` fields are
+        // informational here. The pool's `apply_region_leader_hint_or_invalidate`
+        // is what reads those fields off the hint to choose the cache key.
+        cache.apply_hint(OrganizationSlug::new(1234), VaultSlug::new(5678), &h);
+        let entry =
+            cache.lookup(OrganizationSlug::new(1234), VaultSlug::new(5678)).expect("populated");
+        assert_eq!(entry.leader_endpoint.as_deref(), Some("http://leader:5000"));
     }
 
     #[test]

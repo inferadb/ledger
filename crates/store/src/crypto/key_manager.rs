@@ -18,7 +18,7 @@ use std::{
 
 use inferadb_ledger_types::{
     config::{RmkStatus, RmkVersionInfo, SecretsManagerConfig},
-    types::{ALL_REGIONS, Region},
+    types::Region,
 };
 use serde::{Deserialize, Serialize};
 
@@ -100,14 +100,41 @@ pub trait RegionKeyManager: Send + Sync {
 /// Returns the set of regions a node must hold RMKs for.
 ///
 /// A node holds RMKs for:
-/// - All non-protected regions (`!requires_residency()`: GLOBAL, US_EAST_VA, US_WEST_OR)
-/// - Its own region if it requires residency
+/// - `Region::GLOBAL` (always; the cluster control plane is replicated everywhere).
+/// - Every non-protected data region that the caller passes in `known_regions` with
+///   `requires_residency == false`.
+/// - Its own region if it requires residency.
 ///
-/// Deduplicated — if `node_region` is non-protected, it's already included.
-pub fn required_regions(node_region: Region) -> Vec<Region> {
-    let mut regions: Vec<Region> =
-        ALL_REGIONS.iter().filter(|r| !r.requires_residency()).copied().collect();
-    if node_region.requires_residency() {
+/// `known_regions` carries the resolved set of provisioned data regions
+/// from the GLOBAL region directory — paired with each region's
+/// `requires_residency` flag. Callers higher in the stack
+/// (e.g. `DependencyHealthChecker`, startup-time RMK validation) read
+/// the directory and produce this list; the `store` crate has no
+/// direct access to the registry.
+///
+/// `node_requires_residency` carries the node-region's residency flag
+/// from the same registry source.
+///
+/// The output is deduplicated — `Region::GLOBAL`, the node's region,
+/// and any other matched non-protected regions appear at most once.
+pub fn required_regions<I>(
+    node_region: Region,
+    node_requires_residency: bool,
+    known_regions: I,
+) -> Vec<Region>
+where
+    I: IntoIterator<Item = (Region, bool)>,
+{
+    let mut regions: Vec<Region> = vec![Region::GLOBAL];
+    for (region, requires_residency) in known_regions {
+        if region == Region::GLOBAL || requires_residency {
+            continue;
+        }
+        if !regions.contains(&region) {
+            regions.push(region);
+        }
+    }
+    if node_requires_residency && !regions.contains(&node_region) {
         regions.push(node_region);
     }
     regions
@@ -115,17 +142,27 @@ pub fn required_regions(node_region: Region) -> Vec<Region> {
 
 /// Validates that a node has all required RMK versions provisioned.
 ///
-/// For each region in `required_regions(node_region)`, checks that:
+/// For each region in
+/// [`required_regions`]`(node_region, node_requires_residency, known_regions)`,
+/// checks that:
 /// - At least one active version exists
 /// - All active and deprecated versions are loadable
 ///
 /// Returns an error naming the specific missing version if validation
 /// fails. Called during startup to gate Raft group membership.
-pub fn validate_rmk_provisioning(
+///
+/// `known_regions` and `node_requires_residency` are resolved from the
+/// GLOBAL region directory — see [`required_regions`].
+pub fn validate_rmk_provisioning<I>(
     manager: &dyn RegionKeyManager,
     node_region: Region,
-) -> Result<()> {
-    let regions = required_regions(node_region);
+    node_requires_residency: bool,
+    known_regions: I,
+) -> Result<()>
+where
+    I: IntoIterator<Item = (Region, bool)>,
+{
+    let regions = required_regions(node_region, node_requires_residency, known_regions);
 
     for region in regions {
         let versions = manager.list_versions(region).map_err(|_| Error::Encryption {
@@ -177,14 +214,24 @@ pub fn validate_rmk_provisioning(
 
 /// Returns loaded RMK version info per region for health reporting.
 ///
-/// For each region in `required_regions(node_region)`, calls `list_versions()`
-/// and collects the results. Used by `DependencyHealthChecker` to expose
-/// loaded key versions for rotation coordination.
-pub fn rmk_versions_for_health(
+/// For each region in
+/// [`required_regions`]`(node_region, node_requires_residency, known_regions)`,
+/// calls `list_versions()` and collects the results. Used by
+/// `DependencyHealthChecker` to expose loaded key versions for rotation
+/// coordination.
+///
+/// `known_regions` and `node_requires_residency` are resolved from the
+/// GLOBAL region directory — see [`required_regions`].
+pub fn rmk_versions_for_health<I>(
     manager: &dyn RegionKeyManager,
     node_region: Region,
-) -> HashMap<Region, Vec<RmkVersionInfo>> {
-    let regions = required_regions(node_region);
+    node_requires_residency: bool,
+    known_regions: I,
+) -> HashMap<Region, Vec<RmkVersionInfo>>
+where
+    I: IntoIterator<Item = (Region, bool)>,
+{
+    let regions = required_regions(node_region, node_requires_residency, known_regions);
     let mut result = HashMap::new();
 
     for region in regions {
@@ -1019,9 +1066,19 @@ mod tests {
 
     // ─── required_regions tests ─────────────────────────────
 
+    /// Helper: a sample registry mirroring the historical built-in set.
+    fn sample_known_regions() -> Vec<(Region, bool)> {
+        vec![
+            (Region::US_EAST_VA, false),
+            (Region::US_WEST_OR, false),
+            (Region::DE_CENTRAL_FRANKFURT, true),
+            (Region::IE_EAST_DUBLIN, true),
+        ]
+    }
+
     #[test]
     fn test_required_regions_non_protected() {
-        let regions = required_regions(Region::US_EAST_VA);
+        let regions = required_regions(Region::US_EAST_VA, false, sample_known_regions());
         assert_eq!(regions.len(), 3);
         assert!(regions.contains(&Region::GLOBAL));
         assert!(regions.contains(&Region::US_EAST_VA));
@@ -1030,7 +1087,7 @@ mod tests {
 
     #[test]
     fn test_required_regions_protected() {
-        let regions = required_regions(Region::DE_CENTRAL_FRANKFURT);
+        let regions = required_regions(Region::DE_CENTRAL_FRANKFURT, true, sample_known_regions());
         assert_eq!(regions.len(), 4);
         assert!(regions.contains(&Region::GLOBAL));
         assert!(regions.contains(&Region::US_EAST_VA));
@@ -1040,8 +1097,20 @@ mod tests {
 
     #[test]
     fn test_required_regions_global() {
-        let regions = required_regions(Region::GLOBAL);
+        let regions = required_regions(Region::GLOBAL, false, sample_known_regions());
         assert_eq!(regions.len(), 3);
+        assert!(regions.contains(&Region::GLOBAL));
+        assert!(regions.contains(&Region::US_EAST_VA));
+        assert!(regions.contains(&Region::US_WEST_OR));
+    }
+
+    #[test]
+    fn test_required_regions_dedup_node_already_in_set() {
+        // node_region == US_EAST_VA, requires_residency = false, US_EAST_VA
+        // already appears via known_regions — must not duplicate.
+        let regions = required_regions(Region::US_EAST_VA, false, sample_known_regions());
+        let count = regions.iter().filter(|r| **r == Region::US_EAST_VA).count();
+        assert_eq!(count, 1, "US_EAST_VA must appear exactly once");
     }
 
     // ─── EnvKeyManager parsing tests ────────────────────────
@@ -1525,7 +1594,10 @@ mod tests {
         manager.rotate_rmk(Region::US_EAST_VA).unwrap();
         manager.rotate_rmk(Region::US_WEST_OR).unwrap();
 
-        assert!(validate_rmk_provisioning(&manager, Region::US_EAST_VA).is_ok());
+        assert!(
+            validate_rmk_provisioning(&manager, Region::US_EAST_VA, false, sample_known_regions(),)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1536,7 +1608,9 @@ mod tests {
         // Only provision GLOBAL, missing US_EAST_VA and US_WEST_OR
         manager.rotate_rmk(Region::GLOBAL).unwrap();
 
-        let err = validate_rmk_provisioning(&manager, Region::US_EAST_VA).unwrap_err();
+        let err =
+            validate_rmk_provisioning(&manager, Region::US_EAST_VA, false, sample_known_regions())
+                .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("No RMK versions provisioned"));
     }
@@ -1552,7 +1626,13 @@ mod tests {
         manager.rotate_rmk(Region::US_WEST_OR).unwrap();
 
         // Protected node needs its own region
-        let err = validate_rmk_provisioning(&manager, Region::DE_CENTRAL_FRANKFURT).unwrap_err();
+        let err = validate_rmk_provisioning(
+            &manager,
+            Region::DE_CENTRAL_FRANKFURT,
+            true,
+            sample_known_regions(),
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("de-central-frankfurt") || msg.contains("No RMK versions"));
     }
@@ -1571,7 +1651,9 @@ mod tests {
         // Delete the deprecated v1 key file for GLOBAL (but sidecar still lists it)
         fs::remove_file(dir.path().join("global").join("v1.key")).unwrap();
 
-        let err = validate_rmk_provisioning(&manager, Region::US_EAST_VA).unwrap_err();
+        let err =
+            validate_rmk_provisioning(&manager, Region::US_EAST_VA, false, sample_known_regions())
+                .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("v1") || msg.contains("failed to load"));
     }
@@ -1587,7 +1669,8 @@ mod tests {
         manager.rotate_rmk(Region::US_EAST_VA).unwrap();
         manager.rotate_rmk(Region::US_WEST_OR).unwrap();
 
-        let versions = rmk_versions_for_health(&manager, Region::US_EAST_VA);
+        let versions =
+            rmk_versions_for_health(&manager, Region::US_EAST_VA, false, sample_known_regions());
         assert_eq!(versions.len(), 3);
         assert_eq!(versions[&Region::GLOBAL].len(), 1);
         assert_eq!(versions[&Region::US_EAST_VA].len(), 1);
@@ -1602,7 +1685,8 @@ mod tests {
         // Only GLOBAL provisioned
         manager.rotate_rmk(Region::GLOBAL).unwrap();
 
-        let versions = rmk_versions_for_health(&manager, Region::US_EAST_VA);
+        let versions =
+            rmk_versions_for_health(&manager, Region::US_EAST_VA, false, sample_known_regions());
         assert_eq!(versions.len(), 3);
         assert_eq!(versions[&Region::GLOBAL].len(), 1);
         assert!(versions[&Region::US_EAST_VA].is_empty());
@@ -1828,13 +1912,18 @@ mod tests {
         manager.insert(Region::US_WEST_OR, 1, [0xCC; 32]);
 
         // This should pass since all regions have version 1 active
-        assert!(validate_rmk_provisioning(&manager, Region::US_EAST_VA).is_ok());
+        assert!(
+            validate_rmk_provisioning(&manager, Region::US_EAST_VA, false, sample_known_regions(),)
+                .is_ok()
+        );
 
         // Decommission one region's only key
         manager.decommission_rmk(Region::GLOBAL, 1).unwrap();
 
         // Now validation should fail
-        let err = validate_rmk_provisioning(&manager, Region::US_EAST_VA).unwrap_err();
+        let err =
+            validate_rmk_provisioning(&manager, Region::US_EAST_VA, false, sample_known_regions())
+                .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("No RMK versions") || msg.contains("No active"));
     }
@@ -1933,7 +2022,9 @@ mod tests {
         manager.rotate_rmk(Region::US_EAST_VA).unwrap();
         manager.rotate_rmk(Region::US_WEST_OR).unwrap();
 
-        let err = validate_rmk_provisioning(&manager, Region::US_EAST_VA).unwrap_err();
+        let err =
+            validate_rmk_provisioning(&manager, Region::US_EAST_VA, false, sample_known_regions())
+                .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("No active"), "expected 'No active' in error message, got: {msg}");
     }
@@ -2041,7 +2132,12 @@ mod tests {
         manager.rotate_rmk(Region::DE_CENTRAL_FRANKFURT).unwrap();
 
         // Protected region node needs 4 regions
-        let versions = rmk_versions_for_health(&manager, Region::DE_CENTRAL_FRANKFURT);
+        let versions = rmk_versions_for_health(
+            &manager,
+            Region::DE_CENTRAL_FRANKFURT,
+            true,
+            sample_known_regions(),
+        );
         assert_eq!(versions.len(), 4);
         assert!(versions.contains_key(&Region::DE_CENTRAL_FRANKFURT));
     }

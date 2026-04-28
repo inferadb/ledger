@@ -40,9 +40,12 @@ const BACKOFF_MULTIPLIER: u32 = 5;
 /// cooldown has expired.
 ///
 /// Runs periodically on the leader, scanning for `Deleted` organizations
-/// whose `deleted_at + region.retention_days()` is in the past. For each
-/// expired organization, proposes a `PurgeOrganization` Raft request to
-/// finalize removal of all organization data.
+/// whose `deleted_at + RegionDirectoryEntry.retention_days` is in the
+/// past — the `retention_days` value lives in the GLOBAL region directory
+/// and is resolved per-organization via
+/// [`inferadb_ledger_state::system::region_residency_or_default`]. For
+/// each expired organization, proposes a `PurgeOrganization` Raft
+/// request to finalize removal of all organization data.
 ///
 /// Failed purges are tracked and retried on every subsequent tick until
 /// successful (bypassing the retention cooldown check).
@@ -255,6 +258,7 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
 
         // Phase 2: Scan for newly eligible organizations.
         // Collect indices first to avoid borrow conflict with `priority`.
+        let state = self.state.clone();
         let expired_indices: Vec<usize> = organizations
             .iter()
             .enumerate()
@@ -262,8 +266,10 @@ impl<B: StorageBackend + 'static> OrganizationPurgeJob<B> {
                 !priority.contains(&org.organization_id)
                     && org.status == inferadb_ledger_state::system::OrganizationStatus::Deleted
                     && org.deleted_at.is_some_and(|deleted_at| {
-                        let retention =
-                            chrono::Duration::days(i64::from(org.region.retention_days()));
+                        let residency = inferadb_ledger_state::system::region_residency_or_default(
+                            &state, org.region,
+                        );
+                        let retention = chrono::Duration::days(i64::from(residency.retention_days));
                         now >= deleted_at + retention
                     })
             })
@@ -463,10 +469,11 @@ mod tests {
 
     #[test]
     fn test_retention_window_calculation() {
-        use inferadb_ledger_types::Region;
-
-        // GLOBAL has 90-day retention
-        let retention_global = chrono::Duration::days(i64::from(Region::GLOBAL.retention_days()));
+        // Default retention is 90 days; the registry value is what production
+        // consults (`region_residency_or_default`).
+        let retention_global = chrono::Duration::days(i64::from(
+            inferadb_ledger_state::system::default_retention_days(),
+        ));
         assert_eq!(retention_global.num_days(), 90);
 
         let now = Utc::now();

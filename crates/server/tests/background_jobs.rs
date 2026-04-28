@@ -48,7 +48,7 @@ macro_rules! require_cluster {
 /// creation and leader election timing. Returns `(org_slug, user_slug)`.
 async fn setup_user_and_org(cluster: &ExternalCluster) -> (OrganizationSlug, u64) {
     let email = format!("test-{}@example.com", uuid::Uuid::new_v4());
-    let region = 10; // REGION_US_EAST_VA
+    let region = "us-east-va".to_string();
 
     // Phase 1: Initiate email verification — retry across endpoints because
     // the first call may create the data region (UNAVAILABLE until leader elected).
@@ -63,7 +63,7 @@ async fn setup_user_and_org(cluster: &ExternalCluster) -> (OrganizationSlug, u64
             match client
                 .initiate_email_verification(proto::InitiateEmailVerificationRequest {
                     email: email.clone(),
-                    region,
+                    region: region.clone(),
                 })
                 .await
             {
@@ -106,7 +106,7 @@ async fn setup_user_and_org(cluster: &ExternalCluster) -> (OrganizationSlug, u64
                 .verify_email_code(proto::VerifyEmailCodeRequest {
                     email: email.clone(),
                     code: code.clone(),
-                    region,
+                    region: region.clone(),
                 })
                 .await
             {
@@ -148,7 +148,7 @@ async fn setup_user_and_org(cluster: &ExternalCluster) -> (OrganizationSlug, u64
                 .complete_registration(proto::CompleteRegistrationRequest {
                     onboarding_token: onboarding_token.clone(),
                     email: email.clone(),
-                    region,
+                    region: region.clone(),
                     name: "Test Admin".to_string(),
                     organization_name: org_name.clone(),
                 })

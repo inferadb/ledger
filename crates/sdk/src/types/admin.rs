@@ -7,7 +7,7 @@ use inferadb_ledger_types::{
     OrganizationSlug, Region, TeamSlug, UserEmailId, UserRole, UserSlug, UserStatus, VaultSlug,
 };
 
-use crate::proto_util::{proto_timestamp_to_system_time, region_from_proto_i32};
+use crate::proto_util::{proto_timestamp_to_system_time, region_from_proto_str};
 
 /// Status of an organization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -540,7 +540,7 @@ impl OrganizationInfo {
     pub(crate) fn from_fields(
         slug: Option<proto::OrganizationSlug>,
         name: String,
-        region: i32,
+        region: String,
         member_nodes: Vec<proto::NodeId>,
         config_version: u64,
         status: i32,
@@ -550,7 +550,7 @@ impl OrganizationInfo {
         Self {
             slug: OrganizationSlug::new(slug.map_or(0, |n| n.slug)),
             name,
-            region: region_from_proto_i32(region).unwrap_or(Region::GLOBAL),
+            region: region_from_proto_str(&region).unwrap_or(Region::GLOBAL),
             member_nodes: member_nodes.into_iter().map(|n| n.id).collect(),
             config_version,
             status: OrganizationStatus::from_proto(status),

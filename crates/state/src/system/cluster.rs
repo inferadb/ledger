@@ -44,8 +44,9 @@ pub const MAX_VOTERS: usize = 5;
 /// Minimum number of in-region nodes required to form a protected region's
 /// Raft group.
 ///
-/// Protected regions (where `requires_residency() == true`) reject group
-/// formation if fewer than this many nodes are tagged with the region.
+/// Protected regions (whose `RegionDirectoryEntry.requires_residency` is
+/// `true`) reject group formation if fewer than this many nodes are tagged
+/// with the region.
 pub const MIN_NODES_PER_PROTECTED_REGION: usize = 3;
 
 /// Node's role in the `_system` Raft group.
@@ -374,10 +375,19 @@ impl ClusterMembership {
 
     /// Returns nodes eligible for a region's Raft group.
     ///
-    /// - **Non-protected + GLOBAL**: all cluster nodes.
-    /// - **Protected**: only nodes tagged with the matching region.
-    pub fn eligible_nodes_for_region(&self, region: Region) -> Vec<&NodeInfo> {
-        if region.requires_residency() {
+    /// - **Non-protected + GLOBAL** (`requires_residency=false`): all cluster nodes.
+    /// - **Protected** (`requires_residency=true`): only nodes tagged with the matching region.
+    ///
+    /// The `requires_residency` flag is the value persisted in the region
+    /// directory entry; resolve via
+    /// [`crate::system::lookup_region_residency`] (treat unknown regions
+    /// as `true` per the disciplined-default policy).
+    pub fn eligible_nodes_for_region(
+        &self,
+        region: Region,
+        requires_residency: bool,
+    ) -> Vec<&NodeInfo> {
+        if requires_residency {
             self.nodes.values().filter(|n| n.region == region).collect()
         } else {
             self.nodes.values().collect()
@@ -567,7 +577,7 @@ mod tests {
         cluster.add_node(make_node("node-global", Region::GLOBAL, now));
 
         // US_EAST_VA is non-protected — all nodes eligible
-        let eligible = cluster.eligible_nodes_for_region(Region::US_EAST_VA);
+        let eligible = cluster.eligible_nodes_for_region(Region::US_EAST_VA, false);
         assert_eq!(eligible.len(), 3);
     }
 
@@ -582,7 +592,7 @@ mod tests {
         cluster.add_node(make_node("node-global", Region::GLOBAL, now));
 
         // IE_EAST_DUBLIN requires residency — only IE nodes eligible
-        let eligible = cluster.eligible_nodes_for_region(Region::IE_EAST_DUBLIN);
+        let eligible = cluster.eligible_nodes_for_region(Region::IE_EAST_DUBLIN, true);
         assert_eq!(eligible.len(), 2);
         assert!(eligible.iter().all(|n| n.region == Region::IE_EAST_DUBLIN));
     }

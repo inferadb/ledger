@@ -337,7 +337,7 @@ impl inferadb_ledger_proto::proto::user_service_server::UserService for MockUser
 
         Ok(Response::new(proto::MigrateUserRegionResponse {
             slug: Some(proto::UserSlug { slug }),
-            source_region: proto::Region::Global as i32,
+            source_region: inferadb_ledger_types::Region::GLOBAL.as_str().to_string(),
             target_region: req.target_region,
             directory_status: "MIGRATING".to_string(),
         }))

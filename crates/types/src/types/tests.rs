@@ -462,17 +462,14 @@ fn region_from_str_case_sensitive() {
     assert!("Global".parse::<Region>().is_err());
 }
 
-/// Region residency, serde, serialization, and derived traits.
+/// Region serde, serialization, and derived traits.
+///
+/// Residency / retention semantics now live on `RegionDirectoryEntry` in the
+/// state crate — `Region` itself is a slug-only newtype and exposes no
+/// classification methods.
 #[test]
 fn region_properties() {
     use std::collections::HashMap;
-
-    // Residency: exactly GLOBAL, US_EAST_VA, US_WEST_OR are non-protected
-    assert!(!Region::GLOBAL.requires_residency());
-    assert!(!Region::US_EAST_VA.requires_residency());
-    assert!(!Region::US_WEST_OR.requires_residency());
-    let non_protected_count = ALL_REGIONS.iter().filter(|r| !r.requires_residency()).count();
-    assert_eq!(non_protected_count, 3, "exactly GLOBAL, US_EAST_VA, US_WEST_OR");
 
     // Serde JSON: round-trip and matches Display
     for region in &ALL_REGIONS {
@@ -501,30 +498,14 @@ fn region_properties() {
 
     assert!(Region::GLOBAL < Region::US_EAST_VA);
     assert!(Region::US_EAST_VA < Region::US_WEST_OR);
+
+    // is_global / GLOBAL slug check
+    assert!(Region::GLOBAL.is_global());
+    assert!(!Region::US_EAST_VA.is_global());
+    assert!(!Region::IE_EAST_DUBLIN.is_global());
 }
 
 proptest::proptest! {
-    /// For any valid Region index, `requires_residency() == true` implies the
-    /// region is not GLOBAL, US_EAST_VA, or US_WEST_OR (which have no federal
-    /// data residency requirement).
-    #[test]
-    fn prop_requires_residency_implies_non_global(idx in 0..ALL_REGIONS.len()) {
-        let region = ALL_REGIONS[idx];
-        if region.requires_residency() {
-            proptest::prop_assert!(
-                !matches!(region, Region::GLOBAL | Region::US_EAST_VA | Region::US_WEST_OR),
-                "Region {:?} claims residency but is GLOBAL/US",
-                region
-            );
-        } else {
-            proptest::prop_assert!(
-                matches!(region, Region::GLOBAL | Region::US_EAST_VA | Region::US_WEST_OR),
-                "Region {:?} claims no residency but is not GLOBAL/US",
-                region
-            );
-        }
-    }
-
     /// Postcard serialization round-trip for any valid Region variant.
     #[test]
     fn prop_region_postcard_roundtrip(idx in 0..ALL_REGIONS.len()) {

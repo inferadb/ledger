@@ -127,14 +127,25 @@ pub trait ProposalService: Send + Sync {
     /// `VaultGroup`; the vault identity is also encoded inside the payload
     /// bytes (per-operation), so the apply pipeline still tier-validates.
     ///
+    /// `organization_slug` and `vault_slug` are the external Snowflake slugs
+    /// the gRPC handler received from the client. They are forwarded into
+    /// the `NotLeader` `LeaderHint` so the SDK's `VaultLeaderCache` — keyed
+    /// on `(OrganizationSlug, VaultSlug)` — can update without an extra
+    /// resolve round-trip. Both `None` means the slugs aren't known at
+    /// the call site (e.g. internal callers); the SDK falls through to the
+    /// region path in that case.
+    ///
     /// Returns `UNAVAILABLE` when the vault group is not registered on this
     /// node (not yet started, deleted, or migrated). The caller propagates
     /// the status so the SDK can retry on the correct leader.
+    #[allow(clippy::too_many_arguments)]
     async fn propose_to_vault_bytes(
         &self,
         region: Region,
         organization: OrganizationId,
         vault_id: VaultId,
+        organization_slug: Option<u64>,
+        vault_slug: Option<u64>,
         bytes: Vec<u8>,
         timeout: Duration,
     ) -> Result<LedgerResponse, Status>;
@@ -159,6 +170,12 @@ pub trait ProposalService: Send + Sync {
     ///   one-shot `RaftPayload` (with `caller` and the drained commitments), and proposes through
     ///   `vault_group.handle().propose_and_wait`.
     ///
+    /// `organization_slug` and `vault_slug` carry the external Snowflake
+    /// slugs through to the `NotLeader` hint emitted on a leader miss. The
+    /// SDK's `VaultLeaderCache` is keyed on `(OrganizationSlug, VaultSlug)`,
+    /// so propagating slugs end-to-end keeps cache hits warm. Both `None`
+    /// when the call site doesn't have slugs in scope.
+    ///
     /// Returns:
     /// - `UNAVAILABLE` (with `LeaderHint` `ErrorDetails`) when the vault group is not registered on
     ///   this node, or when the local node is not the leader for the vault.
@@ -166,11 +183,14 @@ pub trait ProposalService: Send + Sync {
     ///   `record_raft_proposal_timeout` metric).
     /// - The classified `tonic::Status` for any other consensus error (mirroring
     ///   `classify_raft_error`).
+    #[allow(clippy::too_many_arguments)]
     async fn propose_organization_request_to_vault(
         &self,
         region: Region,
         organization: OrganizationId,
         vault_id: VaultId,
+        organization_slug: Option<u64>,
+        vault_slug: Option<u64>,
         request: OrganizationRequest,
         caller: u64,
         timeout: Duration,
@@ -237,9 +257,8 @@ async fn forward_global_proposal(
         .map_err(|e| Status::unavailable(format!("register GLOBAL leader peer: {e}")))?;
     let mut client = peer.raft_client();
 
-    let proto_global: inferadb_ledger_proto::proto::Region = Region::GLOBAL.into();
     let rpc_request = tonic::Request::new(inferadb_ledger_proto::proto::RegionalProposalRequest {
-        region: Some(proto_global as i32),
+        region: Some(Region::GLOBAL.as_str().to_string()),
         request_payload: bytes,
         caller: 0,
         timeout_ms: u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX),
@@ -368,6 +387,8 @@ impl ProposalService for RaftProposalService {
                 Some(manager.peer_addresses()),
                 format!("Not the leader for region {region}"),
                 None,
+                None,
+                None,
             ));
         }
 
@@ -383,6 +404,8 @@ impl ProposalService for RaftProposalService {
                     region_group.handle().as_ref(),
                     Some(manager.peer_addresses()),
                     format!("Not the leader for region {region} (lost leadership mid-propose)"),
+                    None,
+                    None,
                     None,
                 ))
             },
@@ -423,6 +446,8 @@ impl ProposalService for RaftProposalService {
                 Some(manager.peer_addresses()),
                 format!("Not the leader for organization {organization} in region {region}"),
                 None,
+                None,
+                None,
             ));
         }
 
@@ -437,6 +462,8 @@ impl ProposalService for RaftProposalService {
                     format!(
                         "Not the leader for organization {organization} in region {region} (lost leadership mid-propose)"
                     ),
+                    None,
+                    None,
                     None,
                 ))
             },
@@ -457,6 +484,8 @@ impl ProposalService for RaftProposalService {
         region: Region,
         organization: OrganizationId,
         vault_id: VaultId,
+        organization_slug: Option<u64>,
+        vault_slug: Option<u64>,
         bytes: Vec<u8>,
         timeout: Duration,
     ) -> Result<LedgerResponse, Status> {
@@ -472,6 +501,13 @@ impl ProposalService for RaftProposalService {
                 ))
             })?;
 
+        // Phase 7 / O1: record activity on the vault. Wakes a `Dormant`
+        // vault back to `Active` synchronously (and fires the wake metric
+        // + log line) before the proposal proceeds. Active vaults
+        // fast-path through a relaxed atomic store, so the call is
+        // cheap on the hot path.
+        vault_group.touch_activity();
+
         // VaultId is i64 (Snowflake-positive); cast preserves the value.
         let vault_hint = Some(vault_id.value() as u64);
         if !vault_group.handle().is_leader() {
@@ -483,6 +519,8 @@ impl ProposalService for RaftProposalService {
                      region {region}"
                 ),
                 vault_hint,
+                organization_slug,
+                vault_slug,
             ));
         }
 
@@ -499,6 +537,8 @@ impl ProposalService for RaftProposalService {
                          in region {region} (lost leadership mid-propose)"
                     ),
                     vault_hint,
+                    organization_slug,
+                    vault_slug,
                 ))
             },
             Err(HandleError::Consensus { source, .. }) => Err(consensus_error_to_status(source)),
@@ -519,6 +559,8 @@ impl ProposalService for RaftProposalService {
         region: Region,
         organization: OrganizationId,
         vault_id: VaultId,
+        organization_slug: Option<u64>,
+        vault_slug: Option<u64>,
         request: OrganizationRequest,
         caller: u64,
         timeout: Duration,
@@ -535,6 +577,12 @@ impl ProposalService for RaftProposalService {
                 ))
             })?;
 
+        // Phase 7 / O1: record activity on the vault. Wakes a `Dormant`
+        // vault back to `Active` synchronously before the proposal
+        // proceeds. See `propose_to_vault_bytes` above for the
+        // rationale.
+        vault_group.touch_activity();
+
         // VaultId is i64 (Snowflake-positive); cast preserves the value.
         let vault_hint = Some(vault_id.value() as u64);
         if !vault_group.handle().is_leader() {
@@ -546,6 +594,8 @@ impl ProposalService for RaftProposalService {
                      region {region}"
                 ),
                 vault_hint,
+                organization_slug,
+                vault_slug,
             ));
         }
 
@@ -604,6 +654,8 @@ impl ProposalService for RaftProposalService {
                          in region {region} (lost leadership mid-propose)"
                     ),
                     vault_hint,
+                    organization_slug,
+                    vault_slug,
                 ))
             },
             Err(HandleError::Consensus { source, .. }) => {
@@ -894,6 +946,8 @@ pub(crate) mod mock {
             region: Region,
             organization: OrganizationId,
             vault_id: VaultId,
+            _organization_slug: Option<u64>,
+            _vault_slug: Option<u64>,
             bytes: Vec<u8>,
             _timeout: Duration,
         ) -> Result<LedgerResponse, Status> {
@@ -909,6 +963,8 @@ pub(crate) mod mock {
             region: Region,
             organization: OrganizationId,
             vault_id: VaultId,
+            _organization_slug: Option<u64>,
+            _vault_slug: Option<u64>,
             request: OrganizationRequest,
             caller: u64,
             _timeout: Duration,
@@ -1145,6 +1201,8 @@ mod tests {
                 Region::GLOBAL,
                 inferadb_ledger_types::OrganizationId::new(99),
                 inferadb_ledger_types::VaultId::new(7),
+                None,
+                None,
                 request,
                 0,
                 Duration::from_millis(200),
@@ -1179,6 +1237,8 @@ mod tests {
                 Region::US_EAST_VA,
                 inferadb_ledger_types::OrganizationId::new(1),
                 inferadb_ledger_types::VaultId::new(1),
+                None,
+                None,
                 request,
                 0,
                 Duration::from_millis(200),

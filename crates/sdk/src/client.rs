@@ -81,30 +81,23 @@ macro_rules! connected_client {
 /// Acquires a channel for a vault-scoped request, consulting the per-vault
 /// leader cache before falling back to region- / gateway-routing.
 ///
-/// Phase 6 wire-in (task A5/B): when the caller knows the request is
-/// targeted at a specific `(organization, vault)` pair, the cache is
-/// consulted first. On hit, the channel routes directly to the cached
-/// leader endpoint; on miss, the call falls through to
-/// [`ConnectionPool::get_channel`] (region cache → gateway).
+/// When the caller knows the request is targeted at a specific
+/// `(organization, vault)` pair, the cache is consulted first. On hit, the
+/// channel routes directly to the cached leader endpoint; on miss, the
+/// call falls through to [`ConnectionPool::get_channel`] (region cache →
+/// gateway).
 ///
-/// Per the SDK's slug-keyed cache rollout (see [`crate::vault_resolver`]),
-/// the cache key is constructed from `(OrganizationSlug, VaultSlug)` cast
-/// into the internal `(OrganizationId, VaultId)` newtypes — both are
-/// numeric wrappers and the cast preserves the slug value. Server-side
-/// hints carry internal IDs, not slugs, so cache population from hints
-/// remains best-effort during this phase; the wire-in path itself is
-/// always exercised on every vault-scoped RPC.
+/// The cache is keyed on `(OrganizationSlug, VaultSlug)` — the identifier
+/// space the SDK actually has at hand. Slugs flow straight through to
+/// [`ConnectionPool::select_for_vault`] without any cast; the server emits
+/// `leader_organization_slug` / `leader_vault_slug` keys in the
+/// `NotLeader` hint so the cache populates from a leader-miss without a
+/// resolve round-trip.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! connected_client_for_vault {
     ($pool:expr, $create_fn:ident, $org_slug:expr, $vault_slug:expr) => {{
-        // OrganizationSlug/VaultSlug are u64; OrganizationId/VaultId are i64.
-        // Snowflake-derived slugs are positive so the cast preserves value.
-        #[allow(clippy::cast_possible_wrap)]
-        let org_id = ::inferadb_ledger_types::OrganizationId::new($org_slug.value() as i64);
-        #[allow(clippy::cast_possible_wrap)]
-        let vault_id = ::inferadb_ledger_types::VaultId::new($vault_slug.value() as i64);
-        let channel = $pool.select_for_vault(org_id, vault_id).await?;
+        let channel = $pool.select_for_vault($org_slug, $vault_slug).await?;
         Self::$create_fn(
             channel,
             $pool.compression_enabled(),
@@ -878,47 +871,6 @@ mod tests {
                 }),
             ),
             (
-                "batch_write",
-                Box::new(|c| {
-                    Box::pin(async move {
-                        let batches =
-                            vec![vec![Operation::set_entity("key", b"value".to_vec(), None, None)]];
-                        c.batch_write(
-                            UserSlug::new(42),
-                            ORG,
-                            Some(VaultSlug::new(0)),
-                            batches,
-                            None,
-                        )
-                        .await
-                        .is_err()
-                    })
-                }),
-            ),
-            (
-                "batch_write (multiple groups)",
-                Box::new(|c| {
-                    Box::pin(async move {
-                        let batches = vec![
-                            vec![Operation::set_entity("user:123", b"alice".to_vec(), None, None)],
-                            vec![
-                                Operation::create_relationship("doc:456", "viewer", "user:123"),
-                                Operation::create_relationship("folder:789", "editor", "user:123"),
-                            ],
-                        ];
-                        c.batch_write(
-                            UserSlug::new(42),
-                            ORG,
-                            Some(VaultSlug::new(0)),
-                            batches,
-                            None,
-                        )
-                        .await
-                        .is_err()
-                    })
-                }),
-            ),
-            (
                 "watch_blocks",
                 Box::new(|c| {
                     Box::pin(async move {
@@ -1346,7 +1298,7 @@ mod tests {
         assert_eq!(hex, "");
     }
 
-    // (write/batch_write connection failure tests consolidated into
+    // (write connection failure tests consolidated into
     // test_all_operations_return_error_on_connection_failure above)
 
     // =========================================================================
@@ -1475,7 +1427,7 @@ mod tests {
         let proto = proto::GetOrganizationResponse {
             slug: Some(proto::OrganizationSlug { slug: 42 }),
             name: "test-organization".to_string(),
-            region: proto::Region::Global.into(),
+            region: Region::GLOBAL.as_str().to_string(),
             member_nodes: vec![
                 proto::NodeId { id: "node-100".to_string() },
                 proto::NodeId { id: "node-101".to_string() },
@@ -1519,7 +1471,7 @@ mod tests {
         let proto = proto::GetOrganizationResponse {
             slug: None,
             name: "minimal".to_string(),
-            region: proto::Region::Unspecified.into(),
+            region: String::new(),
             member_nodes: vec![],
             status: proto::OrganizationStatus::Unspecified as i32,
             config_version: 0,
@@ -2645,23 +2597,6 @@ mod tests {
                 }),
             ),
             (
-                "batch_write",
-                Box::pin(async {
-                    matches!(
-                        client
-                            .batch_write(
-                                UserSlug::new(42),
-                                ORG,
-                                Some(VaultSlug::new(0)),
-                                vec![vec![Operation::set_entity("key", vec![1, 2, 3], None, None)]],
-                                None
-                            )
-                            .await,
-                        Err(crate::error::SdkError::Shutdown)
-                    )
-                }),
-            ),
-            (
                 "batch_read",
                 Box::pin(async {
                     matches!(
@@ -2955,19 +2890,6 @@ mod tests {
                                 Some(t)
                             )
                             .await,
-                            Err(crate::error::SdkError::Cancelled)
-                        )
-                    })
-                }),
-            ),
-            (
-                "batch_write",
-                Box::new(|c, t| {
-                    Box::pin(async move {
-                        let ops =
-                            vec![vec![Operation::set_entity("key", b"val".to_vec(), None, None)]];
-                        matches!(
-                            c.batch_write(UserSlug::new(42), ORG, None, ops, Some(t)).await,
                             Err(crate::error::SdkError::Cancelled)
                         )
                     })

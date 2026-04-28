@@ -466,7 +466,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
                         // Forward the pre-serialized bytes directly to the remote leader.
                         let request_payload = request_bytes.clone();
-                        let proto_region: inferadb_ledger_proto::proto::Region = region.into();
+                        let region_slug = region.as_str().to_string();
 
                         // Obtain the leader's peer connection from the shared
                         // registry. HTTP/2 multiplexes all subsystems over a
@@ -492,7 +492,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
 
                             let mut rpc_request = tonic::Request::new(
                                 inferadb_ledger_proto::proto::RegionalProposalRequest {
-                                    region: Some(proto_region as i32),
+                                    region: Some(region_slug.clone()),
                                     request_payload: request_payload.clone(),
                                     caller: 0,
                                     timeout_ms: 30_000,

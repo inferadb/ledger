@@ -360,6 +360,17 @@ impl<B: StorageBackend> RaftLogStore<B> {
         self.organization_id
     }
 
+    /// Returns the vault this Raft group owns, when this store backs a
+    /// per-vault group.
+    ///
+    /// `None` for org-scoped `OrganizationGroup`s constructed via
+    /// [`Self::open`]; `Some(vault)` for stores constructed via
+    /// [`Self::open_for_vault`]. Used by the apply pipeline to stamp
+    /// per-vault Prometheus labels (Phase 7 / O3).
+    pub fn vault_id(&self) -> Option<VaultId> {
+        self.vault_id
+    }
+
     /// Configures the block announcements broadcast channel.
     ///
     /// When set, the log store will broadcast `BlockAnnouncement` messages

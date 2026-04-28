@@ -18,11 +18,11 @@ use inferadb_ledger_proto::proto::{
     DeleteUserRequest, DeleteUserResponse, EraseUserRequest, EraseUserResponse, GetUserRequest,
     GetUserResponse, InitiateEmailVerificationRequest, InitiateEmailVerificationResponse,
     ListUserCredentialsRequest, ListUserCredentialsResponse, ListUsersRequest, ListUsersResponse,
-    MigrateUserRegionRequest, MigrateUserRegionResponse, Region as ProtoRegion,
-    SearchUserEmailRequest, SearchUserEmailResponse, SearchUsersRequest, SearchUsersResponse,
-    UpdateUserCredentialRequest, UpdateUserCredentialResponse, UpdateUserRequest,
-    UpdateUserResponse, UserSlug as ProtoUserSlug, VerifyEmailCodeRequest, VerifyEmailCodeResponse,
-    VerifyTotpRequest, VerifyTotpResponse, VerifyUserEmailRequest, VerifyUserEmailResponse,
+    MigrateUserRegionRequest, MigrateUserRegionResponse, SearchUserEmailRequest,
+    SearchUserEmailResponse, SearchUsersRequest, SearchUsersResponse, UpdateUserCredentialRequest,
+    UpdateUserCredentialResponse, UpdateUserRequest, UpdateUserResponse, UserSlug as ProtoUserSlug,
+    VerifyEmailCodeRequest, VerifyEmailCodeResponse, VerifyTotpRequest, VerifyTotpResponse,
+    VerifyUserEmailRequest, VerifyUserEmailResponse,
 };
 use inferadb_ledger_raft::{
     error::ServiceError,
@@ -406,7 +406,7 @@ impl proto::user_service_server::UserService for UserService {
             })?;
         }
 
-        let region = inferadb_ledger_proto::convert::region_from_i32(req.region)?;
+        let region = inferadb_ledger_proto::convert::region_from_str(&req.region)?;
         let role = match req.role {
             Some(r) => inferadb_ledger_proto::convert::user_role_from_i32(r)?,
             None => inferadb_ledger_types::UserRole::User,
@@ -1191,7 +1191,7 @@ impl proto::user_service_server::UserService for UserService {
             ctx.set_error("InvalidArgument", status.message());
         })?;
 
-        let target_region = inferadb_ledger_proto::convert::region_from_i32(req.target_region)?;
+        let target_region = inferadb_ledger_proto::convert::region_from_str(&req.target_region)?;
 
         let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
         let dir_entry = sys_svc.get_user_directory(user_id).map_err(|e| {
@@ -1235,7 +1235,17 @@ impl proto::user_service_server::UserService for UserService {
             return Err(Status::invalid_argument("Cannot migrate to GLOBAL control plane region"));
         }
 
-        if target_region.requires_residency() {
+        // Resolve `requires_residency` from the GLOBAL region directory;
+        // an unknown region (no directory entry) is treated as
+        // non-protected — production paths write the entry first.
+        let target_requires_residency = match inferadb_ledger_state::system::lookup_region_residency(
+            &self.ctx.state,
+            target_region,
+        ) {
+            Ok(Some(r)) => r.requires_residency,
+            Ok(None) | Err(_) => false,
+        };
+        if target_requires_residency {
             let nodes = sys_svc.list_nodes().map_err(|e| error_classify::storage_error(&e))?;
             let in_region_count = nodes.iter().filter(|n| n.region == target_region).count();
             if in_region_count < 3 {
@@ -1314,12 +1324,10 @@ impl proto::user_service_server::UserService for UserService {
             .await?;
 
         ctx.set_success();
-        let proto_source: ProtoRegion = source_region.into();
-        let proto_target: ProtoRegion = target_region.into();
         Ok(Response::new(MigrateUserRegionResponse {
             slug: Some(ProtoUserSlug { slug: user_slug_val }),
-            source_region: proto_source.into(),
-            target_region: proto_target.into(),
+            source_region: source_region.as_str().to_string(),
+            target_region: target_region.as_str().to_string(),
             directory_status: "migrating".to_string(),
         }))
     }
@@ -1337,7 +1345,7 @@ impl proto::user_service_server::UserService for UserService {
 
         super::helpers::extract_caller(&mut ctx, &req.caller);
 
-        let region = inferadb_ledger_proto::convert::region_from_i32(req.region)?;
+        let region = inferadb_ledger_proto::convert::region_from_str(&req.region)?;
 
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
         let user_id = slug_resolver.extract_and_resolve_user(&req.user).inspect_err(|status| {
@@ -1405,7 +1413,7 @@ impl proto::user_service_server::UserService for UserService {
             ctx.set_error("InvalidArgument", &msg);
             Status::invalid_argument(msg)
         })?;
-        let region = inferadb_ledger_proto::convert::region_from_i32(req.region)?;
+        let region = inferadb_ledger_proto::convert::region_from_str(&req.region)?;
 
         // Require email blinding key
         let blinding_key = self.ctx.email_blinding_key.as_ref().ok_or_else(|| {
@@ -1467,7 +1475,7 @@ impl proto::user_service_server::UserService for UserService {
             ctx.set_error("InvalidArgument", "code is required");
             return Err(Status::invalid_argument("code is required"));
         }
-        let region = inferadb_ledger_proto::convert::region_from_i32(req.region)?;
+        let region = inferadb_ledger_proto::convert::region_from_str(&req.region)?;
 
         // Require email blinding key
         let blinding_key = self.ctx.email_blinding_key.as_ref().ok_or_else(|| {
@@ -1688,6 +1696,8 @@ impl proto::user_service_server::UserService for UserService {
                 Some(manager.peer_addresses()),
                 "Not the GLOBAL leader — registration saga must run on the leader",
                 None,
+                None,
+                None,
             ));
         }
 
@@ -1717,7 +1727,7 @@ impl proto::user_service_server::UserService for UserService {
             ctx.set_error("InvalidArgument", "onboarding_token is required");
             return Err(Status::invalid_argument("onboarding_token is required"));
         }
-        let region = inferadb_ledger_proto::convert::region_from_i32(req.region)?;
+        let region = inferadb_ledger_proto::convert::region_from_str(&req.region)?;
 
         // Require email blinding key
         let blinding_key = self.ctx.email_blinding_key.as_ref().ok_or_else(|| {

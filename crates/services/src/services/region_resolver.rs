@@ -432,10 +432,29 @@ impl RegionResolverService {
 
     /// Whether the given region can be served locally by this node.
     ///
-    /// Non-protected regions are replicated to all nodes, so they are always
-    /// local. Protected regions are local only when this node's region matches.
+    /// Non-protected regions are replicated to all nodes, so they are
+    /// always local. Protected regions are local only when this node's
+    /// region matches. Residency is resolved from the GLOBAL region
+    /// directory; an unknown region (no directory entry) is treated as
+    /// non-protected — production paths write the entry first, so a
+    /// missing entry implies a test fixture or transient race against
+    /// the directory write.
     fn is_region_local(&self, region: Region) -> bool {
-        if !region.requires_residency() {
+        if region.is_global() {
+            return true;
+        }
+        let requires_residency = self
+            .manager
+            .system_region()
+            .ok()
+            .and_then(|sys| {
+                inferadb_ledger_state::system::lookup_region_residency(sys.state(), region)
+                    .ok()
+                    .flatten()
+            })
+            .map(|r| r.requires_residency)
+            .unwrap_or(false);
+        if !requires_residency {
             return true;
         }
         self.local_region() == region

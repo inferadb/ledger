@@ -1243,6 +1243,21 @@ impl<B: StorageBackend> StateLayer<B> {
         }))
     }
 
+    /// Returns `true` if the cached state root for `vault` is current —
+    /// i.e. the next [`Self::compute_state_root`] call will short-circuit
+    /// without rescanning dirty buckets.
+    ///
+    /// Returns `false` when the vault has dirty buckets (a recompute is
+    /// needed) or no commitment has been instantiated yet (the first
+    /// `compute_state_root` call constructs one).
+    ///
+    /// Used by the apply pipeline to label per-vault Prometheus
+    /// observations as cache hits vs misses without changing the
+    /// `compute_state_root` API surface (Phase 7 / O3).
+    pub fn state_root_is_cached(&self, vault: VaultId) -> bool {
+        self.vault_commitments.read().get(&vault).is_some_and(|commitment| !commitment.is_dirty())
+    }
+
     /// Loads bucket roots from stored vault metadata.
     ///
     /// Called during startup/recovery to restore commitment state.

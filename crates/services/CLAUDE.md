@@ -27,6 +27,8 @@ These files are load-bearing — their invariants ripple beyond the local file. 
 - **Region routing**: `RegionResolverService` (`services/region_resolver.rs`) backs `ResolveRegionLeader` on SystemDiscovery.
 - **Shared helpers** (all in `src/services/`): `error_classify`, `error_details`, `helpers`, `metadata`, `service_infra`, `slug_resolver`.
 - **`SlugResolver`, `JwtEngine`, `ApiVersionLayer`, `ProposalService` trait**.
+- **Per-vault proposal entry point**: `ProposalService::propose_organization_request_to_vault` (`src/proposal.rs`) — the canonical primitive for vault-scoped writes under per-vault consensus. Every entity-mutating handler (`WriteServiceImpl::write`, ingest, etc.) routes through this method. It accepts `(region, organization_id, vault_id, organization_slug, vault_slug, request, caller, timeout)`, locates the per-vault `VaultGroup`, and proposes through that vault's `ConsensusHandle`. Returns `UNAVAILABLE` + `LeaderHint` (carrying the vault's `(organization_slug, vault_slug, leader_node_id, term)`) when the local node is not the vault leader; the SDK's `VaultLeaderCache` consumes the hint and reconnects directly.
+- **Operator vault RPCs**: `AdminService::admin_list_vaults`, `show_vault`, `repair_vault` (`services/admin.rs`) — list, inspect, and best-effort repair per-vault Raft groups on the queried node. Backs the `inferadb-ledger vaults {list,show,repair}` CLI subcommand in `crates/server/src/main.rs`.
 - **`LedgerServer`** (`server.rs`).
 
 ## Test Patterns

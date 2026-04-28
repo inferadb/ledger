@@ -31,7 +31,7 @@ mod shutdown;
 use std::{io::IsTerminal, net::SocketAddr};
 
 use clap::Parser;
-use config::{Cli, CliCommand, Config, ConfigAction, LogFormat, RestoreAction};
+use config::{Cli, CliCommand, Config, ConfigAction, LogFormat, RestoreAction, VaultsAction};
 use inferadb_ledger_raft::otel;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
@@ -114,6 +114,9 @@ async fn main() -> Result<(), ServerError> {
                     return handle_restore_apply(data_dir, staging_dir, region, organization_id);
                 },
             },
+            CliCommand::Vaults { action, host } => {
+                return handle_vaults_command(action, host).await;
+            },
         }
     }
 
@@ -170,6 +173,18 @@ async fn main() -> Result<(), ServerError> {
 
     if let Some(metrics_addr) = config.metrics_addr {
         init_metrics_exporter(metrics_addr)?;
+    }
+
+    // Phase 7 / O3: wire the per-vault Prometheus emission gate before any
+    // metric is sampled. Per-vault metrics default off for cardinality
+    // control; flipping the gate after startup would change the
+    // time-series shape mid-scrape, so it is set exactly once here.
+    inferadb_ledger_raft::metrics::set_vault_metrics_enabled(config.vault_metrics);
+    if config.vault_metrics {
+        tracing::info!(
+            "Per-vault Prometheus metrics enabled (vault_id labels active). \
+             Cardinality scales with the number of vaults per organization."
+        );
     }
 
     // Set up graceful shutdown before bootstrap so we can wire the signal
@@ -505,6 +520,167 @@ fn handle_restore_apply(
     eprintln!();
     eprintln!("Restart the node to bring the restored organization online.");
     Ok(())
+}
+
+/// Dispatches a `vaults` subcommand to the appropriate `AdminService` RPC.
+///
+/// All variants connect to the `--host` node and surface per-vault Raft
+/// group state to the operator. The CLI is intentionally thin — formatting
+/// happens here, the server-side handlers in
+/// `crates/services/src/services/admin.rs` do the work.
+async fn handle_vaults_command(action: VaultsAction, host: String) -> Result<(), ServerError> {
+    let endpoint = format!("http://{}", host);
+    let channel = tonic::transport::Channel::from_shared(endpoint)
+        .map_err(|e| {
+            ServerError::Server(Box::new(std::io::Error::other(format!(
+                "invalid host address '{}': {}",
+                host, e
+            ))))
+        })?
+        .connect()
+        .await
+        .map_err(|e| {
+            ServerError::Server(Box::new(std::io::Error::other(format!(
+                "failed to connect to {}: {}",
+                host, e
+            ))))
+        })?;
+
+    let mut client =
+        inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::new(channel);
+
+    match action {
+        VaultsAction::List { org } => {
+            let response = client
+                .admin_list_vaults(inferadb_ledger_proto::proto::AdminListVaultsRequest {
+                    organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                        slug: org,
+                    }),
+                })
+                .await
+                .map_err(|e| {
+                    ServerError::Server(Box::new(std::io::Error::other(format!(
+                        "AdminListVaults RPC failed: {}",
+                        e
+                    ))))
+                })?;
+            let resp = response.into_inner();
+            print_vaults_list(&resp);
+        },
+        VaultsAction::Show { org, vault } => {
+            let response = client
+                .show_vault(inferadb_ledger_proto::proto::ShowVaultRequest {
+                    organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                        slug: org,
+                    }),
+                    vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
+                })
+                .await
+                .map_err(|e| {
+                    ServerError::Server(Box::new(std::io::Error::other(format!(
+                        "ShowVault RPC failed: {}",
+                        e
+                    ))))
+                })?;
+            let resp = response.into_inner();
+            print_vault_show(&resp);
+        },
+        VaultsAction::Repair { org, vault } => {
+            let response = client
+                .repair_vault(inferadb_ledger_proto::proto::RepairVaultRequest {
+                    organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
+                        slug: org,
+                    }),
+                    vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
+                })
+                .await
+                .map_err(|e| {
+                    ServerError::Server(Box::new(std::io::Error::other(format!(
+                        "RepairVault RPC failed: {}",
+                        e
+                    ))))
+                })?;
+            let resp = response.into_inner();
+            println!("status:  {}", resp.status);
+            println!("message: {}", resp.message);
+        },
+    }
+
+    Ok(())
+}
+
+/// Renders an `AdminListVaultsResponse` as a human-readable table.
+fn print_vaults_list(resp: &inferadb_ledger_proto::proto::AdminListVaultsResponse) {
+    if resp.vaults.is_empty() {
+        println!(
+            "No vaults found on this node for the requested organization. Hit a region voter \
+             for the org for an authoritative view."
+        );
+        return;
+    }
+    println!(
+        "{:<22} {:<8} {:<10} {:<8} {:<8} {:<14} LAST_ACTIVITY",
+        "VAULT_SLUG", "STATUS", "LEADER", "VOTERS", "LEARN", "LAST_APPLIED"
+    );
+    for v in &resp.vaults {
+        let slug = v.slug.as_ref().map_or(0, |s| s.slug);
+        let last_activity = v
+            .last_activity
+            .as_ref()
+            .map(|t| t.seconds.to_string())
+            .unwrap_or_else(|| "-".to_owned());
+        println!(
+            "{:<22} {:<8} {:<10} {:<8} {:<8} {:<14} {}",
+            slug,
+            v.status,
+            v.leader_node_id,
+            v.voter_count,
+            v.learner_count,
+            v.last_applied_index,
+            last_activity,
+        );
+    }
+}
+
+/// Renders a `ShowVaultResponse` as JSON for tooling-friendly consumption.
+fn print_vault_show(resp: &inferadb_ledger_proto::proto::ShowVaultResponse) {
+    let info = resp.info.as_ref();
+    let slug = info.and_then(|i| i.slug.as_ref()).map_or(0, |s| s.slug);
+    let status = info.map_or("", |i| i.status.as_str());
+    let leader = info.map_or(0, |i| i.leader_node_id);
+    let voter_count = info.map_or(0, |i| i.voter_count);
+    let learner_count = info.map_or(0, |i| i.learner_count);
+    let last_applied = info.map_or(0, |i| i.last_applied_index);
+    let last_activity = info
+        .and_then(|i| i.last_activity.as_ref())
+        .map(|t| t.seconds.to_string())
+        .unwrap_or_else(|| "null".to_owned());
+    let pending_membership = resp
+        .pending_membership_started_at
+        .as_ref()
+        .map(|t| t.seconds.to_string())
+        .unwrap_or_else(|| "null".to_owned());
+
+    let voters: Vec<String> = resp.voters.iter().map(|v| v.to_string()).collect();
+    let learners: Vec<String> = resp.learners.iter().map(|v| v.to_string()).collect();
+
+    println!("{{");
+    println!("  \"vault_slug\": {},", slug);
+    println!("  \"region\": \"{}\",", resp.region);
+    println!("  \"organization_id\": {},", resp.organization_id);
+    println!("  \"vault_id\": {},", resp.vault_id);
+    println!("  \"status\": \"{}\",", status);
+    println!("  \"lifecycle_state\": \"{}\",", resp.lifecycle_state);
+    println!("  \"leader_node_id\": {},", leader);
+    println!("  \"voter_count\": {},", voter_count);
+    println!("  \"learner_count\": {},", learner_count);
+    println!("  \"voters\": [{}],", voters.join(", "));
+    println!("  \"learners\": [{}],", learners.join(", "));
+    println!("  \"conf_epoch\": {},", resp.conf_epoch);
+    println!("  \"last_applied_index\": {},", last_applied);
+    println!("  \"last_activity_unix_secs\": {},", last_activity);
+    println!("  \"pending_membership_started_unix_secs\": {}", pending_membership);
+    println!("}}");
 }
 
 /// Initializes the Prometheus metrics exporter.

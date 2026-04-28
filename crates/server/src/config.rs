@@ -126,6 +126,54 @@ pub struct Config {
     #[serde(default)]
     pub metrics_addr: Option<SocketAddr>,
 
+    /// Emit per-vault Prometheus series.
+    ///
+    /// Defaults to `false` for cardinality control: every vault adds a
+    /// fresh `vault_id` label set, multiplying time-series count by the
+    /// number of vaults per organization. Organization-level rollups
+    /// (`org_apply_throughput_ops_total`, `org_active_vault_count`) are
+    /// always-on regardless of this flag.
+    ///
+    /// Enable with `--vault-metrics` or
+    /// `INFERADB__LEDGER__VAULT_METRICS=true` for environments where the
+    /// extra cardinality is acceptable (staging, small clusters,
+    /// single-tenant deploys).
+    #[arg(long = "vault-metrics", env = "INFERADB__LEDGER__VAULT_METRICS")]
+    #[serde(default)]
+    #[builder(default)]
+    pub vault_metrics: bool,
+
+    /// Enable vault hibernation (Phase 7 / O1).
+    ///
+    /// When `true`, the [`RaftManager`](inferadb_ledger_raft::RaftManager)
+    /// runs an idle-detector task that transitions per-vault Raft groups to
+    /// `Dormant` after they have not seen activity in `idle_secs`
+    /// (default 5 min, see
+    /// [`HibernationConfig`](inferadb_ledger_types::config::HibernationConfig)).
+    /// The next request to a dormant vault wakes it back to `Active`.
+    /// Defaults to `false` — hibernation is opt-in to keep the
+    /// disciplined "no surprise throttling" default model (operators
+    /// must accept the wake-time budget consciously).
+    ///
+    /// When `false`, no idle detector runs, vault groups never transition
+    /// out of `Active`, and the `org_active_vault_count{status="dormant"}`
+    /// gauge stays at 0.
+    #[arg(long = "vault-hibernation", env = "INFERADB__LEDGER__VAULT_HIBERNATION")]
+    #[serde(default)]
+    #[builder(default)]
+    pub vault_hibernation: bool,
+
+    /// Vault hibernation policy. The top-level `vault_hibernation` flag
+    /// is the master enable switch; this struct carries the tuning knobs
+    /// (`idle_secs`, `max_warm`, `wake_threshold_ms`, `max_stall_secs`,
+    /// `scan_interval_secs`). The `enabled` field on
+    /// [`HibernationConfig`](inferadb_ledger_types::config::HibernationConfig)
+    /// is overridden by `vault_hibernation` at startup.
+    #[arg(skip)]
+    #[serde(default)]
+    #[builder(default)]
+    pub hibernation: inferadb_ledger_types::config::HibernationConfig,
+
     /// Log output format.
     ///
     /// - `text`: Human-readable format (default for development)
@@ -162,6 +210,26 @@ pub struct Config {
     #[serde(default = "default_region")]
     #[builder(default = default_region())]
     pub region: inferadb_ledger_types::Region,
+
+    /// Comma-separated list of *protected* regions this node opts into hosting.
+    ///
+    /// Joining nodes consult the GLOBAL region directory at boot and apply
+    /// the following policy for every entry:
+    ///
+    /// - **Unprotected regions** (`protected = false`): auto-join. Default behavior.
+    /// - **Protected regions** (`protected = true`): only join when the region's name appears in
+    ///   this list.
+    ///
+    /// Names are matched case-sensitively against the directory entry's
+    /// `name` field (e.g. `us-east-va`, `eu-west-de`). The CLI uses
+    /// `--regions us-east-va,eu-west-de`; the env var
+    /// `INFERADB__LEDGER__REGIONS=us-east-va,eu-west-de` is equivalent.
+    /// Defaults to the empty list — protected regions are never joined
+    /// without explicit operator opt-in.
+    #[arg(long = "regions", value_delimiter = ',', env = "INFERADB__LEDGER__REGIONS")]
+    #[serde(default)]
+    #[builder(default)]
+    pub regions: Vec<String>,
 
     // === Networking ===
     /// Address other nodes should use to reach this node.
@@ -422,9 +490,13 @@ impl Default for Config {
         Self {
             listen: None,
             metrics_addr: None,
+            vault_metrics: false,
+            vault_hibernation: false,
+            hibernation: inferadb_ledger_types::config::HibernationConfig::default(),
             log_format: LogFormat::default(),
             data_dir: None,
             region: default_region(),
+            regions: Vec::new(),
             advertise: None,
             join: None,
             max_concurrent: default_max_concurrent(),
@@ -465,6 +537,9 @@ impl Config {
         Self {
             listen: Some(format!("127.0.0.1:{}", port).parse().unwrap()),
             metrics_addr: None,
+            vault_metrics: false,
+            vault_hibernation: false,
+            hibernation: inferadb_ledger_types::config::HibernationConfig::default(),
             data_dir: Some(data_dir),
             logging: LoggingConfig::for_test(),
             ..Self::default()
@@ -637,6 +712,20 @@ pub enum CliCommand {
         #[command(subcommand)]
         action: RestoreAction,
     },
+    /// Per-vault inspection and repair commands (Phase 7 / O4).
+    ///
+    /// Connects to a running node and queries its `AdminService` for
+    /// per-vault Raft group state. Hit a region voter for the org to
+    /// get an authoritative view — non-voter nodes have no per-vault
+    /// groups for organizations they do not host.
+    Vaults {
+        /// Vault action to perform.
+        #[command(subcommand)]
+        action: VaultsAction,
+        /// Address of the node to query (e.g., "node1:9090").
+        #[arg(long = "host", global = true, default_value = "127.0.0.1:9090")]
+        host: String,
+    },
 }
 
 /// Restore subcommand actions.
@@ -678,6 +767,43 @@ pub enum RestoreAction {
         /// archive manifest's `organization_id`).
         #[arg(long = "organization-id")]
         organization_id: i64,
+    },
+}
+
+/// Per-vault inspection actions exposed by the `vaults` CLI subcommand.
+///
+/// All variants connect to the `--host` node's `AdminService` and surface
+/// per-vault Raft-group state to the operator. Output formats:
+///
+/// - `list`: human-readable table of `(slug, status, leader, voters, learners, last-applied)`.
+/// - `show`: JSON dump of the full `ShowVaultResponse`.
+/// - `repair`: plain-text status line.
+#[derive(Debug, clap::Subcommand)]
+pub enum VaultsAction {
+    /// List all vaults registered on the target node for an organization,
+    /// with their lifecycle state, leadership, and apply progress.
+    List {
+        /// External organization slug (Snowflake u64). Required.
+        org: u64,
+    },
+    /// Show detailed status for a single vault: voters, learners,
+    /// hibernation lifecycle state, last-activity / pending-membership
+    /// timestamps, conf epoch.
+    Show {
+        /// External organization slug. Required.
+        org: u64,
+        /// External vault slug. Required.
+        vault: u64,
+    },
+    /// Trigger an operator-initiated vault repair. Today this is a stub:
+    /// the underlying consensus engine does not expose a "force snapshot"
+    /// or "force re-replication" entrypoint, so the RPC validates the
+    /// vault exists and logs operator intent.
+    Repair {
+        /// External organization slug. Required.
+        org: u64,
+        /// External vault slug. Required.
+        vault: u64,
     },
 }
 
@@ -942,5 +1068,46 @@ mod tests {
         let json = r#"{"listen": "127.0.0.1:50051"}"#;
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.region, inferadb_ledger_types::Region::GLOBAL);
+    }
+
+    #[test]
+    fn test_default_regions_is_empty() {
+        let config = Config::default();
+        assert!(config.regions.is_empty());
+    }
+
+    #[test]
+    fn test_regions_cli_parses_comma_list() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "inferadb-ledger",
+            "--listen",
+            "127.0.0.1:9090",
+            "--regions",
+            "us-east-va,eu-west-de",
+        ])
+        .unwrap();
+        assert_eq!(cli.config.regions, vec!["us-east-va".to_string(), "eu-west-de".to_string()]);
+    }
+
+    #[test]
+    fn test_regions_cli_default_empty() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["inferadb-ledger", "--listen", "127.0.0.1:9090"]).unwrap();
+        assert!(cli.config.regions.is_empty());
+    }
+
+    #[test]
+    fn test_regions_serde_default() {
+        let json = r#"{"listen": "127.0.0.1:50051"}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(config.regions.is_empty());
+    }
+
+    #[test]
+    fn test_regions_serde_explicit() {
+        let json = r#"{"listen": "127.0.0.1:50051", "regions": ["us-east-va", "eu-west-de"]}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.regions, vec!["us-east-va".to_string(), "eu-west-de".to_string()]);
     }
 }

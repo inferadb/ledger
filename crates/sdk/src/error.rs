@@ -174,12 +174,30 @@ pub struct LeaderHint {
     /// rejections from non-vault scopes) leave this `None`. The SDK's
     /// existing region-level retry path remains correct in both cases.
     pub vault_id: Option<u64>,
+    /// Organization slug (Snowflake u64) the leader is for, if known.
+    ///
+    /// The SDK only ever has external slugs in hand — `OrganizationSlug`
+    /// — and the `VaultLeaderCache` is keyed on
+    /// `(OrganizationSlug, VaultSlug)`, so populating this field from the
+    /// server-side hint avoids a slug→id round trip. Legacy servers that
+    /// pre-date the `leader_organization_slug` key emit nothing; the
+    /// SDK's retry path falls through to the region-level cache in that
+    /// case.
+    pub organization_slug: Option<u64>,
+    /// Vault slug (Snowflake u64) the leader is for, if known.
+    ///
+    /// Paired with [`Self::organization_slug`] to drive the SDK's
+    /// `VaultLeaderCache` directly. `None` for region- / org-scoped
+    /// rejections, for legacy servers, and for the vault-scoped sites
+    /// that don't have slugs in scope (raft-internal callers).
+    pub vault_slug: Option<u64>,
 }
 
 impl ServerErrorDetails {
     /// Extracts a leader hint from the `context` map if any of the well-known
     /// keys (`leader_id`, `leader_endpoint`, `leader_term`, `leader_shard`,
-    /// `leader_vault`) are present and parseable.
+    /// `leader_vault`, `leader_organization_slug`, `leader_vault_slug`) are
+    /// present and parseable.
     ///
     /// Empty-string endpoints are treated as absent to prevent dialing an
     /// empty URI.
@@ -188,7 +206,10 @@ impl ServerErrorDetails {
     /// `leader_vault` key (the common case for region- and org-scoped
     /// rejections, and for legacy servers that pre-date the field) leaves
     /// `vault_id = None` — the SDK falls back to its org-level cache entry
-    /// in that case.
+    /// in that case. The `*_slug` keys are field-additive; legacy servers
+    /// that pre-date them leave both slug fields `None` and the SDK's
+    /// `VaultLeaderCache` (keyed on `(OrganizationSlug, VaultSlug)`)
+    /// silently falls through to the region path.
     #[must_use]
     pub fn leader_hint(&self) -> Option<LeaderHint> {
         let leader_id = self.context.get("leader_id").and_then(|s| s.parse().ok());
@@ -197,16 +218,29 @@ impl ServerErrorDetails {
         let term = self.context.get("leader_term").and_then(|s| s.parse().ok());
         let organization_id = self.context.get("leader_shard").and_then(|s| s.parse().ok());
         let vault_id = self.context.get("leader_vault").and_then(|s| s.parse().ok());
+        let organization_slug =
+            self.context.get("leader_organization_slug").and_then(|s| s.parse().ok());
+        let vault_slug = self.context.get("leader_vault_slug").and_then(|s| s.parse().ok());
 
         if leader_id.is_none()
             && leader_endpoint.is_none()
             && term.is_none()
             && organization_id.is_none()
             && vault_id.is_none()
+            && organization_slug.is_none()
+            && vault_slug.is_none()
         {
             return None;
         }
-        Some(LeaderHint { leader_id, leader_endpoint, term, organization_id, vault_id })
+        Some(LeaderHint {
+            leader_id,
+            leader_endpoint,
+            term,
+            organization_id,
+            vault_id,
+            organization_slug,
+            vault_slug,
+        })
     }
 }
 

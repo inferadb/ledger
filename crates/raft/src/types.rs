@@ -884,9 +884,35 @@ pub enum SystemRequest {
         /// this region. Unprotected regions are auto-joined by every cluster
         /// member; protected regions require explicit opt-in.
         protected: bool,
+        /// Whether PII / state for this region must stay in-region.
+        /// Persisted on the directory entry; consulted at every site that
+        /// previously hardcoded `Region::requires_residency()`. Default-deny
+        /// (`true`) for unknown callers — operators provisioning a US-style
+        /// region MUST set this to `false` explicitly.
+        requires_residency: bool,
+        /// Soft-delete retention period, in days, for entities homed in
+        /// this region. Persisted on the directory entry; consulted at
+        /// every site that previously hardcoded `Region::retention_days()`.
+        retention_days: u32,
         /// Initial members for the region's Raft group.
         /// Carried in the Raft entry so all nodes use the same membership.
         initial_members: Vec<(u64, String)>,
+    },
+
+    /// Updates the residency / retention contract for an existing region.
+    ///
+    /// Proposed to the GLOBAL Raft group. Each node's apply handler reads
+    /// the existing `_dir:region:{name}` directory entry, mutates the
+    /// `requires_residency` and `retention_days` fields, and re-persists
+    /// the entry. Migration path for clusters upgraded across the R6
+    /// boundary — see `AdminService::SetRegionResidency`.
+    SetRegionResidency {
+        /// Region whose directory entry to update.
+        region: Region,
+        /// New `requires_residency` value.
+        requires_residency: bool,
+        /// New `retention_days` value.
+        retention_days: u32,
     },
 
     /// Registers a peer's network address so all nodes can route to it.
@@ -2054,6 +2080,18 @@ pub enum LedgerResponse {
         /// The region that was created.
         region: Region,
     },
+
+    /// Returned when a `SetRegionResidency` proposal applies successfully.
+    /// Carries the region and the new residency contract for client-side
+    /// confirmation.
+    RegionResidencyUpdated {
+        /// The region whose directory entry was updated.
+        region: Region,
+        /// Updated `requires_residency` value.
+        requires_residency: bool,
+        /// Updated `retention_days` value.
+        retention_days: u32,
+    },
 }
 
 /// TOTP pre-resolved data embedded in [`SystemRequest::VerifyEmailCode`].
@@ -2349,6 +2387,17 @@ impl fmt::Display for LedgerResponse {
             },
             LedgerResponse::DataRegionCreated { region } => {
                 write!(f, "DataRegionCreated(region={})", region)
+            },
+            LedgerResponse::RegionResidencyUpdated {
+                region,
+                requires_residency,
+                retention_days,
+            } => {
+                write!(
+                    f,
+                    "RegionResidencyUpdated(region={}, requires_residency={}, retention_days={})",
+                    region, requires_residency, retention_days
+                )
             },
         }
     }
@@ -3819,6 +3868,7 @@ mod tests {
             SystemRequest::ActivateOnboardingUser { .. } => RaftScope::Global,
             SystemRequest::ClearRehashProgress { .. } => RaftScope::Global,
             SystemRequest::CreateDataRegion { .. } => RaftScope::Global,
+            SystemRequest::SetRegionResidency { .. } => RaftScope::Global,
             SystemRequest::RegisterPeerAddress { .. } => RaftScope::Global,
             SystemRequest::CreateOnboardingUser { .. } => RaftScope::Global,
             SystemRequest::CreateOrganization { .. } => RaftScope::Global,

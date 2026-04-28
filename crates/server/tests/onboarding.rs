@@ -21,20 +21,20 @@ use crate::common::{TestCluster, create_user_client};
 // Test Helpers
 // ============================================================================
 
-/// Proto region value for GLOBAL (1). TestCluster only registers the GLOBAL
-/// Raft group, so all onboarding requests use this region.
-const REGION_GLOBAL: i32 = 1;
+/// Region slug for GLOBAL. TestCluster only registers the GLOBAL Raft group,
+/// so all onboarding requests use this region.
+const REGION_GLOBAL: &str = "global";
 
 /// Initiates email verification and returns the code from the response.
 async fn initiate(
     client: &mut proto::user_service_client::UserServiceClient<tonic::transport::Channel>,
     email: &str,
-    region: i32,
+    region: &str,
 ) -> Result<String, tonic::Status> {
     let resp = client
         .initiate_email_verification(proto::InitiateEmailVerificationRequest {
             email: email.to_string(),
-            region,
+            region: region.to_string(),
         })
         .await?;
     Ok(resp.into_inner().code)
@@ -45,13 +45,13 @@ async fn verify(
     client: &mut proto::user_service_client::UserServiceClient<tonic::transport::Channel>,
     email: &str,
     code: &str,
-    region: i32,
+    region: &str,
 ) -> Result<proto::VerifyEmailCodeResponse, tonic::Status> {
     client
         .verify_email_code(proto::VerifyEmailCodeRequest {
             email: email.to_string(),
             code: code.to_string(),
-            region,
+            region: region.to_string(),
         })
         .await
         .map(|r| r.into_inner())
@@ -180,31 +180,31 @@ async fn test_verify_empty_code_rejected() {
 // Tests: Region Validation
 // ============================================================================
 
-/// Unknown region value returns INVALID_ARGUMENT.
+/// Malformed region slug returns INVALID_ARGUMENT.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_initiate_invalid_region_rejected() {
     let cluster = TestCluster::new(1).await;
     let addr = &cluster.nodes()[0].addr;
     let mut client = create_user_client(addr).await.expect("connect");
 
-    let err = initiate(&mut client, "region@example.com", 999)
+    let err = initiate(&mut client, "region@example.com", "BAD_REGION")
         .await
-        .expect_err("unknown region should fail");
+        .expect_err("malformed region slug should fail");
 
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
     assert!(err.message().contains("region"), "error should mention region");
 }
 
-/// Unspecified region (0) returns INVALID_ARGUMENT.
+/// Empty region returns INVALID_ARGUMENT.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_initiate_unspecified_region_rejected() {
     let cluster = TestCluster::new(1).await;
     let addr = &cluster.nodes()[0].addr;
     let mut client = create_user_client(addr).await.expect("connect");
 
-    let err = initiate(&mut client, "unspec@example.com", 0)
+    let err = initiate(&mut client, "unspec@example.com", "")
         .await
-        .expect_err("unspecified region should fail");
+        .expect_err("empty region slug should fail");
 
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
 }
@@ -256,7 +256,7 @@ async fn test_complete_registration_malformed_token() {
             email: "alice@example.com".to_string(),
             name: "Alice".to_string(),
             organization_name: "Alice Corp".to_string(),
-            region: REGION_GLOBAL,
+            region: REGION_GLOBAL.to_string(),
         })
         .await
         .expect_err("malformed token should fail");
@@ -285,7 +285,7 @@ async fn test_complete_registration_empty_token() {
             email: "alice@example.com".to_string(),
             name: "Alice".to_string(),
             organization_name: "Alice Corp".to_string(),
-            region: REGION_GLOBAL,
+            region: REGION_GLOBAL.to_string(),
         })
         .await
         .expect_err("empty token should fail");
@@ -309,7 +309,7 @@ async fn test_complete_registration_without_verify() {
             email: "unverified@example.com".to_string(),
             name: "Nobody".to_string(),
             organization_name: "No Corp".to_string(),
-            region: REGION_GLOBAL,
+            region: REGION_GLOBAL.to_string(),
         })
         .await
         .expect_err("complete without verify should fail");
@@ -349,7 +349,7 @@ async fn test_complete_registration_wrong_token_hash() {
             email: "wrong-hash@example.com".to_string(),
             name: "WrongHash".to_string(),
             organization_name: "Wrong Corp".to_string(),
-            region: REGION_GLOBAL,
+            region: REGION_GLOBAL.to_string(),
         })
         .await
         .expect_err("wrong token hash should fail");
@@ -441,7 +441,7 @@ async fn test_missing_blinding_key_returns_failed_precondition() {
     let err = client
         .initiate_email_verification(proto::InitiateEmailVerificationRequest {
             email: "nokey@example.com".to_string(),
-            region: 10, // US_EAST_VA
+            region: "us-east-va".to_string(),
         })
         .await
         .expect_err("should fail without blinding key");

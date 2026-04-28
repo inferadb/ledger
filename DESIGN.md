@@ -608,7 +608,7 @@ Ready ──→ Draining ──→ ShuttingDown
            └──────────────→└──→ exit
 ```
 
-During `Draining`, all mutating RPCs (write, batch_write, create/delete org/vault, join/leave cluster, etc.) return `UNAVAILABLE`. The `TransferLeadership` RPC itself is exempt — it is the mechanism enabling the drain. Reads continue uninterrupted.
+During `Draining`, all mutating RPCs (write, create/delete org/vault, join/leave cluster, etc.) return `UNAVAILABLE`. The `TransferLeadership` RPC itself is exempt — it is the mechanism enabling the drain. Reads continue uninterrupted.
 
 **Best-effort**: Transfer failure (timeout, no eligible target, connection error) logs a warning and falls back to standard shutdown. The cluster recovers via election timeout.
 

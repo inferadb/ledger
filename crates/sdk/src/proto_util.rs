@@ -1,5 +1,7 @@
 //! Shared protobuf conversion helpers used across SDK modules.
 
+use std::str::FromStr;
+
 use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{Region, UserEmailId, UserRole, UserSlug, UserStatus};
 
@@ -35,19 +37,17 @@ pub(crate) fn missing_response_field(field: &str, response_type: &str) -> crate:
     }
 }
 
-/// Converts a protobuf region `i32` to a domain [`Region`].
+/// Converts a protobuf region slug to a domain [`Region`].
 ///
-/// Returns `None` for unspecified (0) or unknown values, allowing callers
-/// to decide the fallback behavior.
-pub(crate) fn region_from_proto_i32(value: i32) -> Option<Region> {
-    let proto_region = proto::Region::try_from(value).ok()?;
-    Region::try_from(proto_region).ok()
+/// Returns `None` for empty or malformed slugs, allowing callers to decide
+/// the fallback behavior.
+pub(crate) fn region_from_proto_str(value: &str) -> Option<Region> {
+    Region::from_str(value).ok()
 }
 
-/// Converts a domain [`Region`] to a protobuf `i32` value.
-pub(crate) fn region_to_proto_i32(region: Region) -> i32 {
-    let proto_region: proto::Region = region.into();
-    proto_region.into()
+/// Converts a domain [`Region`] to its wire-format slug string.
+pub(crate) fn region_to_proto_string(region: Region) -> String {
+    region.as_str().to_string()
 }
 
 /// Converts a protobuf `UserStatus` i32 to a domain [`UserStatus`].

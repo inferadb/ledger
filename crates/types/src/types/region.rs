@@ -13,6 +13,14 @@
 //! `serde(rename = ...)` attributes, so persisted state and wire formats remain
 //! compatible.
 //!
+//! `Region` carries no semantics beyond its slug — the residency contract
+//! (`requires_residency`, `retention_days`) lives in the GLOBAL region
+//! directory (`_dir:region:{name}` → `RegionDirectoryEntry`) and is consulted
+//! via `inferadb_ledger_state::system::lookup_region_residency`. The previously
+//! hardcoded `Region::requires_residency()` / `Region::retention_days()`
+//! methods were removed (they silently mis-classified custom regions and
+//! violated GDPR for any non-built-in EU slug).
+//!
 //! Internally a `Region` is a `&'static str`. Dynamically registered region
 //! names are interned (leaked into the static heap) so the type stays `Copy`.
 //! The intern set is bounded in practice by the number of distinct region
@@ -160,38 +168,6 @@ impl Region {
     /// Whether this is the cluster control-plane region.
     pub fn is_global(&self) -> bool {
         self.0 == "global"
-    }
-
-    /// Whether this region requires data residency enforcement.
-    ///
-    /// Returns `false` for `GLOBAL`, `US_EAST_VA`, and `US_WEST_OR` (no federal
-    /// data residency law). Returns `true` for every other named region —
-    /// including dynamically registered ones (default-deny) so that custom
-    /// regions inherit the safe behaviour until the registry is consulted.
-    ///
-    /// Production callers that need authoritative residency policy must consult
-    /// the region directory (`RegionDirectoryEntry`) in GLOBAL state. This
-    /// method preserves the prior hardcoded behaviour so that the migration to
-    /// registry-driven lookups can land incrementally.
-    #[inline]
-    pub fn requires_residency(&self) -> bool {
-        !matches!(self.0, "global" | "us-east-va" | "us-west-or")
-    }
-
-    /// Soft-delete retention period, in days, for this region.
-    ///
-    /// EU / EEA / UK regions use a 30-day window (GDPR / UK GDPR). All other
-    /// regions, including dynamically registered ones, default to 90 days.
-    pub fn retention_days(&self) -> u32 {
-        match self.0 {
-            "ie-east-dublin"
-            | "fr-north-paris"
-            | "de-central-frankfurt"
-            | "se-east-stockholm"
-            | "it-north-milan"
-            | "uk-south-london" => 30,
-            _ => 90,
-        }
     }
 }
 

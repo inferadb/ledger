@@ -402,8 +402,6 @@ async fn write_worker(
             })
             .collect();
 
-        let start = Instant::now();
-
         // BatchWrite is deprecated as of Phase 6 of the per-vault consensus
         // migration (A5). Every operation now goes through a per-vault `Write`
         // RPC. When `batch_size > 1`, the worker issues `batch_size` sequential
@@ -489,9 +487,6 @@ async fn write_worker(
                 },
             }
         }
-        // Suppress the now-unused `start` variable used to time the whole
-        // batch under the legacy `BatchWrite` path.
-        let _ = start;
 
         batch_counter += 1;
     }

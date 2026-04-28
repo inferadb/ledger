@@ -56,7 +56,10 @@
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -162,8 +165,15 @@ pub enum RaftManagerError {
 /// Result type for multi-raft operations.
 pub type Result<T> = std::result::Result<T, RaftManagerError>;
 
-/// Region creation request: region + initial members for the Raft group.
-pub type RegionCreationRequest = (Region, Vec<(u64, String)>);
+/// Region creation request: region + protected flag + initial members for the
+/// Raft group.
+///
+/// The `protected` flag is sourced from the persisted
+/// [`RegionDirectoryEntry`](inferadb_ledger_state::system::RegionDirectoryEntry)
+/// (`_dir:region:{name}`) and propagated through the apply-time signal so the
+/// bootstrap region handler can decide whether to auto-join (unprotected) or
+/// require operator opt-in via `--regions <name1,name2>` (protected).
+pub type RegionCreationRequest = (Region, bool, Vec<(u64, String)>);
 
 /// Organization creation request: target region + the new organization id.
 ///
@@ -362,6 +372,22 @@ pub struct RegionConfig {
     /// for the data-region and system groups.
     #[builder(default = false)]
     pub delegated_leadership: bool,
+    /// Hint for whether the region requires data-residency enforcement.
+    ///
+    /// `start_region` consults the GLOBAL region directory at startup to
+    /// resolve the authoritative `requires_residency` flag; when the
+    /// directory entry is missing (e.g. in test fixtures that bypass the
+    /// `CreateDataRegion` apply path) this hint is used instead.
+    /// Defaults to `false` (no residency requirement) so test fixtures
+    /// that previously relied on the slug-based default for non-GDPR
+    /// regions (`Region::US_EAST_VA`) continue to work without an
+    /// explicit directory write.
+    ///
+    /// Production callers (`bootstrap_node`'s region-creation handler,
+    /// `start_directory_regions`) populate this from the persisted
+    /// directory entry, so the lookup-then-hint chain is consistent.
+    #[builder(default = false)]
+    pub requires_residency_hint: bool,
 }
 
 impl RegionConfig {
@@ -1316,6 +1342,68 @@ impl OrganizationGroup {
 // VaultGroup — per-vault data plane (Phase 2 of per-vault consensus)
 // ----------------------------------------------------------------------------
 
+/// Lifecycle state of a per-vault Raft group (Phase 7 / O1).
+///
+/// Tracks whether a vault is actively serving requests, hibernating to
+/// reduce overhead, or stalled (operator-visible failure to drain
+/// background work). The state is stored on [`InnerVaultGroup`] in an
+/// [`AtomicU8`] so reads are lock-free on every request hot-path; the
+/// idle-detector + apply-path writers serialise transitions through
+/// `compare_exchange`.
+///
+/// Hibernation is opt-in via
+/// [`HibernationConfig::enabled`](inferadb_ledger_types::config::HibernationConfig)
+/// — when disabled, vaults stay [`VaultLifecycleState::Active`] forever and
+/// no transitions fire.
+///
+/// ## Discriminants
+///
+/// The numeric values are part of the `AtomicU8` storage contract; tests
+/// rely on them. Do not reorder.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VaultLifecycleState {
+    /// Serving requests. Scheduler ticks running, file handles open.
+    Active = 0,
+    /// No requests in `idle_secs`. Logged + counted; today the vault
+    /// continues to tick (the smaller, lower-risk version of Phase 7).
+    /// The metric / lifecycle bookkeeping is the operator-visible win
+    /// without invasive consensus-engine surgery; tick suppression and
+    /// FD eviction are deliberate follow-ups.
+    Dormant = 1,
+    /// Pending membership change has not drained for >`max_stall_secs`.
+    /// Surfaced through `org_active_vault_count{status="stalled"}` so
+    /// operators can investigate; the manager does not auto-recover.
+    Stalled = 2,
+}
+
+impl VaultLifecycleState {
+    /// Decodes from a raw `AtomicU8` value. Unknown values map to
+    /// [`VaultLifecycleState::Active`] — the safe default for an
+    /// unrecognised discriminant.
+    #[inline]
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => VaultLifecycleState::Dormant,
+            2 => VaultLifecycleState::Stalled,
+            _ => VaultLifecycleState::Active,
+        }
+    }
+
+    /// Returns the lowercase metric label for this state — matches the
+    /// `org_active_vault_count{status=...}` label values populated by
+    /// [`metrics::set_org_active_vault_count`].
+    #[inline]
+    #[must_use]
+    pub fn as_metric_label(self) -> &'static str {
+        match self {
+            VaultLifecycleState::Active => "active",
+            VaultLifecycleState::Dormant => "dormant",
+            VaultLifecycleState::Stalled => "stalled",
+        }
+    }
+}
+
 /// Internal per-vault Raft-group storage.
 ///
 /// Mirrors the shape of [`InnerGroup`] but scoped to a single vault
@@ -1439,6 +1527,25 @@ pub struct InnerVaultGroup {
     /// case the vault's `RaftLogStore` is also constructed without a
     /// writer and apply skips event emission.
     pub(crate) event_writer: Option<EventWriter<FileBackend>>,
+    /// Lifecycle state for hibernation tracking (Phase 7 / O1). Stored
+    /// as an [`AtomicU8`] so the request hot-path can read it without
+    /// any locks; transitions go through
+    /// [`InnerVaultGroup::transition_lifecycle_state`] which fires
+    /// metrics + log lines.
+    pub(crate) lifecycle_state: AtomicU8,
+    /// Wall-clock seconds since the UNIX epoch of the last activity
+    /// observed on this vault. Updated by
+    /// [`InnerVaultGroup::touch_activity`] on every request and on
+    /// every leader adoption. The idle detector compares this against
+    /// `now()` to decide whether to transition the vault to
+    /// [`VaultLifecycleState::Dormant`].
+    pub(crate) last_activity_unix_secs: AtomicU64,
+    /// Wall-clock seconds since the UNIX epoch when an in-flight
+    /// membership change started, or `0` if none. Used by the idle
+    /// detector to surface `Stalled` state; see
+    /// [`InnerVaultGroup::mark_membership_change_started`] /
+    /// [`InnerVaultGroup::mark_membership_change_finished`].
+    pub(crate) pending_membership_started_unix_secs: AtomicU64,
 }
 
 impl InnerVaultGroup {
@@ -1547,6 +1654,146 @@ impl InnerVaultGroup {
     pub fn current_leader(&self) -> Option<LedgerNodeId> {
         self.handle.current_leader()
     }
+
+    // ---- Hibernation lifecycle (Phase 7 / O1) -------------------------
+
+    /// Returns the current lifecycle state.
+    #[must_use]
+    pub fn lifecycle_state(&self) -> VaultLifecycleState {
+        VaultLifecycleState::from_u8(self.lifecycle_state.load(Ordering::Acquire))
+    }
+
+    /// Returns the seconds-since-epoch of the last observed activity, or
+    /// `0` if the vault has never seen activity since startup.
+    #[must_use]
+    pub fn last_activity_unix_secs(&self) -> u64 {
+        self.last_activity_unix_secs.load(Ordering::Relaxed)
+    }
+
+    /// Returns the seconds-since-epoch at which an in-flight membership
+    /// change started, or `0` if no membership change is pending.
+    ///
+    /// Used by the operator-facing `ShowVault` RPC to surface stalled
+    /// membership transitions: when the value is non-zero and older than
+    /// `max_stall_secs`, the idle detector marks the vault as
+    /// [`VaultLifecycleState::Stalled`] for operator follow-up.
+    #[must_use]
+    pub fn pending_membership_started_unix_secs(&self) -> u64 {
+        self.pending_membership_started_unix_secs.load(Ordering::Acquire)
+    }
+
+    /// Marks this vault as having outstanding membership work in flight.
+    /// Pairs with [`InnerVaultGroup::mark_membership_change_finished`].
+    /// Idempotent — re-marking does not reset the start timestamp, so
+    /// the stall budget is measured from the first signal.
+    pub fn mark_membership_change_started(&self) {
+        let now = current_unix_secs();
+        let _ = self.pending_membership_started_unix_secs.compare_exchange(
+            0,
+            now,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Clears the in-flight membership marker.
+    pub fn mark_membership_change_finished(&self) {
+        self.pending_membership_started_unix_secs.store(0, Ordering::Release);
+    }
+
+    /// Records activity on this vault: bumps `last_activity_unix_secs`
+    /// and, when the vault is currently
+    /// [`VaultLifecycleState::Dormant`], synchronously transitions back
+    /// to [`VaultLifecycleState::Active`] (firing the wake metric +
+    /// log). This is the single function the request hot-path needs to
+    /// call — it's safe to invoke unconditionally because Active is
+    /// the no-op fast path.
+    ///
+    /// Returns `true` if the call performed a Dormant → Active
+    /// transition (so callers can observe wake-time latency for tests
+    /// / dashboards).
+    pub fn touch_activity(&self) -> bool {
+        self.last_activity_unix_secs.store(current_unix_secs(), Ordering::Relaxed);
+        // Optimistic CAS: only transition if currently Dormant. Stalled
+        // vaults wake too — they had outstanding work, an incoming
+        // request is a cue for the operator to investigate but should
+        // not block the request.
+        let current = self.lifecycle_state.load(Ordering::Acquire);
+        if current == VaultLifecycleState::Active as u8 {
+            return false;
+        }
+        self.transition_lifecycle_state(VaultLifecycleState::Active)
+    }
+
+    /// Transitions to the requested lifecycle state. No-op if the vault
+    /// is already in `target`. Fires metrics + log lines for actual
+    /// transitions.
+    ///
+    /// Returns `true` when a transition fired.
+    pub fn transition_lifecycle_state(&self, target: VaultLifecycleState) -> bool {
+        let target_u8 = target as u8;
+        let prev_u8 = self.lifecycle_state.swap(target_u8, Ordering::AcqRel);
+        if prev_u8 == target_u8 {
+            return false;
+        }
+        let prev = VaultLifecycleState::from_u8(prev_u8);
+        let region_label = self.region.as_str();
+        let org_label = self.organization_id.value().to_string();
+
+        match (prev, target) {
+            (VaultLifecycleState::Dormant, VaultLifecycleState::Active) => {
+                metrics::record_vault_hibernation_transition(region_label, &org_label, "wake");
+                info!(
+                    region = region_label,
+                    organization_id = self.organization_id.value(),
+                    vault_id = self.vault_id.value(),
+                    prev = prev.as_metric_label(),
+                    "Vault hibernation: wake (dormant -> active)",
+                );
+            },
+            (VaultLifecycleState::Active, VaultLifecycleState::Dormant) => {
+                metrics::record_vault_hibernation_transition(region_label, &org_label, "sleep");
+                info!(
+                    region = region_label,
+                    organization_id = self.organization_id.value(),
+                    vault_id = self.vault_id.value(),
+                    "Vault hibernation: sleep (active -> dormant)",
+                );
+            },
+            (_, VaultLifecycleState::Stalled) => {
+                warn!(
+                    region = region_label,
+                    organization_id = self.organization_id.value(),
+                    vault_id = self.vault_id.value(),
+                    prev = prev.as_metric_label(),
+                    "Vault hibernation: marked stalled — pending membership change has not drained",
+                );
+            },
+            _ => {
+                debug!(
+                    region = region_label,
+                    organization_id = self.organization_id.value(),
+                    vault_id = self.vault_id.value(),
+                    prev = prev.as_metric_label(),
+                    target = target.as_metric_label(),
+                    "Vault lifecycle transition",
+                );
+            },
+        }
+        true
+    }
+}
+
+/// Returns the current wall-clock time in seconds since the UNIX epoch.
+///
+/// Returns `0` if the system clock is somehow before the epoch — used as
+/// a sentinel for "never observed activity" in the lifecycle bookkeeping.
+#[inline]
+fn current_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Vault-tier Raft group — data plane scoped to a single vault within an
@@ -1694,6 +1941,44 @@ impl VaultGroup {
     pub fn current_leader(&self) -> Option<LedgerNodeId> {
         self.0.current_leader()
     }
+
+    /// Returns the lifecycle state (Phase 7 / O1).
+    #[must_use]
+    pub fn lifecycle_state(&self) -> VaultLifecycleState {
+        self.0.lifecycle_state()
+    }
+
+    /// Returns the seconds-since-epoch of the last observed activity on
+    /// this vault, or `0` if the vault has never observed activity since
+    /// startup.
+    #[must_use]
+    pub fn last_activity_unix_secs(&self) -> u64 {
+        self.0.last_activity_unix_secs()
+    }
+
+    /// Returns the seconds-since-epoch at which an in-flight membership
+    /// change started, or `0` if no membership change is pending.
+    #[must_use]
+    pub fn pending_membership_started_unix_secs(&self) -> u64 {
+        self.0.pending_membership_started_unix_secs()
+    }
+
+    /// Records activity on this vault — see
+    /// [`InnerVaultGroup::touch_activity`]. Returns `true` when this call
+    /// performed a Dormant → Active wake transition.
+    pub fn touch_activity(&self) -> bool {
+        self.0.touch_activity()
+    }
+
+    /// Test-only helper that backdates the vault's `last_activity_unix_secs`
+    /// stamp. Visible to integration tests in `crates/server/tests/` so
+    /// they can simulate a long-idle vault without sleeping for
+    /// `idle_secs`. Not intended for production callers — there is no
+    /// production reason to rewind the activity timestamp.
+    #[doc(hidden)]
+    pub fn force_last_activity_for_test(&self, secs_since_epoch: u64) {
+        self.0.last_activity_unix_secs.store(secs_since_epoch, Ordering::Release);
+    }
 }
 
 // ============================================================================
@@ -1773,6 +2058,17 @@ pub struct RaftManager {
     /// without parsing tracing output; production callers may also read
     /// this to surface recovery statistics via an admin RPC in the future.
     recovery_stats: RwLock<HashMap<Region, RecoveryStats>>,
+    /// Vault hibernation policy (Phase 7 / O1). When `enabled` is
+    /// `true`, [`RaftManager::start_hibernation_idle_detector`] spawns a
+    /// background task that scans `vault_groups` on the configured
+    /// interval and transitions idle vaults to
+    /// [`VaultLifecycleState::Dormant`]. Defaults to `disabled` so test
+    /// suites and operators that don't opt in see no behaviour change.
+    hibernation_config: parking_lot::Mutex<inferadb_ledger_types::config::HibernationConfig>,
+    /// Whether the idle detector task has been started — guards
+    /// [`RaftManager::start_hibernation_idle_detector`] against
+    /// double-spawn races during bootstrap.
+    hibernation_detector_started: AtomicBool,
 }
 
 /// Membership delta to cascade from a data-region group down to its
@@ -1824,6 +2120,10 @@ impl RaftManager {
             cancellation_token: parking_lot::Mutex::new(CancellationToken::new()),
             runtime_config: parking_lot::Mutex::new(None),
             recovery_stats: RwLock::new(HashMap::new()),
+            hibernation_config: parking_lot::Mutex::new(
+                inferadb_ledger_types::config::HibernationConfig::default(),
+            ),
+            hibernation_detector_started: AtomicBool::new(false),
         }
     }
 
@@ -1859,6 +2159,184 @@ impl RaftManager {
     /// thresholds via a local [`RuntimeConfigHandle::default`] if unset.
     pub fn set_runtime_config(&self, handle: RuntimeConfigHandle) {
         *self.runtime_config.lock() = Some(handle);
+    }
+
+    /// Sets the vault hibernation policy (Phase 7 / O1).
+    ///
+    /// Called during bootstrap from the server's `Config`. The
+    /// idle-detector task picks the new policy up on its next scan
+    /// (re-reading the config value lock-free); transitions in flight
+    /// when the config changes are not rolled back.
+    pub fn set_hibernation_config(&self, config: inferadb_ledger_types::config::HibernationConfig) {
+        *self.hibernation_config.lock() = config;
+    }
+
+    /// Returns a clone of the current hibernation policy.
+    #[must_use]
+    pub fn hibernation_config(&self) -> inferadb_ledger_types::config::HibernationConfig {
+        self.hibernation_config.lock().clone()
+    }
+
+    /// Spawns the hibernation idle-detector task (Phase 7 / O1).
+    ///
+    /// The task wakes up every `scan_interval_secs` seconds, scans
+    /// `vault_groups`, and transitions idle vaults to
+    /// [`VaultLifecycleState::Dormant`]. Vaults with an in-flight
+    /// membership change older than `max_stall_secs` are marked
+    /// [`VaultLifecycleState::Stalled`]. After every scan the per-org
+    /// gauges (`org_active_vault_count{status=active|dormant|stalled}`)
+    /// are republished so observability dashboards always read fresh
+    /// values regardless of transition cadence.
+    ///
+    /// No-ops when hibernation is disabled at the time of the call.
+    /// Idempotent: re-invocation is a no-op once the task is running.
+    /// Cancels via the manager-level cancellation token.
+    ///
+    /// ## Current scope (smaller, lower-risk version)
+    ///
+    /// This implementation tracks lifecycle state, fires metrics + log
+    /// lines on transitions, and exposes the dormant / stalled
+    /// observability that downstream tooling (operator dashboards, O5
+    /// docs) needs. It does **not** yet:
+    ///
+    /// - pause the per-shard scheduler tick on the parent [`ConsensusEngine`]
+    /// - drop the per-vault `state.db` / `raft.db` / `blocks.db` / `events.db` file handles
+    ///
+    /// Both optimizations are deliberate follow-ups: they require
+    /// invasive changes to consensus internals (vault shards share the
+    /// parent org's reactor — pausing the tick per-vault is a
+    /// reactor-level surgery) and to the storage layer's ownership
+    /// model. The bookkeeping landed here is the foundation those
+    /// optimizations build on; once the per-shard tick can be paused,
+    /// the dormant arm in this scan is the natural place to call
+    /// `engine.pause_shard(shard_id)` and friends.
+    pub fn start_hibernation_idle_detector(self: &Arc<Self>) {
+        let config = self.hibernation_config();
+        if !config.enabled {
+            debug!("Hibernation idle detector not started — config disabled");
+            return;
+        }
+        if self
+            .hibernation_detector_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            debug!("Hibernation idle detector already running");
+            return;
+        }
+
+        let manager = Arc::clone(self);
+        let cancel = manager.cancellation_token.lock().child_token();
+        let scan_interval = Duration::from_secs(config.scan_interval_secs.max(1));
+        info!(
+            idle_secs = config.idle_secs,
+            scan_interval_secs = config.scan_interval_secs,
+            max_warm = config.max_warm,
+            max_stall_secs = config.max_stall_secs,
+            "Starting vault hibernation idle detector",
+        );
+
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(scan_interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => {
+                        debug!("Vault hibernation idle detector exiting on cancellation");
+                        break;
+                    }
+                    _ = ticker.tick() => {
+                        manager.run_hibernation_scan_once();
+                    }
+                }
+            }
+        });
+    }
+
+    /// Runs a single hibernation scan pass. Public for testing — the
+    /// background task in [`start_hibernation_idle_detector`] drives
+    /// this on a timer in production.
+    pub fn run_hibernation_scan_once(&self) {
+        let config = self.hibernation_config();
+        if !config.enabled {
+            return;
+        }
+        let now = current_unix_secs();
+        let idle_threshold = config.idle_secs;
+        let stall_threshold = config.max_stall_secs;
+
+        // Snapshot the vault map so the scan does not hold the lock
+        // across atomic transitions / metric publication. Cloning
+        // `Arc<InnerVaultGroup>` is cheap.
+        let vaults: Vec<Arc<InnerVaultGroup>> =
+            self.vault_groups.read().values().cloned().collect();
+
+        // Per-org tally for the gauge republish at the end of the scan.
+        // Keys are `(region, organization_id)`; values are
+        // `[active, dormant, stalled]` counts.
+        let mut tallies: HashMap<(Region, OrganizationId), [u64; 3]> = HashMap::new();
+
+        for vault in &vaults {
+            // Stalled detection takes precedence over idle detection so
+            // a vault that is BOTH idle AND stuck on membership work
+            // surfaces the operator-visible state instead of silently
+            // sleeping.
+            let pending_started =
+                vault.pending_membership_started_unix_secs.load(Ordering::Acquire);
+            let stalled =
+                pending_started > 0 && now.saturating_sub(pending_started) >= stall_threshold;
+
+            if stalled {
+                vault.transition_lifecycle_state(VaultLifecycleState::Stalled);
+            } else {
+                let last_activity = vault.last_activity_unix_secs.load(Ordering::Relaxed);
+                let idle_for = now.saturating_sub(last_activity);
+                let current = vault.lifecycle_state();
+                if current == VaultLifecycleState::Active && idle_for >= idle_threshold {
+                    vault.transition_lifecycle_state(VaultLifecycleState::Dormant);
+                } else if current == VaultLifecycleState::Stalled && pending_started == 0 {
+                    // Membership change finished — clear the stalled
+                    // flag and let activity tracking decide whether the
+                    // vault is Active or eligible for Dormant on the
+                    // next pass.
+                    vault.transition_lifecycle_state(VaultLifecycleState::Active);
+                }
+            }
+
+            let key = (vault.region, vault.organization_id);
+            let tally = tallies.entry(key).or_insert([0; 3]);
+            match vault.lifecycle_state() {
+                VaultLifecycleState::Active => tally[0] += 1,
+                VaultLifecycleState::Dormant => tally[1] += 1,
+                VaultLifecycleState::Stalled => tally[2] += 1,
+            }
+        }
+
+        // Republish per-org gauges. We always emit all three series for
+        // every observed org so a dashboard sees a clean step-down to 0
+        // when, e.g., the last dormant vault wakes up.
+        for ((region, org_id), counts) in &tallies {
+            let region_label = region.as_str();
+            let org_label = org_id.value().to_string();
+            metrics::set_org_active_vault_count(region_label, &org_label, "active", counts[0]);
+            metrics::set_org_active_vault_count(region_label, &org_label, "dormant", counts[1]);
+            metrics::set_org_active_vault_count(region_label, &org_label, "stalled", counts[2]);
+        }
+
+        // Soft warn when the warm-set cap is exceeded — operators can
+        // tune `max_warm` upward or shorten `idle_secs` to drive more
+        // sleeps. Today this is observability only; once the scheduler
+        // tick can be paused per-vault, this is also the point where we
+        // would force-evict the LRU active vaults.
+        let total_active: u64 = tallies.values().map(|c| c[0]).sum();
+        if total_active > config.max_warm as u64 {
+            warn!(
+                active_vaults = total_active,
+                max_warm = config.max_warm,
+                "Hibernation: active vault count exceeds max_warm — consider tuning idle_secs",
+            );
+        }
     }
 
     /// Returns the shared per-node connection registry.
@@ -2457,6 +2935,10 @@ impl RaftManager {
             event_writer: None,
             events_config,
             delegated_leadership: true,
+            // Per-organization groups follow the parent region's residency
+            // contract — `start_region`'s registry lookup picks up the
+            // authoritative value from the GLOBAL directory entry.
+            requires_residency_hint: false,
         };
         let org_inner = self.start_region(region_config, organization_id).await?;
 
@@ -3438,6 +3920,10 @@ impl RaftManager {
         //    leader / term change. Bound to the per-vault cancellation token so `stop_vault_group`
         //    tears it down without disturbing sibling vaults, and to the manager token so
         //    process-wide shutdown drains it alongside the commit-pump stub.
+        // Hibernation activity sentinel: vault_handle is constructed
+        // fresh, so `last_activity` is set in the `InnerVaultGroup`
+        // construction below. The leader watcher loop touches activity
+        // on every successful adoption — see the watcher block.
         let org_handle_for_adopt = org_inner.handle().clone();
         let initial_org_state = org_handle_for_adopt.shard_state();
         if let Some(leader) = initial_org_state.leader {
@@ -3651,6 +4137,14 @@ impl RaftManager {
             cancellation: vault_cancel,
             raft_db: vault_raft_db,
             event_writer: vault_event_writer,
+            // Hibernation lifecycle (Phase 7 / O1). Vault starts Active
+            // with `last_activity` set to "now" — fresh vaults have, by
+            // definition, just been provisioned and should not be
+            // immediately eligible for hibernation. The idle detector
+            // measures elapsed seconds against this baseline.
+            lifecycle_state: AtomicU8::new(VaultLifecycleState::Active as u8),
+            last_activity_unix_secs: AtomicU64::new(current_unix_secs()),
+            pending_membership_started_unix_secs: AtomicU64::new(0),
         });
 
         {
@@ -3898,6 +4392,7 @@ impl RaftManager {
             event_writer,
             events_config,
             delegated_leadership,
+            requires_residency_hint,
         } = region_config;
 
         // Check if this `(region, organization_id)` Raft group is already
@@ -3912,7 +4407,28 @@ impl RaftManager {
             return Err(RaftManagerError::RegionExists { region });
         }
 
-        let is_protected = region.requires_residency();
+        // Resolve `requires_residency` from the GLOBAL region directory.
+        // The `CreateDataRegion` apply handler writes the directory entry
+        // BEFORE signalling the local region-creation handler, so the entry
+        // is in place by the time `start_region` runs in the normal path.
+        // When the directory entry is missing (test fixtures that bypass
+        // `CreateDataRegion`) we fall back to `RegionConfig::requires_residency_hint`,
+        // which defaults to `false` so single-node test setups don't get
+        // rejected by the protected-region quorum check.
+        let is_protected = if region.is_global() {
+            // GLOBAL is the cluster control plane — never subject to
+            // residency rules and always replicated everywhere.
+            false
+        } else {
+            self.system_region()
+                .ok()
+                .and_then(|sys| {
+                    inferadb_ledger_state::system::lookup_region_residency(sys.state(), region)
+                        .ok()
+                        .flatten()
+                })
+                .map_or(requires_residency_hint, |r| r.requires_residency)
+        };
 
         // Protected regions enforce minimum in-region node count
         if is_protected && initial_members.len() < MIN_NODES_PER_PROTECTED_REGION {
@@ -8068,12 +8584,16 @@ mod tests {
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
         manager.start_system_region(system_config).await.expect("start system");
 
-        // IE_EAST_DUBLIN is protected (requires_residency = true)
-        // Only 2 members — should fail (minimum is 3)
-        let data_config = RegionConfig::data(
-            Region::IE_EAST_DUBLIN,
-            vec![(1, "127.0.0.1:50051".to_string()), (2, "127.0.0.1:50052".to_string())],
-        );
+        // IE_EAST_DUBLIN with `requires_residency_hint = true` and only 2
+        // members must fail the protected-region quorum check (minimum 3).
+        let data_config = RegionConfig::builder()
+            .region(Region::IE_EAST_DUBLIN)
+            .initial_members(vec![
+                (1, "127.0.0.1:50051".to_string()),
+                (2, "127.0.0.1:50052".to_string()),
+            ])
+            .requires_residency_hint(true)
+            .build();
         match manager.start_data_region(data_config).await {
             Err(RaftManagerError::InsufficientNodes { region, required, found }) => {
                 assert_eq!(region, Region::IE_EAST_DUBLIN);
@@ -8095,15 +8615,17 @@ mod tests {
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
         manager.start_system_region(system_config).await.expect("start system");
 
-        // IE_EAST_DUBLIN with 3 members — should pass validation
-        let data_config = RegionConfig::data(
-            Region::IE_EAST_DUBLIN,
-            vec![
+        // IE_EAST_DUBLIN with 3 members and explicit residency hint —
+        // should pass the quorum check.
+        let data_config = RegionConfig::builder()
+            .region(Region::IE_EAST_DUBLIN)
+            .initial_members(vec![
                 (1, "127.0.0.1:50051".to_string()),
                 (2, "127.0.0.1:50052".to_string()),
                 (3, "127.0.0.1:50053".to_string()),
-            ],
-        );
+            ])
+            .requires_residency_hint(true)
+            .build();
         // Should pass membership validation (may fail later on Raft bootstrap, which is fine)
         if let Err(RaftManagerError::InsufficientNodes { .. }) =
             manager.start_data_region(data_config).await
@@ -8122,8 +8644,26 @@ mod tests {
         let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
         manager.start_system_region(system_config).await.expect("start system");
 
-        // US_EAST_VA is non-protected (requires_residency = false)
-        // Only 1 member — should pass (no minimum for non-protected)
+        // Provision a non-protected region directory entry so
+        // `start_region`'s residency lookup observes
+        // `requires_residency = false` and skips the in-region quorum check.
+        let propose = crate::types::SystemRequest::CreateDataRegion {
+            region: Region::US_EAST_VA,
+            protected: false,
+            requires_residency: false,
+            retention_days: 90,
+            initial_members: vec![(1, "127.0.0.1:50051".to_string())],
+        };
+        let _ = manager
+            .system_region()
+            .expect("system region")
+            .handle()
+            .propose_and_wait(crate::types::RaftPayload::system(propose), Duration::from_secs(5))
+            .await;
+
+        // Now an explicit `start_data_region` with one node should not be
+        // rejected for member count — the directory entry says it's
+        // non-protected.
         let data_config =
             RegionConfig::data(Region::US_EAST_VA, vec![(1, "127.0.0.1:50051".to_string())]);
         if let Err(RaftManagerError::InsufficientNodes { .. }) =
@@ -8131,19 +8671,6 @@ mod tests {
         {
             panic!("Non-protected region should accept any member count");
         }
-    }
-
-    #[test]
-    fn test_protected_region_empty_members_rejected() {
-        // Verify requires_residency correctly identifies protected regions
-        assert!(Region::IE_EAST_DUBLIN.requires_residency());
-        assert!(Region::DE_CENTRAL_FRANKFURT.requires_residency());
-        assert!(Region::JP_EAST_TOKYO.requires_residency());
-
-        // Non-protected
-        assert!(!Region::GLOBAL.requires_residency());
-        assert!(!Region::US_EAST_VA.requires_residency());
-        assert!(!Region::US_WEST_OR.requires_residency());
     }
 
     #[tokio::test]
@@ -8650,5 +9177,222 @@ mod tests {
         let bytes: Vec<u8> = vec![0xff; 16];
         let result = decode_vault_payload(&bytes);
         assert!(result.is_err(), "garbage bytes must not decode as a RaftPayload");
+    }
+
+    // =========================================================================
+    // Phase 7 / O1: Vault hibernation lifecycle tests
+    // =========================================================================
+
+    #[test]
+    fn vault_lifecycle_state_from_u8_round_trip() {
+        for state in [
+            VaultLifecycleState::Active,
+            VaultLifecycleState::Dormant,
+            VaultLifecycleState::Stalled,
+        ] {
+            let raw = state as u8;
+            assert_eq!(VaultLifecycleState::from_u8(raw), state);
+        }
+    }
+
+    #[test]
+    fn vault_lifecycle_state_unknown_value_falls_back_to_active() {
+        assert_eq!(VaultLifecycleState::from_u8(99), VaultLifecycleState::Active);
+        assert_eq!(VaultLifecycleState::from_u8(255), VaultLifecycleState::Active);
+    }
+
+    #[test]
+    fn vault_lifecycle_state_metric_labels() {
+        assert_eq!(VaultLifecycleState::Active.as_metric_label(), "active");
+        assert_eq!(VaultLifecycleState::Dormant.as_metric_label(), "dormant");
+        assert_eq!(VaultLifecycleState::Stalled.as_metric_label(), "stalled");
+    }
+
+    /// Helper that starts a system region + per-organization group + per-vault
+    /// group on a fresh in-memory test manager. Returns the
+    /// `Arc<InnerVaultGroup>` so tests can directly drive its lifecycle.
+    async fn start_test_vault(
+        manager: &Arc<RaftManager>,
+        organization_id: OrganizationId,
+        vault_id: VaultId,
+    ) -> Arc<InnerVaultGroup> {
+        let system_config = RegionConfig::system(1, "127.0.0.1:50051".to_string());
+        manager.start_system_region(system_config).await.expect("start system");
+        manager
+            .start_organization_group(
+                Region::GLOBAL,
+                organization_id,
+                vec![(1, "127.0.0.1:50051".to_string())],
+                true,
+                None,
+                None,
+            )
+            .await
+            .expect("start org group");
+        let group = manager
+            .start_vault_group(Region::GLOBAL, organization_id, vault_id)
+            .await
+            .expect("start vault group");
+        Arc::clone(group.inner())
+    }
+
+    #[tokio::test]
+    async fn test_vault_starts_active() {
+        let temp = TestDir::new();
+        let manager = test_manager(create_test_config(&temp));
+        let vault = start_test_vault(&manager, OrganizationId::new(1001), VaultId::new(1)).await;
+        assert_eq!(vault.lifecycle_state(), VaultLifecycleState::Active);
+        assert!(vault.last_activity_unix_secs() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_touch_activity_active_vault_is_noop() {
+        let temp = TestDir::new();
+        let manager = test_manager(create_test_config(&temp));
+        let vault = start_test_vault(&manager, OrganizationId::new(1002), VaultId::new(1)).await;
+        let woke = vault.touch_activity();
+        assert!(!woke, "touch_activity on Active vault must not report a wake");
+        assert_eq!(vault.lifecycle_state(), VaultLifecycleState::Active);
+    }
+
+    #[tokio::test]
+    async fn test_touch_activity_wakes_dormant_vault() {
+        let temp = TestDir::new();
+        let manager = test_manager(create_test_config(&temp));
+        let vault = start_test_vault(&manager, OrganizationId::new(1003), VaultId::new(1)).await;
+
+        assert!(vault.transition_lifecycle_state(VaultLifecycleState::Dormant));
+        assert_eq!(vault.lifecycle_state(), VaultLifecycleState::Dormant);
+
+        let woke = vault.touch_activity();
+        assert!(woke, "touch_activity on Dormant vault must report a wake");
+        assert_eq!(vault.lifecycle_state(), VaultLifecycleState::Active);
+    }
+
+    #[tokio::test]
+    async fn test_transition_idempotent() {
+        let temp = TestDir::new();
+        let manager = test_manager(create_test_config(&temp));
+        let vault = start_test_vault(&manager, OrganizationId::new(1004), VaultId::new(1)).await;
+
+        // First transition: Active -> Dormant fires.
+        assert!(vault.transition_lifecycle_state(VaultLifecycleState::Dormant));
+        // Second: same target -> no-op.
+        assert!(!vault.transition_lifecycle_state(VaultLifecycleState::Dormant));
+    }
+
+    #[tokio::test]
+    async fn test_idle_detector_disabled_by_default_does_not_transition() {
+        let temp = TestDir::new();
+        let manager = test_manager(create_test_config(&temp));
+        let vault = start_test_vault(&manager, OrganizationId::new(1005), VaultId::new(1)).await;
+
+        // Backdate activity beyond the threshold so any enabled scan would
+        // sleep this vault. With hibernation disabled (the default), the
+        // scan must observe no transition.
+        vault.last_activity_unix_secs.store(0, Ordering::Relaxed);
+        manager.run_hibernation_scan_once();
+        assert_eq!(vault.lifecycle_state(), VaultLifecycleState::Active);
+    }
+
+    #[tokio::test]
+    async fn test_idle_detector_sleeps_idle_active_vault() {
+        let temp = TestDir::new();
+        let manager = test_manager(create_test_config(&temp));
+        let vault = start_test_vault(&manager, OrganizationId::new(1006), VaultId::new(1)).await;
+
+        manager.set_hibernation_config(
+            inferadb_ledger_types::config::HibernationConfig::builder()
+                .enabled(true)
+                .idle_secs(1)
+                .scan_interval_secs(1)
+                .build()
+                .unwrap(),
+        );
+        // Force "stale" activity timestamp so the next scan sees the vault
+        // as idle long enough to sleep.
+        vault.last_activity_unix_secs.store(0, Ordering::Relaxed);
+
+        manager.run_hibernation_scan_once();
+        assert_eq!(vault.lifecycle_state(), VaultLifecycleState::Dormant);
+    }
+
+    #[tokio::test]
+    async fn test_idle_detector_marks_stalled_membership() {
+        let temp = TestDir::new();
+        let manager = test_manager(create_test_config(&temp));
+        let vault = start_test_vault(&manager, OrganizationId::new(1007), VaultId::new(1)).await;
+
+        manager.set_hibernation_config(
+            inferadb_ledger_types::config::HibernationConfig::builder()
+                .enabled(true)
+                .idle_secs(60)
+                .max_stall_secs(1)
+                .scan_interval_secs(1)
+                .build()
+                .unwrap(),
+        );
+
+        // Backdate the membership-change start to "1" so the scan sees a
+        // long-standing in-flight change. We can't call
+        // `mark_membership_change_started()` first (which CAS-stamps
+        // `now`) because the CAS only fires when the value is 0; storing
+        // a small non-zero sentinel directly is the simplest path.
+        vault.pending_membership_started_unix_secs.store(1, Ordering::Release);
+
+        manager.run_hibernation_scan_once();
+        assert_eq!(vault.lifecycle_state(), VaultLifecycleState::Stalled);
+
+        // Clearing the marker lets the next scan return the vault to Active.
+        vault.mark_membership_change_finished();
+        manager.run_hibernation_scan_once();
+        assert_eq!(vault.lifecycle_state(), VaultLifecycleState::Active);
+    }
+
+    #[tokio::test]
+    async fn test_idle_detector_keeps_recent_vault_active() {
+        let temp = TestDir::new();
+        let manager = test_manager(create_test_config(&temp));
+        let vault = start_test_vault(&manager, OrganizationId::new(1008), VaultId::new(1)).await;
+
+        manager.set_hibernation_config(
+            inferadb_ledger_types::config::HibernationConfig::builder()
+                .enabled(true)
+                .idle_secs(3600)
+                .scan_interval_secs(1)
+                .build()
+                .unwrap(),
+        );
+
+        // Activity is fresh (set at start_vault_group time) — scan must
+        // leave the vault Active.
+        manager.run_hibernation_scan_once();
+        assert_eq!(vault.lifecycle_state(), VaultLifecycleState::Active);
+    }
+
+    #[tokio::test]
+    async fn test_start_idle_detector_no_op_when_disabled() {
+        let temp = TestDir::new();
+        let manager = test_manager(create_test_config(&temp));
+        // Default (disabled) policy.
+        manager.start_hibernation_idle_detector();
+        // No internal flag should be set; calling again must remain a no-op.
+        manager.start_hibernation_idle_detector();
+    }
+
+    #[tokio::test]
+    async fn test_start_idle_detector_idempotent_when_enabled() {
+        let temp = TestDir::new();
+        let manager = test_manager(create_test_config(&temp));
+        manager.set_hibernation_config(
+            inferadb_ledger_types::config::HibernationConfig::builder()
+                .enabled(true)
+                .scan_interval_secs(1)
+                .build()
+                .unwrap(),
+        );
+        manager.start_hibernation_idle_detector();
+        // Second call must be a guarded no-op (no panic, no double-spawn).
+        manager.start_hibernation_idle_detector();
     }
 }

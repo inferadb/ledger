@@ -97,7 +97,7 @@ create_org_and_vault() {
       addr=$(node_addr "$i")
       local init_result
       init_result=$(grpcurl -plaintext \
-        -d "{\"email\": \"$email\", \"region\": 10}" \
+        -d "{\"email\": \"$email\", \"region\": \"us-east-va\"}" \
         "$addr" \
         ledger.v1.UserService/InitiateEmailVerification 2>&1 || true)
       code=$(echo "$init_result" | jq -r '.code // empty' 2>/dev/null || true)
@@ -119,7 +119,7 @@ create_org_and_vault() {
       local addr
       addr=$(node_addr "$i")
       verify_result=$(grpcurl -plaintext \
-        -d "{\"email\": \"$email\", \"code\": \"$code\", \"region\": 10}" \
+        -d "{\"email\": \"$email\", \"code\": \"$code\", \"region\": \"us-east-va\"}" \
         "$addr" \
         ledger.v1.UserService/VerifyEmailCode 2>&1 || true)
       token=$(echo "$verify_result" | jq -r '.newUser.onboardingToken // empty' 2>/dev/null || true)
@@ -140,7 +140,7 @@ create_org_and_vault() {
       addr=$(node_addr "$i")
       local reg_result
       reg_result=$(grpcurl -plaintext \
-        -d "{\"onboarding_token\": \"$token\", \"email\": \"$email\", \"region\": 10, \"name\": \"Crash Test\", \"organization_name\": \"crash-recovery-org\"}" \
+        -d "{\"onboarding_token\": \"$token\", \"email\": \"$email\", \"region\": \"us-east-va\", \"name\": \"Crash Test\", \"organization_name\": \"crash-recovery-org\"}" \
         "$addr" \
         ledger.v1.UserService/CompleteRegistration 2>&1 || true)
       ORG_SLUG=$(echo "$reg_result" | jq -r '.organization.slug // empty' 2>/dev/null || true)

@@ -604,7 +604,7 @@ create_org() {
   local name=$2
   local email
   email="test-$(uuidgen | tr '[:upper:]' '[:lower:]')@lifecycle.local"
-  local region=10  # REGION_US_EAST_VA
+  local region="us-east-va"
 
   # Phase 1: InitiateEmailVerification — retry across endpoints
   local code=""
@@ -618,7 +618,7 @@ create_org() {
       local addr="127.0.0.1:$port"
       local result
       result=$(grpcurl -plaintext \
-        -d "{\"email\": \"$email\", \"region\": $region}" \
+        -d "{\"email\": \"$email\", \"region\": \"$region\"}" \
         "$addr" \
         ledger.v1.UserService/InitiateEmailVerification 2>&1) || true
       local extracted_code
@@ -648,7 +648,7 @@ create_org() {
       local vaddr="127.0.0.1:$port"
       local verify_result
       verify_result=$(grpcurl -plaintext \
-        -d "{\"email\": \"$email\", \"code\": \"$code\", \"region\": $region}" \
+        -d "{\"email\": \"$email\", \"code\": \"$code\", \"region\": \"$region\"}" \
         "$vaddr" \
         ledger.v1.UserService/VerifyEmailCode 2>&1) || true
       onboarding_token=$(echo "$verify_result" | jq -r '.newUser.onboardingToken // empty' 2>/dev/null || true)
@@ -676,7 +676,7 @@ create_org() {
       local reg_addr="127.0.0.1:$port"
       local reg_result
       reg_result=$(grpcurl -plaintext \
-        -d "{\"onboarding_token\": \"$onboarding_token\", \"email\": \"$email\", \"region\": $region, \"name\": \"Test Admin\", \"organization_name\": \"$name\"}" \
+        -d "{\"onboarding_token\": \"$onboarding_token\", \"email\": \"$email\", \"region\": \"$region\", \"name\": \"Test Admin\", \"organization_name\": \"$name\"}" \
         "$reg_addr" \
         ledger.v1.UserService/CompleteRegistration 2>&1) || true
       ORG_SLUG=$(echo "$reg_result" | jq -r '.organization.slug // empty' 2>/dev/null || true)
@@ -1284,8 +1284,10 @@ for _attempt in $(seq 1 30); do
     if ! nc -z 127.0.0.1 "$port" 2>/dev/null; then
       continue
     fi
+    # us-east-va is a US-style region: no residency requirement, 90-day
+    # retention. R6 makes these fields explicit on the wire.
     PROVISION_RESULT=$(grpcurl -plaintext \
-      -d '{"name": "us-east-va", "protected": false}' \
+      -d '{"name": "us-east-va", "protected": false, "requires_residency": false, "retention_days": 90}' \
       "127.0.0.1:$port" \
       ledger.v1.AdminService/ProvisionRegion 2>&1) || true
     if echo "$PROVISION_RESULT" | jq -e '.name' &>/dev/null; then

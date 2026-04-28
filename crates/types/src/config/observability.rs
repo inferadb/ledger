@@ -261,6 +261,56 @@ impl Default for DogStatsdConfig {
 }
 
 // =========================================================================
+// ObservabilityConfig
+// =========================================================================
+
+/// Default value for `vault_metrics_enabled` (false — cardinality control).
+const fn default_vault_metrics_enabled() -> bool {
+    false
+}
+
+/// Per-vault and per-organization metric emission controls.
+///
+/// Per-vault metrics are opt-in by default because every vault adds a fresh
+/// Prometheus label set, multiplying series count and time-series database
+/// cost. Operators can opt in for environments where the cardinality is
+/// acceptable (e.g. staging or small clusters) and stay rolled-up at the
+/// organization level otherwise. The org-level rollups are always-on.
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_types::config::ObservabilityConfig;
+/// let config = ObservabilityConfig::builder()
+///     .vault_metrics_enabled(true)
+///     .build();
+/// assert!(config.vault_metrics_enabled);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, bon::Builder)]
+pub struct ObservabilityConfig {
+    /// Emit per-vault Prometheus series. Default: `false`.
+    ///
+    /// When `false`, per-vault metrics are suppressed entirely; only
+    /// organization-level rollups (always-on) are emitted. This keeps the
+    /// label cardinality bounded by `(region × organization)` rather than
+    /// `(region × organization × vault)`.
+    ///
+    /// When `true`, every per-vault metric gains a `vault_id` label,
+    /// multiplying the time-series count by the number of vaults per
+    /// organization. Use only when the operator is willing to budget the
+    /// extra cardinality.
+    #[serde(default = "default_vault_metrics_enabled")]
+    #[builder(default = default_vault_metrics_enabled())]
+    pub vault_metrics_enabled: bool,
+}
+
+impl Default for ObservabilityConfig {
+    fn default() -> Self {
+        Self { vault_metrics_enabled: default_vault_metrics_enabled() }
+    }
+}
+
+// =========================================================================
 // HotKeyConfig
 // =========================================================================
 
@@ -603,6 +653,35 @@ mod tests {
     fn otel_config_for_test() {
         let config = OtelConfig::for_test();
         assert!(!config.enabled);
+    }
+
+    // ObservabilityConfig tests
+
+    #[test]
+    fn observability_config_defaults_off() {
+        let config = ObservabilityConfig::default();
+        assert!(!config.vault_metrics_enabled);
+    }
+
+    #[test]
+    fn observability_config_builder_opts_in() {
+        let config = ObservabilityConfig::builder().vault_metrics_enabled(true).build();
+        assert!(config.vault_metrics_enabled);
+    }
+
+    #[test]
+    fn observability_config_serde_roundtrip_default() {
+        let config = ObservabilityConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let decoded: ObservabilityConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, decoded);
+    }
+
+    #[test]
+    fn observability_config_serde_omits_default_field() {
+        // Empty JSON should deserialize to default (vault_metrics_enabled = false).
+        let config: ObservabilityConfig = serde_json::from_str("{}").unwrap();
+        assert!(!config.vault_metrics_enabled);
     }
 
     // HotKeyConfig tests

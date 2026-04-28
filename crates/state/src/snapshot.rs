@@ -325,15 +325,23 @@ impl Snapshot {
     /// Validates that this snapshot can be transferred to a node in `target_region`.
     ///
     /// Protected regions restrict snapshot transfer to in-region nodes only.
-    /// Non-protected regions allow transfer to any node.
+    /// Non-protected regions allow transfer to any node. The
+    /// `snapshot_requires_residency` flag is the value persisted in the
+    /// snapshot's source region directory entry; callers resolve it via
+    /// [`crate::system::lookup_region_residency`] (treat unknown regions as
+    /// `true` per the disciplined-default policy).
     ///
     /// # Errors
     ///
     /// Returns [`SnapshotError::CrossRegionTransfer`] if the snapshot belongs to a
     /// protected region and `target_region` differs.
-    pub fn validate_transfer(&self, target_region: Region) -> Result<()> {
+    pub fn validate_transfer(
+        &self,
+        target_region: Region,
+        snapshot_requires_residency: bool,
+    ) -> Result<()> {
         let snapshot_region = self.header.region;
-        if snapshot_region.requires_residency() && snapshot_region != target_region {
+        if snapshot_requires_residency && snapshot_region != target_region {
             return Err(SnapshotError::CrossRegionTransfer {
                 snapshot_region,
                 node_region: target_region,
@@ -345,15 +353,23 @@ impl Snapshot {
     /// Validates that this snapshot can be restored on a node in `node_region`.
     ///
     /// Protected regions restrict snapshot restore to in-region nodes only.
-    /// Non-protected regions allow restore on any node.
+    /// Non-protected regions allow restore on any node. The
+    /// `snapshot_requires_residency` flag is the value persisted in the
+    /// snapshot's source region directory entry; callers resolve it via
+    /// [`crate::system::lookup_region_residency`] (treat unknown regions as
+    /// `true` per the disciplined-default policy).
     ///
     /// # Errors
     ///
     /// Returns [`SnapshotError::CrossRegionRestore`] if the snapshot belongs to a
     /// protected region and `node_region` differs.
-    pub fn validate_restore(&self, node_region: Region) -> Result<()> {
+    pub fn validate_restore(
+        &self,
+        node_region: Region,
+        snapshot_requires_residency: bool,
+    ) -> Result<()> {
         let snapshot_region = self.header.region;
-        if snapshot_region.requires_residency() && snapshot_region != node_region {
+        if snapshot_requires_residency && snapshot_region != node_region {
             return Err(SnapshotError::CrossRegionRestore { snapshot_region, node_region });
         }
         Ok(())
@@ -1093,7 +1109,7 @@ mod tests {
         let snapshot =
             Snapshot::new_simple(Region::CA_CENTRAL_QC, 1, vec![], state).expect("create");
         // Same protected region → allowed
-        assert!(snapshot.validate_transfer(Region::CA_CENTRAL_QC).is_ok());
+        assert!(snapshot.validate_transfer(Region::CA_CENTRAL_QC, true).is_ok());
     }
 
     #[test]
@@ -1102,7 +1118,7 @@ mod tests {
         let snapshot =
             Snapshot::new_simple(Region::CA_CENTRAL_QC, 1, vec![], state).expect("create");
         // Different region → rejected for protected region
-        let err = snapshot.validate_transfer(Region::US_EAST_VA).unwrap_err();
+        let err = snapshot.validate_transfer(Region::US_EAST_VA, true).unwrap_err();
         assert!(matches!(err, SnapshotError::CrossRegionTransfer { .. }));
     }
 
@@ -1111,7 +1127,7 @@ mod tests {
         let state = SnapshotStateData { vault_entities: HashMap::new() };
         // GLOBAL is non-protected
         let snapshot = Snapshot::new_simple(Region::GLOBAL, 1, vec![], state).expect("create");
-        assert!(snapshot.validate_transfer(Region::CA_CENTRAL_QC).is_ok());
+        assert!(snapshot.validate_transfer(Region::CA_CENTRAL_QC, false).is_ok());
     }
 
     #[test]
@@ -1119,7 +1135,7 @@ mod tests {
         let state = SnapshotStateData { vault_entities: HashMap::new() };
         // US_EAST_VA is non-protected
         let snapshot = Snapshot::new_simple(Region::US_EAST_VA, 1, vec![], state).expect("create");
-        assert!(snapshot.validate_transfer(Region::IE_EAST_DUBLIN).is_ok());
+        assert!(snapshot.validate_transfer(Region::IE_EAST_DUBLIN, false).is_ok());
     }
 
     #[test]
@@ -1127,7 +1143,7 @@ mod tests {
         let state = SnapshotStateData { vault_entities: HashMap::new() };
         let snapshot =
             Snapshot::new_simple(Region::IE_EAST_DUBLIN, 1, vec![], state).expect("create");
-        assert!(snapshot.validate_restore(Region::IE_EAST_DUBLIN).is_ok());
+        assert!(snapshot.validate_restore(Region::IE_EAST_DUBLIN, true).is_ok());
     }
 
     #[test]
@@ -1135,7 +1151,7 @@ mod tests {
         let state = SnapshotStateData { vault_entities: HashMap::new() };
         let snapshot =
             Snapshot::new_simple(Region::IE_EAST_DUBLIN, 1, vec![], state).expect("create");
-        let err = snapshot.validate_restore(Region::US_EAST_VA).unwrap_err();
+        let err = snapshot.validate_restore(Region::US_EAST_VA, true).unwrap_err();
         assert!(matches!(err, SnapshotError::CrossRegionRestore { .. }));
     }
 
@@ -1143,7 +1159,7 @@ mod tests {
     fn test_validate_restore_non_protected_any_region_ok() {
         let state = SnapshotStateData { vault_entities: HashMap::new() };
         let snapshot = Snapshot::new_simple(Region::US_WEST_OR, 1, vec![], state).expect("create");
-        assert!(snapshot.validate_restore(Region::CA_CENTRAL_QC).is_ok());
+        assert!(snapshot.validate_restore(Region::CA_CENTRAL_QC, false).is_ok());
     }
 
     #[test]

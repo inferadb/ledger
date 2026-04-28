@@ -18,7 +18,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let selector = data[0] % 10;
+    let selector = data[0] % 9;
     let payload = &data[1..];
 
     match selector {
@@ -35,20 +35,17 @@ fuzz_target!(|data: &[u8]| {
         3 => {
             let _ = proto::CreateVaultRequest::decode(payload);
         },
-        4 => {
-            let _ = proto::BatchWriteRequest::decode(payload);
-        },
         // Individual proto message types
-        5 => {
+        4 => {
             let _ = proto::Transaction::decode(payload);
         },
-        6 => {
+        5 => {
             let _ = proto::Operation::decode(payload);
         },
-        7 => {
+        6 => {
             let _ = proto::Block::decode(payload);
         },
-        8 => {
+        7 => {
             let _ = proto::MerkleProof::decode(payload);
         },
         _ => {

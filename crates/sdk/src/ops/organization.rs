@@ -6,7 +6,7 @@ use inferadb_ledger_types::{OrganizationSlug, Region, TeamSlug, UserSlug};
 use crate::{
     LedgerClient,
     error::Result,
-    proto_util::{missing_response_field, proto_timestamp_to_system_time, region_from_proto_i32},
+    proto_util::{missing_response_field, proto_timestamp_to_system_time, region_from_proto_str},
     types::admin::{
         MigrationInfo, OrganizationDeleteInfo, OrganizationInfo, OrganizationMemberInfo,
         OrganizationMemberRole, OrganizationStatus, OrganizationTier, TeamInfo, TeamMemberRole,
@@ -62,8 +62,7 @@ impl LedgerClient {
         tier: OrganizationTier,
     ) -> Result<OrganizationInfo> {
         let name = name.into();
-        let proto_region: proto::Region = region.into();
-        let region_i32: i32 = proto_region.into();
+        let region_slug = region.as_str().to_string();
         // Generate the organization slug once, outside the retry loop.
         // Every retry for this logical call reuses it so the saga's
         // idempotency-by-slug path returns the same OrganizationId
@@ -79,12 +78,13 @@ impl LedgerClient {
         self.call_with_retry("create_organization", || {
             let pool = pool.clone();
             let name = name.clone();
+            let region_slug = region_slug.clone();
             async move {
                 let mut client = crate::connected_client!(pool, create_organization_client);
 
                 let request = proto::CreateOrganizationRequest {
                     name: name.clone(),
-                    region: region_i32,
+                    region: region_slug,
                     tier: Some(tier.to_proto()),
                     caller: Some(proto::UserSlug { slug: caller.value() }),
                     slug: Some(proto::OrganizationSlug { slug: org_slug.value() }),
@@ -845,17 +845,17 @@ impl LedgerClient {
         acknowledge_residency_downgrade: bool,
         user: UserSlug,
     ) -> Result<MigrationInfo> {
-        let proto_target: proto::Region = target_region.into();
-        let target_i32: i32 = proto_target.into();
+        let target_slug = target_region.as_str().to_string();
         let pool = self.pool.clone();
         self.call_with_retry("migrate_organization", || {
             let pool = pool.clone();
+            let target_slug = target_slug.clone();
             async move {
                 let mut client = crate::connected_client!(pool, create_organization_client);
 
                 let request = proto::MigrateOrganizationRequest {
                     slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                    target_region: target_i32,
+                    target_region: target_slug,
                     acknowledge_residency_downgrade,
                     caller: Some(proto::UserSlug { slug: user.value() }),
                 };
@@ -865,9 +865,9 @@ impl LedgerClient {
 
                 Ok(MigrationInfo {
                     slug: OrganizationSlug::new(response.slug.map_or(0, |s| s.slug)),
-                    source_region: region_from_proto_i32(response.source_region)
+                    source_region: region_from_proto_str(&response.source_region)
                         .unwrap_or(Region::GLOBAL),
-                    target_region: region_from_proto_i32(response.target_region)
+                    target_region: region_from_proto_str(&response.target_region)
                         .unwrap_or(target_region),
                     status: OrganizationStatus::from_proto(response.status),
                 })
@@ -903,17 +903,17 @@ impl LedgerClient {
         user: UserSlug,
         target_region: Region,
     ) -> Result<UserMigrationInfo> {
-        let proto_target: proto::Region = target_region.into();
-        let target_i32: i32 = proto_target.into();
+        let target_slug = target_region.as_str().to_string();
         let pool = self.pool.clone();
         self.call_with_retry("migrate_user_region", || {
             let pool = pool.clone();
+            let target_slug = target_slug.clone();
             async move {
                 let mut client = crate::connected_client!(pool, create_user_client);
 
                 let request = proto::MigrateUserRegionRequest {
                     slug: Some(proto::UserSlug { slug: user.value() }),
-                    target_region: target_i32,
+                    target_region: target_slug,
                     caller: Some(proto::UserSlug { slug: caller.value() }),
                 };
 
@@ -922,9 +922,9 @@ impl LedgerClient {
 
                 Ok(UserMigrationInfo {
                     slug: UserSlug::new(response.slug.map_or(0, |s| s.slug)),
-                    source_region: region_from_proto_i32(response.source_region)
+                    source_region: region_from_proto_str(&response.source_region)
                         .unwrap_or(Region::GLOBAL),
-                    target_region: region_from_proto_i32(response.target_region)
+                    target_region: region_from_proto_str(&response.target_region)
                         .unwrap_or(target_region),
                     directory_status: response.directory_status,
                 })
@@ -960,18 +960,18 @@ impl LedgerClient {
         caller: UserSlug,
         region: Region,
     ) -> Result<UserSlug> {
-        let proto_region: proto::Region = region.into();
-        let region_i32: i32 = proto_region.into();
+        let region_slug = region.as_str().to_string();
         let pool = self.pool.clone();
         self.call_with_retry("erase_user", || {
             let pool = pool.clone();
+            let region_slug = region_slug.clone();
             async move {
                 let mut client = crate::connected_client!(pool, create_user_client);
 
                 let request = proto::EraseUserRequest {
                     user: Some(proto::UserSlug { slug: user.value() }),
                     caller: Some(proto::UserSlug { slug: caller.value() }),
-                    region: region_i32,
+                    region: region_slug,
                 };
 
                 let response = client.erase_user(tonic::Request::new(request)).await?.into_inner();

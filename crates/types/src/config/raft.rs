@@ -506,6 +506,167 @@ fn default_ttl_seconds() -> i64 {
     86_400 // 24 hours
 }
 
+// =========================================================================
+// HibernationConfig
+// =========================================================================
+
+/// Vault hibernation policy (Phase 7 / O1).
+///
+/// Idle vault Raft groups transition to a dormant lifecycle state when they
+/// have not seen activity in `idle_secs`. The dormant state populates the
+/// `org_active_vault_count{status="dormant"}` rollup so operators can see
+/// which orgs hold idle vaults; transitions also bump the
+/// `vault_hibernation_transitions_total` counter.
+///
+/// The policy is **disabled by default**. Operators opt in by setting
+/// `enabled = true` (or via the `--vault-hibernation` /
+/// `INFERADB__LEDGER__VAULT_HIBERNATION=true` server flag) — same
+/// disciplined-default pattern as P9 rate-limiting.
+///
+/// # Validation Rules
+///
+/// - `idle_secs` must be > 0
+/// - `max_warm` must be > 0
+/// - `wake_threshold_ms` must be > 0
+///
+/// # Example
+///
+/// ```no_run
+/// # use inferadb_ledger_types::config::HibernationConfig;
+/// let config = HibernationConfig::builder()
+///     .enabled(true)
+///     .idle_secs(300)
+///     .max_warm(10_000)
+///     .wake_threshold_ms(100)
+///     .build()
+///     .expect("valid hibernation config");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HibernationConfig {
+    /// Master enable switch. Defaults to `false` so operators opt in
+    /// deliberately — silent hibernation can hide bugs behind first-request
+    /// latency spikes.
+    #[serde(default)]
+    pub enabled: bool,
+    /// How long a vault must be idle before transitioning to `Dormant`.
+    /// Default: 300 (5 minutes).
+    #[serde(default = "default_hibernation_idle_secs")]
+    pub idle_secs: u64,
+    /// Maximum number of `Active` vaults per node. Today this is an
+    /// observability hint; once tick suppression lands it caps the
+    /// scheduler's ticking population. Default: 10000.
+    #[serde(default = "default_hibernation_max_warm")]
+    pub max_warm: usize,
+    /// p99 wake-time budget in milliseconds. Used by tests and operator
+    /// dashboards; not enforced as a hard limit. Default: 100.
+    #[serde(default = "default_hibernation_wake_threshold_ms")]
+    pub wake_threshold_ms: u64,
+    /// How long a vault may carry an in-flight membership change before it
+    /// is marked `Stalled` for operator visibility. Default: 300 (5 min).
+    #[serde(default = "default_hibernation_max_stall_secs")]
+    pub max_stall_secs: u64,
+    /// Idle-detector scan interval in seconds. Default: 30.
+    #[serde(default = "default_hibernation_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+}
+
+#[bon::bon]
+impl HibernationConfig {
+    /// Creates a new hibernation configuration with validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if:
+    /// - `idle_secs` is 0
+    /// - `max_warm` is 0
+    /// - `wake_threshold_ms` is 0
+    /// - `scan_interval_secs` is 0
+    #[builder]
+    pub fn new(
+        #[builder(default = false)] enabled: bool,
+        #[builder(default = default_hibernation_idle_secs())] idle_secs: u64,
+        #[builder(default = default_hibernation_max_warm())] max_warm: usize,
+        #[builder(default = default_hibernation_wake_threshold_ms())] wake_threshold_ms: u64,
+        #[builder(default = default_hibernation_max_stall_secs())] max_stall_secs: u64,
+        #[builder(default = default_hibernation_scan_interval_secs())] scan_interval_secs: u64,
+    ) -> Result<Self, ConfigError> {
+        let config = Self {
+            enabled,
+            idle_secs,
+            max_warm,
+            wake_threshold_ms,
+            max_stall_secs,
+            scan_interval_secs,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl HibernationConfig {
+    /// Validates the configuration values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] if any value is out of range.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.idle_secs == 0 {
+            return Err(ConfigError::Validation {
+                message: "hibernation idle_secs must be > 0".to_string(),
+            });
+        }
+        if self.max_warm == 0 {
+            return Err(ConfigError::Validation {
+                message: "hibernation max_warm must be > 0".to_string(),
+            });
+        }
+        if self.wake_threshold_ms == 0 {
+            return Err(ConfigError::Validation {
+                message: "hibernation wake_threshold_ms must be > 0".to_string(),
+            });
+        }
+        if self.scan_interval_secs == 0 {
+            return Err(ConfigError::Validation {
+                message: "hibernation scan_interval_secs must be > 0".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl Default for HibernationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            idle_secs: default_hibernation_idle_secs(),
+            max_warm: default_hibernation_max_warm(),
+            wake_threshold_ms: default_hibernation_wake_threshold_ms(),
+            max_stall_secs: default_hibernation_max_stall_secs(),
+            scan_interval_secs: default_hibernation_scan_interval_secs(),
+        }
+    }
+}
+
+const fn default_hibernation_idle_secs() -> u64 {
+    300
+}
+
+const fn default_hibernation_max_warm() -> usize {
+    10_000
+}
+
+const fn default_hibernation_wake_threshold_ms() -> u64 {
+    100
+}
+
+const fn default_hibernation_max_stall_secs() -> u64 {
+    300
+}
+
+const fn default_hibernation_scan_interval_secs() -> u64 {
+    30
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -638,5 +799,66 @@ mod tests {
     fn eviction_config_serde_defaults_from_empty() {
         let config: ClientSequenceEvictionConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(config, ClientSequenceEvictionConfig::default());
+    }
+
+    // =========================================================================
+    // HibernationConfig tests
+    // =========================================================================
+
+    #[test]
+    fn hibernation_config_default_disabled() {
+        let config = HibernationConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.idle_secs, 300);
+        assert_eq!(config.max_warm, 10_000);
+        assert_eq!(config.wake_threshold_ms, 100);
+        assert_eq!(config.max_stall_secs, 300);
+        assert_eq!(config.scan_interval_secs, 30);
+    }
+
+    #[test]
+    fn hibernation_config_zero_idle_secs_fails() {
+        let result = HibernationConfig::builder().idle_secs(0).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn hibernation_config_zero_max_warm_fails() {
+        let result = HibernationConfig::builder().max_warm(0).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn hibernation_config_zero_wake_threshold_fails() {
+        let result = HibernationConfig::builder().wake_threshold_ms(0).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn hibernation_config_zero_scan_interval_fails() {
+        let result = HibernationConfig::builder().scan_interval_secs(0).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn hibernation_config_serde_defaults_from_empty() {
+        let config: HibernationConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config, HibernationConfig::default());
+    }
+
+    #[test]
+    fn hibernation_config_builder_round_trip() {
+        let config = HibernationConfig::builder()
+            .enabled(true)
+            .idle_secs(60)
+            .max_warm(500)
+            .wake_threshold_ms(50)
+            .max_stall_secs(600)
+            .scan_interval_secs(10)
+            .build()
+            .unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.idle_secs, 60);
+        assert_eq!(config.max_warm, 500);
     }
 }

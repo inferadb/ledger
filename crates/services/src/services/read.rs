@@ -339,6 +339,8 @@ impl ReadService {
             self.peer_addresses.as_ref(),
             message,
             None,
+            None,
+            None,
         )
     }
 
@@ -517,6 +519,8 @@ impl ReadService {
                 self.peer_addresses.as_ref(),
                 "No leader available",
                 None,
+                None,
+                None,
             )
         })?;
 
@@ -530,6 +534,8 @@ impl ReadService {
                     handle.as_ref(),
                     self.peer_addresses.as_ref(),
                     "Leader address not found in peer registry",
+                    None,
+                    None,
                     None,
                 )
             })?;

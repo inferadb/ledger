@@ -21,8 +21,12 @@ use crate::{
 /// Background job that erases users whose soft-delete retention period has expired.
 ///
 /// Runs periodically on the leader, scanning for `Deleting` users whose
-/// `deleted_at + region.retention_days()` is in the past. For each expired
-/// user, proposes an `EraseUser` Raft request to finalize crypto-shredding.
+/// `deleted_at + RegionDirectoryEntry.retention_days` is in the past — the
+/// `retention_days` value lives in the GLOBAL region directory and is
+/// resolved per-user via
+/// [`inferadb_ledger_state::system::region_residency_or_default`]. For each
+/// expired user, proposes an `EraseUser` Raft request to finalize
+/// crypto-shredding.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct UserRetentionReaper<B: StorageBackend + 'static> {
@@ -90,7 +94,11 @@ impl<B: StorageBackend + 'static> UserRetentionReaper<B> {
                 None => continue,
             };
 
-            let retention = chrono::Duration::days(i64::from(user.region.retention_days()));
+            let residency = inferadb_ledger_state::system::region_residency_or_default(
+                &self.state,
+                user.region,
+            );
+            let retention = chrono::Duration::days(i64::from(residency.retention_days));
             let expiry = deleted_at + retention;
 
             if now < expiry {
@@ -225,30 +233,32 @@ mod tests {
     #[test]
     fn test_retention_expiry_logic() {
         use chrono::Utc;
-        use inferadb_ledger_types::Region;
 
-        // Simulate retention check from run_cycle
+        // Simulate retention check from run_cycle. Retention now lives on
+        // `RegionDirectoryEntry` in GLOBAL state — the disciplined default
+        // is 90 days; this test exercises the comparison logic directly.
         let now = Utc::now();
         let deleted_at = now - chrono::Duration::days(100);
-        let retention = chrono::Duration::days(i64::from(Region::US_EAST_VA.retention_days()));
+        let retention_days = inferadb_ledger_state::system::default_retention_days();
+        let retention = chrono::Duration::days(i64::from(retention_days));
         let expiry = deleted_at + retention;
 
-        // User deleted 100 days ago with retention < 100 days should be expired
+        // User deleted 100 days ago with 90-day retention should be expired
         assert!(
             now >= expiry,
-            "user deleted {retention} days ago with retention {} should be expired",
-            Region::US_EAST_VA.retention_days()
+            "user deleted 100 days ago with {retention_days}-day retention should be expired"
         );
     }
 
     #[test]
     fn test_retention_not_expired() {
         use chrono::Utc;
-        use inferadb_ledger_types::Region;
 
         let now = Utc::now();
         let deleted_at = now - chrono::Duration::days(1);
-        let retention = chrono::Duration::days(i64::from(Region::US_EAST_VA.retention_days()));
+        let retention = chrono::Duration::days(i64::from(
+            inferadb_ledger_state::system::default_retention_days(),
+        ));
         let expiry = deleted_at + retention;
 
         // User deleted 1 day ago should NOT be expired

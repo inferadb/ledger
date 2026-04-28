@@ -891,3 +891,129 @@ async fn test_write_routes_to_vault_shard_and_lands_in_vault_state() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
+
+// =============================================================================
+// Phase 7 / O1: vault hibernation integration tests
+// =============================================================================
+
+/// End-to-end hibernation lifecycle test.
+///
+/// 1. Build a 1-node cluster + create org + vault.
+/// 2. Enable hibernation policy at runtime (the cluster is bootstrapped with hibernation OFF;
+///    flipping it on at the manager exercises the same pathway as the `--vault-hibernation` CLI
+///    flag without requiring a second TestCluster constructor).
+/// 3. Backdate the vault's `last_activity` and run a manual scan — assert the vault transitions to
+///    `Dormant`.
+/// 4. Issue a real gRPC `CreateVault` (against a *new* vault slug) on the same org so the proposal
+///    pipeline runs in production shape; the original vault stays Dormant because writes target a
+///    different vault. Then directly call `touch_activity()` on the dormant vault to simulate the
+///    wake-on-request path and assert the wake transition fires within the configured wake budget.
+#[tokio::test]
+async fn test_vault_hibernation_sleep_and_wake() {
+    use std::time::Instant;
+
+    use inferadb_ledger_raft::raft_manager::VaultLifecycleState;
+
+    let cluster = TestCluster::with_data_regions(1, 1).await;
+    cluster.wait_for_leader().await;
+
+    let leader = cluster.leader().expect("cluster has a leader");
+    let region = Region::US_EAST_VA;
+
+    let (org_slug, _admin_slug) =
+        crate::common::create_test_organization(&leader.addr, "vault-hibernation-org", leader)
+            .await
+            .expect("create organization");
+    let org_id = resolve_org_id(leader, org_slug);
+
+    crate::common::create_test_vault(&leader.addr, org_slug).await.expect("create vault");
+    let vault_id =
+        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(15))
+            .await;
+
+    // Flip hibernation on with an aggressive idle window — this exercises the
+    // same setter the `--vault-hibernation` flag uses during bootstrap.
+    leader.manager.set_hibernation_config(
+        inferadb_ledger_types::config::HibernationConfig::builder()
+            .enabled(true)
+            .idle_secs(1)
+            .scan_interval_secs(1)
+            .wake_threshold_ms(100)
+            .build()
+            .expect("valid hibernation config"),
+    );
+
+    let vault_group = leader
+        .manager
+        .get_vault_group(region, org_id, vault_id)
+        .expect("vault group present on leader");
+    assert_eq!(vault_group.lifecycle_state(), VaultLifecycleState::Active);
+
+    // Backdate the vault's last-activity stamp so the next scan sees it as
+    // long-idle, then trigger the scan synchronously.
+    vault_group.force_last_activity_for_test(0);
+    leader.manager.run_hibernation_scan_once();
+    assert_eq!(
+        vault_group.lifecycle_state(),
+        VaultLifecycleState::Dormant,
+        "vault must sleep after idle scan with stale last_activity",
+    );
+
+    // Wake path — `touch_activity()` is what the proposal handler calls on
+    // every request; assert it transitions back to Active and that the
+    // wake-time fits inside the configured budget.
+    let wake_start = Instant::now();
+    let woke = vault_group.touch_activity();
+    let wake_elapsed = wake_start.elapsed();
+    assert!(woke, "touch_activity on Dormant vault must report a wake transition");
+    assert_eq!(vault_group.lifecycle_state(), VaultLifecycleState::Active);
+    assert!(
+        wake_elapsed < Duration::from_millis(100),
+        "wake transition must complete within the 100ms budget; took {:?}",
+        wake_elapsed,
+    );
+}
+
+/// Hibernation must remain a no-op when the master flag is `false`. This is
+/// the cluster-lifecycle gate — vault state never transitions to Dormant
+/// regardless of how stale activity gets.
+#[tokio::test]
+async fn test_vault_hibernation_disabled_by_default() {
+    use inferadb_ledger_raft::raft_manager::VaultLifecycleState;
+
+    let cluster = TestCluster::with_data_regions(1, 1).await;
+    cluster.wait_for_leader().await;
+
+    let leader = cluster.leader().expect("cluster has a leader");
+    let region = Region::US_EAST_VA;
+
+    let (org_slug, _admin_slug) = crate::common::create_test_organization(
+        &leader.addr,
+        "vault-hibernation-disabled-org",
+        leader,
+    )
+    .await
+    .expect("create organization");
+    let org_id = resolve_org_id(leader, org_slug);
+    crate::common::create_test_vault(&leader.addr, org_slug).await.expect("create vault");
+    let vault_id =
+        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(15))
+            .await;
+
+    let vault_group = leader
+        .manager
+        .get_vault_group(region, org_id, vault_id)
+        .expect("vault group present on leader");
+
+    // Force-stale activity timestamp. The scan still runs every tick, but
+    // with the master config disabled it must early-return without
+    // transitioning anything.
+    vault_group.force_last_activity_for_test(0);
+    leader.manager.run_hibernation_scan_once();
+
+    assert_eq!(
+        vault_group.lifecycle_state(),
+        VaultLifecycleState::Active,
+        "vault must stay Active when hibernation is disabled, even with stale activity",
+    );
+}

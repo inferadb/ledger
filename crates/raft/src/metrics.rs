@@ -8,12 +8,49 @@
 //! - Histograms: `_seconds` or `_bytes` suffix
 //! - Gauges: no suffix
 
-use std::time::Instant;
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Instant,
+};
 
 use inferadb_ledger_types::{OrganizationId, VaultId};
 use metrics::{counter, gauge, histogram};
 
 use crate::logging::fields;
+
+// =============================================================================
+// Per-Vault Metric Gating
+// =============================================================================
+
+/// Global gate for per-vault Prometheus label emission.
+///
+/// When `false` (default), helpers that emit `vault_id`-labeled series
+/// fast-path to org-level rollups only. When `true`, the per-vault series
+/// are emitted in addition to the rollups. Set once at startup from
+/// [`ObservabilityConfig::vault_metrics_enabled`](inferadb_ledger_types::config::ObservabilityConfig);
+/// flipping it at runtime would change the time-series shape mid-scrape,
+/// confusing dashboards.
+static VAULT_METRICS_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Sentinel value emitted in place of an internal vault id when per-vault
+/// metrics are disabled. Keeps dashboards stable across opt-in changes —
+/// a panel that groups by `vault_id` always has a value.
+pub const VAULT_ID_ROLLUP_LABEL: &str = "ROLLUP";
+
+/// Sets the per-vault metric emission gate.
+///
+/// Call once during server bootstrap, before any metric is emitted. Reading
+/// the gate is a single relaxed atomic load on the metric hot path.
+#[inline]
+pub fn set_vault_metrics_enabled(enabled: bool) {
+    VAULT_METRICS_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+/// Returns `true` if per-vault Prometheus series should be emitted.
+#[inline]
+pub fn vault_metrics_enabled() -> bool {
+    VAULT_METRICS_ENABLED.load(Ordering::Relaxed)
+}
 
 /// Gate a metric emission through the cardinality tracker.
 ///
@@ -1385,6 +1422,256 @@ pub fn record_event_overflow(region: &str, organization_id: &str, cause: &str, c
     );
 }
 
+// =============================================================================
+// Per-Vault Metrics (Phase 7 — opt-in via ObservabilityConfig::vault_metrics_enabled)
+// =============================================================================
+//
+// These helpers always emit org-level rollups and conditionally emit
+// per-vault series gated on `vault_metrics_enabled()`. Defaulting per-vault
+// off keeps Prometheus cardinality bounded by `(region × organization)`
+// instead of `(region × organization × vault)`.
+
+/// Per-vault apply latency histogram (opt-in).
+///
+/// Labels: `region`, `organization_id`, `vault_id`, `status`.
+const VAULT_APPLY_LATENCY: &str = "vault_apply_latency_seconds";
+
+/// Per-vault state-root cache hits (opt-in).
+///
+/// Labels: `region`, `organization_id`, `vault_id`. Incremented when a
+/// `compute_state_root` call short-circuits on a clean commitment instead
+/// of recomputing bucket roots.
+const VAULT_STATE_ROOT_CACHE_HIT_TOTAL: &str = "vault_state_root_cache_hit_total";
+
+/// Per-vault gRPC request counter (opt-in).
+///
+/// Labels: `region`, `organization_id`, `vault_id`, `method`, `status`.
+const VAULT_REQUEST_TOTAL: &str = "vault_request_total";
+
+/// Per-organization apply throughput counter (always-on rollup).
+///
+/// Labels: `region`, `organization_id`. Sum across all per-vault apply
+/// batches under the organization. Operators can divide by the
+/// per-vault counter (when opt-in is on) to derive vault-level shares
+/// without a high-cardinality time series for the rollup itself.
+const ORG_APPLY_THROUGHPUT_OPS_TOTAL: &str = "org_apply_throughput_ops_total";
+
+/// Per-organization active vault count gauge (always-on rollup).
+///
+/// Labels: `region`, `organization_id`, `status` ∈ {`active`, `dormant`,
+/// `stalled`}. Today only `active` is populated — `dormant` and `stalled`
+/// are reserved for the hibernation milestone (Phase 7 / O1).
+const ORG_ACTIVE_VAULT_COUNT: &str = "org_active_vault_count";
+
+/// Vault hibernation transition counter (always-on rollup).
+///
+/// Labels: `region`, `organization_id`, `direction` ∈ {`wake`, `sleep`}.
+/// Reserved for the hibernation milestone (Phase 7 / O1) — the metric is
+/// registered ahead of time so dashboards do not break when O1 ships.
+const VAULT_HIBERNATION_TRANSITIONS_TOTAL: &str = "vault_hibernation_transitions_total";
+
+/// Returns the `vault_id` label value to emit for the given vault, taking
+/// the global per-vault gate into account.
+#[cfg(test)]
+fn vault_label_value(vault: VaultId) -> String {
+    if vault_metrics_enabled() {
+        vault.value().to_string()
+    } else {
+        VAULT_ID_ROLLUP_LABEL.to_string()
+    }
+}
+
+/// Records a per-vault apply batch.
+///
+/// Always increments the org-level rollup counter
+/// `org_apply_throughput_ops_total`. When per-vault metrics are enabled,
+/// also records the vault-labeled apply latency histogram
+/// `vault_apply_latency_seconds` so operators can identify hot or
+/// stalled vaults.
+///
+/// `vault` is the internal [`VaultId`] of the per-vault Raft group whose
+/// apply pump just drained a batch; if the apply worker drives an
+/// org-scoped group (no vault), pass `None` and the rollup is the only
+/// emission.
+#[inline]
+pub fn record_vault_apply_batch(
+    region: &str,
+    organization_id: &str,
+    vault: Option<VaultId>,
+    status: &str,
+    batch_size: usize,
+    latency_secs: f64,
+) {
+    // Always-on org rollup. Cardinality: region × organization.
+    gated!(
+        ORG_APPLY_THROUGHPUT_OPS_TOTAL,
+        &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id)],
+        {
+            counter!(
+                ORG_APPLY_THROUGHPUT_OPS_TOTAL,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+            )
+            .increment(batch_size as u64);
+        }
+    );
+
+    // Opt-in per-vault histogram. Skip emission entirely when off so the
+    // series never registers — a hard cardinality cap rather than a
+    // sentinel-label emission.
+    if !vault_metrics_enabled() {
+        return;
+    }
+    let vault_label =
+        vault.map_or_else(|| VAULT_ID_ROLLUP_LABEL.to_string(), |v| v.value().to_string());
+    gated!(
+        VAULT_APPLY_LATENCY,
+        &[
+            (fields::REGION, region),
+            (fields::ORGANIZATION_ID, organization_id),
+            (fields::VAULT_ID, &vault_label),
+            (fields::STATUS, status),
+        ],
+        {
+            histogram!(
+                VAULT_APPLY_LATENCY,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+                fields::VAULT_ID => vault_label.clone(),
+                fields::STATUS => status.to_string(),
+            )
+            .record(latency_secs);
+        }
+    );
+}
+
+/// Records a per-vault state-root cache hit.
+///
+/// Opt-in: emitted only when `vault_metrics_enabled()` is `true`. The
+/// org-level cache-hit rate is already covered by
+/// [`record_state_root_computation`]; this helper exists so operators
+/// who opt in can identify per-vault outliers (e.g. a vault whose
+/// commitment is constantly dirty under burst writes).
+#[inline]
+pub fn record_vault_state_root_cache_hit(region: &str, organization_id: &str, vault: VaultId) {
+    if !vault_metrics_enabled() {
+        return;
+    }
+    let vault_label = vault.value().to_string();
+    gated!(
+        VAULT_STATE_ROOT_CACHE_HIT_TOTAL,
+        &[
+            (fields::REGION, region),
+            (fields::ORGANIZATION_ID, organization_id),
+            (fields::VAULT_ID, &vault_label),
+        ],
+        {
+            counter!(
+                VAULT_STATE_ROOT_CACHE_HIT_TOTAL,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+                fields::VAULT_ID => vault_label.clone(),
+            )
+            .increment(1);
+        }
+    );
+}
+
+/// Records a per-vault gRPC request.
+///
+/// Opt-in: emitted only when `vault_metrics_enabled()` is `true`. The
+/// org-level rollup is provided by [`record_grpc_request`]; this helper
+/// adds vault-grain visibility (e.g. for identifying which vault a
+/// `Write` storm is targeting).
+#[inline]
+pub fn record_vault_request(
+    region: &str,
+    organization_id: &str,
+    vault: VaultId,
+    method: &str,
+    status: &str,
+) {
+    if !vault_metrics_enabled() {
+        return;
+    }
+    let vault_label = vault.value().to_string();
+    gated!(
+        VAULT_REQUEST_TOTAL,
+        &[
+            (fields::REGION, region),
+            (fields::ORGANIZATION_ID, organization_id),
+            (fields::VAULT_ID, &vault_label),
+            (fields::METHOD, method),
+            (fields::STATUS, status),
+        ],
+        {
+            counter!(
+                VAULT_REQUEST_TOTAL,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+                fields::VAULT_ID => vault_label.clone(),
+                fields::METHOD => method.to_string(),
+                fields::STATUS => status.to_string(),
+            )
+            .increment(1);
+        }
+    );
+}
+
+/// Sets the per-organization active vault count gauge (always-on rollup).
+///
+/// `status` must be one of `"active"`, `"dormant"`, or `"stalled"`. Today
+/// only `"active"` is populated — `"dormant"` and `"stalled"` are
+/// reserved for the hibernation milestone (Phase 7 / O1).
+#[inline]
+pub fn set_org_active_vault_count(region: &str, organization_id: &str, status: &str, count: u64) {
+    gated!(
+        ORG_ACTIVE_VAULT_COUNT,
+        &[
+            (fields::REGION, region),
+            (fields::ORGANIZATION_ID, organization_id),
+            (fields::STATUS, status),
+        ],
+        {
+            #[allow(clippy::cast_precision_loss)]
+            gauge!(
+                ORG_ACTIVE_VAULT_COUNT,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+                fields::STATUS => status.to_string(),
+            )
+            .set(count as f64);
+        }
+    );
+}
+
+/// Records a vault hibernation transition (always-on rollup).
+///
+/// `direction` must be `"wake"` (dormant → active) or `"sleep"`
+/// (active → dormant). Reserved for the hibernation milestone
+/// (Phase 7 / O1) — the metric is registered ahead of time so dashboards
+/// do not break when O1 ships.
+#[inline]
+pub fn record_vault_hibernation_transition(region: &str, organization_id: &str, direction: &str) {
+    gated!(
+        VAULT_HIBERNATION_TRANSITIONS_TOTAL,
+        &[
+            (fields::REGION, region),
+            (fields::ORGANIZATION_ID, organization_id),
+            (fields::DIRECTION, direction),
+        ],
+        {
+            counter!(
+                VAULT_HIBERNATION_TRANSITIONS_TOTAL,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+                fields::DIRECTION => direction.to_string(),
+            )
+            .increment(1);
+        }
+    );
+}
+
 /// SLI-aligned histogram bucket boundaries (in seconds).
 ///
 /// These buckets are designed for latency SLI/SLO tracking:
@@ -2474,6 +2761,113 @@ mod tests {
     fn test_record_trigger_election_both_paths() {
         record_trigger_election(true);
         record_trigger_election(false);
+    }
+
+    // --- Per-Vault Metrics (Phase 7 opt-in) ---
+
+    #[test]
+    fn test_vault_metrics_gate_default_off() {
+        // Fresh process default — gate is off.
+        // Use a separate gate read so this test stays valid even when
+        // run after other tests have flipped the gate.
+        let prior = vault_metrics_enabled();
+        set_vault_metrics_enabled(false);
+        assert!(!vault_metrics_enabled());
+        set_vault_metrics_enabled(prior);
+    }
+
+    #[test]
+    fn test_vault_metrics_gate_toggle() {
+        let prior = vault_metrics_enabled();
+        set_vault_metrics_enabled(true);
+        assert!(vault_metrics_enabled());
+        set_vault_metrics_enabled(false);
+        assert!(!vault_metrics_enabled());
+        set_vault_metrics_enabled(prior);
+    }
+
+    #[test]
+    fn test_vault_label_value_respects_gate() {
+        let prior = vault_metrics_enabled();
+        set_vault_metrics_enabled(false);
+        assert_eq!(vault_label_value(VaultId::new(42)), VAULT_ID_ROLLUP_LABEL);
+        set_vault_metrics_enabled(true);
+        assert_eq!(vault_label_value(VaultId::new(42)), "42");
+        set_vault_metrics_enabled(prior);
+    }
+
+    #[test]
+    fn test_record_vault_apply_batch_off_emits_rollup_only() {
+        let prior = vault_metrics_enabled();
+        set_vault_metrics_enabled(false);
+        record_vault_apply_batch("us-east-va", "1", Some(VaultId::new(7)), "ok", 5, 0.003);
+        record_vault_apply_batch("us-east-va", "1", None, "ok", 5, 0.003);
+        set_vault_metrics_enabled(prior);
+    }
+
+    #[test]
+    fn test_record_vault_apply_batch_on_emits_per_vault() {
+        let prior = vault_metrics_enabled();
+        set_vault_metrics_enabled(true);
+        record_vault_apply_batch("us-east-va", "1", Some(VaultId::new(7)), "ok", 5, 0.003);
+        record_vault_apply_batch("us-east-va", "1", Some(VaultId::new(8)), "error", 1, 0.5);
+        record_vault_apply_batch("us-east-va", "1", None, "ok", 5, 0.003);
+        set_vault_metrics_enabled(prior);
+    }
+
+    #[test]
+    fn test_record_vault_state_root_cache_hit_off_is_noop() {
+        let prior = vault_metrics_enabled();
+        set_vault_metrics_enabled(false);
+        record_vault_state_root_cache_hit("us-east-va", "1", VaultId::new(7));
+        set_vault_metrics_enabled(prior);
+    }
+
+    #[test]
+    fn test_record_vault_state_root_cache_hit_on_emits() {
+        let prior = vault_metrics_enabled();
+        set_vault_metrics_enabled(true);
+        record_vault_state_root_cache_hit("us-east-va", "1", VaultId::new(7));
+        set_vault_metrics_enabled(prior);
+    }
+
+    #[test]
+    fn test_record_vault_request_off_is_noop() {
+        let prior = vault_metrics_enabled();
+        set_vault_metrics_enabled(false);
+        record_vault_request("us-east-va", "1", VaultId::new(7), "Write", "OK");
+        set_vault_metrics_enabled(prior);
+    }
+
+    #[test]
+    fn test_record_vault_request_on_emits() {
+        let prior = vault_metrics_enabled();
+        set_vault_metrics_enabled(true);
+        record_vault_request("us-east-va", "1", VaultId::new(7), "Write", "OK");
+        record_vault_request("us-east-va", "1", VaultId::new(8), "Read", "Internal");
+        set_vault_metrics_enabled(prior);
+    }
+
+    #[test]
+    fn test_set_org_active_vault_count_always_on() {
+        let prior = vault_metrics_enabled();
+        // Always-on rollup — fires regardless of gate.
+        set_vault_metrics_enabled(false);
+        set_org_active_vault_count("us-east-va", "1", "active", 12);
+        set_vault_metrics_enabled(true);
+        set_org_active_vault_count("us-east-va", "1", "active", 12);
+        set_org_active_vault_count("us-east-va", "1", "dormant", 3);
+        set_org_active_vault_count("us-east-va", "1", "stalled", 0);
+        set_vault_metrics_enabled(prior);
+    }
+
+    #[test]
+    fn test_record_vault_hibernation_transition_always_on() {
+        let prior = vault_metrics_enabled();
+        set_vault_metrics_enabled(false);
+        record_vault_hibernation_transition("us-east-va", "1", "wake");
+        record_vault_hibernation_transition("us-east-va", "1", "sleep");
+        set_vault_metrics_enabled(prior);
     }
 
     // --- Onboarding ---

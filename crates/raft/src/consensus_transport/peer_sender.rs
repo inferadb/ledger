@@ -260,7 +260,7 @@ fn build_consensus_request(
         Ok(payload) => Some(inferadb_ledger_proto::proto::ConsensusEnvelope {
             shard_id: msg.shard.0,
             from_node,
-            region: Some(inferadb_ledger_proto::proto::Region::from(region) as i32),
+            region: Some(region.as_str().to_string()),
             payload,
             from_address: from_address.to_string(),
             cluster_id: 0,

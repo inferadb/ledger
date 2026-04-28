@@ -17,12 +17,11 @@ use inferadb_ledger_proto::proto::{
     ListOrganizationMembersResponse, ListOrganizationTeamsRequest, ListOrganizationTeamsResponse,
     ListOrganizationsRequest, ListOrganizationsResponse, MigrateOrganizationRequest,
     MigrateOrganizationResponse, NodeId, OrganizationSlug,
-    OrganizationStatus as ProtoOrganizationStatus, Region as ProtoRegion,
-    RemoveOrganizationMemberRequest, RemoveOrganizationMemberResponse, RemoveTeamMemberRequest,
-    RemoveTeamMemberResponse, UpdateOrganizationMemberRoleRequest,
-    UpdateOrganizationMemberRoleResponse, UpdateOrganizationRequest, UpdateOrganizationResponse,
-    UpdateOrganizationTeamRequest, UpdateOrganizationTeamResponse, UpdateTeamMemberRoleRequest,
-    UpdateTeamMemberRoleResponse,
+    OrganizationStatus as ProtoOrganizationStatus, RemoveOrganizationMemberRequest,
+    RemoveOrganizationMemberResponse, RemoveTeamMemberRequest, RemoveTeamMemberResponse,
+    UpdateOrganizationMemberRoleRequest, UpdateOrganizationMemberRoleResponse,
+    UpdateOrganizationRequest, UpdateOrganizationResponse, UpdateOrganizationTeamRequest,
+    UpdateOrganizationTeamResponse, UpdateTeamMemberRoleRequest, UpdateTeamMemberRoleResponse,
 };
 use inferadb_ledger_raft::{
     error::ServiceError,
@@ -60,10 +59,21 @@ impl OrganizationService {
 
     /// Validates that a protected region has sufficient in-region nodes for quorum.
     ///
-    /// Returns `Ok(())` if the region is non-protected or has at least 3 in-region nodes.
-    /// Returns a `FailedPrecondition` status with structured error details otherwise.
+    /// Returns `Ok(())` if the region is non-protected or has at least 3
+    /// in-region nodes. Returns a `FailedPrecondition` status with
+    /// structured error details otherwise. The residency contract is
+    /// resolved from the GLOBAL region directory; an unknown region (no
+    /// directory entry) is treated as non-protected — production paths
+    /// always write the directory entry before any organization can
+    /// reference a region, so a missing entry means the region was
+    /// never registered and there is nothing to enforce against.
     fn validate_region_nodes(&self, region: inferadb_ledger_types::Region) -> Result<(), Status> {
-        if !region.requires_residency() {
+        let residency =
+            match inferadb_ledger_state::system::lookup_region_residency(&self.ctx.state, region) {
+                Ok(Some(r)) => r,
+                Ok(None) | Err(_) => return Ok(()),
+            };
+        if !residency.requires_residency {
             return Ok(());
         }
         let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
@@ -395,7 +405,7 @@ impl OrganizationService {
         GetOrganizationResponse {
             slug: Some(OrganizationSlug { slug: resolved_slug.value() }),
             name,
-            region: ProtoRegion::from(org_meta.region).into(),
+            region: org_meta.region.as_str().to_string(),
             member_nodes,
             status: status.into(),
             config_version,
@@ -440,8 +450,8 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         validation::validate_organization_name(&req.name, &self.ctx.validation_config)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-        // Validate and convert proto region to domain region
-        let region = inferadb_ledger_proto::convert::region_from_i32(req.region)?;
+        // Validate and convert proto region slug to domain region
+        let region = inferadb_ledger_proto::convert::region_from_str(&req.region)?;
 
         // GLOBAL is the control plane region — organizations must choose a data
         // residency region
@@ -829,8 +839,8 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         // Validate initiator is an organization administrator
         self.validate_org_admin(&slug_resolver, organization_id, &req.caller, &mut ctx)?;
 
-        // Validate and convert proto region to domain region
-        let target_region = inferadb_ledger_proto::convert::region_from_i32(req.target_region)?;
+        // Validate and convert proto region slug to domain region
+        let target_region = inferadb_ledger_proto::convert::region_from_str(&req.target_region)?;
 
         // Look up current organization state
         let org_meta =
@@ -879,9 +889,34 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             return Err(Status::invalid_argument("Cannot migrate to GLOBAL control plane region"));
         }
 
+        // Resolve residency for both regions from the GLOBAL region
+        // directory. An unknown region (no directory entry) is treated as
+        // non-protected — the migration validation only fires on a known
+        // protected→non-protected jump.
+        let source_residency = match inferadb_ledger_state::system::lookup_region_residency(
+            &self.ctx.state,
+            source_region,
+        ) {
+            Ok(Some(r)) => r,
+            Ok(None) | Err(_) => inferadb_ledger_state::system::RegionResidency {
+                requires_residency: false,
+                retention_days: 90,
+            },
+        };
+        let target_residency = match inferadb_ledger_state::system::lookup_region_residency(
+            &self.ctx.state,
+            target_region,
+        ) {
+            Ok(Some(r)) => r,
+            Ok(None) | Err(_) => inferadb_ledger_state::system::RegionResidency {
+                requires_residency: false,
+                retention_days: 90,
+            },
+        };
+
         // Validate: protected → non-protected requires acknowledgment
-        if source_region.requires_residency()
-            && !target_region.requires_residency()
+        if source_residency.requires_residency
+            && !target_residency.requires_residency
             && !req.acknowledge_residency_downgrade
         {
             let mut context = std::collections::HashMap::new();
@@ -909,7 +944,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
 
         // Determine migration type: metadata-only for non-protected → non-protected
         let metadata_only =
-            !source_region.requires_residency() && !target_region.requires_residency();
+            !source_residency.requires_residency && !target_residency.requires_residency;
 
         // Capture the originating W3C `traceparent` so the saga can propagate
         // it into downstream regional proposals (keeps distributed traces
@@ -1012,12 +1047,10 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             LedgerResponse::Write { .. } => {
                 ctx.set_success();
                 metrics::record_organization_operation(migration_organization, "migrate");
-                let proto_source: ProtoRegion = source_region.into();
-                let proto_target: ProtoRegion = migration_target.into();
                 Ok(Response::new(MigrateOrganizationResponse {
                     slug: Some(OrganizationSlug { slug: organization_slug_val }),
-                    source_region: proto_source.into(),
-                    target_region: proto_target.into(),
+                    source_region: source_region.as_str().to_string(),
+                    target_region: migration_target.as_str().to_string(),
                     status: ProtoOrganizationStatus::Migrating.into(),
                 }))
             },

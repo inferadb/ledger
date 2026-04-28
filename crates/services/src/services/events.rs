@@ -704,7 +704,12 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
         let now = Utc::now();
         let ttl_days = config.default_ttl_days;
         let max_details_bytes = config.max_details_size_bytes;
-        let mut accepted_entries: Vec<(Option<VaultId>, EventEntry)> =
+        // Routing key carries both the internal `VaultId` (used for per-vault
+        // group lookup) and the external `VaultSlug` (forwarded into the
+        // `NotLeader` `LeaderHint` so the SDK's `VaultLeaderCache` — keyed
+        // on `(OrganizationSlug, VaultSlug)` — populates without a resolve
+        // round-trip).
+        let mut accepted_entries: Vec<(Option<(VaultId, VaultSlug)>, EventEntry)> =
             Vec::with_capacity(batch_size);
         let mut rejections: Vec<proto::RejectedEvent> = Vec::new();
 
@@ -825,7 +830,7 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
                     continue;
                 },
                 Some(slug) => match resolver.resolve_vault_pair(slug) {
-                    Ok((owning_org, vault_id)) if owning_org == org_id => Some(vault_id),
+                    Ok((owning_org, vault_id)) if owning_org == org_id => Some((vault_id, slug)),
                     Ok((owning_org, _)) => {
                         rejections.push(proto::RejectedEvent {
                             index: idx as u32,
@@ -919,8 +924,11 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
 
             // Bucket accepted entries by routing key. `BTreeMap` gives
             // deterministic iteration order: `None` (org-level) first,
-            // then `Some(vault_id)` ascending — stable across retries.
-            let mut buckets: BTreeMap<Option<VaultId>, Vec<EventEntry>> = BTreeMap::new();
+            // then `Some((vault_id, _))` ascending by vault id — stable
+            // across retries. The slug travels alongside the id so the
+            // post-loop proposal can forward it into `NotLeader` hints.
+            let mut buckets: BTreeMap<Option<(VaultId, VaultSlug)>, Vec<EventEntry>> =
+                BTreeMap::new();
             for (vault_routing, entry) in accepted_entries {
                 buckets.entry(vault_routing).or_default().push(entry);
             }
@@ -948,8 +956,17 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
                 })?;
 
                 let response = match vault_routing {
-                    Some(vault_id) => proposer
-                        .propose_to_vault_bytes(region, org_id, vault_id, payload, timeout)
+                    Some((vault_id, vault_slug)) => proposer
+                        .propose_to_vault_bytes(
+                            region,
+                            org_id,
+                            vault_id,
+                            // org slug comes from the inbound request (already validated above).
+                            req.organization.as_ref().map(|o| o.slug),
+                            Some(vault_slug.value()),
+                            payload,
+                            timeout,
+                        )
                         .await
                         .map_err(|status| {
                             status_with_correlation(
@@ -978,7 +995,7 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
                             method = "IngestEvents",
                             source_service = %source,
                             org_id = org_id.value(),
-                            vault_id = vault_routing.map(|v| v.value()).unwrap_or(0),
+                            vault_id = vault_routing.map(|v| v.0.value()).unwrap_or(0),
                             error_code = ?code,
                             "IngestExternalEvents apply returned error"
                         );
@@ -992,7 +1009,7 @@ impl<B: StorageBackend + 'static> proto::events_service_server::EventsService fo
                         tracing::error!(
                             service = "EventsService",
                             method = "IngestEvents",
-                            vault_id = vault_routing.map(|v| v.value()).unwrap_or(0),
+                            vault_id = vault_routing.map(|v| v.0.value()).unwrap_or(0),
                             response = ?std::mem::discriminant(&other),
                             "IngestExternalEvents returned unexpected response variant"
                         );
@@ -1185,6 +1202,8 @@ mod tests {
             region: Region,
             _organization: OrganizationId,
             vault_id: inferadb_ledger_types::VaultId,
+            _organization_slug: Option<u64>,
+            _vault_slug: Option<u64>,
             bytes: Vec<u8>,
             _timeout: Duration,
         ) -> Result<LedgerResponse, Status> {
@@ -1202,6 +1221,8 @@ mod tests {
             _region: Region,
             _organization: OrganizationId,
             _vault_id: inferadb_ledger_types::VaultId,
+            _organization_slug: Option<u64>,
+            _vault_slug: Option<u64>,
             _request: OrganizationRequest,
             _caller: u64,
             _timeout: Duration,

@@ -133,7 +133,7 @@ async fn setup_user_and_org(endpoints: &[String]) -> (UserSlug, OrganizationSlug
                 .initiate_email_verification(
                     inferadb_ledger_proto::proto::InitiateEmailVerificationRequest {
                         email: email.clone(),
-                        region: 10, // REGION_US_EAST_VA
+                        region: "us-east-va".to_string(),
                     },
                 )
                 .await
@@ -172,7 +172,7 @@ async fn setup_user_and_org(endpoints: &[String]) -> (UserSlug, OrganizationSlug
         .verify_email_code(inferadb_ledger_proto::proto::VerifyEmailCodeRequest {
             email: email.clone(),
             code,
-            region: 10,
+            region: "us-east-va".to_string(),
         })
         .await
         .expect("verify email code");
@@ -204,7 +204,7 @@ async fn setup_user_and_org(endpoints: &[String]) -> (UserSlug, OrganizationSlug
                 .complete_registration(inferadb_ledger_proto::proto::CompleteRegistrationRequest {
                     onboarding_token: onboarding_token.clone(),
                     email: email.clone(),
-                    region: 10,
+                    region: "us-east-va".to_string(),
                     name: "E2E Test User".to_string(),
                     organization_name: org_name.clone(),
                 })

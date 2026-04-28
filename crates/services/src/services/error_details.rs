@@ -34,6 +34,22 @@ pub(crate) const LEADER_SHARD_KEY: &str = "leader_shard";
 /// rejections omit this key — its absence signals "no vault-level routing
 /// applies" and the SDK falls back to the org-level cache entry.
 pub(crate) const LEADER_VAULT_KEY: &str = "leader_vault";
+/// `ErrorDetails.context` key for the organization slug (Snowflake u64) the
+/// leader is for. Emitted alongside [`LEADER_SHARD_KEY`] (the internal
+/// `OrganizationId(i64)`) so the SDK — which only knows external slugs —
+/// can re-key its caches by `OrganizationSlug` without a lookup.
+///
+/// Absent when the rejection has no organization context (e.g. cross-region
+/// redirects without per-shard identity) or when the server can't translate
+/// the internal id to a slug at the rejection site.
+pub(crate) const LEADER_ORGANIZATION_SLUG_KEY: &str = "leader_organization_slug";
+/// `ErrorDetails.context` key for the vault slug (Snowflake u64) the leader
+/// is for. Emitted alongside [`LEADER_VAULT_KEY`] (the internal `VaultId(i64)`)
+/// so the SDK's `VaultLeaderCache` can key on `(OrganizationSlug, VaultSlug)`
+/// — the identifier space the SDK actually has at hand. Absent when the
+/// rejection is not vault-scoped or the slug isn't known at the rejection
+/// site.
+pub(crate) const LEADER_VAULT_SLUG_KEY: &str = "leader_vault_slug";
 
 /// Builds an [`ErrorDetails`] proto message from error attributes.
 ///
@@ -69,17 +85,26 @@ pub(crate) fn build_error_details(
 /// - `leader_shard` — numeric string (organization id; `"0"` for the data-region group)
 /// - `leader_vault` — numeric string (vault id; absent when the rejecting shard is not
 ///   vault-scoped)
+/// - `leader_organization_slug` — numeric string (Snowflake u64); absent when the slug isn't known
+///   at the rejection site
+/// - `leader_vault_slug` — numeric string (Snowflake u64); absent when the rejecting shard is not
+///   vault-scoped or when the slug isn't known
 ///
 /// Any argument may be `None` when the server has no information for that
 /// field; the key is simply omitted. A missing `leader_vault` key is the
 /// signal to legacy SDKs (and the org-level cache path) that the rejection
-/// is not vault-scoped.
+/// is not vault-scoped. The slug fields are field-additive on the wire —
+/// older SDKs ignore them; legacy servers don't emit them and the new SDK
+/// falls back to the region path.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_not_leader_details(
     leader_id: Option<u64>,
     leader_endpoint: Option<&str>,
     leader_term: Option<u64>,
     leader_shard: Option<u64>,
     leader_vault: Option<u64>,
+    leader_organization_slug: Option<u64>,
+    leader_vault_slug: Option<u64>,
 ) -> proto::ErrorDetails {
     let mut context = HashMap::new();
     if let Some(id) = leader_id {
@@ -96,6 +121,12 @@ pub(crate) fn build_not_leader_details(
     }
     if let Some(vault) = leader_vault {
         context.insert(LEADER_VAULT_KEY.to_owned(), vault.to_string());
+    }
+    if let Some(org_slug) = leader_organization_slug {
+        context.insert(LEADER_ORGANIZATION_SLUG_KEY.to_owned(), org_slug.to_string());
+    }
+    if let Some(vault_slug) = leader_vault_slug {
+        context.insert(LEADER_VAULT_SLUG_KEY.to_owned(), vault_slug.to_string());
     }
 
     proto::ErrorDetails {
@@ -201,6 +232,8 @@ mod tests {
             Some(7),
             Some(5),
             Some(99),
+            Some(1234),
+            Some(5678),
         );
         assert_eq!(details.error_code, "2000"); // ConsensusNotLeader
         assert!(details.is_retryable);
@@ -209,29 +242,34 @@ mod tests {
         assert_eq!(details.context.get("leader_term").unwrap(), "7");
         assert_eq!(details.context.get("leader_shard").unwrap(), "5");
         assert_eq!(details.context.get("leader_vault").unwrap(), "99");
+        assert_eq!(details.context.get("leader_organization_slug").unwrap(), "1234");
+        assert_eq!(details.context.get("leader_vault_slug").unwrap(), "5678");
         assert!(details.suggested_action.as_deref().unwrap().contains("leader"));
     }
 
     #[test]
     fn build_not_leader_details_partial_fields() {
-        let details = build_not_leader_details(Some(42), None, None, None, None);
+        let details = build_not_leader_details(Some(42), None, None, None, None, None, None);
         assert!(details.context.contains_key("leader_id"));
         assert!(!details.context.contains_key("leader_endpoint"));
         assert!(!details.context.contains_key("leader_term"));
         assert!(!details.context.contains_key("leader_shard"));
         assert!(!details.context.contains_key("leader_vault"));
+        assert!(!details.context.contains_key("leader_organization_slug"));
+        assert!(!details.context.contains_key("leader_vault_slug"));
     }
 
     #[test]
     fn build_not_leader_details_no_hints() {
-        let details = build_not_leader_details(None, None, None, None, None);
+        let details = build_not_leader_details(None, None, None, None, None, None, None);
         assert!(details.context.is_empty());
         assert!(details.is_retryable);
     }
 
     #[test]
     fn build_not_leader_details_empty_endpoint_omitted() {
-        let details = build_not_leader_details(Some(42), Some(""), Some(7), Some(0), None);
+        let details =
+            build_not_leader_details(Some(42), Some(""), Some(7), Some(0), None, None, None);
         assert!(!details.context.contains_key("leader_endpoint"));
         assert!(details.context.contains_key("leader_id"));
         assert!(details.context.contains_key("leader_term"));
@@ -244,23 +282,47 @@ mod tests {
         // Region- and org-scoped rejections must NOT emit the leader_vault
         // key — its absence is the signal to the SDK that no vault-level
         // routing applies.
-        let details =
-            build_not_leader_details(Some(1), Some("http://x:5000"), Some(3), Some(12), None);
+        let details = build_not_leader_details(
+            Some(1),
+            Some("http://x:5000"),
+            Some(3),
+            Some(12),
+            None,
+            None,
+            None,
+        );
         assert!(!details.context.contains_key("leader_vault"));
+        assert!(!details.context.contains_key("leader_vault_slug"));
         assert_eq!(details.context.get("leader_shard").unwrap(), "12");
     }
 
     #[test]
     fn build_not_leader_details_emits_vault_when_some() {
-        let details =
-            build_not_leader_details(Some(1), Some("http://x:5000"), Some(3), Some(12), Some(77));
+        let details = build_not_leader_details(
+            Some(1),
+            Some("http://x:5000"),
+            Some(3),
+            Some(12),
+            Some(77),
+            Some(99),
+            Some(101),
+        );
         assert_eq!(details.context.get("leader_vault").unwrap(), "77");
+        assert_eq!(details.context.get("leader_organization_slug").unwrap(), "99");
+        assert_eq!(details.context.get("leader_vault_slug").unwrap(), "101");
     }
 
     #[test]
     fn build_not_leader_details_encode_decode() {
-        let details =
-            build_not_leader_details(Some(1), Some("http://x:5000"), Some(3), Some(12), Some(45));
+        let details = build_not_leader_details(
+            Some(1),
+            Some("http://x:5000"),
+            Some(3),
+            Some(12),
+            Some(45),
+            Some(67),
+            Some(89),
+        );
         let encoded = details.encode_to_vec();
         let decoded = proto::ErrorDetails::decode(encoded.as_slice()).unwrap();
         assert_eq!(decoded.context.get("leader_id").unwrap(), "1");
@@ -268,5 +330,18 @@ mod tests {
         assert_eq!(decoded.context.get("leader_term").unwrap(), "3");
         assert_eq!(decoded.context.get("leader_shard").unwrap(), "12");
         assert_eq!(decoded.context.get("leader_vault").unwrap(), "45");
+        assert_eq!(decoded.context.get("leader_organization_slug").unwrap(), "67");
+        assert_eq!(decoded.context.get("leader_vault_slug").unwrap(), "89");
+    }
+
+    #[test]
+    fn build_not_leader_details_slug_fields_independent_from_id_fields() {
+        // Slugs may be present without their corresponding ID fields and
+        // vice versa — both pairs are independently optional.
+        let details = build_not_leader_details(None, None, None, None, None, Some(11), Some(22));
+        assert!(!details.context.contains_key("leader_shard"));
+        assert!(!details.context.contains_key("leader_vault"));
+        assert_eq!(details.context.get("leader_organization_slug").unwrap(), "11");
+        assert_eq!(details.context.get("leader_vault_slug").unwrap(), "22");
     }
 }

@@ -140,6 +140,21 @@ impl<R: ApplyableRequest> ApplyWorker<R> {
                 batch_size,
                 apply_latency,
             );
+            // Phase 7 / O3 per-vault + org rollup. The org rollup
+            // (`org_apply_throughput_ops_total`) is always-on; the
+            // per-vault apply latency histogram is gated on
+            // `metrics::vault_metrics_enabled()`. `vault_id` is `Some`
+            // only for per-vault Raft groups (Path A); org-scoped
+            // groups (`OrganizationGroup`, control-plane groups) drive
+            // the rollup with `None`.
+            metrics::record_vault_apply_batch(
+                &self.region,
+                &self.shard,
+                self.store.vault_id(),
+                status_label,
+                batch_size,
+                apply_latency,
+            );
 
             let responses: Vec<crate::types::LedgerResponse> = match apply_result {
                 Ok(responses) => responses,

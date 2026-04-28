@@ -600,6 +600,22 @@ impl RaftLogStore {
                 set.into_iter().collect()
             };
 
+            // Phase 7 / O3: per-vault state-root cache hit accounting.
+            // Probe the commitment dirty-bit BEFORE computing — clean
+            // commitments short-circuit inside `compute_state_root`, so a
+            // pre-check is the only place we can label the call as a hit.
+            // Opt-in via `vault_metrics_enabled()`; the helper itself
+            // fast-paths to a no-op when off.
+            for vault in &unique_vaults {
+                if state_layer.state_root_is_cached(*vault) {
+                    crate::metrics::record_vault_state_root_cache_hit(
+                        phase_region,
+                        &phase_org,
+                        *vault,
+                    );
+                }
+            }
+
             // Use the shared bounded apply pool (see
             // `inferadb_ledger_state::apply_pool`) rather than rayon's global
             // pool — the latter competes 1:1 with tokio workers and inflates

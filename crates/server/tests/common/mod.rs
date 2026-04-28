@@ -470,6 +470,11 @@ impl TestCluster {
                 event_writer: None,
                 events_config: None,
                 delegated_leadership: false,
+                // Test fixture: bypasses the `CreateDataRegion` apply path,
+                // so no directory entry exists. Default to non-protected so
+                // single-node test setups don't trip the protected-region
+                // quorum check.
+                requires_residency_hint: false,
             };
             manager_clone
                 .start_data_region(data_region_config)
@@ -722,6 +727,11 @@ impl TestCluster {
                     event_writer: None,
                     events_config: None,
                     delegated_leadership: false,
+                    // Test fixture: bypasses the `CreateDataRegion` apply
+                    // path. Default to non-protected so the protected-region
+                    // quorum check doesn't fire on the joining node's empty
+                    // initial-members vec.
+                    requires_residency_hint: false,
                 };
                 joining_manager.start_data_region(data_region_config).await.unwrap_or_else(|e| {
                     panic!(
@@ -1110,6 +1120,41 @@ impl TestCluster {
         &self,
         region: inferadb_ledger_types::Region,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.create_data_region_with_protection(region, false).await
+    }
+
+    /// Like [`TestCluster::create_data_region`] but allows the caller to
+    /// mark the region as protected. Protected regions require nodes to
+    /// opt in via `--regions <name>` to host them.
+    ///
+    /// When `protected = true`, the helper does NOT wait for every node to
+    /// register the region — only nodes whose `--regions` opt-in matches
+    /// will start the group. Callers asserting which nodes hosted the
+    /// region must inspect `manager.has_region(region)` themselves.
+    pub async fn create_data_region_with_protection(
+        &self,
+        region: inferadb_ledger_types::Region,
+        protected: bool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Default helper: residency tracks the protection flag (historical
+        // semantics) and retention defaults to 90 days. Tests exercising the
+        // R6 residency contract directly should call
+        // [`create_data_region_with_residency`] with explicit values.
+        self.create_data_region_with_residency(region, protected, protected, 90).await
+    }
+
+    /// Like [`TestCluster::create_data_region_with_protection`] but exposes
+    /// the full residency contract (`requires_residency`, `retention_days`).
+    /// Use this for tests that depend on the registry-driven behaviour
+    /// added in R6 — e.g. asserting that an EU region with
+    /// `retention_days=30` is honoured by the soft-delete reaper.
+    pub async fn create_data_region_with_residency(
+        &self,
+        region: inferadb_ledger_types::Region,
+        protected: bool,
+        requires_residency: bool,
+        retention_days: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use inferadb_ledger_raft::types::{RaftPayload, SystemRequest};
 
         // Pre-flight: wait until every node's `peer_addresses` map
@@ -1161,7 +1206,13 @@ impl TestCluster {
         let initial_members: Vec<(u64, String)> =
             self.nodes.iter().map(|n| (n.id, n.addr.clone())).collect();
 
-        let req = SystemRequest::CreateDataRegion { region, protected: false, initial_members };
+        let req = SystemRequest::CreateDataRegion {
+            region,
+            protected,
+            requires_residency,
+            retention_days,
+            initial_members,
+        };
         let resp = leader
             .handle
             .propose_and_wait(RaftPayload::system(req), Duration::from_secs(10))
@@ -1173,6 +1224,18 @@ impl TestCluster {
                 assert_eq!(r, region, "DataRegionCreated region mismatch");
             },
             other => return Err(format!("expected DataRegionCreated, got {other}").into()),
+        }
+
+        // For protected regions, the cluster's nodes do NOT have an
+        // opt-in (`--regions <name>`), so the region-creation handler
+        // skips the local start. The directory entry is persisted; the
+        // helper returns immediately and lets the caller assert the
+        // skip behavior or restart specific nodes with opt-in.
+        if protected {
+            // Brief settle so the apply path persists the directory entry
+            // and every node observes it on a subsequent scan.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            return Ok(());
         }
 
         // Wait for every node to register the region group and elect a
@@ -1526,7 +1589,26 @@ impl TestCluster {
     /// design in `rehydrate_organization_group`; the test helpers wait long
     /// enough for `peer_addresses` to populate before relying on the groups
     /// being live.
+    /// Graceful-restart the cluster, opting one node into a list of
+    /// protected regions. The opt-in node is selected by index (0-based).
+    /// All other nodes restart with no `--regions` flag, mirroring the
+    /// production "single operator opted-in node" topology.
+    ///
+    /// This is the test analogue of `inferadb-ledger --regions
+    /// <name1,name2>` on a single node.
+    pub async fn graceful_restart_with_regions(
+        self,
+        opt_in_node_index: usize,
+        regions: Vec<String>,
+    ) -> Self {
+        self.graceful_restart_inner(Some((opt_in_node_index, regions))).await
+    }
+
     pub async fn graceful_restart(self) -> Self {
+        self.graceful_restart_inner(None).await
+    }
+
+    async fn graceful_restart_inner(self, opt_in: Option<(usize, Vec<String>)>) -> Self {
         // Destructure the cluster so we can move per-node blueprints out of
         // the nodes Vec without hitting partial-move errors through a &mut.
         let Self {
@@ -1643,7 +1725,7 @@ impl TestCluster {
         };
 
         let mut restarted: Vec<TestNode> = Vec::with_capacity(blueprints.len());
-        for blueprint in blueprints {
+        for (idx, blueprint) in blueprints.into_iter().enumerate() {
             // Seed list excludes the node's own address so the node doesn't
             // discover itself. Leaving self in the list is harmless (the
             // restart seed loop filters by `info.node_id != my_node_id`)
@@ -1656,12 +1738,17 @@ impl TestCluster {
                     join_seeds.iter().filter(|a| *a != own_addr).cloned().collect();
                 if seeds.is_empty() { None } else { Some(seeds) }
             };
-            let node = bootstrap_one_node(
+            let regions_for_node: Vec<String> = match opt_in {
+                Some((target_idx, ref regions)) if target_idx == idx => regions.clone(),
+                _ => Vec::new(),
+            };
+            let node = bootstrap_one_node_with_regions(
                 blueprint,
                 key_manager.clone(),
                 include_blinding_key,
                 rate_limit_override.clone(),
                 seeds_for_node,
+                regions_for_node,
             )
             .await;
             restarted.push(node);
@@ -1801,6 +1888,28 @@ async fn bootstrap_one_node(
     rate_limit_override: Option<inferadb_ledger_types::config::RateLimitConfig>,
     join_seeds: Option<Vec<String>>,
 ) -> TestNode {
+    bootstrap_one_node_with_regions(
+        blueprint,
+        key_manager,
+        include_blinding_key,
+        rate_limit_override,
+        join_seeds,
+        Vec::new(),
+    )
+    .await
+}
+
+/// Like [`bootstrap_one_node`] but accepts an explicit `regions` opt-in
+/// list. Used by tests that need to verify protected-region opt-in
+/// behavior.
+async fn bootstrap_one_node_with_regions(
+    blueprint: NodeRestartBlueprint,
+    key_manager: Arc<dyn inferadb_ledger_store::crypto::RegionKeyManager>,
+    include_blinding_key: bool,
+    rate_limit_override: Option<inferadb_ledger_types::config::RateLimitConfig>,
+    join_seeds: Option<Vec<String>>,
+    regions: Vec<String>,
+) -> TestNode {
     let NodeRestartBlueprint { id: node_id_hint, addr, temp_dir, socket_path, listen } = blueprint;
     let data_dir = temp_dir.path().to_path_buf();
 
@@ -1827,6 +1936,7 @@ async fn bootstrap_one_node(
             None
         },
         join: join_seeds,
+        regions,
         ..inferadb_ledger_server::config::Config::default()
     };
 
@@ -2218,7 +2328,7 @@ pub async fn create_test_organization(
         let result = client
             .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
                 name: name.to_string(),
-                region: 10, // US_EAST_VA
+                region: "us-east-va".to_string(),
                 tier: None,
                 caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: admin_slug }),
                 slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
@@ -2502,7 +2612,7 @@ pub async fn setup_org_with_admin(
         let result = client
             .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
                 name: org_name.to_string(),
-                region: 10, // US_EAST_VA
+                region: "us-east-va".to_string(),
                 tier: None,
                 caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: admin_slug }),
                 slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {

@@ -254,6 +254,12 @@ pub enum UserDirectoryStatus {
 /// `voters` and `learners` carry `LedgerNodeId` (`u64`) values to match the
 /// consensus engine's wire-level node identifiers (the same shape used by
 /// `RegionMembershipReport` and `SystemRequest::CreateDataRegion::initial_members`).
+///
+/// `requires_residency` and `retention_days` carry the region's data-residency
+/// contract — every authoritative residency decision flows through these
+/// fields. There is no hardcoded fallback by region slug; an unknown slug
+/// uses the safe defaults
+/// ([`default_requires_residency`] = `true`, [`default_retention_days`] = 90).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegionDirectoryEntry {
     /// Region name slug (e.g. `"us-east-va"`). Matches the `_dir:region:{name}`
@@ -262,6 +268,19 @@ pub struct RegionDirectoryEntry {
     /// Whether nodes must explicitly opt-in (`--region <name>`) to join this
     /// region. `false` for the auto-join default.
     pub protected: bool,
+    /// Whether this region requires data-residency enforcement
+    /// (PII stays in this region; cross-region snapshot transfer is rejected;
+    /// `OrganizationGroup` membership is restricted to in-region nodes).
+    /// Default-deny: missing from old persisted entries decodes as `true`.
+    #[serde(default = "default_requires_residency")]
+    pub requires_residency: bool,
+    /// Soft-delete retention period, in days, for entities homed in this
+    /// region. EU / EEA / UK regions use 30 days for GDPR; most others
+    /// use 90. Operators MUST set this explicitly when provisioning a
+    /// region whose jurisdiction has a stricter retention contract.
+    /// Default-decode: missing from old persisted entries decodes as 90.
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u32,
     /// Configuration epoch. Monotonically increasing on each membership
     /// change; stale reports with a lower epoch are ignored.
     pub conf_epoch: u64,
@@ -271,6 +290,46 @@ pub struct RegionDirectoryEntry {
     pub learners: Vec<u64>,
     /// Wall-clock creation timestamp.
     pub created_at: DateTime<Utc>,
+}
+
+/// Default `requires_residency` for [`RegionDirectoryEntry`]: `true` (default-deny).
+///
+/// Unknown / pre-R6 entries decode with this value. Operators must explicitly
+/// disable residency for non-protected regions (US, GLOBAL) at provisioning time.
+pub fn default_requires_residency() -> bool {
+    true
+}
+
+/// Default `retention_days` for [`RegionDirectoryEntry`]: 90 days.
+///
+/// Long enough that any production deployment has time to update via
+/// `AdminService::SetRegionResidency` after a server upgrade. EU / EEA / UK
+/// deployments must call `SetRegionResidency` to lower this to 30 days for
+/// GDPR / UK GDPR compliance.
+pub fn default_retention_days() -> u32 {
+    90
+}
+
+impl RegionDirectoryEntry {
+    /// Whether this region requires data-residency enforcement.
+    ///
+    /// Authoritative source for the residency contract — the previously
+    /// hardcoded `Region::requires_residency()` method has been replaced by
+    /// this field (set at provisioning time, persisted in GLOBAL state).
+    #[inline]
+    pub fn requires_residency(&self) -> bool {
+        self.requires_residency
+    }
+
+    /// Soft-delete retention period in days for this region.
+    ///
+    /// Authoritative source for the retention contract — the previously
+    /// hardcoded `Region::retention_days()` method has been replaced by
+    /// this field (set at provisioning time, persisted in GLOBAL state).
+    #[inline]
+    pub fn retention_days(&self) -> u32 {
+        self.retention_days
+    }
 }
 
 /// Non-PII user directory record in the GLOBAL control plane.
@@ -657,9 +716,9 @@ pub struct NodeInfo {
     ///
     /// Determines which Raft groups the node participates in:
     /// - `GLOBAL`: all nodes join (control plane, replicated everywhere).
-    /// - Non-protected (`requires_residency() == false`): all nodes join.
-    /// - Protected (`requires_residency() == true`): only nodes tagged with that exact region
-    ///   join.
+    /// - Non-protected (`RegionDirectoryEntry.requires_residency == false`): all nodes join.
+    /// - Protected (`RegionDirectoryEntry.requires_residency == true`): only nodes tagged with
+    ///   that exact region join.
     ///
     /// Region is immutable after registration — moving requires decommission
     /// and re-register.

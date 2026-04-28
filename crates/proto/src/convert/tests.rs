@@ -1035,136 +1035,43 @@ fn test_event_entry_all_actions_roundtrip() {
 // Region conversion tests
 // -------------------------------------------------------------------------
 
-/// Mapping from every domain Region variant to its expected proto counterpart.
-const REGION_PAIRS: [(inferadb_ledger_types::Region, proto::Region); 25] = {
-    use inferadb_ledger_types::Region as D;
-    [
-        (D::GLOBAL, proto::Region::Global),
-        (D::US_EAST_VA, proto::Region::UsEastVa),
-        (D::US_WEST_OR, proto::Region::UsWestOr),
-        (D::CA_CENTRAL_QC, proto::Region::CaCentralQc),
-        (D::BR_SOUTHEAST_SP, proto::Region::BrSoutheastSp),
-        (D::IE_EAST_DUBLIN, proto::Region::IeEastDublin),
-        (D::FR_NORTH_PARIS, proto::Region::FrNorthParis),
-        (D::DE_CENTRAL_FRANKFURT, proto::Region::DeCentralFrankfurt),
-        (D::SE_EAST_STOCKHOLM, proto::Region::SeEastStockholm),
-        (D::IT_NORTH_MILAN, proto::Region::ItNorthMilan),
-        (D::UK_SOUTH_LONDON, proto::Region::UkSouthLondon),
-        (D::SA_CENTRAL_RIYADH, proto::Region::SaCentralRiyadh),
-        (D::BH_CENTRAL_MANAMA, proto::Region::BhCentralManama),
-        (D::AE_CENTRAL_DUBAI, proto::Region::AeCentralDubai),
-        (D::IL_CENTRAL_TEL_AVIV, proto::Region::IlCentralTelAviv),
-        (D::ZA_SOUTH_CAPE_TOWN, proto::Region::ZaSouthCapeTown),
-        (D::NG_WEST_LAGOS, proto::Region::NgWestLagos),
-        (D::SG_CENTRAL_SINGAPORE, proto::Region::SgCentralSingapore),
-        (D::AU_EAST_SYDNEY, proto::Region::AuEastSydney),
-        (D::ID_WEST_JAKARTA, proto::Region::IdWestJakarta),
-        (D::JP_EAST_TOKYO, proto::Region::JpEastTokyo),
-        (D::KR_CENTRAL_SEOUL, proto::Region::KrCentralSeoul),
-        (D::IN_WEST_MUMBAI, proto::Region::InWestMumbai),
-        (D::VN_SOUTH_HCMC, proto::Region::VnSouthHcmc),
-        (D::CN_NORTH_BEIJING, proto::Region::CnNorthBeijing),
-    ]
-};
-
 #[test]
-fn test_region_pairs_covers_all_variants() {
-    assert_eq!(
-        REGION_PAIRS.len(),
-        inferadb_ledger_types::ALL_REGIONS.len(),
-        "REGION_PAIRS is out of sync with ALL_REGIONS"
-    );
+fn test_region_from_str_valid() {
+    use inferadb_ledger_types::Region;
+    assert_eq!(region_from_str("global").unwrap(), Region::GLOBAL);
+    assert_eq!(region_from_str("us-east-va").unwrap(), Region::US_EAST_VA);
+    assert_eq!(region_from_str("cn-north-beijing").unwrap(), Region::CN_NORTH_BEIJING);
+    // Custom regions parse successfully — registration enforcement happens in
+    // the service layer, not the conversion helper.
+    assert_eq!(region_from_str("custom-1").unwrap().as_str(), "custom-1");
 }
 
 #[test]
-fn test_region_roundtrip_all_variants() {
-    for (domain, expected_proto) in &REGION_PAIRS {
-        // domain → proto
-        let proto_region = proto::Region::from(*domain);
-        assert_eq!(proto_region, *expected_proto, "domain→proto failed for {domain}");
-
-        // proto → domain
-        let recovered = inferadb_ledger_types::Region::try_from(proto_region).unwrap();
-        assert_eq!(*domain, recovered, "proto→domain failed for {domain}");
-    }
-}
-
-#[test]
-fn test_region_unspecified_returns_error() {
-    let result = inferadb_ledger_types::Region::try_from(proto::Region::Unspecified);
-    let err = result.unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
-    assert!(err.message().contains("region must be specified"));
-}
-
-#[test]
-fn test_region_from_i32_valid() {
-    // Global = 1
-    let region = region_from_i32(1).unwrap();
-    assert_eq!(region, inferadb_ledger_types::Region::GLOBAL);
-
-    // UsEastVa = 10
-    let region = region_from_i32(10).unwrap();
-    assert_eq!(region, inferadb_ledger_types::Region::US_EAST_VA);
-
-    // CnNorthBeijing = 70
-    let region = region_from_i32(70).unwrap();
-    assert_eq!(region, inferadb_ledger_types::Region::CN_NORTH_BEIJING);
-}
-
-#[test]
-fn test_region_from_i32_invalid_returns_error() {
-    let cases: &[(&str, i32, &str)] = &[
-        ("unspecified (0)", 0, "region must be specified"),
-        ("unknown (999)", 999, "unknown region value: 999"),
-        ("negative (-1)", -1, "unknown region value: -1"),
+fn test_region_from_str_invalid_returns_error() {
+    let cases: &[(&str, &str)] = &[
+        ("empty", ""),
+        ("uppercase", "US-EAST-VA"),
+        ("leading hyphen", "-leading"),
+        ("trailing hyphen", "trailing-"),
+        ("underscore", "bad_underscore"),
+        ("space", "bad space"),
     ];
-
-    for (label, value, expected_msg) in cases {
-        let result = region_from_i32(*value);
+    for (label, value) in cases {
+        let result = region_from_str(value);
         let err = result.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument, "case: {label}");
-        assert!(err.message().contains(expected_msg), "case: {label}");
+        assert!(err.message().contains("invalid region"), "case: {label}");
     }
 }
 
 #[test]
-fn test_region_from_i32_all_variants_roundtrip() {
-    // Test every known proto Region i32 value round-trips correctly
-    let proto_values: [(i32, inferadb_ledger_types::Region); 25] = {
-        use inferadb_ledger_types::Region as D;
-        [
-            (1, D::GLOBAL),
-            (10, D::US_EAST_VA),
-            (11, D::US_WEST_OR),
-            (12, D::CA_CENTRAL_QC),
-            (20, D::BR_SOUTHEAST_SP),
-            (30, D::IE_EAST_DUBLIN),
-            (31, D::FR_NORTH_PARIS),
-            (32, D::DE_CENTRAL_FRANKFURT),
-            (33, D::SE_EAST_STOCKHOLM),
-            (34, D::IT_NORTH_MILAN),
-            (40, D::UK_SOUTH_LONDON),
-            (50, D::SA_CENTRAL_RIYADH),
-            (51, D::BH_CENTRAL_MANAMA),
-            (52, D::AE_CENTRAL_DUBAI),
-            (53, D::IL_CENTRAL_TEL_AVIV),
-            (54, D::ZA_SOUTH_CAPE_TOWN),
-            (55, D::NG_WEST_LAGOS),
-            (60, D::SG_CENTRAL_SINGAPORE),
-            (61, D::AU_EAST_SYDNEY),
-            (62, D::ID_WEST_JAKARTA),
-            (63, D::JP_EAST_TOKYO),
-            (64, D::KR_CENTRAL_SEOUL),
-            (65, D::IN_WEST_MUMBAI),
-            (66, D::VN_SOUTH_HCMC),
-            (70, D::CN_NORTH_BEIJING),
-        ]
-    };
-
-    for (i32_value, expected_domain) in &proto_values {
-        let domain = region_from_i32(*i32_value).unwrap();
-        assert_eq!(domain, *expected_domain, "failed for i32 value {i32_value}");
+fn test_region_well_known_slugs_roundtrip() {
+    // Every well-known compile-time region constant round-trips through
+    // `as_str()` and `region_from_str()`.
+    for region in &inferadb_ledger_types::ALL_REGIONS {
+        let slug = region.as_str();
+        let recovered = region_from_str(slug).unwrap();
+        assert_eq!(*region, recovered, "roundtrip failed for {slug}");
     }
 }
 

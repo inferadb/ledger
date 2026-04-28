@@ -275,6 +275,18 @@ pub async fn bootstrap_node(
     let runtime_config = RuntimeConfigHandle::default();
     manager.set_runtime_config(runtime_config.clone());
 
+    // Phase 7 / O1: vault hibernation policy. The top-level
+    // `vault_hibernation` flag is the master enable switch; the
+    // `hibernation` struct on `Config` carries tuning. Plumb both into
+    // the manager BEFORE any vault group is started so the idle
+    // detector's reads-on-tick observe the operator-configured policy.
+    let mut hibernation_cfg = config.hibernation.clone();
+    hibernation_cfg.enabled = config.vault_hibernation;
+    manager.set_hibernation_config(hibernation_cfg.clone());
+    if hibernation_cfg.enabled {
+        manager.start_hibernation_idle_detector();
+    }
+
     // Check whether this node has been initialized (cluster_id file exists).
     let cluster_id = crate::cluster_id::load_cluster_id(data_dir).map_err(|e| {
         BootstrapError::Database { message: format!("failed to load cluster_id: {e}") }
@@ -308,22 +320,30 @@ pub async fn bootstrap_node(
         let mgr = manager.clone();
         let bootstrap_events_config = config.events.clone();
         let bootstrap_batch_config = config.batching.clone();
+        // Snapshot the operator's protected-region opt-in set at boot. The
+        // set is restart-only — flipping `--regions` requires a node restart
+        // — which matches the existing `--region` (singular) discipline.
+        let opted_in_regions: std::collections::HashSet<String> =
+            config.regions.iter().cloned().collect();
         let healthy_flag = region_handler_healthy_clone;
         tokio::spawn(async move {
             // Each message is processed in a child task for panic isolation.
             // If processing one message panics, tokio catches it via the
             // JoinHandle and the loop continues with the next message.
-            while let Some((region, initial_members)) = region_rx.recv().await {
+            while let Some((region, protected, initial_members)) = region_rx.recv().await {
                 let mgr_clone = mgr.clone();
                 let events_clone = bootstrap_events_config.clone();
                 let batching_clone = bootstrap_batch_config.clone();
+                let opted_in_clone = opted_in_regions.clone();
                 let result = tokio::spawn(async move {
                     process_region_event(
                         &mgr_clone,
                         &events_clone,
                         &batching_clone,
                         region,
+                        protected,
                         initial_members,
+                        &opted_in_clone,
                     )
                     .await;
                 })
@@ -512,6 +532,30 @@ pub async fn bootstrap_node(
                     },
                 }
             }
+        }
+
+        // === Restart: scan GLOBAL region directory for unprotected /
+        //              opted-in regions not yet hosted on disk ===
+        //
+        // `discover_existing_regions` only resolves regions previously
+        // hosted by this node. A node restarting with a new `--regions`
+        // opt-in for a previously-skipped protected region needs to pick
+        // it up here, not wait for a (clean-shutdown-suppressed) WAL
+        // replay signal. Spawned in the background because the directory
+        // entry only carries node IDs — voter addresses are resolved
+        // through `manager.peer_addresses()`, which is repopulated
+        // asynchronously by seed discovery / incoming consensus traffic
+        // post-restart. The task retries every 2 s for up to 60 s.
+        {
+            let opted_in: std::collections::HashSet<String> =
+                config.regions.iter().cloned().collect();
+            spawn_directory_region_starter(
+                manager.clone(),
+                system_region.state().clone(),
+                config.events.clone(),
+                config.batching.clone(),
+                opted_in,
+            );
         }
 
         // === Restart: re-start persisted per-organization Raft groups ===
@@ -985,6 +1029,28 @@ pub async fn bootstrap_node(
                     return Err(BootstrapError::InitTimeout { timeout_secs });
                 },
             }
+        }
+
+        // Post-init: scan the GLOBAL region directory for non-protected /
+        // opted-in regions that exist in the cluster but were not signalled
+        // through the apply pipeline yet. The signal-driven path
+        // (`process_region_event`) handles every fresh CreateDataRegion
+        // entry, but a node that joins an established cluster via seed
+        // discovery may apply the existing entries before the region
+        // handler is fully wired — this safety scan covers that edge plus
+        // any restart that flips `--regions` to opt into a previously
+        // skipped protected region. Spawned in the background; see the
+        // restart path's call site for the rationale.
+        {
+            let opted_in: std::collections::HashSet<String> =
+                config.regions.iter().cloned().collect();
+            spawn_directory_region_starter(
+                manager.clone(),
+                state.clone(),
+                config.events.clone(),
+                config.batching.clone(),
+                opted_in,
+            );
         }
 
         // Now start background jobs (same as restart path).
@@ -1657,12 +1723,19 @@ async fn rehydrate_organization_group(
 /// `RaftManager`) and transport reconciliation signals. Extracted from the
 /// region handler task loop so each event can be individually isolated
 /// with `catch_unwind`.
+///
+/// `protected` carries the directory entry's flag through the apply-time
+/// signal. `opted_in` is the operator's `--regions` set; protected regions
+/// are skipped unless their name appears here. Unprotected regions
+/// auto-join regardless.
 async fn process_region_event(
     mgr: &inferadb_ledger_raft::RaftManager,
     events_config: &inferadb_ledger_types::events::EventConfig,
     batch_config: &inferadb_ledger_types::config::BatchConfig,
     region: inferadb_ledger_types::Region,
+    protected: bool,
     initial_members: Vec<(u64, String)>,
+    opted_in: &std::collections::HashSet<String>,
 ) {
     // Sentinel: Region::GLOBAL signals a transport reconciliation.
     if region == inferadb_ledger_types::Region::GLOBAL {
@@ -1678,6 +1751,17 @@ async fn process_region_event(
         return;
     }
 
+    // Apply the auto-join / opt-in policy from the GLOBAL region directory.
+    let opted_in_for_region = opted_in.contains(region.as_str());
+    if protected && !opted_in_for_region {
+        tracing::info!(
+            region = region.as_str(),
+            "skipping protected region {name} — not in --regions list",
+            name = region.as_str(),
+        );
+        return;
+    }
+
     let node_id = mgr.config().node_id;
     let is_initial_member = initial_members.iter().any(|(id, _)| *id == node_id);
 
@@ -1686,10 +1770,23 @@ async fn process_region_event(
         .initial_members(initial_members)
         .events_config(events_config.clone())
         .batch_writer_config(inferadb_ledger_raft::batching::BatchWriterConfig::from(batch_config))
+        // Apply path: the `CreateDataRegion` apply handler already wrote
+        // the directory entry, so `start_region` reads it from the
+        // registry; the hint serves only as a fallback for the
+        // edge-case race where the apply lands but the directory write
+        // hasn't fully committed (default to `protected`, matching the
+        // operator's intent).
+        .requires_residency_hint(protected)
         .build();
     match mgr.start_data_region(region_config).await {
         Ok(_) => {
-            tracing::info!(region = region.as_str(), "Data region created via Raft consensus");
+            tracing::info!(
+                region = region.as_str(),
+                protected,
+                opted_in = opted_in_for_region,
+                "starting data region {name} (protected={protected}, opted_in={opted_in_for_region})",
+                name = region.as_str(),
+            );
             crate::placement::reconcile_transport_channels(mgr).await;
 
             // Late-joiner: this node is NOT in the initial membership for this
@@ -1714,6 +1811,183 @@ async fn process_region_event(
             );
         },
     }
+}
+
+/// Spawns a background task that scans the GLOBAL region directory and
+/// starts every region this node should host according to the auto-join
+/// / opt-in policy. Retries every 2 s for up to 60 s, giving the seed-
+/// discovery / consensus replay path time to populate the peer address
+/// map (the directory entry only carries node IDs, not addresses, so we
+/// resolve voter addresses through `manager.peer_addresses()`).
+///
+/// Idempotent — already-running regions are skipped on each tick. Used
+/// by the restart path (after `discover_existing_regions`) and by the
+/// fresh-node path after `InitCluster` completes, so a node restarting
+/// with a new `--regions` opt-in picks up previously-skipped protected
+/// regions without waiting for a CreateDataRegion replay signal.
+fn spawn_directory_region_starter(
+    manager: Arc<inferadb_ledger_raft::RaftManager>,
+    state: Arc<inferadb_ledger_state::StateLayer<inferadb_ledger_store::FileBackend>>,
+    events_config: inferadb_ledger_types::events::EventConfig,
+    batch_config: inferadb_ledger_types::config::BatchConfig,
+    opted_in: std::collections::HashSet<String>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        // First scan runs immediately so a synchronous test harness that
+        // populates peers before this task gets scheduled still sees the
+        // region come up promptly.
+        let _ = start_directory_regions(&manager, &state, &events_config, &batch_config, &opted_in)
+            .await;
+        // Retry loop — picks up regions whose voter addresses become
+        // known later (via seed-discovery, RegisterPeerAddress applies, or
+        // incoming consensus traffic auto-registering peers). Bounded so
+        // the task does not run forever on a misconfigured cluster.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let made_progress =
+                start_directory_regions(&manager, &state, &events_config, &batch_config, &opted_in)
+                    .await;
+            if !made_progress {
+                continue;
+            }
+        }
+    })
+}
+
+/// Scans the GLOBAL region directory and starts every region this node
+/// should host according to the auto-join / opt-in policy. Returns
+/// `true` if at least one new region was started during this scan.
+///
+/// Called by [`spawn_directory_region_starter`] on each tick.
+async fn start_directory_regions(
+    manager: &Arc<inferadb_ledger_raft::RaftManager>,
+    state: &Arc<inferadb_ledger_state::StateLayer<inferadb_ledger_store::FileBackend>>,
+    events_config: &inferadb_ledger_types::events::EventConfig,
+    batch_config: &inferadb_ledger_types::config::BatchConfig,
+    opted_in: &std::collections::HashSet<String>,
+) -> bool {
+    use inferadb_ledger_state::system::{RegionDirectoryEntry, SystemKeys};
+
+    let entries = match state.list_entities(
+        inferadb_ledger_state::system::SYSTEM_VAULT_ID,
+        Some(SystemKeys::REGION_DIRECTORY_PREFIX),
+        None,
+        1024,
+    ) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(error = %e, "Region directory scan failed — skipping boot-time discovery");
+            return false;
+        },
+    };
+
+    let mut started_any = false;
+
+    for entity in entries {
+        let key = match std::str::from_utf8(&entity.key) {
+            Ok(k) => k,
+            Err(_) => continue,
+        };
+        let Some(name) = SystemKeys::parse_region_directory_key(key) else {
+            continue;
+        };
+        let entry: RegionDirectoryEntry = match inferadb_ledger_types::decode(&entity.value) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    region = name,
+                    error = %e,
+                    "Region directory entry failed to decode — skipping"
+                );
+                continue;
+            },
+        };
+
+        let region = inferadb_ledger_types::Region::new_owned(name);
+        if region == inferadb_ledger_types::Region::GLOBAL {
+            // GLOBAL is the cluster control plane — always running.
+            continue;
+        }
+        if manager.has_region(region) {
+            continue;
+        }
+
+        let opted_in_for_region = opted_in.contains(region.as_str());
+        if entry.protected && !opted_in_for_region {
+            tracing::info!(
+                region = region.as_str(),
+                "skipping protected region {name} — not in --regions list",
+                name = region.as_str(),
+            );
+            continue;
+        }
+
+        // Reconstruct the initial-members list from the directory entry's
+        // voter set. Addresses are rediscovered from the manager's peer
+        // address map (populated via RegisterPeerAddress applies + seed
+        // discovery). Voters with no known address are dropped — the DR
+        // scheduler picks them up on the next reconciliation cycle.
+        let peers = manager.peer_addresses();
+        let initial_members: Vec<(u64, String)> = entry
+            .voters
+            .iter()
+            .filter_map(|node_id| peers.get(*node_id).map(|addr| (*node_id, addr)))
+            .collect();
+        if initial_members.is_empty() {
+            tracing::warn!(
+                region = region.as_str(),
+                "Region directory voter addresses unknown — deferring start until peers discovered",
+            );
+            continue;
+        }
+        let local_node_id = manager.config().node_id;
+        let is_initial_member = initial_members.iter().any(|(id, _)| *id == local_node_id);
+
+        let region_config = inferadb_ledger_raft::RegionConfig::builder()
+            .region(region)
+            .initial_members(initial_members)
+            .events_config(events_config.clone())
+            .batch_writer_config(inferadb_ledger_raft::batching::BatchWriterConfig::from(
+                batch_config,
+            ))
+            // Boot-time directory scan: pull `requires_residency` straight
+            // from the persisted entry — authoritative source for the
+            // contract.
+            .requires_residency_hint(entry.requires_residency)
+            .build();
+        match manager.start_data_region(region_config).await {
+            Ok(_) => {
+                tracing::info!(
+                    region = region.as_str(),
+                    protected = entry.protected,
+                    opted_in = opted_in_for_region,
+                    "starting data region {name} (protected={protected}, opted_in={opted_in_for_region}) — boot-time directory scan",
+                    name = region.as_str(),
+                    protected = entry.protected,
+                );
+                crate::placement::reconcile_transport_channels(manager).await;
+                if !is_initial_member {
+                    manager.notify_dr_membership_change();
+                }
+                started_any = true;
+            },
+            Err(inferadb_ledger_raft::raft_manager::RaftManagerError::RegionExists { .. })
+            | Err(inferadb_ledger_raft::raft_manager::RaftManagerError::RegionAlreadyOpen {
+                ..
+            }) => {
+                // Concurrent starter — already running.
+            },
+            Err(e) => {
+                tracing::warn!(
+                    region = region.as_str(),
+                    error = %e,
+                    "Boot-time directory scan: failed to start data region",
+                );
+            },
+        }
+    }
+    started_any
 }
 
 /// Quorum-based dead node detection. For each node that the GLOBAL leader

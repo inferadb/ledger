@@ -236,6 +236,11 @@ bootstrap_cluster() {
 }
 
 # Provision a data region via `AdminService::ProvisionRegion`. Data regions
+# carry an explicit residency contract (`requires_residency`, `retention_days`).
+# This helper provisions with `requires_residency=protected` and
+# `retention_days=90` — operators needing GDPR's 30-day retention should call
+# `AdminService::SetRegionResidency` after provisioning, or invoke this RPC
+# directly with the desired values.
 # are no longer auto-created at boot — `init` only brings up the GLOBAL
 # region. Any RPC that writes to a data region (`InitiateEmailVerification`,
 # `CompleteRegistration`, `Write`, etc.) requires the region to be
@@ -289,7 +294,7 @@ provision_region() {
       local addr="127.0.0.1:$((base_port + i))"
       local result
       result=$(grpcurl -plaintext \
-        -d "{\"name\": \"$region\", \"protected\": $protected}" \
+        -d "{\"name\": \"$region\", \"protected\": $protected, \"requires_residency\": $protected, \"retention_days\": 90}" \
         "$addr" \
         ledger.v1.AdminService/ProvisionRegion 2>&1) || true
       last_result="$result"

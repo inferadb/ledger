@@ -78,7 +78,7 @@ Credential operations (create, update, delete credentials; TOTP verification; re
 | `ledger.vault.created`             | `vault_created`             | Apply-phase | CreateVault RPC          | `vault`, `vault_name`                      |
 | `ledger.vault.deleted`             | `vault_deleted`             | Apply-phase | DeleteVault RPC          | `vault`                                    |
 | `ledger.write.committed`           | `write_committed`           | Apply-phase | Write RPC commit         | `block_height`, `operations_count`         |
-| `ledger.write.batch_committed`     | `batch_write_committed`     | Apply-phase | BatchWrite RPC commit    | `block_height`, `operations_count`         |
+| `ledger.write.batch_committed`     | `batch_write_committed`     | Apply-phase | Coalesced Raft batch     | `block_height`, `operations_count`         |
 | `ledger.entity.expired`            | `entity_expired`            | Apply-phase | TTL GC during apply      | `key`                                      |
 | `ledger.vault.health_updated`      | `vault_health_updated`      | Apply-phase | VaultHealth Raft command | `vault`, `status`                          |
 | `ledger.integrity.checked`         | `integrity_checked`         | Handler     | CheckIntegrity RPC       | `vault`, `issues_found`, `full_check`      |

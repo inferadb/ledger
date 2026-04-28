@@ -311,43 +311,6 @@ mod tests {
     }
 
     // =========================================================================
-    // Region::retention_days tests
-    // =========================================================================
-
-    #[test]
-    fn region_retention_days_gdpr_vs_non_gdpr() {
-        use crate::Region;
-
-        let cases: &[(Region, u32)] = &[
-            // GDPR regions: 30 days
-            (Region::IE_EAST_DUBLIN, 30),
-            (Region::FR_NORTH_PARIS, 30),
-            (Region::DE_CENTRAL_FRANKFURT, 30),
-            (Region::SE_EAST_STOCKHOLM, 30),
-            (Region::IT_NORTH_MILAN, 30),
-            (Region::UK_SOUTH_LONDON, 30),
-            // Non-GDPR regions: 90 days
-            (Region::US_EAST_VA, 90),
-            (Region::US_WEST_OR, 90),
-            (Region::GLOBAL, 90),
-            (Region::JP_EAST_TOKYO, 90),
-            (Region::AU_EAST_SYDNEY, 90),
-            (Region::BR_SOUTHEAST_SP, 90),
-            (Region::SG_CENTRAL_SINGAPORE, 90),
-            (Region::IN_WEST_MUMBAI, 90),
-            (Region::SA_CENTRAL_RIYADH, 90),
-        ];
-
-        for (region, expected) in cases {
-            assert_eq!(
-                region.retention_days(),
-                *expected,
-                "{region:?} should have {expected}-day retention"
-            );
-        }
-    }
-
-    // =========================================================================
     // JwtConfig validation tests
     // =========================================================================
 

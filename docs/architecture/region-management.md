@@ -2,7 +2,7 @@
 
 [Documentation](../README.md) > Architecture > Region Management
 
-Regions are geographic data residency zones. Each region maps 1:1 to a Raft consensus group with isolated storage. This guide covers region concepts, organization assignment, write forwarding, and monitoring.
+Regions are geographic data residency zones. Each region maps 1:1 to a Raft consensus group with isolated storage. Region names are arbitrary lowercase-hyphenated slug strings (`us-east-va`, `ie-east-dublin`, `eu-central-frankfurt`, ...) registered dynamically through the cluster's GLOBAL control plane. There is no hardcoded region enum — operators provision regions explicitly, and the cluster's region directory in GLOBAL state is the single source of truth.
 
 > **Related**: For multi-region deployment patterns (regional vs stretched clusters, DR strategies), see [Multi-Region Deployment](multi-region.md). For data-residency compliance guarantees (why GLOBAL/REGIONAL split exists, pseudonymization, crypto-shredding), see [Data Residency Architecture](data-residency.md).
 
@@ -30,7 +30,7 @@ Regions are geographic data residency zones. Each region maps 1:1 to a Raft cons
 │   │  │ (vaults 1-5)   │  │     │  │ (vaults 1-10)  │  │                 │
 │   │  └────────────────┘  │     │  └────────────────┘  │                 │
 │   │                      │     │                      │                 │
-│   │  Nodes: 1, 2, 3     │     │  Nodes: 4, 5, 6     │                 │
+│   │  Nodes: 1, 2, 3      │     │  Nodes: 4, 5, 6      │                 │
 │   └──────────────────────┘     └──────────────────────┘                 │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -38,26 +38,38 @@ Regions are geographic data residency zones. Each region maps 1:1 to a Raft cons
 
 **Key concepts:**
 
-- **Region**: A geographic data residency zone backed by its own Raft group with independent leader election and consensus
-- **Organization**: Isolated storage unit assigned to exactly one region at creation time
-- **Vault**: Blockchain within an organization
-- **GLOBAL**: A special Raft group for the control plane (org registry, sagas, sequences) that stores no PII and replicates to all nodes
+- **Region**: A geographic data residency zone backed by its own Raft group with independent leader election and consensus. Identified by a slug string (e.g. `us-east-va`).
+- **Organization**: Isolated storage unit assigned to exactly one region at creation time.
+- **Vault**: Blockchain within an organization.
+- **GLOBAL**: A reserved Raft group for the control plane (region directory, org registry, sagas, sequences) that stores no PII and replicates to every node. Always present, identified by the slug `global`.
 
-## Region Enum
+## Region Slugs
 
-The `Region` enum defines 25 geographic variants plus a GLOBAL control plane. Each data region corresponds to a jurisdiction with specific privacy regulations:
+Region names are validated lowercase-hyphenated slugs:
 
-| Group                | Regions                                                                                                                             | Regulations             |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
-| North America        | `US_EAST_VA`, `US_WEST_OR`, `CA_CENTRAL_QC`                                                                                         | PIPEDA (Canada)         |
-| South America        | `BR_SOUTHEAST_SP`                                                                                                                   | LGPD (Brazil)           |
-| EU/EEA               | `IE_EAST_DUBLIN`, `FR_NORTH_PARIS`, `DE_CENTRAL_FRANKFURT`, `SE_EAST_STOCKHOLM`, `IT_NORTH_MILAN`                                   | GDPR                    |
-| United Kingdom       | `UK_SOUTH_LONDON`                                                                                                                   | UK GDPR                 |
-| Middle East & Africa | `SA_CENTRAL_RIYADH`, `BH_CENTRAL_MANAMA`, `AE_CENTRAL_DUBAI`, `IL_CENTRAL_TEL_AVIV`, `ZA_SOUTH_CAPE_TOWN`, `NG_WEST_LAGOS`          | PDPL, PDPA, POPIA, NDPA |
-| Asia Pacific         | `SG_CENTRAL_SINGAPORE`, `AU_EAST_SYDNEY`, `ID_WEST_JAKARTA`, `JP_EAST_TOKYO`, `KR_CENTRAL_SEOUL`, `IN_WEST_MUMBAI`, `VN_SOUTH_HCMC` | PDPA, APPI, PIPA, DPDPA |
-| China                | `CN_NORTH_BEIJING`                                                                                                                  | PIPL                    |
+- ASCII lowercase letters, digits, and `-`
+- No leading or trailing hyphen
+- Non-empty
 
-Proto enum values use geographic range prefixes: North America (10-19), South America (20-29), EU/EEA (30-39), UK (40-49), Middle East & Africa (50-59), Asia Pacific (60-69), China (70-79).
+`global` is the reserved control-plane region. Any other slug must be explicitly provisioned before organizations or users can reference it. Operators can adopt any naming convention that suits their compliance regime — common choices follow the `<country>-<bearing>-<city>` shape used by InferaDB-managed clusters (`us-east-va`, `ie-east-dublin`, `de-central-frankfurt`, ...), but the cluster does not enforce that pattern.
+
+## Provisioning a Region
+
+Regions are created through `AdminService.ProvisionRegion`, which proposes a `RegisterRegionDirectoryEntry` operation through GLOBAL Raft. Once committed, every node observes the new region in the directory and starts the regional Raft group on the assigned voters.
+
+```bash
+grpcurl -plaintext \
+  -d '{"name": "ie-east-dublin", "protected": true}' \
+  localhost:50051 ledger.v1.AdminService/ProvisionRegion
+```
+
+The `protected` bool flags regions whose data must remain in-country (GDPR jurisdictions, PIPL, ID PDP, KSA PDPL, etc.). Protected regions:
+
+- Require a minimum quorum of in-region nodes before organizations can be assigned (default: 3).
+- Cannot be downgraded to a non-protected region without `acknowledge_residency_downgrade = true`.
+- Restrict which nodes can host the region's data — see "Region Membership" below.
+
+The region directory entry is the **only** authoritative residency policy. The `RegionDirectoryEntry.requires_residency` and `RegionDirectoryEntry.retention_days` fields, set at `ProvisionRegion` time (or rewritten via `SetRegionResidency`), drive every residency / retention decision in the workspace. The `Region` newtype carries no semantics beyond its slug — the previously hardcoded `Region::requires_residency()` / `Region::retention_days()` methods were removed because they silently mis-classified custom slugs (e.g. `"eu-custom"` defaulted to `retention_days=90`, a GDPR violation).
 
 ## Storage Layout
 
@@ -67,7 +79,7 @@ Each region gets isolated database files under a dedicated directory. The GLOBAL
 {data_dir}/
 ├── node_id                          # node identity
 ├── global/                          # GLOBAL Raft group (control plane)
-│   ├── state.db                     # org registry, sequences, sagas (no PII)
+│   ├── state.db                     # region directory, org registry, sequences, sagas (no PII)
 │   ├── blocks.db                    # global blockchain
 │   ├── raft.db                      # Raft log for GLOBAL group
 │   └── events.db                    # audit events for GLOBAL group
@@ -76,7 +88,7 @@ Each region gets isolated database files under a dedicated directory. The GLOBAL
 │   │   ├── state.db                 # entity/relationship stores, indexes
 │   │   ├── blocks.db                # regional blockchain
 │   │   ├── raft.db                  # Raft log for this region
-│   │   └── events.db               # audit events for this region
+│   │   └── events.db                # audit events for this region
 │   ├── ie-east-dublin/
 │   │   ├── state.db
 │   │   ├── blocks.db
@@ -90,28 +102,26 @@ Each region gets isolated database files under a dedicated directory. The GLOBAL
 └── keys/                            # per-region RMK storage
 ```
 
-This layout eliminates write lock contention between concurrent Raft group applies, enables per-region encryption (one `EncryptedBackend` per file with that region's RMK), and simplifies migration, snapshots, crypto-shredding, and disk accounting.
+Per-region directories are named after the region slug verbatim. This layout eliminates write-lock contention between concurrent Raft group applies, enables per-region encryption (one `EncryptedBackend` per file with that region's RMK), and simplifies migration, snapshots, crypto-shredding, and disk accounting.
 
 ## Organization-to-Region Assignment
 
-Organizations are assigned to exactly one region at creation time via the `region` parameter on `CreateOrganization`. The region determines where all organization data (vaults, entities, relationships) is stored.
+Organizations are assigned to exactly one region at creation time via the `region` slug parameter on `CreateOrganization`. The region must already exist in the GLOBAL region directory.
 
 ### Creating an Organization
 
-The `region` field is required. It accepts a proto enum value from the `Region` enum:
-
 ```bash
 grpcurl -plaintext \
-  -d '{"name": "acme_corp", "region": "REGION_IE_EAST_DUBLIN"}' \
-  localhost:50051 ledger.v1.AdminService/CreateOrganization
+  -d '{"name": "acme_corp", "region": "ie-east-dublin"}' \
+  localhost:50051 ledger.v1.OrganizationService/CreateOrganization
 ```
 
-Response includes the assigned region:
+Response includes the assigned region slug:
 
 ```json
 {
   "slug": { "slug": "482938471625728" },
-  "region": "REGION_IE_EAST_DUBLIN"
+  "region": "ie-east-dublin"
 }
 ```
 
@@ -120,7 +130,7 @@ Response includes the assigned region:
 ```bash
 grpcurl -plaintext \
   -d '{"slug": {"slug": "482938471625728"}}' \
-  localhost:50051 ledger.v1.AdminService/GetOrganization
+  localhost:50051 ledger.v1.OrganizationService/GetOrganization
 ```
 
 Response:
@@ -129,7 +139,7 @@ Response:
 {
   "slug": { "slug": "482938471625728" },
   "name": "acme_corp",
-  "region": "REGION_IE_EAST_DUBLIN",
+  "region": "ie-east-dublin",
   "memberNodes": [
     { "id": "123456789" },
     { "id": "234567890" },
@@ -147,12 +157,12 @@ Organizations can be migrated between regions via `MigrateOrganization` (execute
 grpcurl -plaintext \
   -d '{
     "slug": {"slug": "482938471625728"},
-    "targetRegion": "REGION_DE_CENTRAL_FRANKFURT"
+    "targetRegion": "de-central-frankfurt"
   }' \
-  localhost:50051 ledger.v1.AdminService/MigrateOrganization
+  localhost:50051 ledger.v1.OrganizationService/MigrateOrganization
 ```
 
-Migrations between non-protected regions are metadata-only. Migrations involving protected regions (mandatory in-country storage, e.g., `SA_CENTRAL_RIYADH`, `ID_WEST_JAKARTA`, `CN_NORTH_BEIJING`) involve full data transfer via saga. Writes to the organization are rejected during migration.
+Migrations between non-protected regions are metadata-only. Migrations involving protected regions involve full data transfer via saga. Writes to the organization are rejected during migration.
 
 Downgrading from a protected region to a non-protected region requires explicit acknowledgment:
 
@@ -160,10 +170,10 @@ Downgrading from a protected region to a non-protected region requires explicit 
 grpcurl -plaintext \
   -d '{
     "slug": {"slug": "482938471625728"},
-    "targetRegion": "REGION_US_EAST_VA",
+    "targetRegion": "us-east-va",
     "acknowledgeResidencyDowngrade": true
   }' \
-  localhost:50051 ledger.v1.AdminService/MigrateOrganization
+  localhost:50051 ledger.v1.OrganizationService/MigrateOrganization
 ```
 
 ## Viewing System State
@@ -185,14 +195,14 @@ Response:
     {
       "slug": { "slug": "482938471625728" },
       "name": "acme_corp",
-      "region": "REGION_IE_EAST_DUBLIN",
+      "region": "ie-east-dublin",
       "members": [{"id": "123"}, {"id": "234"}, {"id": "345"}],
       "status": "ORGANIZATION_STATUS_ACTIVE"
     },
     {
       "slug": { "slug": "582938471625729" },
       "name": "other_org",
-      "region": "REGION_US_EAST_VA",
+      "region": "us-east-va",
       "members": [{"id": "456"}, {"id": "567"}, {"id": "678"}],
       "status": "ORGANIZATION_STATUS_ACTIVE"
     }
@@ -212,23 +222,9 @@ grpcurl -plaintext \
 
 If version <= 41, response is empty (use cached data). If version > 41, response contains the updated routing table.
 
-## Write Forwarding
+## Client Routing
 
-In multi-region deployments, the `WriteService` transparently forwards writes to the correct region's leader. Clients can send write requests to **any node** in the cluster — if the target organization lives in a different region, the receiving node forwards the request to that region's leader via `RegionResolver`.
-
-```text
-Client --> Node A (us-east-va) --> RegionResolver(org) --> ie-east-dublin Leader --> Response --> Node A --> Client
-```
-
-**Behavior:**
-
-- The originating node performs pre-flight validation (rate limiting, input validation, idempotency check) before forwarding
-- The `RegionResolver` determines the target region from the organization's registry entry in GLOBAL state
-- The destination region's leader performs vault slug resolution and Raft proposal
-- Forwarding is transparent to clients -- the response is relayed back through the originating node
-- If the destination leader is unavailable, the client receives `UNAVAILABLE` and can retry
-
-Clients do not need region-aware routing for writes. Any node accepts writes for any organization. The same forwarding applies for reads via `ReadService`.
+Clients use redirect-only routing: every node accepts any region slug; if the receiving node is not the leader for that region, it returns `NotLeader` along with a `LeaderHint` carrying the region's leader endpoint. The SDK's `RegionLeaderCache` consumes the hint and reconnects directly to the leader on retry. Server-side request forwarding is reserved for saga orchestration only.
 
 ## Region Membership
 
@@ -236,55 +232,27 @@ Clients do not need region-aware routing for writes. Any node accepts writes for
 
 Each region has its own Raft group with:
 
-- **Voters**: Full voting members (max 5 per region)
-- **Learners**: Replicate data but don't vote (for read scaling)
+- **Voters**: Full voting members (max 5 per region).
+- **Learners**: Replicate data but don't vote (for read scaling).
 
-Nodes join specific region Raft groups. A single physical node can participate in multiple regions (the GLOBAL group plus one or more data regions).
+A single physical node can participate in multiple regions (the GLOBAL group plus one or more data regions).
 
-### Node-to-Region Assignment
+### Opting Into Protected Regions
 
-Nodes are added to region Raft groups when:
+A node opts into hosting a protected region by listing the region slug at startup via `--regions` (or the `INFERADB_REGIONS` environment variable):
 
-1. Cluster bootstrap assigns initial region membership
-2. `JoinCluster` RPC adds a node to the GLOBAL group
-3. Organization creation in a new region triggers region Raft group formation
+```bash
+inferadb-ledger start \
+  --node-id 1 \
+  --addr 127.0.0.1:50051 \
+  --regions us-east-va,ie-east-dublin
+```
+
+If a node is not opted into a protected region, it will not be added as a voter for that region's Raft group. Non-protected regions are joined automatically when the cluster needs additional capacity.
 
 ### Region Rebalancing
 
 Organization-to-region assignment reflects data residency requirements and is not automatically rebalanced. To move an organization between regions, use the `MigrateOrganization` RPC.
-
-## Client Routing
-
-Clients use the routing table from `GetSystemState` to send requests directly to the correct region's nodes:
-
-1. **Cache system state** from `GetSystemState`
-2. **Look up region** for target organization
-3. **Send request** to any node in that region
-4. **Invalidate cache** when `version` changes
-
-Example client routing:
-
-```rust
-// Fetch routing table
-let state = client.get_system_state().await?;
-
-// Find region for organization
-let org_entry = state.organizations
-    .iter()
-    .find(|o| o.slug == target_org_slug)
-    .ok_or(Error::OrganizationNotFound)?;
-
-let region_members = &org_entry.members;
-
-// Connect to any member of the region
-let node = region_members.choose(&mut rand::thread_rng());
-let connection = connect_to_node(node)?;
-
-// Send request (or rely on write forwarding from any node)
-connection.write(request).await?;
-```
-
-Direct routing reduces latency by avoiding forwarding hops. Write forwarding provides a fallback so clients without routing awareness still work.
 
 ## Capacity Planning
 
@@ -348,21 +316,21 @@ inferadb_ledger_disk_bytes / inferadb_ledger_disk_capacity_bytes > 0.85
 
 ### Region Placement
 
-- **Compliance first**: Choose the region that satisfies the organization's data residency requirements. Protected regions (`SA_CENTRAL_RIYADH`, `ID_WEST_JAKARTA`, `CN_NORTH_BEIJING`) enforce mandatory in-country storage.
+- **Compliance first**: Choose the region whose protected/non-protected designation satisfies the organization's data residency requirements. Provision protected regions for jurisdictions that mandate in-country processing.
 - **Latency**: Place organizations in the region closest to their users to minimize read/write latency.
 - **Isolation**: High-volume organizations benefit from regions with fewer tenants to reduce contention.
 
 ### Operational Simplicity
 
 - Start with a single data region plus the GLOBAL control plane.
-- Add regions only when data residency requirements or latency constraints demand it.
+- Provision new regions only when data residency requirements or latency constraints demand it.
 - Every active region requires its own Raft group (leader election, log replication, snapshots), so fewer regions means less operational overhead.
 
 ### GLOBAL Group
 
-- The GLOBAL Raft group stores only non-PII metadata: org registry, node discovery, Snowflake sequences, and saga state.
+- The GLOBAL Raft group stores only non-PII metadata: region directory, org registry, node discovery, Snowflake sequences, and saga state.
 - Every node in the cluster participates in the GLOBAL group.
-- GLOBAL availability is required for organization creation and routing, but individual region Raft groups can serve reads and writes independently once routing is cached.
+- GLOBAL availability is required for region provisioning, organization creation, and routing, but individual region Raft groups can serve reads and writes independently once routing is cached.
 
 ### Data Residency Verification
 
@@ -376,3 +344,4 @@ inferadb_ledger_disk_bytes / inferadb_ledger_disk_capacity_bytes > 0.85
 - [Multi-Region](multi-region.md) - Geographic distribution patterns
 - [Capacity Planning](../how-to/capacity-planning.md) - Sizing guidelines
 - SystemDiscoveryService `GetSystemState` RPC - Routing API
+- AdminService `ProvisionRegion` RPC - Region registration

@@ -58,50 +58,15 @@ message ClientAssertionId {
   int64 id = 1;
 }
 
-// Geographic region for data residency. Each Raft consensus group maps 1:1 to
-// a region. Organizations declare a region governing where their data is stored.
-enum Region {
-  REGION_UNSPECIFIED = 0;
-  REGION_GLOBAL = 1;
-
-  // North America (10-19)
-  REGION_US_EAST_VA = 10;
-  REGION_US_WEST_OR = 11;
-  REGION_CA_CENTRAL_QC = 12;
-
-  // South America (20-29)
-  REGION_BR_SOUTHEAST_SP = 20;
-
-  // Europe — EU/EEA (30-39)
-  REGION_IE_EAST_DUBLIN = 30;
-  REGION_FR_NORTH_PARIS = 31;
-  REGION_DE_CENTRAL_FRANKFURT = 32;
-  REGION_SE_EAST_STOCKHOLM = 33;
-  REGION_IT_NORTH_MILAN = 34;
-
-  // United Kingdom (40-49)
-  REGION_UK_SOUTH_LONDON = 40;
-
-  // Middle East & Africa (50-59)
-  REGION_SA_CENTRAL_RIYADH = 50;
-  REGION_BH_CENTRAL_MANAMA = 51;
-  REGION_AE_CENTRAL_DUBAI = 52;
-  REGION_IL_CENTRAL_TEL_AVIV = 53;
-  REGION_ZA_SOUTH_CAPE_TOWN = 54;
-  REGION_NG_WEST_LAGOS = 55;
-
-  // Asia Pacific (60-69)
-  REGION_SG_CENTRAL_SINGAPORE = 60;
-  REGION_AU_EAST_SYDNEY = 61;
-  REGION_ID_WEST_JAKARTA = 62;
-  REGION_JP_EAST_TOKYO = 63;
-  REGION_KR_CENTRAL_SEOUL = 64;
-  REGION_IN_WEST_MUMBAI = 65;
-  REGION_VN_SOUTH_HCMC = 66;
-
-  // China (70-79)
-  REGION_CN_NORTH_BEIJING = 70;
-}
+// Region names for data residency. Regions are arbitrary lowercase-hyphenated
+// slugs (e.g. `"us-east-va"`, `"ie-east-dublin"`, `"global"`). The set of
+// regions is registered dynamically in GLOBAL Raft state via
+// `AdminService.ProvisionRegion`; there is no hardcoded enum.
+//
+// Wire shape: every previously enum-typed `Region` field is now a `string`.
+// `"global"` is the cluster control-plane region. Any other slug must be
+// registered through `ProvisionRegion` before organizations or users can
+// reference it.
 
 // Unique node identifier
 message NodeId {
@@ -666,9 +631,6 @@ message ListEntitiesResponse {
 service WriteService {
   // Submit a transaction
   rpc Write(WriteRequest) returns (WriteResponse);
-
-  // Submit multiple transactions in a batch
-  rpc BatchWrite(BatchWriteRequest) returns (BatchWriteResponse);
 }
 
 message WriteRequest {
@@ -761,59 +723,6 @@ message ErrorDetails {
   map<string, string> context = 4;
   // Human-readable recovery guidance (e.g., "Reduce request rate").
   optional string suggested_action = 5;
-}
-
-// Batch write with all-or-nothing atomicity.
-//
-// Semantics:
-// - All writes are committed in a SINGLE block (shared block_height in response)
-// - Writes are applied in ARRAY ORDER (writes[0] before writes[1], etc.)
-// - If ANY write's condition fails (e.g., CAS mismatch), the ENTIRE batch fails
-// - On failure, no writes are applied—the vault state is unchanged
-//
-// Idempotency: Uses BATCH-LEVEL client_id/idempotency_key (not per-write).
-// The entire batch is the idempotency unit—retry with same (client_id, idempotency_key)
-// returns the original result. Per-write values in operations[] are IGNORED.
-//
-// Use cases:
-// - Multi-key transactions requiring atomic commit
-// - Ordered operations where later writes depend on earlier writes' effects
-message BatchWriteRequest {
-  OrganizationSlug organization = 1;
-  optional VaultSlug vault = 2; // All writes target same vault scope
-  ClientId client_id = 3; // Batch-level idempotency (per-write client_id ignored)
-  bytes idempotency_key = 4; // 16-byte UUID for idempotent retries (server rejects reuse with different payload)
-  repeated BatchWriteOperation operations = 5; // Operations in this batch
-  bool include_tx_proofs = 6; // Request block_header + tx_proofs in response for verification
-  // Identity of the user performing this operation.
-  UserSlug caller = 7;
-}
-
-// Logical grouping of operations within a BatchWriteRequest.
-// Purpose: Allows expressing ordered operation groups within an atomic batch.
-// Processing: Groups are processed in array order (operations[0], then operations[1], etc.)
-//             All groups share the batch's organization, vault, client_id, and idempotency_key.
-// Atomicity: The ENTIRE batch is atomic—if any operation fails, no changes are applied.
-message BatchWriteOperation {
-  repeated Operation operations = 1; // Operations in this group
-}
-
-// Response for batch write.
-// All-or-nothing: either all writes succeed or none are applied.
-message BatchWriteResponse {
-  oneof result {
-    BatchWriteSuccess success = 1;
-    WriteError error = 2; // First failing write; no writes applied
-  }
-}
-
-message BatchWriteSuccess {
-  TxId tx_id = 1; // Single transaction ID for entire batch
-  uint64 block_height = 2; // Block containing this transaction
-  // For client-side verification (optional):
-  optional BlockHeader block_header = 3; // Contains tx_merkle_root for proof verification
-  optional MerkleProof tx_proof = 4; // Proof this tx is in block
-  uint64 assigned_sequence = 5; // Server-assigned sequence number for this batch
 }
 
 // =============================================================================
@@ -1170,6 +1079,40 @@ service AdminService {
   // Normally regional groups are created lazily on first organization or
   // user assignment. This RPC allows pre-provisioning for capacity planning.
   rpc ProvisionRegion(ProvisionRegionRequest) returns (ProvisionRegionResponse);
+
+  // Update the residency / retention contract for an existing region.
+  // The authoritative source for `requires_residency` and `retention_days`
+  // is the GLOBAL region directory; this RPC rewrites the directory entry.
+  // Required when upgrading clusters across the R6 boundary — pre-R6
+  // entries fall back to disciplined defaults
+  // (`requires_residency=true, retention_days=90`); EU operators MUST
+  // call this RPC with `retention_days=30` to restore the GDPR contract.
+  rpc SetRegionResidency(SetRegionResidencyRequest) returns (SetRegionResidencyResponse);
+
+  // ==========================================================================
+  // Per-Vault Inspection (Phase 7 / O4)
+  // ==========================================================================
+
+  // Lists all per-vault Raft groups for an organization with their
+  // lifecycle state, leadership, voter count, and last applied index.
+  // Read-only; used by `ledger vaults list <org-slug>` for operator
+  // inspection. Returns one entry per vault registered on this node;
+  // operators should hit a region voter for the org for an authoritative
+  // view.
+  rpc AdminListVaults(AdminListVaultsRequest) returns (AdminListVaultsResponse);
+
+  // Returns detailed status for a single vault: voters, learners,
+  // hibernation lifecycle state, last-activity / pending-membership
+  // timestamps, conf epoch. Used by `ledger vaults show`.
+  rpc ShowVault(ShowVaultRequest) returns (ShowVaultResponse);
+
+  // Operator-triggered vault repair. Today this is a stub: it logs an
+  // operator intent to repair and returns "noop" because the underlying
+  // consensus engine does not yet expose a "force snapshot install" or
+  // "force re-replication" entrypoint. Future work will wire the actual
+  // repair semantics (`docs/superpowers/completed/2026-04-23-per-vault-consensus.md`
+  // Phase 7).
+  rpc RepairVault(RepairVaultRequest) returns (RepairVaultResponse);
 }
 
 // -----------------------------------------------------------------------------
@@ -1181,7 +1124,7 @@ service AdminService {
 // governing where its data is stored.
 message CreateOrganizationRequest {
   string name = 1; // Human-readable name (e.g., "acme_corp")
-  Region region = 2; // Data residency region (required)
+  string region = 2; // Data residency region slug (required, e.g. "us-east-va")
   optional OrganizationTier tier = 3; // Billing tier (Free if not specified)
   UserSlug caller = 4; // Identity of the user performing this operation.
   // Client-generated Snowflake slug for the new organization. Required.
@@ -1198,7 +1141,7 @@ message CreateOrganizationRequest {
 message CreateOrganizationResponse {
   OrganizationSlug slug = 1;
   string name = 2;
-  Region region = 3;                // Data residency region
+  string region = 3;                // Data residency region slug
   repeated NodeId member_nodes = 4; // Nodes in the region's Raft group
   OrganizationStatus status = 5;    // Lifecycle state
   uint64 config_version = 6;        // For cache invalidation
@@ -1229,7 +1172,7 @@ message GetOrganizationRequest {
 message GetOrganizationResponse {
   OrganizationSlug slug = 1;
   string name = 2;
-  Region region = 3;                // Data residency region
+  string region = 3;                // Data residency region slug
   repeated NodeId member_nodes = 4; // Nodes in the region's Raft group
   OrganizationStatus status = 5;    // Lifecycle state
   uint64 config_version = 6;        // For cache invalidation
@@ -1282,7 +1225,7 @@ message ListOrganizationsResponse {
 // Protected → non-protected requires acknowledge_residency_downgrade = true.
 message MigrateOrganizationRequest {
   OrganizationSlug slug = 1;
-  Region target_region = 2;
+  string target_region = 2;
   bool acknowledge_residency_downgrade = 3;
   UserSlug caller = 4; // Identity of the user performing this operation.
 }
@@ -1291,8 +1234,8 @@ message MigrateOrganizationRequest {
 // Status will be MIGRATING while the saga is in progress.
 message MigrateOrganizationResponse {
   OrganizationSlug slug = 1;
-  Region source_region = 2;
-  Region target_region = 3;
+  string source_region = 2;
+  string target_region = 3;
   OrganizationStatus status = 4;
 }
 
@@ -1308,7 +1251,7 @@ message UpdateOrganizationRequest {
 message UpdateOrganizationResponse {
   OrganizationSlug slug = 1;
   string name = 2;
-  Region region = 3;
+  string region = 3;
   repeated NodeId member_nodes = 4;
   OrganizationStatus status = 5;
   uint64 config_version = 6;
@@ -1481,7 +1424,7 @@ message UpdateTeamMemberRoleResponse {
 // Request to migrate a user's PII to a different region.
 message MigrateUserRegionRequest {
   UserSlug slug = 1;
-  Region target_region = 2;
+  string target_region = 2;
   // Identity of the user performing this operation.
   UserSlug caller = 3;
 }
@@ -1489,8 +1432,8 @@ message MigrateUserRegionRequest {
 // Migration response with source/target region and current directory status.
 message MigrateUserRegionResponse {
   UserSlug slug = 1;
-  Region source_region = 2;
-  Region target_region = 3;
+  string source_region = 2;
+  string target_region = 3;
   // User directory status will be MIGRATING while the saga is in progress.
   string directory_status = 4;
 }
@@ -1707,7 +1650,7 @@ enum VaultHealthProto {
 message CreateUserRequest {
   string name = 1;                // Display name (1-200 characters)
   string email = 2;               // Primary email address (normalized to lowercase)
-  Region region = 3;              // Region for PII storage
+  string region = 3;              // Region slug for PII storage (e.g. "us-east-va")
   optional UserRole role = 4;     // Default: USER
   string email_hmac = 5;          // HMAC-SHA256 of normalized email (hex, caller-computed with blinding key)
   string organization_name = 6;   // Name for the default organization
@@ -1758,7 +1701,7 @@ message DeleteUserResponse {
 message ListUsersRequest {
   optional bytes page_token = 1;
   uint32 page_size = 2;           // Default: 100, Max: 1000
-  optional Region region = 3;     // Filter by region
+  optional string region = 3;     // Filter by region slug
   // Identity of the user performing this operation.
   UserSlug caller = 4;
 }
@@ -1851,7 +1794,7 @@ message VerifyUserEmailResponse {
 // Start email verification for user onboarding.
 message InitiateEmailVerificationRequest {
   string email = 1;               // Plaintext email address
-  Region region = 2;              // Data residency region for this email
+  string region = 2;              // Data residency region slug for this email
 }
 
 // The verification code to send to the user's email.
@@ -1863,7 +1806,7 @@ message InitiateEmailVerificationResponse {
 message VerifyEmailCodeRequest {
   string email = 1;               // Same email used in initiation
   string code = 2;                // Code from the email
-  Region region = 3;              // Same region used in initiation
+  string region = 3;              // Same region slug used in initiation
 }
 
 // Result is either a session for an existing user, an onboarding token
@@ -1892,7 +1835,7 @@ message OnboardingSession {
 message CompleteRegistrationRequest {
   string onboarding_token = 1;    // From VerifyEmailCodeResponse
   string email = 2;               // Same email used in verification
-  Region region = 3;              // Same region used in verification
+  string region = 3;              // Same region slug used in verification
   string name = 4;                // User display name (PII, regional)
   string organization_name = 5;   // Organization name (PII, regional)
 }
@@ -2139,8 +2082,8 @@ message BackupManifest {
   // Format sentinel literal — protects against operators pointing the
   // restore path at an unrelated `.tar.zst` archive.
   string format = 2;
-  // Region the source organization lives in.
-  Region region = 3;
+  // Region slug the source organization lives in.
+  string region = 3;
   // External Snowflake slug for the organization at backup time.
   OrganizationSlug organization = 4;
   // Internal numeric organization ID at backup time. Diagnostic-only —
@@ -3507,7 +3450,7 @@ message NodeInfo {
   uint32 grpc_port = 3; // gRPC port (same for all addresses), typically 5000
   google.protobuf.Timestamp last_heartbeat = 5;
   google.protobuf.Timestamp joined_at = 6; // For voter election ordering
-  Region region = 7;    // Geographic region this node belongs to
+  string region = 7;    // Geographic region slug this node belongs to
 }
 
 // Routing entry: organization → region assignment
@@ -3515,7 +3458,7 @@ message NodeInfo {
 message OrganizationRegistry {
   OrganizationSlug slug = 1;
   string name = 2;                // Human-readable organization name
-  Region region = 3;              // Data residency region (Raft group)
+  string region = 3;              // Data residency region slug (Raft group)
   repeated NodeId members = 4;    // Nodes in the region's Raft group
   OrganizationStatus status = 5;  // Lifecycle state
   uint64 config_version = 6;      // For cache invalidation
@@ -3524,7 +3467,7 @@ message OrganizationRegistry {
 
 // Region leader resolution for SDK direct-connect optimization.
 message ResolveRegionLeaderRequest {
-  Region region = 1; // Target data residency region
+  string region = 1; // Target data residency region slug
 }
 
 message ResolveRegionLeaderResponse {
@@ -3534,7 +3477,7 @@ message ResolveRegionLeaderResponse {
 }
 
 message WatchLeaderRequest {
-  Region region = 1;
+  string region = 1;
 }
 
 // Server-pushed leader update. Sent once immediately on stream open (current
@@ -3662,8 +3605,8 @@ message ConsensusEnvelope {
   uint64 shard_id = 1;
   // Node ID of the sender.
   uint64 from_node = 2;
-  // Region the shard belongs to.
-  optional Region region = 3;
+  // Region slug the shard belongs to.
+  optional string region = 3;
   // Postcard-serialized consensus Message (the inner protocol payload).
   bytes payload = 4;
   // gRPC address of the sender (e.g. "127.0.0.1:50051").
@@ -3682,8 +3625,8 @@ message ConsensusAck {}
 
 // Request submitting a regional proposal to the data region leader.
 message RegionalProposalRequest {
-  // Target data region.
-  optional Region region = 1;
+  // Target data region slug.
+  optional string region = 1;
   // Postcard-serialized `RaftPayload<R>` where `R` is the tier-specific
   // request type (`SystemRequest` / `RegionRequest` / `OrganizationRequest`).
   // The receiving node decodes based on the target group's tier.
@@ -3811,8 +3754,8 @@ message EraseUserRequest {
   UserSlug user = 1;
   // Identity of the user performing this operation.
   UserSlug caller = 2;
-  // Region where the user's PII resides.
-  Region region = 3;
+  // Region slug where the user's PII resides.
+  string region = 3;
 }
 
 message EraseUserResponse {
@@ -3827,8 +3770,8 @@ message EraseUserResponse {
 // Migrate existing users from flat _system store to regional directory
 // structure. Explicit admin action for pre-release data migration.
 message MigrateExistingUsersRequest {
-  // Default region for users without an assigned region.
-  Region default_region = 1;
+  // Default region slug for users without an assigned region.
+  string default_region = 1;
   // Hex-encoded email blinding key for HMAC computation.
   // The key stays in the handler and never enters the Raft log.
   string email_blinding_key = 2;
@@ -3856,6 +3799,17 @@ message ProvisionRegionRequest {
   // Whether nodes must explicitly opt-in (`--region <name>`) to join this
   // region. Unprotected regions are auto-joined by every cluster member.
   bool protected = 2;
+  // Whether PII / state for this region must stay in-region. The
+  // authoritative source for the residency contract for `name`. Defaults
+  // to `true` (default-deny) on the server side when omitted by the client
+  // — operators provisioning a non-protected US-style region MUST set
+  // this to `false` explicitly.
+  bool requires_residency = 3;
+  // Soft-delete retention period, in days, for entities homed in this
+  // region. 30 for GDPR / UK GDPR jurisdictions; 90 elsewhere; operators
+  // are responsible for matching the regional regulatory contract.
+  // Server defaults to 90 when omitted.
+  uint32 retention_days = 4;
 }
 
 message ProvisionRegionResponse {
@@ -3885,5 +3839,146 @@ message RegionDirectoryEntry {
   repeated uint64 learners = 5;
   // Wall-clock creation timestamp.
   google.protobuf.Timestamp created_at = 6;
+  // Whether PII / state for this region must stay in-region. The
+  // authoritative source for the residency contract — replaces the prior
+  // hardcoded `Region::requires_residency()` lookup.
+  bool requires_residency = 7;
+  // Soft-delete retention period, in days, for entities homed in this
+  // region. The authoritative source for retention — replaces the prior
+  // hardcoded `Region::retention_days()` lookup.
+  uint32 retention_days = 8;
+}
+
+// Update the residency contract for an existing region. Idempotent — the
+// directory entry is rewritten with the supplied flags and the next
+// retention sweep / residency check observes the new values.
+//
+// Migration path for clusters upgraded across the R6 boundary: pre-R6
+// `RegionDirectoryEntry` entries decode without `requires_residency` /
+// `retention_days`, so they pick up disciplined defaults
+// (`requires_residency=true`, `retention_days=90`). EU operators MUST
+// call `SetRegionResidency` with `retention_days=30` after the upgrade
+// to re-establish GDPR's 30-day retention contract.
+message SetRegionResidencyRequest {
+  // Region name slug (e.g. `"us-east-va"`). The `"global"` slug is
+  // rejected — the control plane is never subject to residency rules.
+  string name = 1;
+  // New `requires_residency` value for the region directory entry.
+  bool requires_residency = 2;
+  // New `retention_days` value for the region directory entry.
+  uint32 retention_days = 3;
+}
+
+message SetRegionResidencyResponse {
+  // Region name slug echoed back for the client.
+  string name = 1;
+  // Updated `requires_residency` value.
+  bool requires_residency = 2;
+  // Updated `retention_days` value.
+  uint32 retention_days = 3;
+}
+
+// -----------------------------------------------------------------------------
+// Per-Vault Inspection Messages (Phase 7 / O4)
+// -----------------------------------------------------------------------------
+
+// Per-vault summary returned by `AdminListVaults` and embedded in
+// `ShowVaultResponse`. Captures the operator-relevant view of a
+// per-vault Raft group: lifecycle state, leader, voter / learner
+// counts, apply progress, and the last-observed activity timestamp.
+message AdminVaultInfo {
+  // External vault slug.
+  VaultSlug slug = 1;
+  // Lifecycle state — one of "active" | "dormant" | "stalled". Mirrors
+  // the `org_active_vault_count{status=...}` metric label.
+  string status = 2;
+  // Current leader's node id, or 0 if leadership has not been
+  // established yet on this node's view of the group.
+  uint64 leader_node_id = 3;
+  // Total voter count in the vault group's current membership.
+  uint64 voter_count = 4;
+  // Total learner count in the vault group's current membership.
+  uint64 learner_count = 5;
+  // Highest log index applied to this vault's state machine (0 if no
+  // entries have been applied yet — fresh vault).
+  uint64 last_applied_index = 6;
+  // Wall-clock timestamp of the last observed activity on this vault
+  // (request, leader adoption, or membership change). Absent when the
+  // vault has never observed activity since process start.
+  optional google.protobuf.Timestamp last_activity = 7;
+}
+
+// Request: list all per-vault Raft groups in an organization with
+// their lifecycle state, leadership, and apply progress.
+message AdminListVaultsRequest {
+  // Organization to inspect. Required.
+  OrganizationSlug organization = 1;
+}
+
+message AdminListVaultsResponse {
+  // One entry per vault group registered on the responding node.
+  // Empty if the org has no vaults or if this node is not a voter for
+  // the org's region.
+  repeated AdminVaultInfo vaults = 1;
+}
+
+// Request: detailed status for a single vault.
+message ShowVaultRequest {
+  // Owning organization. Required.
+  OrganizationSlug organization = 1;
+  // Vault to inspect. Required.
+  VaultSlug vault = 2;
+}
+
+// Detailed per-vault status. Includes the summary embedded in
+// `AdminListVaults` plus full membership, internal IDs, and
+// hibernation-specific timestamps.
+message ShowVaultResponse {
+  // Summary view shared with `AdminListVaults`.
+  AdminVaultInfo info = 1;
+  // Region the vault lives in (matches the org's region).
+  string region = 2;
+  // Internal organization ID (operator-facing; not exposed to
+  // SDK clients). Useful for cross-referencing logs / metrics that
+  // emit `organization_id`.
+  uint64 organization_id = 3;
+  // Internal vault ID (operator-facing; not exposed to SDK clients).
+  uint64 vault_id = 4;
+  // Full voter set in the vault group's current membership.
+  repeated uint64 voters = 5;
+  // Full learner set in the vault group's current membership.
+  repeated uint64 learners = 6;
+  // Configuration epoch of the vault group's membership. Increments
+  // on every committed membership change.
+  uint64 conf_epoch = 7;
+  // Raw lifecycle enum value — same as `info.status` but explicit
+  // for tools that want the unparsed value.
+  string lifecycle_state = 8;
+  // Wall-clock timestamp of the last observed activity. Absent when
+  // the vault has never observed activity since process start.
+  optional google.protobuf.Timestamp last_activity_at = 9;
+  // Wall-clock timestamp at which an in-flight membership change
+  // started. Absent when no membership change is pending. Used by
+  // operators to investigate stalled membership transitions.
+  optional google.protobuf.Timestamp pending_membership_started_at = 10;
+}
+
+// Request: trigger an operator-initiated vault repair.
+message RepairVaultRequest {
+  // Owning organization. Required.
+  OrganizationSlug organization = 1;
+  // Vault to repair. Required.
+  VaultSlug vault = 2;
+}
+
+// Response from `RepairVault`. The `status` field is one of
+// "triggered" (repair scheduled), "noop" (no action taken — vault
+// already healthy or repair API unavailable), or "error" (repair
+// could not be initiated).
+message RepairVaultResponse {
+  // Status outcome — see message-level docs for the value vocabulary.
+  string status = 1;
+  // Human-readable message explaining the outcome.
+  string message = 2;
 }
 

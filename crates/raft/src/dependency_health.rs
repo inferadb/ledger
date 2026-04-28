@@ -68,6 +68,15 @@ pub struct DependencyHealthChecker {
     key_manager: Option<Arc<dyn RegionKeyManager>>,
     /// Node's region for determining required RMK regions.
     node_region: Option<Region>,
+    /// Whether the node's region requires residency. Resolved from the
+    /// GLOBAL region directory by the caller.
+    node_requires_residency: bool,
+    /// Snapshot of known data regions and their `requires_residency` flags
+    /// (resolved from the GLOBAL region directory by the caller). Empty
+    /// when the registry is unavailable; the disciplined defaults in
+    /// `required_regions` keep `Region::GLOBAL` and the node's own region
+    /// in the required set regardless.
+    known_regions: Vec<(Region, bool)>,
     /// Peer address map for TCP reachability checks.
     peer_addresses: Option<PeerAddressMap>,
 }
@@ -82,8 +91,23 @@ impl DependencyHealthChecker {
             cache: Arc::new(RwLock::new(None)),
             key_manager: None,
             node_region: None,
+            node_requires_residency: inferadb_ledger_state::system::default_requires_residency(),
+            known_regions: Vec::new(),
             peer_addresses: None,
         }
+    }
+
+    /// Attaches the resolved residency contract for the node's region and
+    /// the known set of provisioned data regions, derived from the GLOBAL
+    /// region directory.
+    pub fn with_region_residency(
+        mut self,
+        node_requires_residency: bool,
+        known_regions: Vec<(Region, bool)>,
+    ) -> Self {
+        self.node_requires_residency = node_requires_residency;
+        self.known_regions = known_regions;
+        self
     }
 
     /// Attaches the peer address map for TCP reachability checks.
@@ -137,7 +161,12 @@ impl DependencyHealthChecker {
 
         // RMK provisioning check
         if let (Some(km), Some(region)) = (&self.key_manager, self.node_region) {
-            let rmk_result = check_rmk_provisioning(km.as_ref(), region);
+            let rmk_result = check_rmk_provisioning(
+                km.as_ref(),
+                region,
+                self.node_requires_residency,
+                self.known_regions.clone(),
+            );
             results.insert("rmk_provisioning".to_string(), rmk_result);
         }
 
@@ -284,8 +313,11 @@ pub(crate) async fn check_peer_reachability_handle(
 pub(crate) fn check_rmk_provisioning(
     key_manager: &dyn RegionKeyManager,
     node_region: Region,
+    node_requires_residency: bool,
+    known_regions: Vec<(Region, bool)>,
 ) -> DependencyCheckResult {
-    let versions_map = rmk_versions_for_health(key_manager, node_region);
+    let versions_map =
+        rmk_versions_for_health(key_manager, node_region, node_requires_residency, known_regions);
 
     let mut region_summaries = Vec::new();
     let mut all_ok = true;
@@ -474,7 +506,12 @@ mod tests {
         manager.rotate_rmk(Region::US_EAST_VA).expect("rotate US_EAST_VA");
         manager.rotate_rmk(Region::US_WEST_OR).expect("rotate US_WEST_OR");
 
-        let result = check_rmk_provisioning(&manager, Region::US_EAST_VA);
+        let result = check_rmk_provisioning(
+            &manager,
+            Region::US_EAST_VA,
+            false,
+            vec![(Region::US_EAST_VA, false), (Region::US_WEST_OR, false)],
+        );
         assert!(result.healthy);
         assert!(result.detail.contains("rmk_versions"));
     }
@@ -490,7 +527,12 @@ mod tests {
         // Only provision GLOBAL
         manager.rotate_rmk(Region::GLOBAL).expect("rotate GLOBAL");
 
-        let result = check_rmk_provisioning(&manager, Region::US_EAST_VA);
+        let result = check_rmk_provisioning(
+            &manager,
+            Region::US_EAST_VA,
+            false,
+            vec![(Region::US_EAST_VA, false), (Region::US_WEST_OR, false)],
+        );
         assert!(!result.healthy);
     }
 
@@ -507,7 +549,12 @@ mod tests {
         manager.rotate_rmk(Region::US_EAST_VA).expect("rotate US_EAST_VA");
         manager.rotate_rmk(Region::US_WEST_OR).expect("rotate US_WEST_OR");
 
-        let result = check_rmk_provisioning(&manager, Region::US_EAST_VA);
+        let result = check_rmk_provisioning(
+            &manager,
+            Region::US_EAST_VA,
+            false,
+            vec![(Region::US_EAST_VA, false), (Region::US_WEST_OR, false)],
+        );
         assert!(result.healthy);
         assert!(result.detail.contains("v1"));
         assert!(result.detail.contains("v2"));

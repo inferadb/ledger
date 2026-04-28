@@ -32,7 +32,7 @@ impl inferadb_ledger_proto::proto::organization_service_server::OrganizationServ
         let organization =
             OrganizationSlug::new(self.state.next_organization.fetch_add(1, Ordering::SeqCst));
 
-        let region = crate::proto_util::region_from_proto_i32(req.region)
+        let region = crate::proto_util::region_from_proto_str(&req.region)
             .unwrap_or(inferadb_ledger_types::Region::GLOBAL);
         let admin_slug = req.caller.map_or(0, |u| u.slug);
         let members = vec![MockMember {
@@ -58,7 +58,7 @@ impl inferadb_ledger_proto::proto::organization_service_server::OrganizationServ
         Ok(Response::new(proto::CreateOrganizationResponse {
             slug: Some(proto::OrganizationSlug { slug: organization.value() }),
             name: req.name,
-            region: crate::proto_util::region_to_proto_i32(region),
+            region: crate::proto_util::region_to_proto_string(region),
             member_nodes: vec![],
             status: proto::OrganizationStatus::Active as i32,
             config_version: 1,
@@ -135,7 +135,7 @@ impl inferadb_ledger_proto::proto::organization_service_server::OrganizationServ
         Ok(Response::new(proto::GetOrganizationResponse {
             slug: Some(proto::OrganizationSlug { slug: organization.value() }),
             name: data.name.clone(),
-            region: crate::proto_util::region_to_proto_i32(data.region),
+            region: crate::proto_util::region_to_proto_string(data.region),
             member_nodes: vec![],
             status: data.status,
             config_version: 1,
@@ -159,7 +159,7 @@ impl inferadb_ledger_proto::proto::organization_service_server::OrganizationServ
             .map(|(slug, data)| proto::GetOrganizationResponse {
                 slug: Some(proto::OrganizationSlug { slug: slug.value() }),
                 name: data.name.clone(),
-                region: crate::proto_util::region_to_proto_i32(data.region),
+                region: crate::proto_util::region_to_proto_string(data.region),
                 member_nodes: vec![],
                 status: data.status,
                 config_version: 1,
@@ -201,7 +201,7 @@ impl inferadb_ledger_proto::proto::organization_service_server::OrganizationServ
             .ok_or_else(|| Status::invalid_argument("Missing initiator"))?;
 
         // Look up existing org to get source region and validate initiator
-        let source_region_i32 = {
+        let source_region_slug = {
             let organizations = self.state.organizations.read();
             let data = organizations
                 .get(&slug)
@@ -211,7 +211,7 @@ impl inferadb_ledger_proto::proto::organization_service_server::OrganizationServ
                 return Err(Status::permission_denied("Initiator is not an admin"));
             }
 
-            crate::proto_util::region_to_proto_i32(data.region)
+            crate::proto_util::region_to_proto_string(data.region)
         };
 
         // Update status to Migrating
@@ -224,7 +224,7 @@ impl inferadb_ledger_proto::proto::organization_service_server::OrganizationServ
 
         Ok(Response::new(proto::MigrateOrganizationResponse {
             slug: Some(proto::OrganizationSlug { slug: slug_val }),
-            source_region: source_region_i32,
+            source_region: source_region_slug,
             target_region: req.target_region,
             status: proto::OrganizationStatus::Migrating as i32,
         }))
@@ -263,7 +263,7 @@ impl inferadb_ledger_proto::proto::organization_service_server::OrganizationServ
         Ok(Response::new(proto::UpdateOrganizationResponse {
             slug: Some(proto::OrganizationSlug { slug: slug_val }),
             name: data.name.clone(),
-            region: crate::proto_util::region_to_proto_i32(data.region),
+            region: crate::proto_util::region_to_proto_string(data.region),
             member_nodes: vec![],
             status: data.status,
             config_version: 1,

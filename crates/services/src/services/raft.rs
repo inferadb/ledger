@@ -151,6 +151,10 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
                     "Not the leader",
                     // VaultId is i64 (Snowflake-positive); cast preserves value.
                     Some(vault_id.value() as u64),
+                    // Slugs come straight from the request; the SDK keys its
+                    // VaultLeaderCache on (OrganizationSlug, VaultSlug).
+                    Some(org_slug_proto.slug),
+                    Some(vault_slug_proto.slug),
                 ));
             }
 
@@ -192,6 +196,8 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
                 handle.as_ref(),
                 Some(self.manager.peer_addresses()),
                 "Not the leader",
+                None,
+                None,
                 None,
             ));
         }
@@ -312,12 +318,7 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
         // Resolve the target region — None means GLOBAL (same logic as forward_consensus).
         let region = match req.region {
             None => inferadb_ledger_types::Region::GLOBAL,
-            Some(v) => {
-                let proto_region = inferadb_ledger_proto::proto::Region::try_from(v)
-                    .map_err(|_| Status::invalid_argument(format!("invalid region enum: {v}")))?;
-                inferadb_ledger_types::Region::try_from(proto_region)
-                    .map_err(|_| Status::invalid_argument(format!("unsupported region: {v}")))?
-            },
+            Some(ref slug) => inferadb_ledger_proto::convert::region_from_str(slug)?,
         };
 
         // Saga sends pre-serialized `postcard(RaftPayload<R>)` bytes.
@@ -369,12 +370,7 @@ async fn handle_consensus_message(
     // Some(invalid) is an error.
     let region = match req.region {
         None => inferadb_ledger_types::Region::GLOBAL,
-        Some(v) => {
-            let proto_region = inferadb_ledger_proto::proto::Region::try_from(v)
-                .map_err(|_| Status::invalid_argument(format!("invalid region enum: {v}")))?;
-            inferadb_ledger_types::Region::try_from(proto_region)
-                .map_err(|_| Status::invalid_argument(format!("unsupported region: {v}")))?
-        },
+        Some(ref slug) => inferadb_ledger_proto::convert::region_from_str(slug)?,
     };
 
     // B.1.7 multi-engine routing: each per-organization Raft group runs
@@ -481,7 +477,7 @@ mod tests {
     use std::sync::Arc;
 
     use inferadb_ledger_consensus::Message;
-    use inferadb_ledger_proto::proto::{ConsensusEnvelope, Region as ProtoRegion};
+    use inferadb_ledger_proto::proto::ConsensusEnvelope;
     use inferadb_ledger_raft::{RaftManager, RaftManagerConfig, RegionConfig};
     use inferadb_ledger_test_utils::TestDir;
     use inferadb_ledger_types::{Region, encode};
@@ -528,7 +524,7 @@ mod tests {
             ConsensusEnvelope {
                 shard_id: 0,
                 from_node: 1,
-                region: Some(ProtoRegion::Global as i32),
+                region: Some(Region::GLOBAL.as_str().to_string()),
                 payload: vec![0xde, 0xad],
                 from_address: String::new(),
                 cluster_id: 0,
@@ -550,7 +546,7 @@ mod tests {
             ConsensusEnvelope {
                 shard_id: 0,
                 from_node: 99,
-                region: Some(ProtoRegion::Global as i32),
+                region: Some(Region::GLOBAL.as_str().to_string()),
                 payload: vec![0xde, 0xad],
                 from_address: String::new(),
                 cluster_id: 0,
@@ -571,7 +567,7 @@ mod tests {
             ConsensusEnvelope {
                 shard_id: 0,
                 from_node: 0,
-                region: Some(ProtoRegion::Global as i32),
+                region: Some(Region::GLOBAL.as_str().to_string()),
                 payload: vec![0x01],
                 from_address: String::new(),
                 cluster_id: 0,
@@ -593,7 +589,7 @@ mod tests {
             ConsensusEnvelope {
                 shard_id: 0,
                 from_node: 1,
-                region: Some(ProtoRegion::Global as i32),
+                region: Some(Region::GLOBAL.as_str().to_string()),
                 payload: vec![0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
                 from_address: String::new(),
                 cluster_id: 0,
@@ -615,7 +611,7 @@ mod tests {
             ConsensusEnvelope {
                 shard_id: 0,
                 from_node: 1,
-                region: Some(ProtoRegion::Global as i32),
+                region: Some(Region::GLOBAL.as_str().to_string()),
                 payload: vec![],
                 from_address: String::new(),
                 cluster_id: 0,
@@ -667,7 +663,7 @@ mod tests {
             ConsensusEnvelope {
                 shard_id: 0,
                 from_node: 1,
-                region: Some(ProtoRegion::Global as i32),
+                region: Some(Region::GLOBAL.as_str().to_string()),
                 payload,
                 from_address: String::new(),
                 cluster_id: 0,

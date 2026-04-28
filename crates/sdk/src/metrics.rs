@@ -106,7 +106,7 @@ pub trait SdkMetrics: Send + Sync + fmt::Debug {
     ///
     /// Called once per successful top-level operation (after retries resolve).
     ///
-    /// - `method`: The RPC method name (e.g., "read", "write", "batch_write").
+    /// - `method`: The RPC method name (e.g., "read", "write", "batch_read").
     /// - `duration`: Wall-clock time from request start to final response.
     /// - `success`: Whether the request ultimately succeeded.
     fn record_request(&self, method: &str, duration: Duration, success: bool) {

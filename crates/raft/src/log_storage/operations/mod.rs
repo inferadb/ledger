@@ -234,9 +234,21 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         }
                     } else {
                         // Soft-delete: set status and timestamp, keep slug index
-                        // (slug cleanup deferred to PurgeOrganization)
+                        // (slug cleanup deferred to PurgeOrganization).
+                        // Resolve `retention_days` from the GLOBAL region
+                        // directory; fall back to the disciplined default
+                        // (90 days) when the directory entry is unavailable.
                         let deleted_at = block_timestamp;
-                        let retention_days = org.region.retention_days();
+                        let retention_days = self
+                            .state_layer
+                            .as_ref()
+                            .map(|sl| {
+                                inferadb_ledger_state::system::region_residency_or_default(
+                                    sl, org.region,
+                                )
+                                .retention_days
+                            })
+                            .unwrap_or_else(inferadb_ledger_state::system::default_retention_days);
                         let mut org = org.clone();
                         org.status = OrganizationStatus::Deleted;
                         // Re-serialize after mutation
@@ -1844,7 +1856,23 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         if let Some(sys) = &sys_service {
                             match sys.soft_delete_user(*user_id) {
                                 Ok(user) => {
-                                    let retention_days = user.region.retention_days();
+                                    // Resolve retention_days from the GLOBAL
+                                    // region directory; fall back to the
+                                    // disciplined default (90 days) when the
+                                    // entry is unavailable.
+                                    let retention_days = self
+                                        .state_layer
+                                        .as_ref()
+                                        .map(|sl| {
+                                            inferadb_ledger_state::system::region_residency_or_default(
+                                                sl,
+                                                user.region,
+                                            )
+                                            .retention_days
+                                        })
+                                        .unwrap_or_else(
+                                            inferadb_ledger_state::system::default_retention_days,
+                                        );
                                     LedgerResponse::UserSoftDeleted {
                                         user_id: *user_id,
                                         retention_days,
@@ -1922,11 +1950,22 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         }
                         LedgerResponse::Empty
                     },
-                    SystemRequest::CreateDataRegion { region, protected, initial_members } => {
+                    SystemRequest::CreateDataRegion {
+                        region,
+                        protected,
+                        requires_residency,
+                        retention_days,
+                        initial_members,
+                    } => {
                         // Persist the region's directory entry in GLOBAL state under
                         // `_dir:region:{name}`. Authoritative record for every node;
                         // bootstrap consults this directory to decide which regions
                         // to start locally (auto-join unprotected, opt-in protected).
+                        // The `requires_residency` and `retention_days` fields are the
+                        // authoritative source for the residency / retention contract —
+                        // every site that previously hardcoded
+                        // `Region::requires_residency()` / `retention_days()` now
+                        // consults this entry via `lookup_region_residency`.
                         if let Some(ref sl) = self.state_layer {
                             let key = SystemKeys::region_directory_entry(region.as_str());
                             if let Err(msg) = SystemKeys::validate_key_tier(&key, KeyTier::Global) {
@@ -1939,6 +1978,8 @@ impl<B: StorageBackend> RaftLogStore<B> {
                                 let entry = RegionDirectoryEntry {
                                     name: region.as_str().to_owned(),
                                     protected: *protected,
+                                    requires_residency: *requires_residency,
+                                    retention_days: *retention_days,
                                     conf_epoch: 0,
                                     voters: initial_members.iter().map(|(id, _)| *id).collect(),
                                     learners: Vec::new(),
@@ -1962,10 +2003,12 @@ impl<B: StorageBackend> RaftLogStore<B> {
                         }
 
                         // Signal the region creation handler to start this region locally.
-                        // Each node runs this apply handler independently, ensuring all
-                        // nodes create the region through Raft consensus.
+                        // Each node runs this apply handler independently. The handler
+                        // decides whether to auto-join (unprotected) or require operator
+                        // opt-in via `--regions <name1,name2>` (protected) based on the
+                        // signalled `protected` flag.
                         if let Some(ref sender) = self.region_creation_sender
-                            && sender.send((*region, initial_members.clone())).is_err()
+                            && sender.send((*region, *protected, initial_members.clone())).is_err()
                         {
                             tracing::error!(
                                 region = region.as_str(),
@@ -1973,6 +2016,80 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             );
                         }
                         LedgerResponse::DataRegionCreated { region: *region }
+                    },
+                    SystemRequest::SetRegionResidency {
+                        region,
+                        requires_residency,
+                        retention_days,
+                    } => {
+                        // Apply the new residency contract by reading the existing
+                        // entry, mutating the two fields, and re-persisting. This is
+                        // the migration path for pre-R6 entries that decoded with
+                        // disciplined defaults, plus the live operator path for
+                        // updating a region's contract after rules change.
+                        if let Some(ref sl) = self.state_layer {
+                            let key = SystemKeys::region_directory_entry(region.as_str());
+                            match sl.get_entity(SYSTEM_VAULT_ID, key.as_bytes()) {
+                                Ok(Some(entity)) => {
+                                    match decode::<RegionDirectoryEntry>(&entity.value) {
+                                        Ok(mut entry) => {
+                                            entry.requires_residency = *requires_residency;
+                                            entry.retention_days = *retention_days;
+                                            let value = encode(&entry).unwrap_or_default();
+                                            let ops = vec![Operation::SetEntity {
+                                                key,
+                                                value,
+                                                condition: None,
+                                                expires_at: None,
+                                            }];
+                                            if let Err(e) =
+                                                sl.apply_operations_lazy(SYSTEM_VAULT_ID, &ops, 0)
+                                            {
+                                                tracing::error!(
+                                                    region = region.as_str(),
+                                                    error = %e,
+                                                    "SetRegionResidency: failed to persist update"
+                                                );
+                                                LedgerResponse::Error {
+                                                    code: ErrorCode::Internal,
+                                                    message: format!(
+                                                        "Failed to update region residency: {e}"
+                                                    ),
+                                                }
+                                            } else {
+                                                LedgerResponse::RegionResidencyUpdated {
+                                                    region: *region,
+                                                    requires_residency: *requires_residency,
+                                                    retention_days: *retention_days,
+                                                }
+                                            }
+                                        },
+                                        Err(e) => LedgerResponse::Error {
+                                            code: ErrorCode::Internal,
+                                            message: format!(
+                                                "Failed to decode region directory entry: {e}"
+                                            ),
+                                        },
+                                    }
+                                },
+                                Ok(None) => LedgerResponse::Error {
+                                    code: ErrorCode::NotFound,
+                                    message: format!(
+                                        "Region {} not found in directory",
+                                        region.as_str()
+                                    ),
+                                },
+                                Err(e) => LedgerResponse::Error {
+                                    code: ErrorCode::Internal,
+                                    message: format!("Failed to read region directory entry: {e}"),
+                                },
+                            }
+                        } else {
+                            LedgerResponse::Error {
+                                code: ErrorCode::FailedPrecondition,
+                                message: "State layer is not available".to_string(),
+                            }
+                        }
                     },
                     SystemRequest::RegisterPeerAddress { node_id, address } => {
                         // Store the address in the peer_addresses map so all nodes
@@ -1996,6 +2113,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
                             && sender
                                 .send((
                                     inferadb_ledger_types::Region::GLOBAL,
+                                    false,
                                     vec![(0, "reconcile_transport".to_string())],
                                 ))
                                 .is_err()

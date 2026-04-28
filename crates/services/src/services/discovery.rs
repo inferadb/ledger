@@ -13,8 +13,8 @@ use std::{
 use inferadb_ledger_proto::proto::{
     AnnouncePeerRequest, AnnouncePeerResponse, GetPeersRequest, GetPeersResponse,
     GetSystemStateRequest, GetSystemStateResponse, LeaderUpdate, NodeId, NodeInfo,
-    OrganizationRegistry, OrganizationSlug, PeerInfo, Region as ProtoRegion,
-    ResolveRegionLeaderRequest, ResolveRegionLeaderResponse, WatchLeaderRequest,
+    OrganizationRegistry, OrganizationSlug, PeerInfo, ResolveRegionLeaderRequest,
+    ResolveRegionLeaderResponse, WatchLeaderRequest,
     system_discovery_service_server::SystemDiscoveryService,
 };
 use inferadb_ledger_raft::{
@@ -315,7 +315,9 @@ impl DiscoveryService {
                 None,
                 Some(current_term),
                 Some(organization_id),
-                // Region-scoped resolver — no per-vault hint.
+                // Region-scoped resolver — no per-vault hint or slug context.
+                None,
+                None,
                 None,
             )
         })?;
@@ -463,7 +465,7 @@ impl SystemDiscoveryService for DiscoveryService {
                     grpc_port,
                     last_heartbeat: None,
                     joined_at: None,
-                    region: ProtoRegion::Global.into(),
+                    region: inferadb_ledger_types::Region::GLOBAL.as_str().to_string(),
                 })
             })
             .collect();
@@ -486,7 +488,7 @@ impl SystemDiscoveryService for DiscoveryService {
                             .map_or(ns.organization.value() as u64, |s| s.value()),
                     }),
                     name: String::new(),
-                    region: ProtoRegion::Global.into(),
+                    region: inferadb_ledger_types::Region::GLOBAL.as_str().to_string(),
                     members: member_nodes.clone(),
                     status: status.into(),
                     config_version: current_version,
@@ -504,8 +506,7 @@ impl SystemDiscoveryService for DiscoveryService {
     ) -> Result<Response<ResolveRegionLeaderResponse>, Status> {
         let req = request.into_inner();
 
-        let proto_region = ProtoRegion::try_from(req.region).unwrap_or(ProtoRegion::Unspecified);
-        let region = inferadb_ledger_types::Region::try_from(proto_region)?;
+        let region = inferadb_ledger_proto::convert::region_from_str(&req.region)?;
 
         let (endpoint, raft_term, ttl_seconds) = self.resolve_region_leader_impl(region)?;
 
@@ -521,8 +522,7 @@ impl SystemDiscoveryService for DiscoveryService {
         let req = request.into_inner();
 
         // Validate region — reject unrecognized values.
-        let proto_region = ProtoRegion::try_from(req.region).unwrap_or(ProtoRegion::Unspecified);
-        let region = inferadb_ledger_types::Region::try_from(proto_region)?;
+        let region = inferadb_ledger_proto::convert::region_from_str(&req.region)?;
 
         // Subscribe to the requested region's leader watch — not the GLOBAL
         // group's. Under multi-tier consensus the GLOBAL leader and the

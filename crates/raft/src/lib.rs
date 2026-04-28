@@ -206,7 +206,7 @@ pub use post_erasure_compaction::PostErasureCompactionJob;
 #[doc(hidden)]
 pub use raft_manager::{
     InnerGroup, OrganizationGroup, RaftManager, RaftManagerConfig, RegionConfig, RegionGroup,
-    SystemGroup, SystemStateReader,
+    SystemGroup, SystemStateReader, VaultGroup, VaultLifecycleState,
 };
 #[doc(hidden)]
 pub use rate_limit::RateLimiter;

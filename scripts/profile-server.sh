@@ -351,7 +351,7 @@ if command -v grpcurl >/dev/null 2>&1; then
     PR_RESULT=$(grpcurl -plaintext \
         -import-path "$ROOT_DIR/proto" \
         -proto ledger/v1/ledger.proto \
-        -d '{"name": "us-east-va", "protected": false}' \
+        -d '{"name": "us-east-va", "protected": false, "requires_residency": false, "retention_days": 90}' \
         "127.0.0.1:${PORT}" \
         ledger.v1.AdminService/ProvisionRegion 2>&1) || true
     if ! echo "$PR_RESULT" | grep -q '"name"'; then

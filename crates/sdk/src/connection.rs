@@ -522,10 +522,14 @@ impl ConnectionPool {
     ///
     /// Dispatch order:
     ///
-    /// - `vault_id` present on the hint → update the per-vault cache. This is the Phase 6 path: the
-    ///   per-org Raft group rejected the request because the vault's delegated leader is elsewhere.
-    /// - `vault_id` absent → fall through to the region cache (legacy path). Region- and org-scoped
-    ///   rejections, or rejections from servers that pre-date the vault hint, are routed here.
+    /// - `(organization_slug, vault_slug)` both present on the hint → update the per-vault cache.
+    ///   This is the slug-keyed path: the SDK's `VaultLeaderCache` is keyed on `(OrganizationSlug,
+    ///   VaultSlug)`, so both slug fields must be known. The internal `*_id` keys also flow through
+    ///   and are ignored here — they're informational.
+    /// - Either slug absent → fall through to the region cache. Region- and org-scoped rejections,
+    ///   plus legacy servers that pre-date the slug fields, route here. Updating the per-vault
+    ///   cache from a hint that lacks slugs would write under the wrong key, so we deliberately
+    ///   skip rather than guess.
     ///
     /// When the hint carries no usable endpoint, the corresponding cache
     /// entry is invalidated instead so the next attempt cold-resolves.
@@ -535,14 +539,12 @@ impl ConnectionPool {
     pub fn apply_region_leader_hint_or_invalidate(&self, err: &SdkError) {
         let hint = err.server_error_details().and_then(|d| d.leader_hint());
 
-        // Vault-scoped path: the hint identifies a specific (org, vault).
+        // Vault-scoped path: the hint identifies a specific (org_slug, vault_slug).
         if let Some(ref h) = hint
-            && let (Some(org_raw), Some(vault_raw)) = (h.organization_id, h.vault_id)
+            && let (Some(org_slug_raw), Some(vault_slug_raw)) = (h.organization_slug, h.vault_slug)
         {
-            #[allow(clippy::cast_possible_wrap)]
-            let org = inferadb_ledger_types::OrganizationId::new(org_raw as i64);
-            #[allow(clippy::cast_possible_wrap)]
-            let vault = inferadb_ledger_types::VaultId::new(vault_raw as i64);
+            let org = inferadb_ledger_types::OrganizationSlug::new(org_slug_raw);
+            let vault = inferadb_ledger_types::VaultSlug::new(vault_slug_raw);
             if h.leader_endpoint.is_some() {
                 self.vault_cache.apply_hint(org, vault, h);
                 *self.channel.write() = None;
@@ -553,7 +555,7 @@ impl ConnectionPool {
                 let label = self
                     .region_cache
                     .as_ref()
-                    .map_or_else(|| format!("vault:{vault_raw}"), |c| c.region().to_string());
+                    .map_or_else(|| format!("vault:{vault_slug_raw}"), |c| c.region().to_string());
                 self.config.metrics().redirect_retry(&label);
                 return;
             }
@@ -563,7 +565,10 @@ impl ConnectionPool {
             return;
         }
 
-        // Region-scoped path: existing behavior.
+        // Region-scoped path: existing behavior. A hint that carries
+        // `vault_id` but no `vault_slug` (legacy server) lands here too —
+        // we can't populate the slug-keyed vault cache without slug values,
+        // so the request retries through the region path.
         let Some(ref cache) = self.region_cache else {
             return;
         };
@@ -606,14 +611,18 @@ impl ConnectionPool {
     /// first vault-scoped request still goes through the region path; the
     /// second and subsequent requests benefit from the cached vault leader.
     ///
+    /// The cache is keyed on external `OrganizationSlug` / `VaultSlug` —
+    /// the identifiers the SDK actually has at hand — so call sites pass
+    /// slugs directly without any translation.
+    ///
     /// # Errors
     ///
     /// Returns the same error classes as [`Self::get_channel`]: connection,
     /// circuit-open, configuration, and transport errors propagate directly.
     pub async fn select_for_vault(
         &self,
-        organization: inferadb_ledger_types::OrganizationId,
-        vault: inferadb_ledger_types::VaultId,
+        organization: inferadb_ledger_types::OrganizationSlug,
+        vault: inferadb_ledger_types::VaultSlug,
     ) -> Result<Channel> {
         // Check circuit breaker before doing anything.
         if let Some(ref cb) = self.circuit_breaker {
@@ -659,6 +668,8 @@ impl ConnectionPool {
                 term: Some(1),
                 organization_id: None,
                 vault_id: None,
+                organization_slug: None,
+                vault_slug: None,
             };
             cache.apply_hint(&hint);
         }
@@ -1318,8 +1329,8 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn apply_hint_with_vault_id_routes_to_vault_cache() {
-        use inferadb_ledger_types::{OrganizationId, Region, VaultId};
+    fn apply_hint_with_vault_slug_routes_to_vault_cache() {
+        use inferadb_ledger_types::{OrganizationSlug, Region, VaultSlug};
         use tonic::Code;
 
         use crate::error::ServerErrorDetails;
@@ -1328,8 +1339,10 @@ mod tests {
         let config = test_config_with_region(Region::US_EAST_VA);
         let pool = ConnectionPool::new(config);
 
-        // Hint carries leader_shard (org id) AND leader_vault — must route
-        // to the vault cache, NOT the region cache.
+        // Hint carries leader_organization_slug + leader_vault_slug — must
+        // route to the vault cache, NOT the region cache. The legacy
+        // leader_shard / leader_vault keys are present too (informational);
+        // dispatch is driven by the slug pair.
         let details = ServerErrorDetails {
             error_code: "2000".into(),
             is_retryable: true,
@@ -1340,6 +1353,8 @@ mod tests {
                 ("leader_term".to_owned(), "9".to_owned()),
                 ("leader_shard".to_owned(), "42".to_owned()),
                 ("leader_vault".to_owned(), "7".to_owned()),
+                ("leader_organization_slug".to_owned(), "1234".to_owned()),
+                ("leader_vault_slug".to_owned(), "5678".to_owned()),
             ]),
             suggested_action: None,
         };
@@ -1353,10 +1368,10 @@ mod tests {
 
         pool.apply_region_leader_hint_or_invalidate(&err);
 
-        // The vault cache should now hold the endpoint, keyed by (42, 7).
+        // The vault cache should now hold the endpoint, keyed by slugs.
         let entry = pool
             .vault_cache()
-            .lookup(OrganizationId::new(42), VaultId::new(7))
+            .lookup(OrganizationSlug::new(1234), VaultSlug::new(5678))
             .expect("vault cache populated");
         assert_eq!(entry.leader_endpoint.as_deref(), Some("http://vault-leader:5000"));
         assert_eq!(entry.term, Some(9));
@@ -1366,6 +1381,57 @@ mod tests {
         assert!(
             pool.region_cached_endpoint().is_none(),
             "region cache must not be populated by a vault-scoped hint",
+        );
+    }
+
+    #[test]
+    fn apply_hint_with_only_legacy_vault_id_falls_through_to_region_cache() {
+        use inferadb_ledger_types::{OrganizationSlug, Region, VaultSlug};
+        use tonic::Code;
+
+        use crate::error::ServerErrorDetails;
+
+        // Legacy server compat: hint carries leader_vault (internal id)
+        // but no leader_vault_slug. The SDK's VaultLeaderCache is keyed on
+        // slugs, so we cannot populate from an id-only hint. The retry must
+        // fall through to the region path instead.
+        let config = test_config_with_region(Region::US_EAST_VA);
+        let pool = ConnectionPool::new(config);
+
+        let details = ServerErrorDetails {
+            error_code: "2000".into(),
+            is_retryable: true,
+            retry_after_ms: None,
+            context: std::collections::HashMap::from([
+                ("leader_id".to_owned(), "11".to_owned()),
+                ("leader_endpoint".to_owned(), "http://legacy-leader:5000".to_owned()),
+                ("leader_term".to_owned(), "9".to_owned()),
+                ("leader_shard".to_owned(), "42".to_owned()),
+                ("leader_vault".to_owned(), "7".to_owned()),
+                // No slug fields — legacy server.
+            ]),
+            suggested_action: None,
+        };
+        let err = SdkError::Rpc {
+            code: Code::Unavailable,
+            message: "not leader".into(),
+            request_id: None,
+            trace_id: None,
+            error_details: Some(Box::new(details)),
+        };
+
+        pool.apply_region_leader_hint_or_invalidate(&err);
+
+        // Vault cache must remain empty — we don't have slug keys to write under.
+        assert!(
+            pool.vault_cache().lookup(OrganizationSlug::new(42), VaultSlug::new(7)).is_none(),
+            "vault cache must not populate from legacy id-only hint",
+        );
+        // Region cache catches the fallthrough.
+        assert_eq!(
+            pool.region_cached_endpoint().as_deref(),
+            Some("http://legacy-leader:5000"),
+            "region cache should populate for legacy hint",
         );
     }
 
@@ -1411,7 +1477,7 @@ mod tests {
 
     #[test]
     fn vault_hint_term_gating_drops_older_hint() {
-        use inferadb_ledger_types::{OrganizationId, Region, VaultId};
+        use inferadb_ledger_types::{OrganizationSlug, Region, VaultSlug};
         use tonic::Code;
 
         use crate::error::ServerErrorDetails;
@@ -1429,6 +1495,8 @@ mod tests {
                     ("leader_term".to_owned(), term.to_string()),
                     ("leader_shard".to_owned(), "1".to_owned()),
                     ("leader_vault".to_owned(), "1".to_owned()),
+                    ("leader_organization_slug".to_owned(), "1".to_owned()),
+                    ("leader_vault_slug".to_owned(), "1".to_owned()),
                 ]),
                 suggested_action: None,
             };
@@ -1445,8 +1513,10 @@ mod tests {
         pool.apply_region_leader_hint_or_invalidate(&make_err("http://A:5000", 9));
         pool.apply_region_leader_hint_or_invalidate(&make_err("http://B:5000", 5));
 
-        let entry =
-            pool.vault_cache().lookup(OrganizationId::new(1), VaultId::new(1)).expect("populated");
+        let entry = pool
+            .vault_cache()
+            .lookup(OrganizationSlug::new(1), VaultSlug::new(1))
+            .expect("populated");
         assert_eq!(
             entry.leader_endpoint.as_deref(),
             Some("http://A:5000"),
@@ -1456,7 +1526,7 @@ mod tests {
 
     #[test]
     fn vault_hint_works_without_preferred_region() {
-        use inferadb_ledger_types::{OrganizationId, VaultId};
+        use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
         use tonic::Code;
 
         use crate::error::ServerErrorDetails;
@@ -1474,6 +1544,8 @@ mod tests {
                 ("leader_term".to_owned(), "3".to_owned()),
                 ("leader_shard".to_owned(), "1".to_owned()),
                 ("leader_vault".to_owned(), "2".to_owned()),
+                ("leader_organization_slug".to_owned(), "1".to_owned()),
+                ("leader_vault_slug".to_owned(), "2".to_owned()),
             ]),
             suggested_action: None,
         };
@@ -1490,14 +1562,14 @@ mod tests {
 
         let entry = pool
             .vault_cache()
-            .lookup(OrganizationId::new(1), VaultId::new(2))
+            .lookup(OrganizationSlug::new(1), VaultSlug::new(2))
             .expect("vault cache populated even without region cache");
         assert_eq!(entry.leader_endpoint.as_deref(), Some("http://vault-leader:5000"));
     }
 
     #[test]
     fn vault_hint_without_endpoint_invalidates_entry() {
-        use inferadb_ledger_types::{OrganizationId, Region, VaultId};
+        use inferadb_ledger_types::{OrganizationSlug, Region, VaultSlug};
         use tonic::Code;
 
         use crate::error::ServerErrorDetails;
@@ -1515,6 +1587,8 @@ mod tests {
                 ("leader_term".to_owned(), "5".to_owned()),
                 ("leader_shard".to_owned(), "1".to_owned()),
                 ("leader_vault".to_owned(), "1".to_owned()),
+                ("leader_organization_slug".to_owned(), "1".to_owned()),
+                ("leader_vault_slug".to_owned(), "1".to_owned()),
             ]),
             suggested_action: None,
         };
@@ -1525,7 +1599,7 @@ mod tests {
             trace_id: None,
             error_details: Some(Box::new(seed)),
         });
-        assert!(pool.vault_cache().lookup(OrganizationId::new(1), VaultId::new(1)).is_some());
+        assert!(pool.vault_cache().lookup(OrganizationSlug::new(1), VaultSlug::new(1)).is_some());
 
         // Now an empty-endpoint hint with vault context — must invalidate.
         let purge = ServerErrorDetails {
@@ -1535,6 +1609,8 @@ mod tests {
             context: std::collections::HashMap::from([
                 ("leader_shard".to_owned(), "1".to_owned()),
                 ("leader_vault".to_owned(), "1".to_owned()),
+                ("leader_organization_slug".to_owned(), "1".to_owned()),
+                ("leader_vault_slug".to_owned(), "1".to_owned()),
             ]),
             suggested_action: None,
         };
@@ -1547,14 +1623,14 @@ mod tests {
         });
 
         assert!(
-            pool.vault_cache().lookup(OrganizationId::new(1), VaultId::new(1)).is_none(),
+            pool.vault_cache().lookup(OrganizationSlug::new(1), VaultSlug::new(1)).is_none(),
             "endpoint-less vault hint must invalidate the entry",
         );
     }
 
     #[test]
     fn select_for_vault_falls_through_on_cache_miss() {
-        use inferadb_ledger_types::{OrganizationId, VaultId};
+        use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
         // No preferred region, no preseeded vault cache, dummy endpoint.
         // We can't await connect successfully, but the call must reach the
@@ -1570,7 +1646,7 @@ mod tests {
 
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
-            let result = pool.select_for_vault(OrganizationId::new(1), VaultId::new(1)).await;
+            let result = pool.select_for_vault(OrganizationSlug::new(1), VaultSlug::new(1)).await;
             assert!(result.is_err(), "fallback to unreachable endpoint should fail");
         });
     }

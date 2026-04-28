@@ -47,7 +47,7 @@ Zero plaintext PII appears in any GLOBAL Raft entry.
 
 ### Protected Regions
 
-22 of 25 regions enforce `requires_residency() == true`. These regions restrict:
+A region is protected when its `RegionDirectoryEntry.requires_residency` flag is `true` — set at provisioning time via `AdminService.ProvisionRegion` (or rewritten later via `AdminService.SetRegionResidency`). Protected regions restrict:
 
 - **Raft group membership** — only nodes tagged with the same region can join the regional Raft group
 - **Data storage** — PII proposed via `propose_regional()` is stored only in the region's state layer
@@ -55,11 +55,11 @@ Zero plaintext PII appears in any GLOBAL Raft entry.
 
 ### Non-Protected Regions
 
-3 regions are non-protected: `GLOBAL`, `US_EAST_VA`, `US_WEST_OR`. These have no federal data residency requirement. All nodes hold RMKs for non-protected regions.
+`GLOBAL` is hardcoded as non-protected (the cluster control plane is replicated everywhere). Other regions are non-protected when their `RegionDirectoryEntry.requires_residency` is `false`. The historical `US_EAST_VA` / `US_WEST_OR` constants are non-protected by convention — operators provisioning them must pass `requires_residency=false` on the `ProvisionRegion` RPC. All nodes hold RMKs for non-protected regions.
 
 #### US Region Replication Behavior
 
-`US_EAST_VA` and `US_WEST_OR` are **non-protected** (`requires_residency() == false`). This means:
+When provisioned with `requires_residency=false`:
 
 - User PII (names, emails) for organizations assigned to US regions is replicated to **all** nodes in the cluster, regardless of geographic location.
 - A cluster with both US and non-US nodes (e.g., a Frankfurt node for EU) will receive US user data on all nodes.
@@ -69,8 +69,7 @@ Zero plaintext PII appears in any GLOBAL Raft entry.
 
 1. Deploy US-only clusters (no non-US nodes) to ensure US data stays within US infrastructure.
 2. Use separate cluster deployments per jurisdiction rather than a single multi-region cluster.
-
-Making US regions optionally protected is a large architectural change (`requires_residency()` is a compile-time `const fn`) and is not currently supported. Contact InferaDB if this is a requirement for your deployment.
+3. Provision the region with `requires_residency=true` so the regional Raft group only accepts nodes tagged with that exact region — the same isolation contract that GDPR / PIPL / etc. regions use.
 
 ### Crypto-Shredding
 

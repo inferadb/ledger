@@ -22,7 +22,6 @@ All per-RPC latency SLIs use `ledger_grpc_request_latency_seconds{service=..., m
 | --------------------- | ---------- | ---------- | ---------- | ---------------------------------------------------------------------------------------- |
 | Read (single entity)  | < 1ms      | < 5ms      | < 10ms     | `ledger_grpc_request_latency_seconds{service="ReadService", method="GetRelationship"}`   |
 | Write (single entity) | < 5ms      | < 25ms     | < 50ms     | `ledger_grpc_request_latency_seconds{service="WriteService", method="SetRelationships"}` |
-| Batch write           | < 10ms     | < 50ms     | < 100ms    | `ledger_grpc_request_latency_seconds{service="WriteService", method="BatchWrite"}`       |
 | Raft apply            | < 1ms      | < 5ms      | < 25ms     | `inferadb_ledger_raft_apply_latency_seconds`                                             |
 | Batch flush           | < 5ms      | < 25ms     | < 100ms    | `ledger_batch_flush_latency_seconds`                                                     |
 | Token validation      | < 1ms      | < 5ms      | < 10ms     | `ledger_token_validation_latency_seconds`                                                |

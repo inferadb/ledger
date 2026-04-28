@@ -24,18 +24,18 @@ impl LedgerClient {
         region: Region,
     ) -> Result<EmailVerificationCode> {
         let email = email.into();
-        let proto_region: proto::Region = region.into();
-        let region_i32: i32 = proto_region.into();
+        let region_slug = region.as_str().to_string();
         let pool = self.pool.clone();
         self.call_with_retry("initiate_email_verification", || {
             let pool = pool.clone();
             let email = email.clone();
+            let region_slug = region_slug.clone();
             async move {
                 let mut client = crate::connected_client!(pool, create_user_client);
 
                 let request = proto::InitiateEmailVerificationRequest {
                     email: email.clone(),
-                    region: region_i32,
+                    region: region_slug,
                 };
 
                 let response = client.initiate_email_verification(request).await?.into_inner();
@@ -58,20 +58,20 @@ impl LedgerClient {
     ) -> Result<EmailVerificationResult> {
         let email = email.into();
         let code = code.into();
-        let proto_region: proto::Region = region.into();
-        let region_i32: i32 = proto_region.into();
+        let region_slug = region.as_str().to_string();
         let pool = self.pool.clone();
         self.call_with_retry("verify_email_code", || {
             let pool = pool.clone();
             let code = code.clone();
             let email = email.clone();
+            let region_slug = region_slug.clone();
             async move {
                 let mut client = crate::connected_client!(pool, create_user_client);
 
                 let request = proto::VerifyEmailCodeRequest {
                     email: email.clone(),
                     code: code.clone(),
-                    region: region_i32,
+                    region: region_slug,
                 };
 
                 let response = client.verify_email_code(request).await?.into_inner();
@@ -126,8 +126,7 @@ impl LedgerClient {
         let email = email.into();
         let name = name.into();
         let organization_name = organization_name.into();
-        let proto_region: proto::Region = region.into();
-        let region_i32: i32 = proto_region.into();
+        let region_slug = region.as_str().to_string();
         let pool = self.pool.clone();
         self.call_with_retry("complete_registration", || {
             let pool = pool.clone();
@@ -135,13 +134,14 @@ impl LedgerClient {
             let name = name.clone();
             let onboarding_token = onboarding_token.clone();
             let organization_name = organization_name.clone();
+            let region_slug = region_slug.clone();
             async move {
                 let mut client = crate::connected_client!(pool, create_user_client);
 
                 let request = proto::CompleteRegistrationRequest {
                     onboarding_token: onboarding_token.clone(),
                     email: email.clone(),
-                    region: region_i32,
+                    region: region_slug,
                     name: name.clone(),
                     organization_name: organization_name.clone(),
                 };

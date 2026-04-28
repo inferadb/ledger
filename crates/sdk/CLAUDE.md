@@ -22,10 +22,15 @@ These files are load-bearing — their invariants ripple beyond the local file. 
 - **`LedgerClient`** — public API: authenticate, read/write, admin, leader discovery.
 - **Config** (`src/config.rs`): `ClientConfig`, `TlsConfig`, `CircuitBreakerConfig` — all bon fallible builders.
 - **Errors** (`src/error.rs`): `SdkError`, `ResolverError` (thiserror).
-- **Connection layer**: `connection.rs`, `circuit_breaker.rs`, leader caching via `region_resolver.rs` / `discovery.rs`.
+- **Connection layer**: `connection.rs`, `circuit_breaker.rs`, leader caching via `region_resolver.rs` (region-level) and `vault_resolver.rs` (per-vault).
+- **Vault leader cache** (`src/vault_resolver.rs`): `VaultLeaderCache` — slug-keyed `(OrganizationSlug, VaultSlug)` LRU map, term-gated. Populated from server-emitted `LeaderHint` carrying `(organization_slug, vault_slug, leader_node_id, term)` (see `LeaderHint` in `src/error.rs`). Updated on every `NotLeader` reply; reads on every retry to short-circuit the next hop directly to the vault leader.
 - **Metrics**: `SdkMetrics` trait + `NoopSdkMetrics` / `MetricsSdkMetrics` in `src/metrics.rs`.
 - **Retry entry point**: `with_retry_cancellable(method, pool, ...)` in `src/retry.rs` — used by every RPC call in `client.rs`.
 - **Streaming / ops**: `src/streaming.rs`, `src/ops/`.
+
+## Removed surface
+
+- **`LedgerClient::batch_write` and `BatchWriteRequest` / `BatchWriteResponse` / `BatchWriteOperation` / `BatchWriteSuccess`** — removed in Phase 6 of the per-vault consensus migration. Cross-vault atomic writes are not supported under per-vault consensus (every vault is its own Raft group; a single proposal cannot span vaults). Callers that previously issued `batch_write` now issue a per-vault `write` per target vault. Server-side already returns `FAILED_PRECONDITION` + `AppDeprecated` for any legacy proto wire; the client-side surface is gone.
 
 ## Test Patterns
 
@@ -41,7 +46,7 @@ These files are load-bearing — their invariants ripple beyond the local file. 
 3. **`with_retry_cancellable` requires `method: &str`.** Used for retry metrics labels and circuit-breaker key. Call sites that pass `""` lose observability; call sites that pass a dynamic string blow up label cardinality.
 4. **bon `Option<T>` setters accept `T`, not `Option<T>`.** `.field(Some(x))` is a compile error — write `.field(x)`. bon auto-wraps.
 5. **`#[builder(default)]` on `Option<T>` is redundant.** bon auto-infers `None`; adding the attribute produces a compiler error.
-6. **Leader cache updates are term-gated.** Hints for older terms MUST be dropped — a stale reply reaching the cache first would overwrite a newer leader and cause a retry storm.
+6. **Leader cache updates are term-gated.** Hints for older terms MUST be dropped — a stale reply reaching the cache first would overwrite a newer leader and cause a retry storm. Both `RegionLeaderCache` (region-level) and `VaultLeaderCache` (per-vault, keyed on `(OrganizationSlug, VaultSlug)`) follow this rule. `LeaderHint` carries `(leader_node_id, term, organization_slug, vault_slug)` so `VaultLeaderCache` can be populated directly from the hint without a slug→id round trip.
 7. **`SdkError::CircuitOpen` is non-retryable.** The retry loop exits immediately when the circuit opens; otherwise retries would hammer an open circuit.
 8. **Routing is redirect-only.** The SDK reconnects directly to the leader on `NotLeader` + `LeaderHint`. Never ask the server to forward client requests — server-side forwarding is reserved for saga orchestration (see root rule 11).
 9. **UDS endpoints bypass TCP keep-alive.** Endpoints starting with `/` are treated as Unix-socket paths; don't apply TCP-specific settings to them.

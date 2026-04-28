@@ -9,8 +9,7 @@
 use std::{fmt::Write, sync::Arc, time::Duration};
 
 use inferadb_ledger_proto::proto::{
-    BatchWriteRequest, BatchWriteResponse, TxId, WriteError, WriteErrorCode, WriteRequest,
-    WriteResponse, WriteSuccess,
+    TxId, WriteError, WriteErrorCode, WriteRequest, WriteResponse, WriteSuccess,
 };
 use inferadb_ledger_raft::{
     event_writer::EventEmitter,
@@ -44,8 +43,7 @@ pub struct WriteService {
     #[builder(default)]
     manager: Option<Arc<RaftManager>>,
     /// Typed proposal service used to route per-vault writes through the
-    /// shared `ProposalService` abstraction (consolidates the two inline
-    /// vault-routing blocks in `write` and `batch_write`).
+    /// shared `ProposalService` abstraction.
     proposal_service: Arc<dyn crate::proposal::ProposalService>,
     /// Idempotency cache for duplicate detection.
     idempotency: Arc<IdempotencyCache>,
@@ -562,6 +560,8 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                     self.peer_addresses.as_ref(),
                     "Not the leader for this region",
                     None,
+                    None,
+                    None,
                 ),
                 &ctx.request_id(),
                 ctx.trace_id(),
@@ -971,12 +971,20 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
         // outcome locally.
         ctx.start_raft_timer();
         ctx.set_batch_info(false, 1);
+        // Forward the request slugs into the proposal so a `NotLeader`
+        // hint carries `(OrganizationSlug, VaultSlug)` — the keys the SDK's
+        // `VaultLeaderCache` uses. Both fields are `Some` here because the
+        // handler resolved both slugs above.
+        let organization_slug_hint = req.organization.as_ref().map(|o| o.slug);
+        let vault_slug_hint = req.vault.as_ref().map(|v| v.slug);
         let response = match self
             .proposal_service
             .propose_organization_request_to_vault(
                 region.region,
                 organization_id,
                 vault_id,
+                organization_slug_hint,
+                vault_slug_hint,
                 ledger_request,
                 ctx.caller_or_zero(),
                 timeout,
@@ -1118,75 +1126,6 @@ impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteS
                 ))
             },
         }
-    }
-
-    /// Rejects cross-vault `BatchWrite` requests with a structured deprecation
-    /// error.
-    ///
-    /// Phase 6 of the per-vault consensus migration deprecates `BatchWrite`:
-    /// every vault is its own Raft group, and a single Raft proposal can no
-    /// longer atomically span multiple vaults. Clients must issue per-vault
-    /// `Write` calls instead. The SDK migration is tracked separately; the
-    /// server's job here is to reject loudly and tell the client exactly
-    /// where to go next.
-    ///
-    /// The response carries a structured `ErrorDetails`:
-    /// - `error_code` = `DiagnosticCode::AppDeprecated` (3209)
-    /// - `is_retryable` = false (clients must change behaviour, not retry)
-    /// - `suggested_action` = "Use per-vault Write calls instead"
-    /// - `context.docs` = path to the migration doc
-    ///
-    /// The status code is `FAILED_PRECONDITION`: the request is well-formed,
-    /// but the server's preconditions for accepting it (RPC not deprecated)
-    /// are not met. SDKs that decode `ErrorDetails` get explicit non-
-    /// retryability + a forward path; SDKs that don't still see the human-
-    /// readable status message.
-    async fn batch_write(
-        &self,
-        request: Request<BatchWriteRequest>,
-    ) -> Result<Response<BatchWriteResponse>, Status> {
-        use std::collections::HashMap;
-
-        use inferadb_ledger_types::DiagnosticCode;
-        use prost::Message;
-
-        // Build the request context so the deprecation rejection still emits
-        // a canonical log line (operation, error code, request id, trace id)
-        // — the same observability shape every other write rejection has.
-        let event_handle: Option<Arc<dyn EventEmitter>> =
-            self.event_handle.as_ref().map(|h| Arc::new(h.clone()) as _);
-        let mut ctx =
-            RequestContext::from_request("WriteService", "batch_write", &request, event_handle);
-        ctx.set_operation_type(OperationType::Write);
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
-
-        ctx.set_error(
-            "Deprecated",
-            "BatchWrite is deprecated; issue per-vault Write calls instead",
-        );
-
-        let mut context = HashMap::new();
-        context.insert("docs".to_owned(), "docs/architecture/per-vault-consensus.md".to_owned());
-        let details = super::error_details::build_error_details(
-            DiagnosticCode::AppDeprecated.as_u16(),
-            false,
-            None,
-            context,
-            Some("Use per-vault Write calls instead"),
-        );
-        let status = Status::with_details(
-            tonic::Code::FailedPrecondition,
-            "BatchWriteRequest is deprecated as of Phase 6 of the per-vault consensus \
-             migration. Issue per-vault Write calls instead. \
-             See docs/architecture/per-vault-consensus.md.",
-            details.encode_to_vec().into(),
-        );
-        Err(status_with_correlation(status, &ctx.request_id(), ctx.trace_id()))
     }
 }
 

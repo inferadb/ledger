@@ -8,7 +8,8 @@
 use std::{str::FromStr, sync::Arc, time::Duration};
 
 use inferadb_ledger_proto::proto::{
-    BackupInfo, CheckIntegrityRequest, CheckIntegrityResponse, CheckPeerLivenessRequest,
+    AdminListVaultsRequest, AdminListVaultsResponse, AdminVaultInfo, BackupInfo,
+    CheckIntegrityRequest, CheckIntegrityResponse, CheckPeerLivenessRequest,
     CheckPeerLivenessResponse, ClusterMember, CreateBackupRequest, CreateBackupResponse,
     CreateSnapshotRequest, CreateSnapshotResponse, DataRegionReplica,
     GetBlindingKeyRehashStatusRequest, GetBlindingKeyRehashStatusResponse, GetClusterInfoRequest,
@@ -17,13 +18,15 @@ use inferadb_ledger_proto::proto::{
     GetRewrapStatusResponse, Hash, IntegrityIssue, JoinClusterRequest, JoinClusterResponse,
     LeaveClusterRequest, LeaveClusterResponse, ListBackupsRequest, ListBackupsResponse,
     MigrateExistingUsersRequest, MigrateExistingUsersResponse, ProvisionRegionRequest,
-    ProvisionRegionResponse, RecoverVaultRequest, RecoverVaultResponse, RestoreBackupRequest,
-    RestoreBackupResponse, RotateBlindingKeyRequest, RotateBlindingKeyResponse,
-    RotateRegionKeyRequest, RotateRegionKeyResponse, TransferLeadershipRequest,
-    TransferLeadershipResponse, UpdateConfigRequest, UpdateConfigResponse, VaultHealthProto,
+    ProvisionRegionResponse, RecoverVaultRequest, RecoverVaultResponse, RepairVaultRequest,
+    RepairVaultResponse, RestoreBackupRequest, RestoreBackupResponse, RotateBlindingKeyRequest,
+    RotateBlindingKeyResponse, RotateRegionKeyRequest, RotateRegionKeyResponse,
+    SetRegionResidencyRequest, SetRegionResidencyResponse, ShowVaultRequest, ShowVaultResponse,
+    TransferLeadershipRequest, TransferLeadershipResponse, UpdateConfigRequest,
+    UpdateConfigResponse, VaultHealthProto,
 };
 use inferadb_ledger_raft::{
-    ConsensusHandle, HandleError, NodeStatus,
+    ConsensusHandle, HandleError, NodeStatus, VaultGroup,
     log_storage::{AppliedStateAccessor, VaultHealthStatus},
     logging::{OperationType, RequestContext, Sampler},
     metrics,
@@ -1843,6 +1846,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
                 self.peer_addresses.as_ref(),
                 msg,
                 None,
+                None,
+                None,
             ));
         }
 
@@ -2714,8 +2719,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let grpc_metadata = request.metadata().clone();
         let req = request.into_inner();
 
-        // Pre-validation: parse default region (reject UNSPECIFIED).
-        let default_region = inferadb_ledger_proto::convert::region_from_i32(req.default_region)?;
+        // Pre-validation: parse default region (reject empty / malformed slug).
+        let default_region = inferadb_ledger_proto::convert::region_from_str(&req.default_region)?;
 
         // Pre-validation: reject GLOBAL as default region (users must live in
         // a data region, not the control plane).
@@ -2891,6 +2896,27 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let protected = req.protected;
         let region = inferadb_ledger_proto::convert::region_from_str(&req.name)?;
 
+        // The proto carries `requires_residency` and `retention_days` as
+        // primitive fields; default them to the disciplined safe values when
+        // the client omits them (clients constructing the request via prost
+        // get `false` / `0` by default — we substitute the registry defaults
+        // documented on `RegionDirectoryEntry`).
+        let requires_residency = if req.requires_residency {
+            true
+        } else {
+            // Wire default for `bool` is `false`; explicit `false` is what
+            // operators provisioning a US-style region pass.  Either way the
+            // value carried in the proto IS the operator's intent — so
+            // reflect it directly.  We DO NOT auto-default to `true` for an
+            // explicitly-false field.
+            false
+        };
+        let retention_days = if req.retention_days == 0 {
+            inferadb_ledger_state::system::default_retention_days()
+        } else {
+            req.retention_days
+        };
+
         if region == inferadb_ledger_types::Region::GLOBAL {
             ctx.set_error("InvalidArgument", "GLOBAL region cannot be provisioned");
             return Err(Status::invalid_argument(
@@ -2959,6 +2985,8 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
         let req = inferadb_ledger_raft::types::SystemRequest::CreateDataRegion {
             region,
             protected,
+            requires_residency,
+            retention_days,
             initial_members,
         };
         let response = self
@@ -3006,6 +3034,328 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
 
         Ok(Response::new(ProvisionRegionResponse { created, name: region.as_str().to_owned() }))
     }
+
+    /// Updates the residency contract (`requires_residency`,
+    /// `retention_days`) for an existing region directory entry.
+    ///
+    /// Migration path for clusters upgraded across the R6 boundary —
+    /// pre-R6 entries decode with disciplined defaults
+    /// (`requires_residency=true`, `retention_days=90`); EU operators
+    /// MUST call this RPC with `retention_days=30` to restore the GDPR
+    /// 30-day retention contract.
+    async fn set_region_residency(
+        &self,
+        request: Request<SetRegionResidencyRequest>,
+    ) -> Result<Response<SetRegionResidencyResponse>, Status> {
+        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
+        super::helpers::check_not_draining(self.health_state.as_ref())?;
+
+        let mut ctx = self.make_request_context_unified("set_region_residency", &request);
+        let req = request.into_inner();
+
+        let region = inferadb_ledger_proto::convert::region_from_str(&req.name)?;
+        if region == inferadb_ledger_types::Region::GLOBAL {
+            ctx.set_error("InvalidArgument", "GLOBAL region has no residency contract");
+            return Err(Status::invalid_argument(
+                "GLOBAL region is the cluster control plane and has no residency contract",
+            ));
+        }
+
+        let propose = inferadb_ledger_raft::types::SystemRequest::SetRegionResidency {
+            region,
+            requires_residency: req.requires_residency,
+            retention_days: req.retention_days,
+        };
+        let response = self
+            .handle
+            .propose_and_wait(
+                inferadb_ledger_raft::types::RaftPayload::system(propose),
+                std::time::Duration::from_secs(10),
+            )
+            .await
+            .map_err(|e| {
+                ctx.set_error("Internal", &format!("SetRegionResidency propose failed: {e}"));
+                error_classify::raft_error(&e)
+            })?;
+
+        match response {
+            LedgerResponse::RegionResidencyUpdated {
+                region: r,
+                requires_residency,
+                retention_days,
+            } => Ok(Response::new(SetRegionResidencyResponse {
+                name: r.as_str().to_owned(),
+                requires_residency,
+                retention_days,
+            })),
+            LedgerResponse::Error { code, message } => {
+                ctx.set_error(code.grpc_code_name(), &message);
+                Err(super::helpers::error_code_to_status(code, message))
+            },
+            other => {
+                ctx.set_error("Internal", &format!("Unexpected response: {other:?}"));
+                Err(Status::internal(format!(
+                    "Unexpected response from SetRegionResidency: {other:?}"
+                )))
+            },
+        }
+    }
+
+    // =========================================================================
+    // Per-Vault Inspection (Phase 7 / O4)
+    // =========================================================================
+
+    /// Lists per-vault Raft groups for an organization with their
+    /// lifecycle state, leadership, and apply progress.
+    ///
+    /// Read-only, served from local in-memory state. Returns empty when
+    /// the organization has no vaults registered on this node — typically
+    /// because this node is not a voter for the org's region. Operators
+    /// should target a region voter for an authoritative view.
+    async fn admin_list_vaults(
+        &self,
+        request: Request<AdminListVaultsRequest>,
+    ) -> Result<Response<AdminListVaultsResponse>, Status> {
+        let mut ctx = self.make_request_context_unified("admin_list_vaults", &request);
+        let req = request.into_inner();
+
+        let manager = self.raft_manager.as_ref().ok_or_else(|| {
+            ctx.set_error("FailedPrecondition", "Raft manager is not configured on this node");
+            Status::failed_precondition("Raft manager is not configured on this node")
+        })?;
+
+        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let organization_slug_val = req.organization.as_ref().map_or(0, |n| n.slug);
+        let organization_id =
+            slug_resolver.extract_and_resolve(&req.organization).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
+            })?;
+        ctx.set_target(organization_slug_val, 0);
+
+        // Iterate every per-vault Raft group on this node, filter to the
+        // requested organization, and project each into a `VaultInfo`.
+        // Slug reverse-lookup goes through the applied state — if a vault
+        // was just deleted but the group hasn't torn down, the slug may
+        // be missing; we fall back to the internal id for the slug field.
+        let mut vaults = Vec::new();
+        for (region, org_id, vault_id) in manager.list_vault_groups() {
+            if org_id != organization_id {
+                continue;
+            }
+            let Ok(group) = manager.get_vault_group(region, org_id, vault_id) else {
+                continue;
+            };
+            vaults.push(self.vault_info_from_group(&group));
+        }
+
+        ctx.set_success();
+        Ok(Response::new(AdminListVaultsResponse { vaults }))
+    }
+
+    /// Returns detailed status for a single vault: voters, learners,
+    /// hibernation lifecycle state, last-activity / pending-membership
+    /// timestamps.
+    async fn show_vault(
+        &self,
+        request: Request<ShowVaultRequest>,
+    ) -> Result<Response<ShowVaultResponse>, Status> {
+        let mut ctx = self.make_request_context_unified("show_vault", &request);
+        let req = request.into_inner();
+
+        let manager = self.raft_manager.as_ref().ok_or_else(|| {
+            ctx.set_error("FailedPrecondition", "Raft manager is not configured on this node");
+            Status::failed_precondition("Raft manager is not configured on this node")
+        })?;
+
+        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let organization_slug_val = req.organization.as_ref().map_or(0, |n| n.slug);
+        let vault_slug_val = req.vault.as_ref().map_or(0, |v| v.slug);
+        let organization_id =
+            slug_resolver.extract_and_resolve(&req.organization).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
+            })?;
+        let vault_id =
+            slug_resolver.extract_and_resolve_vault(&req.vault).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
+            })?;
+        ctx.set_target(organization_slug_val, vault_slug_val);
+
+        let region = manager.get_organization_region(organization_id).ok_or_else(|| {
+            ctx.set_error(
+                "OrganizationNotPlaced",
+                &format!("Organization {} has no region placement on file", organization_id),
+            );
+            Status::failed_precondition(format!(
+                "Organization {} has no region placement on file",
+                organization_id
+            ))
+        })?;
+
+        let group = manager.get_vault_group(region, organization_id, vault_id).map_err(|e| {
+            ctx.set_error("VaultGroupNotFound", &e.to_string());
+            Status::not_found(format!(
+                "Vault group not registered on this node: organization={}, vault={}, region={}",
+                organization_id,
+                vault_id,
+                region.as_str()
+            ))
+        })?;
+
+        let info = self.vault_info_from_group(&group);
+        let shard_state = group.handle().shard_state();
+        let last_activity_secs = group.last_activity_unix_secs();
+        let pending_membership_secs = group.pending_membership_started_unix_secs();
+        let lifecycle = group.lifecycle_state();
+
+        let response = ShowVaultResponse {
+            info: Some(info),
+            region: region.as_str().to_owned(),
+            organization_id: organization_id.value() as u64,
+            vault_id: vault_id.value() as u64,
+            voters: shard_state.voters.iter().map(|n| n.0).collect(),
+            learners: shard_state.learners.iter().map(|n| n.0).collect(),
+            conf_epoch: shard_state.conf_epoch,
+            lifecycle_state: lifecycle.as_metric_label().to_owned(),
+            last_activity_at: unix_secs_to_timestamp(last_activity_secs),
+            pending_membership_started_at: unix_secs_to_timestamp(pending_membership_secs),
+        };
+
+        ctx.set_success();
+        Ok(Response::new(response))
+    }
+
+    /// Operator-triggered vault repair (Phase 7 / O4 stub).
+    ///
+    /// Today this is a no-op: the underlying consensus engine does not
+    /// expose a "force snapshot install" or "force re-replication"
+    /// entrypoint, so the RPC validates that the vault exists and
+    /// returns `status = "noop"`. The repair signal is logged so
+    /// operators can observe the request via canonical log lines /
+    /// audit hooks; future work will wire the actual repair semantics.
+    async fn repair_vault(
+        &self,
+        request: Request<RepairVaultRequest>,
+    ) -> Result<Response<RepairVaultResponse>, Status> {
+        let mut ctx = self.make_request_context_unified("repair_vault", &request);
+        let req = request.into_inner();
+
+        let manager = self.raft_manager.as_ref().ok_or_else(|| {
+            ctx.set_error("FailedPrecondition", "Raft manager is not configured on this node");
+            Status::failed_precondition("Raft manager is not configured on this node")
+        })?;
+
+        let slug_resolver = SlugResolver::new(self.applied_state.clone());
+        let organization_slug_val = req.organization.as_ref().map_or(0, |n| n.slug);
+        let vault_slug_val = req.vault.as_ref().map_or(0, |v| v.slug);
+        let organization_id =
+            slug_resolver.extract_and_resolve(&req.organization).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
+            })?;
+        let vault_id =
+            slug_resolver.extract_and_resolve_vault(&req.vault).inspect_err(|status| {
+                ctx.set_error("InvalidArgument", status.message());
+            })?;
+        ctx.set_target(organization_slug_val, vault_slug_val);
+
+        let region = manager.get_organization_region(organization_id).ok_or_else(|| {
+            ctx.set_error(
+                "OrganizationNotPlaced",
+                &format!("Organization {} has no region placement on file", organization_id),
+            );
+            Status::failed_precondition(format!(
+                "Organization {} has no region placement on file",
+                organization_id
+            ))
+        })?;
+
+        // Validate the vault group exists locally — repair against an
+        // unknown vault would silently no-op without operator visibility.
+        let _ = manager.get_vault_group(region, organization_id, vault_id).map_err(|e| {
+            ctx.set_error("VaultGroupNotFound", &e.to_string());
+            Status::not_found(format!(
+                "Vault group not registered on this node: organization={}, vault={}, region={}",
+                organization_id,
+                vault_id,
+                region.as_str()
+            ))
+        })?;
+
+        tracing::warn!(
+            region = region.as_str(),
+            organization_id = organization_id.value(),
+            vault_id = vault_id.value(),
+            organization_slug = organization_slug_val,
+            vault_slug = vault_slug_val,
+            "RepairVault requested — no consensus-engine repair API yet, returning noop"
+        );
+
+        ctx.set_success();
+        Ok(Response::new(RepairVaultResponse {
+            status: "noop".to_owned(),
+            message: "Vault repair is not yet implemented. The consensus engine does not \
+                      currently expose a force-snapshot or force-re-replication entrypoint. \
+                      Operator intent has been logged; track follow-up in \
+                      docs/superpowers/completed/2026-04-23-per-vault-consensus.md Phase 7."
+                .to_owned(),
+        }))
+    }
+}
+
+/// Projects a vault `unix_secs` timestamp into a `prost_types::Timestamp`.
+///
+/// Returns `None` when `secs == 0` — the sentinel for "never observed
+/// activity" / "no membership change pending" used by
+/// [`InnerVaultGroup::last_activity_unix_secs`] and
+/// [`InnerVaultGroup::pending_membership_started_unix_secs`].
+fn unix_secs_to_timestamp(secs: u64) -> Option<prost_types::Timestamp> {
+    if secs == 0 {
+        return None;
+    }
+    Some(prost_types::Timestamp { seconds: secs as i64, nanos: 0 })
+}
+
+impl AdminService {
+    /// Builds the operator-facing `AdminVaultInfo` summary from a vault group.
+    ///
+    /// Pulls the vault's external slug from the applied-state slug index;
+    /// when the slug is missing (extremely unlikely outside of a deletion
+    /// race) the field falls back to slug `0`. Lifecycle state /
+    /// last-activity come from the per-vault [`InnerVaultGroup`] state;
+    /// voter / learner counts and the leader come from the consensus
+    /// handle's `ShardState` snapshot.
+    fn vault_info_from_group(&self, group: &VaultGroup) -> AdminVaultInfo {
+        let region = group.region();
+        let organization_id = group.organization_id();
+        let vault_id = group.vault_id();
+
+        let slug = self
+            .applied_state
+            .resolve_vault_id_to_slug(organization_id, vault_id)
+            .map(|s| s.value())
+            .unwrap_or(0);
+
+        let shard_state = group.handle().shard_state();
+        let lifecycle = group.lifecycle_state();
+        let last_activity_secs = group.last_activity_unix_secs();
+        let last_applied_index =
+            group.vault_applied_state().load().last_applied.map_or(0, |id| id.index);
+
+        // Reference `region` so static analysis sees the binding even
+        // when no future field is added — keeps the helper grep-friendly
+        // for future operators that want to surface the region in the
+        // summary view (it is already visible on `ShowVaultResponse`).
+        let _ = region;
+
+        AdminVaultInfo {
+            slug: Some(inferadb_ledger_proto::proto::VaultSlug { slug }),
+            status: lifecycle.as_metric_label().to_owned(),
+            leader_node_id: shard_state.leader.map_or(0, |n| n.0),
+            voter_count: shard_state.voters.len() as u64,
+            learner_count: shard_state.learners.len() as u64,
+            last_applied_index,
+            last_activity: unix_secs_to_timestamp(last_activity_secs),
+        }
+    }
 }
 
 /// Computes the hash of a vault block entry for chain verification.
@@ -3033,15 +3383,13 @@ fn compute_vault_block_hash(entry: &VaultEntry) -> [u8; 32] {
 /// [`CreateBackupResponse`] / [`RestoreBackupResponse`] / [`BackupInfo`].
 ///
 /// The proto mirror is intentionally a flat copy — the conversion only
-/// re-shapes types (`Region` enum → i32, `OrganizationSlug` → message
+/// re-shapes types (`Region` slug → string, `OrganizationSlug` → message
 /// wrapper, `Vec<DbEntry>` → `Vec<BackupDbEntry>`). No validation logic
 /// lives here; a manifest that round-trips through this helper carries
 /// the same byte values as the on-disk JSON manifest member.
 fn backup_manifest_to_proto(
     manifest: &inferadb_ledger_raft::backup::archive::BackupManifest,
 ) -> inferadb_ledger_proto::proto::BackupManifest {
-    let proto_region: inferadb_ledger_proto::proto::Region = manifest.region.into();
-
     let dbs = manifest
         .dbs
         .iter()
@@ -3055,7 +3403,7 @@ fn backup_manifest_to_proto(
     inferadb_ledger_proto::proto::BackupManifest {
         schema_version: manifest.schema_version,
         format: manifest.format.clone(),
-        region: proto_region as i32,
+        region: manifest.region.as_str().to_string(),
         organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
             slug: manifest.organization_slug.value(),
         }),

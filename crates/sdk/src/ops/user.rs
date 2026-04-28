@@ -33,8 +33,7 @@ impl LedgerClient {
         let name = name.into();
         let email = email.into();
         let email_hmac = email_hmac.into();
-        let proto_region: proto::Region = region.into();
-        let region_i32: i32 = proto_region.into();
+        let region_slug = region.as_str().to_string();
         let proto_role: proto::UserRole = role.into();
         let role_i32: i32 = proto_role.into();
         let pool = self.pool.clone();
@@ -43,13 +42,14 @@ impl LedgerClient {
             let email = email.clone();
             let email_hmac = email_hmac.clone();
             let name = name.clone();
+            let region_slug = region_slug.clone();
             async move {
                 let mut client = crate::connected_client!(pool, create_user_client);
 
                 let request = proto::CreateUserRequest {
                     name: name.clone(),
                     email: email.clone(),
-                    region: region_i32,
+                    region: region_slug,
                     role: Some(role_i32),
                     email_hmac: email_hmac.clone(),
                     organization_name: String::new(),

@@ -428,39 +428,6 @@ mod integration_tests {
         assert_eq!(server.write_count(), 1);
     }
 
-    #[tokio::test]
-    async fn test_batch_write_atomic() {
-        let server = MockLedgerServer::start().await.unwrap();
-        let client = create_client_for_mock(&server).await;
-
-        let batches = vec![
-            vec![Operation::set_entity("batch1:a", b"a".to_vec(), None, None)],
-            vec![
-                Operation::set_entity("batch2:b", b"b".to_vec(), None, None),
-                Operation::set_entity("batch2:c", b"c".to_vec(), None, None),
-            ],
-        ];
-        let result =
-            client.batch_write(UserSlug::new(42), ORG, Some(VAULT), batches, None).await.unwrap();
-
-        assert!(!result.tx_id.is_empty());
-        assert_eq!(server.write_count(), 1); // Single batch write
-
-        // All entities from all batches should be readable
-        assert_eq!(
-            client.read(UserSlug::new(42), ORG, Some(VAULT), "batch1:a", None, None).await.unwrap(),
-            Some(b"a".to_vec())
-        );
-        assert_eq!(
-            client.read(UserSlug::new(42), ORG, Some(VAULT), "batch2:b", None, None).await.unwrap(),
-            Some(b"b".to_vec())
-        );
-        assert_eq!(
-            client.read(UserSlug::new(42), ORG, Some(VAULT), "batch2:c", None, None).await.unwrap(),
-            Some(b"c".to_vec())
-        );
-    }
-
     // ==================== Single-Operation Convenience Methods ====================
 
     #[tokio::test]
@@ -612,18 +579,6 @@ mod integration_tests {
         let result2 = client.write(UserSlug::new(42), ORG, Some(VAULT), ops2, None).await.unwrap();
 
         assert_eq!(result2.assigned_sequence, 2);
-    }
-
-    #[tokio::test]
-    async fn test_batch_write_returns_assigned_sequence() {
-        let server = MockLedgerServer::start().await.unwrap();
-        let client = create_client_for_mock(&server).await;
-
-        let batches = vec![vec![Operation::set_entity("bw:1", b"first".to_vec(), None, None)]];
-        let result =
-            client.batch_write(UserSlug::new(42), ORG, Some(VAULT), batches, None).await.unwrap();
-
-        assert_eq!(result.assigned_sequence, 1);
     }
 
     #[tokio::test]
