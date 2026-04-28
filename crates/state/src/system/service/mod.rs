@@ -127,28 +127,71 @@ pub(super) fn require_tier(key: &str, expected: KeyTier) -> Result<()> {
         .map_err(|message| SystemError::TierMismatch { message })
 }
 
+/// Process-wide cache for signing keys keyed by kid (UUID).
+///
+/// Created once per process (typically on `RaftManager` and the
+/// `ServiceContext`) and shared across every `SystemOrganizationService`
+/// constructed on the hot path. The kid namespace is globally unique so
+/// sharing the cache across regions and call sites is correct.
+///
+/// Constructing a fresh `moka::sync::Cache` per request triggers
+/// `crossbeam_epoch::Global::try_advance` GC churn that dominated CPU
+/// self-time on the write path before this type was introduced — see
+/// `docs/superpowers/specs/2026-04-27-reactor-wal-investigation.md`.
+pub type SigningKeyCache = Arc<moka::sync::Cache<String, SigningKey>>;
+
+/// Builds a fresh process-wide [`SigningKeyCache`] with the standard
+/// capacity (100 entries) and TTL (60s).
+///
+/// Server bootstrap calls this exactly once and threads the resulting
+/// `Arc` through `RaftManager` and `ServiceContext`. Tests and helpers
+/// that need a private cache can also use this constructor.
+#[must_use]
+pub fn new_signing_key_cache() -> SigningKeyCache {
+    Arc::new(
+        moka::sync::Cache::builder()
+            .max_capacity(100)
+            .time_to_live(std::time::Duration::from_secs(60))
+            .build(),
+    )
+}
+
 /// Service for reading from and writing to the `_system` organization.
 ///
 /// All `_system` data is stored in `organization_id=0`, `vault_id=0`.
 /// [`StateLayer`] is internally thread-safe via `inferadb-ledger-store`'s MVCC.
 pub struct SystemOrganizationService<B: StorageBackend> {
     pub(super) state: Arc<StateLayer<B>>,
-    /// In-memory cache for signing keys keyed by kid (UUID key identifier).
+    /// Shared in-memory cache for signing keys keyed by kid (UUID key identifier).
     ///
     /// Avoids two B+ tree lookups per JWT verification on the hot path.
-    pub(super) signing_key_cache: moka::sync::Cache<String, SigningKey>,
+    /// Sharing the `Arc` across requests prevents per-request `moka::Cache`
+    /// construct/destroy churn that previously dominated CPU self-time.
+    pub(super) signing_key_cache: SigningKeyCache,
 }
 
 impl<B: StorageBackend> SystemOrganizationService<B> {
-    /// Creates a new system organization service.
+    /// Creates a new system organization service with a private signing-key cache.
+    ///
+    /// Allocates a fresh [`SigningKeyCache`] for this service instance. Suitable
+    /// for cold paths (admin, maintenance, recovery, tests) where no shared cache
+    /// is available. Hot paths (per-request handlers, routing) MUST use
+    /// [`with_signing_key_cache`](Self::with_signing_key_cache) instead, passing a
+    /// long-lived cache from `RaftManager` or `ServiceContext`.
     pub fn new(state: Arc<StateLayer<B>>) -> Self {
-        Self {
-            state,
-            signing_key_cache: moka::sync::Cache::builder()
-                .max_capacity(100)
-                .time_to_live(std::time::Duration::from_secs(60))
-                .build(),
-        }
+        Self::with_signing_key_cache(state, new_signing_key_cache())
+    }
+
+    /// Creates a new system organization service that shares an existing signing-key cache.
+    ///
+    /// Pass the long-lived cache from `RaftManager::signing_key_cache()` or
+    /// `ServiceContext::signing_key_cache` to avoid the per-request `moka::Cache`
+    /// allocation that triggers `crossbeam_epoch::Global::try_advance` GC churn.
+    pub fn with_signing_key_cache(
+        state: Arc<StateLayer<B>>,
+        signing_key_cache: SigningKeyCache,
+    ) -> Self {
+        Self { state, signing_key_cache }
     }
 
     // =========================================================================

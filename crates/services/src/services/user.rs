@@ -184,7 +184,7 @@ impl UserService {
         })?;
         let user_slug = SlugResolver::extract_user_slug(proto_slug)?;
 
-        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc = self.ctx.system_service();
         let dir_entry = sys_svc
             .get_user_directory(user_id)
             .map_err(|e| error_classify::storage_error(&e))?
@@ -290,7 +290,7 @@ impl UserService {
             .as_ref()
             .ok_or_else(|| Status::failed_precondition("JWT engine not configured"))?;
 
-        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc = self.ctx.system_service();
         let dir_entry = sys_svc
             .get_user_directory(user_id)
             .map_err(|e| error_classify::storage_error(&e))?
@@ -299,7 +299,7 @@ impl UserService {
             dir_entry.region.ok_or_else(|| Status::internal("User has no assigned region"))?;
 
         let regional_state = self.ctx.regional_state(user_region)?;
-        let regional_sys = SystemOrganizationService::new(regional_state);
+        let regional_sys = self.ctx.regional_system_service(regional_state);
         let user = regional_sys
             .get_user(user_id)
             .map_err(|e| error_classify::storage_error(&e))?
@@ -507,7 +507,7 @@ impl proto::user_service_server::UserService for UserService {
         })?;
         let user_slug = SlugResolver::extract_user_slug(&req.slug)?;
 
-        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc = self.ctx.system_service();
         let user = sys_svc.get_user(user_id).map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
             error_classify::storage_error(&e)
@@ -603,7 +603,7 @@ impl proto::user_service_server::UserService for UserService {
         // Look up user's region from GLOBAL directory for regional proposal.
         // Capture region for reuse when reading the response.
         let user_region = if let Some(name) = req.name {
-            let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+            let sys_svc = self.ctx.system_service();
             let dir_entry = sys_svc.get_user_directory(user_id).map_err(|e| {
                 ctx.set_error("Internal", &e.to_string());
                 error_classify::storage_error(&e)
@@ -659,10 +659,10 @@ impl proto::user_service_server::UserService for UserService {
         // Otherwise, read from GLOBAL state.
         let user = if let Some(region) = user_region {
             let regional_state = self.ctx.regional_state(region)?;
-            let regional_sys = SystemOrganizationService::new(regional_state);
+            let regional_sys = self.ctx.regional_system_service(regional_state);
             regional_sys.get_user(user_id).map_err(|e| error_classify::storage_error(&e))?
         } else {
-            let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+            let sys_svc = self.ctx.system_service();
             sys_svc.get_user(user_id).map_err(|e| error_classify::storage_error(&e))?
         };
 
@@ -747,7 +747,7 @@ impl proto::user_service_server::UserService for UserService {
         let start_after_key =
             req.page_token.as_ref().and_then(|token| String::from_utf8(token.clone()).ok());
 
-        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc = self.ctx.system_service();
         let users = sys_svc.list_users(start_after_key.as_deref(), page_size + 1).map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
             error_classify::storage_error(&e)
@@ -795,7 +795,7 @@ impl proto::user_service_server::UserService for UserService {
             Status::invalid_argument("At least email filter must be provided")
         })?;
 
-        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc = self.ctx.system_service();
         let user = sys_svc.search_users_by_email(&email).map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
             error_classify::storage_error(&e)
@@ -845,7 +845,7 @@ impl proto::user_service_server::UserService for UserService {
         }
 
         // Look up user's region from GLOBAL directory for regional proposal.
-        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc = self.ctx.system_service();
         let dir_entry = sys_svc.get_user_directory(user_id).map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
             error_classify::storage_error(&e)
@@ -948,7 +948,7 @@ impl proto::user_service_server::UserService for UserService {
 
                 // Read back from REGIONAL state (email record lives in-region).
                 let regional_state = self.ctx.regional_state(region)?;
-                let regional_sys = SystemOrganizationService::new(regional_state);
+                let regional_sys = self.ctx.regional_system_service(regional_state);
                 let email = regional_sys
                     .get_user_email(email_id)
                     .map_err(|e| error_classify::storage_error(&e))?;
@@ -1051,7 +1051,7 @@ impl proto::user_service_server::UserService for UserService {
             Status::invalid_argument("filter is required")
         })?;
 
-        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc = self.ctx.system_service();
         let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
 
         // If user filter is set, list that user's emails
@@ -1121,7 +1121,7 @@ impl proto::user_service_server::UserService for UserService {
         }
 
         // Hash the plaintext token and look up the verification record
-        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc = self.ctx.system_service();
         let token_record = sys_svc.get_verification_token_by_hash(&req.token).map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
             error_classify::storage_error(&e)
@@ -1193,7 +1193,7 @@ impl proto::user_service_server::UserService for UserService {
 
         let target_region = inferadb_ledger_proto::convert::region_from_str(&req.target_region)?;
 
-        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc = self.ctx.system_service();
         let dir_entry = sys_svc.get_user_directory(user_id).map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
             error_classify::storage_error(&e)
@@ -1492,7 +1492,7 @@ impl proto::user_service_server::UserService for UserService {
 
         // Pre-resolve: check GLOBAL HMAC index for existing *active* user.
         // Provisioning entries (in-flight onboarding sagas) are not existing users.
-        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc = self.ctx.system_service();
         let email_hash_entry =
             sys_svc.get_email_hash(&email_hmac).map_err(|e| error_classify::storage_error(&e))?;
         let existing_user_hmac_hit = matches!(&email_hash_entry, Some(EmailHashEntry::Active(_)));
@@ -1507,7 +1507,7 @@ impl proto::user_service_server::UserService for UserService {
             if let Some(ref dir) = dir_entry {
                 if let (Some(user_region), Some(slug)) = (dir.region, dir.slug) {
                     let regional_state = self.ctx.regional_state(user_region)?;
-                    let regional_sys = SystemOrganizationService::new(regional_state);
+                    let regional_sys = self.ctx.regional_system_service(regional_state);
                     let totp_creds = regional_sys
                         .list_user_credentials(
                             *user_id,
@@ -1599,7 +1599,7 @@ impl proto::user_service_server::UserService for UserService {
 
                 // Read user from actual region
                 let regional_state = self.ctx.regional_state(user_region)?;
-                let regional_sys = SystemOrganizationService::new(regional_state);
+                let regional_sys = self.ctx.regional_system_service(regional_state);
                 let user = regional_sys
                     .get_user(user_id)
                     .map_err(|e| error_classify::storage_error(&e))?
@@ -1753,7 +1753,7 @@ impl proto::user_service_server::UserService for UserService {
         };
 
         // Idempotency check: read GLOBAL HMAC index
-        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc = self.ctx.system_service();
         if let Some(hash_entry) =
             sys_svc.get_email_hash(&email_hmac).map_err(|e| error_classify::storage_error(&e))?
         {
@@ -1774,7 +1774,7 @@ impl proto::user_service_server::UserService for UserService {
 
                     // Read user from actual region to get role + version
                     let regional_state = self.ctx.regional_state(user_region)?;
-                    let regional_sys = SystemOrganizationService::new(regional_state);
+                    let regional_sys = self.ctx.regional_system_service(regional_state);
                     let user = regional_sys
                         .get_user(user_id)
                         .map_err(|e| error_classify::storage_error(&e))?
@@ -1825,7 +1825,7 @@ impl proto::user_service_server::UserService for UserService {
         // been forwarded to the data region leader. Raft replication to this follower
         // node can lag by a few milliseconds; poll until the entry is applied locally.
         let regional_state = self.ctx.regional_state(region)?;
-        let regional_sys = SystemOrganizationService::new(regional_state);
+        let regional_sys = self.ctx.regional_system_service(regional_state);
         let account = {
             let mut found = None;
             for attempt in 0..20u32 {
@@ -1987,7 +1987,7 @@ impl proto::user_service_server::UserService for UserService {
 
         // Verify user is active (defense-in-depth: credentials for deleted users are useless)
         let regional_state = self.ctx.regional_state(region)?;
-        let regional_sys = SystemOrganizationService::new(regional_state);
+        let regional_sys = self.ctx.regional_system_service(regional_state);
         let user = regional_sys.get_user(user_id).map_err(|e| {
             ctx.set_error("Internal", &e.to_string());
             error_classify::storage_error(&e)
@@ -2124,7 +2124,7 @@ impl proto::user_service_server::UserService for UserService {
 
         // Read credentials from regional state
         let regional_state = self.ctx.regional_state(region)?;
-        let regional_sys = SystemOrganizationService::new(regional_state);
+        let regional_sys = self.ctx.regional_system_service(regional_state);
         let credentials =
             regional_sys.list_user_credentials(user_id, type_filter).map_err(|e| {
                 ctx.set_error("Internal", &e.to_string());
@@ -2196,7 +2196,7 @@ impl proto::user_service_server::UserService for UserService {
             LedgerResponse::UserCredentialUpdated { credential_id: updated_id } => {
                 // Read back the updated credential
                 let regional_state = self.ctx.regional_state(region)?;
-                let regional_sys = SystemOrganizationService::new(regional_state);
+                let regional_sys = self.ctx.regional_system_service(regional_state);
                 let cred = regional_sys
                     .get_user_credential(user_id, updated_id)
                     .map_err(|e| error_classify::storage_error(&e))?
@@ -2355,7 +2355,7 @@ impl proto::user_service_server::UserService for UserService {
 
         // Read challenge from regional state
         let regional_state = self.ctx.regional_state(region)?;
-        let regional_sys = SystemOrganizationService::new(regional_state);
+        let regional_sys = self.ctx.regional_system_service(regional_state);
 
         let challenge = regional_sys
             .get_totp_challenge(user_id, &nonce)
@@ -2417,7 +2417,7 @@ impl proto::user_service_server::UserService for UserService {
         }
 
         // TOTP code valid — create session directly
-        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc = self.ctx.system_service();
         let signing_key = self.ensure_signing_key_cached(&sys_svc)?;
         let jwt_config = self
             .ctx
@@ -2493,7 +2493,7 @@ impl proto::user_service_server::UserService for UserService {
 
         // Read challenge from regional state
         let regional_state = self.ctx.regional_state(region)?;
-        let regional_sys = SystemOrganizationService::new(regional_state);
+        let regional_sys = self.ctx.regional_system_service(regional_state);
 
         let challenge = regional_sys
             .get_totp_challenge(user_id, &nonce)
@@ -2541,7 +2541,7 @@ impl proto::user_service_server::UserService for UserService {
         let code_hash: [u8; 32] = sha2::Sha256::digest(req.code.as_bytes()).into();
 
         // Prepare session tokens
-        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc = self.ctx.system_service();
         let signing_key = self.ensure_signing_key_cached(&sys_svc)?;
         let jwt_config = self
             .ctx

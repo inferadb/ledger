@@ -12,7 +12,7 @@ use inferadb_ledger_raft::{
     logging::{OperationType, RequestContext, Sampler},
     types::{LedgerResponse, OrganizationRequest, RaftPayload, RegionRequest, SystemRequest},
 };
-use inferadb_ledger_state::StateLayer;
+use inferadb_ledger_state::{StateLayer, system::SigningKeyCache};
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{EmailBlindingKey, OrganizationId, Region, config::ValidationConfig};
 use tonic::Status;
@@ -83,6 +83,18 @@ pub(crate) struct ServiceContext {
     #[allow(dead_code)]
     pub(crate) saga_handle:
         Arc<tokio::sync::OnceCell<inferadb_ledger_raft::SagaOrchestratorHandle>>,
+    /// Process-wide cache for JWT signing keys, sourced from
+    /// `RaftManager::signing_key_cache()`.
+    ///
+    /// Every hot-path [`SystemOrganizationService`] built off this context
+    /// MUST clone this `Arc` and pass it to
+    /// [`SystemOrganizationService::with_signing_key_cache`] rather than
+    /// constructing a fresh cache via `SystemOrganizationService::new`.
+    /// Per-request cache construction triggered the
+    /// `crossbeam_epoch::Global::try_advance` GC churn this field
+    /// eliminates — see
+    /// `docs/superpowers/specs/2026-04-27-reactor-wal-investigation.md`.
+    pub(crate) signing_key_cache: SigningKeyCache,
 }
 
 /// Routing target for [`ServiceContext::propose_serialized`].
@@ -328,7 +340,11 @@ impl ServiceContext {
         // UserShredKey is stored in REGIONAL state (written during user creation).
         // Read from the region's state layer, not the GLOBAL one.
         let regional_state = self.regional_state(region)?;
-        let sys_svc = inferadb_ledger_state::system::SystemOrganizationService::new(regional_state);
+        let sys_svc =
+            inferadb_ledger_state::system::SystemOrganizationService::with_signing_key_cache(
+                regional_state,
+                self.signing_key_cache.clone(),
+            );
         let shred_key =
             sys_svc.get_user_shred_key(user_id).map_err(|e| error_classify::crypto_error(&e))?;
 
@@ -375,7 +391,11 @@ impl ServiceContext {
         // OrgShredKey is stored in REGIONAL state (written by CreateOrganization saga).
         // Read from the region's state layer, not the GLOBAL one.
         let regional_state = self.regional_state(region)?;
-        let sys_svc = inferadb_ledger_state::system::SystemOrganizationService::new(regional_state);
+        let sys_svc =
+            inferadb_ledger_state::system::SystemOrganizationService::with_signing_key_cache(
+                regional_state,
+                self.signing_key_cache.clone(),
+            );
         let shred_key = sys_svc
             .get_org_shred_key(organization)
             .map_err(|e| error_classify::crypto_error(&e))?;
@@ -400,6 +420,33 @@ impl ServiceContext {
             ctx,
         )
         .await
+    }
+
+    /// Builds a `SystemOrganizationService` rooted at the GLOBAL state layer
+    /// that shares the process-wide signing-key cache.
+    ///
+    /// Always prefer this over `SystemOrganizationService::new(self.ctx.state.clone())`
+    /// on hot paths — see field documentation on
+    /// [`signing_key_cache`](Self#structfield.signing_key_cache).
+    pub(crate) fn system_service(
+        &self,
+    ) -> inferadb_ledger_state::system::SystemOrganizationService<FileBackend> {
+        inferadb_ledger_state::system::SystemOrganizationService::with_signing_key_cache(
+            self.state.clone(),
+            self.signing_key_cache.clone(),
+        )
+    }
+
+    /// Builds a `SystemOrganizationService` rooted at the supplied regional
+    /// state layer that shares the process-wide signing-key cache.
+    pub(crate) fn regional_system_service(
+        &self,
+        regional_state: Arc<StateLayer<FileBackend>>,
+    ) -> inferadb_ledger_state::system::SystemOrganizationService<FileBackend> {
+        inferadb_ledger_state::system::SystemOrganizationService::with_signing_key_cache(
+            regional_state,
+            self.signing_key_cache.clone(),
+        )
     }
 
     /// Returns current Raft metrics for the GLOBAL group.
@@ -478,6 +525,7 @@ pub(crate) mod tests {
             key_manager: None,
             manager: None,
             saga_handle: Arc::new(tokio::sync::OnceCell::new()),
+            signing_key_cache: inferadb_ledger_state::system::new_signing_key_cache(),
         };
         (ctx, applied_state_inner)
     }
@@ -515,6 +563,7 @@ pub(crate) mod tests {
             key_manager: None,
             manager: None,
             saga_handle: Arc::new(tokio::sync::OnceCell::new()),
+            signing_key_cache: inferadb_ledger_state::system::new_signing_key_cache(),
         };
         (ctx, temp)
     }
@@ -552,6 +601,7 @@ pub(crate) mod tests {
             key_manager: None,
             manager: None,
             saga_handle: Arc::new(tokio::sync::OnceCell::new()),
+            signing_key_cache: inferadb_ledger_state::system::new_signing_key_cache(),
         };
         (ctx, manager, temp)
     }

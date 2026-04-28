@@ -83,11 +83,16 @@ impl TokenServiceImpl {
     }
 
     /// Creates a `SystemOrganizationService` for direct state reads.
+    ///
+    /// Reuses the process-wide signing-key cache from the
+    /// [`ServiceContext`](super::service_infra::ServiceContext) so the
+    /// per-RPC token verification path does not allocate a fresh
+    /// `moka::Cache` (P11).
     fn system_service(
         &self,
     ) -> inferadb_ledger_state::system::SystemOrganizationService<inferadb_ledger_store::FileBackend>
     {
-        inferadb_ledger_state::system::SystemOrganizationService::new(self.ctx.state.clone())
+        self.ctx.system_service()
     }
 
     /// Ensures the signing key identified by `kid` is loaded in the JwtEngine cache.

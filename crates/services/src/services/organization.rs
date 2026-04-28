@@ -76,7 +76,7 @@ impl OrganizationService {
         if !residency.requires_residency {
             return Ok(());
         }
-        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc = self.ctx.system_service();
         let nodes = sys_svc.list_nodes().map_err(|e| error_classify::storage_error(&e))?;
         let in_region_count = nodes.iter().filter(|n| n.region == region).count();
         if in_region_count >= 3 {
@@ -396,7 +396,7 @@ impl OrganizationService {
             registry.as_ref().map(|r| crate::proto_compat::datetime_to_proto(&r.created_at));
 
         let members = org.as_ref().map_or(vec![], |o| {
-            let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+            let sys_svc = self.ctx.system_service();
             o.members.iter().filter_map(|m| Self::member_to_proto(&sys_svc, m)).collect()
         });
         let updated_at =
@@ -486,7 +486,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             )
         })?;
         let admin_user_slug = inferadb_ledger_types::UserSlug::new(admin_slug_proto.slug);
-        let sys_svc_admin = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc_admin = self.ctx.system_service();
         let admin_user_id = sys_svc_admin
             .get_user_id_by_slug(admin_user_slug)
             .map_err(|e| error_classify::storage_error(&e))?
@@ -607,7 +607,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         if let Some(org_meta) = self.ctx.applied_state.get_organization(organization_id)
             && let Ok(regional_state) = self.ctx.regional_state(org_meta.region)
         {
-            let sys_svc = SystemOrganizationService::new(regional_state);
+            let sys_svc = self.ctx.regional_system_service(regional_state);
             if let Ok(invitations) = sys_svc.list_invitations_by_org(organization_id, None, 1000) {
                 for inv in invitations {
                     if inv.status != inferadb_ledger_types::InvitationStatus::Pending {
@@ -1207,7 +1207,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         let page_size = crate::proto_compat::normalize_page_size(req.page_size);
         let start_after = crate::proto_compat::decode_page_token(&req.page_token);
 
-        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc = self.ctx.system_service();
 
         // Resolve member slugs, then paginate by slug cursor
         let members_with_slugs: Vec<_> = profile
@@ -1444,7 +1444,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
                 ctx.set_success();
 
                 // Re-read profile after Raft apply for fresh data
-                let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+                let sys_svc = self.ctx.system_service();
                 let member = self.read_organization(organization_id).and_then(|p| {
                     p.members
                         .iter()
@@ -1510,7 +1510,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         let page_size = crate::proto_compat::normalize_page_size(inner.page_size);
         let start_after = crate::proto_compat::decode_page_token(&inner.page_token);
 
-        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc = self.ctx.system_service();
 
         let teams_with_slugs: Vec<_> = teams
             .iter()
@@ -1573,7 +1573,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
             return Err(Status::not_found("Team not found"));
         }
 
-        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc = self.ctx.system_service();
         let proto_team = Self::team_to_proto(&sys_svc, &team, org_slug);
 
         ctx.set_success();
@@ -1702,7 +1702,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         }
 
         ctx.set_success();
-        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc = self.ctx.system_service();
         let team = self
             .read_team(organization_id, team_id)
             .map(|t| Self::team_to_proto(&sys_svc, &t, org_slug));
@@ -1897,7 +1897,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         match response {
             LedgerResponse::OrganizationUpdated { .. } => {
                 ctx.set_success();
-                let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+                let sys_svc = self.ctx.system_service();
                 let team = self
                     .read_team(organization_id, team_id)
                     .map(|t| Self::team_to_proto(&sys_svc, &t, org_slug));
@@ -1986,7 +1986,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         match response {
             LedgerResponse::OrganizationUpdated { .. } => {
                 ctx.set_success();
-                let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+                let sys_svc = self.ctx.system_service();
                 let team = self
                     .read_team(organization_id, team_id)
                     .map(|t| Self::team_to_proto(&sys_svc, &t, org_slug));
@@ -2142,7 +2142,7 @@ impl proto::organization_service_server::OrganizationService for OrganizationSer
         match response {
             LedgerResponse::OrganizationUpdated { .. } => {
                 ctx.set_success();
-                let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+                let sys_svc = self.ctx.system_service();
                 let team = self
                     .read_team(organization_id, team_id)
                     .map(|t| Self::team_to_proto(&sys_svc, &t, org_slug));

@@ -67,7 +67,10 @@ use inferadb_ledger_consensus::WalBackend as _;
 use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_state::{
     BlockArchive, StateLayer,
-    system::{MIN_NODES_PER_PROTECTED_REGION, SystemOrganizationService},
+    system::{
+        MIN_NODES_PER_PROTECTED_REGION, SigningKeyCache, SystemOrganizationService,
+        new_signing_key_cache,
+    },
 };
 use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::{NodeId, OrganizationId, Region, VaultId};
@@ -2069,6 +2072,16 @@ pub struct RaftManager {
     /// [`RaftManager::start_hibernation_idle_detector`] against
     /// double-spawn races during bootstrap.
     hibernation_detector_started: AtomicBool,
+    /// Process-wide cache for JWT signing keys.
+    ///
+    /// One [`SigningKeyCache`] is allocated per `RaftManager` and shared with
+    /// every [`SystemOrganizationService`] constructed on a hot path
+    /// (`route_organization`, `RegionResolverService::resolve_with_redirect`,
+    /// `ServiceContext`-rooted handlers). Sharing the `Arc` eliminates the
+    /// per-request `moka::Cache` construct/drop cycle that previously
+    /// dominated CPU self-time via `crossbeam_epoch::Global::try_advance` —
+    /// see `docs/superpowers/specs/2026-04-27-reactor-wal-investigation.md`.
+    signing_key_cache: SigningKeyCache,
 }
 
 /// Membership delta to cascade from a data-region group down to its
@@ -2124,7 +2137,20 @@ impl RaftManager {
                 inferadb_ledger_types::config::HibernationConfig::default(),
             ),
             hibernation_detector_started: AtomicBool::new(false),
+            signing_key_cache: new_signing_key_cache(),
         }
+    }
+
+    /// Returns the process-wide signing-key cache shared with every
+    /// hot-path [`SystemOrganizationService`] built off this manager.
+    ///
+    /// Pass the returned `Arc` to
+    /// [`SystemOrganizationService::with_signing_key_cache`] so that the
+    /// constructed service reuses the long-lived cache rather than
+    /// allocating (and immediately dropping) a fresh `moka::Cache`.
+    #[must_use]
+    pub fn signing_key_cache(&self) -> SigningKeyCache {
+        self.signing_key_cache.clone()
     }
 
     /// Returns the last crash-recovery replay stats captured for `region`, if any.
@@ -2854,7 +2880,14 @@ impl RaftManager {
     /// * `organization` - Internal organization identifier (`OrganizationId`).
     pub fn get_organization_region(&self, organization: OrganizationId) -> Option<Region> {
         let system = self.system_region().ok()?;
-        let sys = SystemOrganizationService::new(system.state().clone());
+        // Reuse the process-wide signing-key cache to avoid the per-request
+        // `moka::Cache` construct/drop cycle that dominated CPU self-time
+        // before the cache was lifted out (P11 — see
+        // `docs/superpowers/specs/2026-04-27-reactor-wal-investigation.md`).
+        let sys = SystemOrganizationService::with_signing_key_cache(
+            system.state().clone(),
+            self.signing_key_cache.clone(),
+        );
         let registry = sys.get_organization(organization).ok().flatten()?;
         Some(registry.region)
     }

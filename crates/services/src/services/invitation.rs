@@ -23,7 +23,7 @@ use inferadb_ledger_raft::{
 };
 use inferadb_ledger_state::system::{
     Organization, OrganizationMemberRole as DomainMemberRole, OrganizationProfile, SYSTEM_VAULT_ID,
-    SystemKeys, SystemOrganizationService,
+    SystemKeys,
 };
 use inferadb_ledger_types::{
     EmailBlindingKey, InvitationStatus as DomainInvitationStatus, InviteEmailEntry, InviteId,
@@ -134,7 +134,7 @@ impl InvitationService {
 
     /// Looks up the organization's current region from the GLOBAL registry.
     fn org_region(&self, org_id: OrganizationId) -> Result<inferadb_ledger_types::Region, Status> {
-        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc = self.ctx.system_service();
         let registry = sys_svc
             .get_organization(org_id)
             .map_err(|e| error_classify::storage_error(&e))?
@@ -217,7 +217,7 @@ impl InvitationService {
         user_id: UserId,
         blinding_key: &EmailBlindingKey,
     ) -> Result<Vec<String>, Status> {
-        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc = self.ctx.system_service();
         let emails =
             sys_svc.get_user_emails(user_id).map_err(|e| error_classify::storage_error(&e))?;
         Ok(emails
@@ -579,7 +579,7 @@ impl proto::invitation_service_server::InvitationService for InvitationService {
         let invitee_email_hmac = compute_email_hmac(blinding_key, email);
 
         // 8. Existing member check with timing equalization
-        let sys_svc = SystemOrganizationService::new(self.ctx.state.clone());
+        let sys_svc = self.ctx.system_service();
         let email_hash_entry = sys_svc
             .get_email_hash(&invitee_email_hmac)
             .map_err(|e| error_classify::storage_error(&e))?;

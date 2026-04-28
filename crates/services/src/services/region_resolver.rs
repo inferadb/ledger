@@ -501,8 +501,12 @@ impl RegionResolver for RegionResolverService {
             .manager
             .system_region()
             .map_err(|e| Status::unavailable(format!("System region not available: {}", e)))?;
-        let sys = inferadb_ledger_state::system::SystemOrganizationService::new(
+        // Reuse the process-wide signing-key cache to avoid the per-request
+        // `moka::Cache` construct/drop cycle (P11 — see
+        // `docs/superpowers/specs/2026-04-27-reactor-wal-investigation.md`).
+        let sys = inferadb_ledger_state::system::SystemOrganizationService::with_signing_key_cache(
             system_state.state().clone(),
+            self.manager.signing_key_cache(),
         );
 
         let registry = sys

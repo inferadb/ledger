@@ -438,6 +438,7 @@ impl LedgerServer {
             key_manager: self.token_service.as_ref().map(|ts| ts.key_manager.clone()),
             manager: Some(self.manager.clone()),
             saga_handle: self.saga_handle.clone(),
+            signing_key_cache: self.manager.signing_key_cache(),
         };
 
         let organization_service = OrganizationService::new(svc_ctx.clone());
