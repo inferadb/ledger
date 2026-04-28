@@ -76,7 +76,9 @@
 
 use std::{
     collections::BTreeSet,
+    future::Future,
     sync::{Arc, Weak},
+    time::Duration,
 };
 
 use inferadb_ledger_consensus::types::NodeId as ConsensusNodeId;
@@ -388,6 +390,14 @@ pub struct MembershipDispatcher {
     /// construction so the run loop does not have to re-borrow the
     /// [`InnerGroup::membership_queue`] field on every iteration.
     queue: Arc<MembershipQueue>,
+    /// Per-vault conf-change timeout (Phase 5 / M5). Captured from
+    /// [`crate::raft_manager::RaftManagerConfig::vault_conf_change_timeout_secs`]
+    /// at spawn time. Each
+    /// [`apply_cascade_action_for_vault`] call is wrapped in a
+    /// [`tokio::time::timeout`] of this duration; on elapsed, the
+    /// dispatcher logs a WARN, increments
+    /// `ledger_vault_conf_change_stalled_total`, and drops the entry.
+    conf_change_timeout: Duration,
 }
 
 impl MembershipDispatcher {
@@ -398,12 +408,20 @@ impl MembershipDispatcher {
     /// [`MembershipQueue`] (i.e. it is a control-plane group at
     /// `OrganizationId(0)`); the caller should skip spawning in that
     /// case.
+    ///
+    /// `conf_change_timeout` is the per-vault conf-change timeout (M5).
+    /// Production callers thread this through from
+    /// [`crate::raft_manager::RaftManagerConfig::vault_conf_change_timeout_secs`].
     #[must_use]
-    pub fn new(manager: Weak<RaftManager>, org_group: Arc<InnerGroup>) -> Option<Self> {
+    pub fn new(
+        manager: Weak<RaftManager>,
+        org_group: Arc<InnerGroup>,
+        conf_change_timeout: Duration,
+    ) -> Option<Self> {
         let queue = Arc::clone(org_group.membership_queue()?);
         let region = org_group.region();
         let organization_id = org_group.organization_id();
-        Some(Self { manager, region, organization_id, queue })
+        Some(Self { manager, region, organization_id, queue, conf_change_timeout })
     }
 
     /// Main loop. Drains entries one at a time. Exits when the queue
@@ -519,7 +537,7 @@ impl MembershipDispatcher {
             "MembershipDispatcher: applying cascade",
         );
 
-        apply_cascade_action_for_vault(
+        let cascade_fut = apply_cascade_action_for_vault(
             action,
             &manager,
             vault_group.handle(),
@@ -528,7 +546,287 @@ impl MembershipDispatcher {
             self.region,
             self.organization_id,
             vault_id,
+        );
+
+        run_conf_change_with_timeout(
+            self.region,
+            self.organization_id,
+            vault_id,
+            node_id,
+            action,
+            self.conf_change_timeout,
+            cascade_fut,
         )
         .await;
+    }
+}
+
+/// Runs a per-vault conf-change future under a fixed timeout (Phase 5 /
+/// M5).
+///
+/// This is the testable inner kernel of
+/// [`MembershipDispatcher::dispatch`]. On `tokio::time::timeout`
+/// elapsed, it emits an operator-visible WARN log, increments
+/// `ledger_vault_conf_change_stalled_total{reason="timeout"}`, and
+/// returns — the caller drops the request and continues to the next
+/// queue entry (the watcher's next region-state delta will re-derive
+/// any change the dropped entry failed to propagate, so we do not
+/// re-enqueue).
+///
+/// Factored out so unit tests can drive the timeout path with a
+/// synthetic future (`tokio::time::pause()` + a hung future) without
+/// constructing a real [`RaftManager`] + vault group.
+pub(crate) async fn run_conf_change_with_timeout<F>(
+    region: Region,
+    organization_id: OrganizationId,
+    vault_id: VaultId,
+    node_id: u64,
+    action: CascadeMembershipAction,
+    timeout: Duration,
+    fut: F,
+) where
+    F: Future<Output = ()>,
+{
+    match tokio::time::timeout(timeout, fut).await {
+        Ok(()) => {},
+        Err(_elapsed) => {
+            warn!(
+                region = %region.as_str(),
+                organization_id = organization_id.value(),
+                vault_id = vault_id.value(),
+                node_id,
+                action = ?action,
+                timeout_secs = timeout.as_secs(),
+                "Vault conf-change stalled — DR state may be inconsistent",
+            );
+
+            let action_label = match action {
+                CascadeMembershipAction::AddLearner => "AddLearner",
+                CascadeMembershipAction::PromoteVoter => "PromoteVoter",
+                CascadeMembershipAction::Remove => "Remove",
+            };
+            let organization_label = organization_id.value().to_string();
+            let vault_label = vault_id.value().to_string();
+            crate::metrics::record_vault_conf_change_stalled(
+                region.as_str(),
+                &organization_label,
+                &vault_label,
+                action_label,
+                "timeout",
+            );
+        },
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    use tracing_subscriber::layer::SubscriberExt;
+
+    use super::*;
+
+    /// Tracing layer that counts WARN events whose message starts with
+    /// `"Vault conf-change stalled"`. We assert on the count rather than
+    /// the formatted body so the assertion does not couple to the tracing
+    /// formatter's exact rendering.
+    struct StallWarnCounter {
+        count: Arc<AtomicUsize>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for StallWarnCounter {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() != tracing::Level::WARN {
+                return;
+            }
+            // Capture the message via a visitor — the WARN log uses the
+            // message pattern `"Vault conf-change stalled — ..."`.
+            struct Visitor<'a> {
+                target: &'a str,
+                hit: bool,
+            }
+            impl tracing::field::Visit for Visitor<'_> {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        let rendered = format!("{value:?}");
+                        if rendered.contains(self.target) {
+                            self.hit = true;
+                        }
+                    }
+                }
+            }
+            let mut visitor = Visitor { target: "Vault conf-change stalled", hit: false };
+            event.record(&mut visitor);
+            if visitor.hit {
+                self.count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// On timeout the helper must:
+    ///  1. Return promptly once the timer elapses (we drive simulated time forward — `start_paused
+    ///     = true` makes the assertion wall-clock-instant).
+    ///  2. Emit the WARN log with the stall message.
+    ///  3. Increment `ledger_vault_conf_change_stalled_total{reason="timeout"}`.
+    #[test]
+    fn run_conf_change_with_timeout_fires_on_hung_future() {
+        let warn_count = Arc::new(AtomicUsize::new(0));
+        let layer = StallWarnCounter { count: Arc::clone(&warn_count) };
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        // Build a current-thread runtime with paused time. The helper
+        // reads `tokio::time::Instant::now()` inside `tokio::time::timeout`,
+        // and `start_paused` auto-advances simulated time when no task
+        // is runnable — so a `pending()` future immediately advances
+        // past the configured timeout without sleeping wall-clock.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .unwrap();
+
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                // Simulated future that never completes — the
+                // dispatcher's real-world failure mode is a vault
+                // group whose conf-change RPC hangs forever.
+                let hung = std::future::pending::<()>();
+
+                // 60s configured timeout — the production default.
+                let timeout = Duration::from_secs(60);
+
+                run_conf_change_with_timeout(
+                    Region::new("test"),
+                    OrganizationId::new(7),
+                    VaultId::new(123),
+                    42,
+                    CascadeMembershipAction::AddLearner,
+                    timeout,
+                    hung,
+                )
+                .await;
+            });
+        });
+
+        // 1. Timeout fired — the helper returned. Reaching this line is the assertion. With paused
+        //    time, hanging would cause cargo test's per-test timeout to trip.
+
+        // 2. WARN log was emitted exactly once.
+        assert_eq!(
+            warn_count.load(Ordering::SeqCst),
+            1,
+            "expected exactly one stall WARN, got {}",
+            warn_count.load(Ordering::SeqCst),
+        );
+
+        // 3. Counter incremented exactly once with the correct labels.
+        let snapshot = snapshotter.snapshot();
+        let mut found = None;
+        for (ck, _, _, value) in snapshot.into_vec() {
+            if ck.key().name() == "ledger_vault_conf_change_stalled_total" {
+                let labels: Vec<(String, String)> = ck
+                    .key()
+                    .labels()
+                    .map(|l| (l.key().to_string(), l.value().to_string()))
+                    .collect();
+                found = Some((value, labels));
+                break;
+            }
+        }
+        let (value, labels) = found.expect(
+            "ledger_vault_conf_change_stalled_total counter must be recorded on \
+             timeout",
+        );
+        match value {
+            DebugValue::Counter(n) => {
+                assert_eq!(n, 1, "expected counter increment of exactly 1, got {n}");
+            },
+            other => {
+                panic!("ledger_vault_conf_change_stalled_total should be a Counter, got {other:?}",)
+            },
+        }
+        // Labels mirror the operator alert query — the dashboard
+        // splits by every dimension, so all five must be present.
+        let label_pairs: Vec<(&str, &str)> =
+            labels.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        assert!(label_pairs.contains(&("region", "test")), "labels missing region: {labels:?}");
+        assert!(
+            label_pairs.contains(&("organization_id", "7")),
+            "labels missing organization_id: {labels:?}",
+        );
+        assert!(label_pairs.contains(&("vault_id", "123")), "labels missing vault_id: {labels:?}",);
+        assert!(
+            label_pairs.contains(&("action", "AddLearner")),
+            "labels missing action: {labels:?}",
+        );
+        assert!(label_pairs.contains(&("reason", "timeout")), "labels missing reason: {labels:?}",);
+    }
+
+    /// On a future that completes inside the timeout window the helper
+    /// must return without logging or incrementing the stall counter —
+    /// healthy lifecycle ops must not produce spurious operator
+    /// alerts.
+    #[test]
+    fn run_conf_change_with_timeout_no_op_on_fast_completion() {
+        let warn_count = Arc::new(AtomicUsize::new(0));
+        let layer = StallWarnCounter { count: Arc::clone(&warn_count) };
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .unwrap();
+
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                run_conf_change_with_timeout(
+                    Region::new("test"),
+                    OrganizationId::new(7),
+                    VaultId::new(123),
+                    42,
+                    CascadeMembershipAction::PromoteVoter,
+                    Duration::from_secs(60),
+                    async {}, // completes immediately
+                )
+                .await;
+            });
+        });
+
+        assert_eq!(
+            warn_count.load(Ordering::SeqCst),
+            0,
+            "fast completion must not emit a stall WARN",
+        );
+
+        let snapshot = snapshotter.snapshot();
+        for (ck, ..) in snapshot.into_vec() {
+            assert_ne!(
+                ck.key().name(),
+                "ledger_vault_conf_change_stalled_total",
+                "fast completion must not increment the stall counter",
+            );
+        }
     }
 }

@@ -292,6 +292,29 @@ pub struct RaftManagerConfig {
     /// [`crate::log_storage::DEFAULT_MAX_CONCURRENT_REPLAY`].
     #[builder(default = crate::log_storage::DEFAULT_MAX_CONCURRENT_REPLAY)]
     pub parallel_wal_replay_max_concurrent: usize,
+
+    /// Per-vault conf-change timeout in seconds (Phase 5 / M5 of the
+    /// centralised membership plan).
+    ///
+    /// Each entry the
+    /// [`MembershipDispatcher`](crate::region_membership_watcher::MembershipDispatcher)
+    /// pops off the per-org [`MembershipQueue`](crate::membership_queue::MembershipQueue)
+    /// is wrapped in a [`tokio::time::timeout`] of this duration. If the
+    /// per-vault `apply_cascade_action_for_vault` call has not completed
+    /// when the timer fires, the dispatcher logs a WARN with full
+    /// context, increments
+    /// `ledger_vault_conf_change_stalled_total`, and drops the request.
+    /// The cascade is best-effort — the next region-state delta the
+    /// [`RegionMembershipWatcher`](crate::region_membership_watcher::RegionMembershipWatcher)
+    /// observes will re-derive any membership change the dropped entry
+    /// failed to propagate.
+    ///
+    /// Default `60` — long enough that healthy Raft proposals never
+    /// trip it. Operators on unusually-slow networks can raise it; the
+    /// trade-off is a longer dispatcher stall on a truly broken vault
+    /// before the queue advances.
+    #[builder(default = 60)]
+    pub vault_conf_change_timeout_secs: u64,
 }
 
 impl RaftManagerConfig {
@@ -2619,6 +2642,7 @@ impl RaftManager {
                     crate::region_membership_watcher::MembershipDispatcher::new(
                         manager_weak,
                         Arc::clone(&org_inner),
+                        std::time::Duration::from_secs(self.config.vault_conf_change_timeout_secs),
                     )
                 {
                     tokio::spawn(dispatcher.run(dispatcher_cancel));

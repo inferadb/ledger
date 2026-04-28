@@ -724,6 +724,74 @@ pub fn record_org_purge_failure(tier: &str, exhausted: bool) {
     );
 }
 
+// ─── Vault Membership Cascade (Phase 5 / M5) ──────────────────
+
+/// Vault conf-change stalled counter (Phase 5 / M5).
+///
+/// Incremented every time the
+/// [`MembershipDispatcher`](crate::region_membership_watcher::MembershipDispatcher)
+/// fires a per-vault conf-change and the call does not complete inside
+/// the configured timeout (default 60s, tunable via
+/// [`RaftManagerConfig::vault_conf_change_timeout_secs`](crate::raft_manager::RaftManagerConfig)).
+/// A non-zero value means the vault's Raft proposal pipeline is
+/// stalled — the cascade has been dropped to keep the dispatcher
+/// moving, and DR replica state may be inconsistent until the next
+/// region-state delta re-derives the change.
+///
+/// Labels:
+/// * `region` — region name (e.g. `"us-west"`).
+/// * `organization_id` — internal organization id (stringified `i64`).
+/// * `vault_id` — internal vault id (stringified `i64`).
+/// * `action` — `"AddLearner"` | `"PromoteVoter"` | `"Remove"`.
+/// * `reason` — currently always `"timeout"`. Reserved label for future stall causes (e.g.
+///   `"transport_error"`).
+const VAULT_CONF_CHANGE_STALLED_TOTAL: &str = "ledger_vault_conf_change_stalled_total";
+
+/// Records a stalled per-vault membership conf-change.
+///
+/// Called from
+/// [`MembershipDispatcher`](crate::region_membership_watcher::MembershipDispatcher)
+/// after the per-vault conf-change RPC exceeds the configured
+/// timeout.
+///
+/// Labels:
+/// * `region` — region name (e.g. `"us-west"`).
+/// * `organization_id` — internal organization id (stringified `i64`).
+/// * `vault_id` — internal vault id (stringified `i64`).
+/// * `action` — `"AddLearner"` | `"PromoteVoter"` | `"Remove"`.
+/// * `reason` — currently always `"timeout"`. Reserved for future stall causes.
+///
+/// `ledger_vault_conf_change_stalled_total{region, organization_id, vault_id, action, reason}`.
+pub fn record_vault_conf_change_stalled(
+    region: &str,
+    organization_id: &str,
+    vault_id: &str,
+    action: &str,
+    reason: &str,
+) {
+    gated!(
+        VAULT_CONF_CHANGE_STALLED_TOTAL,
+        &[
+            (fields::REGION, region),
+            (fields::ORGANIZATION_ID, organization_id),
+            (fields::VAULT_ID, vault_id),
+            (fields::ACTION, action),
+            (fields::REASON, reason),
+        ],
+        {
+            counter!(
+                VAULT_CONF_CHANGE_STALLED_TOTAL,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+                fields::VAULT_ID => vault_id.to_string(),
+                fields::ACTION => action.to_string(),
+                fields::REASON => reason.to_string()
+            )
+            .increment(1);
+        }
+    );
+}
+
 // ─── Proof Generation ─────────────────────────────────────────
 
 /// Block proof generation failure counter.
