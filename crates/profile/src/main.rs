@@ -137,6 +137,32 @@ struct ConcurrentWritesMultivaultArgs {
     /// Number of vaults to fan writes across. Provisioned at bootstrap.
     #[arg(long, default_value_t = 16)]
     vaults: usize,
+
+    /// When set, every concurrent task reuses the harness's bootstrap
+    /// `LedgerClient` (cloned). The `LedgerClient` wraps a single tonic
+    /// `Channel`, so a shared client funnels every request through one
+    /// TCP/HTTP-2 connection — the production-realistic shape for a
+    /// service that reuses one SDK instance. When unset (default), each
+    /// task constructs its own `LedgerClient` via `connect_task_client`,
+    /// which produces one TCP/HTTP-2 connection per task.
+    ///
+    /// Used to diagnose the per-`client_id` contention ceiling: the
+    /// asymmetry between shared and per-task at the same total request
+    /// rate isolates connection-pinned bottlenecks (h2 frame dispatch,
+    /// tower `concurrency_limit`, etc.) from per-`client_id` server
+    /// state.
+    #[arg(long)]
+    shared_client: bool,
+
+    /// Override `ClientConfig::connection_pool_size` for every
+    /// `LedgerClient` created by the workload — applies to the shared
+    /// client (when `--shared-client` is set) and to per-task clients
+    /// otherwise. Default `0` falls back to the SDK default of `1`,
+    /// preserving the original single-channel behavior. Higher values
+    /// let one client drive multiple parallel tonic `Buffer` workers,
+    /// trading TCP/HTTP-2 footprint for dispatch parallelism.
+    #[arg(long, default_value_t = 0)]
+    pool_size: u8,
 }
 
 /// Args for the `concurrent-writes-multiorg` preset — base preset args
@@ -218,8 +244,15 @@ async fn main() -> Result<(), MainError> {
                 concurrency = a.concurrency,
                 "concurrent-writes-multivault: provisioned vaults"
             );
-            workloads::concurrent_writes_multivault::run(&harness, duration, a.concurrency, vaults)
-                .await
+            workloads::concurrent_writes_multivault::run(
+                &harness,
+                duration,
+                a.concurrency,
+                vaults,
+                a.shared_client,
+                a.pool_size,
+            )
+            .await
         },
         Preset::ConcurrentWritesMultiorg(a) => {
             let mut targets = harness
@@ -357,6 +390,8 @@ mod tests {
                 assert_eq!(a.base.duration, 30);
                 assert_eq!(a.concurrency, 64);
                 assert_eq!(a.vaults, 8);
+                assert!(!a.shared_client);
+                assert_eq!(a.pool_size, 0);
             },
             other => panic!("expected ConcurrentWritesMultivault, got {other:?}"),
         }
@@ -375,6 +410,8 @@ mod tests {
             Preset::ConcurrentWritesMultivault(a) => {
                 assert_eq!(a.concurrency, 32);
                 assert_eq!(a.vaults, 16);
+                assert!(!a.shared_client);
+                assert_eq!(a.pool_size, 0);
             },
             other => panic!("expected ConcurrentWritesMultivault, got {other:?}"),
         }

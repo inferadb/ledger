@@ -183,6 +183,15 @@ impl StorageBackend for FileBackend {
         Ok(())
     }
 
+    fn evict_page_cache(&self) -> Result<()> {
+        // Best-effort hint to the kernel. Safe to call concurrently with
+        // reads — `posix_fadvise(POSIX_FADV_DONTNEED)` does not invalidate
+        // an in-flight `pread`, it only marks pages as eligible for
+        // reclamation. No lock needed.
+        inferadb_ledger_fs_sync::evict_page_cache(&self.file)?;
+        Ok(())
+    }
+
     fn file_size(&self) -> Result<u64> {
         // metadata() takes &self — no lock needed.
         Ok(self.file.metadata()?.len())

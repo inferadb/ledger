@@ -2585,4 +2585,53 @@ mod tests {
             "retry sync_state must flush dirty pages once the fault clears"
         );
     }
+
+    /// `Database::evict_page_cache` is best-effort and must round-trip:
+    /// write → evict → read should still observe the data on every
+    /// supported platform (the OS re-populates the page cache lazily on the
+    /// next read; on Apple/Windows the call is a no-op so the cache is
+    /// untouched). Calling twice in a row is a no-op success (idempotent).
+    #[test]
+    fn test_evict_page_cache_roundtrips_and_is_idempotent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("evict.ink");
+
+        let db = Database::<FileBackend>::create(&db_path).unwrap();
+
+        // Seed a few rows so the file has actual on-disk pages to evict.
+        for i in 0..32u64 {
+            let mut txn = db.write().unwrap();
+            txn.insert::<tables::RaftLog>(&(i + 1), &vec![i as u8; 64]).unwrap();
+            txn.commit().unwrap();
+        }
+
+        // First eviction. Best-effort: must succeed on every platform —
+        // Linux drops cached pages via posix_fadvise, Apple/Windows return
+        // Ok without touching the cache.
+        db.evict_page_cache().expect("evict_page_cache must succeed");
+
+        // Second eviction is idempotent.
+        db.evict_page_cache().expect("evict_page_cache must be idempotent");
+
+        // Reads still observe seeded data after eviction. On Linux the
+        // first read here goes through a cold OS page cache; on macOS the
+        // call was a no-op so this re-reads from the warm cache. Both
+        // paths must yield the same data.
+        let txn = db.read().unwrap();
+        for i in 0..32u64 {
+            let v = txn.get::<tables::RaftLog>(&(i + 1)).unwrap();
+            assert_eq!(v, Some(vec![i as u8; 64]), "row {i} corrupted by evict_page_cache");
+        }
+    }
+
+    /// `Database::evict_page_cache` on the in-memory backend is a successful
+    /// no-op (the in-memory backend has no concept of an OS page cache).
+    /// Useful guard so unit-test fixtures that call evict regardless of
+    /// backend stay green.
+    #[test]
+    fn test_evict_page_cache_in_memory_is_noop() {
+        let db = Database::<InMemoryBackend>::open_in_memory().unwrap();
+        db.evict_page_cache().expect("in-memory evict must succeed");
+        db.evict_page_cache().expect("in-memory evict must be idempotent");
+    }
 }

@@ -21,6 +21,7 @@ These files are load-bearing — their invariants ripple beyond the local file. 
 ## Owned Surface
 
 - **`StorageEngine<B>`, `StateLayer<B>`** — generic over `StorageBackend`. `StateLayer` exposes two apply entrypoints: `apply_operations` (strict-durable; for admin / recovery callers that must return with on-disk durability — `AdminService::recover_vault`, `check_integrity`, `ReadService` historical replay, `AutoRecoveryJob`) and `apply_operations_lazy` (lazy via `commit_in_memory`; for every IN-APPLY-PIPELINE admin arm reachable from `apply_request_with_events`).
+- **`StateLayer::evict_vault_state_page_cache(vault_id)`** — best-effort OS-page-cache eviction for the per-vault `state.db` (O6 vault hibernation Pass 2). Called only by the raft layer's hibernation path (`RaftManager::sleep_vault`); errors with `StateError::VaultNotMaterialized` if the caller asks to evict a vault this layer has never opened. Idempotent on materialised vaults; no-op success on platforms without `posix_fadvise` (Apple, Windows). Per-vault `raft.db` / `blocks.db` / `events.db` eviction goes directly through `Database::evict_page_cache` on the handles owned by `InnerVaultGroup` — `StateLayer` only owns state.db.
 - **`SystemKeys::*`** key builders, `KEY_REGISTRY`, `KeyTier` (`Global` / `Regional`), `KeyFamily` (`Entity`, `Directory`, `Index`, `Meta`, `Sequence`, `Shred`, `Temporary`, `Audit`).
 - **Stores**: `EntityStore`, `RelationshipStore`, `RelationshipIndex`, `BlockArchive`.
 - **`ShardManager`** — org-to-shard routing; not persisted, rebuilt from GLOBAL state on start.

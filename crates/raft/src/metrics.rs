@@ -1470,6 +1470,35 @@ const ORG_ACTIVE_VAULT_COUNT: &str = "org_active_vault_count";
 /// registered ahead of time so dashboards do not break when O1 ships.
 const VAULT_HIBERNATION_TRANSITIONS_TOTAL: &str = "vault_hibernation_transitions_total";
 
+/// Vault hibernation: number of completed sleeps (active → dormant) that
+/// drove the page-cache eviction path. Always-on rollup, labelled by
+/// `region`, `organization_id`. Counts vaults sent to sleep, not page-cache
+/// eviction calls — eviction is best-effort and may be a no-op on
+/// platforms without `posix_fadvise`.
+const VAULT_HIBERNATION_EVICTED_TOTAL: &str = "vault_hibernation_evicted_total";
+
+/// Vault hibernation: number of completed wakes (dormant → active) issued
+/// by [`crate::raft_manager::RaftManager::wake_vault`]. Always-on rollup,
+/// labelled by `region`, `organization_id`.
+const VAULT_HIBERNATION_WOKEN_TOTAL: &str = "vault_hibernation_woken_total";
+
+/// Vault hibernation: histogram of wake-side latency in seconds. Measured
+/// from `wake_vault` entry to return; covers `engine.resume_shard` round-
+/// trip plus the lifecycle transition. Bucketed via [`SLI_HISTOGRAM_BUCKETS`]
+/// (p99 budget: < 100ms). Always-on rollup, labelled by `region`,
+/// `organization_id`.
+const VAULT_HIBERNATION_WAKE_DURATION_SECONDS: &str = "vault_hibernation_wake_duration_seconds";
+
+/// Vault hibernation: counter of paused-shard peer messages whose
+/// `ConsensusStateId` had no entry in [`crate::raft_manager::RaftManager`]'s
+/// `vault_shard_index` reverse map. Always-on rollup with no labels —
+/// the per-shard label would explode cardinality, and the counter's
+/// purpose is "is the notifier ever firing without a registered vault?"
+/// not "which shard". A non-zero value means a peer is replicating to a
+/// shard that was unregistered between `start_vault_group` and the wake
+/// event landing.
+const VAULT_HIBERNATION_WAKE_UNMATCHED_TOTAL: &str = "vault_hibernation_wake_unmatched_total";
+
 /// Returns the `vault_id` label value to emit for the given vault, taking
 /// the global per-vault gate into account.
 #[cfg(test)]
@@ -1670,6 +1699,68 @@ pub fn record_vault_hibernation_transition(region: &str, organization_id: &str, 
             .increment(1);
         }
     );
+}
+
+/// Records a completed sleep (active → dormant) that drove the page-cache
+/// eviction path. Always-on rollup labelled by `region`, `organization_id`.
+/// Use [`record_vault_hibernation_transition`] for the broader Active ↔
+/// Dormant ↔ Stalled transitions; this counter is specifically the
+/// observability surface for the O6 Pass 2 sleep_vault path.
+#[inline]
+pub fn record_vault_hibernation_evicted(region: &str, organization_id: &str) {
+    gated!(
+        VAULT_HIBERNATION_EVICTED_TOTAL,
+        &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id)],
+        {
+            counter!(
+                VAULT_HIBERNATION_EVICTED_TOTAL,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+            )
+            .increment(1);
+        }
+    );
+}
+
+/// Records a completed wake (dormant → active) issued by
+/// [`crate::raft_manager::RaftManager::wake_vault`] together with its
+/// observed latency in seconds. The histogram uses [`SLI_HISTOGRAM_BUCKETS`]
+/// so dashboards share buckets with the rest of the SLO surface.
+#[inline]
+pub fn record_vault_hibernation_woken(region: &str, organization_id: &str, latency_secs: f64) {
+    gated!(
+        VAULT_HIBERNATION_WOKEN_TOTAL,
+        &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id)],
+        {
+            counter!(
+                VAULT_HIBERNATION_WOKEN_TOTAL,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+            )
+            .increment(1);
+            histogram!(
+                VAULT_HIBERNATION_WAKE_DURATION_SECONDS,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+            )
+            .record(latency_secs);
+        }
+    );
+}
+
+/// Records a paused-shard peer-message wake whose `ConsensusStateId` was
+/// not present in
+/// [`crate::raft_manager::RaftManager`]'s `vault_shard_index`. No labels —
+/// the metric's purpose is "is this happening?" not "which shard". The
+/// `_shard_id` is taken so the call site can pass the value verbatim
+/// without separate logging plumbing.
+#[inline]
+pub fn record_vault_hibernation_wake_unmatched(
+    _shard_id: inferadb_ledger_consensus::types::ConsensusStateId,
+) {
+    gated!(VAULT_HIBERNATION_WAKE_UNMATCHED_TOTAL, &[], {
+        counter!(VAULT_HIBERNATION_WAKE_UNMATCHED_TOTAL).increment(1);
+    });
 }
 
 /// SLI-aligned histogram bucket boundaries (in seconds).

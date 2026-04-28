@@ -262,6 +262,14 @@ pub async fn bootstrap_node(
     let registry = Arc::new(inferadb_ledger_raft::node_registry::NodeConnectionRegistry::new());
     let manager = Arc::new(RaftManager::new(raft_manager_config, registry));
 
+    // Install the self-Weak so per-org `ConsensusEngine`s built from
+    // `start_with_wake_notifier` can route paused-shard peer-message
+    // events through `RaftManagerWakeNotifier` into `RaftManager::wake_vault`
+    // (O6 hibernation Pass 2). MUST run before the first `start_region`
+    // call below; the notifier is built at engine construction time and
+    // captures a clone of the same `Arc<Mutex<Weak<RaftManager>>>` cell.
+    manager.install_self_weak();
+
     // Link per-region background jobs to the shutdown coordinator so they
     // are cancelled when the coordinator's root token is cancelled.
     manager.set_cancellation_token(coordinator.child_token("raft-manager-regions"));

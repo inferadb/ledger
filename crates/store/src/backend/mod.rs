@@ -120,6 +120,28 @@ pub trait StorageBackend: Send + Sync {
     /// Returns `Error::Io` if the sync fails.
     fn sync(&self) -> Result<()>;
 
+    /// Hints to the OS that this backend's cached pages may be dropped from
+    /// the page cache.
+    ///
+    /// Best-effort: backends that have no notion of an OS page cache (e.g.,
+    /// the in-memory backend) return `Ok(())`. The default implementation is
+    /// a no-op. The file-backed implementation calls
+    /// [`inferadb_ledger_fs_sync::evict_page_cache`] on the underlying file
+    /// descriptor — `posix_fadvise(POSIX_FADV_DONTNEED)` on Linux, no-op
+    /// success on Apple / Windows.
+    ///
+    /// Idempotent. Used by the O6 vault-hibernation path
+    /// (`Database::evict_page_cache`) to release per-vault DB memory pressure
+    /// when a vault transitions to `Dormant`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Io` if the underlying syscall fails on a platform
+    /// where eviction is supported.
+    fn evict_page_cache(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Returns the current file size in bytes.
     ///
     /// # Errors

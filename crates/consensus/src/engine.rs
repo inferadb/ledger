@@ -38,10 +38,11 @@ use crate::{
     error::ConsensusError,
     leadership::ShardState,
     message::Message,
-    reactor::{Reactor, ReactorEvent},
+    reactor::{PauseMap, Reactor, ReactorEvent},
     rng::RngSource,
     transport::NetworkTransport,
     types::*,
+    wake::{NoopShardWakeNotifier, ShardWakeNotifier},
     wal_backend::WalBackend,
 };
 
@@ -69,6 +70,13 @@ pub struct ConsensusEngine {
     /// function before touching the idempotency cache or the reactor. A
     /// returned `Err(reason)` rejects the proposal immediately.
     validator: Option<Arc<ValidatorFn>>,
+    /// Shared map of paused shard IDs (O6 hibernation primitive).
+    ///
+    /// Shared with [`Reactor`] via [`Arc`] so
+    /// [`Self::is_shard_paused`] is a lock-free read. Mutations always
+    /// flow through the reactor's control inbox so we get an existence
+    /// check on the target shard before flipping the flag.
+    pause_state: Arc<PauseMap>,
 }
 
 impl ConsensusEngine {
@@ -103,6 +111,48 @@ impl ConsensusEngine {
         W: WalBackend + Send + 'static,
         T: NetworkTransport,
     {
+        Self::start_with_wake_notifier(
+            shards,
+            wal,
+            clock,
+            transport,
+            flush_interval,
+            Arc::new(NoopShardWakeNotifier),
+        )
+    }
+
+    /// Starts the engine with an explicit [`ShardWakeNotifier`] for O6
+    /// hibernation wake-on-peer-message routing.
+    ///
+    /// Identical to [`start`](Self::start) but routes
+    /// [`crate::reactor::ReactorEvent::PeerMessage`] events targeting paused
+    /// shards through `wake_notifier` (default is
+    /// [`NoopShardWakeNotifier`]). The reactor invokes
+    /// [`ShardWakeNotifier::on_peer_message_for_paused_shard`] and DROPS the
+    /// originating message; the peer's next AppendEntries retry lands on
+    /// the awoken shard.
+    ///
+    /// Existing call sites that do not yet wire up O6 hibernation should
+    /// continue to use [`start`](Self::start), which installs a no-op
+    /// notifier.
+    pub fn start_with_wake_notifier<C, R, W, T>(
+        shards: Vec<ConsensusState<C, R>>,
+        wal: W,
+        clock: C,
+        transport: T,
+        flush_interval: Duration,
+        wake_notifier: Arc<dyn ShardWakeNotifier>,
+    ) -> (
+        Self,
+        mpsc::Receiver<CommittedBatch>,
+        HashMap<ConsensusStateId, watch::Receiver<ShardState>>,
+    )
+    where
+        C: Clock + Clone + Send + 'static,
+        R: RngSource + Send + 'static,
+        W: WalBackend + Send + 'static,
+        T: NetworkTransport,
+    {
         // Priority split: control traffic gets a small dedicated channel so
         // membership / snapshot / shutdown events can't be starved by a
         // proposal flood. Proposals get the larger bulk channel with
@@ -111,8 +161,19 @@ impl ConsensusEngine {
         let (proposal_tx, proposal_rx) = mpsc::channel(PROPOSAL_QUEUE_CAPACITY);
         let (commit_tx, commit_rx) = mpsc::channel(10_000);
 
-        let mut reactor =
-            Reactor::new(control_rx, proposal_rx, wal, clock, transport, commit_tx, flush_interval);
+        let pause_state = Arc::new(PauseMap::new());
+
+        let mut reactor = Reactor::with_wake_notifier(
+            control_rx,
+            proposal_rx,
+            wal,
+            clock,
+            transport,
+            commit_tx,
+            flush_interval,
+            Arc::clone(&pause_state),
+            wake_notifier,
+        );
         let mut state_receivers = HashMap::new();
 
         for shard in shards {
@@ -152,6 +213,7 @@ impl ConsensusEngine {
                 reactor_handle,
                 idempotency,
                 validator: None,
+                pause_state,
             },
             commit_rx,
             state_receivers,
@@ -564,6 +626,70 @@ impl ConsensusEngine {
             .map_err(|_| ConsensusError::InboxFull)
     }
 
+    /// Pauses tick processing for a shard (O6 hibernation primitive).
+    ///
+    /// While paused, the reactor:
+    ///   * skips delivery of expired election / heartbeat timers for the shard,
+    ///   * drops outbound [`crate::action::Action::Send`] actions originating from the shard,
+    ///   * drops incoming [`crate::reactor::ReactorEvent::PeerMessage`] events for the shard after
+    ///     invoking the registered [`ShardWakeNotifier`].
+    ///
+    /// Cleanup timers and explicit `RemoveShard` cleanup paths are NOT
+    /// suppressed — pausing does not block decommissioning.
+    ///
+    /// Idempotent: pausing an already-paused shard is a no-op success.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConsensusError::ShardUnavailable`] if the shard is not
+    /// registered with this engine, [`ConsensusError::InboxFull`] if the
+    /// control inbox is full, or [`ConsensusError::ReactorShutdown`] if
+    /// the reactor has shut down before processing the request.
+    pub async fn pause_shard(&self, shard: ConsensusStateId) -> Result<(), ConsensusError> {
+        let (tx, rx) = oneshot::channel();
+        self.control_inbox
+            .send(ReactorEvent::PauseShard { shard, response: tx })
+            .await
+            .map_err(|_| ConsensusError::InboxFull)?;
+        rx.await.map_err(|_| ConsensusError::ReactorShutdown)?
+    }
+
+    /// Resumes tick processing for a paused shard.
+    ///
+    /// Idempotent: resuming an already-active shard is a no-op success.
+    /// Does NOT inject any synthetic timer or peer message — the shard
+    /// re-arms its election / heartbeat timers via normal Raft state-machine
+    /// transitions on the next legitimate event (heartbeat from the parent
+    /// group's leader, application command, etc.). For delegated-leadership
+    /// vault shards a missed election timeout while paused is a no-op
+    /// regardless.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConsensusError::ShardUnavailable`] if the shard is not
+    /// registered with this engine, [`ConsensusError::InboxFull`] if the
+    /// control inbox is full, or [`ConsensusError::ReactorShutdown`] if
+    /// the reactor has shut down before processing the request.
+    pub async fn resume_shard(&self, shard: ConsensusStateId) -> Result<(), ConsensusError> {
+        let (tx, rx) = oneshot::channel();
+        self.control_inbox
+            .send(ReactorEvent::ResumeShard { shard, response: tx })
+            .await
+            .map_err(|_| ConsensusError::InboxFull)?;
+        rx.await.map_err(|_| ConsensusError::ReactorShutdown)?
+    }
+
+    /// Returns `true` if the shard is currently paused.
+    ///
+    /// Lock-free: reads from a shared [`dashmap::DashMap`] without round-tripping
+    /// the reactor. Suitable for hot-path checks (e.g., admission control,
+    /// metrics labels). Returns `false` for unknown shards — callers that
+    /// need the registered/paused/active distinction should use a typed
+    /// query path instead.
+    pub fn is_shard_paused(&self, shard: ConsensusStateId) -> bool {
+        self.pause_state.contains_key(&shard)
+    }
+
     /// Gracefully shuts down the reactor and waits for it to finish.
     pub async fn shutdown(self) {
         let _ = self.control_inbox.send(ReactorEvent::Shutdown).await;
@@ -775,6 +901,71 @@ mod tests {
 
         let result = engine.flush_for_shutdown(std::time::Duration::from_secs(1)).await;
         assert!(result.is_err(), "flush_for_shutdown should fail after shutdown, got {result:?}");
+    }
+
+    /// `pause_shard` then `resume_shard` round-trip; `is_shard_paused` reflects
+    /// state correctly across the transitions.
+    #[tokio::test]
+    async fn pause_resume_round_trip_reflects_state() {
+        let (engine, _commit_rx) = make_engine();
+
+        assert!(!engine.is_shard_paused(ConsensusStateId(1)));
+
+        engine.pause_shard(ConsensusStateId(1)).await.unwrap();
+        assert!(engine.is_shard_paused(ConsensusStateId(1)));
+
+        engine.resume_shard(ConsensusStateId(1)).await.unwrap();
+        assert!(!engine.is_shard_paused(ConsensusStateId(1)));
+
+        engine.shutdown().await;
+    }
+
+    /// Pausing an unknown shard returns `ShardUnavailable`.
+    #[tokio::test]
+    async fn pause_unknown_shard_returns_shard_unavailable() {
+        let (engine, _commit_rx) = make_engine();
+
+        let result = engine.pause_shard(ConsensusStateId(99)).await;
+        assert!(
+            matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })),
+            "expected ShardUnavailable, got {result:?}",
+        );
+        assert!(!engine.is_shard_paused(ConsensusStateId(99)));
+
+        engine.shutdown().await;
+    }
+
+    /// Resuming an unknown shard returns `ShardUnavailable`.
+    #[tokio::test]
+    async fn resume_unknown_shard_returns_shard_unavailable() {
+        let (engine, _commit_rx) = make_engine();
+
+        let result = engine.resume_shard(ConsensusStateId(99)).await;
+        assert!(
+            matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })),
+            "expected ShardUnavailable, got {result:?}",
+        );
+
+        engine.shutdown().await;
+    }
+
+    /// Pausing an already-paused shard is an idempotent success — same for
+    /// resuming an already-active shard.
+    #[tokio::test]
+    async fn pause_resume_are_idempotent() {
+        let (engine, _commit_rx) = make_engine();
+
+        // Two consecutive pauses both return Ok.
+        engine.pause_shard(ConsensusStateId(1)).await.unwrap();
+        engine.pause_shard(ConsensusStateId(1)).await.unwrap();
+        assert!(engine.is_shard_paused(ConsensusStateId(1)));
+
+        // Two consecutive resumes both return Ok.
+        engine.resume_shard(ConsensusStateId(1)).await.unwrap();
+        engine.resume_shard(ConsensusStateId(1)).await.unwrap();
+        assert!(!engine.is_shard_paused(ConsensusStateId(1)));
+
+        engine.shutdown().await;
     }
 
     /// Different data produces a different cache key and reaches the reactor.

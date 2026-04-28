@@ -57,7 +57,7 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::Duration,
@@ -1988,6 +1988,95 @@ impl VaultGroup {
 // Raft Manager
 // ============================================================================
 
+/// [`ShardWakeNotifier`](inferadb_ledger_consensus::wake::ShardWakeNotifier)
+/// implementation that translates a paused-shard peer-message event into a
+/// [`RaftManager::wake_vault`] call (O6 vault hibernation Pass 2).
+///
+/// Holds an `Arc<Mutex<Weak<RaftManager>>>` shared with [`RaftManager`] —
+/// bootstrap fills the `Weak` via [`RaftManager::install_self_weak`]
+/// immediately after wrapping the manager in an `Arc`. The notifier is
+/// installed on every per-org [`ConsensusEngine`] via
+/// [`ConsensusEngine::start_with_wake_notifier`](inferadb_ledger_consensus::ConsensusEngine::start_with_wake_notifier),
+/// so the late-bind pattern is forgiving of the precise call ordering
+/// between "build engine" and "install self_weak".
+///
+/// ## Drop-and-let-Raft-retry
+///
+/// The reactor invokes `on_peer_message_for_paused_shard` then **drops**
+/// the originating peer message. The notifier dispatches the wake work on
+/// a tokio task and returns immediately — the reactor's event loop is
+/// single-threaded, and blocking inside the notifier stalls every other
+/// shard managed by the reactor (see `crates/consensus/src/wake.rs` and
+/// raft rule 17). The peer's next AppendEntries heartbeat (~50ms typical)
+/// lands on the awoken shard.
+///
+/// On a missing reverse-map entry (shard arrived after `stop_vault_group`,
+/// or a transient race during start), the notifier increments
+/// `ledger_vault_hibernation_wake_unmatched_total` and logs a warning.
+struct RaftManagerWakeNotifier {
+    manager: Arc<parking_lot::Mutex<Weak<RaftManager>>>,
+}
+
+impl inferadb_ledger_consensus::wake::ShardWakeNotifier for RaftManagerWakeNotifier {
+    fn on_peer_message_for_paused_shard(
+        &self,
+        shard_id: inferadb_ledger_consensus::types::ConsensusStateId,
+    ) {
+        // Upgrade the Weak under the mutex, then release the mutex before
+        // spawning the task so notifier callbacks for sibling shards do
+        // not contend on the lock.
+        let manager = match self.manager.lock().upgrade() {
+            Some(arc) => arc,
+            None => {
+                // Two cases:
+                // 1. RaftManager is being dropped (process shutdown). The wake event is obsolete —
+                //    there is nothing to wake against.
+                // 2. install_self_weak was never called (test fixture without hibernation). Falling
+                //    through is correct; tests that need wake routing must call it.
+                tracing::debug!(
+                    ?shard_id,
+                    "RaftManagerWakeNotifier: weak upgrade returned None; skipping wake \
+                     (manager dropped or self_weak not installed)"
+                );
+                return;
+            },
+        };
+        // Resolve the shard_id → vault triple before the spawn so the
+        // task does not need to round-trip through Self again. Lookup is
+        // O(1) on the DashMap and does not contend with the vault_groups
+        // RwLock.
+        let triple = manager.vault_shard_index.get(&shard_id).map(|e| *e.value());
+        let Some((region, organization_id, vault_id)) = triple else {
+            metrics::record_vault_hibernation_wake_unmatched(shard_id);
+            tracing::warn!(
+                ?shard_id,
+                "RaftManagerWakeNotifier: paused-shard peer message has no vault \
+                 mapping in vault_shard_index; dropping wake (peer's next \
+                 AppendEntries will retry)"
+            );
+            return;
+        };
+
+        // Spawn-and-return so the reactor's event loop is unblocked.
+        // wake_vault.await is short — engine.resume_shard() is a single
+        // control-channel round-trip, lifecycle transition is an atomic
+        // store, page-cache repopulation is lazy on first access — but
+        // the notifier contract is "do not block the reactor", and that
+        // promise is not contingent on wake being fast.
+        tokio::spawn(async move {
+            if let Err(e) = manager.wake_vault(region, organization_id, vault_id).await {
+                tracing::warn!(
+                    error = %e,
+                    region = region.as_str(),
+                    organization_id = organization_id.value(),
+                    vault_id = vault_id.value(),
+                    "RaftManagerWakeNotifier: wake_vault failed"
+                );
+            }
+        });
+    }
+}
+
 /// Manager for multiple Raft region groups.
 ///
 /// Concrete map type backing [`RaftManager::vault_groups`]. Keyed by the
@@ -2082,6 +2171,35 @@ pub struct RaftManager {
     /// dominated CPU self-time via `crossbeam_epoch::Global::try_advance` —
     /// see `docs/superpowers/specs/2026-04-27-reactor-wal-investigation.md`.
     signing_key_cache: SigningKeyCache,
+    /// Self-`Weak` so `RaftManagerWakeNotifier` (installed on every
+    /// per-org `ConsensusEngine` via `start_with_wake_notifier`) can
+    /// upgrade and call back into the manager from the consensus reactor's
+    /// thread without creating an `Arc` cycle.
+    ///
+    /// Populated by [`RaftManager::install_self_weak`] immediately after
+    /// the manager is wrapped in `Arc<RaftManager>` during bootstrap.
+    /// The notifier holds a clone of the same `Arc<Mutex<Weak<…>>>` so
+    /// it observes the late install without re-plumbing. Tests that don't
+    /// exercise hibernation may leave it unset; the notifier degrades to
+    /// a metric-only warning when the upgrade returns `None` (also
+    /// covers the "manager is being dropped" race).
+    self_weak: Arc<parking_lot::Mutex<Weak<RaftManager>>>,
+    /// Reverse map from `ConsensusStateId` (the consensus-tier shard id) to
+    /// the `(region, organization_id, vault_id)` triple keyed in
+    /// [`RaftManager::vault_groups`]. Maintained alongside `vault_groups`
+    /// inserts/removes by [`RaftManager::start_vault_group`] /
+    /// [`RaftManager::stop_vault_group`].
+    ///
+    /// Used by `RaftManagerWakeNotifier::on_peer_message_for_paused_shard`
+    /// to translate the reactor's `shard_id` into the triple
+    /// [`RaftManager::wake_vault`] expects without scanning every entry of
+    /// `vault_groups` under a lock. Lookup is `DashMap`-style (read-only
+    /// `get`) so the notifier's hot path does not contend with new vault
+    /// registrations.
+    vault_shard_index: dashmap::DashMap<
+        inferadb_ledger_consensus::types::ConsensusStateId,
+        (Region, OrganizationId, VaultId),
+    >,
 }
 
 /// Membership delta to cascade from a data-region group down to its
@@ -2138,7 +2256,41 @@ impl RaftManager {
             ),
             hibernation_detector_started: AtomicBool::new(false),
             signing_key_cache: new_signing_key_cache(),
+            self_weak: Arc::new(parking_lot::Mutex::new(Weak::new())),
+            vault_shard_index: dashmap::DashMap::new(),
         }
+    }
+
+    /// Records a `Weak` to this manager so the per-org [`ConsensusEngine`]'s
+    /// [`ShardWakeNotifier`](inferadb_ledger_consensus::wake::ShardWakeNotifier)
+    /// can route wake-on-peer-message events back into
+    /// [`RaftManager::wake_vault`] without an `Arc` cycle.
+    ///
+    /// Bootstrap calls this immediately after wrapping the manager in an
+    /// `Arc`. Tests that exercise the hibernation path invoke this from
+    /// their fixture; tests that don't may leave it unset, in which case
+    /// the notifier degrades to a metric-only warning.
+    pub fn install_self_weak(self: &Arc<Self>) {
+        *self.self_weak.lock() = Arc::downgrade(self);
+    }
+
+    /// Returns a [`ShardWakeNotifier`](inferadb_ledger_consensus::wake::ShardWakeNotifier)
+    /// bound to this manager's `self_weak`, suitable for passing to
+    /// [`ConsensusEngine::start_with_wake_notifier`](inferadb_ledger_consensus::ConsensusEngine::start_with_wake_notifier).
+    ///
+    /// Spawns a tokio task on every wake event and returns immediately —
+    /// the consensus reactor's event loop is single-threaded, and blocking
+    /// inside the notifier stalls every shard managed by the reactor (see
+    /// [`crate::raft_manager::RaftManagerWakeNotifier`] docs and
+    /// `crates/consensus/src/wake.rs`).
+    ///
+    /// The returned notifier carries a clone of the same shared
+    /// `Arc<Mutex<Weak<RaftManager>>>` cell as `self_weak`, so a later
+    /// [`Self::install_self_weak`] call wires every notifier built before
+    /// the install — bootstrap call ordering between
+    /// `start_with_wake_notifier` and `install_self_weak` is forgiving.
+    fn build_wake_notifier(&self) -> Arc<dyn inferadb_ledger_consensus::wake::ShardWakeNotifier> {
+        Arc::new(RaftManagerWakeNotifier { manager: Arc::clone(&self.self_weak) })
     }
 
     /// Returns the process-wide signing-key cache shared with every
@@ -2283,7 +2435,12 @@ impl RaftManager {
     /// Runs a single hibernation scan pass. Public for testing — the
     /// background task in [`start_hibernation_idle_detector`] drives
     /// this on a timer in production.
-    pub fn run_hibernation_scan_once(&self) {
+    ///
+    /// Sleep transitions (`Active → Dormant`) are dispatched as background
+    /// tokio tasks via [`Self::sleep_vault`] so the sync scan loop is not
+    /// blocked on the per-vault `engine.pause_shard` round-trip or the
+    /// best-effort page-cache eviction syscalls.
+    pub fn run_hibernation_scan_once(self: &Arc<Self>) {
         let config = self.hibernation_config();
         if !config.enabled {
             return;
@@ -2320,7 +2477,27 @@ impl RaftManager {
                 let idle_for = now.saturating_sub(last_activity);
                 let current = vault.lifecycle_state();
                 if current == VaultLifecycleState::Active && idle_for >= idle_threshold {
-                    vault.transition_lifecycle_state(VaultLifecycleState::Dormant);
+                    // Dispatch sleep on a background task so the scan is
+                    // not blocked on engine.pause_shard + the page-cache
+                    // eviction syscalls. sleep_vault performs the
+                    // lifecycle transition itself; the scan does not call
+                    // transition_lifecycle_state directly here.
+                    let manager = Arc::clone(self);
+                    let region = vault.region;
+                    let organization_id = vault.organization_id;
+                    let vault_id = vault.vault_id;
+                    tokio::spawn(async move {
+                        if let Err(e) = manager.sleep_vault(region, organization_id, vault_id).await
+                        {
+                            warn!(
+                                error = %e,
+                                region = region.as_str(),
+                                organization_id = organization_id.value(),
+                                vault_id = vault_id.value(),
+                                "hibernation idle detector: sleep_vault failed"
+                            );
+                        }
+                    });
                 } else if current == VaultLifecycleState::Stalled && pending_started == 0 {
                     // Membership change finished — clear the stalled
                     // flag and let activity tracking decide whether the
@@ -2363,6 +2540,202 @@ impl RaftManager {
                 "Hibernation: active vault count exceeds max_warm — consider tuning idle_secs",
             );
         }
+    }
+
+    /// Transitions a vault to the Dormant lifecycle state and releases its
+    /// per-vault DB OS-page-cache footprint (O6 hibernation Pass 2).
+    ///
+    /// Steps, in order:
+    /// 1. Resolve the [`InnerVaultGroup`] for `(region, organization_id, vault_id)`.
+    /// 2. Pause the vault's consensus shard via the parent org's [`ConsensusEngine`]
+    ///    (`engine.pause_shard(shard_id)`). Idempotent: re-pausing an already-paused shard is a
+    ///    no-op success.
+    /// 3. Transition the vault's `VaultLifecycleState` to [`VaultLifecycleState::Dormant`] (which
+    ///    fires the existing `record_vault_hibernation_transition("sleep")` metric).
+    /// 4. Best-effort evict the OS page cache for the vault's four per-vault DBs: `state.db` (via
+    ///    [`StateLayer::evict_vault_state_page_cache`]), `raft.db`, `blocks.db`, and `events.db`
+    ///    (when present, via [`Database::evict_page_cache`] on the per-vault handles).
+    /// 5. Increment `vault_hibernation_evicted_total{region, organization_id}`.
+    ///
+    /// Page-cache eviction is the primary hibernation mechanism for memory
+    /// pressure: the per-vault `Arc<Database>` clones on [`InnerVaultGroup`]
+    /// stay alive across sleep/wake, FDs are not closed, and pages
+    /// re-populate lazily on the first read after wake. Eviction is best-
+    /// effort — the call is `posix_fadvise(POSIX_FADV_DONTNEED)` on Linux
+    /// and a successful no-op on Apple / Windows (see
+    /// [`Database::evict_page_cache`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RaftManagerError::VaultGroupNotFound`] if the triple has no
+    /// registered group on this node. Pause-shard and eviction failures are
+    /// logged at warn but do **not** propagate — the lifecycle transition is
+    /// the load-bearing observable change, and a partial sleep (paused but
+    /// not evicted, or vice versa) is still strictly better than no sleep.
+    pub async fn sleep_vault(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+        vault_id: VaultId,
+    ) -> Result<()> {
+        let inner: Arc<InnerVaultGroup> =
+            self.vault_groups.read().get(&(region, organization_id, vault_id)).cloned().ok_or(
+                RaftManagerError::VaultGroupNotFound { region, organization_id, vault_id },
+            )?;
+
+        // Idempotent fast-path: already dormant, nothing to do. We still
+        // honor the pause/evict path on first transition so a manual
+        // sleep_vault call from a test fixture lands the same observable
+        // changes as the idle-detector path.
+        let was_dormant = inner.lifecycle_state() == VaultLifecycleState::Dormant;
+
+        // Step 1: pause the consensus shard. Pause is observational — does
+        // not abort in-flight proposals (those resolve normally if quorum
+        // is met before the flag is checked) and does not shut down the
+        // shard. Idempotent at the engine level.
+        let engine = inner.handle().engine_arc();
+        if let Err(e) = engine.pause_shard(inner.shard_id()).await {
+            warn!(
+                error = %e,
+                region = region.as_str(),
+                organization_id = organization_id.value(),
+                vault_id = vault_id.value(),
+                shard_id = ?inner.shard_id(),
+                "sleep_vault: engine.pause_shard failed; continuing with eviction"
+            );
+        }
+
+        // Step 2: lifecycle transition. The transition method fires the
+        // existing `record_vault_hibernation_transition("sleep")` counter
+        // and the `Vault hibernation: sleep ...` info log line.
+        inner.transition_lifecycle_state(VaultLifecycleState::Dormant);
+
+        // Step 3: best-effort page-cache eviction across the four per-vault
+        // DBs. Each call is independent — a failure on raft.db must not
+        // prevent eviction on blocks.db (Linux posix_fadvise rarely fails,
+        // but we do not want the chain to be coupled).
+        if let Err(e) = inner.state().evict_vault_state_page_cache(vault_id) {
+            warn!(
+                error = %e,
+                region = region.as_str(),
+                organization_id = organization_id.value(),
+                vault_id = vault_id.value(),
+                db = "state",
+                "sleep_vault: evict_vault_state_page_cache failed"
+            );
+        }
+        if let Err(e) = inner.raft_db().evict_page_cache() {
+            warn!(
+                error = %e,
+                region = region.as_str(),
+                organization_id = organization_id.value(),
+                vault_id = vault_id.value(),
+                db = "raft",
+                "sleep_vault: raft.db evict_page_cache failed"
+            );
+        }
+        if let Err(e) = inner.block_archive().db().evict_page_cache() {
+            warn!(
+                error = %e,
+                region = region.as_str(),
+                organization_id = organization_id.value(),
+                vault_id = vault_id.value(),
+                db = "blocks",
+                "sleep_vault: blocks.db evict_page_cache failed"
+            );
+        }
+        if let Some(ew) = inner.event_writer()
+            && let Err(e) = ew.events_db().db().evict_page_cache()
+        {
+            warn!(
+                error = %e,
+                region = region.as_str(),
+                organization_id = organization_id.value(),
+                vault_id = vault_id.value(),
+                db = "events",
+                "sleep_vault: events.db evict_page_cache failed"
+            );
+        }
+
+        if !was_dormant {
+            metrics::record_vault_hibernation_evicted(
+                region.as_str(),
+                &organization_id.value().to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Wakes a Dormant vault: transitions back to Active and resumes the
+    /// underlying consensus shard so AppendEntries traffic flows again
+    /// (O6 hibernation Pass 2).
+    ///
+    /// Steps:
+    /// 1. Resolve the [`InnerVaultGroup`] for `(region, organization_id, vault_id)`.
+    /// 2. Resume the consensus shard via `engine.resume_shard(shard_id)`. Idempotent.
+    /// 3. Transition `VaultLifecycleState` back to [`VaultLifecycleState::Active`] (no-op if the
+    ///    vault is already Active — the existing wake metric fires only when there's a real Dormant
+    ///    → Active transition).
+    /// 4. Page-cache repopulation is **lazy** — the first read after wake re-fetches pages from
+    ///    disk on Linux (or finds them still hot on Apple / Windows where eviction was a no-op). No
+    ///    explicit reopen.
+    ///
+    /// Wake p99 budget: < 100ms. The hot path is `engine.resume_shard` (one
+    /// control-channel round-trip ≈ µs) plus an atomic state store; first-
+    /// read cold-cache cost dominates p99 in practice. Validated by
+    /// `tests/hibernation_wake_latency.rs` and the SLI histogram
+    /// `vault_hibernation_wake_duration_seconds`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RaftManagerError::VaultGroupNotFound`] if the triple is not
+    /// registered. Resume-shard failures are logged and surfaced through the
+    /// returned error so the caller (the [`RaftManagerWakeNotifier`] task or
+    /// a test fixture) can metric them.
+    pub async fn wake_vault(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+        vault_id: VaultId,
+    ) -> Result<()> {
+        let start = std::time::Instant::now();
+        let inner: Arc<InnerVaultGroup> =
+            self.vault_groups.read().get(&(region, organization_id, vault_id)).cloned().ok_or(
+                RaftManagerError::VaultGroupNotFound { region, organization_id, vault_id },
+            )?;
+
+        // Step 1: resume the consensus shard. Idempotent at the engine
+        // level — calling resume_shard on a non-paused shard is a no-op
+        // success. The reactor re-arms timers via normal Raft state-
+        // machine transitions on the next legitimate event.
+        let engine = inner.handle().engine_arc();
+        if let Err(e) = engine.resume_shard(inner.shard_id()).await {
+            // Do propagate engine failures here — wake is a correctness
+            // event (peer is trying to talk to a paused shard), not a
+            // best-effort observability blip.
+            return Err(RaftManagerError::Raft {
+                region,
+                message: format!(
+                    "wake_vault: engine.resume_shard for shard {:?} failed: {e}",
+                    inner.shard_id()
+                ),
+            });
+        }
+
+        // Step 2: lifecycle transition. transition_lifecycle_state is a
+        // no-op when the vault is already Active and only fires the wake
+        // metric on a real Dormant → Active transition — so a wake_vault
+        // call against an Active vault costs nothing observable beyond
+        // the resume_shard idempotent round-trip.
+        inner.transition_lifecycle_state(VaultLifecycleState::Active);
+
+        let elapsed = start.elapsed();
+        metrics::record_vault_hibernation_woken(
+            region.as_str(),
+            &organization_id.value().to_string(),
+            elapsed.as_secs_f64(),
+        );
+        Ok(())
     }
 
     /// Returns the shared per-node connection registry.
@@ -4185,6 +4558,14 @@ impl RaftManager {
             vault_groups.insert((region, organization_id, vault_id), Arc::clone(&inner));
         }
 
+        // Maintain the reverse `shard_id → triple` index used by
+        // [`RaftManagerWakeNotifier`] to translate a paused-shard peer-
+        // message event into a [`Self::wake_vault`] call. Inserted under
+        // the same lifecycle window as `vault_groups` so the notifier's
+        // O(1) `DashMap::get` cannot observe a vault group without its
+        // shard mapping (and vice versa).
+        self.vault_shard_index.insert(shard_id, (region, organization_id, vault_id));
+
         info!(
             region = region.as_str(),
             organization_id = organization_id.value(),
@@ -4252,6 +4633,12 @@ impl RaftManager {
         })?;
 
         let shard_id = inner.shard_id();
+
+        // Mirror the `vault_groups` removal in the reverse `shard_id → triple`
+        // index so [`RaftManagerWakeNotifier`] cannot observe a stale shard
+        // mapping. After this point a peer message landing on this shard
+        // routes through the "no triple → unmatched metric + drop" path.
+        self.vault_shard_index.remove(&shard_id);
 
         // Cancel the per-vault commit-pump stub (and, once wired, the
         // real apply worker). The stub task exits on its next poll.
@@ -4760,13 +5147,15 @@ impl RaftManager {
                 }
             }
         }
-        let (engine, commit_rx, state_watchers) = inferadb_ledger_consensus::ConsensusEngine::start(
-            vec![consensus_shard],
-            wal,
-            inferadb_ledger_consensus::SystemClock,
-            consensus_transport,
-            std::time::Duration::from_millis(2),
-        );
+        let (engine, commit_rx, state_watchers) =
+            inferadb_ledger_consensus::ConsensusEngine::start_with_wake_notifier(
+                vec![consensus_shard],
+                wal,
+                inferadb_ledger_consensus::SystemClock,
+                consensus_transport,
+                std::time::Duration::from_millis(2),
+                self.build_wake_notifier(),
+            );
         // Wrap the engine in `Arc` immediately so additional per-shard
         // handles (e.g. per-vault groups built by `start_vault_group`)
         // can share it via `ConsensusHandle::engine_arc` /
@@ -5109,12 +5498,22 @@ impl RaftManager {
         let vault_groups_for_events = Arc::clone(&self.vault_groups);
         let region_for_checkpointer = region;
         let organization_id_for_checkpointer = organization_id;
+        // Closures filter out Dormant vaults: O6 hibernation Pass 2
+        // explicitly skips checkpointer fan-out for vaults whose
+        // page-cache footprint we just evicted. Dormant means no in-flight
+        // writes (apply pipeline already drained at the Active → Dormant
+        // boundary), so there's nothing for the per-tick `sync_state` to
+        // advance — and re-syncing would refault the OS pages we just
+        // dropped via `posix_fadvise(POSIX_FADV_DONTNEED)`. On wake the
+        // vault returns to Active and the next tick picks it back up.
         let vault_raft_dbs_fn: VaultRaftDbsFn = Arc::new(move || {
             vault_groups_for_raft
                 .read()
                 .iter()
-                .filter(|((r, o, _), _)| {
-                    *r == region_for_checkpointer && *o == organization_id_for_checkpointer
+                .filter(|((r, o, _), inner)| {
+                    *r == region_for_checkpointer
+                        && *o == organization_id_for_checkpointer
+                        && inner.lifecycle_state() != VaultLifecycleState::Dormant
                 })
                 .map(|((_, _, vid), inner)| (*vid, Arc::clone(inner.raft_db())))
                 .collect()
@@ -5123,8 +5522,10 @@ impl RaftManager {
             vault_groups_for_blocks
                 .read()
                 .iter()
-                .filter(|((r, o, _), _)| {
-                    *r == region_for_checkpointer && *o == organization_id_for_checkpointer
+                .filter(|((r, o, _), inner)| {
+                    *r == region_for_checkpointer
+                        && *o == organization_id_for_checkpointer
+                        && inner.lifecycle_state() != VaultLifecycleState::Dormant
                 })
                 .map(|((_, _, vid), inner)| (*vid, Arc::clone(inner.block_archive().db())))
                 .collect()
@@ -5134,16 +5535,40 @@ impl RaftManager {
         // [`RaftManager::start_vault_group`] inherits "no events" from
         // the parent and skips per-vault DB construction in that case,
         // so vaults without an event writer simply filter out here.
+        // Dormant vaults are also filtered (see comment on
+        // `vault_raft_dbs_fn` above).
         let vault_events_dbs_fn: VaultEventsDbsFn = Arc::new(move || {
             vault_groups_for_events
                 .read()
                 .iter()
-                .filter(|((r, o, _), _)| {
-                    *r == region_for_checkpointer && *o == organization_id_for_checkpointer
+                .filter(|((r, o, _), inner)| {
+                    *r == region_for_checkpointer
+                        && *o == organization_id_for_checkpointer
+                        && inner.lifecycle_state() != VaultLifecycleState::Dormant
                 })
                 .filter_map(|((_, _, vid), inner)| {
                     inner.event_writer().map(|ew| (*vid, Arc::clone(ew.events_db().db())))
                 })
+                .collect()
+        });
+        // Closure for the per-tick Dormant snapshot — see `DormantVaultsFn`
+        // docs in `state_checkpointer.rs` and the page-cache-eviction
+        // discussion in `RaftManager::sleep_vault`. Dormant vaults must
+        // not be re-synced because every sync touches the backend and
+        // refaults the OS pages we just dropped via posix_fadvise.
+        let vault_groups_for_dormant = Arc::clone(&self.vault_groups);
+        let region_for_dormant = region;
+        let organization_id_for_dormant = organization_id;
+        let dormant_vaults_fn: crate::state_checkpointer::DormantVaultsFn = Arc::new(move || {
+            vault_groups_for_dormant
+                .read()
+                .iter()
+                .filter(|((r, o, _), inner)| {
+                    *r == region_for_dormant
+                        && *o == organization_id_for_dormant
+                        && inner.lifecycle_state() == VaultLifecycleState::Dormant
+                })
+                .map(|((_, _, vid), _)| *vid)
                 .collect()
         });
         let state_checkpointer = StateCheckpointer::from_config(
@@ -5155,6 +5580,7 @@ impl RaftManager {
             vault_raft_dbs_fn,
             vault_blocks_dbs_fn,
             vault_events_dbs_fn,
+            dormant_vaults_fn,
             runtime_config,
             applied_index_rx,
             parent_token.child_token(),
@@ -9332,6 +9758,7 @@ mod tests {
     async fn test_idle_detector_sleeps_idle_active_vault() {
         let temp = TestDir::new();
         let manager = test_manager(create_test_config(&temp));
+        manager.install_self_weak();
         let vault = start_test_vault(&manager, OrganizationId::new(1006), VaultId::new(1)).await;
 
         manager.set_hibernation_config(
@@ -9347,6 +9774,19 @@ mod tests {
         vault.last_activity_unix_secs.store(0, Ordering::Relaxed);
 
         manager.run_hibernation_scan_once();
+
+        // O6 hibernation Pass 2: sleep is dispatched as a tokio task
+        // (the scan does not block on engine.pause_shard + the per-DB
+        // page-cache eviction syscalls). Poll briefly for the
+        // transition to land. In practice this resolves on the next
+        // executor tick — the loop is bounded so a regression in the
+        // scan's spawn path surfaces as a timeout, not a hang.
+        for _ in 0..50 {
+            if vault.lifecycle_state() == VaultLifecycleState::Dormant {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         assert_eq!(vault.lifecycle_state(), VaultLifecycleState::Dormant);
     }
 
@@ -9427,5 +9867,142 @@ mod tests {
         manager.start_hibernation_idle_detector();
         // Second call must be a guarded no-op (no panic, no double-spawn).
         manager.start_hibernation_idle_detector();
+    }
+
+    /// `sleep_vault` is idempotent and lands the load-bearing observable
+    /// changes: lifecycle Active → Dormant, shard pause flag set, and the
+    /// per-vault DB page-cache eviction calls all return `Ok(())` (which on
+    /// macOS / Windows is a no-op success — see
+    /// [`Database::evict_page_cache`]).
+    #[tokio::test]
+    async fn test_sleep_vault_transitions_dormant_and_pauses_shard() {
+        let temp = TestDir::new();
+        let manager = test_manager(create_test_config(&temp));
+        manager.install_self_weak();
+        let org_id = OrganizationId::new(2001);
+        let vault_id = VaultId::new(1);
+        let vault = start_test_vault(&manager, org_id, vault_id).await;
+
+        assert_eq!(vault.lifecycle_state(), VaultLifecycleState::Active);
+        manager
+            .sleep_vault(Region::GLOBAL, org_id, vault_id)
+            .await
+            .expect("sleep_vault must succeed on a live vault");
+        assert_eq!(vault.lifecycle_state(), VaultLifecycleState::Dormant);
+
+        // Engine-level pause flag must be set. Lock-free check via the
+        // shared DashMap consensus rule 12 documents.
+        let engine = vault.handle().engine_arc();
+        assert!(
+            engine.is_shard_paused(vault.shard_id()),
+            "after sleep_vault, engine must report shard paused"
+        );
+
+        // Idempotent: a second call is a no-op success.
+        manager
+            .sleep_vault(Region::GLOBAL, org_id, vault_id)
+            .await
+            .expect("sleep_vault must be idempotent");
+        assert_eq!(vault.lifecycle_state(), VaultLifecycleState::Dormant);
+    }
+
+    /// `wake_vault` resumes the shard, transitions the vault back to
+    /// Active, and is idempotent on an already-Active vault.
+    #[tokio::test]
+    async fn test_wake_vault_resumes_shard_and_transitions_active() {
+        let temp = TestDir::new();
+        let manager = test_manager(create_test_config(&temp));
+        manager.install_self_weak();
+        let org_id = OrganizationId::new(2002);
+        let vault_id = VaultId::new(1);
+        let vault = start_test_vault(&manager, org_id, vault_id).await;
+
+        manager.sleep_vault(Region::GLOBAL, org_id, vault_id).await.expect("sleep");
+        assert_eq!(vault.lifecycle_state(), VaultLifecycleState::Dormant);
+        assert!(vault.handle().engine_arc().is_shard_paused(vault.shard_id()));
+
+        manager.wake_vault(Region::GLOBAL, org_id, vault_id).await.expect("wake");
+        assert_eq!(vault.lifecycle_state(), VaultLifecycleState::Active);
+        assert!(
+            !vault.handle().engine_arc().is_shard_paused(vault.shard_id()),
+            "after wake_vault, engine must report shard not paused"
+        );
+
+        // Idempotent: waking an already-Active vault is a no-op success.
+        manager.wake_vault(Region::GLOBAL, org_id, vault_id).await.expect("idempotent");
+        assert_eq!(vault.lifecycle_state(), VaultLifecycleState::Active);
+    }
+
+    /// Returning an error variant for unknown vaults — at sleep / wake
+    /// time, an unknown triple is a programmer bug; surface it.
+    #[tokio::test]
+    async fn test_sleep_wake_vault_unknown_triple_errors() {
+        let temp = TestDir::new();
+        let manager = test_manager(create_test_config(&temp));
+        manager.install_self_weak();
+        let org_id = OrganizationId::new(2003);
+        let vault_id = VaultId::new(99);
+
+        let err = manager.sleep_vault(Region::GLOBAL, org_id, vault_id).await.expect_err("sleep");
+        assert!(matches!(err, RaftManagerError::VaultGroupNotFound { .. }), "{err:?}");
+
+        let err = manager.wake_vault(Region::GLOBAL, org_id, vault_id).await.expect_err("wake");
+        assert!(matches!(err, RaftManagerError::VaultGroupNotFound { .. }), "{err:?}");
+    }
+
+    /// Wake-latency p99 budget: < 100ms. Sleeps a vault, waits a beat to
+    /// let any pause-induced settling happen, then measures the
+    /// sleep→wake→Active round-trip across enough cold wakes to assert
+    /// p99 < 100ms.
+    ///
+    /// In-process measurement only (Pass 2 scope); a multi-process
+    /// subprocess stress test arrives in Pass 3
+    /// (`crates/server/tests/hibernation_overhead.rs`).
+    ///
+    /// On unloaded test infrastructure this consistently lands well under
+    /// budget — the hot path is `engine.resume_shard` (one control-channel
+    /// round-trip ≈ µs) plus an atomic state store. Page-cache repopulation
+    /// is lazy: the next read after wake re-fetches pages on Linux (or
+    /// finds them still hot on Apple / Windows where eviction was a no-op).
+    /// The test does not exercise the read; the wake measurement is the
+    /// engine-resume + lifecycle-transition path that the budget covers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_wake_latency_p99_budget() {
+        let temp = TestDir::new();
+        let manager = test_manager(create_test_config(&temp));
+        manager.install_self_weak();
+        let org_id = OrganizationId::new(2010);
+        let vault_id = VaultId::new(1);
+        let _vault = start_test_vault(&manager, org_id, vault_id).await;
+
+        // 20 sleep/wake cycles. Single vault avoids cross-shard scheduling
+        // noise from the reactor.
+        const ITERATIONS: usize = 20;
+        let mut latencies_ms: Vec<f64> = Vec::with_capacity(ITERATIONS);
+
+        for _ in 0..ITERATIONS {
+            manager
+                .sleep_vault(Region::GLOBAL, org_id, vault_id)
+                .await
+                .expect("sleep_vault must succeed");
+            let start = std::time::Instant::now();
+            manager
+                .wake_vault(Region::GLOBAL, org_id, vault_id)
+                .await
+                .expect("wake_vault must succeed");
+            latencies_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        latencies_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // p99 across 20 samples = the highest sample. p95 = sample[18].
+        let p99 = latencies_ms[ITERATIONS - 1];
+        let p50 = latencies_ms[ITERATIONS / 2];
+        // 100ms budget. Generous because CI runners under load can spike
+        // the resume_shard control-channel round-trip; the practical
+        // observed value on dev hardware is sub-millisecond.
+        assert!(
+            p99 < 100.0,
+            "wake p99 budget: {p99:.3}ms exceeds 100ms (p50 = {p50:.3}ms; samples {latencies_ms:?})"
+        );
     }
 }

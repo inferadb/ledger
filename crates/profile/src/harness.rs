@@ -18,7 +18,7 @@ use std::time::Duration;
 use inferadb_ledger_sdk::{EmailVerificationResult, LedgerClient};
 use inferadb_ledger_types::{OrganizationSlug, Region, UserSlug, VaultSlug};
 use serde::Serialize;
-use snafu::{ResultExt, Snafu};
+use snafu::{IntoError, ResultExt, Snafu};
 
 /// A bootstrapped profiling session: a connected client plus the slugs needed
 /// to drive writes and checks.
@@ -297,6 +297,56 @@ impl Harness {
     pub async fn connect_task_client(&self, task_id: usize) -> Result<LedgerClient, HarnessError> {
         let client_id = format!("profile-task-{task_id}");
         LedgerClient::connect(&self.endpoint, client_id)
+            .await
+            .with_context(|_| ConnectSnafu { endpoint: self.endpoint.clone() })
+    }
+
+    /// Like [`Self::connect_task_client`], but applies a non-default
+    /// `connection_pool_size`. A `pool_size` of `0` falls back to the
+    /// SDK default (`1`) for backwards compatibility with the original
+    /// per-task wiring.
+    pub async fn connect_task_client_with_pool(
+        &self,
+        task_id: usize,
+        pool_size: u8,
+    ) -> Result<LedgerClient, HarnessError> {
+        if pool_size <= 1 {
+            return self.connect_task_client(task_id).await;
+        }
+        use inferadb_ledger_sdk::{ClientConfig, ServerSource};
+        let client_id = format!("profile-task-{task_id}");
+        let config = ClientConfig::builder()
+            .servers(ServerSource::from_static([self.endpoint.clone()]))
+            .client_id(client_id)
+            .connection_pool_size(pool_size)
+            .build()
+            .map_err(|e| ConnectSnafu { endpoint: self.endpoint.clone() }.into_error(e))?;
+        LedgerClient::new(config)
+            .await
+            .with_context(|_| ConnectSnafu { endpoint: self.endpoint.clone() })
+    }
+
+    /// Builds a fresh `LedgerClient` against the harness's endpoint with
+    /// the given `connection_pool_size` and a fixed `client_id`. Used by
+    /// shared-client workload paths to override the bootstrap client's
+    /// pool size without rebuilding the entire harness.
+    pub async fn build_shared_client_with_pool(
+        &self,
+        pool_size: u8,
+    ) -> Result<LedgerClient, HarnessError> {
+        if pool_size <= 1 {
+            // Default pool size — clone the bootstrap client, which is
+            // already pool-size 1.
+            return Ok(self.client.clone());
+        }
+        use inferadb_ledger_sdk::{ClientConfig, ServerSource};
+        let config = ClientConfig::builder()
+            .servers(ServerSource::from_static([self.endpoint.clone()]))
+            .client_id("profile-workload")
+            .connection_pool_size(pool_size)
+            .build()
+            .map_err(|e| ConnectSnafu { endpoint: self.endpoint.clone() }.into_error(e))?;
+        LedgerClient::new(config)
             .await
             .with_context(|_| ConnectSnafu { endpoint: self.endpoint.clone() })
     }

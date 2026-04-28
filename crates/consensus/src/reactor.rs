@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use dashmap::DashMap;
 use metrics::counter;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -27,8 +28,19 @@ use crate::{
     timer::TimerWheel,
     transport::{NetworkTransport, OutboundMessage},
     types::{ConsensusStateId, MembershipChange, NodeId, TimerKind},
+    wake::{NoopShardWakeNotifier, ShardWakeNotifier},
     wal_backend::{CheckpointFrame, FsyncPhase, WalBackend, WalFrame},
 };
+
+/// Lock-free map of paused shard IDs.
+///
+/// Entry presence (regardless of value) means the shard is paused; absence
+/// means the shard is active. The value is unit so the type is essentially a
+/// concurrent set. Shared between [`crate::ConsensusEngine`] and
+/// [`Reactor`] via [`Arc`] so the engine can answer
+/// [`is_shard_paused`](crate::ConsensusEngine::is_shard_paused) lock-free
+/// while the reactor mutates membership through round-tripped events.
+pub(crate) type PauseMap = DashMap<ConsensusStateId, ()>;
 
 /// Events sent to the reactor via the inbox channel.
 pub enum ReactorEvent {
@@ -188,6 +200,37 @@ pub enum ReactorEvent {
         /// Target shard.
         shard: ConsensusStateId,
     },
+    /// Pause tick processing for a shard (O6 hibernation primitive).
+    ///
+    /// While paused, the reactor:
+    ///   * skips delivery of expired timers for the shard,
+    ///   * drops outbound [`Action::Send`] actions originating from the shard,
+    ///   * drops incoming [`ReactorEvent::PeerMessage`] events for the shard after invoking the
+    ///     registered [`ShardWakeNotifier`].
+    ///
+    /// Idempotent: pausing an already-paused shard is a no-op success.
+    /// Returns [`ConsensusError::ShardUnavailable`] if the shard is not
+    /// registered with the reactor.
+    PauseShard {
+        /// Target shard.
+        shard: ConsensusStateId,
+        /// Channel to send the result back on.
+        response: oneshot::Sender<Result<(), ConsensusError>>,
+    },
+    /// Resume tick processing for a paused shard.
+    ///
+    /// Idempotent: resuming an already-active shard is a no-op success.
+    /// Returns [`ConsensusError::ShardUnavailable`] if the shard is not
+    /// registered with the reactor. Does NOT inject any synthetic timer or
+    /// peer message — the shard re-arms timers via normal Raft state-machine
+    /// transitions on the next legitimate event (heartbeat from the parent
+    /// group's leader, application command, etc.).
+    ResumeShard {
+        /// Target shard.
+        shard: ConsensusStateId,
+        /// Channel to send the result back on.
+        response: oneshot::Sender<Result<(), ConsensusError>>,
+    },
     /// Graceful shutdown request.
     Shutdown,
 }
@@ -234,6 +277,18 @@ pub struct Reactor<C: Clock, R: RngSource, W: WalBackend, T: NetworkTransport> {
     /// restore-from-shutdown guard used for the membership-driven
     /// [`crate::action::Action::ShardRemoved`] path.
     force_removal_shards: HashSet<ConsensusStateId>,
+    /// Lock-free map of paused shard IDs (O6 hibernation primitive).
+    ///
+    /// Shared with [`crate::ConsensusEngine`] via [`Arc`] so
+    /// [`crate::ConsensusEngine::is_shard_paused`] can answer without
+    /// round-tripping the reactor. Mutations always pass through a
+    /// reactor event ([`ReactorEvent::PauseShard`] /
+    /// [`ReactorEvent::ResumeShard`]) so the engine cannot mark a
+    /// not-yet-registered shard as paused.
+    pause_state: Arc<PauseMap>,
+    /// Wake notifier invoked when a [`ReactorEvent::PeerMessage`] arrives for
+    /// a paused shard. Default is [`NoopShardWakeNotifier`].
+    wake_notifier: Arc<dyn ShardWakeNotifier>,
 }
 
 impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor<C, R, W, T> {
@@ -254,6 +309,39 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
         commit_tx: mpsc::Sender<CommittedBatch>,
         flush_interval: Duration,
     ) -> Self {
+        Self::with_wake_notifier(
+            control_inbox,
+            proposal_inbox,
+            wal,
+            clock,
+            transport,
+            commit_tx,
+            flush_interval,
+            Arc::new(PauseMap::new()),
+            Arc::new(NoopShardWakeNotifier),
+        )
+    }
+
+    /// Creates a reactor that shares its pause-state map with the surrounding
+    /// [`crate::ConsensusEngine`] and delegates wake-on-paused-message events
+    /// to the supplied [`ShardWakeNotifier`].
+    ///
+    /// Used by [`crate::ConsensusEngine::start`] (and the future
+    /// `start_with_wake_notifier` overload). Tests typically use the simpler
+    /// [`Reactor::new`] constructor, which installs a private pause map and
+    /// a [`NoopShardWakeNotifier`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_wake_notifier(
+        control_inbox: mpsc::Receiver<ReactorEvent>,
+        proposal_inbox: mpsc::Receiver<ReactorEvent>,
+        wal: W,
+        clock: C,
+        transport: T,
+        commit_tx: mpsc::Sender<CommittedBatch>,
+        flush_interval: Duration,
+        pause_state: Arc<PauseMap>,
+        wake_notifier: Arc<dyn ShardWakeNotifier>,
+    ) -> Self {
         Self {
             shards: HashMap::new(),
             timers: TimerWheel::new(),
@@ -272,6 +360,8 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             state_watchers: HashMap::new(),
             fsync_phase: FsyncPhase::Idle,
             force_removal_shards: HashSet::new(),
+            pause_state,
+            wake_notifier,
         }
     }
 
@@ -545,6 +635,26 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             ReactorEvent::PeerMessage { shard, from, message } => {
                 if let Some(s) = self.shards.get_mut(&shard) {
                     if s.is_failed() {
+                        return vec![];
+                    }
+                    // O6 hibernation: a paused shard drops the message and
+                    // notifies the wake handler. The peer's next AppendEntries
+                    // retry (Raft heartbeat) will land on the awoken shard —
+                    // no buffer, no redelivery contract.
+                    if self.pause_state.contains_key(&shard) {
+                        counter!(
+                            "consensus_paused_peer_message_dropped_total",
+                            "shard_id" => shard.0.to_string()
+                        )
+                        .increment(1);
+                        tracing::debug!(
+                            shard = shard.0,
+                            from = from.0,
+                            "reactor: dropping PeerMessage for paused shard; invoking wake notifier",
+                        );
+                        self.wake_notifier.on_peer_message_for_paused_shard(shard);
+                        // `from` and `message` are dropped here.
+                        let _ = (from, message);
                         return vec![];
                     }
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -863,6 +973,32 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                 }
                 vec![]
             },
+            ReactorEvent::PauseShard { shard, response } => {
+                if !self.shards.contains_key(&shard) {
+                    let _ = response.send(Err(ConsensusError::ShardUnavailable { shard }));
+                    return vec![];
+                }
+                // Idempotent: inserting an existing key is a no-op.
+                let was_paused = self.pause_state.insert(shard, ()).is_some();
+                tracing::info!(
+                    shard = shard.0,
+                    already_paused = was_paused,
+                    "reactor: shard paused",
+                );
+                let _ = response.send(Ok(()));
+                vec![]
+            },
+            ReactorEvent::ResumeShard { shard, response } => {
+                if !self.shards.contains_key(&shard) {
+                    let _ = response.send(Err(ConsensusError::ShardUnavailable { shard }));
+                    return vec![];
+                }
+                // Idempotent: removing a non-existent key is a no-op.
+                let was_paused = self.pause_state.remove(&shard).is_some();
+                tracing::info!(shard = shard.0, was_paused, "reactor: shard resumed",);
+                let _ = response.send(Ok(()));
+                vec![]
+            },
             ReactorEvent::Shutdown => {
                 // Handled in run() before dispatch.
                 vec![]
@@ -895,6 +1031,34 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                 "reactor: timer fired",
             );
             if let Some(shard) = self.shards.get_mut(&shard_id) {
+                // O6 hibernation: skip Election/Heartbeat timer delivery for
+                // paused shards. The timer was already removed from the wheel
+                // by `poll_expired` above (silently dropped — cheaper than
+                // re-arming). On resume, the shard re-arms normal Raft
+                // election/heartbeat timers via state-machine transitions on
+                // the next legitimate event (peer message from the parent
+                // group's leader, application command, etc.). Cleanup timers
+                // are NOT suppressed — they're reactor-internal removal
+                // markers; dropping them would orphan a shard that was
+                // marked for removal while paused.
+                let is_paused = self.pause_state.contains_key(&shard_id);
+                let suppress_for_pause =
+                    is_paused && matches!(kind, TimerKind::Election | TimerKind::Heartbeat);
+                if suppress_for_pause {
+                    counter!(
+                        "consensus_paused_timer_skipped_total",
+                        "shard_id" => shard_id.0.to_string(),
+                        "kind" => format!("{kind:?}"),
+                    )
+                    .increment(1);
+                    tracing::debug!(
+                        shard = shard_id.0,
+                        kind = ?kind,
+                        "reactor: skipping expired timer for paused shard",
+                    );
+                    affected.push(shard_id);
+                    continue;
+                }
                 let actions = match kind {
                     TimerKind::Election => {
                         if shard.is_failed() {
@@ -1022,6 +1186,9 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             self.shards.remove(&shard_id);
             self.state_watchers.remove(&shard_id);
             self.last_applied.remove(&shard_id);
+            // Clear any lingering pause flag so a subsequent AddShard
+            // with the same id observes the shard as active.
+            self.pause_state.remove(&shard_id);
             self.force_removal_shards.remove(&shard_id);
         }
 
@@ -1109,6 +1276,24 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                     // Already handled in pass 1.
                 },
                 Action::Send { to, shard, msg } => {
+                    // O6 hibernation: drop sends originating from a paused
+                    // shard. Vote requests are dropped along with the rest;
+                    // a paused shard should not be electioneering.
+                    if self.pause_state.contains_key(&shard) {
+                        counter!(
+                            "consensus_paused_send_dropped_total",
+                            "shard_id" => shard.0.to_string()
+                        )
+                        .increment(1);
+                        tracing::debug!(
+                            shard = shard.0,
+                            to = to.0,
+                            "reactor: dropping Send action from paused shard",
+                        );
+                        // `to` and `msg` are dropped at end of this match arm.
+                        let _ = (to, msg);
+                        continue;
+                    }
                     // Vote request messages bypass the outbox to avoid election
                     // latency. This is safe because PersistTermState (if present)
                     // was already fsynced in pass 1.
@@ -2812,5 +2997,289 @@ mod tests {
             matches!(result, Err(ConsensusError::NotLeader)),
             "expected NotLeader for missing shard, got {result:?}"
         );
+    }
+
+    // ── O6 pause / resume primitives ──────────────────────────────────
+
+    /// Recording wake notifier — captures shard IDs the reactor passes to it
+    /// so tests can assert the wake hook fired exactly once per paused
+    /// PeerMessage.
+    #[derive(Default)]
+    struct RecordingWakeNotifier {
+        seen: parking_lot::Mutex<Vec<ConsensusStateId>>,
+    }
+
+    impl RecordingWakeNotifier {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn calls(&self) -> Vec<ConsensusStateId> {
+            self.seen.lock().clone()
+        }
+    }
+
+    impl ShardWakeNotifier for RecordingWakeNotifier {
+        fn on_peer_message_for_paused_shard(&self, shard_id: ConsensusStateId) {
+            self.seen.lock().push(shard_id);
+        }
+    }
+
+    /// Builds a reactor wired up with a shared pause map and a recording
+    /// wake notifier so tests can assert both the drop + the notifier
+    /// invocation.
+    #[allow(clippy::type_complexity)]
+    fn make_reactor_with_wake_notifier(
+        notifier: Arc<RecordingWakeNotifier>,
+    ) -> (
+        Reactor<Arc<SimulatedClock>, SimulatedRng, InMemoryWalBackend, InMemoryTransport>,
+        mpsc::Sender<ReactorEvent>,
+        mpsc::Sender<ReactorEvent>,
+        mpsc::Receiver<CommittedBatch>,
+        Arc<PauseMap>,
+    ) {
+        let (control_tx, control_rx) = mpsc::channel(64);
+        let (proposal_tx, proposal_rx) = mpsc::channel(64);
+        let (commit_tx, commit_rx) = mpsc::channel(64);
+        let clock = Arc::new(SimulatedClock::new());
+        let wal = InMemoryWalBackend::new();
+        let transport = InMemoryTransport::new();
+        let pause_state = Arc::new(PauseMap::new());
+        let notifier_dyn: Arc<dyn ShardWakeNotifier> = notifier;
+        let reactor = Reactor::with_wake_notifier(
+            control_rx,
+            proposal_rx,
+            wal,
+            clock,
+            transport,
+            commit_tx,
+            Duration::from_millis(10),
+            Arc::clone(&pause_state),
+            notifier_dyn,
+        );
+        (reactor, control_tx, proposal_tx, commit_rx, pause_state)
+    }
+
+    #[test]
+    fn test_paused_shard_drops_send_action_from_outbox() {
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
+
+        // Mark shard 1 as paused via the shared pause map.
+        reactor.pause_state.insert(ConsensusStateId(1), ());
+
+        reactor.process_actions(vec![Action::Send {
+            to: NodeId(2),
+            shard: ConsensusStateId(1),
+            msg: Message::TimeoutNow,
+        }]);
+
+        assert_eq!(
+            reactor.outbox.len(),
+            0,
+            "Send action from a paused shard must be dropped before reaching the outbox",
+        );
+    }
+
+    #[test]
+    fn test_paused_vote_send_is_also_dropped() {
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
+        reactor.pause_state.insert(ConsensusStateId(1), ());
+
+        // Vote requests normally bypass the outbox and go straight to
+        // the transport. Pausing must drop them too — a paused shard
+        // should not be electioneering.
+        reactor.process_actions(vec![Action::Send {
+            to: NodeId(2),
+            shard: ConsensusStateId(1),
+            msg: Message::PreVoteRequest {
+                term: 1,
+                candidate_id: NodeId(1),
+                last_log_index: 0,
+                last_log_term: 0,
+            },
+        }]);
+
+        assert_eq!(reactor.outbox.len(), 0);
+        assert_eq!(
+            reactor.transport.sent_count(),
+            0,
+            "vote request from a paused shard must not reach the transport",
+        );
+    }
+
+    #[test]
+    fn test_resumed_shard_send_action_reaches_outbox() {
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
+
+        // Pause then resume — pause flag cleared, sends flow normally.
+        reactor.pause_state.insert(ConsensusStateId(1), ());
+        reactor.pause_state.remove(&ConsensusStateId(1));
+
+        reactor.process_actions(vec![Action::Send {
+            to: NodeId(2),
+            shard: ConsensusStateId(1),
+            msg: Message::TimeoutNow,
+        }]);
+
+        assert_eq!(reactor.outbox.len(), 1, "Send action after resume must reach the outbox",);
+    }
+
+    #[test]
+    fn test_paused_shard_skips_expired_election_timer() {
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
+
+        let clock = reactor.clock.clone();
+        let shard = make_shard(ConsensusStateId(1), clock.clone());
+        reactor.add_shard(ConsensusStateId(1), shard);
+
+        // Pause the shard before the election timer fires.
+        reactor.pause_state.insert(ConsensusStateId(1), ());
+
+        // Advance the clock past the election timeout — without pause,
+        // process_expired_timers would dispatch and the single-node shard
+        // would self-elect. With pause set, the timer is skipped silently.
+        clock.advance(Duration::from_secs(5));
+
+        let _ = reactor.process_expired_timers();
+
+        // The shard must NOT have transitioned to leader.
+        assert_ne!(
+            reactor.shards.get(&ConsensusStateId(1)).unwrap().state(),
+            crate::types::NodeState::Leader,
+            "paused shard must not self-elect via skipped election timer",
+        );
+        // No outbound traffic from the suppressed timer.
+        assert_eq!(reactor.outbox.len(), 0);
+        assert_eq!(reactor.transport.sent_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_paused_shard_drops_peer_message_and_invokes_notifier() {
+        let notifier = Arc::new(RecordingWakeNotifier::new());
+        let (mut reactor, _tx, _proposal_tx, _rx, pause_state) =
+            make_reactor_with_wake_notifier(Arc::clone(&notifier));
+
+        let clock = reactor.clock.clone();
+        let shard = make_shard(ConsensusStateId(1), clock);
+        reactor.add_shard(ConsensusStateId(1), shard);
+
+        // Mark the shard as paused.
+        pause_state.insert(ConsensusStateId(1), ());
+
+        // Capture commit_index before — a delivered AppendEntries on a
+        // single-node shard would advance state. We assert it does not.
+        let term_before = reactor.shards.get(&ConsensusStateId(1)).unwrap().current_term();
+
+        let _ = reactor.handle_event(ReactorEvent::PeerMessage {
+            shard: ConsensusStateId(1),
+            from: NodeId(2),
+            message: Message::AppendEntries {
+                term: 99,
+                leader_id: NodeId(2),
+                prev_log_index: 0,
+                prev_log_term: 0,
+                entries: Arc::from(Vec::<Entry>::new()),
+                leader_commit: 0,
+                closed_ts_nanos: 0,
+            },
+        });
+
+        // Notifier was invoked exactly once with the paused shard's id.
+        assert_eq!(notifier.calls(), vec![ConsensusStateId(1)]);
+
+        // Term did NOT advance — the message was dropped before reaching
+        // the shard. (A delivered AppendEntries with term 99 would have
+        // bumped current_term.)
+        assert_eq!(
+            reactor.shards.get(&ConsensusStateId(1)).unwrap().current_term(),
+            term_before,
+            "paused shard must not observe the dropped peer message",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resumed_shard_processes_subsequent_send_and_message() {
+        let notifier = Arc::new(RecordingWakeNotifier::new());
+        let (mut reactor, _tx, _proposal_tx, _rx, pause_state) =
+            make_reactor_with_wake_notifier(Arc::clone(&notifier));
+
+        let clock = reactor.clock.clone();
+        let shard = make_shard(ConsensusStateId(1), clock);
+        reactor.add_shard(ConsensusStateId(1), shard);
+
+        // Pause then resume.
+        pause_state.insert(ConsensusStateId(1), ());
+        pause_state.remove(&ConsensusStateId(1));
+
+        // Send action flows normally.
+        reactor.process_actions(vec![Action::Send {
+            to: NodeId(2),
+            shard: ConsensusStateId(1),
+            msg: Message::TimeoutNow,
+        }]);
+        assert_eq!(reactor.outbox.len(), 1, "post-resume Send must reach outbox");
+
+        // Peer message reaches the shard normally — observable via term bump
+        // (an AppendEntries with a higher term updates current_term).
+        let term_before = reactor.shards.get(&ConsensusStateId(1)).unwrap().current_term();
+        let _ = reactor.handle_event(ReactorEvent::PeerMessage {
+            shard: ConsensusStateId(1),
+            from: NodeId(2),
+            message: Message::AppendEntries {
+                term: term_before + 5,
+                leader_id: NodeId(2),
+                prev_log_index: 0,
+                prev_log_term: 0,
+                entries: Arc::from(Vec::<Entry>::new()),
+                leader_commit: 0,
+                closed_ts_nanos: 0,
+            },
+        });
+        assert_eq!(
+            reactor.shards.get(&ConsensusStateId(1)).unwrap().current_term(),
+            term_before + 5,
+            "resumed shard must observe delivered peer messages",
+        );
+        assert!(
+            notifier.calls().is_empty(),
+            "wake notifier must not fire for resumed (active) shards",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pause_event_unknown_shard_returns_shard_unavailable() {
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
+
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let _ = reactor.handle_event(ReactorEvent::PauseShard {
+            shard: ConsensusStateId(99),
+            response: resp_tx,
+        });
+
+        let result = resp_rx.await.expect("response channel should not be dropped");
+        assert!(
+            matches!(result, Err(ConsensusError::ShardUnavailable { shard: ConsensusStateId(99) })),
+            "expected ShardUnavailable, got {result:?}",
+        );
+        assert!(!reactor.pause_state.contains_key(&ConsensusStateId(99)));
+    }
+
+    #[tokio::test]
+    async fn test_pause_event_idempotent_for_known_shard() {
+        let (mut reactor, _tx, _proposal_tx, _rx) = make_reactor();
+
+        let clock = reactor.clock.clone();
+        let shard = make_shard(ConsensusStateId(1), clock);
+        reactor.add_shard(ConsensusStateId(1), shard);
+
+        for _ in 0..2 {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            let _ = reactor.handle_event(ReactorEvent::PauseShard {
+                shard: ConsensusStateId(1),
+                response: resp_tx,
+            });
+            assert!(resp_rx.await.unwrap().is_ok());
+        }
+        assert!(reactor.pause_state.contains_key(&ConsensusStateId(1)));
     }
 }

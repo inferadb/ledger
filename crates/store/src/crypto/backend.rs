@@ -353,6 +353,14 @@ impl<B: StorageBackend> StorageBackend for EncryptedBackend<B> {
         self.inner.sync()
     }
 
+    fn evict_page_cache(&self) -> Result<()> {
+        // Evict both the encrypted page file and the per-page crypto-
+        // metadata sidecar so the entire on-disk footprint of this
+        // backend stops pinning page-cache memory.
+        self.sidecar.evict_page_cache()?;
+        self.inner.evict_page_cache()
+    }
+
     fn file_size(&self) -> Result<u64> {
         self.inner.file_size()
     }

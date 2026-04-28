@@ -138,6 +138,30 @@ pub struct ClientConfig {
     /// A capacity of zero disables the per-vault cache (every vault-scoped
     /// hint falls through to the region cache).
     pub(crate) vault_cache_capacity: usize,
+
+    /// Number of independent tonic `Channel`s the pool maintains for one
+    /// endpoint. Default: 1.
+    ///
+    /// Each tonic `Channel` wraps a single tower `Buffer` that serializes
+    /// every request through one mpsc worker task feeding one HTTP/2
+    /// connection. With many concurrent in-flight RPCs through one client
+    /// (the typical SaaS-service shape), that single per-Channel worker
+    /// becomes the dispatch bottleneck around 24-30k ops/s on loopback,
+    /// even though each request is fast and the server has headroom.
+    ///
+    /// Setting `connection_pool_size > 1` materializes that many
+    /// independent Channels; the pool round-robins requests across them.
+    /// Each Channel has its own Buffer worker, mpsc queue, and HTTP/2
+    /// connection, so dispatch parallelism scales linearly with pool
+    /// size up to the server's per-connection ceiling × N.
+    ///
+    /// Tradeoff: each pooled Channel opens its own TCP/HTTP-2
+    /// connection, so the SDK's TCP footprint grows linearly. For most
+    /// services 1-4 is enough; high-throughput workers can go up to
+    /// `nproc`. Values above 16 rarely help on any single endpoint.
+    ///
+    /// Must be >= 1.
+    pub(crate) connection_pool_size: u8,
 }
 
 #[bon]
@@ -208,6 +232,7 @@ impl ClientConfig {
         http2_initial_connection_window_bytes: u32,
         #[builder(default = crate::vault_resolver::DEFAULT_VAULT_CACHE_CAPACITY)]
         vault_cache_capacity: usize,
+        #[builder(default = 1)] connection_pool_size: u8,
     ) -> Result<Self> {
         // Validate static endpoints
         if let ServerSource::Static(ref endpoints) = servers {
@@ -254,6 +279,11 @@ impl ClientConfig {
                 ),
             });
         }
+        if connection_pool_size == 0 {
+            return Err(SdkError::Config {
+                message: "connection_pool_size must be >= 1".to_owned(),
+            });
+        }
 
         Ok(Self {
             servers,
@@ -273,6 +303,7 @@ impl ClientConfig {
             http2_initial_stream_window_bytes,
             http2_initial_connection_window_bytes,
             vault_cache_capacity,
+            connection_pool_size,
         })
     }
 }
@@ -384,6 +415,12 @@ impl ClientConfig {
     #[must_use]
     pub fn vault_cache_capacity(&self) -> usize {
         self.vault_cache_capacity
+    }
+
+    /// Returns the configured number of pooled tonic Channels.
+    #[must_use]
+    pub fn connection_pool_size(&self) -> u8 {
+        self.connection_pool_size
     }
 }
 

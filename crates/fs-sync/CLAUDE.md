@@ -28,15 +28,28 @@ audited, and documented. Any new `unsafe` block in this crate must:
 3. Map directly to a single syscall with no additional logic.
 4. Be reviewed by a human before merge.
 
+## Public surface
+
+- `sync(file)` — barrier fsync: `fcntl(F_BARRIERFSYNC)` on Apple,
+  `sync_data()` elsewhere. Used on every commit / WAL flush.
+- `evict_page_cache(file)` — best-effort page-cache eviction, used by the
+  O6 vault hibernation path to release Linux page-cache pressure on
+  Dormant vaults. `posix_fadvise(POSIX_FADV_DONTNEED)` on Linux; no-op
+  success on Apple / Windows / other (macOS does not expose
+  `posix_fadvise`, and `fcntl(F_NOCACHE)` does not evict already-cached
+  pages — see module docs).
+
 ## Rules
 
-- **No `unsafe` outside `sync_barrier` on Apple platforms.** Any new
-  unsafe block must be justified in a PR against this file.
+- **No `unsafe` outside `sync_barrier_apple` and `evict_page_cache_linux`.**
+  Both blocks map to a single syscall and carry a `SAFETY:` comment. Any
+  new unsafe block must be justified in a PR against this file.
 - **No additional dependencies without review.** The dependency surface is
   `libc` + `serde` intentionally. Adding a third dep should trigger a
   conversation about whether the scope is creeping.
-- **No I/O beyond a single `fcntl` / `sync_data` call per public function.**
-  This crate is a syscall wrapper, not an orchestration layer.
+- **No I/O beyond a single `fcntl` / `sync_data` / `posix_fadvise` call
+  per public function.** This crate is a syscall wrapper, not an
+  orchestration layer.
 
 ## Auditor allowlist
 

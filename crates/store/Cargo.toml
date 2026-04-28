@@ -48,6 +48,11 @@ moka = { workspace = true }
 
 # Key management types and region definitions
 inferadb-ledger-types = { workspace = true }
+
+# Page-cache eviction primitive (used by Database::evict_page_cache for the
+# O6 vault hibernation path; backed by posix_fadvise on Linux, no-op on
+# Apple / Windows).
+inferadb-ledger-fs-sync = { workspace = true }
 chrono = { workspace = true }
 
 # Serialization for versions.json sidecar

@@ -28,7 +28,13 @@
 //! # }
 //! ```
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use parking_lot::RwLock;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
@@ -56,8 +62,24 @@ const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
 /// be cloned by multiple callers.
 #[derive(Debug, Clone)]
 pub struct ConnectionPool {
-    /// Cached channel, lazily initialized.
-    channel: Arc<RwLock<Option<Channel>>>,
+    /// Lazily-initialized pool of tonic `Channel`s for the active endpoint.
+    ///
+    /// When the pool is empty, no connection has been established yet and
+    /// the next call to [`get_channel`](Self::get_channel) will populate
+    /// it. When non-empty, calls to [`get_channel`](Self::get_channel)
+    /// round-robin across the pool entries via [`Self::next_channel_idx`].
+    ///
+    /// Pool size is governed by [`ClientConfig::connection_pool_size`];
+    /// the default of 1 preserves the historical single-Channel
+    /// behavior. Sizes >1 materialize N independent tonic Channels (each
+    /// with its own tower `Buffer` mpsc worker, hyper HTTP/2 connection,
+    /// and TCP socket) so frame dispatch parallelism scales with pool
+    /// size — the per-Channel `Buffer` is the dispatch bottleneck above
+    /// roughly 24-30k ops/s on loopback.
+    channels: Arc<RwLock<Vec<Channel>>>,
+
+    /// Round-robin cursor across [`Self::channels`].
+    next_channel_idx: Arc<AtomicUsize>,
 
     /// Client configuration for connection settings.
     config: ClientConfig,
@@ -138,7 +160,8 @@ impl ConnectionPool {
         vault_cache.set_metrics(Arc::clone(config.metrics()));
 
         Self {
-            channel: Arc::new(RwLock::new(None)),
+            channels: Arc::new(RwLock::new(Vec::new())),
+            next_channel_idx: Arc::new(AtomicUsize::new(0)),
             config,
             dynamic_endpoints: Arc::new(RwLock::new(None)),
             selector: ServerSelector::new(),
@@ -175,7 +198,8 @@ impl ConnectionPool {
         vault_cache.set_metrics(Arc::clone(config.metrics()));
 
         Self {
-            channel: Arc::new(RwLock::new(None)),
+            channels: Arc::new(RwLock::new(Vec::new())),
+            next_channel_idx: Arc::new(AtomicUsize::new(0)),
             config,
             dynamic_endpoints: Arc::new(RwLock::new(None)),
             selector,
@@ -187,11 +211,81 @@ impl ConnectionPool {
         }
     }
 
+    /// Returns a clone of the next pooled channel via round-robin, or
+    /// `None` when the pool is empty.
+    ///
+    /// Uses `Ordering::Relaxed` for the cursor — a stale read that
+    /// returns the same index twice in a row across two concurrent
+    /// callers is fine; the only invariant is "every cursor value maps
+    /// to a valid index modulo `len()`".
+    fn cached_channel(&self) -> Option<Channel> {
+        let guard = self.channels.read();
+        if guard.is_empty() {
+            return None;
+        }
+        let idx = self.next_channel_idx.fetch_add(1, Ordering::Relaxed) % guard.len();
+        Some(guard[idx].clone())
+    }
+
+    /// Returns the configured pool size, clamped to >= 1.
+    fn pool_size(&self) -> usize {
+        usize::from(self.config.connection_pool_size().max(1))
+    }
+
+    /// Replaces the pooled channels with `new_channels`, dropping the
+    /// previous pool. Resets the round-robin cursor to 0.
+    fn store_pool(&self, new_channels: Vec<Channel>) {
+        let mut guard = self.channels.write();
+        *guard = new_channels;
+        self.next_channel_idx.store(0, Ordering::Relaxed);
+    }
+
+    /// Drops every pooled channel. The next [`Self::get_channel`] call
+    /// will reconnect lazily.
+    fn clear_pool(&self) {
+        let mut guard = self.channels.write();
+        if !guard.is_empty() {
+            guard.clear();
+            self.next_channel_idx.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// Establishes `pool_size` independent channels via [`Self::create_channel`].
+    ///
+    /// Connections are created sequentially — the first connect resolves
+    /// DNS / TLS for the endpoint and the rest reuse no shared state, so
+    /// running them in parallel doesn't shorten the critical path
+    /// materially. Sequential keeps error attribution clean and avoids a
+    /// burst of concurrent SYNs against the server during cold start.
+    async fn create_channel_pool(&self) -> Result<Vec<Channel>> {
+        let pool_size = self.pool_size();
+        let mut out = Vec::with_capacity(pool_size);
+        for _ in 0..pool_size {
+            out.push(self.create_channel().await?);
+        }
+        Ok(out)
+    }
+
+    /// Establishes `pool_size` independent channels to a specific
+    /// endpoint URL (used by the region-leader cache path).
+    async fn connect_to_endpoint_pool(&self, endpoint_url: &str) -> Result<Vec<Channel>> {
+        let pool_size = self.pool_size();
+        let mut out = Vec::with_capacity(pool_size);
+        for _ in 0..pool_size {
+            out.push(self.connect_to_endpoint(endpoint_url).await?);
+        }
+        Ok(out)
+    }
+
     /// Returns a connected channel, establishing the connection if needed.
     ///
     /// On first call, this method establishes a connection to the configured
-    /// endpoint(s). Subsequent calls return a clone of the cached channel
-    /// (which shares the underlying HTTP/2 connection).
+    /// endpoint(s). Subsequent calls return a clone of the next pooled
+    /// channel (which shares the underlying HTTP/2 connection).
+    ///
+    /// When `connection_pool_size > 1`, each call rotates round-robin
+    /// across the pooled channels. With pool size 1 the rotation is a
+    /// no-op and behavior matches the historical single-channel path.
     ///
     /// # Errors
     ///
@@ -211,22 +305,19 @@ impl ConnectionPool {
             return self.get_region_channel(cache).await;
         }
 
-        // Fast path: check if channel already exists
-        {
-            let guard = self.channel.read();
-            if let Some(channel) = guard.as_ref() {
-                return Ok(channel.clone());
-            }
+        // Fast path: pool already populated.
+        if let Some(channel) = self.cached_channel() {
+            return Ok(channel);
         }
 
-        // Slow path: need to establish connection
+        // Slow path: need to establish connections.
         let endpoint = self.current_endpoint();
-        let new_channel = match self.create_channel().await {
-            Ok(ch) => {
+        let new_channels = match self.create_channel_pool().await {
+            Ok(channels) => {
                 self.config
                     .metrics()
                     .record_connection(&endpoint, crate::metrics::ConnectionEvent::Connected);
-                ch
+                channels
             },
             Err(e) => {
                 self.config
@@ -236,17 +327,22 @@ impl ConnectionPool {
             },
         };
 
-        // Store and return the channel
+        // Store the pool. Double-check: another task may have populated it
+        // while we waited; if so, prefer the existing pool.
         {
-            let mut guard = self.channel.write();
-            // Double-check pattern: another task might have connected while we waited
-            if let Some(channel) = guard.as_ref() {
-                return Ok(channel.clone());
+            let mut guard = self.channels.write();
+            if !guard.is_empty() {
+                let idx = self.next_channel_idx.fetch_add(1, Ordering::Relaxed) % guard.len();
+                return Ok(guard[idx].clone());
             }
-            *guard = Some(new_channel.clone());
+            *guard = new_channels;
+            self.next_channel_idx.store(0, Ordering::Relaxed);
+            // Hand back the first channel directly — the cursor will
+            // advance on the next caller.
+            let chan = guard[0].clone();
+            self.next_channel_idx.fetch_add(1, Ordering::Relaxed);
+            Ok(chan)
         }
-
-        Ok(new_channel)
     }
 
     /// Creates a new channel with all configured settings applied.
@@ -396,13 +492,15 @@ impl ConnectionPool {
                 metrics.region_resolve_stale_served(&region_label);
                 cache.spawn_background_refresh(gateway);
             }
-            let existing = self.channel.read().clone();
-            if let Some(channel) = existing {
+            if let Some(channel) = self.cached_channel() {
                 return Ok(channel);
             }
-            let channel = self.connect_to_endpoint(cached.as_ref()).await?;
-            *self.channel.write() = Some(channel.clone());
-            return Ok(channel);
+            let new_channels = self.connect_to_endpoint_pool(cached.as_ref()).await?;
+            // Prefer the first newly-built channel for the immediate
+            // return; the pool round-robin will pick up subsequent calls.
+            let chosen = new_channels[0].clone();
+            self.store_pool(new_channels);
+            return Ok(chosen);
         }
 
         // Cache miss/expired — resolve via gateway
@@ -410,9 +508,10 @@ impl ConnectionPool {
         let gateway = self.get_or_create_gateway_channel().await?;
         match cache.resolve(&gateway).await {
             Ok(endpoint) => {
-                let channel = self.connect_to_endpoint(&endpoint).await?;
-                *self.channel.write() = Some(channel.clone());
-                Ok(channel)
+                let new_channels = self.connect_to_endpoint_pool(&endpoint).await?;
+                let chosen = new_channels[0].clone();
+                self.store_pool(new_channels);
+                Ok(chosen)
             },
             Err(_) => {
                 // Resolution failed — fall back to gateway
@@ -547,7 +646,7 @@ impl ConnectionPool {
             let vault = inferadb_ledger_types::VaultSlug::new(vault_slug_raw);
             if h.leader_endpoint.is_some() {
                 self.vault_cache.apply_hint(org, vault, h);
-                *self.channel.write() = None;
+                self.clear_pool();
                 // Use a label that captures the vault-routing axis. The
                 // existing `redirect_retry` metric is keyed by region; for
                 // per-vault redirects we synthesize a region-like label
@@ -561,7 +660,7 @@ impl ConnectionPool {
             }
             // Hint had vault context but no endpoint — purge the entry.
             self.vault_cache.invalidate(org, vault);
-            *self.channel.write() = None;
+            self.clear_pool();
             return;
         }
 
@@ -575,14 +674,14 @@ impl ConnectionPool {
         match hint {
             Some(ref h) if h.leader_endpoint.is_some() => {
                 cache.apply_hint(h);
-                *self.channel.write() = None;
+                self.clear_pool();
                 // Hint applied — a redirect occurred; record it so operators
                 // can observe redirect cost (cold-start vs. warm path).
                 self.config.metrics().redirect_retry(&cache.region().to_string());
             },
             _ => {
                 cache.invalidate();
-                *self.channel.write() = None;
+                self.clear_pool();
             },
         }
     }
@@ -631,16 +730,24 @@ impl ConnectionPool {
         }
 
         if let Some(endpoint) = self.vault_cache.cached_endpoint(organization, vault) {
-            // Reuse the existing pool channel only when its endpoint matches
-            // the vault leader. The single cached channel is shared across
-            // calls; if a different vault routed to a different endpoint
-            // last, we need a fresh connection.
-            let cached_channel = self.channel.read().clone();
-            if let Some(channel) = cached_channel
-                && self.current_endpoint() == endpoint.as_ref()
+            // Reuse a pooled channel when its endpoint matches the vault
+            // leader. The pool is shared across vault calls; if a
+            // different vault routed to a different endpoint last, we
+            // need fresh connections (the cache will replace the pool
+            // entirely on the redirect path).
+            if self.current_endpoint() == endpoint.as_ref()
+                && let Some(channel) = self.cached_channel()
             {
                 return Ok(channel);
             }
+            // Endpoint mismatch — connect a one-off channel for this
+            // request. We deliberately do NOT replace `self.channels`
+            // here: vault-leader endpoints diverge per-vault under the
+            // per-vault consensus model, so caching them in the
+            // round-robin pool would thrash the pool when fan-out
+            // touches many vaults. The leader cache itself (and the
+            // gateway-resolution path) populate the pool when it's the
+            // right thing to do.
             let channel = self.connect_to_endpoint(endpoint.as_ref()).await?;
             return Ok(channel);
         }
@@ -689,14 +796,14 @@ impl ConnectionPool {
         &self.config
     }
 
-    /// Clears the cached channel, forcing reconnection on next use.
+    /// Clears every pooled channel, forcing reconnection on next use.
     ///
     /// This can be useful after network changes or when the server
     /// indicates the connection should be reset.
     pub fn reset(&self) {
-        let mut guard = self.channel.write();
-        if guard.is_some() {
-            *guard = None;
+        let was_populated = !self.channels.read().is_empty();
+        if was_populated {
+            self.clear_pool();
             self.config.metrics().record_connection(
                 &self.current_endpoint(),
                 crate::metrics::ConnectionEvent::Disconnected,
@@ -885,9 +992,8 @@ mod tests {
         let config = test_config();
         let pool = ConnectionPool::new(config);
 
-        // Channel should be None initially (lazy connection)
-        let guard = pool.channel.read();
-        assert!(guard.is_none(), "channel should be None before first use");
+        // Channel pool should be empty initially (lazy connection)
+        assert!(pool.channels.read().is_empty(), "pool should be empty before first use");
     }
 
     #[test]
@@ -915,11 +1021,11 @@ mod tests {
         let pool = ConnectionPool::new(config);
 
         // Initially empty
-        assert!(pool.channel.read().is_none());
+        assert!(pool.channels.read().is_empty());
 
         // Reset on empty pool is a no-op
         pool.reset();
-        assert!(pool.channel.read().is_none());
+        assert!(pool.channels.read().is_empty());
     }
 
     #[test]
@@ -954,8 +1060,8 @@ mod tests {
         let config = test_config();
         let pool = ConnectionPool::new(config);
 
-        // Before any connection attempt, channel is None
-        assert!(pool.channel.read().is_none());
+        // Before any connection attempt, the channel pool is empty
+        assert!(pool.channels.read().is_empty());
 
         // Note: We can't test successful caching without a real/mock server
         // The get_channel call would fail, but the caching logic is correct
@@ -1081,9 +1187,9 @@ mod tests {
         pool.update_endpoints(vec!["http://10.0.0.1:5000".to_string()]);
         assert_eq!(pool.active_endpoints(), vec!["http://10.0.0.1:5000".to_string()]);
 
-        // Reset clears the channel but keeps dynamic endpoints
+        // Reset clears the channel pool but keeps dynamic endpoints
         pool.reset();
-        assert!(pool.channel.read().is_none());
+        assert!(pool.channels.read().is_empty());
         // Dynamic endpoints are still set
         assert_eq!(pool.active_endpoints(), vec!["http://10.0.0.1:5000".to_string()]);
     }
@@ -1099,6 +1205,75 @@ mod tests {
         assert_eq!(pool2.active_endpoints(), vec!["http://10.0.0.1:5000".to_string()]);
     }
 
+    /// `cached_channel` returns `None` when the pool is empty and rotates
+    /// across pooled entries when populated. The cursor wraps modulo
+    /// `len()` and is independent of the original insertion order.
+    #[tokio::test]
+    async fn cached_channel_round_robins_across_pooled_entries() {
+        // Synthesize three lazy-connect channels — they never actually
+        // connect, but `Channel` is `Clone` and the pool only inspects
+        // identity via the cursor index.
+        let chans: Vec<Channel> =
+            (0..3).map(|_| Endpoint::from_static("http://127.0.0.1:1").connect_lazy()).collect();
+
+        let config = test_config();
+        let pool = ConnectionPool::new(config);
+
+        // Empty pool → None.
+        assert!(pool.cached_channel().is_none());
+
+        pool.store_pool(chans.clone());
+
+        // Eight calls over a 3-entry pool: cursor walks 0,1,2,0,1,2,0,1.
+        // We can't compare Channel identity directly (no PartialEq), but
+        // we can check the cursor advanced and stayed within bounds by
+        // observing the AtomicUsize directly.
+        for _ in 0..8 {
+            let _ = pool.cached_channel().expect("pool populated");
+        }
+        // After 8 fetches starting from cursor=0, the cursor should be 8.
+        assert_eq!(
+            pool.next_channel_idx.load(Ordering::Relaxed),
+            8,
+            "round-robin cursor should advance once per fetch"
+        );
+
+        // clear_pool resets state.
+        pool.clear_pool();
+        assert!(pool.cached_channel().is_none());
+        assert_eq!(pool.next_channel_idx.load(Ordering::Relaxed), 0);
+    }
+
+    /// `pool_size()` reads from `ClientConfig.connection_pool_size` and
+    /// clamps zero (which the builder rejects, but the field is `u8`) to
+    /// 1.
+    #[test]
+    fn pool_size_reflects_config() {
+        let config = ClientConfig::builder()
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
+            .client_id("test-client")
+            .connection_pool_size(4)
+            .build()
+            .expect("valid config");
+        let pool = ConnectionPool::new(config);
+        assert_eq!(pool.pool_size(), 4);
+
+        let default_config = test_config();
+        let default_pool = ConnectionPool::new(default_config);
+        assert_eq!(default_pool.pool_size(), 1);
+    }
+
+    /// `connection_pool_size = 0` is rejected at config build time.
+    #[test]
+    fn connection_pool_size_zero_is_rejected() {
+        let result = ClientConfig::builder()
+            .servers(ServerSource::from_static(["http://localhost:50051"]))
+            .client_id("test-client")
+            .connection_pool_size(0)
+            .build();
+        assert!(result.is_err(), "connection_pool_size=0 must fail validation");
+    }
+
     #[test]
     fn multiple_reset_calls_are_safe() {
         let config = test_config();
@@ -1108,7 +1283,7 @@ mod tests {
         pool.reset();
         pool.reset();
         pool.reset();
-        assert!(pool.channel.read().is_none());
+        assert!(pool.channels.read().is_empty());
     }
 
     #[test]

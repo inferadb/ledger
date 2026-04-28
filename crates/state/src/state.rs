@@ -88,6 +88,22 @@ pub enum StateError {
         /// The condition that failed (for specific error code mapping).
         failed_condition: Option<SetCondition>,
     },
+
+    /// Vault has not been materialised in this `StateLayer`.
+    ///
+    /// Returned by [`StateLayer::evict_vault_state_page_cache`] when the
+    /// caller asks to evict a vault that this state layer has never opened
+    /// — at sleep time, that's a programmer bug (the raft layer drives
+    /// hibernation only for vaults whose group it has registered, and the
+    /// register path always materialises the per-vault DB before completing).
+    #[snafu(display("Vault {vault_id} not materialised in state layer"))]
+    VaultNotMaterialized {
+        /// The vault that was requested but is not in the per-vault DB map.
+        vault_id: VaultId,
+        /// Location where the error was raised.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 }
 
 /// Result type for state operations.
@@ -451,6 +467,49 @@ impl<B: StorageBackend> StateLayer<B> {
     /// awaiting per-DB sync futures.
     pub fn live_vault_dbs(&self) -> Vec<(VaultId, Arc<Database<B>>)> {
         self.dbs.read().iter().map(|(v, db)| (*v, Arc::clone(db))).collect()
+    }
+
+    /// Hints to the OS that the page cache for `vault`'s state.db may be
+    /// dropped (O6 vault hibernation Pass 2).
+    ///
+    /// Best-effort: on Linux this calls `posix_fadvise(POSIX_FADV_DONTNEED)`
+    /// on the per-vault `state.db` file; on Apple / Windows it is a no-op
+    /// success (see [`Database::evict_page_cache`]). Idempotent — calling
+    /// twice in a row is a no-op success.
+    ///
+    /// **Used only by the raft-layer hibernation path.** `RaftManager::sleep_vault`
+    /// drives this together with eviction on the per-vault `raft.db` /
+    /// `blocks.db` / `events.db` (via direct `Database::evict_page_cache`
+    /// calls on the per-vault DB handles owned by `InnerVaultGroup`). The
+    /// in-process page cache is intentionally NOT cleared — wake p99
+    /// stays under 100ms via warm in-process cache hits while the OS-side
+    /// memory pressure is released.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::VaultNotMaterialized`] if the vault has never
+    /// been opened in this `StateLayer` (which at sleep time would be a
+    /// programmer bug — the raft layer only drives hibernation for vaults
+    /// whose group it has registered, and the register path materialises
+    /// the per-vault DB before completing). Returns [`StateError::Store`]
+    /// if the underlying syscall fails on a platform where eviction is
+    /// supported.
+    pub fn evict_vault_state_page_cache(&self, vault: VaultId) -> Result<()> {
+        // Look up the per-vault DB without materialising on miss — eviction
+        // on an unmaterialised vault is a no-op-vs-programmer-error
+        // ambiguity; surface the latter so the raft-layer caller can log
+        // the bug rather than silently drop the request.
+        let db = match self.dbs.read().get(&vault) {
+            Some(db) => Arc::clone(db),
+            None => {
+                return Err(StateError::VaultNotMaterialized {
+                    vault_id: vault,
+                    location: snafu::location!(),
+                });
+            },
+        };
+        db.evict_page_cache().context(StoreSnafu)?;
+        Ok(())
     }
 
     // Slice 2b note: the pre-Slice-2b `begin_write(vault)` / `begin_read(vault)`
@@ -3393,5 +3452,60 @@ mod tests {
             .unwrap()
             .expect("apply_operations must persist across reopen");
         assert_eq!(entity.value, b"durable_value".to_vec());
+    }
+
+    /// `evict_vault_state_page_cache` errors when the vault is not
+    /// materialised (rather than silently no-oping). At sleep time this
+    /// would be a programmer bug — surface it so the raft-layer caller
+    /// can log and metric it.
+    #[test]
+    fn test_evict_vault_state_page_cache_unknown_vault_errors() {
+        let state = create_test_state();
+        // VaultId(99) was never written, so the factory was never invoked
+        // for it. Eviction must surface VaultNotMaterialized.
+        let err = state
+            .evict_vault_state_page_cache(VaultId::new(99))
+            .expect_err("evict on never-materialised vault must error");
+        assert!(
+            matches!(err, StateError::VaultNotMaterialized { vault_id, .. } if vault_id == VaultId::new(99)),
+            "expected VaultNotMaterialized, got {err:?}"
+        );
+    }
+
+    /// `evict_vault_state_page_cache` is best-effort and idempotent on a
+    /// materialised vault. The in-memory backend is a no-op success path
+    /// (no OS page cache to drop); the round-trip asserts the API works
+    /// both before and after a write lands without disturbing the data.
+    #[test]
+    fn test_evict_vault_state_page_cache_materialised_vault_roundtrips() {
+        let state = create_test_state();
+        let vault = VaultId::new(1);
+
+        // Materialise the vault by performing a write.
+        let ops = vec![Operation::SetEntity {
+            key: "k".to_string(),
+            value: b"v".to_vec(),
+            condition: None,
+            expires_at: None,
+        }];
+        state.apply_operations(vault, &ops, 1).unwrap();
+
+        // First eviction.
+        state.evict_vault_state_page_cache(vault).expect("evict must succeed");
+        // Second eviction is idempotent.
+        state.evict_vault_state_page_cache(vault).expect("evict must be idempotent");
+
+        // The underlying data is still readable post-eviction.
+        let e = state.get_entity(vault, b"k").unwrap();
+        assert_eq!(e.map(|e| e.value), Some(b"v".to_vec()));
+    }
+
+    /// `evict_vault_state_page_cache` works on the eagerly-materialised
+    /// system vault even before any apply touches it.
+    #[test]
+    fn test_evict_vault_state_page_cache_system_vault_is_eager() {
+        let state = create_test_state();
+        // SYSTEM_VAULT_ID is materialised eagerly in StateLayer::new.
+        state.evict_vault_state_page_cache(SYSTEM_VAULT_ID).expect("system vault eager");
     }
 }

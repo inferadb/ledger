@@ -113,6 +113,23 @@ pub type VaultBlocksDbsFn =
 pub type VaultEventsDbsFn =
     Arc<dyn Fn() -> Vec<(VaultId, Arc<Database<FileBackend>>)> + Send + Sync>;
 
+/// Snapshot accessor for the set of vault IDs that are currently
+/// [`crate::raft_manager::VaultLifecycleState::Dormant`] in the manager's
+/// `vault_groups` map.
+///
+/// Invoked once per tick. The returned [`Vec`] is a frozen snapshot at the
+/// top of `do_checkpoint` and used to filter every Phase A fan-out so the
+/// checkpointer never refaults the OS page cache pages we just evicted via
+/// `posix_fadvise(POSIX_FADV_DONTNEED)` in
+/// [`crate::raft_manager::RaftManager::sleep_vault`].
+///
+/// For state.db: the per-org [`StateLayer`] does not know about
+/// hibernation lifecycle, so the checkpointer applies the filter after
+/// `live_vault_dbs()`. For raft.db / blocks.db / events.db: the
+/// `vault_*_dbs_fn` closures (built in `RaftManager::start_background_jobs`)
+/// already filter on lifecycle inline. Both paths land at the same outcome.
+pub type DormantVaultsFn = Arc<dyn Fn() -> Vec<VaultId> + Send + Sync>;
+
 /// Floor on the internal poll cadence so sub-50ms `interval_ms` settings do
 /// not spin the task at the tokio timer's minimum resolution.
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -231,6 +248,12 @@ pub struct StateCheckpointer {
     /// inherits "no events" from the parent org and never opens the
     /// per-vault DB.
     vault_events_dbs_fn: VaultEventsDbsFn,
+    /// Snapshot accessor for the set of vault IDs whose
+    /// [`crate::raft_manager::VaultLifecycleState`] is `Dormant`. Used to
+    /// filter the per-vault state.db fan-out so eviction-and-resync
+    /// thrash is avoided. The raft.db / blocks.db / events.db closures
+    /// already filter inline (see [`crate::raft_manager::RaftManager`]).
+    dormant_vaults_fn: DormantVaultsFn,
     /// Live runtime-config handle. Re-read on every wake-up so live
     /// `UpdateConfig` RPCs take effect on the next tick.
     runtime_config: RuntimeConfigHandle,
@@ -283,6 +306,7 @@ impl StateCheckpointer {
         vault_raft_dbs_fn: VaultRaftDbsFn,
         vault_blocks_dbs_fn: VaultBlocksDbsFn,
         vault_events_dbs_fn: VaultEventsDbsFn,
+        dormant_vaults_fn: DormantVaultsFn,
         runtime_config: RuntimeConfigHandle,
         applied_rx: watch::Receiver<u64>,
         cancellation_token: CancellationToken,
@@ -299,6 +323,7 @@ impl StateCheckpointer {
             vault_raft_dbs_fn,
             vault_blocks_dbs_fn,
             vault_events_dbs_fn,
+            dormant_vaults_fn,
             runtime_config,
             applied_rx,
             cancellation_token,
@@ -469,7 +494,28 @@ impl StateCheckpointer {
         // entries via `commit_in_memory`. Fanning these out in Phase A
         // alongside the vault state DBs closes the steady-state crash
         // gap (Task #145 covers the shutdown-side equivalent).
-        let vault_dbs = self.state_layer.live_vault_dbs();
+        // Filter Dormant vaults from the per-vault state.db fan-out: O6
+        // hibernation Pass 2 evicts the OS page cache for Dormant vaults
+        // via `posix_fadvise(POSIX_FADV_DONTNEED)`; if the checkpointer
+        // re-syncs those handles every tick it would refault the very
+        // pages we just dropped. Dormant vaults have no in-flight writes
+        // (apply pipeline drained at Active → Dormant), so their
+        // `last_synced_snapshot_id` is already caught up and the early-
+        // return inside `Database::sync_state` would be a no-op anyway —
+        // but we still skip the iteration to avoid touching the backend.
+        // The system vault (`SYSTEM_VAULT_ID`) is never marked Dormant by
+        // the idle detector, so it is never filtered here.
+        // The raft / blocks / events closures (built in
+        // `RaftManager::start_background_jobs`) already filter Dormant
+        // vaults inline.
+        let dormant: std::collections::HashSet<VaultId> =
+            (self.dormant_vaults_fn)().into_iter().collect();
+        let vault_dbs: Vec<(VaultId, Arc<Database<FileBackend>>)> = self
+            .state_layer
+            .live_vault_dbs()
+            .into_iter()
+            .filter(|(vid, _)| !dormant.contains(vid))
+            .collect();
         let vault_raft_dbs = (self.vault_raft_dbs_fn)();
         let vault_blocks_dbs = (self.vault_blocks_dbs_fn)();
         let vault_events_dbs = (self.vault_events_dbs_fn)();
@@ -927,6 +973,10 @@ mod tests {
         let vault_events_dbs_fn: VaultEventsDbsFn = Arc::new(move || {
             vault_events_dbs.iter().map(|(vid, db)| (*vid, Arc::clone(db))).collect()
         });
+        // Tests do not exercise the hibernation path — every vault is
+        // Active for the duration of the run, so the dormant snapshot is
+        // empty.
+        let dormant_vaults_fn: DormantVaultsFn = Arc::new(Vec::new);
         let cp = StateCheckpointer::from_config(
             state_layer,
             Arc::clone(&dbs.raft),
@@ -936,6 +986,7 @@ mod tests {
             vault_raft_dbs_fn,
             vault_blocks_dbs_fn,
             vault_events_dbs_fn,
+            dormant_vaults_fn,
             runtime_config.clone(),
             rx,
             token.clone(),
@@ -1277,6 +1328,7 @@ mod tests {
         let vault_raft_dbs_fn: VaultRaftDbsFn = Arc::new(Vec::new);
         let vault_blocks_dbs_fn: VaultBlocksDbsFn = Arc::new(Vec::new);
         let vault_events_dbs_fn: VaultEventsDbsFn = Arc::new(Vec::new);
+        let dormant_vaults_fn: DormantVaultsFn = Arc::new(Vec::new);
         let cp = StateCheckpointer::from_config(
             state_layer,
             Arc::clone(&dbs.raft),
@@ -1286,6 +1338,7 @@ mod tests {
             vault_raft_dbs_fn,
             vault_blocks_dbs_fn,
             vault_events_dbs_fn,
+            dormant_vaults_fn,
             runtime_config,
             rx,
             token,
@@ -1667,6 +1720,7 @@ mod tests {
         );
         let vault_blocks_dbs_fn: VaultBlocksDbsFn = Arc::new(Vec::new);
         let vault_events_dbs_fn: VaultEventsDbsFn = Arc::new(Vec::new);
+        let dormant_vaults_fn: DormantVaultsFn = Arc::new(Vec::new);
         let cp = StateCheckpointer::from_config(
             state_layer,
             Arc::clone(&dbs.raft),
@@ -1676,6 +1730,7 @@ mod tests {
             vault_raft_dbs_fn,
             vault_blocks_dbs_fn,
             vault_events_dbs_fn,
+            dormant_vaults_fn,
             runtime_config,
             rx,
             token,

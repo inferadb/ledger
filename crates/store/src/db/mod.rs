@@ -1111,4 +1111,41 @@ impl<B: StorageBackend> Database<B> {
 
         Ok(())
     }
+
+    /// Hints to the OS that this database's cached pages may be dropped from
+    /// the page cache.
+    ///
+    /// Best-effort. On Linux this calls `posix_fadvise(POSIX_FADV_DONTNEED)`
+    /// on the underlying file (and the crypto sidecar, if any). On Apple
+    /// and Windows the call is a successful no-op — the platforms do not
+    /// expose an equivalent "drop pages now" hint without an mmap roundtrip,
+    /// which is out of scope for the storage layer.
+    ///
+    /// Idempotent. Calling twice is a no-op success. Safe to invoke
+    /// concurrently with active reads — the syscall does not invalidate
+    /// in-flight `pread` traffic, only marks pages as eligible for
+    /// reclamation.
+    ///
+    /// # Used by
+    ///
+    /// The O6 vault-hibernation path drops per-vault DB page-cache pressure
+    /// when a vault transitions to `Dormant`. `StateLayer::evict_vault_state_page_cache`
+    /// and `RaftManager::sleep_vault` drive this; the in-process [`PageCache`]
+    /// (capped via `DatabaseConfig::cache_size`) is intentionally left
+    /// untouched so the next access on wake repopulates the OS page cache
+    /// lazily, and warm in-process cache hits keep wake p99 under 100ms.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if the underlying syscall fails on a platform
+    /// where eviction is supported. Eviction failures on unsupported
+    /// platforms are silently no-op success.
+    pub fn evict_page_cache(&self) -> Result<()> {
+        // Read lock is sufficient — `StorageBackend::evict_page_cache`
+        // takes `&self` and the backing syscall (`posix_fadvise` on Linux)
+        // does not require write access. Holding the write lock would
+        // serialize eviction against active readers for no benefit.
+        let backend = self.backend.read();
+        backend.evict_page_cache()
+    }
 }
