@@ -22,11 +22,23 @@ use snafu::{ResultExt, Snafu};
 
 /// A bootstrapped profiling session: a connected client plus the slugs needed
 /// to drive writes and checks.
+///
+/// The `client` field holds the setup-phase `LedgerClient` (used by
+/// `bootstrap`, `provision_vaults`, and `provision_orgs` to onboard
+/// users / orgs / vaults). Concurrent workloads do **not** share this
+/// client across spawned tasks — each task constructs its own
+/// `LedgerClient` via [`Harness::connect_task_client`] so server-side
+/// per-`client_id` metrics (request rates, idempotency keys, sequence
+/// numbers) are properly partitioned across tasks rather than all
+/// credited to one synthetic client.
 pub struct Harness {
     pub client: LedgerClient,
     pub user: UserSlug,
     pub organization: OrganizationSlug,
     pub vault: VaultSlug,
+    /// gRPC endpoint passed to `bootstrap`. Workloads use this to
+    /// construct per-task clients with distinct `client_id`s.
+    pub endpoint: String,
 }
 
 /// Latency percentiles over the set of recorded successful operations, in
@@ -266,7 +278,27 @@ impl Harness {
         tracing::info!(user = %user.value(), organization = %organization.value(), "creating vault");
         let vault_info = client.create_vault(user, organization).await.context(CreateVaultSnafu)?;
 
-        Ok(Self { client, user, organization, vault: vault_info.vault })
+        Ok(Self {
+            client,
+            user,
+            organization,
+            vault: vault_info.vault,
+            endpoint: endpoint.to_string(),
+        })
+    }
+
+    /// Connects a fresh `LedgerClient` for a single workload task, stamped
+    /// with a unique `client_id` so server-side per-client metrics partition
+    /// cleanly across the spawned tasks. Each concurrent workload calls this
+    /// once per task before entering its measured loop — sharing one client
+    /// across tasks would funnel every request through a single
+    /// `client_id="profile-workload"` entry on the rate limiter, hot-key
+    /// detector, and request-rate counters.
+    pub async fn connect_task_client(&self, task_id: usize) -> Result<LedgerClient, HarnessError> {
+        let client_id = format!("profile-task-{task_id}");
+        LedgerClient::connect(&self.endpoint, client_id)
+            .await
+            .with_context(|_| ConnectSnafu { endpoint: self.endpoint.clone() })
     }
 
     /// Provisions `n` additional vaults under the harness's existing org +

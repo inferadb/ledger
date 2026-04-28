@@ -249,6 +249,19 @@ pub struct RaftManagerConfig {
     /// Whether to inject trace context into Raft RPCs.
     #[builder(default = true)]
     pub trace_raft_rpcs: bool,
+    /// Cap on concurrent snapshot-producing membership conf-changes per
+    /// per-organization Raft group (Phase 5 / M2 of the centralised
+    /// membership plan). Default `2`, matching TiKV's
+    /// `max_snapshot_per_store` default.
+    ///
+    /// Plumbed onto every per-organization
+    /// [`InnerGroup`]'s `membership_queue` when the group is
+    /// constructed; M2 only adds the primitive (the cascade still
+    /// fires through the existing
+    /// [`RaftManager::cascade_membership_to_children`] path), so this
+    /// value has no observable effect until M3 wires the watcher.
+    #[builder(default = crate::membership_queue::DEFAULT_MAX_CONCURRENT_SNAPSHOT_PRODUCING)]
+    pub max_concurrent_snapshot_producing: usize,
 }
 
 impl RaftManagerConfig {
@@ -522,6 +535,19 @@ pub struct InnerGroup {
     ///
     /// [`commit_dispatcher`]: InnerGroup::commit_dispatcher
     pub(crate) commit_dispatcher: Arc<crate::commit_dispatcher::CommitDispatcher>,
+    /// Rate-limited queue for per-vault membership conf-changes
+    /// (Phase 5 / M2). Populated only on per-organization groups
+    /// (`organization_id != OrganizationId::new(0)`); the system group
+    /// and the regional control-plane group leave this `None`.
+    ///
+    /// In M2 the queue is constructed but receives no entries — the
+    /// existing
+    /// [`RaftManager::cascade_membership_to_children`] cascade still
+    /// fires synchronously. M3 wires the
+    /// `RegionMembershipWatcher` task that produces entries, and M4
+    /// wires the dispatcher that drains them via
+    /// [`MembershipQueue::take_next`](crate::membership_queue::MembershipQueue::take_next).
+    pub(crate) membership_queue: Option<Arc<crate::membership_queue::MembershipQueue>>,
 }
 
 impl InnerGroup {
@@ -630,6 +656,19 @@ impl InnerGroup {
     /// returns.
     pub fn commit_dispatcher(&self) -> &Arc<crate::commit_dispatcher::CommitDispatcher> {
         &self.commit_dispatcher
+    }
+
+    /// Returns the per-organization rate-limited membership queue, if
+    /// this group is a per-organization data-plane group.
+    ///
+    /// Returns `None` for the system group (`GLOBAL`,
+    /// `OrganizationId(0)`) and the regional control-plane group
+    /// (`region`, `OrganizationId(0)`).
+    ///
+    /// In M2 this is wired but unused — see
+    /// [`crate::membership_queue`] for the migration plan.
+    pub fn membership_queue(&self) -> Option<&Arc<crate::membership_queue::MembershipQueue>> {
+        self.membership_queue.as_ref()
     }
 
     /// Records activity on this group, resetting the idle timer.
@@ -1197,6 +1236,26 @@ impl OrganizationGroup {
     /// Returns the current leader node ID.
     pub fn current_leader(&self) -> Option<LedgerNodeId> {
         self.0.current_leader()
+    }
+
+    /// Returns the per-organization rate-limited membership queue
+    /// (Phase 5 / M2).
+    ///
+    /// In M2 this returns the constructed queue for every
+    /// per-organization group; M3 will start producing entries through
+    /// it and M4 will drain them. Until then the queue is inert — the
+    /// existing
+    /// [`RaftManager::cascade_membership_to_children`] cascade still
+    /// fires synchronously.
+    ///
+    /// Returns `None` only when the underlying group is a
+    /// control-plane group (`organization_id == OrganizationId(0)`);
+    /// callers reaching this method through
+    /// [`OrganizationGroup`] in production always observe `Some` —
+    /// route_organization only constructs the wrapper for per-org
+    /// groups.
+    pub fn membership_queue(&self) -> Option<&Arc<crate::membership_queue::MembershipQueue>> {
+        self.0.membership_queue()
     }
 }
 
@@ -2189,6 +2248,10 @@ impl RaftManager {
             vault_creation_rx: parking_lot::Mutex::new(None),
             vault_deletion_rx: parking_lot::Mutex::new(None),
             commit_dispatcher,
+            // System / region control-plane groups do not own a
+            // membership queue — only per-organization data-plane groups
+            // do.
+            membership_queue: None,
         });
 
         {
@@ -4226,6 +4289,20 @@ impl RaftManager {
         // `block_archive` (which owns a domain API, not a durability API).
         let jobs_running = enable_background_jobs;
         let blocks_db = Arc::clone(block_archive.db());
+        // Phase 5 / M2: per-organization data-plane groups carry a
+        // `MembershipQueue` for rate-limiting per-vault conf-changes.
+        // System (`GLOBAL`, 0) and regional control-plane (`region`, 0)
+        // groups don't — they cascade through the existing
+        // `cascade_membership_to_children` path until M3 wires the
+        // watcher.
+        let membership_queue = if organization_id == OrganizationId::new(0) {
+            None
+        } else {
+            Some(Arc::new(crate::membership_queue::MembershipQueue::new(
+                self.config.max_concurrent_snapshot_producing,
+                crate::membership_queue::DEFAULT_MAX_BACKLOG,
+            )))
+        };
         let inner = Arc::new(InnerGroup {
             region,
             organization_id,
@@ -4253,6 +4330,7 @@ impl RaftManager {
             vault_creation_rx: parking_lot::Mutex::new(vault_creation_rx),
             vault_deletion_rx: parking_lot::Mutex::new(vault_deletion_rx),
             commit_dispatcher,
+            membership_queue,
         });
 
         {

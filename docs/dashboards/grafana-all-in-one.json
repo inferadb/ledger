@@ -726,7 +726,7 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "description": "Applies accumulated in memory since the last successful checkpoint, per region. Rises toward `applies_threshold` (default 5000) and snaps back on checkpoint. A growing floor means checkpoints are lagging behind the apply rate.",
+      "description": "Applies accumulated in memory since the last successful checkpoint, per region. Rises toward `applies_threshold` (default 50000) and snaps back on checkpoint. A growing floor means checkpoints are lagging behind the apply rate.",
       "fieldConfig": {
         "defaults": {
           "custom": { "drawStyle": "line", "lineInterpolation": "linear", "spanNulls": false },

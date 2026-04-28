@@ -1132,7 +1132,7 @@ impl<B: StorageBackend + 'static> EventHandle<B> {
 /// events is realised by
 /// [`StateCheckpointer`](crate::state_checkpointer::StateCheckpointer),
 /// which syncs `events.db` alongside the other state DBs on every
-/// `checkpoint_interval_ms` tick (default 500ms). Clean-shutdown zero-loss
+/// `checkpoint_interval_ms` tick (default 2000ms). Clean-shutdown zero-loss
 /// is preserved via Phase 5b (`flush_for_shutdown` drains the queue) →
 /// Phase 5c (`sync_all_state_dbs` syncs `events.db`) in the server's
 /// `pre_shutdown` closure. See
@@ -1312,12 +1312,12 @@ impl<B: StorageBackend + 'static> EventFlusher<B> {
     /// The per-flush dual-slot fsync was the dominant cost under
     /// `concurrent-writes @ 32` (~12% of wall-clock). Durability is realised
     /// by `StateCheckpointer`, which syncs `events.db` on
-    /// every tick (default `checkpoint_interval_ms = 500ms` — see
+    /// every tick (default `checkpoint_interval_ms = 2000ms` — see
     /// `crates/raft/src/state_checkpointer.rs` and
     /// `crates/types/src/config/storage.rs` `default_checkpoint_interval_ms`).
     /// The crash-loss window widens from "last flusher tick" (up to
     /// `flush_interval_ms`, default 100ms) to "last checkpointer tick" (up
-    /// to `checkpoint_interval_ms`, default 500ms). Graceful shutdown still
+    /// to `checkpoint_interval_ms`, default 2000ms). Graceful shutdown still
     /// preserves zero-loss via Phase 5b (`flush_for_shutdown` drains the
     /// queue with `commit_in_memory`) immediately followed by Phase 5c
     /// (`RaftManager::sync_all_state_dbs` syncs `events.db`); see

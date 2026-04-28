@@ -210,7 +210,10 @@ impl TestNode {
 /// election timeouts — 2x faster than production while remaining stable under
 /// CPU contention from parallel test execution.
 fn test_rate_limit_config() -> inferadb_ledger_types::config::RateLimitConfig {
+    // Enable the limiter for tests that exercise it. Tests that rely on the
+    // disabled fast path build their own config (or omit `--ratelimit`).
     inferadb_ledger_types::config::RateLimitConfig::builder()
+        .enabled(true)
         .client_burst(10_000_u64)
         .client_rate(10_000.0)
         .organization_burst(10_000_u64)
@@ -367,6 +370,12 @@ impl TestCluster {
             .build()
             .expect("valid backup config");
 
+        // Tests historically expect rate limiting to be wired up (a few of
+        // them assert it rejects with `ResourceExhausted`). Mirror the master
+        // switch from the rate-limit struct so the existing high-burst
+        // defaults take effect; per-test overrides then narrow the bucket
+        // via `with_rate_limit`.
+        let rate_limit_cfg = rate_limit_override.clone().unwrap_or_else(test_rate_limit_config);
         let config = inferadb_ledger_server::config::Config {
             listen,
             socket: socket_path.clone(),
@@ -376,7 +385,8 @@ impl TestCluster {
             raft: Some(test_raft_config()),
             saga: inferadb_ledger_types::config::SagaConfig { poll_interval_secs: 2 },
             token_maintenance_interval_secs: 3,
-            rate_limit: Some(rate_limit_override.clone().unwrap_or_else(test_rate_limit_config)),
+            ratelimit: rate_limit_cfg.enabled,
+            rate_limit: Some(rate_limit_cfg),
             email_blinding_key: if include_blinding_key {
                 Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string())
             } else {
@@ -1799,6 +1809,7 @@ async fn bootstrap_one_node(
         .build()
         .expect("valid backup config");
 
+    let rate_limit_cfg = rate_limit_override.unwrap_or_else(test_rate_limit_config);
     let config = inferadb_ledger_server::config::Config {
         listen,
         socket: socket_path.clone(),
@@ -1808,7 +1819,8 @@ async fn bootstrap_one_node(
         raft: Some(test_raft_config()),
         saga: inferadb_ledger_types::config::SagaConfig { poll_interval_secs: 2 },
         token_maintenance_interval_secs: 3,
-        rate_limit: Some(rate_limit_override.unwrap_or_else(test_rate_limit_config)),
+        ratelimit: rate_limit_cfg.enabled,
+        rate_limit: Some(rate_limit_cfg),
         email_blinding_key: if include_blinding_key {
             Some(TEST_BLINDING_KEY_HEX.to_string())
         } else {

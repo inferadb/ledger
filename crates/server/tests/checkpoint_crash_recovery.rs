@@ -163,6 +163,7 @@ impl CrashableNode {
             .expect("valid raft cfg");
 
         let rate_limit = inferadb_ledger_types::config::RateLimitConfig::builder()
+            .enabled(true)
             .client_burst(10_000_u64)
             .client_rate(10_000.0)
             .organization_burst(10_000_u64)
@@ -185,6 +186,7 @@ impl CrashableNode {
             raft: Some(raft),
             saga: inferadb_ledger_types::config::SagaConfig { poll_interval_secs: 2 },
             token_maintenance_interval_secs: 3,
+            ratelimit: true,
             rate_limit: Some(rate_limit),
             email_blinding_key: Some(
                 "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
@@ -1718,7 +1720,7 @@ async fn test_handler_events_lost_within_flush_window_on_crash() {
 /// runs `sync_state` on events.db so every queued event is durable before
 /// the server exits. A subsequent restart must surface every pre-shutdown
 /// event — the durability window closes at shutdown, not at the default
-/// 500ms StateCheckpointer cadence.
+/// 2000ms StateCheckpointer cadence.
 ///
 /// Setup: use the default batch config so the flusher is ticking normally
 /// (100ms interval). Emit events, immediately call graceful_shutdown which
@@ -1728,7 +1730,7 @@ async fn test_handler_events_lost_within_flush_window_on_crash() {
 ///
 /// On a restart the events must be present in events.db. This test does
 /// NOT attempt to distinguish "drained at the 100ms tick + checkpointed at
-/// the 500ms tick" from "drained by flush_for_shutdown + synced by
+/// the 2000ms tick" from "drained by flush_for_shutdown + synced by
 /// sync_all_state_dbs" — both are valid paths to durability and the
 /// contract is the same. The test asserts the union outcome: every emitted
 /// event is on disk.
@@ -1780,13 +1782,13 @@ async fn test_handler_events_preserved_across_graceful_shutdown() {
 /// the durability contract to "at most `checkpoint_interval_ms`
 /// of handler-phase events lost on crash".
 ///
-/// The loss window is "checkpoint_interval_ms" (default 500ms).
+/// The loss window is "checkpoint_interval_ms" (default 2000ms).
 /// `EventFlusher::commit_batch` uses `commit_in_memory` — only the
 /// `StateCheckpointer`'s per-tick `sync_state` on events.db makes queued
 /// events durable on an unclean crash.
 ///
 /// Setup: default `EventWriterBatchConfig` (100ms flush interval) + default
-/// `CheckpointConfig` (500ms checkpoint interval). Emit events, wait for
+/// `CheckpointConfig` (2000ms checkpoint interval). Emit events, wait for
 /// the queue to drain (flush tick) AND for the events.db
 /// `last_synced_snapshot_id` to advance (checkpoint tick), crash, restart,
 /// assert every event is present.
@@ -1803,7 +1805,7 @@ async fn test_handler_events_durable_after_checkpoint_interval() {
 
     // Capture the pre-emit synced snapshot id on events.db so we can detect
     // the checkpoint tick deterministically (rather than sleeping and
-    // hoping the 500ms tick fired on time).
+    // hoping the 2000ms tick fired on time).
     let events_db_handle = Arc::clone(
         node.manager
             .get_region_group(Region::GLOBAL)
@@ -1834,9 +1836,9 @@ async fn test_handler_events_durable_after_checkpoint_interval() {
 
     // Phase 2: wait for the StateCheckpointer to advance events.db's
     // `last_synced_snapshot_id` — this is the durability boundary. Default
-    // checkpoint_interval_ms is 500ms; 5s is a ~10× safety margin against
+    // checkpoint_interval_ms is 2000ms; 10s is a ~5× safety margin against
     // CI scheduling jitter.
-    let sync_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let sync_deadline = std::time::Instant::now() + Duration::from_secs(10);
     while events_db_handle.last_synced_snapshot_id() <= synced_before
         && std::time::Instant::now() < sync_deadline
     {

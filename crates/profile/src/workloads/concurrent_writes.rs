@@ -8,9 +8,12 @@
 //! Concurrency: configurable via `--concurrency N` (default 32).
 //! Key space: N × 10,000 (each task gets 10k keys in its own prefix).
 //!
-//! The SDK's `LedgerClient` is `Clone` and multiplexes over a single tonic
-//! HTTP/2 channel — cloning into N tasks exercises concurrent gRPC streams on
-//! one connection, which is the realistic shape for a multi-threaded client.
+//! Each task constructs its own `LedgerClient` with a unique
+//! `client_id="profile-task-{task_id}"`. This is test hygiene rather than a
+//! perf optimization: it ensures server-side per-client metrics (request
+//! rate, idempotency keys, sequence numbers, hot-key counters) partition
+//! across the spawned tasks instead of all being credited to one synthetic
+//! client. Mirrors how a real multi-tenant deployment would shape load.
 
 use std::time::{Duration, Instant};
 
@@ -32,10 +35,19 @@ pub async fn run(harness: &Harness, duration: Duration, concurrency: usize) -> S
     let start = Instant::now();
     let mut handles = Vec::with_capacity(concurrency);
     for task_id in 0..concurrency {
-        let client = harness.client.clone();
         let user = harness.user;
         let organization = harness.organization;
         let vault = harness.vault;
+        let client = match harness.connect_task_client(task_id).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, task_id, "failed to connect per-task client");
+                let mut local = Summary::default();
+                local.errors += 1;
+                handles.push(tokio::spawn(async move { local }));
+                continue;
+            },
+        };
         handles.push(tokio::spawn(async move {
             let mut local = Summary::default();
             let task_start = Instant::now();

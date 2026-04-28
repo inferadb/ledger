@@ -17,6 +17,16 @@ use super::ConfigError;
 // acting only as a runaway-client / DDoS backstop. Multi-tenant production
 // deployments should tune down via `UpdateConfig` per the SLO model in
 // `docs/reference/configuration.md`.
+//
+// The master `enabled` switch defaults to `false` — see the field's
+// doc-comment for the rationale. Existing thresholds remain configured but
+// inert until rate-limiting is opted-in via `--ratelimit` (or the runtime
+// `UpdateConfig` RPC).
+
+/// Default master switch — rate limiting is disabled by default.
+const fn default_enabled() -> bool {
+    false
+}
 
 /// Default per-client token bucket capacity (max burst).
 fn default_client_burst() -> u64 {
@@ -66,6 +76,7 @@ fn default_backpressure_threshold() -> u64 {
 /// ```no_run
 /// # use inferadb_ledger_types::config::RateLimitConfig;
 /// let config = RateLimitConfig::builder()
+///     .enabled(true)
 ///     .client_burst(200)
 ///     .client_rate(100.0)
 ///     .organization_burst(2000)
@@ -76,6 +87,24 @@ fn default_backpressure_threshold() -> u64 {
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RateLimitConfig {
+    /// Master opt-in switch. Default: `false` (rate limiting disabled).
+    ///
+    /// Surprise default throttling combined with SDK silent retry hides the
+    /// rate limit behind retry backoff — the request looks like I/O wait in
+    /// flamegraphs while the SDK transparently retries `ResourceExhausted`.
+    /// Past perf investigations spent multiple weeks chasing phantom
+    /// bottlenecks before the actual cause turned out to be the default
+    /// per-client throttle hitting the test harness. The defaults below stay
+    /// configured (so an opt-in via `--ratelimit` activates a sensible
+    /// baseline) but are inert until `enabled = true`.
+    ///
+    /// Production deployments that need DoS protection or per-tenant SLO
+    /// enforcement opt in deliberately. The InferaDB Ledger threat model
+    /// already trusts callers (WireGuard VPN), so the limiter primarily
+    /// guards against runaway-client bugs rather than malicious traffic;
+    /// operators who know their bad-actor surface know when to enable it.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
     /// Maximum burst size per client (token bucket capacity).
     ///
     /// Must be > 0.
@@ -112,6 +141,7 @@ impl RateLimitConfig {
     /// Returns [`ConfigError::Validation`] if any value is zero or negative.
     #[builder]
     pub fn new(
+        #[builder(default = default_enabled())] enabled: bool,
         #[builder(default = default_client_burst())] client_burst: u64,
         #[builder(default = default_client_rate())] client_rate: f64,
         #[builder(default = default_organization_burst())] organization_burst: u64,
@@ -119,6 +149,7 @@ impl RateLimitConfig {
         #[builder(default = default_backpressure_threshold())] backpressure_threshold: u64,
     ) -> Result<Self, ConfigError> {
         let config = Self {
+            enabled,
             client_burst,
             client_rate,
             organization_burst,
@@ -195,6 +226,7 @@ impl RateLimitConfig {
 impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
+            enabled: default_enabled(),
             client_burst: default_client_burst(),
             client_rate: default_client_rate(),
             organization_burst: default_organization_burst(),
@@ -943,6 +975,34 @@ mod tests {
     use super::*;
 
     // RateLimitConfig tests
+
+    #[test]
+    fn rate_limit_disabled_by_default() {
+        let config = RateLimitConfig::default();
+        assert!(
+            !config.enabled,
+            "Rate limiting must be disabled by default — see field doc-comment"
+        );
+    }
+
+    #[test]
+    fn rate_limit_serde_defaults_disabled() {
+        let config: RateLimitConfig = serde_json::from_str("{}").unwrap();
+        assert!(!config.enabled, "Empty config must deserialize with `enabled = false`");
+    }
+
+    #[test]
+    fn rate_limit_builder_default_is_disabled() {
+        let config = RateLimitConfig::builder().build().unwrap();
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn rate_limit_explicit_enabled_round_trips() {
+        let config = RateLimitConfig::builder().enabled(true).build().unwrap();
+        assert!(config.enabled);
+        assert!(config.validate().is_ok());
+    }
 
     #[test]
     fn rate_limit_zero_client_burst_fails() {

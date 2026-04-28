@@ -81,6 +81,7 @@ impl RuntimeConfigHandle {
             if let Some(limiter) = rate_limiter {
                 if let Some(ref rl) = new_config.rate_limit {
                     limiter.update_config(
+                        rl.enabled,
                         rl.client_burst,
                         rl.client_rate,
                         rl.organization_burst,
@@ -88,6 +89,7 @@ impl RuntimeConfigHandle {
                         rl.backpressure_threshold,
                     );
                     info!(
+                        enabled = rl.enabled,
                         client_burst = rl.client_burst,
                         client_rate = rl.client_rate,
                         organization_burst = rl.organization_burst,
@@ -95,6 +97,11 @@ impl RuntimeConfigHandle {
                         backpressure_threshold = rl.backpressure_threshold,
                         "Rate limiter config updated"
                     );
+                } else {
+                    // `rate_limit` was set but is now `None` — disable the
+                    // limiter, leaving thresholds intact for a later re-enable.
+                    limiter.set_enabled(false);
+                    info!("Rate limiter disabled (rate_limit cleared)");
                 }
             } else {
                 warn!("Rate limit config changed but no rate limiter is configured");
@@ -261,6 +268,35 @@ mod tests {
 
         let loaded = handle.load();
         assert_eq!(loaded.rate_limit, Some(RateLimitConfig::default()));
+    }
+
+    #[test]
+    fn test_update_propagates_enabled_to_rate_limiter() {
+        // Wire a real RateLimiter through `update` and confirm the master
+        // switch flips through the runtime-config path. Guards the silent-
+        // throttling-defaults invariant: rate-limit reconfig must include
+        // the `enabled` field, not just thresholds.
+        let limiter = Arc::new(RateLimiter::new(false, 10, 10.0, 10, 10.0, 100, "test"));
+        let handle = RuntimeConfigHandle::new(RuntimeConfig::default());
+
+        // Enable via update.
+        let cfg = RuntimeConfig::builder()
+            .rate_limit(RateLimitConfig::builder().enabled(true).build().unwrap())
+            .build();
+        handle.update(cfg, Some(&limiter), None).unwrap();
+        assert!(limiter.is_enabled(), "update_config must flip enabled to true");
+
+        // Disable by clearing the rate_limit section.
+        let cfg = RuntimeConfig::default();
+        handle.update(cfg, Some(&limiter), None).unwrap();
+        assert!(!limiter.is_enabled(), "clearing rate_limit must disable the limiter");
+
+        // Re-enable.
+        let cfg = RuntimeConfig::builder()
+            .rate_limit(RateLimitConfig::builder().enabled(true).build().unwrap())
+            .build();
+        handle.update(cfg, Some(&limiter), None).unwrap();
+        assert!(limiter.is_enabled());
     }
 
     #[test]

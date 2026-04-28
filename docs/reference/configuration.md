@@ -15,6 +15,7 @@ Complete reference for Ledger configuration via environment variables and CLI ar
 | `INFERADB__LEDGER__ADVERTISE`        | `--advertise`  | _(auto)_      | Address advertised to peers                  |
 | `INFERADB__LEDGER__MAX_CONCURRENT`   | `--concurrent` | `10000`       | Max concurrent requests                      |
 | `INFERADB__LEDGER__TIMEOUT`          | `--timeout`    | `30`          | Request timeout (seconds)                    |
+| `INFERADB__LEDGER__RATELIMIT`        | `--ratelimit`  | `false`       | Enable server-side rate limiting (opt-in)    |
 | —                                    | `--log-format` | `auto`        | Log format (`text`/`json`/`auto`)            |
 | `INFERADB__LEDGER__LOGGING__ENABLED` | —              | `true`        | Enable request logging                       |
 
@@ -163,29 +164,60 @@ INFERADB__LEDGER__TIMEOUT=60
 
 ## Rate Limiting
 
-Three-tier token-bucket admission control. Configured via `RuntimeConfig` (the `UpdateConfig` admin RPC).
+Three-tier token-bucket admission control. **Disabled by default — opt in with `--ratelimit`.**
 
-**Defaults are tuned for single-tenant / trusted-caller deployments** — the rate limiter acts only as a runaway-client / DDoS backstop, not as a per-tenant SLO enforcement surface. **Multi-tenant production deployments should tune these down via `UpdateConfig` to match the SLO model** for each tenant class (see [slo.md](slo.md)). The defaults deliberately do not enforce a per-tenant budget; until you set one, one tenant can consume the full node's capacity.
+| Variable                       | CLI           | Default | Description                                  |
+| ------------------------------ | ------------- | ------- | -------------------------------------------- |
+| `INFERADB__LEDGER__RATELIMIT`  | `--ratelimit` | `false` | Master opt-in switch for server-side throttling |
+
+When `--ratelimit` is **not** set, every admission check fast-paths through a single relaxed atomic load — no token-bucket math, no per-call overhead, no rejections. The `client_burst`, `organization_burst`, etc. knobs below are still loaded into the runtime config, but they have no effect until the master switch is flipped on.
+
+### Why is rate limiting opt-in?
+
+Surprise default throttling combined with SDK silent retry is a classic debugging trap. The SDK retries `ResourceExhausted` transparently with backoff, so a request that's actually being throttled looks like I/O wait in flamegraphs while the SDK transparently retries. Past perf investigations spent multiple weeks chasing phantom bottlenecks (HTTP/2 flow control, checkpoint thresholds, apply-pipeline parallelism) before the actual cause turned out to be the default per-client throttle hitting the test harness.
+
+InferaDB Ledger's [trust posture](#network-configuration) — services run behind WireGuard VPN, callers are authenticated peers — means the threat model already trusts callers. Rate limiting in that environment primarily protects against runaway-client bugs rather than malicious traffic; the operators who know they have a known-bad caller know when to enable it. Production deployments that need DoS protection or per-tenant SLO enforcement opt in deliberately with thresholds tuned to the workload.
+
+### Enabling rate limiting
+
+```bash
+# Enable with built-in defaults
+inferadb-ledger --ratelimit --listen 0.0.0.0:50051 --data /data
+
+# Or via env var
+INFERADB__LEDGER__RATELIMIT=true inferadb-ledger --listen 0.0.0.0:50051 --data /data
+```
+
+Once enabled, the limiter applies the default thresholds below (or values supplied via `UpdateConfig`).
 
 | Field                    | Default  | Unit       | Rationale                                                                                        |
 | ------------------------ | -------- | ---------- | ------------------------------------------------------------------------------------------------ |
+| `enabled`                | `false`  | bool       | Master opt-in switch (mirrors `--ratelimit`).                                                     |
 | `client_burst`           | `10000`  | tokens     | Per-client bucket capacity; bias-toward-throughput default. Tune down to enforce per-caller cap. |
 | `client_rate`            | `10000`  | requests/s | Per-client sustained refill.                                                                     |
 | `organization_burst`     | `100000` | tokens     | Per-organization bucket capacity across all callers in the org.                                  |
 | `organization_rate`      | `100000` | requests/s | Per-organization sustained refill.                                                               |
 | `backpressure_threshold` | `10000`  | proposals  | Pending-Raft-proposal threshold above which all new requests are rejected globally.              |
 
-These defaults were raised ~100× from earlier values (`client_burst=100`, `client_rate=50`, `organization_burst=1000`, `organization_rate=500`, `backpressure_threshold=100`). Under `concurrent-writes @ 32`, the older per-client defaults capped a single node at ~52 ops/s via `tokens_exhausted` rejections — well below the 1,350 ops/s the WAL + apply pipeline can sustain. The current defaults are effectively inert for any reasonable single-tenant workload; `UpdateConfig` remains the authoritative knob for multi-tenant tuning.
+The thresholds default to high-burst values that are effectively inert for any reasonable single-tenant workload — they exist as a sensible baseline for opt-in callers, not as a per-tenant SLO surface. **Multi-tenant production deployments should tune these down via `UpdateConfig` to match the SLO model** for each tenant class (see [slo.md](slo.md)).
 
-### UpdateConfig example — multi-tenant tuning
+### UpdateConfig example — flip on with multi-tenant tuning
 
 ```bash
 grpcurl -plaintext -d '{
-  "config_json": "{\"rate_limit\":{\"client_burst\":500,\"client_rate\":250.0,\"organization_burst\":5000,\"organization_rate\":2500.0,\"backpressure_threshold\":1000}}"
+  "config_json": "{\"rate_limit\":{\"enabled\":true,\"client_burst\":500,\"client_rate\":250.0,\"organization_burst\":5000,\"organization_rate\":2500.0,\"backpressure_threshold\":1000}}"
 }' localhost:50051 ledger.v1.AdminService/UpdateConfig
 ```
 
-Validation enforces `> 0` on every field and caps (`client_*` ≤ 1,000,000; `organization_*` ≤ 10,000,000). Hot-reloadable — the `RateLimiter`'s backing atomics re-read on every admission check.
+### UpdateConfig example — disable at runtime
+
+```bash
+grpcurl -plaintext -d '{
+  "config_json": "{\"rate_limit\":{\"enabled\":false}}"
+}' localhost:50051 ledger.v1.AdminService/UpdateConfig
+```
+
+Flipping `enabled` `true → false → true` works without restart; the underlying token-bucket state survives the disabled window so re-enabling doesn't reset every caller's quota. Validation enforces `> 0` on every numeric field and caps (`client_*` ≤ 1,000,000; `organization_*` ≤ 10,000,000) — only `enabled` controls whether the values take effect.
 
 ## Logging
 
@@ -341,11 +373,11 @@ Controls the per-region `StateCheckpointer` background task that drives `Databas
 
 The checkpointer syncs **four** databases per region: `state.db` (entity tables), `raft.db` (Raft applied state), `blocks.db` (blockchain archive), and `events.db` (audit events, when the region is configured to own an events shard). The dirty-page trigger reads `max()` across all four DBs, so an ingest-heavy workload that dirties `events.db` while `state.db` stays clean still fires the checkpoint. Checkpoint duration scales roughly linearly with how many of the four are dirty at tick time — expect p99 `ledger_state_checkpoint_duration_seconds` to scale accordingly on write-heavy workloads. Sync is concurrent via `tokio::join!`; accumulators advance only when every configured DB's sync succeeded.
 
-| Field                   | Type | Default | Description                                               |
-| ----------------------- | ---- | ------- | --------------------------------------------------------- |
-| `interval_ms`           | u64  | `500`   | Time trigger — fire at least this often (50–60,000 ms)    |
-| `applies_threshold`     | u64  | `5000`  | Apply-count trigger — fire after N entries applied (≥1)   |
-| `dirty_pages_threshold` | u64  | `10000` | Dirty-page trigger — fire when cache dirty-pages ≥ N (≥1) |
+| Field                   | Type | Default  | Description                                               |
+| ----------------------- | ---- | -------- | --------------------------------------------------------- |
+| `interval_ms`           | u64  | `2000`   | Time trigger — fire at least this often (50–60,000 ms)    |
+| `applies_threshold`     | u64  | `50000`  | Apply-count trigger — fire after N entries applied (≥1)   |
+| `dirty_pages_threshold` | u64  | `100000` | Dirty-page trigger — fire when cache dirty-pages ≥ N (≥1) |
 
 The three triggers are OR'd — the checkpointer fires on whichever threshold hits first. Checkpoints coalesce across concurrent callers by `last_synced_snapshot_id`, so forced syncs (snapshot / backup / graceful shutdown) never duplicate work an in-flight checkpoint already covered.
 

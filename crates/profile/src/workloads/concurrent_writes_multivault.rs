@@ -38,10 +38,19 @@ pub async fn run(
     let start = Instant::now();
     let mut handles = Vec::with_capacity(concurrency);
     for task_id in 0..concurrency {
-        let client = harness.client.clone();
         let user = harness.user;
         let organization = harness.organization;
         let vault = vaults[task_id % vaults.len()];
+        let client = match harness.connect_task_client(task_id).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, task_id, "failed to connect per-task client");
+                let mut local = Summary::default();
+                local.errors += 1;
+                handles.push(tokio::spawn(async move { local }));
+                continue;
+            },
+        };
         handles.push(tokio::spawn(async move {
             let mut local = Summary::default();
             let task_start = Instant::now();

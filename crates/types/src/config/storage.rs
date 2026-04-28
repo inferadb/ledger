@@ -240,18 +240,41 @@ impl BTreeCompactionConfig {
 // =========================================================================
 
 /// Default checkpoint interval in milliseconds.
+///
+/// Tradeoff: longer interval = lower checkpoint pressure (fewer
+/// `persist_state_to_disk` fsync chains, less pwrite traffic across the four
+/// regional DBs — state.db, raft.db, blocks.db, events.db) but a larger
+/// crash-recovery WAL replay window. Recovery is unaffected for correctness:
+/// state is re-derived by replaying `(applied_durable, last_committed]` from
+/// the WAL on restart (see `docs/architecture/durability.md`); this knob only
+/// lengthens the per-checkpoint replay distance.
 const fn default_checkpoint_interval_ms() -> u64 {
-    500
+    2_000
 }
 
 /// Default apply-count threshold before forcing a checkpoint.
+///
+/// Tradeoff: a higher threshold means fewer mid-stream forced checkpoints
+/// under sustained write load, at the cost of replaying more applied entries
+/// from the WAL during crash recovery. The recovery contract is unchanged —
+/// replay still recovers everything in `(applied_durable, last_committed]`
+/// from the WAL (see `docs/architecture/durability.md`); the change just
+/// lengthens the per-checkpoint replay distance.
 const fn default_checkpoint_applies_threshold() -> u64 {
-    5_000
+    50_000
 }
 
 /// Default dirty-page threshold before forcing a checkpoint.
+///
+/// Tradeoff: a higher threshold lets the page cache absorb more in-flight
+/// writes before a checkpoint is forced, reducing checkpoint frequency under
+/// burst load at the cost of a larger resident dirty-page footprint and a
+/// larger crash-recovery WAL replay window. Recovery still replays
+/// `(applied_durable, last_committed]` from the WAL on restart (see
+/// `docs/architecture/durability.md`); only the per-checkpoint replay
+/// distance grows.
 const fn default_checkpoint_dirty_pages_threshold() -> u64 {
-    10_000
+    100_000
 }
 
 /// Minimum checkpoint interval (50 ms floor keeps tight polling cheap).
@@ -292,17 +315,17 @@ const MAX_CHECKPOINT_INTERVAL_MS: u64 = 60_000;
 pub struct CheckpointConfig {
     /// Time between checkpoint wake-ups in milliseconds.
     ///
-    /// Must be in `[50, 60_000]`. Default: 500.
+    /// Must be in `[50, 60_000]`. Default: 2_000.
     #[serde(default = "default_checkpoint_interval_ms")]
     pub interval_ms: u64,
     /// Number of applies accumulated in memory that will force a checkpoint.
     ///
-    /// Must be >= 1. Default: 5_000.
+    /// Must be >= 1. Default: 50_000.
     #[serde(default = "default_checkpoint_applies_threshold")]
     pub applies_threshold: u64,
     /// Number of dirty pages in the page cache that will force a checkpoint.
     ///
-    /// Must be >= 1. Default: 10_000 (~40MB at a 4KB page size).
+    /// Must be >= 1. Default: 100_000 (~400MB at a 4KB page size).
     #[serde(default = "default_checkpoint_dirty_pages_threshold")]
     pub dirty_pages_threshold: u64,
 }
@@ -1377,9 +1400,9 @@ mod tiered_storage_tests {
     fn checkpoint_config_serde_defaults() {
         let config: CheckpointConfig = serde_json::from_str("{}").unwrap();
         config.validate().unwrap();
-        assert_eq!(config.interval_ms, 500);
-        assert_eq!(config.applies_threshold, 5_000);
-        assert_eq!(config.dirty_pages_threshold, 10_000);
+        assert_eq!(config.interval_ms, 2_000);
+        assert_eq!(config.applies_threshold, 50_000);
+        assert_eq!(config.dirty_pages_threshold, 100_000);
     }
 
     #[test]

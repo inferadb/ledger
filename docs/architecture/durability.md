@@ -89,7 +89,7 @@ Each trigger emits its own label on `ledger_event_flush_triggers_total{trigger=t
 ### What losing the flush window looks like
 
 - **SIGKILL / panic / OOM between enqueue and the next `StateCheckpointer` tick** — every handler-phase event that was enqueued-but-not-yet-checkedpointed is lost. Post-restart, those events are **not** replayed (no WAL backstop). The events do not appear in `events.db`; downstream consumers scanning the audit trail see the request's WAL-backed state transitions without the corresponding handler-phase audit rows.
-- **Worst case:** `state_checkpoint.interval_ms` worth of handler-phase events (default: the last ~500ms), plus anything still in the flusher's in-memory queue. Apply-phase events emitted during the same window are unaffected — they come out of `replay_crash_gap` deterministically.
+- **Worst case:** `state_checkpoint.interval_ms` worth of handler-phase events (default: the last ~2s), plus anything still in the flusher's in-memory queue. Apply-phase events emitted during the same window are unaffected — they come out of `replay_crash_gap` deterministically.
 - **Clean shutdown (SIGTERM):** zero events lost. Phase 5b of `GracefulShutdown` invokes `EventHandle::flush_for_shutdown(5s)` between the WAL flush (Phase 5a) and `sync_all_state_dbs` (Phase 5c). The flusher drains the queue (in-memory commit) and Phase 5c's `sync_all_state_dbs` then fsyncs events.db alongside state.db / raft.db / blocks.db before exit.
 
 ### Tuning
@@ -165,17 +165,17 @@ The barrier-fsync syscall is isolated in `crates/fs-sync/` — the single worksp
 
 The checkpointer is the operator's primary durability knob. It fires when **any** of three thresholds is crossed:
 
-| Field                   | Default | Range       | Unit    | Meaning                                                       |
-| ----------------------- | ------- | ----------- | ------- | ------------------------------------------------------------- |
-| `interval_ms`           | 500     | [50, 60000] | ms      | Time since last successful checkpoint                         |
-| `applies_threshold`     | 5000    | >= 1        | applies | Applies accumulated in memory since last checkpoint           |
-| `dirty_pages_threshold` | 10000   | >= 1        | pages   | Dirty pages in the state-DB page cache (~40 MB at 4 KB pages) |
+| Field                   | Default | Range       | Unit    | Meaning                                                        |
+| ----------------------- | ------- | ----------- | ------- | -------------------------------------------------------------- |
+| `interval_ms`           | 2000    | [50, 60000] | ms      | Time since last successful checkpoint                          |
+| `applies_threshold`     | 50000   | >= 1        | applies | Applies accumulated in memory since last checkpoint            |
+| `dirty_pages_threshold` | 100000  | >= 1        | pages   | Dirty pages in the state-DB page cache (~400 MB at 4 KB pages) |
 
 All three are runtime-reconfigurable via the `UpdateConfig` admin RPC; the `StateCheckpointer` re-reads from `RuntimeConfigHandle` on each wake-up, so changes take effect on the next tick.
 
 ### When to tighten (tighter recovery window, more fsync cost)
 
-- High-throughput workloads where a 500ms recovery gap is unacceptable.
+- High-throughput workloads where a 2s recovery gap is unacceptable.
 - Deployments with fast NVMe where dual-slot fsync cost is negligible.
 - Regulatory environments requiring smaller in-flight data loss exposure.
 

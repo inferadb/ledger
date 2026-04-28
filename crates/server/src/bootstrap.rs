@@ -707,8 +707,19 @@ pub async fn bootstrap_node(
         });
 
     // Create rate limiter and hot key detector.
-    let rl = config.rate_limit.clone().unwrap_or_default();
+    //
+    // Rate limiting defaults to disabled (per the silent-throttling-defaults
+    // lesson). The top-level `--ratelimit` CLI flag is the master opt-in;
+    // `RateLimitConfig::enabled` mirrors it so the in-struct flag and the
+    // runtime-reconfig path stay coherent. When `ratelimit = false`, the
+    // existing tuning knobs (`client_burst`, etc.) are still loaded but the
+    // limiter's `check` fast-paths through a single atomic load — operators
+    // who later flip `ratelimit = true` (via `UpdateConfig`) get a sensible
+    // baseline without restart.
+    let mut rl = config.rate_limit.clone().unwrap_or_default();
+    rl.enabled = config.ratelimit;
     let rate_limiter = Arc::new(RateLimiter::new(
+        rl.enabled,
         rl.client_burst,
         rl.client_rate,
         rl.organization_burst,

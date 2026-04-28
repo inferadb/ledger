@@ -32,7 +32,7 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -338,6 +338,7 @@ impl TokenBucket {
 /// use inferadb_ledger_types::OrganizationId;
 ///
 /// let limiter = RateLimiter::new(
+///     true,         // enabled — opt-in master switch
 ///     1000, 500.0,  // per-client: burst 1000, 500/s sustained
 ///     5000, 2000.0, // per-organization: burst 5000, 2000/s sustained
 ///     100,          // backpressure threshold: 100 pending proposals
@@ -347,8 +348,21 @@ impl TokenBucket {
 /// // Check all three tiers
 /// limiter.check("client-1", OrganizationId::new(42)).unwrap();
 /// ```
+///
+/// # Disabled fast path
+///
+/// When constructed with `enabled = false`, [`check`](Self::check) is a single
+/// [`AtomicBool::load`] with `Ordering::Relaxed` — no `DashMap` lookup, no
+/// token-bucket math, no allocation. The token-bucket fields are still
+/// initialized, so a runtime flip via [`set_enabled`](Self::set_enabled) (or
+/// `update_config`) reactivates the limiter without restart.
 #[derive(Debug)]
 pub struct RateLimiter {
+    /// Master opt-in switch. When `false`, [`check`](Self::check) returns
+    /// `Ok(())` after a single relaxed atomic load — no further work.
+    /// Mutable at runtime via [`set_enabled`](Self::set_enabled).
+    enabled: AtomicBool,
+
     /// Per-client token buckets keyed by client_id.
     client_buckets: DashMap<String, Arc<TokenBucket>>,
     /// Per-organization token buckets keyed by organization.
@@ -381,13 +395,20 @@ impl RateLimiter {
     ///
     /// # Arguments
     ///
+    /// * `enabled` — master opt-in switch. When `false`, [`check`](Self::check) is a fast-path
+    ///   single relaxed atomic load that returns `Ok(())` regardless of input volume.
     /// * `client_capacity` — max burst size per client
     /// * `client_refill_rate` — sustained requests/sec per client
     /// * `organization_capacity` — max burst size per organization
     /// * `organization_refill_rate` — sustained requests/sec per organization
     /// * `backpressure_threshold` — pending Raft proposals above which all requests are throttled
     /// * `region` — Region identifier for Prometheus metric labels.
+    ///
+    /// All token-bucket fields are initialized regardless of `enabled` so that a runtime flip
+    /// to `enabled = true` (via [`set_enabled`](Self::set_enabled) or
+    /// [`update_config`](Self::update_config)) activates protection without a restart.
     pub fn new(
+        enabled: bool,
         client_capacity: u64,
         client_refill_rate: f64,
         organization_capacity: u64,
@@ -396,6 +417,7 @@ impl RateLimiter {
         region: impl Into<String>,
     ) -> Self {
         Self {
+            enabled: AtomicBool::new(enabled),
             client_buckets: DashMap::new(),
             organization_buckets: DashMap::new(),
             client_capacity: AtomicU64::new(client_capacity),
@@ -407,6 +429,23 @@ impl RateLimiter {
             rejected_count: AtomicU64::new(0),
             region: region.into(),
         }
+    }
+
+    /// Returns `true` if rate limiting is currently active.
+    #[inline]
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+
+    /// Atomically enables or disables the limiter without restart.
+    ///
+    /// Used by [`update_config`](Self::update_config) and the
+    /// [`RuntimeConfigHandle`](crate::runtime_config::RuntimeConfigHandle) hot
+    /// reload path. The change is observable on the next [`check`](Self::check)
+    /// call (relaxed ordering — no global synchronization required).
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
     }
 
     /// Looks up or inserts a client bucket. Uses an initial read-only get to
@@ -460,6 +499,15 @@ impl RateLimiter {
         client_id: &str,
         organization: OrganizationId,
     ) -> Result<(), RateLimitRejection> {
+        // Tier 0: Master opt-in switch. When disabled, this is the only work we
+        // do — a single relaxed atomic load. No `DashMap` lookup, no
+        // token-bucket math, no allocation. Per the silent-throttling-defaults
+        // lesson, this is the new common case (default-disabled) and must not
+        // pay any per-call cost.
+        if !self.enabled.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
         // Tier 1: Global backpressure (cheapest — single atomic load, no token consumption)
         let pending = self.pending_proposals.load(Ordering::Relaxed);
         let backpressure_threshold = self.backpressure_threshold.load(Ordering::Relaxed);
@@ -580,18 +628,24 @@ impl RateLimiter {
 
     /// Updates rate limiter configuration at runtime.
     ///
-    /// Atomically updates all threshold fields and propagates capacity/refill
-    /// changes to every existing token bucket. Existing token buckets retain
-    /// their current token counts — only future refills use the new rate and
-    /// capacity.
+    /// Atomically updates the master `enabled` switch and all threshold fields,
+    /// and propagates capacity/refill changes to every existing token bucket.
+    /// Existing token buckets retain their current token counts — only future
+    /// refills use the new rate and capacity.
+    ///
+    /// Flipping `enabled` `true → false → true` works dynamically without
+    /// restart; the bucket state survives the disabled window so re-enabling
+    /// doesn't reset every caller's quota.
     pub fn update_config(
         &self,
+        enabled: bool,
         client_capacity: u64,
         client_refill_rate: f64,
         organization_capacity: u64,
         organization_refill_rate: f64,
         backpressure_threshold: u64,
     ) {
+        self.enabled.store(enabled, Ordering::Relaxed);
         self.client_capacity.store(client_capacity, Ordering::Relaxed);
         self.client_refill_rate_bits.store(client_refill_rate.to_bits(), Ordering::Relaxed);
         self.organization_capacity.store(organization_capacity, Ordering::Relaxed);
@@ -615,8 +669,13 @@ mod tests {
     use super::*;
 
     /// Helper to create a rate limiter with small capacity for testing.
+    ///
+    /// Tests in this module exercise the limiter itself — they enable it
+    /// explicitly. The default-disabled fast path is covered separately by
+    /// [`disabled_fast_path_returns_allowed_under_burst`].
     fn test_limiter() -> RateLimiter {
         RateLimiter::new(
+            true, // enabled — tests are exercising the limiter
             5,    // client burst: 5
             10.0, // client refill: 10/s
             10,   // organization burst: 10
@@ -702,6 +761,94 @@ mod tests {
         }
     }
 
+    // ── Disabled fast path ──────────────────────────────────────────────
+
+    /// When constructed disabled, [`RateLimiter::check`] returns `Ok(())`
+    /// regardless of input volume. Burst loops that would exhaust any
+    /// reasonable bucket must all pass.
+    #[test]
+    fn disabled_fast_path_returns_allowed_under_burst() {
+        let limiter = RateLimiter::new(
+            false, // disabled — fast path
+            1,     // tiny burst (would reject after 1 if enabled)
+            0.0,   // zero refill (would never replenish)
+            1, 0.0, 1, // tiny backpressure threshold
+            "global",
+        );
+
+        // Even with a 1-token bucket and zero refill, every call must pass.
+        // 1M is enough to make a real bucket scream. Bound elapsed time
+        // loosely — the assertion that matters is "all allowed", not timing.
+        let start = std::time::Instant::now();
+        for _ in 0..1_000_000 {
+            assert!(limiter.check("client", 1.into()).is_ok());
+        }
+        let elapsed = start.elapsed();
+
+        // No tokens consumed → no rejections recorded.
+        assert_eq!(limiter.rejected_count(), 0);
+        // Sanity: 1M atomic loads should comfortably finish within seconds
+        // even under heavy CI load. Anything multi-minute means we're not
+        // actually on the fast path.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "1M disabled-fast-path checks took {elapsed:?}; fast path should be sub-microsecond per call"
+        );
+    }
+
+    /// Backpressure threshold is irrelevant when the limiter is disabled —
+    /// pending proposals can pile up arbitrarily high without rejecting.
+    #[test]
+    fn disabled_ignores_backpressure() {
+        let limiter = RateLimiter::new(false, 100, 100.0, 100, 100.0, 1, "global");
+        limiter.set_pending_proposals(1_000_000);
+        assert!(limiter.check("client", 1.into()).is_ok());
+        assert_eq!(limiter.rejected_count(), 0);
+    }
+
+    /// Flipping `enabled` at runtime (false → true → false) takes effect
+    /// immediately on the next `check` call.
+    #[test]
+    fn runtime_enable_disable_round_trip() {
+        let limiter = RateLimiter::new(false, 1, 0.0, 1, 0.0, 100, "global");
+
+        // Disabled — burst far past capacity passes.
+        for _ in 0..10 {
+            assert!(limiter.check("c", 1.into()).is_ok());
+        }
+
+        // Enable. The single-token bucket now rejects once exhausted.
+        limiter.set_enabled(true);
+        assert!(limiter.is_enabled());
+        // First call may pass (we may have refill from `enabled = false`
+        // window) but the second within the same millisecond must reject
+        // since refill_rate is 0.
+        let _ = limiter.check("c", 1.into());
+        let _ = limiter.check("c", 1.into());
+        let result = limiter.check("c", 1.into());
+        assert!(result.is_err(), "rate limiter should reject once tokens drained");
+
+        // Disable again — even with the bucket exhausted, every call passes.
+        limiter.set_enabled(false);
+        assert!(!limiter.is_enabled());
+        for _ in 0..10 {
+            assert!(limiter.check("c", 1.into()).is_ok());
+        }
+    }
+
+    /// `update_config` carries the `enabled` flag and propagates atomically.
+    #[test]
+    fn update_config_toggles_enabled() {
+        let limiter = RateLimiter::new(false, 5, 1.0, 10, 1.0, 100, "global");
+        assert!(!limiter.is_enabled());
+
+        limiter.update_config(true, 5, 1.0, 10, 1.0, 100);
+        assert!(limiter.is_enabled());
+
+        limiter.update_config(false, 5, 1.0, 10, 1.0, 100);
+        assert!(!limiter.is_enabled());
+    }
+
     // ── Per-client rate limiting ─────────────────────────────────────────
 
     #[test]
@@ -740,6 +887,7 @@ mod tests {
     #[test]
     fn empty_client_id_skips_client_check() {
         let limiter = RateLimiter::new(
+            true,  // enabled
             1,     // very low client burst
             0.1,   // very low client refill
             1000,  // high organization burst
@@ -831,7 +979,7 @@ mod tests {
     #[test]
     fn check_order_backpressure_first() {
         // If both backpressure and organization are exceeded, backpressure wins
-        let limiter = RateLimiter::new(100, 100.0, 1, 0.001, 10, "global");
+        let limiter = RateLimiter::new(true, 100, 100.0, 1, 0.001, 10, "global");
 
         // Exhaust organization
         limiter.check("c", 1.into()).unwrap();
@@ -928,6 +1076,7 @@ mod tests {
 
         // Start with generous limits so initial checks pass
         let limiter = Arc::new(RateLimiter::new(
+            true, // enabled — stress test exercises the limiter
             10_000, 5_000.0, // per-client: high burst, high refill
             50_000, 20_000.0, // per-organization: very high
             1000,     // backpressure threshold
@@ -971,10 +1120,10 @@ mod tests {
                 while running.load(AOrdering::Relaxed) {
                     if iteration % 2 == updater_id {
                         // Tighten limits
-                        limiter.update_config(100, 50.0, 500, 200.0, 10);
+                        limiter.update_config(true, 100, 50.0, 500, 200.0, 10);
                     } else {
                         // Loosen limits
-                        limiter.update_config(10_000, 5_000.0, 50_000, 20_000.0, 1000);
+                        limiter.update_config(true, 10_000, 5_000.0, 50_000, 20_000.0, 1000);
                     }
                     iteration += 1;
                     thread::yield_now();
@@ -1018,6 +1167,7 @@ mod tests {
 
         let burst_capacity = 50u64;
         let limiter = Arc::new(RateLimiter::new(
+            true, // enabled — stress test exercises the limiter
             burst_capacity,
             0.0, // Zero refill — tokens don't regenerate during test
             100_000,

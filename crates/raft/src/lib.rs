@@ -87,6 +87,8 @@ pub mod log_storage;
 #[doc(hidden)]
 pub mod logging;
 #[doc(hidden)]
+pub mod membership_queue;
+#[doc(hidden)]
 pub mod node_registry;
 #[cfg(feature = "observability")]
 #[doc(hidden)]

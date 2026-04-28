@@ -2067,6 +2067,7 @@ async fn test_token_maintenance_idempotency() {
 #[tokio::test]
 async fn test_rate_limiting_on_create_vault_token() {
     let rate_limit = inferadb_ledger_types::config::RateLimitConfig::builder()
+        .enabled(true)
         .client_burst(100_u64)
         .client_rate(1.0)
         .organization_burst(10_000_u64)

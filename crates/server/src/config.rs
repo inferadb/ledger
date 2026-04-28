@@ -335,10 +335,30 @@ pub struct Config {
     pub health_check: Option<inferadb_ledger_types::config::HealthCheckConfig>,
 
     // === Rate Limiting ===
+    /// Master opt-in switch for server-side rate limiting.
+    ///
+    /// Defaults to `false`. When `true`, the multi-tier token-bucket
+    /// rate limiter applies the thresholds in `rate_limit` (or sensible
+    /// production defaults when `rate_limit` is absent). When `false`,
+    /// rate-limit checks fast-path through a single relaxed atomic load —
+    /// `--client-rate-limit`, `--org-rate-limit`, etc. are silently inert.
+    ///
+    /// The default is disabled because surprise default throttling
+    /// combined with SDK silent retry hides the rate limit behind retry
+    /// backoff — a debugging trap that has historically cost more time
+    /// than the protection saved. Production deployments that need DoS
+    /// protection or per-tenant SLO enforcement opt in deliberately.
+    #[arg(long = "ratelimit", env = "INFERADB__LEDGER__RATELIMIT")]
+    #[serde(default)]
+    #[builder(default)]
+    pub ratelimit: bool,
+
     /// Rate limit configuration for per-client and per-organization request throttling.
     ///
-    /// Controls token bucket capacities and refill rates. When absent, uses
-    /// hardcoded defaults (client burst=100, org burst=1000).
+    /// Controls token bucket capacities and refill rates. The `enabled`
+    /// field of this struct is overridden by the top-level `ratelimit`
+    /// CLI flag — set `--ratelimit` to activate the limiter, then tune
+    /// thresholds via this struct (or the runtime `UpdateConfig` RPC).
     #[arg(skip)]
     #[serde(default)]
     pub rate_limit: Option<inferadb_ledger_types::config::RateLimitConfig>,
@@ -421,6 +441,7 @@ impl Default for Config {
             integrity: inferadb_ledger_types::config::IntegrityConfig::default(),
             tiered_storage: inferadb_ledger_types::config::TieredStorageConfig::default(),
             health_check: None,
+            ratelimit: false,
             rate_limit: None,
             token_maintenance_interval_secs: default_token_maintenance_interval_secs(),
             email_blinding_key: None,
