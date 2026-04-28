@@ -2546,6 +2546,56 @@ impl RaftManager {
             });
         }
 
+        // Phase 5 / M3: spawn the per-org `RegionMembershipWatcher` +
+        // `MembershipDispatcher` pair. The watcher observes the
+        // parent data-region group's voter / learner deltas and
+        // enqueues per-vault membership requests; the dispatcher
+        // drains the queue (one in-flight conf-change at a time,
+        // gated by the queue's snapshot-cap semaphore) and applies
+        // each through `apply_cascade_action_for_vault`.
+        //
+        // The legacy cascade in
+        // [`Self::cascade_membership_to_children`] is still callable
+        // for tests / emergency tooling, but the production cascade
+        // sites in `dr_scheduler::execute_operator` and
+        // `admin::leave_cluster` no longer invoke it as of M3 sub-stage
+        // 5c — the OrganizationGroup-driven path is the sole
+        // production cascade.
+        //
+        // Both tasks tie to a child of the manager's cancellation
+        // token; on shutdown the watcher exits, the queue's
+        // `take_next` returns `None`, and the dispatcher exits without
+        // leaking pending work.
+        if org_inner.membership_queue().is_some() {
+            // Look up the parent region group. Skip silently if the
+            // region control-plane group is not registered locally —
+            // can happen on a node that holds an org replica without
+            // being a region-tier voter (rare, but defensive).
+            let region_inner_opt =
+                self.regions.read().get(&(region, OrganizationId::new(0))).cloned();
+            if let Some(region_inner) = region_inner_opt {
+                let manager_weak = Arc::downgrade(self);
+                let watcher_cancel = self.cancellation_token.lock().child_token();
+                let dispatcher_cancel = self.cancellation_token.lock().child_token();
+
+                let watcher = crate::region_membership_watcher::RegionMembershipWatcher::new(
+                    manager_weak.clone(),
+                    Arc::clone(&region_inner),
+                    Arc::clone(&org_inner),
+                );
+                tokio::spawn(watcher.run(watcher_cancel));
+
+                if let Some(dispatcher) =
+                    crate::region_membership_watcher::MembershipDispatcher::new(
+                        manager_weak,
+                        Arc::clone(&org_inner),
+                    )
+                {
+                    tokio::spawn(dispatcher.run(dispatcher_cancel));
+                }
+            }
+        }
+
         // Rehydrate vault groups persisted in this org's applied state.
         //
         // On fresh CreateOrganization signals, `applied_state.vaults` is
@@ -5909,6 +5959,78 @@ async fn apply_cascade_action(
             }
         },
     }
+}
+
+/// Applies a single cascade action to a per-organization shard.
+///
+/// Thin wrapper over [`apply_cascade_action`] for the org-tier path
+/// — pre-registers the peer on the org's
+/// [`GrpcConsensusTransport`](crate::consensus_transport::GrpcConsensusTransport)
+/// (when `transport` is `Some`) and proposes the conf-change against
+/// the org's Raft group. Used by the M3
+/// [`RegionMembershipWatcher`](crate::region_membership_watcher::RegionMembershipWatcher)
+/// to apply the org-level half of the cascade synchronously before
+/// enqueueing per-vault entries — the per-vault dispatcher reuses
+/// the org's transport (root rule 17), so the org-level transport
+/// must know about the new peer first.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_cascade_action_for_org(
+    action: CascadeMembershipAction,
+    manager: &RaftManager,
+    handle: &Arc<crate::ConsensusHandle>,
+    transport: Option<&crate::consensus_transport::GrpcConsensusTransport>,
+    target: inferadb_ledger_consensus::types::NodeId,
+    node_id: u64,
+    region: Region,
+    organization_id: OrganizationId,
+) {
+    apply_cascade_action(
+        action,
+        manager,
+        handle,
+        transport,
+        target,
+        node_id,
+        region,
+        organization_id,
+        None,
+    )
+    .await;
+}
+
+/// Applies a single cascade action to a per-vault shard.
+///
+/// Thin wrapper over [`apply_cascade_action`] with `transport = None`
+/// — vault groups share their parent organization's transport (root
+/// rule 17), so the vault path never registers peers on its own
+/// transport. Used by the M3
+/// [`MembershipDispatcher`](crate::region_membership_watcher::MembershipDispatcher)
+/// to reuse the legacy cascade primitive without re-implementing its
+/// idempotence / retry logic.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_cascade_action_for_vault(
+    action: CascadeMembershipAction,
+    manager: &RaftManager,
+    handle: &Arc<crate::ConsensusHandle>,
+    target: inferadb_ledger_consensus::types::NodeId,
+    node_id: u64,
+    region: Region,
+    organization_id: OrganizationId,
+    vault_id: VaultId,
+) {
+    apply_cascade_action(
+        action,
+        manager,
+        handle,
+        // Vault groups share parent org's transport.
+        None,
+        target,
+        node_id,
+        region,
+        organization_id,
+        Some(vault_id),
+    )
+    .await;
 }
 
 // ============================================================================

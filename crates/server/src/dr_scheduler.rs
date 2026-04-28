@@ -10,9 +10,7 @@ use std::{
 };
 
 use inferadb_ledger_raft::{
-    InnerGroup, RaftManager,
-    raft_manager::{CascadeMembershipAction, SystemStateReader},
-    types::NodeStatus,
+    InnerGroup, RaftManager, raft_manager::SystemStateReader, types::NodeStatus,
 };
 
 /// Priority for DR membership operators.
@@ -435,37 +433,22 @@ pub async fn execute_operator(
         // Report the updated membership to GLOBAL.
         report_membership_to_global(manager, group, op.region).await;
 
-        // Cascade the membership change to every per-organization and
-        // per-vault group in the same region. Per multi-tier consensus
-        // (root rule 14), per-org / per-vault shards run in
-        // `LeadershipMode::Delegated`: they adopt the data-region's
-        // leader but maintain *independent* Raft membership state. If
-        // we add a learner to the data-region group only, the learner
-        // is replicated for region traffic but never receives
-        // AppendEntries for its child shards — which surfaced as the
-        // lifecycle Phase 5 "Vault not active on this node" failure
-        // when every original voter died and only the late-joining node
-        // survived. Cascading the same operator down to every child
-        // shard keeps their voter sets in lockstep with the parent.
-        if let Some(cascade_action) = match &op.action {
-            OperatorAction::AddLearner { .. } => Some(CascadeMembershipAction::AddLearner),
-            OperatorAction::PromoteLearner { .. } => Some(CascadeMembershipAction::PromoteVoter),
-            OperatorAction::RemoveVoter { .. } | OperatorAction::RemoveLearner { .. } => {
-                Some(CascadeMembershipAction::Remove)
-            },
-            OperatorAction::TransferLeader { .. } => None,
-        } {
-            let cascade_node_id = match &op.action {
-                OperatorAction::AddLearner { node_id }
-                | OperatorAction::PromoteLearner { node_id }
-                | OperatorAction::RemoveVoter { node_id }
-                | OperatorAction::RemoveLearner { node_id } => *node_id,
-                OperatorAction::TransferLeader { .. } => unreachable!(),
-            };
-            manager
-                .cascade_membership_to_children(op.region, cascade_node_id, cascade_action)
-                .await;
-        }
+        // Phase 5 / M3 sub-stage 5c: per-organization and per-vault
+        // membership cascades are owned by each per-org group's
+        // `RegionMembershipWatcher` + `MembershipDispatcher` pair
+        // (spawned in `RaftManager::start_organization_group`). The
+        // watcher observes this region's voter / learner deltas via
+        // its `state_rx` watch and enqueues per-vault membership
+        // requests into the org's `MembershipQueue`; the dispatcher
+        // drains the queue at a rate-limited cap, preventing the
+        // snapshot storm the previous parallel-fan-out cascade
+        // produced at high vault counts.
+        //
+        // Pre-M3 this site called
+        // `RaftManager::cascade_membership_to_children` synchronously;
+        // that function is preserved as a public API for tests and
+        // emergency tooling but is no longer invoked from production
+        // code paths.
 
         // After removing a voter, check if it's now fully drained from ALL
         // local DRs. If so AND we are the GLOBAL leader, trigger immediate

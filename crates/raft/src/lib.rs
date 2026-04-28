@@ -106,6 +106,8 @@ pub mod raft_manager;
 #[doc(hidden)]
 pub mod read_index;
 #[doc(hidden)]
+pub mod region_membership_watcher;
+#[doc(hidden)]
 pub mod resource_metrics;
 #[doc(hidden)]
 pub mod runtime_config;
