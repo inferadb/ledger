@@ -3523,6 +3523,107 @@ service RaftService {
   // Not for client use; client writes reach their target region via
   // `NotLeader` + hint redirect, not this RPC.
   rpc RegionalProposal(RegionalProposalRequest) returns (RegionalProposalResult);
+
+  // Stream an encrypted snapshot from the leader to a follower.
+  //
+  // Internal Raft transport only; not customer-facing. Stage 3 of the
+  // snapshot install path: the leader chunks the at-rest encrypted snapshot
+  // bytes (whole-file AES-256-GCM envelope produced by `SnapshotPersister`)
+  // and ships them to the follower over an HTTP/2 client-streaming RPC. The
+  // follower writes the bytes to a staging file on disk; receiver-side install
+  // (decrypt → validate → install) is handled by Stage 4.
+  //
+  // The wire format mirrors the at-rest format verbatim — on-the-wire
+  // encryption is provided by WireGuard at the link layer, so the streaming
+  // protocol carries the encrypted envelope as opaque bytes and the follower
+  // decrypts on install. This avoids divergence between disk and wire.
+  rpc InstallSnapshotStream(stream InstallSnapshotChunk)
+      returns (InstallSnapshotStreamResponse);
+}
+
+// One chunk in an `InstallSnapshotStream` RPC.
+//
+// The first chunk MUST carry a header; subsequent chunks alternate between
+// `data` chunks (raw encrypted bytes) and a final `footer` (CRC + byte count).
+// The receiver rejects streams that do not follow this ordering.
+message InstallSnapshotChunk {
+  oneof payload {
+    InstallSnapshotHeader header = 1;
+    bytes data = 2;
+    InstallSnapshotFooter footer = 3;
+  }
+}
+
+// Header for an `InstallSnapshotStream`. Identifies the snapshot, its scope,
+// and the leader's term so the follower can validate before allocating the
+// staging file.
+message InstallSnapshotHeader {
+  // Leader's current Raft term. The follower rejects if its observed term
+  // is strictly greater (stale leader).
+  uint64 leader_term = 1;
+  // Leader node ID for diagnostics.
+  uint64 leader_id = 2;
+  // Routing scope — discriminates org-level vs. per-vault snapshots. Mirrors
+  // `SnapshotScope` in the raft crate.
+  oneof scope {
+    InstallSnapshotOrgScope org = 3;
+    InstallSnapshotVaultScope vault = 4;
+  }
+  // Last log index covered by the snapshot. Doubles as the staging file's
+  // index suffix.
+  uint64 snapshot_index = 5;
+  // Term of the last log entry covered by the snapshot.
+  uint64 snapshot_term = 6;
+  // Total encrypted byte count the leader plans to ship. The follower uses
+  // this for progress reporting and as a sanity bound.
+  uint64 total_bytes = 7;
+  // Chunk size the leader is using. Informational; the receiver does not
+  // require fixed-size chunks.
+  uint64 chunk_size_bytes = 8;
+  // LSNP version string for forward-compat. Currently `"LSNP-v2"`.
+  string lsnp_version = 9;
+}
+
+// Org-scoped snapshot routing fields — mirrors `SnapshotScope::Org`.
+message InstallSnapshotOrgScope {
+  // Region the org's `OrganizationGroup` lives in.
+  string region = 1;
+  // Internal sequential organization ID (NOT a slug). Internal Raft
+  // transport — root rule 4 mandates internal IDs on the apply path; the
+  // SnapshotPersister keys snapshots by `OrganizationId`, not slug.
+  int64 organization_id = 2;
+}
+
+// Vault-scoped snapshot routing fields — mirrors `SnapshotScope::Vault`.
+message InstallSnapshotVaultScope {
+  // Region the vault's `VaultGroup` lives in.
+  string region = 1;
+  // Internal sequential organization ID.
+  int64 organization_id = 2;
+  // Internal sequential vault ID.
+  int64 vault_id = 3;
+}
+
+// Footer for an `InstallSnapshotStream`. Sent after all `data` chunks; the
+// receiver uses the CRC and byte count to validate the staged file.
+message InstallSnapshotFooter {
+  // CRC32C over the concatenated `data` chunk bytes (in order). The
+  // follower rejects on mismatch and deletes the staging temp file.
+  uint32 stream_crc32c = 1;
+  // Total bytes the leader streamed. Must match `header.total_bytes`.
+  uint64 final_byte_count = 2;
+}
+
+// Response for an `InstallSnapshotStream` RPC.
+message InstallSnapshotStreamResponse {
+  // Follower's current Raft term, so the leader can step down if stale.
+  uint64 follower_term = 1;
+  // Whether the follower accepted the stream and staged the file.
+  bool success = 2;
+  // Diagnostic message when `success` is false.
+  string error_message = 3;
+  // Echoes the staged snapshot index when `success` is true; 0 otherwise.
+  uint64 staged_at_index = 4;
 }
 
 // Raft vote (term + node_id + committed flag).

@@ -28,6 +28,7 @@ use inferadb_ledger_types::OrganizationId;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
+    apply_command::ApplyCommand,
     consensus_handle::{ResponseMap, SpilloverMap},
     log_storage::{RaftLogStore, operations::ApplyableRequest},
     metrics,
@@ -105,10 +106,63 @@ impl<R: ApplyableRequest> ApplyWorker<R> {
         self
     }
 
-    /// Runs the apply loop until the channel is closed (engine shutdown).
-    pub async fn run(mut self, mut rx: mpsc::Receiver<CommittedBatch>) {
+    /// Runs the apply loop until the commit channel is closed (engine
+    /// shutdown).
+    ///
+    /// `ctrl_rx` is the per-shard out-of-band [`ApplyCommand`] channel
+    /// drained alongside `rx` via `tokio::select!`. Stage 4's
+    /// `RaftManagerSnapshotInstaller` emits
+    /// [`ApplyCommand::InstallSnapshot`](crate::apply_command::ApplyCommand::InstallSnapshot)
+    /// here so the install happens on the same task that owns the
+    /// `RaftLogStore` — preventing any race between an in-flight batch
+    /// apply and a snapshot install.
+    pub async fn run(
+        mut self,
+        mut rx: mpsc::Receiver<CommittedBatch>,
+        mut ctrl_rx: crate::apply_command::ApplyCommandReceiver,
+    ) {
         use tracing::Instrument;
-        while let Some(batch) = rx.recv().await {
+        loop {
+            let batch = tokio::select! {
+                biased;
+                cmd = ctrl_rx.recv() => {
+                    match cmd {
+                        Some(ApplyCommand::InstallSnapshot {
+                            meta,
+                            plaintext,
+                            completion,
+                            _backend: _,
+                        }) => {
+                            // Install the snapshot synchronously on the apply
+                            // task. Concurrent batch apply during this window
+                            // is impossible because we own `&mut self` and
+                            // the select arm runs to completion before we
+                            // poll `rx` again.
+                            let install_result =
+                                self.store.install_snapshot(&meta, plaintext).await;
+                            // The completion channel may be closed if the
+                            // installer task was cancelled while we held the
+                            // command — drop silently in that case.
+                            let _ = completion.send(install_result);
+                            continue;
+                        },
+                        None => {
+                            // Control channel closed (manager dropped).
+                            // Continue draining the commit channel until it
+                            // closes too, but silently ignore further
+                            // control commands (the recv() returns None
+                            // immediately on subsequent polls).
+                            continue;
+                        },
+                    }
+                },
+                maybe_batch = rx.recv() => {
+                    match maybe_batch {
+                        Some(b) => b,
+                        None => break,
+                    }
+                },
+            };
             if batch.entries.is_empty() {
                 continue;
             }

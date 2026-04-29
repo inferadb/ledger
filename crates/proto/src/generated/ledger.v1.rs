@@ -3901,6 +3901,128 @@ pub struct LeaderUpdate {
     #[prost(uint64, tag = "3")]
     pub leader_node_id: u64,
 }
+/// One chunk in an `InstallSnapshotStream` RPC.
+///
+/// The first chunk MUST carry a header; subsequent chunks alternate between
+/// `data` chunks (raw encrypted bytes) and a final `footer` (CRC + byte count).
+/// The receiver rejects streams that do not follow this ordering.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InstallSnapshotChunk {
+    #[prost(oneof = "install_snapshot_chunk::Payload", tags = "1, 2, 3")]
+    pub payload: ::core::option::Option<install_snapshot_chunk::Payload>,
+}
+/// Nested message and enum types in `InstallSnapshotChunk`.
+pub mod install_snapshot_chunk {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Payload {
+        #[prost(message, tag = "1")]
+        Header(super::InstallSnapshotHeader),
+        #[prost(bytes, tag = "2")]
+        Data(::prost::alloc::vec::Vec<u8>),
+        #[prost(message, tag = "3")]
+        Footer(super::InstallSnapshotFooter),
+    }
+}
+/// Header for an `InstallSnapshotStream`. Identifies the snapshot, its scope,
+/// and the leader's term so the follower can validate before allocating the
+/// staging file.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InstallSnapshotHeader {
+    /// Leader's current Raft term. The follower rejects if its observed term
+    /// is strictly greater (stale leader).
+    #[prost(uint64, tag = "1")]
+    pub leader_term: u64,
+    /// Leader node ID for diagnostics.
+    #[prost(uint64, tag = "2")]
+    pub leader_id: u64,
+    /// Last log index covered by the snapshot. Doubles as the staging file's
+    /// index suffix.
+    #[prost(uint64, tag = "5")]
+    pub snapshot_index: u64,
+    /// Term of the last log entry covered by the snapshot.
+    #[prost(uint64, tag = "6")]
+    pub snapshot_term: u64,
+    /// Total encrypted byte count the leader plans to ship. The follower uses
+    /// this for progress reporting and as a sanity bound.
+    #[prost(uint64, tag = "7")]
+    pub total_bytes: u64,
+    /// Chunk size the leader is using. Informational; the receiver does not
+    /// require fixed-size chunks.
+    #[prost(uint64, tag = "8")]
+    pub chunk_size_bytes: u64,
+    /// LSNP version string for forward-compat. Currently `"LSNP-v2"`.
+    #[prost(string, tag = "9")]
+    pub lsnp_version: ::prost::alloc::string::String,
+    /// Routing scope — discriminates org-level vs. per-vault snapshots. Mirrors
+    /// `SnapshotScope` in the raft crate.
+    #[prost(oneof = "install_snapshot_header::Scope", tags = "3, 4")]
+    pub scope: ::core::option::Option<install_snapshot_header::Scope>,
+}
+/// Nested message and enum types in `InstallSnapshotHeader`.
+pub mod install_snapshot_header {
+    /// Routing scope — discriminates org-level vs. per-vault snapshots. Mirrors
+    /// `SnapshotScope` in the raft crate.
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Scope {
+        #[prost(message, tag = "3")]
+        Org(super::InstallSnapshotOrgScope),
+        #[prost(message, tag = "4")]
+        Vault(super::InstallSnapshotVaultScope),
+    }
+}
+/// Org-scoped snapshot routing fields — mirrors `SnapshotScope::Org`.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InstallSnapshotOrgScope {
+    /// Region the org's `OrganizationGroup` lives in.
+    #[prost(string, tag = "1")]
+    pub region: ::prost::alloc::string::String,
+    /// Internal sequential organization ID (NOT a slug). Internal Raft
+    /// transport — root rule 4 mandates internal IDs on the apply path; the
+    /// SnapshotPersister keys snapshots by `OrganizationId`, not slug.
+    #[prost(int64, tag = "2")]
+    pub organization_id: i64,
+}
+/// Vault-scoped snapshot routing fields — mirrors `SnapshotScope::Vault`.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InstallSnapshotVaultScope {
+    /// Region the vault's `VaultGroup` lives in.
+    #[prost(string, tag = "1")]
+    pub region: ::prost::alloc::string::String,
+    /// Internal sequential organization ID.
+    #[prost(int64, tag = "2")]
+    pub organization_id: i64,
+    /// Internal sequential vault ID.
+    #[prost(int64, tag = "3")]
+    pub vault_id: i64,
+}
+/// Footer for an `InstallSnapshotStream`. Sent after all `data` chunks; the
+/// receiver uses the CRC and byte count to validate the staged file.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InstallSnapshotFooter {
+    /// CRC32C over the concatenated `data` chunk bytes (in order). The
+    /// follower rejects on mismatch and deletes the staging temp file.
+    #[prost(uint32, tag = "1")]
+    pub stream_crc32c: u32,
+    /// Total bytes the leader streamed. Must match `header.total_bytes`.
+    #[prost(uint64, tag = "2")]
+    pub final_byte_count: u64,
+}
+/// Response for an `InstallSnapshotStream` RPC.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InstallSnapshotStreamResponse {
+    /// Follower's current Raft term, so the leader can step down if stale.
+    #[prost(uint64, tag = "1")]
+    pub follower_term: u64,
+    /// Whether the follower accepted the stream and staged the file.
+    #[prost(bool, tag = "2")]
+    pub success: bool,
+    /// Diagnostic message when `success` is false.
+    #[prost(string, tag = "3")]
+    pub error_message: ::prost::alloc::string::String,
+    /// Echoes the staged snapshot index when `success` is true; 0 otherwise.
+    #[prost(uint64, tag = "4")]
+    pub staged_at_index: u64,
+}
 /// Raft vote (term + node_id + committed flag).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RaftVote {
@@ -19862,6 +19984,47 @@ pub mod raft_service_client {
                 .insert(GrpcMethod::new("ledger.v1.RaftService", "RegionalProposal"));
             self.inner.unary(req, path, codec).await
         }
+        /// Stream an encrypted snapshot from the leader to a follower.
+        ///
+        /// Internal Raft transport only; not customer-facing. Stage 3 of the
+        /// snapshot install path: the leader chunks the at-rest encrypted snapshot
+        /// bytes (whole-file AES-256-GCM envelope produced by `SnapshotPersister`)
+        /// and ships them to the follower over an HTTP/2 client-streaming RPC. The
+        /// follower writes the bytes to a staging file on disk; receiver-side install
+        /// (decrypt → validate → install) is handled by Stage 4.
+        ///
+        /// The wire format mirrors the at-rest format verbatim — on-the-wire
+        /// encryption is provided by WireGuard at the link layer, so the streaming
+        /// protocol carries the encrypted envelope as opaque bytes and the follower
+        /// decrypts on install. This avoids divergence between disk and wire.
+        pub async fn install_snapshot_stream(
+            &mut self,
+            request: impl tonic::IntoStreamingRequest<
+                Message = super::InstallSnapshotChunk,
+            >,
+        ) -> std::result::Result<
+            tonic::Response<super::InstallSnapshotStreamResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.RaftService/InstallSnapshotStream",
+            );
+            let mut req = request.into_streaming_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.RaftService", "InstallSnapshotStream"),
+                );
+            self.inner.client_streaming(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -19918,6 +20081,26 @@ pub mod raft_service_server {
             request: tonic::Request<super::RegionalProposalRequest>,
         ) -> std::result::Result<
             tonic::Response<super::RegionalProposalResult>,
+            tonic::Status,
+        >;
+        /// Stream an encrypted snapshot from the leader to a follower.
+        ///
+        /// Internal Raft transport only; not customer-facing. Stage 3 of the
+        /// snapshot install path: the leader chunks the at-rest encrypted snapshot
+        /// bytes (whole-file AES-256-GCM envelope produced by `SnapshotPersister`)
+        /// and ships them to the follower over an HTTP/2 client-streaming RPC. The
+        /// follower writes the bytes to a staging file on disk; receiver-side install
+        /// (decrypt → validate → install) is handled by Stage 4.
+        ///
+        /// The wire format mirrors the at-rest format verbatim — on-the-wire
+        /// encryption is provided by WireGuard at the link layer, so the streaming
+        /// protocol carries the encrypted envelope as opaque bytes and the follower
+        /// decrypts on install. This avoids divergence between disk and wire.
+        async fn install_snapshot_stream(
+            &self,
+            request: tonic::Request<tonic::Streaming<super::InstallSnapshotChunk>>,
+        ) -> std::result::Result<
+            tonic::Response<super::InstallSnapshotStreamResponse>,
             tonic::Status,
         >;
     }
@@ -20133,6 +20316,54 @@ pub mod raft_service_server {
                                 max_encoding_message_size,
                             );
                         let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.RaftService/InstallSnapshotStream" => {
+                    #[allow(non_camel_case_types)]
+                    struct InstallSnapshotStreamSvc<T: RaftService>(pub Arc<T>);
+                    impl<
+                        T: RaftService,
+                    > tonic::server::ClientStreamingService<super::InstallSnapshotChunk>
+                    for InstallSnapshotStreamSvc<T> {
+                        type Response = super::InstallSnapshotStreamResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                tonic::Streaming<super::InstallSnapshotChunk>,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as RaftService>::install_snapshot_stream(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = InstallSnapshotStreamSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.client_streaming(method, req).await;
                         Ok(res)
                     };
                     Box::pin(fut)

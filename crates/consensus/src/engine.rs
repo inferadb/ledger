@@ -40,6 +40,9 @@ use crate::{
     message::Message,
     reactor::{PauseMap, Reactor, ReactorEvent},
     rng::RngSource,
+    snapshot_coordinator::{NoopSnapshotCoordinator, SnapshotCoordinator},
+    snapshot_installer::{NoopSnapshotInstaller, SnapshotInstaller},
+    snapshot_sender::{NoopSnapshotSender, SnapshotSender},
     transport::NetworkTransport,
     types::*,
     wake::{NoopShardWakeNotifier, ShardWakeNotifier},
@@ -153,6 +156,174 @@ impl ConsensusEngine {
         W: WalBackend + Send + 'static,
         T: NetworkTransport,
     {
+        Self::start_with_coordinators(
+            shards,
+            wal,
+            clock,
+            transport,
+            flush_interval,
+            wake_notifier,
+            Arc::new(NoopSnapshotCoordinator),
+        )
+    }
+
+    /// Starts the engine with explicit [`ShardWakeNotifier`] and
+    /// [`SnapshotCoordinator`] callbacks.
+    ///
+    /// The wake notifier routes [`ReactorEvent::PeerMessage`] events
+    /// targeting paused shards (see [`Self::start_with_wake_notifier`]). The
+    /// snapshot coordinator handles
+    /// [`Action::TriggerSnapshot`](crate::action::Action::TriggerSnapshot)
+    /// emissions: when a shard's commit index crosses the configured
+    /// snapshot threshold, the reactor invokes
+    /// [`SnapshotCoordinator::on_trigger_snapshot`] which MUST dispatch the
+    /// snapshot build asynchronously and call back into
+    /// [`Self::notify_snapshot_completed`] when the snapshot is durable on
+    /// disk (so the shard advances `last_snapshot_index` and the next
+    /// threshold check uses the correct baseline).
+    ///
+    /// Existing call sites that do not wire up Stage 2 snapshot
+    /// persistence should continue to use [`Self::start_with_wake_notifier`]
+    /// or [`Self::start`], which install
+    /// [`NoopSnapshotCoordinator`].
+    ///
+    /// Installs the no-op snapshot sender ([`NoopSnapshotSender`]) — see
+    /// [`Self::start_with_full_coordinators`] for the variant that accepts
+    /// a real [`SnapshotSender`] for Stage 3 wire transfer.
+    ///
+    /// [`ReactorEvent::PeerMessage`]: crate::reactor::ReactorEvent::PeerMessage
+    pub fn start_with_coordinators<C, R, W, T>(
+        shards: Vec<ConsensusState<C, R>>,
+        wal: W,
+        clock: C,
+        transport: T,
+        flush_interval: Duration,
+        wake_notifier: Arc<dyn ShardWakeNotifier>,
+        snapshot_coordinator: Arc<dyn SnapshotCoordinator>,
+    ) -> (
+        Self,
+        mpsc::Receiver<CommittedBatch>,
+        HashMap<ConsensusStateId, watch::Receiver<ShardState>>,
+    )
+    where
+        C: Clock + Clone + Send + 'static,
+        R: RngSource + Send + 'static,
+        W: WalBackend + Send + 'static,
+        T: NetworkTransport,
+    {
+        Self::start_with_full_coordinators(
+            shards,
+            wal,
+            clock,
+            transport,
+            flush_interval,
+            wake_notifier,
+            snapshot_coordinator,
+            Arc::new(NoopSnapshotSender),
+        )
+    }
+
+    /// Starts the engine with explicit [`ShardWakeNotifier`],
+    /// [`SnapshotCoordinator`], and [`SnapshotSender`] callbacks.
+    ///
+    /// The snapshot sender handles
+    /// [`Action::SendSnapshot`](crate::action::Action::SendSnapshot)
+    /// emissions: when the leader's heartbeat replicator detects a follower
+    /// that has fallen below the leader's first available log index, the
+    /// shard emits this action and the reactor invokes
+    /// [`SnapshotSender::send_snapshot`]. The implementor MUST dispatch the
+    /// streaming I/O asynchronously and return immediately — the reactor's
+    /// event loop is on hold until the callback returns. Failures are
+    /// dropped (logged + metric); the leader's next heartbeat retry
+    /// re-emits the action, so transient failures self-heal without
+    /// explicit retry state in the reactor.
+    ///
+    /// Existing call sites that do not wire up Stage 3 snapshot wire
+    /// transfer should continue to use [`Self::start_with_coordinators`],
+    /// which installs [`NoopSnapshotSender`].
+    ///
+    /// [`ReactorEvent::PeerMessage`]: crate::reactor::ReactorEvent::PeerMessage
+    pub fn start_with_full_coordinators<C, R, W, T>(
+        shards: Vec<ConsensusState<C, R>>,
+        wal: W,
+        clock: C,
+        transport: T,
+        flush_interval: Duration,
+        wake_notifier: Arc<dyn ShardWakeNotifier>,
+        snapshot_coordinator: Arc<dyn SnapshotCoordinator>,
+        snapshot_sender: Arc<dyn SnapshotSender>,
+    ) -> (
+        Self,
+        mpsc::Receiver<CommittedBatch>,
+        HashMap<ConsensusStateId, watch::Receiver<ShardState>>,
+    )
+    where
+        C: Clock + Clone + Send + 'static,
+        R: RngSource + Send + 'static,
+        W: WalBackend + Send + 'static,
+        T: NetworkTransport,
+    {
+        Self::start_with_all_callbacks(
+            shards,
+            wal,
+            clock,
+            transport,
+            flush_interval,
+            wake_notifier,
+            snapshot_coordinator,
+            snapshot_sender,
+            Arc::new(NoopSnapshotInstaller),
+        )
+    }
+
+    /// Starts the engine with all four callbacks — wake notifier, snapshot
+    /// coordinator, snapshot sender, and snapshot installer.
+    ///
+    /// The snapshot installer handles
+    /// [`Action::InstallSnapshot`](crate::action::Action::InstallSnapshot)
+    /// emissions: when a follower accepts a leader's
+    /// [`Message::InstallSnapshot`],
+    /// the shard emits this action and the reactor invokes
+    /// [`SnapshotInstaller::install_snapshot`]. The implementor MUST
+    /// dispatch the install I/O asynchronously and return immediately — the
+    /// reactor's event loop is on hold until the callback returns. Failures
+    /// are dropped (logged + metric); the leader's next heartbeat retry
+    /// re-emits `Action::SendSnapshot` (re-staging the file via Stage 3),
+    /// which then re-emits this action, so transient failures self-heal
+    /// without explicit retry state in the reactor.
+    ///
+    /// On install completion the implementor calls back into
+    /// [`Self::notify_snapshot_installed`] so the shard's `last_applied` /
+    /// `last_snapshot_index` advance and the log prefix subsumed by the
+    /// snapshot is truncated.
+    ///
+    /// Existing call sites that do not wire up Stage 4 snapshot install
+    /// should continue to use [`Self::start_with_full_coordinators`], which
+    /// installs [`NoopSnapshotInstaller`].
+    ///
+    /// [`ReactorEvent::PeerMessage`]: crate::reactor::ReactorEvent::PeerMessage
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_with_all_callbacks<C, R, W, T>(
+        shards: Vec<ConsensusState<C, R>>,
+        wal: W,
+        clock: C,
+        transport: T,
+        flush_interval: Duration,
+        wake_notifier: Arc<dyn ShardWakeNotifier>,
+        snapshot_coordinator: Arc<dyn SnapshotCoordinator>,
+        snapshot_sender: Arc<dyn SnapshotSender>,
+        snapshot_installer: Arc<dyn SnapshotInstaller>,
+    ) -> (
+        Self,
+        mpsc::Receiver<CommittedBatch>,
+        HashMap<ConsensusStateId, watch::Receiver<ShardState>>,
+    )
+    where
+        C: Clock + Clone + Send + 'static,
+        R: RngSource + Send + 'static,
+        W: WalBackend + Send + 'static,
+        T: NetworkTransport,
+    {
         // Priority split: control traffic gets a small dedicated channel so
         // membership / snapshot / shutdown events can't be starved by a
         // proposal flood. Proposals get the larger bulk channel with
@@ -163,7 +334,7 @@ impl ConsensusEngine {
 
         let pause_state = Arc::new(PauseMap::new());
 
-        let mut reactor = Reactor::with_wake_notifier(
+        let mut reactor = Reactor::with_all_callbacks(
             control_rx,
             proposal_rx,
             wal,
@@ -173,6 +344,9 @@ impl ConsensusEngine {
             flush_interval,
             Arc::clone(&pause_state),
             wake_notifier,
+            snapshot_coordinator,
+            snapshot_sender,
+            snapshot_installer,
         );
         let mut state_receivers = HashMap::new();
 
@@ -491,6 +665,40 @@ impl ConsensusEngine {
     ) -> Result<(), ConsensusError> {
         self.control_inbox
             .send(ReactorEvent::SnapshotCompleted { shard, last_included_index })
+            .await
+            .map_err(|_| ConsensusError::InboxFull)
+    }
+
+    /// Notifies the reactor that a leader-streamed snapshot has been
+    /// successfully installed by the external installer.
+    ///
+    /// Sister of [`Self::notify_snapshot_completed`]: that method is the
+    /// callback for snapshots **produced locally**, advancing only
+    /// `last_snapshot_index`. This method is the callback for snapshots
+    /// **received from the leader** (Stage 4 install path), advancing
+    /// `last_applied`, `last_snapshot_index`, and `commit_index` to
+    /// `last_included_index` and truncating the log prefix that is now
+    /// subsumed by the snapshot. See
+    /// [`ConsensusState::handle_snapshot_installed`](crate::ConsensusState::handle_snapshot_installed)
+    /// for the full state-transition semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConsensusError::InboxFull`] if the reactor inbox is
+    /// full, or [`ConsensusError::ReactorShutdown`] if the reactor has
+    /// shut down.
+    pub async fn notify_snapshot_installed(
+        &self,
+        shard: ConsensusStateId,
+        last_included_index: u64,
+        last_included_term: u64,
+    ) -> Result<(), ConsensusError> {
+        self.control_inbox
+            .send(ReactorEvent::SnapshotInstalled {
+                shard,
+                last_included_index,
+                last_included_term,
+            })
             .await
             .map_err(|_| ConsensusError::InboxFull)
     }

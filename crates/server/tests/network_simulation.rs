@@ -69,6 +69,12 @@ impl RaftService for MinimalRaftService {
     ) -> Result<Response<RegionalProposalResult>, Status> {
         Err(Status::unimplemented("RegionalProposal not supported in mock"))
     }
+    async fn install_snapshot_stream(
+        &self,
+        _request: Request<tonic::Streaming<inferadb_ledger_proto::proto::InstallSnapshotChunk>>,
+    ) -> Result<Response<inferadb_ledger_proto::proto::InstallSnapshotStreamResponse>, Status> {
+        Err(Status::unimplemented("InstallSnapshotStream not supported in mock"))
+    }
 }
 
 /// Starts a minimal Raft server on the given turmoil host.
@@ -285,6 +291,13 @@ fn test_majority_partition_continues_operating() {
             _request: Request<RegionalProposalRequest>,
         ) -> Result<Response<RegionalProposalResult>, Status> {
             Err(Status::unimplemented("RegionalProposal not supported in mock"))
+        }
+        async fn install_snapshot_stream(
+            &self,
+            _request: Request<tonic::Streaming<inferadb_ledger_proto::proto::InstallSnapshotChunk>>,
+        ) -> Result<Response<inferadb_ledger_proto::proto::InstallSnapshotStreamResponse>, Status>
+        {
+            Err(Status::unimplemented("InstallSnapshotStream not supported in mock"))
         }
     }
 
@@ -532,6 +545,13 @@ fn test_intermittent_connectivity() {
             _request: Request<RegionalProposalRequest>,
         ) -> Result<Response<RegionalProposalResult>, Status> {
             Err(Status::unimplemented("RegionalProposal not supported in mock"))
+        }
+        async fn install_snapshot_stream(
+            &self,
+            _request: Request<tonic::Streaming<inferadb_ledger_proto::proto::InstallSnapshotChunk>>,
+        ) -> Result<Response<inferadb_ledger_proto::proto::InstallSnapshotStreamResponse>, Status>
+        {
+            Err(Status::unimplemented("InstallSnapshotStream not supported in mock"))
         }
     }
 

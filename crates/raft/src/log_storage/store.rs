@@ -200,6 +200,18 @@ pub struct RaftLogStore<B: StorageBackend = FileBackend> {
     pub(super) applied_index_tx: Arc<tokio::sync::watch::Sender<u64>>,
     /// Receiver side of the applied index watch channel.
     pub(super) applied_index_rx: tokio::sync::watch::Receiver<u64>,
+    /// Per-scope snapshot encryption key provider (Stage 1a scaffolding).
+    ///
+    /// Plumbed onto [`LedgerSnapshotBuilder`](super::LedgerSnapshotBuilder)
+    /// via [`Self::get_snapshot_builder`] so that the Stage 1b builder
+    /// bifurcation and Stage 2 `SnapshotPersister` can resolve a
+    /// `(region, organization, Option<vault>)` triple to a snapshot DEK.
+    /// Defaults to
+    /// [`NoopSnapshotKeyProvider`](crate::snapshot_key_provider::NoopSnapshotKeyProvider)
+    /// in [`Self::open`] and [`Self::open_for_vault`]; production callers
+    /// override via [`Self::with_snapshot_key_provider`] (driven by
+    /// [`RaftManagerConfig`](crate::raft_manager::RaftManagerConfig)).
+    pub(super) snapshot_key_provider: Arc<dyn crate::snapshot_key_provider::SnapshotKeyProvider>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -281,6 +293,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
             )),
             applied_index_tx: Arc::new(applied_index_tx),
             applied_index_rx,
+            snapshot_key_provider: Arc::new(crate::snapshot_key_provider::NoopSnapshotKeyProvider),
         };
 
         // Load cached values
@@ -328,6 +341,22 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// Configures the block archive for permanent block storage.
     pub fn with_block_archive(mut self, block_archive: Arc<BlockArchive<B>>) -> Self {
         self.block_archive = Some(block_archive);
+        self
+    }
+
+    /// Configures the per-scope snapshot encryption key provider.
+    ///
+    /// Plumbed onto every [`LedgerSnapshotBuilder`](super::LedgerSnapshotBuilder)
+    /// produced by [`Self::get_snapshot_builder`]. Stage 1a stores the
+    /// provider; the Stage 1b builder bifurcation and the Stage 2
+    /// `SnapshotPersister` are the first consumers. The default
+    /// installed by [`Self::open`] is
+    /// [`NoopSnapshotKeyProvider`](crate::snapshot_key_provider::NoopSnapshotKeyProvider).
+    pub fn with_snapshot_key_provider(
+        mut self,
+        provider: Arc<dyn crate::snapshot_key_provider::SnapshotKeyProvider>,
+    ) -> Self {
+        self.snapshot_key_provider = provider;
         self
     }
 

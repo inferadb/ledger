@@ -99,6 +99,37 @@ pub enum Action {
         /// Last term included in the snapshot.
         last_included_term: u64,
     },
+    /// The follower has accepted an `InstallSnapshot` message and the
+    /// reactor should install the staged snapshot file written by Stage 3's
+    /// `snapshot_receiver`.
+    ///
+    /// The reactor delegates the actual install to a `SnapshotInstaller`
+    /// callback (registered by the raft crate). When no callback is
+    /// registered, the action is dropped — the leader's heartbeat
+    /// replicator re-emits `Action::SendSnapshot` on the next cycle, which
+    /// re-stages the file via Stage 3 and re-emits this action.
+    ///
+    /// Stage 4 of the snapshot install path.
+    InstallSnapshot {
+        /// ConsensusState that needs the install.
+        shard: ConsensusStateId,
+        /// Term of the originating `Message::InstallSnapshot` (the leader's
+        /// term at the moment of streaming). Carried for diagnostics +
+        /// metrics; the install does not gate on this term match because
+        /// the staged file's LSNP header is the authoritative source for
+        /// scope + index + term verification.
+        leader_term: u64,
+        /// Last log index covered by the snapshot — used by the installer
+        /// to find the matching staged file via
+        /// [`SnapshotPersister::list_staged`](../../../raft/src/snapshot_persister.rs).
+        last_included_index: u64,
+        /// Last log term covered by the snapshot. Stored as snapshot
+        /// metadata; the installer passes it back to
+        /// [`ConsensusEngine::notify_snapshot_installed`](crate::ConsensusEngine::notify_snapshot_installed)
+        /// so the shard's `last_snapshot_index` / `last_snapshot_term`
+        /// advance.
+        last_included_term: u64,
+    },
     /// The local node was removed from this shard's voter and learner sets.
     /// The reactor should schedule cleanup (stop timers, remove shard).
     ShardRemoved {

@@ -25,6 +25,9 @@ use crate::{
     message::Message,
     network_outbox::NetworkOutbox,
     rng::RngSource,
+    snapshot_coordinator::{NoopSnapshotCoordinator, SnapshotCoordinator},
+    snapshot_installer::{NoopSnapshotInstaller, SnapshotInstaller},
+    snapshot_sender::{NoopSnapshotSender, SnapshotSender},
     timer::TimerWheel,
     transport::{NetworkTransport, OutboundMessage},
     types::{ConsensusStateId, MembershipChange, NodeId, TimerKind},
@@ -124,6 +127,24 @@ pub enum ReactorEvent {
         shard: ConsensusStateId,
         /// The last log index included in the completed snapshot.
         last_included_index: u64,
+    },
+    /// Notify the reactor that a leader-streamed snapshot has been
+    /// successfully installed by the external installer.
+    ///
+    /// Sister of [`Self::SnapshotCompleted`]: that event is for snapshots
+    /// produced locally; this event is for snapshots received from the
+    /// leader (Stage 4 install path). Routes to
+    /// [`crate::ConsensusState::handle_snapshot_installed`], which advances
+    /// `last_applied`, `last_snapshot_index`, and `commit_index` to
+    /// `last_included_index` and truncates the log prefix subsumed by the
+    /// snapshot.
+    SnapshotInstalled {
+        /// Target shard.
+        shard: ConsensusStateId,
+        /// The last log index covered by the installed snapshot.
+        last_included_index: u64,
+        /// The term of the last log entry covered by the installed snapshot.
+        last_included_term: u64,
     },
     /// Query a peer's match_index for the specified shard.
     QueryPeerState {
@@ -289,6 +310,27 @@ pub struct Reactor<C: Clock, R: RngSource, W: WalBackend, T: NetworkTransport> {
     /// Wake notifier invoked when a [`ReactorEvent::PeerMessage`] arrives for
     /// a paused shard. Default is [`NoopShardWakeNotifier`].
     wake_notifier: Arc<dyn ShardWakeNotifier>,
+    /// Snapshot coordinator invoked when an
+    /// [`Action::TriggerSnapshot`](crate::action::Action::TriggerSnapshot) is
+    /// processed. Default is [`NoopSnapshotCoordinator`]. The raft crate
+    /// installs a real implementation that builds and persists the
+    /// snapshot off the reactor task.
+    snapshot_coordinator: Arc<dyn SnapshotCoordinator>,
+    /// Snapshot sender invoked when an
+    /// [`Action::SendSnapshot`](crate::action::Action::SendSnapshot) is
+    /// processed. Default is [`NoopSnapshotSender`]. The raft crate installs
+    /// a real implementation that streams the at-rest encrypted snapshot
+    /// bytes to the follower over the internal Raft transport's
+    /// `InstallSnapshotStream` RPC. Stage 3 of the snapshot install path.
+    snapshot_sender: Arc<dyn SnapshotSender>,
+    /// Snapshot installer invoked when an
+    /// [`Action::InstallSnapshot`](crate::action::Action::InstallSnapshot) is
+    /// processed. Default is [`NoopSnapshotInstaller`]. The raft crate
+    /// installs a real implementation that locates the staged snapshot file
+    /// (Stage 3's receiver output), decrypts it, and feeds the plaintext
+    /// through `RaftLogStore::install_snapshot`. Stage 4 of the snapshot
+    /// install path.
+    snapshot_installer: Arc<dyn SnapshotInstaller>,
 }
 
 impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor<C, R, W, T> {
@@ -309,7 +351,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
         commit_tx: mpsc::Sender<CommittedBatch>,
         flush_interval: Duration,
     ) -> Self {
-        Self::with_wake_notifier(
+        Self::with_all_callbacks(
             control_inbox,
             proposal_inbox,
             wal,
@@ -319,17 +361,22 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             flush_interval,
             Arc::new(PauseMap::new()),
             Arc::new(NoopShardWakeNotifier),
+            Arc::new(NoopSnapshotCoordinator),
+            Arc::new(NoopSnapshotSender),
+            Arc::new(NoopSnapshotInstaller),
         )
     }
 
     /// Creates a reactor that shares its pause-state map with the surrounding
     /// [`crate::ConsensusEngine`] and delegates wake-on-paused-message events
-    /// to the supplied [`ShardWakeNotifier`].
+    /// to the supplied [`ShardWakeNotifier`]. Installs the no-op snapshot
+    /// coordinator — see [`Self::with_coordinators`] for the variant that
+    /// accepts both notifiers.
     ///
-    /// Used by [`crate::ConsensusEngine::start`] (and the future
+    /// Used by [`crate::ConsensusEngine::start`] (and the
     /// `start_with_wake_notifier` overload). Tests typically use the simpler
     /// [`Reactor::new`] constructor, which installs a private pause map and
-    /// a [`NoopShardWakeNotifier`].
+    /// no-op coordinators.
     #[allow(clippy::too_many_arguments)]
     pub fn with_wake_notifier(
         control_inbox: mpsc::Receiver<ReactorEvent>,
@@ -341,6 +388,135 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
         flush_interval: Duration,
         pause_state: Arc<PauseMap>,
         wake_notifier: Arc<dyn ShardWakeNotifier>,
+    ) -> Self {
+        Self::with_all_callbacks(
+            control_inbox,
+            proposal_inbox,
+            wal,
+            clock,
+            transport,
+            commit_tx,
+            flush_interval,
+            pause_state,
+            wake_notifier,
+            Arc::new(NoopSnapshotCoordinator),
+            Arc::new(NoopSnapshotSender),
+            Arc::new(NoopSnapshotInstaller),
+        )
+    }
+
+    /// Creates a reactor that shares its pause-state map with the surrounding
+    /// [`crate::ConsensusEngine`] and delegates wake-on-paused-message events
+    /// to the supplied [`ShardWakeNotifier`] and snapshot-trigger events to
+    /// the supplied [`SnapshotCoordinator`].
+    ///
+    /// Used by [`crate::ConsensusEngine::start_with_coordinators`]. The
+    /// snapshot coordinator's
+    /// [`on_trigger_snapshot`](SnapshotCoordinator::on_trigger_snapshot) is
+    /// invoked from the reactor task when an
+    /// [`Action::TriggerSnapshot`] is processed; implementors MUST
+    /// dispatch any I/O asynchronously and
+    /// return immediately (the reactor's event loop is on hold until the
+    /// callback returns).
+    ///
+    /// Installs the no-op snapshot sender — see
+    /// [`Self::with_full_coordinators`] for the variant that accepts a
+    /// real [`SnapshotSender`] for Stage 3 wire transfer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_coordinators(
+        control_inbox: mpsc::Receiver<ReactorEvent>,
+        proposal_inbox: mpsc::Receiver<ReactorEvent>,
+        wal: W,
+        clock: C,
+        transport: T,
+        commit_tx: mpsc::Sender<CommittedBatch>,
+        flush_interval: Duration,
+        pause_state: Arc<PauseMap>,
+        wake_notifier: Arc<dyn ShardWakeNotifier>,
+        snapshot_coordinator: Arc<dyn SnapshotCoordinator>,
+    ) -> Self {
+        Self::with_all_callbacks(
+            control_inbox,
+            proposal_inbox,
+            wal,
+            clock,
+            transport,
+            commit_tx,
+            flush_interval,
+            pause_state,
+            wake_notifier,
+            snapshot_coordinator,
+            Arc::new(NoopSnapshotSender),
+            Arc::new(NoopSnapshotInstaller),
+        )
+    }
+
+    /// Creates a reactor wired up with all three callbacks — wake notifier,
+    /// snapshot coordinator, and snapshot sender.
+    ///
+    /// Used by [`crate::ConsensusEngine::start_with_full_coordinators`]. The
+    /// snapshot sender's
+    /// [`send_snapshot`](SnapshotSender::send_snapshot) is invoked from the
+    /// reactor task when an [`Action::SendSnapshot`] is
+    /// processed; implementors MUST dispatch any I/O asynchronously and
+    /// return immediately (the reactor's event loop is on hold until the
+    /// callback returns) — same contract as the wake notifier and snapshot
+    /// coordinator.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_full_coordinators(
+        control_inbox: mpsc::Receiver<ReactorEvent>,
+        proposal_inbox: mpsc::Receiver<ReactorEvent>,
+        wal: W,
+        clock: C,
+        transport: T,
+        commit_tx: mpsc::Sender<CommittedBatch>,
+        flush_interval: Duration,
+        pause_state: Arc<PauseMap>,
+        wake_notifier: Arc<dyn ShardWakeNotifier>,
+        snapshot_coordinator: Arc<dyn SnapshotCoordinator>,
+        snapshot_sender: Arc<dyn SnapshotSender>,
+    ) -> Self {
+        Self::with_all_callbacks(
+            control_inbox,
+            proposal_inbox,
+            wal,
+            clock,
+            transport,
+            commit_tx,
+            flush_interval,
+            pause_state,
+            wake_notifier,
+            snapshot_coordinator,
+            snapshot_sender,
+            Arc::new(NoopSnapshotInstaller),
+        )
+    }
+
+    /// Creates a reactor wired up with all four callbacks — wake notifier,
+    /// snapshot coordinator, snapshot sender, and snapshot installer.
+    ///
+    /// Used by [`crate::ConsensusEngine::start_with_all_callbacks`]. The
+    /// snapshot installer's
+    /// [`install_snapshot`](SnapshotInstaller::install_snapshot) is invoked
+    /// from the reactor task when an [`Action::InstallSnapshot`]
+    /// is processed; implementors MUST dispatch any I/O asynchronously and
+    /// return immediately (the reactor's event loop is on hold until the
+    /// callback returns) — same contract as the wake notifier, snapshot
+    /// coordinator, and snapshot sender.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_all_callbacks(
+        control_inbox: mpsc::Receiver<ReactorEvent>,
+        proposal_inbox: mpsc::Receiver<ReactorEvent>,
+        wal: W,
+        clock: C,
+        transport: T,
+        commit_tx: mpsc::Sender<CommittedBatch>,
+        flush_interval: Duration,
+        pause_state: Arc<PauseMap>,
+        wake_notifier: Arc<dyn ShardWakeNotifier>,
+        snapshot_coordinator: Arc<dyn SnapshotCoordinator>,
+        snapshot_sender: Arc<dyn SnapshotSender>,
+        snapshot_installer: Arc<dyn SnapshotInstaller>,
     ) -> Self {
         Self {
             shards: HashMap::new(),
@@ -362,6 +538,9 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             force_removal_shards: HashSet::new(),
             pause_state,
             wake_notifier,
+            snapshot_coordinator,
+            snapshot_sender,
+            snapshot_installer,
         }
     }
 
@@ -786,6 +965,27 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
             ReactorEvent::SnapshotCompleted { shard, last_included_index } => {
                 if let Some(s) = self.shards.get_mut(&shard) {
                     s.handle_snapshot_completed(last_included_index);
+                }
+                vec![]
+            },
+            ReactorEvent::SnapshotInstalled { shard, last_included_index, last_included_term } => {
+                // Stage 4: the external installer has successfully consumed
+                // the staged snapshot file and loaded it into the local
+                // state-machine. Advance the shard's `last_applied`,
+                // `last_snapshot_index`, and `commit_index` and truncate
+                // the log prefix subsumed by the snapshot.
+                //
+                // Idempotent inside `handle_snapshot_installed` — repeat
+                // notifications for the same index are no-ops.
+                if let Some(s) = self.shards.get_mut(&shard) {
+                    s.handle_snapshot_installed(last_included_index, last_included_term);
+                    // Bump our `last_applied` tracker so the next commit
+                    // dispatch does not re-deliver entries already covered
+                    // by the installed snapshot.
+                    let entry = self.last_applied.entry(shard).or_insert(0);
+                    if last_included_index > *entry {
+                        *entry = last_included_index;
+                    }
                 }
                 vec![]
             },
@@ -1262,6 +1462,7 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                         | Action::TriggerSnapshot { .. }
                         | Action::MembershipChanged { .. }
                         | Action::SendSnapshot { .. }
+                        | Action::InstallSnapshot { .. }
                         | Action::ShardRemoved { .. } => {},
                     }
                 }
@@ -1346,32 +1547,103 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                 Action::MembershipChanged { membership, .. } => {
                     self.transport.on_membership_changed(&membership);
                 },
-                Action::TriggerSnapshot { .. } => {
-                    // Snapshot creation is handled by the apply worker / external coordinator.
+                Action::TriggerSnapshot { shard, last_included_index, last_included_term } => {
+                    // Stage 2: dispatch to the snapshot coordinator. The
+                    // coordinator MUST spawn any I/O asynchronously; the
+                    // reactor's event loop is on hold until this returns.
+                    // The coordinator resolves the actual covered index from
+                    // the snapshot it produces and invokes
+                    // `ConsensusEngine::notify_snapshot_completed` to
+                    // advance the shard's `last_snapshot_index`.
+                    tracing::debug!(
+                        shard = shard.0,
+                        last_included_index,
+                        last_included_term,
+                        "reactor: TriggerSnapshot — dispatching to snapshot coordinator",
+                    );
+                    self.snapshot_coordinator.on_trigger_snapshot(
+                        shard,
+                        last_included_index,
+                        last_included_term,
+                    );
                 },
                 Action::SendSnapshot {
                     to,
                     shard,
-                    term,
-                    leader_id,
+                    term: _,
+                    leader_id: _,
+                    last_included_index,
+                    last_included_term: _,
+                } => {
+                    // Stage 3: dispatch to the snapshot sender. The sender
+                    // resolves the shard ID to its scope, reads the at-rest
+                    // encrypted snapshot bytes via SnapshotPersister, and
+                    // streams them to the follower over the internal Raft
+                    // transport's `InstallSnapshotStream` RPC.
+                    //
+                    // The sender MUST spawn any I/O asynchronously; the
+                    // reactor's event loop is on hold until this returns.
+                    // On dispatch failure (no scope mapping, follower
+                    // unreachable, staging-write error, CRC mismatch), the
+                    // sender logs + records a metric and drops the
+                    // request. The leader's heartbeat replicator re-emits
+                    // `Action::SendSnapshot` on the next cycle, so
+                    // transient failures self-heal without explicit retry
+                    // state in the reactor — same drop-and-let-Raft-retry
+                    // contract as the wake notifier and snapshot
+                    // coordinator.
+                    //
+                    // O6 hibernation: drops from a paused shard were
+                    // already filtered in pass 1 (see the `Action::Send`
+                    // arm), so we do not re-check `pause_state` here.
+                    tracing::debug!(
+                        shard = shard.0,
+                        to = to.0,
+                        last_included_index,
+                        "reactor: SendSnapshot — dispatching to snapshot sender",
+                    );
+                    self.snapshot_sender.send_snapshot(shard, to, last_included_index);
+                },
+                Action::InstallSnapshot {
+                    shard,
+                    leader_term,
                     last_included_index,
                     last_included_term,
                 } => {
-                    // Future: delegate to a SnapshotSender callback registered by the
-                    // raft crate for streaming snapshot transfer. For now, fall back to
-                    // the InstallSnapshot message path.
-                    self.outbox.enqueue(
-                        to,
+                    // Stage 4: dispatch to the snapshot installer. The
+                    // installer resolves the shard ID to its scope, locates
+                    // the staged file written by Stage 3's
+                    // `snapshot_receiver`, decrypts via the
+                    // `SnapshotKeyProvider`, and feeds the plaintext to
+                    // `RaftLogStore::install_snapshot`. On completion the
+                    // installer calls back into
+                    // `ConsensusEngine::notify_snapshot_installed` so the
+                    // shard's `last_applied` / `last_snapshot_index`
+                    // advance.
+                    //
+                    // The installer MUST spawn any I/O asynchronously; the
+                    // reactor's event loop is on hold until this returns.
+                    // On dispatch failure (no scope mapping, staged file
+                    // not found yet, decrypt error, scope mismatch), the
+                    // installer logs + records a metric and drops the
+                    // request. The leader's heartbeat replicator re-emits
+                    // `Action::SendSnapshot` on the next cycle (re-staging
+                    // the file via Stage 3 and re-emitting this action),
+                    // so transient failures self-heal — same
+                    // drop-and-let-Raft-retry contract as the snapshot
+                    // sender / coordinator.
+                    tracing::debug!(
+                        shard = shard.0,
+                        leader_term,
+                        last_included_index,
+                        last_included_term,
+                        "reactor: InstallSnapshot — dispatching to snapshot installer",
+                    );
+                    self.snapshot_installer.install_snapshot(
                         shard,
-                        Message::InstallSnapshot {
-                            term,
-                            leader_id,
-                            last_included_index,
-                            last_included_term,
-                            offset: 0,
-                            data: Vec::new(),
-                            done: false,
-                        },
+                        leader_term,
+                        last_included_index,
+                        last_included_term,
                     );
                 },
                 Action::ShardRemoved { shard } => {
@@ -3009,6 +3281,35 @@ mod tests {
         seen: parking_lot::Mutex<Vec<ConsensusStateId>>,
     }
 
+    /// Recording snapshot coordinator — captures the trigger payload so
+    /// Stage 2 tests can assert the no-op reactor arm now dispatches
+    /// through the coordinator.
+    #[derive(Default)]
+    struct RecordingSnapshotCoordinator {
+        seen: parking_lot::Mutex<Vec<(ConsensusStateId, u64, u64)>>,
+    }
+
+    impl RecordingSnapshotCoordinator {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn calls(&self) -> Vec<(ConsensusStateId, u64, u64)> {
+            self.seen.lock().clone()
+        }
+    }
+
+    impl crate::snapshot_coordinator::SnapshotCoordinator for RecordingSnapshotCoordinator {
+        fn on_trigger_snapshot(
+            &self,
+            shard_id: ConsensusStateId,
+            last_included_index: u64,
+            last_included_term: u64,
+        ) {
+            self.seen.lock().push((shard_id, last_included_index, last_included_term));
+        }
+    }
+
     impl RecordingWakeNotifier {
         fn new() -> Self {
             Self::default()
@@ -3281,5 +3582,99 @@ mod tests {
             assert!(resp_rx.await.unwrap().is_ok());
         }
         assert!(reactor.pause_state.contains_key(&ConsensusStateId(1)));
+    }
+
+    // ── Stage 2 snapshot coordinator dispatch ──────────────────────────
+
+    #[allow(clippy::type_complexity)]
+    fn make_reactor_with_snapshot_coordinator(
+        coord: Arc<RecordingSnapshotCoordinator>,
+    ) -> (
+        Reactor<Arc<SimulatedClock>, SimulatedRng, InMemoryWalBackend, InMemoryTransport>,
+        mpsc::Sender<ReactorEvent>,
+        mpsc::Sender<ReactorEvent>,
+        mpsc::Receiver<CommittedBatch>,
+    ) {
+        let (control_tx, control_rx) = mpsc::channel(64);
+        let (proposal_tx, proposal_rx) = mpsc::channel(64);
+        let (commit_tx, commit_rx) = mpsc::channel(64);
+        let clock = Arc::new(SimulatedClock::new());
+        let wal = InMemoryWalBackend::new();
+        let transport = InMemoryTransport::new();
+        let pause_state = Arc::new(PauseMap::new());
+        let coord_dyn: Arc<dyn crate::snapshot_coordinator::SnapshotCoordinator> = coord;
+        let reactor = Reactor::with_coordinators(
+            control_rx,
+            proposal_rx,
+            wal,
+            clock,
+            transport,
+            commit_tx,
+            Duration::from_millis(10),
+            pause_state,
+            Arc::new(crate::wake::NoopShardWakeNotifier),
+            coord_dyn,
+        );
+        (reactor, control_tx, proposal_tx, commit_rx)
+    }
+
+    /// Verifies that processing an `Action::TriggerSnapshot` invokes the
+    /// installed `SnapshotCoordinator` exactly once with the action's
+    /// `(shard, last_included_index, last_included_term)` payload.
+    /// This is the contract Stage 2 introduces: the previously-no-op
+    /// arm now dispatches to the coordinator.
+    #[test]
+    fn test_trigger_snapshot_action_dispatches_to_coordinator() {
+        let coord = Arc::new(RecordingSnapshotCoordinator::new());
+        let (mut reactor, _tx, _proposal_tx, _rx) =
+            make_reactor_with_snapshot_coordinator(Arc::clone(&coord));
+
+        reactor.process_actions(vec![Action::TriggerSnapshot {
+            shard: ConsensusStateId(7),
+            last_included_index: 42,
+            last_included_term: 3,
+        }]);
+
+        assert_eq!(coord.calls(), vec![(ConsensusStateId(7), 42, 3)]);
+        // The dispatch is fire-and-forget; no outbox / WAL effects.
+        assert!(reactor.outbox.is_empty());
+        assert!(reactor.pending_wal_frames.is_empty());
+        assert!(reactor.pending_commits.is_empty());
+    }
+
+    /// The coordinator is invoked once per action — back-to-back triggers
+    /// preserve order and count.
+    #[test]
+    fn test_multiple_trigger_snapshot_actions_each_dispatch() {
+        let coord = Arc::new(RecordingSnapshotCoordinator::new());
+        let (mut reactor, _tx, _proposal_tx, _rx) =
+            make_reactor_with_snapshot_coordinator(Arc::clone(&coord));
+
+        reactor.process_actions(vec![
+            Action::TriggerSnapshot {
+                shard: ConsensusStateId(1),
+                last_included_index: 10,
+                last_included_term: 2,
+            },
+            Action::TriggerSnapshot {
+                shard: ConsensusStateId(2),
+                last_included_index: 20,
+                last_included_term: 2,
+            },
+            Action::TriggerSnapshot {
+                shard: ConsensusStateId(1),
+                last_included_index: 30,
+                last_included_term: 4,
+            },
+        ]);
+
+        assert_eq!(
+            coord.calls(),
+            vec![
+                (ConsensusStateId(1), 10, 2),
+                (ConsensusStateId(2), 20, 2),
+                (ConsensusStateId(1), 30, 4),
+            ],
+        );
     }
 }

@@ -91,6 +91,9 @@ zstd.workspace = true
 tar.workspace = true
 blake3.workspace = true
 
+# CRC32 — Stage 3 snapshot wire transfer integrity check
+crc32fast.workspace = true
+
 # Streaming
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util.workspace = true

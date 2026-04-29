@@ -1161,8 +1161,8 @@ impl<C: Clock + Clone, R: RngSource> ConsensusState<C, R> {
         from: NodeId,
         term: u64,
         leader_id: NodeId,
-        _last_included_index: u64,
-        _last_included_term: u64,
+        last_included_index: u64,
+        last_included_term: u64,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
 
@@ -1187,13 +1187,33 @@ impl<C: Clock + Clone, R: RngSource> ConsensusState<C, R> {
         // Valid leader contact — reset election timer.
         self.reset_election_timer(&mut actions);
 
-        // Acknowledge receipt. Actual snapshot application is handled by the
-        // reactor/apply worker, not the shard state machine.
+        // Idempotency / out-of-order guard: if our `last_snapshot_index` or
+        // `last_applied` already covers this snapshot, skip the install
+        // dispatch. Stage 4's installer is otherwise idempotent (re-running
+        // an install over the same staged file is correct), but emitting
+        // the action does extra I/O; suppress here for clarity.
+        let already_covered =
+            last_included_index <= self.last_snapshot_index || last_included_index == 0;
+
+        // Acknowledge receipt before kicking off the install — Raft's
+        // contract is that the leader can keep streaming heartbeats while
+        // the install runs in the background. The follower's `last_applied`
+        // advances later, when `notify_snapshot_installed` round-trips
+        // through the reactor.
         actions.push(Action::Send {
             to: from,
             shard: self.id,
             msg: Message::InstallSnapshotResponse { term: self.current_term },
         });
+
+        if !already_covered {
+            actions.push(Action::InstallSnapshot {
+                shard: self.id,
+                leader_term: term,
+                last_included_index,
+                last_included_term,
+            });
+        }
         actions
     }
 
@@ -1561,6 +1581,62 @@ impl<C: Clock + Clone, R: RngSource> ConsensusState<C, R> {
         if last_included_index > self.last_snapshot_index {
             self.last_snapshot_index = last_included_index;
         }
+    }
+
+    /// Advances `last_applied`, `last_snapshot_index`, and `commit_index` after
+    /// a leader-streamed snapshot has been successfully installed by the
+    /// external installer.
+    ///
+    /// Sister of [`Self::handle_snapshot_completed`]:
+    ///
+    /// - `handle_snapshot_completed` is called for snapshots **produced locally** (the shard built
+    ///   and persisted its own state). Only `last_snapshot_index` advances; the log itself is
+    ///   unaffected because the entries up to `last_included_index` are still on disk and applied.
+    /// - `handle_snapshot_installed` is called for snapshots **received from the leader** (Stage 4
+    ///   install path). The shard's local state has been replaced wholesale by the snapshot, so
+    ///   `last_applied`, `last_snapshot_index`, and `commit_index` all advance to
+    ///   `last_included_index`, and the prefix of the in-memory log up to `last_included_index` is
+    ///   truncated (those entries are now subsumed by the snapshot).
+    ///
+    /// This method is idempotent: if `last_included_index <= last_snapshot_index`,
+    /// it is a no-op (out-of-order Raft retry, or two installer round-trips
+    /// for the same index).
+    pub fn handle_snapshot_installed(&mut self, last_included_index: u64, last_included_term: u64) {
+        if last_included_index <= self.last_snapshot_index || last_included_index == 0 {
+            return;
+        }
+        self.last_snapshot_index = last_included_index;
+
+        // Advance commit / applied if the snapshot covers further than we have.
+        if last_included_index > self.commit_index {
+            self.commit_index = last_included_index;
+            self.last_committed_term = last_included_term;
+        }
+        if last_included_index > self.last_applied {
+            self.last_applied = last_included_index;
+        }
+
+        // Truncate log entries up to and including `last_included_index`. The
+        // log carries entries indexed `[1..=log.len()]` (1-based). A snapshot
+        // at index N subsumes entries `[1..=N]`, so we drop those from the
+        // front.
+        //
+        // After truncation the front-of-log entry's index is
+        // `last_included_index + 1`. If the log was already shorter than
+        // `last_included_index` (we received a snapshot covering further
+        // than our local log), drain the whole log.
+        let log_len = self.log.len() as u64;
+        if last_included_index >= log_len {
+            self.log.clear();
+        } else {
+            let drain_count = last_included_index as usize;
+            self.log.drain(..drain_count);
+        }
+
+        // Clear `snapshot_in_flight` if it was set — the installed snapshot
+        // satisfies whatever local trigger was outstanding (the leader's
+        // snapshot is at least as recent as anything we would have built).
+        self.snapshot_in_flight = false;
     }
 
     // ── Log helpers ─────────────────────────────────────────────────
@@ -2663,6 +2739,122 @@ mod tests {
             shard.last_snapshot_index, match_index,
             "last_snapshot_index should advance after completion"
         );
+    }
+
+    #[test]
+    fn test_handle_snapshot_installed_advances_indices_and_truncates_log() {
+        let (_clock, mut shard) = make_3node_shard(1);
+
+        // Seed a non-trivial log: the shard has 5 entries committed and applied.
+        shard.log = std::collections::VecDeque::from(vec![
+            Entry { term: 1, index: 1, kind: EntryKind::Normal, data: Arc::from(b"a".as_slice()) },
+            Entry { term: 1, index: 2, kind: EntryKind::Normal, data: Arc::from(b"b".as_slice()) },
+            Entry { term: 1, index: 3, kind: EntryKind::Normal, data: Arc::from(b"c".as_slice()) },
+            Entry { term: 1, index: 4, kind: EntryKind::Normal, data: Arc::from(b"d".as_slice()) },
+            Entry { term: 1, index: 5, kind: EntryKind::Normal, data: Arc::from(b"e".as_slice()) },
+        ]);
+        shard.commit_index = 3;
+        shard.last_applied = 3;
+        shard.last_snapshot_index = 0;
+
+        // Install a snapshot covering through index 4 (one ahead of our
+        // current commit_index). All three indices should advance, and
+        // entries 1..=4 should be truncated from the log.
+        shard.handle_snapshot_installed(4, 1);
+
+        assert_eq!(shard.last_snapshot_index, 4);
+        assert_eq!(shard.commit_index, 4);
+        assert_eq!(shard.last_applied, 4);
+        assert_eq!(shard.log.len(), 1, "entries 1..=4 should be truncated");
+        assert_eq!(shard.log.front().unwrap().index, 5);
+    }
+
+    #[test]
+    fn test_handle_snapshot_installed_idempotent() {
+        let (_clock, mut shard) = make_3node_shard(1);
+        shard.last_snapshot_index = 10;
+        shard.commit_index = 10;
+        shard.last_applied = 10;
+
+        // Re-install at the same index — must be a no-op.
+        shard.handle_snapshot_installed(10, 1);
+        assert_eq!(shard.last_snapshot_index, 10);
+        assert_eq!(shard.commit_index, 10);
+
+        // Re-install at a stale index — also a no-op.
+        shard.handle_snapshot_installed(5, 1);
+        assert_eq!(shard.last_snapshot_index, 10);
+    }
+
+    #[test]
+    fn test_handle_snapshot_installed_clears_in_flight_flag() {
+        let (_clock, mut shard) = make_3node_shard(1);
+        shard.snapshot_in_flight = true;
+        shard.handle_snapshot_installed(1, 1);
+        assert!(!shard.snapshot_in_flight);
+    }
+
+    #[test]
+    fn test_install_snapshot_message_emits_action_install_snapshot() {
+        let (clock, mut shard) = make_3node_shard(1);
+        // Drive the shard to a state where the leader is known.
+        elect_leader(&mut shard, &clock);
+        // Step down so we can receive an InstallSnapshot from a peer.
+        shard.become_follower(2, &mut Vec::new());
+
+        let actions = shard.handle_message(
+            NodeId(2),
+            Message::InstallSnapshot {
+                term: 2,
+                leader_id: NodeId(2),
+                last_included_index: 50,
+                last_included_term: 2,
+                offset: 0,
+                data: Vec::new(),
+                done: true,
+            },
+        );
+
+        // The shard should have emitted both a response and an
+        // Action::InstallSnapshot (Stage 4 dispatch) since
+        // last_snapshot_index (0) < last_included_index (50).
+        let response_count = actions
+            .iter()
+            .filter(|a| {
+                matches!(a, Action::Send { msg: Message::InstallSnapshotResponse { .. }, .. })
+            })
+            .count();
+        assert_eq!(response_count, 1, "expected exactly one InstallSnapshotResponse");
+
+        let install_count =
+            actions.iter().filter(|a| matches!(a, Action::InstallSnapshot { .. })).count();
+        assert_eq!(install_count, 1, "expected exactly one Action::InstallSnapshot");
+    }
+
+    #[test]
+    fn test_install_snapshot_already_covered_skips_action() {
+        let (_clock, mut shard) = make_3node_shard(1);
+        // Pre-set last_snapshot_index past the incoming snapshot.
+        shard.last_snapshot_index = 100;
+
+        let actions = shard.handle_message(
+            NodeId(2),
+            Message::InstallSnapshot {
+                term: 1,
+                leader_id: NodeId(2),
+                last_included_index: 50,
+                last_included_term: 1,
+                offset: 0,
+                data: Vec::new(),
+                done: true,
+            },
+        );
+
+        // The response is sent, but no Action::InstallSnapshot — we already
+        // have a more-recent snapshot covering this index.
+        let install_count =
+            actions.iter().filter(|a| matches!(a, Action::InstallSnapshot { .. })).count();
+        assert_eq!(install_count, 0, "covered snapshot must skip install dispatch");
     }
 
     #[test]

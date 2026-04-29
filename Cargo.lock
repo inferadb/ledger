@@ -1859,6 +1859,7 @@ dependencies = [
  "bon",
  "bytes",
  "chrono",
+ "crc32fast",
  "dashmap",
  "ed25519-dalek",
  "fs2",

@@ -6089,6 +6089,514 @@ mod tests {
     }
 
     // ========================================================================
+    // Stage 1b: Org/vault snapshot bifurcation tests
+    // ========================================================================
+
+    /// Returns the underlying `Database<FileBackend>` for a vault's `state.db`,
+    /// reaching through `StateLayer` so the test can iterate the per-vault
+    /// table set directly.
+    fn vault_state_db(
+        state_layer: &inferadb_ledger_state::StateLayer<FileBackend>,
+        vault_id: VaultId,
+    ) -> Arc<inferadb_ledger_store::Database<FileBackend>> {
+        state_layer.db_for(vault_id).expect("open per-vault state.db")
+    }
+
+    /// Builds a state layer where each vault opens an *independent* on-disk
+    /// `state.db` under `dir/state/vault-{n}/state.db`, mirroring the
+    /// production layout in `RaftManager::start_vault_group`.
+    fn per_vault_state_layer(
+        dir: &std::path::Path,
+    ) -> Arc<inferadb_ledger_state::StateLayer<FileBackend>> {
+        let meta_db = std::sync::Arc::new(
+            inferadb_ledger_store::Database::<FileBackend>::create(dir.join("_meta.db"))
+                .expect("create meta db"),
+        );
+        let base = dir.to_path_buf();
+        std::sync::Arc::new(
+            inferadb_ledger_state::StateLayer::new(
+                move |vault: VaultId| {
+                    let vdir = base.join("state").join(format!("vault-{}", vault.value()));
+                    // Tests run in tempdirs so directory creation cannot
+                    // realistically fail; bail loudly if it does — there is
+                    // no `StateError::Io` variant to lift this through.
+                    std::fs::create_dir_all(&vdir).expect("create vault state dir");
+                    let path = vdir.join("state.db");
+                    let db = inferadb_ledger_store::Database::<FileBackend>::create(&path)
+                        .map_err(|e| inferadb_ledger_state::StateError::Store {
+                            source: e,
+                            location: snafu::location!(),
+                        })?;
+                    Ok(std::sync::Arc::new(db))
+                },
+                meta_db,
+            )
+            .expect("build per-vault StateLayer"),
+        )
+    }
+
+    /// Vault test fixture: a per-vault `RaftLogStore` wired with its own
+    /// `state.db` (via `state_layer`), `blocks.db` (via `BlockArchive`),
+    /// and `events.db` (via `EventWriter`).
+    fn vault_store_with_full_deps(
+        dir: &std::path::Path,
+        organization_id: OrganizationId,
+        vault_id: VaultId,
+    ) -> RaftLogStore<FileBackend> {
+        let state_layer = per_vault_state_layer(dir);
+
+        let blocks_db = std::sync::Arc::new(
+            inferadb_ledger_store::Database::<FileBackend>::create(dir.join("blocks.db"))
+                .expect("create blocks db"),
+        );
+        let block_archive =
+            std::sync::Arc::new(inferadb_ledger_state::BlockArchive::<FileBackend>::new(blocks_db));
+
+        let events_db = inferadb_ledger_state::EventsDatabase::open(dir).expect("open events db");
+        let event_writer = crate::event_writer::EventWriter::new(
+            std::sync::Arc::new(events_db),
+            EventConfig::default(),
+        );
+
+        RaftLogStore::<FileBackend>::open_for_vault(dir.join("raft.db"), organization_id, vault_id)
+            .expect("open_for_vault")
+            .with_state_layer(state_layer)
+            .with_block_archive(block_archive)
+            .with_event_writer(event_writer)
+    }
+
+    /// Build path: an org-level snapshot contains exactly the org-raft
+    /// table block — never the per-vault tables (Entities, Blocks, etc.).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn org_build_snapshot_contains_only_org_raft_tables() {
+        use crate::snapshot::{CHECKSUM_SIZE, SnapshotReader, SnapshotScope, TableBlockKind};
+
+        let dir = tempdir().expect("create temp dir");
+        let mut store =
+            RaftLogStore::<FileBackend>::open(dir.path().join("raft.db")).expect("open");
+        store = store.with_organization_id(OrganizationId::new(1));
+
+        // Persist a state core so the snapshot is non-empty.
+        {
+            let mut state = (*store.applied_state.load_full()).clone();
+            setup_org_and_vault(&mut state);
+            state.last_applied = Some(make_log_id(1, 1));
+            store.save_state_core(&state, &PendingExternalWrites::default()).expect("persist core");
+        }
+
+        let mut builder = store.get_snapshot_builder();
+        let scope = builder.scope();
+        assert!(matches!(scope, SnapshotScope::Org { .. }));
+
+        let (file, _meta) = builder.build_snapshot().await.expect("build_snapshot");
+
+        // Read back the snapshot file and assert its scope + block layout.
+        let mut file = file;
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let file_size = file.seek(std::io::SeekFrom::End(0)).await.unwrap();
+        file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+
+        let buf_reader = tokio::io::BufReader::new(file.take(file_size - CHECKSUM_SIZE as u64));
+        let mut decoder = SnapshotReader::decompressor(buf_reader);
+
+        let (read_scope, _core) = SnapshotReader::read_header(&mut decoder).await.unwrap();
+        assert!(matches!(read_scope, SnapshotScope::Org { .. }));
+
+        let block_count = SnapshotReader::read_table_block_count(&mut decoder).await.unwrap();
+        assert_eq!(block_count, 1, "org snapshot should have exactly 1 table block");
+
+        let (kind, _) = SnapshotReader::read_table_block_header(&mut decoder).await.unwrap();
+        assert_eq!(kind, TableBlockKind::OrgRaft);
+    }
+
+    /// Build path: a vault snapshot contains all three vault block kinds in
+    /// the documented order (raft → state → blocks).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vault_build_snapshot_contains_all_three_block_kinds() {
+        use crate::snapshot::{CHECKSUM_SIZE, SnapshotReader, SnapshotScope, TableBlockKind};
+
+        let dir = tempdir().expect("create temp dir");
+        let store =
+            vault_store_with_full_deps(dir.path(), OrganizationId::new(7), VaultId::new(11));
+
+        {
+            let mut state = (*store.applied_state.load_full()).clone();
+            state.last_applied = Some(make_log_id(1, 5));
+            store.save_state_core(&state, &PendingExternalWrites::default()).expect("persist core");
+        }
+
+        let mut builder = store.get_snapshot_builder();
+        let scope = builder.scope();
+        assert!(matches!(
+            scope,
+            SnapshotScope::Vault { organization_id, vault_id }
+                if organization_id == OrganizationId::new(7)
+                && vault_id == VaultId::new(11)
+        ));
+
+        let (file, _meta) = builder.build_snapshot().await.expect("build vault snapshot");
+
+        let mut file = file;
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let file_size = file.seek(std::io::SeekFrom::End(0)).await.unwrap();
+        file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+
+        let buf_reader = tokio::io::BufReader::new(file.take(file_size - CHECKSUM_SIZE as u64));
+        let mut decoder = SnapshotReader::decompressor(buf_reader);
+
+        let (read_scope, _core) = SnapshotReader::read_header(&mut decoder).await.unwrap();
+        match read_scope {
+            SnapshotScope::Vault { organization_id, vault_id } => {
+                assert_eq!(organization_id, OrganizationId::new(7));
+                assert_eq!(vault_id, VaultId::new(11));
+            },
+            _ => panic!("expected vault scope, got {read_scope:?}"),
+        }
+
+        let block_count = SnapshotReader::read_table_block_count(&mut decoder).await.unwrap();
+        assert_eq!(block_count, 3, "vault snapshot should have 3 table blocks");
+
+        // Confirm only the FIRST block kind here; full block-by-block
+        // verification happens in the install round-trip tests.
+        let (kind, _) = SnapshotReader::read_table_block_header(&mut decoder).await.unwrap();
+        assert_eq!(
+            kind,
+            TableBlockKind::VaultRaft,
+            "first vault block must be VaultRaft per wire contract"
+        );
+    }
+
+    /// Build path: a per-vault builder constructed without `state_layer`
+    /// fails loudly rather than silently dropping the per-vault tables.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vault_build_snapshot_missing_state_layer_fails() {
+        let dir = tempdir().expect("create temp dir");
+        // Open a vault store WITHOUT wiring state_layer / block_archive.
+        let store = RaftLogStore::<FileBackend>::open_for_vault(
+            dir.path().join("raft.db"),
+            OrganizationId::new(7),
+            VaultId::new(11),
+        )
+        .expect("open_for_vault");
+
+        let mut builder = store.get_snapshot_builder();
+        let result = builder.build_snapshot().await;
+        assert!(result.is_err(), "expected build_snapshot to fail without state_layer");
+        let err_msg = result.err().unwrap().to_string();
+        assert!(
+            err_msg.contains("state_layer"),
+            "error should mention missing state_layer: {err_msg}"
+        );
+    }
+
+    /// Round-trip: org snapshot built on store A and installed into a
+    /// fresh org store B reproduces the org-raft tables.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn org_snapshot_install_round_trip() {
+        let source_dir = tempdir().expect("create source dir");
+        let target_dir = tempdir().expect("create target dir");
+
+        // Source: populate org meta + persist core.
+        let mut source =
+            RaftLogStore::<FileBackend>::open(source_dir.path().join("raft.db")).expect("open");
+        source = source.with_organization_id(OrganizationId::new(42));
+        {
+            let org_meta = super::types::OrganizationMeta {
+                organization: OrganizationId::new(42),
+                slug: inferadb_ledger_types::OrganizationSlug::new(420),
+                region: Region::US_EAST_VA,
+                status: OrganizationStatus::Active,
+                tier: OrganizationTier::Free,
+                pending_region: None,
+                storage_bytes: 1234,
+            };
+            let encoded = postcard::to_allocvec(&org_meta).expect("encode org");
+            let mut txn = source.db.write().expect("write txn");
+            txn.insert::<tables::OrganizationMeta>(&42i64, &encoded).expect("insert");
+            txn.commit().expect("commit");
+        }
+        {
+            let mut state = (*source.applied_state.load_full()).clone();
+            state.last_applied = Some(make_log_id(1, 7));
+            source
+                .save_state_core(&state, &PendingExternalWrites::default())
+                .expect("persist core");
+        }
+
+        let snapshot = source
+            .get_current_snapshot()
+            .await
+            .expect("get_current_snapshot")
+            .expect("source has state");
+
+        // Copy snapshot file → reopen for install.
+        let snapshot_path = target_dir.path().join("snap.bin");
+        {
+            let mut src_file = snapshot.0;
+            let mut dst_file = tokio::fs::File::create(&snapshot_path).await.unwrap();
+            tokio::io::copy(&mut src_file, &mut dst_file).await.unwrap();
+        }
+
+        let mut target =
+            RaftLogStore::<FileBackend>::open(target_dir.path().join("raft.db")).expect("open");
+        target = target.with_organization_id(OrganizationId::new(42));
+        let install_file = tokio::fs::File::open(&snapshot_path).await.unwrap();
+        target
+            .install_snapshot(&snapshot.1, Box::new(install_file))
+            .await
+            .expect("install org snapshot");
+
+        // Target raft.db now has the org meta row.
+        let txn = target.db.read().expect("read txn");
+        let restored = txn
+            .get::<tables::OrganizationMeta>(&42i64)
+            .expect("read org")
+            .expect("org meta present");
+        let decoded: super::types::OrganizationMeta =
+            postcard::from_bytes(&restored).expect("decode org");
+        assert_eq!(decoded.organization, OrganizationId::new(42));
+        assert_eq!(decoded.storage_bytes, 1234);
+    }
+
+    /// Round-trip: vault snapshot built on store A and installed into a
+    /// fresh vault store B at the same `vault_id` reproduces every
+    /// per-vault table on every source DB.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vault_snapshot_install_round_trip() {
+        let source_dir = tempdir().expect("create source dir");
+        let target_dir = tempdir().expect("create target dir");
+
+        let org = OrganizationId::new(7);
+        let vault = VaultId::new(11);
+
+        let mut source = vault_store_with_full_deps(source_dir.path(), org, vault);
+
+        // Seed each source DB with one identifying row so install can
+        // verify it copied them.
+        // 1) raft.db: VaultMeta
+        {
+            let vmeta = super::types::VaultMeta {
+                organization: org,
+                vault,
+                slug: VaultSlug::new(99),
+                name: Some("v11".to_string()),
+                deleted: false,
+                last_write_timestamp: 0,
+                retention_policy: BlockRetentionPolicy::default(),
+            };
+            let encoded = postcard::to_allocvec(&vmeta).expect("encode vmeta");
+            let mut txn = source.db.write().expect("write txn");
+            txn.insert::<tables::VaultMeta>(&vault.value(), &encoded).expect("insert");
+            txn.commit().expect("commit");
+        }
+        // 2) state.db: Entities
+        let source_state_layer = source.state_layer.as_ref().expect("state_layer wired").clone();
+        let source_state_db = vault_state_db(&source_state_layer, vault);
+        {
+            let mut txn = source_state_db.write().expect("write txn");
+            txn.insert::<tables::Entities>(&b"hello".to_vec(), &b"world".to_vec())
+                .expect("insert entity");
+            txn.commit().expect("commit entity");
+        }
+        // 3) blocks.db: Blocks (stored as raw bytes via insert_raw to keep the test independent of
+        //    RegionBlock encoding)
+        let source_blocks_db =
+            Arc::clone(source.block_archive.as_ref().expect("block_archive wired").db());
+        {
+            let mut txn = source_blocks_db.write().expect("write txn");
+            txn.insert_raw(
+                inferadb_ledger_store::TableId::Blocks,
+                &1u64.to_be_bytes(),
+                b"block-bytes",
+            )
+            .expect("insert block");
+            txn.commit().expect("commit block");
+        }
+        // 4) Persist core so get_current_snapshot finds applied state.
+        {
+            let mut state = (*source.applied_state.load_full()).clone();
+            state.last_applied = Some(make_log_id(1, 9));
+            source
+                .save_state_core(&state, &PendingExternalWrites::default())
+                .expect("persist core");
+        }
+
+        let snapshot = source
+            .get_current_snapshot()
+            .await
+            .expect("get_current_snapshot")
+            .expect("source has state");
+
+        // Persist snapshot to disk and re-open for install.
+        let snapshot_path = target_dir.path().join("snap.bin");
+        {
+            let mut src_file = snapshot.0;
+            let mut dst_file = tokio::fs::File::create(&snapshot_path).await.unwrap();
+            tokio::io::copy(&mut src_file, &mut dst_file).await.unwrap();
+        }
+
+        let mut target = vault_store_with_full_deps(target_dir.path(), org, vault);
+        let install_file = tokio::fs::File::open(&snapshot_path).await.unwrap();
+        target
+            .install_snapshot(&snapshot.1, Box::new(install_file))
+            .await
+            .expect("install vault snapshot");
+
+        // Verify each source DB's row landed on its sibling target DB.
+        // raft.db
+        {
+            let txn = target.db.read().expect("read txn");
+            let vmeta = txn
+                .get::<tables::VaultMeta>(&vault.value())
+                .expect("read vmeta")
+                .expect("vmeta present");
+            let decoded: super::types::VaultMeta =
+                postcard::from_bytes(&vmeta).expect("decode vmeta");
+            assert_eq!(decoded.vault, vault);
+            assert_eq!(decoded.slug, VaultSlug::new(99));
+        }
+        // state.db
+        {
+            let target_state_db = target
+                .state_layer
+                .as_ref()
+                .expect("state_layer")
+                .db_for(vault)
+                .expect("open state db");
+            let txn = target_state_db.read().expect("read txn");
+            let value = txn
+                .get::<tables::Entities>(&b"hello".to_vec())
+                .expect("read entity")
+                .expect("entity present");
+            assert_eq!(value, b"world".to_vec());
+        }
+        // blocks.db
+        {
+            let target_blocks_db =
+                Arc::clone(target.block_archive.as_ref().expect("block_archive").db());
+            let txn = target_blocks_db.read().expect("read txn");
+            let mut found = false;
+            for (key, value) in txn.iter::<tables::Blocks>().expect("iter blocks") {
+                if key.as_slice() == 1u64.to_be_bytes().as_slice() {
+                    assert_eq!(value, b"block-bytes".to_vec());
+                    found = true;
+                }
+            }
+            assert!(found, "block row should have been restored");
+        }
+    }
+
+    /// Cross-install rejection: org snapshot installed into per-vault store
+    /// is rejected before any data is written.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cross_install_rejected_org_into_vault_store() {
+        let source_dir = tempdir().expect("create source dir");
+        let target_dir = tempdir().expect("create target dir");
+
+        // Source: org store with seeded state.
+        let mut source =
+            RaftLogStore::<FileBackend>::open(source_dir.path().join("raft.db")).expect("open");
+        source = source.with_organization_id(OrganizationId::new(1));
+        {
+            let mut state = (*source.applied_state.load_full()).clone();
+            state.last_applied = Some(make_log_id(1, 1));
+            source
+                .save_state_core(&state, &PendingExternalWrites::default())
+                .expect("persist core");
+        }
+
+        let snapshot = source.get_current_snapshot().await.expect("snap").expect("present");
+        let path = target_dir.path().join("snap.bin");
+        {
+            let mut sf = snapshot.0;
+            let mut df = tokio::fs::File::create(&path).await.unwrap();
+            tokio::io::copy(&mut sf, &mut df).await.unwrap();
+        }
+
+        // Target: per-vault store.
+        let mut target =
+            vault_store_with_full_deps(target_dir.path(), OrganizationId::new(1), VaultId::new(2));
+        let install_file = tokio::fs::File::open(&path).await.unwrap();
+        let result = target.install_snapshot(&snapshot.1, Box::new(install_file)).await;
+        assert!(result.is_err(), "expected ScopeMismatch on org→vault install");
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("Snapshot scope mismatch") || msg.contains("scope mismatch"),
+            "expected scope-mismatch message, got: {msg}"
+        );
+    }
+
+    /// Cross-install rejection: vault snapshot installed into an org store
+    /// is rejected.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cross_install_rejected_vault_into_org_store() {
+        let source_dir = tempdir().expect("create source dir");
+        let target_dir = tempdir().expect("create target dir");
+
+        let mut source =
+            vault_store_with_full_deps(source_dir.path(), OrganizationId::new(1), VaultId::new(2));
+        {
+            let mut state = (*source.applied_state.load_full()).clone();
+            state.last_applied = Some(make_log_id(1, 1));
+            source
+                .save_state_core(&state, &PendingExternalWrites::default())
+                .expect("persist core");
+        }
+
+        let snapshot = source.get_current_snapshot().await.expect("snap").expect("present");
+        let path = target_dir.path().join("snap.bin");
+        {
+            let mut sf = snapshot.0;
+            let mut df = tokio::fs::File::create(&path).await.unwrap();
+            tokio::io::copy(&mut sf, &mut df).await.unwrap();
+        }
+
+        let mut target = RaftLogStore::<FileBackend>::open(target_dir.path().join("raft.db"))
+            .expect("open org store");
+        target = target.with_organization_id(OrganizationId::new(1));
+        let install_file = tokio::fs::File::open(&path).await.unwrap();
+        let result = target.install_snapshot(&snapshot.1, Box::new(install_file)).await;
+        assert!(result.is_err(), "expected ScopeMismatch on vault→org install");
+    }
+
+    /// Cross-install rejection: vault A snapshot installed into vault B
+    /// store (different vault_id, same org) is rejected.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cross_install_rejected_vault_a_into_vault_b() {
+        let source_dir = tempdir().expect("create source dir");
+        let target_dir = tempdir().expect("create target dir");
+
+        let mut source =
+            vault_store_with_full_deps(source_dir.path(), OrganizationId::new(7), VaultId::new(1));
+        {
+            let mut state = (*source.applied_state.load_full()).clone();
+            state.last_applied = Some(make_log_id(1, 1));
+            source
+                .save_state_core(&state, &PendingExternalWrites::default())
+                .expect("persist core");
+        }
+
+        let snapshot = source.get_current_snapshot().await.expect("snap").expect("present");
+        let path = target_dir.path().join("snap.bin");
+        {
+            let mut sf = snapshot.0;
+            let mut df = tokio::fs::File::create(&path).await.unwrap();
+            tokio::io::copy(&mut sf, &mut df).await.unwrap();
+        }
+
+        let mut target =
+            vault_store_with_full_deps(target_dir.path(), OrganizationId::new(7), VaultId::new(2));
+        let install_file = tokio::fs::File::open(&path).await.unwrap();
+        let result = target.install_snapshot(&snapshot.1, Box::new(install_file)).await;
+        assert!(result.is_err(), "expected ScopeMismatch on vault-A → vault-B install");
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("vault_id"),
+            "scope mismatch should name vault_id mismatch, got: {msg}"
+        );
+    }
+
+    // ========================================================================
     // Client Sequence TTL Eviction Tests
     // ========================================================================
 

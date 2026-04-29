@@ -126,6 +126,32 @@ const SNAPSHOTS_CREATED: &str = "ledger_snapshots_created_total";
 const SNAPSHOT_SIZE_BYTES: &str = "ledger_snapshot_size_bytes";
 const SNAPSHOT_RESTORE_DURATION: &str = "ledger_snapshot_restore_duration_seconds";
 
+// SnapshotPersister metrics (Stage 2 — atomic write + encryption envelope + retention).
+const SNAPSHOT_PERSIST_TOTAL: &str = "ledger_snapshot_persist_total";
+const SNAPSHOT_PERSIST_DURATION_SECONDS: &str = "ledger_snapshot_persist_duration_seconds";
+const SNAPSHOT_PERSIST_BYTES: &str = "ledger_snapshot_persist_bytes";
+const SNAPSHOT_COUNT: &str = "ledger_snapshot_count";
+const SNAPSHOT_PRUNED_TOTAL: &str = "ledger_snapshot_pruned_total";
+const SNAPSHOT_RETENTION_FAILED_TOTAL: &str = "ledger_snapshot_retention_failed_total";
+const SNAPSHOT_DECRYPT_FAILED_TOTAL: &str = "ledger_snapshot_decrypt_failed_total";
+
+// SnapshotStreamer (Stage 3 — leader-side wire transfer over `InstallSnapshotStream`).
+const SNAPSHOT_SEND_TOTAL: &str = "ledger_snapshot_send_total";
+const SNAPSHOT_SEND_BYTES: &str = "ledger_snapshot_send_bytes_total";
+const SNAPSHOT_SEND_DURATION_SECONDS: &str = "ledger_snapshot_send_duration_seconds";
+const SNAPSHOT_SEND_CHUNK_SIZE_BYTES: &str = "ledger_snapshot_send_chunk_size_bytes";
+
+// SnapshotReceiver (Stage 3 — follower-side wire transfer over `InstallSnapshotStream`).
+const SNAPSHOT_RECV_TOTAL: &str = "ledger_snapshot_recv_total";
+const SNAPSHOT_RECV_BYTES: &str = "ledger_snapshot_recv_bytes_total";
+const SNAPSHOT_RECV_STAGED_TOTAL: &str = "ledger_snapshot_recv_staged_total";
+
+// SnapshotInstaller (Stage 4 — follower-side install of staged snapshots into RaftLogStore).
+const SNAPSHOT_INSTALL_TOTAL: &str = "ledger_snapshot_install_total";
+const SNAPSHOT_INSTALL_DURATION_SECONDS: &str = "ledger_snapshot_install_duration_seconds";
+const SNAPSHOT_INSTALL_BYTES: &str = "ledger_snapshot_install_bytes";
+const SNAPSHOT_INSTALL_DECRYPT_FAILED_TOTAL: &str = "ledger_snapshot_install_decrypt_failed_total";
+
 // Idempotency cache metrics
 const IDEMPOTENCY_OPERATIONS: &str = "ledger_idempotency_operations_total";
 const IDEMPOTENCY_SIZE: &str = "ledger_idempotency_cache_size";
@@ -461,6 +487,146 @@ pub fn record_snapshot_created(size_bytes: usize) {
 #[inline]
 pub fn record_snapshot_restore(latency_secs: f64) {
     histogram!(SNAPSHOT_RESTORE_DURATION).record(latency_secs);
+}
+
+/// Records a snapshot persist attempt — used by `SnapshotPersister::persist`.
+///
+/// Labels: `scope_kind` (`"org"` | `"vault"`), `result` (`"success"` |
+/// `"failure"`). The duration histogram uses [`SLI_HISTOGRAM_BUCKETS`] so
+/// snapshot-write latency lands on the same buckets as other SLIs. The
+/// byte size histogram uses default linear buckets — it tracks growth
+/// rather than bounded latency.
+#[inline]
+pub fn record_snapshot_persist(
+    scope_kind: &'static str,
+    success: bool,
+    duration_secs: f64,
+    size_bytes: u64,
+) {
+    let result = if success { "success" } else { "failure" };
+    counter!(SNAPSHOT_PERSIST_TOTAL, "scope_kind" => scope_kind, "result" => result).increment(1);
+    histogram!(SNAPSHOT_PERSIST_DURATION_SECONDS, "scope_kind" => scope_kind).record(duration_secs);
+    histogram!(SNAPSHOT_PERSIST_BYTES, "scope_kind" => scope_kind).record(size_bytes as f64);
+}
+
+/// Records the current count of persisted snapshots for a `(scope, region,
+/// organization)` tuple. Emitted from `SnapshotPersister::persist` after a
+/// successful write so dashboards reflect the post-retention state.
+#[inline]
+pub fn record_snapshot_count(
+    scope_kind: &'static str,
+    region: inferadb_ledger_types::Region,
+    organization_id: OrganizationId,
+    count: usize,
+) {
+    gauge!(
+        SNAPSHOT_COUNT,
+        "scope_kind" => scope_kind,
+        "region" => region.as_str().to_string(),
+        "organization_id" => organization_id.value().to_string(),
+    )
+    .set(count as f64);
+}
+
+/// Records that one or more older snapshots were pruned during the
+/// retention sweep.
+#[inline]
+pub fn record_snapshot_pruned(count: u64) {
+    counter!(SNAPSHOT_PRUNED_TOTAL).increment(count);
+}
+
+/// Records that the retention sweep failed (logged as warn, non-fatal in
+/// the persist path).
+#[inline]
+pub fn record_snapshot_retention_failed() {
+    counter!(SNAPSHOT_RETENTION_FAILED_TOTAL).increment(1);
+}
+
+/// Records a decryption failure — wrong key or tampered envelope.
+#[inline]
+pub fn record_snapshot_decrypt_failed() {
+    counter!(SNAPSHOT_DECRYPT_FAILED_TOTAL).increment(1);
+}
+
+/// Records a snapshot send attempt — used by Stage 3's leader-side
+/// `SnapshotStreamer`.
+///
+/// Labels: `scope_kind` (`"org"` | `"vault"`), `result` (`"success"` |
+/// `"failure"`). The duration histogram uses [`SLI_HISTOGRAM_BUCKETS`] so
+/// streaming latency lands on the same buckets as other SLIs.
+#[inline]
+pub fn record_snapshot_send(
+    scope_kind: &'static str,
+    success: bool,
+    duration_secs: f64,
+    bytes_sent: u64,
+) {
+    let result = if success { "success" } else { "failure" };
+    counter!(SNAPSHOT_SEND_TOTAL, "scope_kind" => scope_kind, "result" => result).increment(1);
+    histogram!(SNAPSHOT_SEND_DURATION_SECONDS, "scope_kind" => scope_kind).record(duration_secs);
+    counter!(SNAPSHOT_SEND_BYTES, "scope_kind" => scope_kind).increment(bytes_sent);
+}
+
+/// Records the size of a single chunk shipped on the `InstallSnapshotStream`
+/// RPC. Lets dashboards distinguish a uniform-chunk-size stream from a
+/// degraded one (e.g., last-chunk-only-1KB after a transient stall).
+#[inline]
+pub fn record_snapshot_send_chunk_size(bytes: usize) {
+    histogram!(SNAPSHOT_SEND_CHUNK_SIZE_BYTES).record(bytes as f64);
+}
+
+/// Records a snapshot receive attempt — used by Stage 3's follower-side
+/// `SnapshotReceiver`.
+///
+/// Labels: `scope_kind` (`"org"` | `"vault"`), `result` (`"success"` |
+/// `"failure"` | `"interrupted"`). The bytes counter is incremented on
+/// every successfully received chunk, regardless of whether the stream
+/// ultimately validates — dashboards can then distinguish "we received
+/// data but rejected it" from "we never received any data".
+#[inline]
+pub fn record_snapshot_recv(scope_kind: &'static str, result: &'static str, bytes_received: u64) {
+    counter!(SNAPSHOT_RECV_TOTAL, "scope_kind" => scope_kind, "result" => result).increment(1);
+    counter!(SNAPSHOT_RECV_BYTES, "scope_kind" => scope_kind).increment(bytes_received);
+}
+
+/// Records that a streamed snapshot has been successfully staged on disk
+/// and is ready for Stage 4 to pick up via
+/// [`SnapshotPersister::list_staged`](crate::snapshot_persister::SnapshotPersister::list_staged).
+#[inline]
+pub fn record_snapshot_recv_staged(scope_kind: &'static str) {
+    counter!(SNAPSHOT_RECV_STAGED_TOTAL, "scope_kind" => scope_kind).increment(1);
+}
+
+/// Records a snapshot install attempt — Stage 4 of the snapshot install
+/// path.
+///
+/// Labels:
+/// - `scope_kind`: `"org"` | `"vault"` | `"unknown"` (when shard → scope resolution fails).
+/// - `result`: `"success"` | `"failure"` | `"staged_not_found"` | `"decrypt_failed"` |
+///   `"scope_mismatch"`.
+///
+/// The duration histogram uses [`SLI_HISTOGRAM_BUCKETS`] so install latency
+/// lands on the same buckets as other SLIs. The `bytes` argument is the
+/// post-decrypt plaintext byte count; on failure paths it is `0`.
+#[inline]
+pub fn record_snapshot_install(
+    scope_kind: &'static str,
+    result: &'static str,
+    duration_secs: f64,
+    bytes: u64,
+) {
+    counter!(SNAPSHOT_INSTALL_TOTAL, "scope_kind" => scope_kind, "result" => result).increment(1);
+    histogram!(SNAPSHOT_INSTALL_DURATION_SECONDS, "scope_kind" => scope_kind).record(duration_secs);
+    histogram!(SNAPSHOT_INSTALL_BYTES, "scope_kind" => scope_kind).record(bytes as f64);
+}
+
+/// Records a snapshot install decrypt failure. Broken out as a dedicated
+/// counter so operators can alert specifically on key-mismatch failures
+/// (which usually indicate a misconfigured `SnapshotKeyProvider`) without
+/// the noise of transient `staged_not_found` retries.
+#[inline]
+pub fn record_snapshot_install_decrypt_failed(scope_kind: &'static str) {
+    counter!(SNAPSHOT_INSTALL_DECRYPT_FAILED_TOTAL, "scope_kind" => scope_kind).increment(1);
 }
 
 // =============================================================================

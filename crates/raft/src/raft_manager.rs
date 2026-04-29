@@ -163,6 +163,15 @@ pub enum RaftManagerError {
         "Vault group {vault_id} (organization {organization_id}, region {region}) already exists"
     ))]
     VaultGroupExists { region: Region, organization_id: OrganizationId, vault_id: VaultId },
+
+    /// Generic operational failure with a contextual message.
+    ///
+    /// Used by lifecycle paths (snapshot persistence, future admin
+    /// trigger entry points) that compose multiple fallible steps where
+    /// the surrounding context — not the structured failure variant —
+    /// is what the caller logs.
+    #[snafu(display("Raft manager error: {msg}"))]
+    Other { msg: String },
 }
 
 /// Result type for multi-raft operations.
@@ -328,6 +337,24 @@ pub struct RaftManagerConfig {
     /// before the queue advances.
     #[builder(default = 60)]
     pub vault_conf_change_timeout_secs: u64,
+
+    /// Per-scope snapshot encryption key provider (Stage 1a scaffolding).
+    ///
+    /// Threaded onto every [`RaftLogStore`](crate::log_storage::RaftLogStore)
+    /// constructed by [`RaftManager`] (org-scoped at `start_region`,
+    /// per-vault at `start_vault_group`) so that
+    /// [`LedgerSnapshotBuilder`](crate::log_storage::LedgerSnapshotBuilder)
+    /// can resolve a `(region, organization, Option<vault>)` triple to a
+    /// snapshot DEK. Stage 1a stores the provider; Stage 1b's bifurcated
+    /// `build_snapshot` paths and Stage 2's `SnapshotPersister` are the
+    /// first consumers.
+    ///
+    /// Defaults to [`NoopSnapshotKeyProvider`](crate::NoopSnapshotKeyProvider),
+    /// which always returns `None`. The Stage 2 persister will skip the
+    /// encryption envelope when the provider returns `None` — only valid
+    /// for tests / unencrypted local-dev configurations.
+    #[builder(default = Arc::new(crate::snapshot_key_provider::NoopSnapshotKeyProvider))]
+    pub snapshot_key_provider: Arc<dyn crate::snapshot_key_provider::SnapshotKeyProvider>,
 }
 
 impl RaftManagerConfig {
@@ -630,6 +657,20 @@ pub struct InnerGroup {
     /// wires the dispatcher that drains them via
     /// [`MembershipQueue::take_next`](crate::membership_queue::MembershipQueue::take_next).
     pub(crate) membership_queue: Option<Arc<crate::membership_queue::MembershipQueue>>,
+    /// Sender side of the per-shard apply-command channel used by Stage 4's
+    /// `RaftManagerSnapshotInstaller` to route
+    /// [`ApplyCommand::InstallSnapshot`](crate::apply_command::ApplyCommand::InstallSnapshot)
+    /// onto the apply task that owns the org's
+    /// [`RaftLogStore`](crate::log_storage::RaftLogStore).
+    ///
+    /// The receiver side is held by the apply worker spawned in
+    /// [`RaftManager::start_region`] and drained alongside the commit
+    /// channel via `tokio::select!`. The channel is sized for at most a
+    /// handful of in-flight install commands
+    /// ([`APPLY_COMMAND_CHANNEL_CAPACITY`](crate::apply_command::APPLY_COMMAND_CHANNEL_CAPACITY))
+    /// — beyond that, drop-and-let-Raft-retry kicks in and the leader's
+    /// next heartbeat re-emits `Action::SendSnapshot`.
+    pub(crate) apply_command_tx: crate::apply_command::ApplyCommandSender,
 }
 
 impl InnerGroup {
@@ -714,6 +755,15 @@ impl InnerGroup {
     /// without an `event_writer` and skips event emission.
     pub fn event_writer(&self) -> Option<&EventWriter<FileBackend>> {
         self.event_writer.as_ref()
+    }
+
+    /// Returns the per-shard apply-command sender used by Stage 4's
+    /// snapshot installer to route
+    /// [`ApplyCommand::InstallSnapshot`](crate::apply_command::ApplyCommand::InstallSnapshot)
+    /// onto the apply task that owns this org's
+    /// [`RaftLogStore`](crate::log_storage::RaftLogStore).
+    pub fn apply_command_tx(&self) -> &crate::apply_command::ApplyCommandSender {
+        &self.apply_command_tx
     }
 
     /// Returns the batch writer handle.
@@ -2077,6 +2127,86 @@ impl inferadb_ledger_consensus::wake::ShardWakeNotifier for RaftManagerWakeNotif
     }
 }
 
+/// Snapshot coordinator that translates
+/// [`Action::TriggerSnapshot`](inferadb_ledger_consensus::action::Action::TriggerSnapshot)
+/// emissions from any per-org reactor into a `RaftManager::persist_snapshot`
+/// call.
+///
+/// Holds an `Arc<Mutex<Weak<RaftManager>>>` shared with [`RaftManager`] —
+/// bootstrap fills the `Weak` via [`RaftManager::install_self_weak`]
+/// immediately after wrapping the manager in an `Arc`. Sister of
+/// [`RaftManagerWakeNotifier`]; same late-bind pattern, same
+/// drop-and-let-Raft-retry contract for the reactor (the coordinator MUST
+/// dispatch any I/O asynchronously and return immediately).
+///
+/// On a missing reverse-map entry (the shard does not resolve to either an
+/// org or a vault scope on this node), the coordinator logs at warn level
+/// and increments the unmatched-trigger metric.
+struct RaftManagerSnapshotCoordinator {
+    manager: Arc<parking_lot::Mutex<Weak<RaftManager>>>,
+}
+
+impl inferadb_ledger_consensus::snapshot_coordinator::SnapshotCoordinator
+    for RaftManagerSnapshotCoordinator
+{
+    fn on_trigger_snapshot(
+        &self,
+        shard_id: inferadb_ledger_consensus::types::ConsensusStateId,
+        last_included_index: u64,
+        last_included_term: u64,
+    ) {
+        let manager = match self.manager.lock().upgrade() {
+            Some(arc) => arc,
+            None => {
+                // Two cases:
+                // 1. RaftManager is being dropped (process shutdown). The trigger is obsolete —
+                //    persisting a snapshot during shutdown would race state-DB sync.
+                // 2. install_self_weak was never called (test fixture). Falling through is correct;
+                //    tests that exercise the snapshot path must call it.
+                tracing::debug!(
+                    ?shard_id,
+                    "RaftManagerSnapshotCoordinator: weak upgrade returned None; \
+                     skipping snapshot trigger (manager dropped or self_weak not installed)",
+                );
+                return;
+            },
+        };
+
+        // Resolve the shard_id → scope address before the spawn so the
+        // task does not need to round-trip through Self again.
+        let scope_addr = manager.resolve_shard_to_scope(shard_id);
+        let Some((region, organization_id, vault_id)) = scope_addr else {
+            tracing::warn!(
+                ?shard_id,
+                last_included_index,
+                last_included_term,
+                "RaftManagerSnapshotCoordinator: no scope mapping for trigger; \
+                 dropping (peer's next threshold check will retry)",
+            );
+            return;
+        };
+
+        // Spawn-and-return: the reactor's event loop is on hold until this
+        // method returns. The async build + persist + notify chain happens
+        // off the reactor task.
+        tokio::spawn(async move {
+            if let Err(e) = manager
+                .persist_snapshot(region, organization_id, vault_id, shard_id, last_included_term)
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    region = region.as_str(),
+                    organization_id = organization_id.value(),
+                    vault_id = vault_id.map(|v| v.value()),
+                    shard_id = shard_id.0,
+                    "RaftManagerSnapshotCoordinator: persist_snapshot failed",
+                );
+            }
+        });
+    }
+}
+
 /// Manager for multiple Raft region groups.
 ///
 /// Concrete map type backing [`RaftManager::vault_groups`]. Keyed by the
@@ -2200,6 +2330,30 @@ pub struct RaftManager {
         inferadb_ledger_consensus::types::ConsensusStateId,
         (Region, OrganizationId, VaultId),
     >,
+    /// Reverse map from `ConsensusStateId` (the consensus-tier shard id) to
+    /// the `(region, organization_id)` pair keyed in
+    /// [`RaftManager::regions`]. Maintained alongside `regions` inserts /
+    /// removes by [`RaftManager::start_region`] / `stop_region`.
+    ///
+    /// Used by `RaftManagerSnapshotCoordinator::on_trigger_snapshot` to
+    /// translate the reactor's `shard_id` into the org coordinates
+    /// [`RaftManager::persist_snapshot`] expects without scanning the
+    /// `regions` map under a lock. Wake-on-peer-message routing
+    /// deliberately uses [`Self::vault_shard_index`] only — org-level
+    /// shards have no hibernation primitive.
+    org_shard_index: dashmap::DashMap<
+        inferadb_ledger_consensus::types::ConsensusStateId,
+        (Region, OrganizationId),
+    >,
+    /// Stage 2 snapshot persister.
+    ///
+    /// Built once during [`Self::new`] from `config.snapshot_key_provider`
+    /// and the shared `region_storage` manager so every per-org reactor's
+    /// `RaftManagerSnapshotCoordinator` resolves to the same persister
+    /// instance — single retention pruning point, single warning-emission
+    /// dedup. Wrapped in `Arc` so the coordinator and any future direct
+    /// admin caller share the handle.
+    snapshot_persister: Arc<crate::snapshot_persister::SnapshotPersister>,
 }
 
 /// Membership delta to cascade from a data-region group down to its
@@ -2239,6 +2393,22 @@ impl RaftManager {
     ) -> Self {
         let storage_manager = RegionStorageManager::new(config.data_dir.clone());
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        // Stage 2 snapshot persister — shared across every per-org
+        // `RaftManagerSnapshotCoordinator` so retention pruning and the
+        // unencrypted-warning dedup all converge on a single instance.
+        // Persister's RegionStorageManager is a separate instance with the
+        // same data_dir — it only ever calls `snapshot_dir(region, org)`,
+        // a pure path computation that does not depend on the open-DB
+        // bookkeeping the manager-owned instance maintains. Sharing the
+        // same Arc would require dual-tier locking on the open-DB map for
+        // a feature that doesn't need it.
+        let persister_storage = Arc::new(RegionStorageManager::new(config.data_dir.clone()));
+        let snapshot_persister = Arc::new(
+            crate::snapshot_persister::SnapshotPersister::builder()
+                .region_storage(persister_storage)
+                .snapshot_key_provider(Arc::clone(&config.snapshot_key_provider))
+                .build(),
+        );
         Self {
             config,
             storage_manager,
@@ -2258,6 +2428,8 @@ impl RaftManager {
             signing_key_cache: new_signing_key_cache(),
             self_weak: Arc::new(parking_lot::Mutex::new(Weak::new())),
             vault_shard_index: dashmap::DashMap::new(),
+            org_shard_index: dashmap::DashMap::new(),
+            snapshot_persister,
         }
     }
 
@@ -2291,6 +2463,349 @@ impl RaftManager {
     /// `start_with_wake_notifier` and `install_self_weak` is forgiving.
     fn build_wake_notifier(&self) -> Arc<dyn inferadb_ledger_consensus::wake::ShardWakeNotifier> {
         Arc::new(RaftManagerWakeNotifier { manager: Arc::clone(&self.self_weak) })
+    }
+
+    /// Returns a
+    /// [`SnapshotCoordinator`](inferadb_ledger_consensus::snapshot_coordinator::SnapshotCoordinator)
+    /// bound to this manager's `self_weak`, suitable for passing to
+    /// [`ConsensusEngine::start_with_coordinators`](inferadb_ledger_consensus::ConsensusEngine::start_with_coordinators).
+    ///
+    /// Spawns a tokio task on every snapshot trigger and returns
+    /// immediately — same reactor-single-thread contract as
+    /// [`Self::build_wake_notifier`].
+    fn build_snapshot_coordinator(
+        &self,
+    ) -> Arc<dyn inferadb_ledger_consensus::snapshot_coordinator::SnapshotCoordinator> {
+        Arc::new(RaftManagerSnapshotCoordinator { manager: Arc::clone(&self.self_weak) })
+    }
+
+    /// Returns a
+    /// [`SnapshotSender`](inferadb_ledger_consensus::snapshot_sender::SnapshotSender)
+    /// bound to this manager's `self_weak`, suitable for passing to
+    /// [`ConsensusEngine::start_with_full_coordinators`](inferadb_ledger_consensus::ConsensusEngine::start_with_full_coordinators).
+    ///
+    /// Spawns a tokio task on every `Action::SendSnapshot` and returns
+    /// immediately — same reactor-single-thread contract as
+    /// [`Self::build_wake_notifier`] and [`Self::build_snapshot_coordinator`].
+    /// The dispatched task resolves the shard ID to its scope, opens the
+    /// at-rest encrypted snapshot via
+    /// [`SnapshotPersister::open_encrypted`](crate::snapshot_persister::SnapshotPersister::open_encrypted),
+    /// and streams chunks to the follower over the internal Raft
+    /// transport's `InstallSnapshotStream` RPC. Failures drop the request
+    /// and let the leader's heartbeat replicator retry on the next cycle.
+    fn build_snapshot_sender(
+        &self,
+    ) -> Arc<dyn inferadb_ledger_consensus::snapshot_sender::SnapshotSender> {
+        Arc::new(crate::snapshot_streamer::RaftManagerSnapshotSender {
+            manager: Arc::clone(&self.self_weak),
+            chunk_size_bytes: crate::snapshot_streamer::DEFAULT_CHUNK_SIZE_BYTES,
+        })
+    }
+
+    /// Returns a
+    /// [`SnapshotInstaller`](inferadb_ledger_consensus::snapshot_installer::SnapshotInstaller)
+    /// bound to this manager's `self_weak`, suitable for passing to
+    /// [`ConsensusEngine::start_with_all_callbacks`](inferadb_ledger_consensus::ConsensusEngine::start_with_all_callbacks).
+    ///
+    /// Spawns a tokio task on every `Action::InstallSnapshot` and returns
+    /// immediately — same reactor-single-thread contract as
+    /// [`Self::build_wake_notifier`], [`Self::build_snapshot_coordinator`],
+    /// and [`Self::build_snapshot_sender`]. The dispatched task locates the
+    /// staged file via [`SnapshotPersister::list_staged`], decrypts via the
+    /// [`SnapshotKeyProvider`](crate::snapshot_key_provider::SnapshotKeyProvider),
+    /// routes the install onto the apply worker via the per-shard
+    /// [`ApplyCommand::InstallSnapshot`](crate::apply_command::ApplyCommand::InstallSnapshot)
+    /// channel, and on success calls back into
+    /// [`ConsensusEngine::notify_snapshot_installed`](inferadb_ledger_consensus::ConsensusEngine::notify_snapshot_installed).
+    /// Failures drop the request and let the leader's heartbeat replicator
+    /// retry on the next cycle.
+    ///
+    /// [`SnapshotPersister::list_staged`]: crate::snapshot_persister::SnapshotPersister::list_staged
+    fn build_snapshot_installer(
+        &self,
+    ) -> Arc<dyn inferadb_ledger_consensus::snapshot_installer::SnapshotInstaller> {
+        Arc::new(crate::snapshot_installer::RaftManagerSnapshotInstaller {
+            manager: Arc::clone(&self.self_weak),
+            staged_file_wait: crate::snapshot_installer::DEFAULT_STAGED_WAIT,
+        })
+    }
+
+    /// Resolves a `ConsensusStateId` to its
+    /// `(region, organization_id, Option<vault_id>)` scope tuple.
+    ///
+    /// Returns `Some(.., None)` for org-level shards (looked up via
+    /// [`Self::org_shard_index`]) and `Some(.., Some(vault_id))` for vault
+    /// shards (looked up via [`Self::vault_shard_index`]). Returns `None`
+    /// when the shard is not registered on this node, which can happen
+    /// during the brief window between
+    /// [`Self::stop_vault_group`](RaftManager::stop_vault_group) /
+    /// `stop_region` and the engine's final shard cleanup tick — the
+    /// trigger is dropped and the next threshold check retries.
+    pub fn resolve_shard_to_scope(
+        &self,
+        shard_id: inferadb_ledger_consensus::types::ConsensusStateId,
+    ) -> Option<(Region, OrganizationId, Option<VaultId>)> {
+        if let Some(entry) = self.vault_shard_index.get(&shard_id) {
+            let (region, org, vault) = *entry.value();
+            return Some((region, org, Some(vault)));
+        }
+        if let Some(entry) = self.org_shard_index.get(&shard_id) {
+            let (region, org) = *entry.value();
+            return Some((region, org, None));
+        }
+        None
+    }
+
+    /// Builds the snapshot file for a `(region, org, vault?)` scope, persists
+    /// it via the manager's [`SnapshotPersister`], then notifies the engine
+    /// so the shard's `last_snapshot_index` advances.
+    ///
+    /// Stage 2's first production caller of
+    /// [`ConsensusEngine::notify_snapshot_completed`](inferadb_ledger_consensus::ConsensusEngine::notify_snapshot_completed).
+    /// `last_included_term` is the term reported by
+    /// [`Action::TriggerSnapshot`](inferadb_ledger_consensus::action::Action::TriggerSnapshot)
+    /// — used purely as snapshot metadata; the actual covered index is
+    /// resolved from the produced snapshot's
+    /// [`SnapshotMeta`](crate::log_storage::SnapshotMeta).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RaftManagerError::Other`] wrapping any underlying
+    /// build / persist / notify failure. Failures are surfaced to the caller
+    /// (the snapshot coordinator) which logs at warn level — the next
+    /// threshold check will re-trigger.
+    pub async fn persist_snapshot(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+        vault_id: Option<VaultId>,
+        shard_id: inferadb_ledger_consensus::types::ConsensusStateId,
+        last_included_term: u64,
+    ) -> Result<crate::snapshot_persister::PersistedSnapshotMeta> {
+        let mut builder = self.build_snapshot_builder(region, organization_id, vault_id)?;
+
+        let (file, meta) = builder
+            .build_snapshot()
+            .await
+            .map_err(|e| RaftManagerError::Other { msg: format!("build_snapshot: {e}") })?;
+
+        let scope = builder.scope();
+        let covered_index = meta.last_log_id.map(|id| id.index).unwrap_or(0);
+        let covered_term = meta.last_log_id.map(|id| id.term).unwrap_or(last_included_term);
+
+        let persisted = self
+            .snapshot_persister
+            .persist(region, scope, covered_index, covered_term, file)
+            .await
+            .map_err(|e| RaftManagerError::Other { msg: format!("persist snapshot: {e}") })?;
+
+        // Resolve the engine and notify the shard. The engine reference
+        // lives behind the `ConsensusHandle` carried by either the
+        // `InnerGroup` (org-level shard) or the `InnerVaultGroup` (vault
+        // shard).
+        let engine = self.engine_for_shard(region, organization_id, vault_id).ok_or_else(|| {
+            RaftManagerError::Other {
+                msg: format!(
+                    "engine for shard {shard_id:?} (region={region:?}, org={organization_id:?}, \
+                     vault={vault_id:?}) not found — snapshot persisted but \
+                     last_snapshot_index will not advance",
+                ),
+            }
+        })?;
+        engine.notify_snapshot_completed(shard_id, covered_index).await.map_err(|e| {
+            RaftManagerError::Other { msg: format!("notify_snapshot_completed: {e}") }
+        })?;
+
+        tracing::info!(
+            region = region.as_str(),
+            organization_id = organization_id.value(),
+            vault_id = vault_id.map(|v| v.value()),
+            shard_id = shard_id.0,
+            covered_index,
+            size_bytes = persisted.size_bytes,
+            encrypted = persisted.encrypted,
+            "Snapshot persisted",
+        );
+
+        Ok(persisted)
+    }
+
+    /// Builds a [`LedgerSnapshotBuilder`](crate::log_storage::LedgerSnapshotBuilder)
+    /// for the requested scope by reading the live `Arc` handles off the
+    /// resolved [`InnerGroup`] / [`InnerVaultGroup`].
+    fn build_snapshot_builder(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+        vault_id: Option<VaultId>,
+    ) -> Result<crate::log_storage::LedgerSnapshotBuilder> {
+        match vault_id {
+            Some(vault_id) => {
+                let inner = self
+                    .vault_groups
+                    .read()
+                    .get(&(region, organization_id, vault_id))
+                    .map(Arc::clone)
+                    .ok_or(RaftManagerError::VaultGroupNotFound {
+                        region,
+                        organization_id,
+                        vault_id,
+                    })?;
+                let event_writer = inner.event_writer();
+                let events_db = event_writer.map(|w| Arc::clone(w.events_db()));
+                let event_config = event_writer.map(|w| w.config().clone());
+                Ok(crate::log_storage::LedgerSnapshotBuilder::for_vault_group(
+                    Arc::clone(inner.raft_db()),
+                    Arc::clone(inner.state()),
+                    Arc::clone(inner.block_archive()),
+                    events_db,
+                    event_config,
+                    Arc::clone(&self.config.snapshot_key_provider),
+                    region,
+                    organization_id,
+                    vault_id,
+                ))
+            },
+            None => {
+                let inner = self
+                    .regions
+                    .read()
+                    .get(&(region, organization_id))
+                    .map(Arc::clone)
+                    .ok_or(RaftManagerError::RegionNotFound { region })?;
+                let event_writer = inner.event_writer();
+                let events_db = event_writer.map(|w| Arc::clone(w.events_db()));
+                let event_config = event_writer.map(|w| w.config().clone());
+                Ok(crate::log_storage::LedgerSnapshotBuilder::for_org_group(
+                    Arc::clone(inner.raft_db()),
+                    events_db,
+                    event_config,
+                    Arc::clone(&self.config.snapshot_key_provider),
+                    region,
+                    organization_id,
+                ))
+            },
+        }
+    }
+
+    /// Returns the [`ConsensusEngine`](inferadb_ledger_consensus::ConsensusEngine)
+    /// that owns `shard_id` for the given scope, or `None` when the scope
+    /// has been torn down.
+    fn engine_for_shard(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+        vault_id: Option<VaultId>,
+    ) -> Option<Arc<inferadb_ledger_consensus::ConsensusEngine>> {
+        match vault_id {
+            Some(vault_id) => {
+                let inner =
+                    self.vault_groups.read().get(&(region, organization_id, vault_id)).cloned()?;
+                Some(inner.handle().engine_arc())
+            },
+            None => {
+                let inner = self.regions.read().get(&(region, organization_id)).cloned()?;
+                Some(inner.handle().engine_arc())
+            },
+        }
+    }
+
+    /// Returns the shared [`SnapshotPersister`](crate::snapshot_persister::SnapshotPersister)
+    /// instance for this manager. Exposed for tests + future admin
+    /// callers (e.g. `AdminService::create_snapshot`); the production
+    /// path goes through [`Self::persist_snapshot`].
+    pub fn snapshot_persister(&self) -> Arc<crate::snapshot_persister::SnapshotPersister> {
+        Arc::clone(&self.snapshot_persister)
+    }
+
+    /// Public accessor used by Stage 4's
+    /// [`RaftManagerSnapshotInstaller`](crate::snapshot_installer::RaftManagerSnapshotInstaller)
+    /// to resolve the engine that owns `shard_id` for a given scope.
+    /// Wraps the crate-private [`Self::engine_for_shard`].
+    pub fn snapshot_engine_for_shard(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+        vault_id: Option<VaultId>,
+    ) -> Option<Arc<inferadb_ledger_consensus::ConsensusEngine>> {
+        self.engine_for_shard(region, organization_id, vault_id)
+    }
+
+    /// Returns the per-shard apply-command sender for the org-level group at
+    /// `(region, organization_id)`, or `None` when the group is not started
+    /// on this node.
+    ///
+    /// Stage 4's installer uses this to route
+    /// [`ApplyCommand::InstallSnapshot`](crate::apply_command::ApplyCommand::InstallSnapshot)
+    /// onto the apply task that owns the org's
+    /// [`RaftLogStore`](crate::log_storage::RaftLogStore).
+    pub fn apply_command_sender(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+    ) -> Option<crate::apply_command::ApplyCommandSender> {
+        let inner = self.regions.read().get(&(region, organization_id)).cloned()?;
+        Some(inner.apply_command_tx().clone())
+    }
+
+    /// Returns `(leader_term, leader_node_id)` for the shard backing
+    /// `shard_id`, or `None` if the shard does not resolve on this node.
+    ///
+    /// Used by Stage 3's leader-side
+    /// [`RaftManagerSnapshotSender`](crate::snapshot_streamer::RaftManagerSnapshotSender)
+    /// to stamp the streaming `InstallSnapshotHeader` with the leader's
+    /// current term + node id without plumbing those fields through the
+    /// `SnapshotSender::send_snapshot` trait surface (which keeps the
+    /// trait shape identical to the wake notifier and snapshot
+    /// coordinator).
+    ///
+    /// `leader_term` reads from the shard's state-watch channel — same
+    /// source as `ConsensusHandle::current_term`. `leader_node_id` returns
+    /// the local node id (this method is only meaningful when called on
+    /// the leader, since `Action::SendSnapshot` is leader-only).
+    pub fn leader_term_and_id_for_shard(
+        &self,
+        shard_id: inferadb_ledger_consensus::types::ConsensusStateId,
+    ) -> Option<(u64, u64)> {
+        let (region, organization_id, vault_id) = self.resolve_shard_to_scope(shard_id)?;
+        match vault_id {
+            Some(vault_id) => {
+                let inner =
+                    self.vault_groups.read().get(&(region, organization_id, vault_id)).cloned()?;
+                Some((inner.handle().current_term(), inner.handle().node_id()))
+            },
+            None => {
+                let inner = self.regions.read().get(&(region, organization_id)).cloned()?;
+                Some((inner.handle().current_term(), inner.handle().node_id()))
+            },
+        }
+    }
+
+    /// Returns the current Raft term for an explicit scope, or `None` if
+    /// the scope's group is not registered on this node.
+    ///
+    /// Used by Stage 3's follower-side
+    /// [`snapshot_receiver`](crate::snapshot_receiver) to stamp the
+    /// `InstallSnapshotStreamResponse.follower_term` field — the follower
+    /// reports the local term so the leader can step down if it's stale.
+    pub fn current_term_for_scope(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+        vault_id: Option<VaultId>,
+    ) -> Option<u64> {
+        match vault_id {
+            Some(vault_id) => self
+                .vault_groups
+                .read()
+                .get(&(region, organization_id, vault_id))
+                .map(|g| g.handle().current_term()),
+            None => self
+                .regions
+                .read()
+                .get(&(region, organization_id))
+                .map(|g| g.handle().current_term()),
+        }
     }
 
     /// Returns the process-wide signing-key cache shared with every
@@ -3151,6 +3666,15 @@ impl RaftManager {
         let commit_dispatcher =
             Arc::new(crate::commit_dispatcher::CommitDispatcher::new(unused_rx));
 
+        // External registration path: the apply worker is wired upstream
+        // and we do not own the apply-command receiver. Construct a sender
+        // whose receiver is dropped immediately so any installer-side send
+        // fails fast (returns `mpsc::error::TrySendError::Closed`) — the
+        // installer treats this the same as "no apply-target on this
+        // node" and falls back to drop-and-let-Raft-retry.
+        let (apply_command_tx, _) = tokio::sync::mpsc::channel::<crate::apply_command::ApplyCommand>(
+            crate::apply_command::APPLY_COMMAND_CHANNEL_CAPACITY,
+        );
         let inner = Arc::new(InnerGroup {
             region,
             organization_id: OrganizationId::new(0),
@@ -3182,12 +3706,17 @@ impl RaftManager {
             // membership queue — only per-organization data-plane groups
             // do.
             membership_queue: None,
+            apply_command_tx,
         });
 
         {
             let mut regions = self.regions.write();
             regions.insert((region, OrganizationId::new(0)), Arc::clone(&inner));
         }
+        // Maintain the reverse `shard_id → (region, org)` index alongside
+        // `regions` so the snapshot coordinator's hot-path lookup is
+        // O(1). Drops on `stop_region`.
+        self.org_shard_index.insert(inner.handle().shard_id(), (region, OrganizationId::new(0)));
 
         Ok(Arc::new(SystemGroup(inner)))
     }
@@ -3821,7 +4350,8 @@ impl RaftManager {
             NodeId::new(self.config.node_id.to_string()),
             self.config.node_id,
         )
-        .with_leader_lease(Arc::clone(org_inner.leader_lease()));
+        .with_leader_lease(Arc::clone(org_inner.leader_lease()))
+        .with_snapshot_key_provider(Arc::clone(&self.config.snapshot_key_provider));
 
         // Phase 4.2: open / create the per-vault `events.db` and wrap it
         // in a fresh per-vault [`EventWriter`]. Each vault now owns its
@@ -5148,13 +5678,16 @@ impl RaftManager {
             }
         }
         let (engine, commit_rx, state_watchers) =
-            inferadb_ledger_consensus::ConsensusEngine::start_with_wake_notifier(
+            inferadb_ledger_consensus::ConsensusEngine::start_with_all_callbacks(
                 vec![consensus_shard],
                 wal,
                 inferadb_ledger_consensus::SystemClock,
                 consensus_transport,
                 std::time::Duration::from_millis(2),
                 self.build_wake_notifier(),
+                self.build_snapshot_coordinator(),
+                self.build_snapshot_sender(),
+                self.build_snapshot_installer(),
             );
         // Wrap the engine in `Arc` immediately so additional per-shard
         // handles (e.g. per-vault groups built by `start_vault_group`)
@@ -5279,6 +5812,16 @@ impl RaftManager {
         );
         tokio::spawn(divergence_handler.run());
 
+        // Per-shard apply-command channel (Stage 4). Drained by the apply
+        // worker via `tokio::select!` alongside the commit channel; the
+        // sender side is stored on `InnerGroup` so
+        // `RaftManagerSnapshotInstaller` can find it via the
+        // `(region, organization_id)` key.
+        let (apply_command_tx, apply_command_rx) =
+            tokio::sync::mpsc::channel::<crate::apply_command::ApplyCommand>(
+                crate::apply_command::APPLY_COMMAND_CHANNEL_CAPACITY,
+            );
+
         // Spawn the apply worker — bridges consensus commits to state machine.
         //
         // Phase D wire-format flip: the apply worker type is dispatched per
@@ -5307,7 +5850,7 @@ impl RaftManager {
             }
             // Apply worker reads from the per-shard channel registered with
             // the dispatcher above, not the raw engine commit channel.
-            tokio::spawn(apply_worker.run(org_batch_rx));
+            tokio::spawn(apply_worker.run(org_batch_rx, apply_command_rx));
         } else {
             // Per-organization group — uses OrganizationRequest.
             let apply_worker =
@@ -5320,7 +5863,7 @@ impl RaftManager {
                 );
             // Apply worker reads from the per-shard channel registered with
             // the dispatcher above, not the raw engine commit channel.
-            tokio::spawn(apply_worker.run(org_batch_rx));
+            tokio::spawn(apply_worker.run(org_batch_rx, apply_command_rx));
         }
 
         // Create region group.
@@ -5373,12 +5916,17 @@ impl RaftManager {
             vault_deletion_rx: parking_lot::Mutex::new(vault_deletion_rx),
             commit_dispatcher,
             membership_queue,
+            apply_command_tx,
         });
 
         {
             let mut regions = self.regions.write();
             regions.insert((region, organization_id), Arc::clone(&inner));
         }
+        // Maintain the reverse `shard_id → (region, org)` index alongside
+        // `regions` so the snapshot coordinator's hot-path lookup is
+        // O(1). Drops on `stop_region`.
+        self.org_shard_index.insert(inner.handle().shard_id(), (region, organization_id));
 
         info!(
             region = region.as_str(),
@@ -5743,7 +6291,8 @@ impl RaftManager {
             .with_organization_id(organization_id)
             .with_block_announcements(block_announcements.clone())
             .with_divergence_sender(divergence_sender)
-            .with_leader_lease(leader_lease);
+            .with_leader_lease(leader_lease)
+            .with_snapshot_key_provider(Arc::clone(&self.config.snapshot_key_provider));
 
         // Wire region creation channel for the GLOBAL log store.
         // CreateDataRegion entries applied on GLOBAL send the region through
@@ -5830,6 +6379,11 @@ impl RaftManager {
                 .ok_or(RaftManagerError::RegionNotFound { region })?
         };
 
+        // Mirror the `regions` removal in the reverse `shard_id → (region,
+        // org)` index so the snapshot coordinator cannot resolve to a
+        // dropped group.
+        self.org_shard_index.remove(&region_group.handle().shard_id());
+
         // Abort background jobs first
         {
             let mut jobs = region_group.background_jobs.lock();
@@ -5903,6 +6457,11 @@ impl RaftManager {
                 .remove(&(region, organization_id))
                 .ok_or(RaftManagerError::RegionNotFound { region })?
         };
+
+        // Mirror the `regions` removal in the reverse `shard_id → (region,
+        // org)` index so the snapshot coordinator cannot resolve to a
+        // dropped group.
+        self.org_shard_index.remove(&org_group.handle().shard_id());
 
         // Abort background jobs first.
         {

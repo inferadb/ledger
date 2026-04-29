@@ -172,6 +172,12 @@ impl RaftService for SplitBrainDetectionService {
     ) -> Result<Response<RegionalProposalResult>, Status> {
         Err(Status::unimplemented("RegionalProposal not supported in mock"))
     }
+    async fn install_snapshot_stream(
+        &self,
+        _request: Request<tonic::Streaming<inferadb_ledger_proto::proto::InstallSnapshotChunk>>,
+    ) -> Result<Response<inferadb_ledger_proto::proto::InstallSnapshotStreamResponse>, Status> {
+        Err(Status::unimplemented("InstallSnapshotStream not supported in mock"))
+    }
 }
 
 /// Verifies that a minority partition cannot elect a leader.
@@ -323,6 +329,13 @@ fn test_write_fails_in_minority_partition() {
         ) -> Result<Response<RegionalProposalResult>, Status> {
             Err(Status::unimplemented("RegionalProposal not supported in mock"))
         }
+        async fn install_snapshot_stream(
+            &self,
+            _request: Request<tonic::Streaming<inferadb_ledger_proto::proto::InstallSnapshotChunk>>,
+        ) -> Result<Response<inferadb_ledger_proto::proto::InstallSnapshotStreamResponse>, Status>
+        {
+            Err(Status::unimplemented("InstallSnapshotStream not supported in mock"))
+        }
     }
 
     let partition_flag = Arc::new(Mutex::new(false));
@@ -461,6 +474,13 @@ fn test_consistency_after_partition_heals() {
             _request: Request<RegionalProposalRequest>,
         ) -> Result<Response<RegionalProposalResult>, Status> {
             Err(Status::unimplemented("RegionalProposal not supported in mock"))
+        }
+        async fn install_snapshot_stream(
+            &self,
+            _request: Request<tonic::Streaming<inferadb_ledger_proto::proto::InstallSnapshotChunk>>,
+        ) -> Result<Response<inferadb_ledger_proto::proto::InstallSnapshotStreamResponse>, Status>
+        {
+            Err(Status::unimplemented("InstallSnapshotStream not supported in mock"))
         }
     }
 
@@ -605,6 +625,13 @@ fn test_network_delay_request_completion() {
             _request: Request<RegionalProposalRequest>,
         ) -> Result<Response<RegionalProposalResult>, Status> {
             Err(Status::unimplemented("RegionalProposal not supported in mock"))
+        }
+        async fn install_snapshot_stream(
+            &self,
+            _request: Request<tonic::Streaming<inferadb_ledger_proto::proto::InstallSnapshotChunk>>,
+        ) -> Result<Response<inferadb_ledger_proto::proto::InstallSnapshotStreamResponse>, Status>
+        {
+            Err(Status::unimplemented("InstallSnapshotStream not supported in mock"))
         }
     }
 

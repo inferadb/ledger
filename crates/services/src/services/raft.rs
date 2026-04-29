@@ -351,6 +351,49 @@ impl inferadb_ledger_proto::proto::raft_service_server::RaftService for RaftServ
             })),
         }
     }
+
+    async fn install_snapshot_stream(
+        &self,
+        request: Request<tonic::Streaming<inferadb_ledger_proto::proto::InstallSnapshotChunk>>,
+    ) -> Result<Response<inferadb_ledger_proto::proto::InstallSnapshotStreamResponse>, Status> {
+        // Stage 3 receiver-side handler. The streaming body validates
+        // header/data/footer ordering, computes a CRC32 over the data
+        // chunks, and writes the encrypted bytes to a per-scope staging
+        // file. Decryption + LSNP verification + Raft install are Stage 4.
+        //
+        // The handler does NOT gate on caller IP (unlike `RegionalProposal`)
+        // because the snapshot stream's payload integrity is anchored by:
+        //   1. The leader-issued CRC32 footer over the encrypted bytes.
+        //   2. The on-disk AES-256-GCM envelope's authentication tag, verified at install time
+        //      (Stage 4).
+        // An off-cluster impostor cannot forge a stream that decrypts; an
+        // on-cluster peer is already trusted at the transport layer
+        // (WireGuard).
+        let inbound = request.into_inner();
+        let manager = Arc::clone(&self.manager);
+        match inferadb_ledger_raft::snapshot_receiver::receive_install_snapshot_stream(
+            &manager, inbound,
+        )
+        .await
+        {
+            Ok(received) => Ok(Response::new(
+                inferadb_ledger_raft::snapshot_receiver::success_response(&manager, &received),
+            )),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "install_snapshot_stream: receive failed; staging file cleaned up",
+                );
+                // We don't have the region available on this path because
+                // the failure may have happened before the header was
+                // observed; pass `None` so the helper falls back to a
+                // term of 0.
+                Ok(Response::new(inferadb_ledger_raft::snapshot_receiver::failure_response(
+                    &manager, None, &err,
+                )))
+            },
+        }
+    }
 }
 
 /// Core per-message consensus handler, shared by the streaming RPC and tests.

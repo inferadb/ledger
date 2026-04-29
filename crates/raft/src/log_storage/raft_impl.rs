@@ -8,11 +8,11 @@ use std::{sync::Arc, time::Instant};
 
 use chrono::DateTime;
 use inferadb_ledger_consensus::{committed::CommittedEntry, types::EntryKind};
-use inferadb_ledger_state::EventsDatabase;
+use inferadb_ledger_state::{BlockArchive, EventsDatabase, StateLayer};
 use inferadb_ledger_store::{Database, FileBackend, TableId, tables};
 use inferadb_ledger_types::{
-    AppId, AppSlug, ClientAssertionId, EmailVerifyTokenId, TeamId, TeamSlug, UserEmailId, UserId,
-    decode, encode, events::EventConfig,
+    AppId, AppSlug, ClientAssertionId, EmailVerifyTokenId, OrganizationId, Region, TeamId,
+    TeamSlug, UserEmailId, UserId, VaultId, decode, encode, events::EventConfig,
 };
 
 use super::{
@@ -26,7 +26,10 @@ use super::{
 use crate::{
     metrics,
     snapshot::{
-        SNAPSHOT_TABLE_IDS, SnapshotError, SnapshotReader, SnapshotWriter, SyncSnapshotReader,
+        SNAPSHOT_TABLE_IDS_ORG_RAFT, SNAPSHOT_TABLE_IDS_VAULT_BLOCKS,
+        SNAPSHOT_TABLE_IDS_VAULT_RAFT, SNAPSHOT_TABLE_IDS_VAULT_STATE, SnapshotError,
+        SnapshotReader, SnapshotScope, SnapshotWriter, SyncSnapshotReader, TableBlockKind,
+        allowed_tables_for_block,
     },
 };
 
@@ -40,50 +43,219 @@ const STATE_CORE_VERSION_SENTINEL: [u8; 2] = [0x00, 0x01];
 
 /// Builds a snapshot from the current state.
 ///
-/// Created by `RaftLogStore::get_snapshot_builder()`. Contains references to
-/// the database and events layer needed for snapshot creation.
+/// Created by [`RaftLogStore::get_snapshot_builder`]. Stage 1b bifurcates
+/// snapshot creation into two scopes: an org-level snapshot captures the
+/// org's `raft.db` only; a per-vault snapshot captures the vault's `raft.db`,
+/// `state.db`, `blocks.db`, and apply-phase events. The scope is fixed at
+/// construction time and persisted in the on-disk header so the install
+/// path can refuse cross-scope installs.
 pub struct LedgerSnapshotBuilder {
-    /// Shared B-tree database (log + state tables).
-    db: Arc<inferadb_ledger_store::Database<FileBackend>>,
-    /// State layer for entity/relationship storage.
-    #[allow(dead_code)]
-    state_layer: Option<Arc<inferadb_ledger_state::StateLayer<FileBackend>>>,
-    /// Events database for apply-phase event snapshot (separate from main db).
+    /// The Raft log database — org-level `raft.db` for `Org` scope, the
+    /// per-vault `raft.db` for `Vault` scope.
+    db: Arc<Database<FileBackend>>,
+    /// State layer for per-vault `state.db` access. Required for `Vault`
+    /// scope (used via `state_layer.db_for(vault_id)` to read entity tables).
+    /// Unused for `Org` scope.
+    state_layer: Option<Arc<StateLayer<FileBackend>>>,
+    /// Per-vault `BlockArchive` for `blocks.db` access. Required for `Vault`
+    /// scope. Unused for `Org` scope (org-level groups never own a block
+    /// archive — block storage lives on per-vault DBs per root rule 17).
+    block_archive: Option<Arc<BlockArchive<FileBackend>>>,
+    /// Events database for apply-phase event snapshot (separate from `db`).
+    /// `Vault` scope uses this; `Org` scope leaves it `None` and writes a
+    /// zero-length event section.
     events_db: Option<Arc<EventsDatabase<FileBackend>>>,
-    /// Event config for snapshot event limits.
+    /// Event config for snapshot event limits. `None` outside `Vault` scope.
     event_config: Option<EventConfig>,
+    /// Per-scope snapshot encryption key provider.
+    ///
+    /// Threaded through Stage 1a; resolved by Stage 2's `SnapshotPersister`
+    /// against [`SnapshotScope`] coordinates. The Stage 1b builder body
+    /// does not encrypt — Stage 2's persister is the first dereferencing
+    /// call site.
+    #[allow(dead_code)]
+    snapshot_key_provider: Arc<dyn crate::snapshot_key_provider::SnapshotKeyProvider>,
+    /// Region this snapshot belongs to.
+    region: Region,
+    /// Organization the snapshot belongs to.
+    organization_id: OrganizationId,
+    /// Vault the snapshot belongs to (Vault scope only).
+    vault_id: Option<VaultId>,
 }
 
 impl LedgerSnapshotBuilder {
+    /// Constructs an org-scoped snapshot builder from raw `Arc` handles.
+    ///
+    /// Used by [`crate::snapshot_persister::SnapshotPersister`] when the
+    /// `RaftLogStore` instance has been moved into the apply task and only
+    /// the underlying handles are reachable from
+    /// [`InnerGroup`](crate::raft_manager::InnerGroup). Equivalent to
+    /// [`RaftLogStore::get_snapshot_builder`] for an org-scoped store.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn for_org_group(
+        db: Arc<Database<FileBackend>>,
+        events_db: Option<Arc<EventsDatabase<FileBackend>>>,
+        event_config: Option<EventConfig>,
+        snapshot_key_provider: Arc<dyn crate::snapshot_key_provider::SnapshotKeyProvider>,
+        region: Region,
+        organization_id: OrganizationId,
+    ) -> Self {
+        Self {
+            db,
+            state_layer: None,
+            block_archive: None,
+            events_db,
+            event_config,
+            snapshot_key_provider,
+            region,
+            organization_id,
+            vault_id: None,
+        }
+    }
+
+    /// Constructs a vault-scoped snapshot builder from raw `Arc` handles.
+    ///
+    /// Sibling of [`Self::for_org_group`] for the per-vault path. The
+    /// `state_layer` and `block_archive` arguments are required —
+    /// [`Self::build_snapshot`] returns an error if either is missing for
+    /// a vault scope.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn for_vault_group(
+        db: Arc<Database<FileBackend>>,
+        state_layer: Arc<StateLayer<FileBackend>>,
+        block_archive: Arc<BlockArchive<FileBackend>>,
+        events_db: Option<Arc<EventsDatabase<FileBackend>>>,
+        event_config: Option<EventConfig>,
+        snapshot_key_provider: Arc<dyn crate::snapshot_key_provider::SnapshotKeyProvider>,
+        region: Region,
+        organization_id: OrganizationId,
+        vault_id: VaultId,
+    ) -> Self {
+        Self {
+            db,
+            state_layer: Some(state_layer),
+            block_archive: Some(block_archive),
+            events_db,
+            event_config,
+            snapshot_key_provider,
+            region,
+            organization_id,
+            vault_id: Some(vault_id),
+        }
+    }
+}
+
+impl LedgerSnapshotBuilder {
+    /// Returns the [`SnapshotScope`] this builder will produce.
+    pub fn scope(&self) -> SnapshotScope {
+        match self.vault_id {
+            Some(vault_id) => {
+                SnapshotScope::Vault { organization_id: self.organization_id, vault_id }
+            },
+            None => SnapshotScope::Org { organization_id: self.organization_id },
+        }
+    }
+
+    /// Returns the region this snapshot belongs to.
+    pub fn region(&self) -> Region {
+        self.region
+    }
+
     /// Builds a snapshot file and returns the file handle plus metadata.
     ///
-    /// Forces `Database::sync_state` before reading the state DB so the
-    /// snapshot captures a durable dual-slot-consistent state. Under the
-    /// lazy-commit regime, `committed_state` can be ahead of the last synced
-    /// disk state; shipping a snapshot at an unsynced `applied` index to
-    /// followers risks follower WAL truncation of entries the local node
-    /// still needs on crash recovery.
+    /// Dispatches on [`scope`](Self::scope): an org-level builder reads only
+    /// from `raft.db`; a vault builder reads from the vault's `raft.db`,
+    /// `state.db`, `blocks.db`, and the apply-phase event stream.
+    ///
+    /// Forces `Database::sync_state` before reading so the snapshot captures
+    /// a durable dual-slot-consistent state. Under the lazy-commit regime,
+    /// `committed_state` can be ahead of the last synced disk state.
+    /// Shipping a snapshot at an unsynced `applied` index to followers risks
+    /// follower WAL truncation of entries the local node still needs on
+    /// crash recovery.
     ///
     /// This narrows the race window rather than eliminating it: a concurrent
     /// apply on the `ApplyWorker` can land a `commit_in_memory` between this
     /// `sync_state` call and the subsequent `db.read()`, leaving the captured
     /// `last_applied` one or more entries ahead of the synced dual-slot. The
     /// `StateCheckpointer` re-syncs on its 500ms cadence, so the residual
-    /// window collapses quickly under steady state; crash-recovery tests
-    /// confirm whether a tighter post-read re-sync loop is needed.
+    /// window collapses quickly under steady state.
     pub async fn build_snapshot(&mut self) -> Result<(tokio::fs::File, SnapshotMeta), StoreError> {
+        match self.scope() {
+            SnapshotScope::Org { .. } => self.build_org_snapshot().await,
+            SnapshotScope::Vault { vault_id, .. } => self.build_vault_snapshot(vault_id).await,
+        }
+    }
+
+    /// Builds an org-level snapshot. Reads org-scoped tables from `raft.db`
+    /// plus org-scoped apply-phase events from the org's `events.db`.
+    /// Entity / block / per-vault data lives on per-vault DBs (root rule
+    /// 17) and is captured by per-vault snapshots.
+    async fn build_org_snapshot(&mut self) -> Result<(tokio::fs::File, SnapshotMeta), StoreError> {
         Arc::clone(&self.db).sync_state().await.map_err(|e| to_storage_error(&e))?;
 
-        let (org_ids, last_ts) = extract_snapshot_event_context(&self.db)?;
-
+        // Org-scoped emissions (CreateVault, AddOrganizationMember, etc.)
+        // land in the org's events.db. Collect them — `events_db` is None
+        // for fixtures without an event writer.
+        let last_ts = extract_last_applied_timestamp_ns(&self.db).unwrap_or(0);
         let event_entries = collect_snapshot_events(
             self.events_db.as_deref(),
             self.event_config.as_ref(),
-            &org_ids,
+            &collect_organization_ids_from_raft_db(&self.db).unwrap_or_default(),
             last_ts,
         );
 
-        write_snapshot_to_file(&self.db, event_entries)
+        let scope = SnapshotScope::Org { organization_id: self.organization_id };
+        write_org_snapshot_to_file(&self.db, scope, event_entries)
+            .await
+            .map_err(|e| StoreError::msg(e.to_string()))
+    }
+
+    /// Builds a per-vault snapshot from the four-source-DB layout.
+    ///
+    /// Returns [`SnapshotError::ScopeMismatch`] (wrapped in `StoreError`) if
+    /// the builder was constructed without the per-vault dependencies wired
+    /// (`state_layer` / `block_archive`); production callers always wire
+    /// them, but the type system permits `None` so we precondition-check
+    /// here rather than panicking.
+    async fn build_vault_snapshot(
+        &mut self,
+        vault_id: VaultId,
+    ) -> Result<(tokio::fs::File, SnapshotMeta), StoreError> {
+        let state_layer = self.state_layer.as_ref().cloned().ok_or_else(|| {
+            StoreError::msg(format!(
+                "vault snapshot builder for vault {} missing state_layer dependency",
+                vault_id.value()
+            ))
+        })?;
+        let block_archive = self.block_archive.as_ref().cloned().ok_or_else(|| {
+            StoreError::msg(format!(
+                "vault snapshot builder for vault {} missing block_archive dependency",
+                vault_id.value()
+            ))
+        })?;
+        let state_db = state_layer
+            .db_for(vault_id)
+            .map_err(|e| StoreError::msg(format!("failed to open vault state.db: {e}")))?;
+        let blocks_db = Arc::clone(block_archive.db());
+
+        // Sync all four source DBs before the read transactions below.
+        Arc::clone(&self.db).sync_state().await.map_err(|e| to_storage_error(&e))?;
+        Arc::clone(&state_db).sync_state().await.map_err(|e| to_storage_error(&e))?;
+        Arc::clone(&blocks_db).sync_state().await.map_err(|e| to_storage_error(&e))?;
+
+        // Per-vault event collection. Vault snapshots scope events to the
+        // owning organization (the apply-phase event stream is keyed by
+        // organization_id; per-vault filtering happens at consumption time).
+        let event_entries = collect_snapshot_events(
+            self.events_db.as_deref(),
+            self.event_config.as_ref(),
+            &[self.organization_id],
+            extract_last_applied_timestamp_ns(&self.db).unwrap_or(0),
+        );
+
+        let scope = SnapshotScope::Vault { organization_id: self.organization_id, vault_id };
+        write_vault_snapshot_to_file(&self.db, &state_db, &blocks_db, event_entries, scope)
             .await
             .map_err(|e| StoreError::msg(e.to_string()))
     }
@@ -93,132 +265,146 @@ impl LedgerSnapshotBuilder {
 // Shared snapshot creation helper
 // ============================================================================
 
-/// Creates a complete snapshot file and returns the open file handle plus metadata.
-///
-/// Separates sync B-tree reads from async file I/O for `Send` safety:
-/// 1. (sync) Open `ReadTransaction`, read `AppliedStateCore` + table + entity data
-/// 2. (async) Write all pre-collected data to the snapshot file via `SnapshotWriter`
-///
-/// All data comes from a single `ReadTransaction` for transactional consistency.
-///
-/// Event entries must be collected by the caller before invoking this function,
-/// because `EventsDatabase` contains raw pointers (`!Send`). Passing pre-collected
-/// `Vec<Vec<u8>>` keeps this async function's future `Send`-safe.
-async fn write_snapshot_to_file(
-    db: &inferadb_ledger_store::Database<FileBackend>,
-    event_entries: Vec<Vec<u8>>,
-) -> Result<(tokio::fs::File, SnapshotMeta), SnapshotError> {
-    // --- Sync phase: collect all data from a single ReadTransaction ---
+/// Reads the on-disk `AppliedStateCore` blob from a Raft database and decodes
+/// it. Tolerates the legacy whole-`AppliedState` shape (re-encoding via the
+/// `From<&AppliedState>` projection) and the empty-state case (fresh DB).
+fn read_applied_state_core(
+    db: &Database<FileBackend>,
+) -> Result<(AppliedStateCore, Vec<u8>), SnapshotError> {
+    let read_txn = db.read().map_err(|e| SnapshotError::InvalidEntry {
+        reason: format!("Failed to open read transaction: {e}"),
+    })?;
 
-    let (core_bytes, last_applied, membership, snapshot_id, table_data, entity_entries) = {
-        let read_txn = db.read().map_err(|e| SnapshotError::InvalidEntry {
-            reason: format!("Failed to open read transaction: {e}"),
-        })?;
-
-        // 1. Read AppliedStateCore from the RaftState table
-        let state_data = read_txn
-            .get::<tables::RaftState>(&super::KEY_APPLIED_STATE.to_string())
-            .map_err(|e| SnapshotError::InvalidEntry {
+    let state_data = read_txn
+        .get::<tables::RaftState>(&super::KEY_APPLIED_STATE.to_string())
+        .map_err(|e| SnapshotError::InvalidEntry {
             reason: format!("Failed to read AppliedStateCore from RaftState: {e}"),
         })?;
 
-        let (core, core_bytes) = match state_data {
-            Some(data) if data.len() >= 2 && data[0..2] == STATE_CORE_VERSION_SENTINEL => {
-                // New format: version sentinel + postcard(AppliedStateCore)
-                let core: AppliedStateCore =
-                    decode(&data[2..]).map_err(|e| SnapshotError::InvalidEntry {
-                        reason: format!("Failed to decode AppliedStateCore: {e}"),
-                    })?;
-                let core_bytes = encode(&core).map_err(|e| SnapshotError::InvalidEntry {
-                    reason: format!("Failed to re-encode AppliedStateCore: {e}"),
+    match state_data {
+        Some(data) if data.len() >= 2 && data[0..2] == STATE_CORE_VERSION_SENTINEL => {
+            let core: AppliedStateCore =
+                decode(&data[2..]).map_err(|e| SnapshotError::InvalidEntry {
+                    reason: format!("Failed to decode AppliedStateCore: {e}"),
                 })?;
-                (core, core_bytes)
-            },
-            Some(data) => {
-                // Old format: full AppliedState blob (pre-migration)
-                let state: AppliedState =
-                    decode(&data).map_err(|e| SnapshotError::InvalidEntry {
-                        reason: format!("Failed to decode old-format AppliedState: {e}"),
-                    })?;
-                let core = AppliedStateCore::from(&state);
-                let core_bytes = encode(&core).map_err(|e| SnapshotError::InvalidEntry {
-                    reason: format!("Failed to encode AppliedStateCore: {e}"),
-                })?;
-                (core, core_bytes)
-            },
-            None => {
-                // Fresh database — empty state
-                let core = AppliedStateCore {
-                    last_applied: None,
-                    membership: StoredMembership::default(),
-                    region_height: 0,
-                    previous_region_hash: inferadb_ledger_types::Hash::default(),
-                    last_applied_timestamp_ns: 0,
-                };
-                let core_bytes = encode(&core).map_err(|e| SnapshotError::InvalidEntry {
-                    reason: format!("Failed to encode default AppliedStateCore: {e}"),
-                })?;
-                (core, core_bytes)
-            },
-        };
+            let core_bytes = encode(&core).map_err(|e| SnapshotError::InvalidEntry {
+                reason: format!("Failed to re-encode AppliedStateCore: {e}"),
+            })?;
+            Ok((core, core_bytes))
+        },
+        Some(data) => {
+            let state: AppliedState = decode(&data).map_err(|e| SnapshotError::InvalidEntry {
+                reason: format!("Failed to decode old-format AppliedState: {e}"),
+            })?;
+            let core = AppliedStateCore::from(&state);
+            let core_bytes = encode(&core).map_err(|e| SnapshotError::InvalidEntry {
+                reason: format!("Failed to encode AppliedStateCore: {e}"),
+            })?;
+            Ok((core, core_bytes))
+        },
+        None => {
+            let core = AppliedStateCore {
+                last_applied: None,
+                membership: StoredMembership::default(),
+                region_height: 0,
+                previous_region_hash: inferadb_ledger_types::Hash::default(),
+                last_applied_timestamp_ns: 0,
+            };
+            let core_bytes = encode(&core).map_err(|e| SnapshotError::InvalidEntry {
+                reason: format!("Failed to encode default AppliedStateCore: {e}"),
+            })?;
+            Ok((core, core_bytes))
+        },
+    }
+}
 
-        let snapshot_id = format!(
-            "snapshot-{}-{}",
-            core.last_applied.as_ref().map_or(0, |l| l.index),
-            chrono::Utc::now().timestamp()
-        );
+/// Builds a deterministic snapshot id from the applied log index and current
+/// wall-clock — same shape across org and vault paths.
+fn build_snapshot_id(core: &AppliedStateCore) -> String {
+    format!(
+        "snapshot-{}-{}",
+        core.last_applied.as_ref().map_or(0, |l| l.index),
+        chrono::Utc::now().timestamp()
+    )
+}
 
-        // 2. Collect all table data from the same ReadTransaction
-        let mut tables = Vec::with_capacity(SNAPSHOT_TABLE_IDS.len());
-        for &table_id_u8 in SNAPSHOT_TABLE_IDS {
-            let table_id = TableId::from_u8(table_id_u8)
-                .ok_or(SnapshotError::UnknownTableId { table_id: table_id_u8 })?;
-            let entries = iter_table_raw(&read_txn, table_id)?;
-            tables.push((table_id_u8, entries));
+/// One table's worth of pre-collected `(key, value)` entries.
+type CollectedTableEntries = Vec<(Vec<u8>, Vec<u8>)>;
+
+/// One table-block's worth of pre-collected `(table_id, entries)` pairs,
+/// ready to stream into a `SnapshotWriter` block.
+type CollectedTableBlock = Vec<(u8, CollectedTableEntries)>;
+
+/// Collects all entries for the given table-id whitelist from a database, in
+/// the same order the whitelist enumerates them.
+fn collect_table_block(
+    db: &Database<FileBackend>,
+    table_ids: &[u8],
+) -> Result<CollectedTableBlock, SnapshotError> {
+    let read_txn = db.read().map_err(|e| SnapshotError::InvalidEntry {
+        reason: format!("Failed to open read transaction: {e}"),
+    })?;
+    let mut out = Vec::with_capacity(table_ids.len());
+    for &table_id_u8 in table_ids {
+        let table_id = TableId::from_u8(table_id_u8)
+            .ok_or(SnapshotError::UnknownTableId { table_id: table_id_u8 })?;
+        let entries = iter_table_raw(&read_txn, table_id)?;
+        out.push((table_id_u8, entries));
+    }
+    Ok(out)
+}
+
+/// Streams a single typed table block into the writer.
+async fn write_table_block(
+    writer: &mut SnapshotWriter<tokio::fs::File>,
+    kind: TableBlockKind,
+    tables: &CollectedTableBlock,
+) -> Result<(), SnapshotError> {
+    writer.write_table_block_header(kind, tables.len() as u32).await?;
+    for (table_id_u8, entries) in tables {
+        writer.write_table_header(*table_id_u8, entries.len() as u32).await?;
+        for (key, value) in entries {
+            writer.write_table_entry(key, value).await?;
         }
+    }
+    Ok(())
+}
 
-        // Collect entities
-        let entities = iter_table_raw(&read_txn, TableId::Entities)?;
-
-        // ReadTransaction is dropped here — no longer held across awaits
-        (core_bytes, core.last_applied, core.membership.clone(), snapshot_id, tables, entities)
-    };
-
-    // --- Async phase: write all collected data to the snapshot file ---
+/// Creates a complete org-level snapshot file from the org's `raft.db`.
+///
+/// Org-scoped events (CreateVault, organization membership, etc.) live in
+/// the org's `events.db` and are captured here; vault-scoped events live
+/// on per-vault `events.db`s and are captured by [`write_vault_snapshot_to_file`].
+async fn write_org_snapshot_to_file(
+    raft_db: &Database<FileBackend>,
+    scope: SnapshotScope,
+    event_entries: Vec<Vec<u8>>,
+) -> Result<(tokio::fs::File, SnapshotMeta), SnapshotError> {
+    let (core, core_bytes) = read_applied_state_core(raft_db)?;
+    let last_applied = core.last_applied;
+    let membership = core.membership.clone();
+    let snapshot_id = build_snapshot_id(&core);
+    let raft_tables = collect_table_block(raft_db, SNAPSHOT_TABLE_IDS_ORG_RAFT)?;
 
     let std_file = tempfile::tempfile()
         .map_err(|e| SnapshotError::Io { source: e, location: snafu::location!() })?;
     let file = tokio::fs::File::from_std(std_file);
     let mut writer = SnapshotWriter::new(file);
 
-    // Header
-    writer.write_header(&core_bytes).await?;
+    writer.write_header(scope, &core_bytes).await?;
 
-    // Table sections
-    writer.write_table_count(table_data.len() as u32).await?;
-    for (table_id_u8, entries) in &table_data {
-        writer.write_table_header(*table_id_u8, entries.len() as u32).await?;
-        for (key, value) in entries {
-            writer.write_table_entry(key, value).await?;
-        }
-    }
+    // Org snapshot: 1 table block (OrgRaft).
+    writer.write_table_block_count(1).await?;
+    write_table_block(&mut writer, TableBlockKind::OrgRaft, &raft_tables).await?;
 
-    // Entity section
-    writer.write_entity_count(entity_entries.len() as u64).await?;
-    for (key, value) in &entity_entries {
-        writer.write_entity_entry(key, value).await?;
-    }
-
-    // Event section
+    // Event section — org-scoped apply-phase events from the org's events.db.
     writer.write_event_count(event_entries.len() as u64).await?;
     for entry_bytes in &event_entries {
         writer.write_event_entry(entry_bytes).await?;
     }
 
-    // Finalize: flush zstd stream and write checksum footer
     let mut file = writer.finish().await?;
 
-    // Seek to start for reading
     use tokio::io::AsyncSeekExt;
     file.seek(std::io::SeekFrom::Start(0))
         .await
@@ -227,14 +413,104 @@ async fn write_snapshot_to_file(
     let meta = SnapshotMeta { last_log_id: last_applied, last_membership: membership, snapshot_id };
 
     tracing::info!(
-        last_applied = ?last_applied,
-        table_count = table_data.len(),
-        entity_count = entity_entries.len(),
+        ?last_applied,
+        organization_id = scope.organization_id().value(),
+        raft_table_count = raft_tables.len(),
         event_count = event_entries.len(),
-        "Snapshot file created"
+        "Org snapshot file created"
     );
 
     Ok((file, meta))
+}
+
+/// Creates a complete per-vault snapshot file from the vault's four source DBs.
+async fn write_vault_snapshot_to_file(
+    raft_db: &Database<FileBackend>,
+    state_db: &Database<FileBackend>,
+    blocks_db: &Database<FileBackend>,
+    event_entries: Vec<Vec<u8>>,
+    scope: SnapshotScope,
+) -> Result<(tokio::fs::File, SnapshotMeta), SnapshotError> {
+    let (core, core_bytes) = read_applied_state_core(raft_db)?;
+    let last_applied = core.last_applied;
+    let membership = core.membership.clone();
+    let snapshot_id = build_snapshot_id(&core);
+
+    let raft_tables = collect_table_block(raft_db, SNAPSHOT_TABLE_IDS_VAULT_RAFT)?;
+    let state_tables = collect_table_block(state_db, SNAPSHOT_TABLE_IDS_VAULT_STATE)?;
+    let blocks_tables = collect_table_block(blocks_db, SNAPSHOT_TABLE_IDS_VAULT_BLOCKS)?;
+
+    let std_file = tempfile::tempfile()
+        .map_err(|e| SnapshotError::Io { source: e, location: snafu::location!() })?;
+    let file = tokio::fs::File::from_std(std_file);
+    let mut writer = SnapshotWriter::new(file);
+
+    writer.write_header(scope, &core_bytes).await?;
+
+    // Vault snapshot: 3 table blocks (raft, state, blocks) — order is part of
+    // the wire contract; install replays in the same order.
+    writer.write_table_block_count(3).await?;
+    write_table_block(&mut writer, TableBlockKind::VaultRaft, &raft_tables).await?;
+    write_table_block(&mut writer, TableBlockKind::VaultState, &state_tables).await?;
+    write_table_block(&mut writer, TableBlockKind::VaultBlocks, &blocks_tables).await?;
+
+    writer.write_event_count(event_entries.len() as u64).await?;
+    for entry_bytes in &event_entries {
+        writer.write_event_entry(entry_bytes).await?;
+    }
+
+    let mut file = writer.finish().await?;
+
+    use tokio::io::AsyncSeekExt;
+    file.seek(std::io::SeekFrom::Start(0))
+        .await
+        .map_err(|e| SnapshotError::Io { source: e, location: snafu::location!() })?;
+
+    let meta = SnapshotMeta { last_log_id: last_applied, last_membership: membership, snapshot_id };
+
+    tracing::info!(
+        ?last_applied,
+        organization_id = scope.organization_id().value(),
+        vault_id = scope.vault_id().map(|v| v.value()),
+        raft_table_count = raft_tables.len(),
+        state_table_count = state_tables.len(),
+        blocks_table_count = blocks_tables.len(),
+        event_count = event_entries.len(),
+        "Vault snapshot file created"
+    );
+
+    Ok((file, meta))
+}
+
+/// Collects all organization ids materialised in the `OrganizationMeta`
+/// table on a raft.db. Used by the org-snapshot path to drive event
+/// collection. Returns an empty vec on read failure (snapshot is still
+/// taken; events are best-effort).
+fn collect_organization_ids_from_raft_db(
+    db: &Database<FileBackend>,
+) -> Option<Vec<inferadb_ledger_types::OrganizationId>> {
+    let read_txn = db.read().ok()?;
+    let iter = read_txn.iter::<tables::OrganizationMeta>().ok()?;
+    Some(
+        iter.filter_map(|(key, _)| {
+            <i64 as inferadb_ledger_store::Key>::decode(&key)
+                .map(inferadb_ledger_types::OrganizationId::new)
+        })
+        .collect(),
+    )
+}
+
+/// Reads the `last_applied_timestamp_ns` from the `AppliedStateCore` if
+/// available; returns `None` for fresh databases.
+fn extract_last_applied_timestamp_ns(db: &Database<FileBackend>) -> Option<i64> {
+    let read_txn = db.read().ok()?;
+    let data =
+        read_txn.get::<tables::RaftState>(&super::KEY_APPLIED_STATE.to_string()).ok().flatten()?;
+    if data.len() >= 2 && data[0..2] == STATE_CORE_VERSION_SENTINEL {
+        decode::<AppliedStateCore>(&data[2..]).ok().map(|core| core.last_applied_timestamp_ns)
+    } else {
+        None
+    }
 }
 
 /// Iterates all entries in a table by its runtime `TableId`, returning raw
@@ -277,38 +553,6 @@ fn iter_table_raw(
         TableId::StringDictionary => collect_table!(tables::StringDictionary),
         TableId::StringDictionaryReverse => collect_table!(tables::StringDictionaryReverse),
     }
-}
-
-/// Extracts organization IDs and the last applied deterministic timestamp from
-/// the database. Used by snapshot creation to parameterize event collection.
-fn extract_snapshot_event_context(
-    db: &inferadb_ledger_store::Database<FileBackend>,
-) -> Result<(Vec<inferadb_ledger_types::OrganizationId>, i64), StoreError> {
-    let read_txn = db.read().map_err(|e| to_storage_error(&e))?;
-
-    // Extract org IDs from OrganizationMeta table
-    let org_iter = read_txn.iter::<tables::OrganizationMeta>().map_err(|e| to_storage_error(&e))?;
-    let org_ids: Vec<_> = org_iter
-        .filter_map(|(key, _)| {
-            <i64 as inferadb_ledger_store::Key>::decode(&key)
-                .map(inferadb_ledger_types::OrganizationId::new)
-        })
-        .collect();
-
-    // Extract last_applied_timestamp_ns from AppliedStateCore
-    let timestamp_ns = read_txn
-        .get::<tables::RaftState>(&super::KEY_APPLIED_STATE.to_string())
-        .map_err(|e| to_storage_error(&e))?
-        .and_then(|data| {
-            if data.len() >= 2 && data[0..2] == STATE_CORE_VERSION_SENTINEL {
-                decode::<AppliedStateCore>(&data[2..]).ok()
-            } else {
-                None
-            }
-        })
-        .map_or(0, |core| core.last_applied_timestamp_ns);
-
-    Ok((org_ids, timestamp_ns))
 }
 
 /// Collects apply-phase events from events.db for snapshot inclusion.
@@ -1132,22 +1376,37 @@ impl RaftLogStore {
         LedgerSnapshotBuilder {
             db: Arc::clone(&self.db),
             state_layer: self.state_layer.as_ref().map(Arc::clone),
+            block_archive: self.block_archive.as_ref().map(Arc::clone),
             events_db: self.event_writer.as_ref().map(|ew| Arc::clone(ew.events_db())),
             event_config: self.event_writer.as_ref().map(|ew| ew.config().clone()),
+            snapshot_key_provider: Arc::clone(&self.snapshot_key_provider),
+            region: self.region,
+            organization_id: self.organization_id,
+            vault_id: self.vault_id,
         }
     }
 
     /// Installs a snapshot received from the leader.
     ///
-    /// Streams decompressed data directly into B-trees and restores the
-    /// in-memory state from the committed tables.
+    /// Streams decompressed data directly into the appropriate B-trees and
+    /// restores the in-memory state from the committed tables. Stage 1b
+    /// dispatches on the snapshot's [`SnapshotScope`] header marker:
     ///
-    /// No `Database::sync_state` hook here. Installing a
-    /// snapshot is a receive path (we're absorbing state shipped by the
-    /// leader), not a ship path. The write transaction at the end of the
-    /// streaming sync phase (`write_txn.commit()` at the end of the
-    /// `block_in_place` below) is itself a durable commit and captures the
-    /// restored state on disk, so there is nothing local to flush first.
+    /// - **Org snapshot** — writes restored rows into `self.db` (the org's `raft.db`) only.
+    /// - **Vault snapshot** — writes vault raft tables into `self.db` (the per-vault `raft.db`),
+    ///   vault state tables into the per-vault `state.db` (resolved via `state_layer.db_for(...)`),
+    ///   vault block tables into the per-vault `blocks.db` (owned by the vault's `BlockArchive`),
+    ///   and apply-phase events into the per-vault events DB.
+    ///
+    /// Cross-scope installs (org snapshot into vault store, vault into org,
+    /// vault A into vault B) are rejected with
+    /// [`SnapshotError::ScopeMismatch`] before any data is written.
+    ///
+    /// No `Database::sync_state` hook here. Installing a snapshot is a
+    /// receive path (we're absorbing state shipped by the leader), not a
+    /// ship path. The write transactions at the end of the streaming sync
+    /// phase are themselves durable commits and capture the restored state
+    /// on disk, so there is nothing local to flush first.
     pub async fn install_snapshot(
         &mut self,
         meta: &SnapshotMeta,
@@ -1157,7 +1416,7 @@ impl RaftLogStore {
 
         let mut file = *snapshot;
 
-        // Async phase: verify SHA-256 checksum over compressed bytes
+        // Async phase: verify SHA-256 checksum over compressed bytes.
         let file_size = file.seek(std::io::SeekFrom::End(0)).await.map_err(StoreError::from_io)?;
         file.seek(std::io::SeekFrom::Start(0)).await.map_err(StoreError::from_io)?;
 
@@ -1165,15 +1424,33 @@ impl RaftLogStore {
             .await
             .map_err(|e| StoreError::msg(e.to_string()))?;
 
-        // Convert to std::fs::File for synchronous streaming
+        // Convert to std::fs::File for synchronous streaming.
         let std_file = file.into_std().await;
         let compressed_size = file_size - crate::snapshot::CHECKSUM_SIZE as u64;
 
-        // Sync phase: stream decompressed data directly into B-trees
-        let db = &self.db;
+        // Resolve per-vault dependencies up-front. We don't know the snapshot
+        // scope until we read the header, so we capture references for both
+        // possible code paths.
+        let raft_db = Arc::clone(&self.db);
+        let store_vault_id = self.vault_id;
+        let store_org_id = self.organization_id;
+        let state_layer = self.state_layer.as_ref().cloned();
+        let block_archive = self.block_archive.as_ref().cloned();
         let event_writer_ref = self.event_writer.as_ref();
 
-        let (core, table_count, entity_count, event_count) =
+        // For the vault path, eagerly resolve state.db / blocks.db handles
+        // *if* this is a per-vault store. If the snapshot's scope turns out
+        // to be Org, these handles are simply unused.
+        let vault_state_db = match (store_vault_id, &state_layer) {
+            (Some(vid), Some(sl)) => Some(
+                sl.db_for(vid)
+                    .map_err(|e| StoreError::msg(format!("failed to open vault state.db: {e}")))?,
+            ),
+            _ => None,
+        };
+        let vault_blocks_db = block_archive.as_ref().map(|a| Arc::clone(a.db()));
+
+        let (core, scope, raft_table_count, state_table_count, blocks_table_count, event_count) =
             tokio::task::block_in_place(|| -> Result<_, StoreError> {
                 use std::io::{BufReader, Read, Seek, SeekFrom};
 
@@ -1184,62 +1461,205 @@ impl RaftLogStore {
                 let mut decoder =
                     zstd::stream::read::Decoder::new(reader).map_err(StoreError::from_io)?;
 
-                // Read header → AppliedStateCore
-                let core_bytes = SyncSnapshotReader::read_header(&mut decoder)
+                // Read header → scope + AppliedStateCore.
+                let (scope, core_bytes) = SyncSnapshotReader::read_header(&mut decoder)
                     .map_err(|e| StoreError::msg(e.to_string()))?;
                 let core: AppliedStateCore =
                     decode(&core_bytes).map_err(|e| StoreError::from_error(&e))?;
 
-                // Open WriteTransaction
-                let mut write_txn = db.write().map_err(|e| to_storage_error(&e))?;
+                // Cross-scope rejection BEFORE writing any data.
+                match (scope, store_vault_id) {
+                    (SnapshotScope::Org { .. }, Some(vid)) => {
+                        return Err(StoreError::msg(
+                            SnapshotError::ScopeMismatch {
+                                reason: format!(
+                                    "org snapshot installed into per-vault store (vault_id={})",
+                                    vid.value()
+                                ),
+                            }
+                            .to_string(),
+                        ));
+                    },
+                    (SnapshotScope::Vault { vault_id, .. }, None) => {
+                        return Err(StoreError::msg(
+                            SnapshotError::ScopeMismatch {
+                                reason: format!(
+                                    "vault snapshot (vault_id={}) installed into org-level store",
+                                    vault_id.value()
+                                ),
+                            }
+                            .to_string(),
+                        ));
+                    },
+                    (SnapshotScope::Vault { vault_id, .. }, Some(store_vid))
+                        if vault_id != store_vid =>
+                    {
+                        return Err(StoreError::msg(
+                            SnapshotError::ScopeMismatch {
+                                reason: format!(
+                                    "vault snapshot for vault_id={} installed into store for \
+                                     vault_id={}",
+                                    vault_id.value(),
+                                    store_vid.value()
+                                ),
+                            }
+                            .to_string(),
+                        ));
+                    },
+                    _ => {},
+                }
 
-                // Stream table entries
-                let table_count = SyncSnapshotReader::read_u32(&mut decoder)
+                // Read the table-block count.
+                let block_count = SyncSnapshotReader::read_u32(&mut decoder)
                     .map_err(|e| StoreError::msg(e.to_string()))?;
 
-                for _ in 0..table_count {
-                    let (table_id_u8, entry_count) =
-                        SyncSnapshotReader::read_table_header(&mut decoder)
+                // Track stats per block kind for the post-install log line.
+                let mut raft_table_count: u32 = 0;
+                let mut state_table_count: u32 = 0;
+                let mut blocks_table_count: u32 = 0;
+
+                // Open one write transaction per source DB.
+                let mut raft_txn = raft_db.write().map_err(|e| to_storage_error(&e))?;
+                let mut state_txn = match (&vault_state_db, scope) {
+                    (Some(db), SnapshotScope::Vault { .. }) => {
+                        Some(db.write().map_err(|e| to_storage_error(&e))?)
+                    },
+                    _ => None,
+                };
+                let mut blocks_txn = match (&vault_blocks_db, scope) {
+                    (Some(db), SnapshotScope::Vault { .. }) => {
+                        Some(db.write().map_err(|e| to_storage_error(&e))?)
+                    },
+                    _ => None,
+                };
+
+                for _ in 0..block_count {
+                    let (kind, table_count) =
+                        SyncSnapshotReader::read_table_block_header(&mut decoder)
                             .map_err(|e| StoreError::msg(e.to_string()))?;
 
-                    let table_id = TableId::from_u8(table_id_u8).ok_or_else(|| {
-                        StoreError::msg(format!("unknown table ID: {table_id_u8}"))
-                    })?;
+                    // Defense-in-depth: enforce that block kind matches the
+                    // snapshot scope. An org snapshot must contain only
+                    // `OrgRaft`; a vault snapshot must contain only the
+                    // three vault-tagged kinds.
+                    let block_ok = matches!(
+                        (scope, kind),
+                        (SnapshotScope::Org { .. }, TableBlockKind::OrgRaft)
+                            | (
+                                SnapshotScope::Vault { .. },
+                                TableBlockKind::VaultRaft
+                                    | TableBlockKind::VaultState
+                                    | TableBlockKind::VaultBlocks
+                            )
+                    );
+                    if !block_ok {
+                        return Err(StoreError::msg(
+                            SnapshotError::ScopeMismatch {
+                                reason: format!(
+                                    "table block kind {kind:?} not allowed for snapshot scope \
+                                     {scope:?}"
+                                ),
+                            }
+                            .to_string(),
+                        ));
+                    }
 
-                    for _ in 0..entry_count {
-                        let (key, value) = SyncSnapshotReader::read_kv_entry(&mut decoder)
-                            .map_err(|e| StoreError::msg(e.to_string()))?;
-                        write_txn
-                            .insert_raw(table_id, &key, &value)
-                            .map_err(|e| to_storage_error(&e))?;
+                    let allowed = allowed_tables_for_block(kind);
+
+                    for _ in 0..table_count {
+                        let (table_id_u8, entry_count) =
+                            SyncSnapshotReader::read_table_header(&mut decoder)
+                                .map_err(|e| StoreError::msg(e.to_string()))?;
+
+                        if !allowed.contains(&table_id_u8) {
+                            return Err(StoreError::msg(
+                                SnapshotError::InvalidEntry {
+                                    reason: format!(
+                                        "table_id {table_id_u8} not permitted in block {kind:?}"
+                                    ),
+                                }
+                                .to_string(),
+                            ));
+                        }
+
+                        let table_id = TableId::from_u8(table_id_u8).ok_or_else(|| {
+                            StoreError::msg(format!("unknown table ID: {table_id_u8}"))
+                        })?;
+
+                        for _ in 0..entry_count {
+                            let (key, value) = SyncSnapshotReader::read_kv_entry(&mut decoder)
+                                .map_err(|e| StoreError::msg(e.to_string()))?;
+
+                            match kind {
+                                TableBlockKind::OrgRaft | TableBlockKind::VaultRaft => {
+                                    raft_txn
+                                        .insert_raw(table_id, &key, &value)
+                                        .map_err(|e| to_storage_error(&e))?;
+                                },
+                                TableBlockKind::VaultState => {
+                                    let txn = state_txn.as_mut().ok_or_else(|| {
+                                        StoreError::msg(
+                                            "vault snapshot install missing state.db transaction"
+                                                .to_string(),
+                                        )
+                                    })?;
+                                    txn.insert_raw(table_id, &key, &value)
+                                        .map_err(|e| to_storage_error(&e))?;
+                                },
+                                TableBlockKind::VaultBlocks => {
+                                    let txn = blocks_txn.as_mut().ok_or_else(|| {
+                                        StoreError::msg(
+                                            "vault snapshot install missing blocks.db transaction"
+                                                .to_string(),
+                                        )
+                                    })?;
+                                    txn.insert_raw(table_id, &key, &value)
+                                        .map_err(|e| to_storage_error(&e))?;
+                                },
+                            }
+                        }
+                    }
+
+                    match kind {
+                        TableBlockKind::OrgRaft | TableBlockKind::VaultRaft => {
+                            raft_table_count = raft_table_count.saturating_add(table_count);
+                        },
+                        TableBlockKind::VaultState => {
+                            state_table_count = state_table_count.saturating_add(table_count);
+                        },
+                        TableBlockKind::VaultBlocks => {
+                            blocks_table_count = blocks_table_count.saturating_add(table_count);
+                        },
                     }
                 }
 
-                // Stream entity entries
-                let entity_count = SyncSnapshotReader::read_u64(&mut decoder)
-                    .map_err(|e| StoreError::msg(e.to_string()))?;
-
-                for _ in 0..entity_count {
-                    let (key, value) = SyncSnapshotReader::read_kv_entry(&mut decoder)
-                        .map_err(|e| StoreError::msg(e.to_string()))?;
-                    inferadb_ledger_state::StateLayer::restore_entity(&mut write_txn, &key, &value)
-                        .map_err(|e| to_storage_error(&e))?;
-                }
-
-                // Persist the AppliedStateCore blob with version sentinel
+                // Persist the AppliedStateCore blob with version sentinel into raft.db.
                 let core_data = encode(&core).map_err(|e| to_serde_error(&e))?;
                 let mut state_data =
                     Vec::with_capacity(STATE_CORE_VERSION_SENTINEL.len() + core_data.len());
                 state_data.extend_from_slice(&STATE_CORE_VERSION_SENTINEL);
                 state_data.extend_from_slice(&core_data);
-                write_txn
+                raft_txn
                     .insert::<tables::RaftState>(&super::KEY_APPLIED_STATE.to_string(), &state_data)
                     .map_err(|e| to_storage_error(&e))?;
 
-                // Atomic commit
-                write_txn.commit().map_err(|e| to_storage_error(&e))?;
+                // Atomic commits — raft first, then per-vault DBs. Each
+                // commit is independently durable; the AppliedStateCore in
+                // raft.db is the recovery anchor, so committing it last
+                // would mean a crash mid-install leaves the state machines
+                // ahead of the apply progress.
+                raft_txn.commit().map_err(|e| to_storage_error(&e))?;
+                if let Some(txn) = state_txn {
+                    txn.commit().map_err(|e| to_storage_error(&e))?;
+                }
+                if let Some(txn) = blocks_txn {
+                    txn.commit().map_err(|e| to_storage_error(&e))?;
+                }
 
-                // Best-effort event restoration
+                // Best-effort event restoration. Same shape as the v1 path:
+                // failures here log + continue rather than failing the
+                // install, since events are crash-replayable from the apply
+                // pipeline once the state machine is back online.
                 let event_count = SyncSnapshotReader::read_u64(&mut decoder)
                     .map_err(|e| StoreError::msg(e.to_string()))?;
 
@@ -1304,14 +1724,21 @@ impl RaftLogStore {
                     }
                 }
 
-                Ok((core, table_count, entity_count, event_count))
+                Ok((
+                    core,
+                    scope,
+                    raft_table_count,
+                    state_table_count,
+                    blocks_table_count,
+                    event_count,
+                ))
             })?;
 
-        // Restore in-memory state from the committed tables
+        // Restore in-memory state from the committed tables.
         let loaded_state = self.load_applied_state_from_db(&core)?;
         self.applied_state.store(Arc::new(loaded_state));
 
-        // Restore region chain tracking
+        // Restore region chain tracking.
         *self.region_chain.write() = RegionChainState {
             height: core.region_height,
             previous_hash: core.previous_region_hash,
@@ -1320,8 +1747,12 @@ impl RaftLogStore {
         tracing::info!(
             snapshot_id = %meta.snapshot_id,
             last_log_id = ?meta.last_log_id,
-            table_count,
-            entity_count,
+            scope = ?scope,
+            store_organization_id = store_org_id.value(),
+            store_vault_id = store_vault_id.map(|v| v.value()),
+            raft_table_count,
+            state_table_count,
+            blocks_table_count,
             event_count,
             "Snapshot installed (streaming)"
         );
@@ -1330,24 +1761,14 @@ impl RaftLogStore {
     }
 
     /// Gets the current snapshot, if any state has been applied.
+    ///
+    /// Dispatches on the store's residency identity: a per-vault store
+    /// (`vault_id().is_some()`) produces a [`SnapshotScope::Vault`]
+    /// snapshot; an org-scoped store produces a [`SnapshotScope::Org`]
+    /// snapshot. Forces `Database::sync_state` before reading.
     pub async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<(tokio::fs::File, SnapshotMeta)>, StoreError> {
-        // Force `Database::sync_state` before reading the state DB so the
-        // snapshot captures a durable dual-slot-consistent state. Under
-        // the lazy-commit regime, `committed_state` can be ahead of the
-        // last synced disk state;
-        // shipping a snapshot at an unsynced `applied` index to followers
-        // risks follower WAL truncation of entries the local node still
-        // needs on crash recovery.
-        //
-        // This narrows the race rather than eliminating it: a concurrent
-        // apply can land a `commit_in_memory` between this `sync_state`
-        // and the subsequent `db.read()`, leaving the captured
-        // `last_applied` ahead of the synced dual-slot. The
-        // `StateCheckpointer`'s 500ms cadence closes the residual gap;
-        // Crash-recovery tests confirm whether a tighter post-read
-        // re-sync loop is needed.
         Arc::clone(&self.db).sync_state().await.map_err(|e| to_storage_error(&e))?;
 
         // Check whether any state has been applied
@@ -1362,18 +1783,8 @@ impl RaftLogStore {
             }
         }
 
-        let (org_ids, last_ts) = extract_snapshot_event_context(&self.db)?;
-
-        let event_entries = {
-            let events_db = self.event_writer.as_ref().map(|ew| Arc::clone(ew.events_db()));
-            let event_config = self.event_writer.as_ref().map(|ew| ew.config().clone());
-            collect_snapshot_events(events_db.as_deref(), event_config.as_ref(), &org_ids, last_ts)
-        };
-
-        let (file, meta) = write_snapshot_to_file(&self.db, event_entries)
-            .await
-            .map_err(|e| StoreError::msg(e.to_string()))?;
-
+        let mut builder = self.get_snapshot_builder();
+        let (file, meta) = builder.build_snapshot().await?;
         Ok(Some((file, meta)))
     }
 

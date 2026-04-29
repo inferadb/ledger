@@ -40,6 +40,8 @@ pub mod metrics;
 // ---------------------------------------------------------------------------
 
 #[doc(hidden)]
+pub mod apply_command;
+#[doc(hidden)]
 pub mod apply_pool;
 #[doc(hidden)]
 pub mod apply_worker;
@@ -139,6 +141,16 @@ pub mod saga_orchestrator;
 #[doc(hidden)]
 pub mod snapshot;
 #[doc(hidden)]
+pub mod snapshot_installer;
+#[doc(hidden)]
+pub mod snapshot_key_provider;
+#[doc(hidden)]
+pub mod snapshot_persister;
+#[doc(hidden)]
+pub mod snapshot_receiver;
+#[doc(hidden)]
+pub mod snapshot_streamer;
+#[doc(hidden)]
 pub mod state_checkpointer;
 #[doc(hidden)]
 pub mod state_root_verifier;
@@ -222,6 +234,15 @@ pub use runtime_config::RuntimeConfigHandle;
 pub use saga_orchestrator::{
     OnboardingPii, OrgPii, SagaOrchestrator, SagaOrchestratorHandle, SagaOutput, SagaPii,
     SagaSubmission,
+};
+#[doc(hidden)]
+pub use snapshot_key_provider::{
+    InMemorySnapshotKeyProvider, NoopSnapshotKeyProvider, SnapshotKeyProvider,
+};
+#[doc(hidden)]
+pub use snapshot_persister::{
+    DEFAULT_RETENTION_COUNT, DecryptedSnapshot, PersistError, PersistedSnapshotMeta,
+    SnapshotPersister, StagedSnapshotMeta,
 };
 #[doc(hidden)]
 pub use state_checkpointer::StateCheckpointer;
