@@ -85,7 +85,7 @@ inferadb-ledger --listen 0.0.0.0:50051 --data /var/lib/ledger
 inferadb-ledger --listen 0.0.0.0:50051 --dev
 ```
 
-`--data` and `--dev` are mutually exclusive; the server refuses to start without exactly one of them.
+`--data` and `--dev` are mutually exclusive; the server-launch invocation requires exactly one of them. Client subcommands like `init` ignore both flags — they connect to a running server over `--host`.
 
 **Bootstrap the cluster (once, from any machine):**
 
@@ -128,7 +128,7 @@ See the [deployment guide](docs/how-to/deployment.md) for multi-node setup, Kube
 | `--region`    | Geographic data residency [region](docs/how-to/deployment.md)                                     | `global`        |
 | `--advertise` | Address advertised to peers ([details](docs/how-to/deployment.md#advertise-address))              | _(auto-detect)_ |
 
-Exactly one of `--data` or `--dev` is required at startup; supplying neither (or both) returns a clear CLI error before bootstrap. At least one of `--listen` or `--socket` must also be specified. On restart, only the storage flag is required — all other flags are persisted on first boot and ignored on subsequent starts.
+Exactly one of `--data` or `--dev` is required when launching the server; supplying neither aborts at the start of `main` with a clear error, and supplying both is rejected at parse time. Client subcommands (`init`, `vaults`, `config schema`, `restore apply`) do not require a storage flag — they either talk to a running server over gRPC or carry their own arguments. At least one of `--listen` or `--socket` must also be specified for the server-launch path. On restart, only the storage flag is required — all other flags are persisted on first boot and ignored on subsequent starts.
 
 See [Configuration Reference](docs/how-to/deployment.md#configuration-reference) for environment variables and all options including metrics, batching, and tuning.
 

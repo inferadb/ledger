@@ -133,6 +133,19 @@ async fn main() -> Result<(), ServerError> {
 
     let config = cli.config;
 
+    // Fail fast on the server-launch path when no storage flag was
+    // supplied. clap's `ArgGroup("storage")` enforces mutual exclusion
+    // (`multiple = false`) so `--data /path --dev` is rejected at parse
+    // time, but the group is no longer `required` — that requirement
+    // applied to every invocation including client subcommands like
+    // `init`, which made the flag mandatory for gRPC clients that have
+    // no use for local storage. The check lives here so the operator
+    // sees the same well-formatted error text whether they hit it via
+    // CLI parse (no subcommand) or via programmatic construction.
+    config
+        .storage_mode()
+        .map_err(|e| ServerError::Server(Box::new(std::io::Error::other(e.to_string()))))?;
+
     // Initialize logging based on config
     #[cfg(feature = "profiling")]
     let _flame_guard = init_logging(&config, flamegraph_spans.as_deref())?;

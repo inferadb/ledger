@@ -97,8 +97,14 @@ pub enum LogFormat {
 ///
 /// # Storage Mode
 ///
-/// Exactly one of `--data <path>` or `--dev` must be supplied at startup.
-/// Neither / both produces a CLI parse error. `--data` selects persistent
+/// Exactly one of `--data <path>` or `--dev` must be supplied for the
+/// server-launch invocation (i.e. running `inferadb-ledger` with no
+/// subcommand). Supplying both produces a CLI parse error; supplying
+/// neither produces a runtime [`ConfigError::NoStorageMode`] at the
+/// start of `main` before any I/O. Client subcommands (`init`,
+/// `vaults`, `config schema`, `restore apply`) do **not** require a
+/// storage flag — they either talk to a running server over gRPC or
+/// take their own `--data-dir` argument. `--data` selects persistent
 /// file-system storage at the given path. `--dev` selects ephemeral
 /// file-backed storage at an auto-generated tempdir under
 /// `std::env::temp_dir()`; the path changes on every restart, so the
@@ -121,8 +127,15 @@ pub enum LogFormat {
 #[derive(Debug, Clone, Deserialize, JsonSchema, Builder, Parser)]
 #[builder(derive(Debug))]
 #[command(group(
+    // Mutually exclusive but not required at parse time. The
+    // server-launch path (no subcommand) enforces "exactly one of
+    // --data / --dev" via `Config::storage_mode()` in `main.rs`,
+    // which produces `ConfigError::NoStorageMode` when neither flag
+    // is supplied. Client subcommands (`init`, `vaults`,
+    // `config schema`, `restore apply`) skip the check entirely —
+    // local storage is meaningless for a gRPC client.
     ArgGroup::new("storage")
-        .required(true)
+        .required(false)
         .multiple(false)
         .args(["data_dir", "dev"]),
 ))]
@@ -238,11 +251,15 @@ pub struct Config {
 
     /// Persistent data directory for Raft logs and snapshots.
     ///
-    /// Exactly one of `--data` or `--dev` must be specified at startup
-    /// (the CLI returns a parse error otherwise). When `--data` is set,
-    /// the server uses [`StorageMode::File`] and the path is honored
-    /// verbatim. For development / one-off testing without a path,
-    /// pass `--dev` instead.
+    /// Required for the server-launch invocation (i.e. running
+    /// `inferadb-ledger` with no subcommand): exactly one of `--data`
+    /// or `--dev` must be specified, otherwise `main` aborts with
+    /// `ConfigError::NoStorageMode`. Client subcommands (`init`,
+    /// `vaults`, `config schema`, `restore apply`) ignore the flag
+    /// entirely. When `--data` is set, the server uses
+    /// [`StorageMode::File`] and the path is honored verbatim. For
+    /// development / one-off testing without a path, pass `--dev`
+    /// instead.
     #[arg(long = "data", env = "INFERADB__LEDGER__DATA")]
     #[serde(default)]
     pub data_dir: Option<PathBuf>,
@@ -751,17 +768,20 @@ pub enum ConfigError {
     },
     /// Neither `--data` nor `--dev` was supplied at startup.
     ///
-    /// The CLI surface enforces mutual exclusion via clap's `ArgGroup`,
-    /// so end users hit this only when constructing [`Config`]
-    /// programmatically (notably tests).
+    /// The server-launch path (no subcommand) requires exactly one
+    /// storage flag; `main` calls [`Config::storage_mode`] before any
+    /// I/O and aborts with this variant when neither is set. Client
+    /// subcommands (`init`, `vaults`, `config schema`,
+    /// `restore apply`) skip the check entirely.
     #[snafu(display(
         "exactly one of `--data <path>` or `--dev` is required at startup; neither was supplied"
     ))]
     NoStorageMode,
     /// Both `--data` and `--dev` were supplied at startup.
     ///
-    /// The CLI surface enforces mutual exclusion via clap's `ArgGroup`,
-    /// so end users hit this only when constructing [`Config`]
+    /// clap's `ArgGroup` rejects this at parse time for every
+    /// invocation (server-launch and subcommands alike). End users
+    /// hit this variant only when constructing [`Config`]
     /// programmatically (notably tests).
     #[snafu(display("`--data` and `--dev` are mutually exclusive"))]
     ConflictingStorageModes,
@@ -1097,22 +1117,33 @@ mod tests {
     }
 
     #[test]
-    fn cli_rejects_invocation_without_storage_mode() {
+    fn cli_parses_invocation_without_storage_mode() {
         // Bare `inferadb-ledger` (no subcommand, no storage flag) must
-        // fail at parse time so operators see a clear error from clap
-        // before the bootstrap path runs.
-        let err = Cli::try_parse_from(["inferadb-ledger"])
-            .expect_err("clap should reject missing storage mode");
+        // *parse* cleanly — the storage requirement is enforced at
+        // runtime in `main` via `Config::storage_mode()` so client
+        // subcommands (`init`, `vaults`, etc.) don't inherit the
+        // requirement when they have no use for local storage.
+        let cli = Cli::try_parse_from(["inferadb-ledger"])
+            .expect("bare invocation should parse; runtime check in main enforces storage flag");
+        assert!(cli.command.is_none());
+        assert!(cli.config.data_dir.is_none());
+        assert!(!cli.config.dev);
+
+        // The runtime check produces the canonical error text.
+        let err = cli.config.storage_mode().expect_err("storage_mode rejects missing storage flag");
+        assert!(matches!(err, ConfigError::NoStorageMode));
         let msg = err.to_string();
-        assert!(msg.contains("--data"), "clap error mentions --data: {msg}");
-        assert!(msg.contains("--dev"), "clap error mentions --dev: {msg}");
+        assert!(msg.contains("--data"), "error mentions --data: {msg}");
+        assert!(msg.contains("--dev"), "error mentions --dev: {msg}");
     }
 
     #[test]
     fn cli_rejects_both_data_and_dev() {
+        // Mutual exclusion is still a parse-time check (clap
+        // `ArgGroup` with `multiple = false`), so `--data /path --dev`
+        // fails before any runtime logic runs.
         let err = Cli::try_parse_from(["inferadb-ledger", "--data", "/tmp/ledger", "--dev"])
             .expect_err("clap should reject --data + --dev");
-        // clap's mutual-exclusion message names the conflicting argument.
         let msg = err.to_string();
         assert!(
             msg.contains("--dev") || msg.contains("--data"),
@@ -1133,6 +1164,58 @@ mod tests {
         let cli = Cli::try_parse_from(["inferadb-ledger", "--dev"]).expect("--dev alone is valid");
         assert!(cli.config.data_dir.is_none());
         assert!(cli.config.dev);
+    }
+
+    #[test]
+    fn cli_init_subcommand_does_not_require_storage_flag() {
+        // `init` is a gRPC client subcommand — it talks to a running
+        // server over `--host` and has no use for local storage.
+        // Before #245 the top-level `--data` / `--dev` requirement
+        // forced operators to pass an irrelevant placeholder.
+        let cli = Cli::try_parse_from(["inferadb-ledger", "init", "--host", "127.0.0.1:9090"])
+            .expect("init parses without --data / --dev");
+        assert!(matches!(cli.command, Some(CliCommand::Init { .. })));
+        assert!(cli.config.data_dir.is_none());
+        assert!(!cli.config.dev);
+    }
+
+    #[test]
+    fn cli_vaults_subcommand_does_not_require_storage_flag() {
+        let cli = Cli::try_parse_from(["inferadb-ledger", "vaults", "list", "42"])
+            .expect("vaults parses without --data / --dev");
+        assert!(matches!(cli.command, Some(CliCommand::Vaults { .. })));
+    }
+
+    #[test]
+    fn cli_config_schema_subcommand_does_not_require_storage_flag() {
+        let cli = Cli::try_parse_from(["inferadb-ledger", "config", "schema"])
+            .expect("config schema parses without --data / --dev");
+        assert!(matches!(cli.command, Some(CliCommand::Config { action: ConfigAction::Schema })));
+    }
+
+    #[test]
+    fn cli_restore_apply_subcommand_does_not_require_top_level_storage_flag() {
+        // `restore apply` carries its own `--data-dir` argument
+        // (offline operation against a stopped node's data tree); the
+        // top-level `--data` / `--dev` flag is meaningless and must
+        // not be required.
+        let cli = Cli::try_parse_from([
+            "inferadb-ledger",
+            "restore",
+            "apply",
+            "--data-dir",
+            "/var/lib/ledger",
+            "--staging",
+            "/var/lib/ledger/.restore-staging/42",
+            "--region",
+            "us-east-va",
+            "--organization-id",
+            "42",
+        ])
+        .expect("restore apply parses without top-level --data / --dev");
+        assert!(matches!(cli.command, Some(CliCommand::Restore { .. })));
+        assert!(cli.config.data_dir.is_none());
+        assert!(!cli.config.dev);
     }
 
     // === Logging Config Tests ===
@@ -1201,7 +1284,6 @@ mod tests {
             .batch_interval_ms(2500)
             .timeout_ms(5000)
             .shutdown_timeout_ms(7500)
-            .trace_raft_rpcs(false)
             .build()
             .unwrap();
 
@@ -1212,7 +1294,6 @@ mod tests {
         assert_eq!(config.batch_interval_ms, 2500);
         assert_eq!(config.timeout_ms, 5000);
         assert_eq!(config.shutdown_timeout_ms, 7500);
-        assert!(!config.trace_raft_rpcs);
     }
 
     #[test]

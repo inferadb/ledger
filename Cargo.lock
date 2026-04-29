@@ -1874,7 +1874,6 @@ dependencies = [
  "inferadb-ledger-test-utils",
  "inferadb-ledger-types",
  "metrics",
- "metrics-exporter-dogstatsd",
  "metrics-util",
  "moka",
  "opentelemetry",
@@ -2367,21 +2366,6 @@ checksum = "5d5312e9ba3771cfa961b585728215e3d972c950a3eed9252aa093d6301277e8"
 dependencies = [
  "ahash",
  "portable-atomic",
-]
-
-[[package]]
-name = "metrics-exporter-dogstatsd"
-version = "0.9.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "961f3712d8a7cfe14caaf74c3af503fe701cee6439ff49a7a3ebd04bf49c0502"
-dependencies = [
- "bytes",
- "itoa",
- "metrics",
- "metrics-util",
- "ryu",
- "thiserror",
- "tracing",
 ]
 
 [[package]]

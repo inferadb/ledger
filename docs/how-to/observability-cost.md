@@ -12,22 +12,9 @@ InferaDB Ledger avoids high-cardinality labels on Prometheus metrics by design. 
 
 ## Distributions vs Histograms
 
-By default, Ledger uses the standard Prometheus histogram format. Each histogram produces `_bucket`, `_sum`, and `_count` series, plus a series per bucket boundary per label combination.
+Ledger uses the standard Prometheus histogram format. Each histogram produces `_bucket`, `_sum`, and `_count` series, plus a series per bucket boundary per label combination.
 
-If you run the DogStatsD agent and want native Datadog distribution metrics (which support arbitrary post-ingest percentile queries and Metrics Without Limits):
-
-```bash
-# Enable DogStatsD distribution emission at build time
-cargo build --features dogstatsd
-```
-
-Or set the environment variable at runtime:
-
-```bash
-INFERADB__LEDGER__DOGSTATSD_ADDR=127.0.0.1:8125
-```
-
-When enabled, latency histograms emit as `distribution` type to DogStatsD **in addition to** the standard Prometheus `/metrics` endpoint. Use distributions when you need percentile slicing by tag combinations not known at scrape time. Disable if you are scraping Prometheus only — double-emission wastes DogStatsD ingestion budget.
+If you need native Datadog distribution metrics (arbitrary post-ingest percentile queries and Metrics Without Limits), forward the Prometheus scrape through the OTLP pipeline to the Datadog OTLP receiver. There is no separate DogStatsD code path in the binary — the OTLP pipeline is the single supported route to Datadog.
 
 ## Per-Region Tenant-Tag Pattern
 
@@ -109,7 +96,6 @@ The "before" estimate assumes naive tagging of every metric with `organization_i
 
 ## Checklist
 
-- [ ] DogStatsD enabled only if you need distribution percentile queries
 - [ ] `region`, `env`, `cluster` added at agent level — not per-request
 - [ ] `organization_id` / `vault_id` labels absent from all scraped metrics (verify: no spikes in custom metric count when org count grows)
 - [ ] Metrics Without Limits applied to cluster-aggregate metrics (`quorum_status`, `is_leader`, `raft_term`)

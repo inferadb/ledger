@@ -186,6 +186,53 @@ pub struct BootstrappedNode {
     pub event_flusher_handle: tokio::task::JoinHandle<()>,
 }
 
+/// Builds the initial
+/// [`RuntimeConfig`](inferadb_ledger_types::config::RuntimeConfig) used to
+/// seed the [`RuntimeConfigHandle`] at bootstrap.
+///
+/// Maps every [`Config`] field that has both an operator-input source and a
+/// matching `RuntimeConfig` slot into the resulting snapshot. Hot-path
+/// readers consume the seeded handle on their first read, so the snapshot
+/// must reflect the operator's resolved configuration — not
+/// `RuntimeConfig::default`, which leaves every section `None` (i.e.
+/// disabled) and silently overrides the operator until the first
+/// `UpdateConfig` RPC lands.
+///
+/// Resolution rules:
+///
+/// - `rate_limit`: cloned from [`Config::rate_limit`] (default-constructed if absent), with
+///   `enabled` resolved through
+///   [`RateLimitConfig::resolve_enabled`](inferadb_ledger_types::config::RateLimitConfig::resolve_enabled)
+///   so the `--ratelimit` CLI override takes precedence over the inner field — matching the
+///   dedicated [`RateLimiter`] construction site later in `bootstrap_node`.
+/// - `integrity`: cloned from [`Config::integrity`] (always present — it's a non-`Option` field on
+///   `Config`).
+/// - `jwt`: cloned from [`Config::jwt`] (always present — it's a non-`Option` field on `Config`).
+///
+/// Sections with no operator-input source on `Config` (`hot_key`,
+/// `compaction`, `validation`, `state_checkpoint`, `event_writer_batch`,
+/// `metrics_cardinality`, `events`) are left as `None`. The hot-path
+/// consumers fall back to the per-component default snapshot in that case;
+/// operators tune those sections via the runtime `UpdateConfig` RPC. The
+/// `events` section in particular requires an explicit
+/// [`EventConfig`](inferadb_ledger_types::events::EventConfig) →
+/// [`RuntimeEventsConfig`](inferadb_ledger_types::config::RuntimeEventsConfig)
+/// converter (the two types differ in shape — `bool` vs `Option<bool>`)
+/// and is intentionally out of scope for this seeding helper.
+fn build_initial_runtime_config(config: &Config) -> inferadb_ledger_types::config::RuntimeConfig {
+    let mut rl = config.rate_limit.clone().unwrap_or_default();
+    rl.enabled = inferadb_ledger_types::config::RateLimitConfig::resolve_enabled(
+        config.ratelimit,
+        rl.enabled,
+    );
+    inferadb_ledger_types::config::RuntimeConfig {
+        rate_limit: Some(rl),
+        integrity: Some(config.integrity.clone()),
+        jwt: Some(config.jwt.clone()),
+        ..Default::default()
+    }
+}
+
 /// Bootstraps the node using the two-phase start+init pattern.
 ///
 /// The function detects whether this node has been initialized by checking for
@@ -280,7 +327,18 @@ pub async fn bootstrap_node(
     // `UpdateConfig` RPCs adjust thresholds without a restart.
     // The handle is cloned later into `LedgerServer` so the admin UpdateConfig
     // RPC writes into the same ArcSwap.
-    let runtime_config = RuntimeConfigHandle::default();
+    //
+    // Seed the handle with the operator-resolved configuration so hot-path
+    // readers (rate limiter, hot-key detector, validation, integrity scrubber,
+    // JWT engine) observe the operator's settings on the first request —
+    // not the all-`None` `Default::default()` snapshot. Without this, an
+    // operator that sets `rate_limit.enabled = true` would see the limiter
+    // remain disabled at the runtime-config layer until the first
+    // `UpdateConfig` RPC arrived. The dedicated per-component construction
+    // sites below (e.g. `RateLimiter::new`) consume the resolved values
+    // directly; this seeding wires the same values into the handle so the
+    // runtime view stays consistent with the per-component view.
+    let runtime_config = RuntimeConfigHandle::new(build_initial_runtime_config(config));
     manager.set_runtime_config(runtime_config.clone());
 
     // Phase 7 / O1: vault hibernation policy. The `hibernation` struct on
@@ -2163,6 +2221,122 @@ mod tests {
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let result = bootstrap_node(&config, &data_dir, health, rx, None).await;
         assert!(result.is_ok(), "bootstrap should succeed: {:?}", result.err());
+    }
+
+    // =================================================================
+    // build_initial_runtime_config / RuntimeConfigHandle seeding
+    // =================================================================
+
+    #[test]
+    fn build_initial_runtime_config_seeds_rate_limit_enabled_from_inner_field() {
+        let mut config = Config::default();
+        config.rate_limit = Some(inferadb_ledger_types::config::RateLimitConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        config.ratelimit = None; // no CLI override
+
+        let runtime = build_initial_runtime_config(&config);
+
+        let rl = runtime.rate_limit.expect("rate_limit must be seeded");
+        assert!(
+            rl.enabled,
+            "operator-set rate_limit.enabled = true must propagate to the seeded RuntimeConfig"
+        );
+    }
+
+    #[test]
+    fn build_initial_runtime_config_resolves_cli_ratelimit_override() {
+        // CLI override = Some(true) wins regardless of inner field.
+        let mut config = Config::default();
+        config.rate_limit = Some(inferadb_ledger_types::config::RateLimitConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        config.ratelimit = Some(true);
+
+        let runtime = build_initial_runtime_config(&config);
+
+        let rl = runtime.rate_limit.expect("rate_limit must be seeded");
+        assert!(rl.enabled, "--ratelimit=true must override inner field");
+
+        // CLI override = Some(false) wins regardless of inner field.
+        let mut config = Config::default();
+        config.rate_limit = Some(inferadb_ledger_types::config::RateLimitConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        config.ratelimit = Some(false);
+
+        let runtime = build_initial_runtime_config(&config);
+
+        let rl = runtime.rate_limit.expect("rate_limit must be seeded");
+        assert!(!rl.enabled, "--ratelimit=false must override inner field");
+    }
+
+    #[test]
+    fn build_initial_runtime_config_seeds_integrity_and_jwt() {
+        let config = Config::default();
+        let runtime = build_initial_runtime_config(&config);
+
+        // Both should be seeded — they're non-Option fields on Config so we
+        // always have a concrete value to plumb through.
+        assert!(runtime.integrity.is_some(), "integrity must be seeded");
+        assert!(runtime.jwt.is_some(), "jwt must be seeded");
+    }
+
+    #[test]
+    fn build_initial_runtime_config_leaves_unseeded_sections_none() {
+        // Sections without a Config-input source remain None — the runtime
+        // UpdateConfig RPC is the only knob for these.
+        let config = Config::default();
+        let runtime = build_initial_runtime_config(&config);
+
+        assert!(runtime.hot_key.is_none(), "hot_key has no Config input");
+        assert!(runtime.compaction.is_none(), "compaction has no Config input");
+        assert!(runtime.validation.is_none(), "validation has no Config input");
+        assert!(runtime.state_checkpoint.is_none(), "state_checkpoint has no Config input");
+        assert!(runtime.event_writer_batch.is_none(), "event_writer_batch has no Config input");
+        assert!(runtime.metrics_cardinality.is_none(), "metrics_cardinality has no Config input");
+        // events is intentionally out of scope (EventConfig vs RuntimeEventsConfig type drift).
+        assert!(runtime.events.is_none(), "events seeding is deferred (type-shape drift)");
+    }
+
+    #[tokio::test]
+    async fn bootstrap_seeds_runtime_config_with_operator_rate_limit_enabled() {
+        // Regression: pre-fix, bootstrap initialised the RuntimeConfigHandle
+        // via `RuntimeConfigHandle::default()`, which left every section
+        // `None` regardless of the operator's input. Hot-path readers that
+        // consult the handle (rate limiter status checks, etc.) saw the
+        // limiter as disabled at the runtime-config layer until the first
+        // `UpdateConfig` RPC arrived — even when the operator had set
+        // `rate_limit.enabled = true` in their server config.
+        let temp_dir = tempdir().expect("create temp dir");
+        let data_dir = temp_dir.path().to_path_buf();
+        let mut config = Config::for_test(1, 50061, data_dir.clone());
+        config.rate_limit = Some(inferadb_ledger_types::config::RateLimitConfig {
+            enabled: true,
+            ..Default::default()
+        });
+
+        crate::cluster_id::write_cluster_id(&data_dir, 1).expect("write cluster_id");
+
+        let health = inferadb_ledger_raft::HealthState::new();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let node = bootstrap_node(&config, &data_dir, health, rx, None)
+            .await
+            .expect("bootstrap should succeed");
+
+        // No UpdateConfig RPC has been issued — the snapshot must already
+        // reflect the operator's `enabled = true`.
+        let snapshot = node.runtime_config.load();
+        let rl =
+            snapshot.rate_limit.as_ref().expect("rate_limit section must be seeded by bootstrap");
+        assert!(
+            rl.enabled,
+            "RuntimeConfigHandle snapshot must reflect operator-resolved \
+             rate_limit.enabled = true before the first UpdateConfig"
+        );
     }
 
     #[tokio::test]

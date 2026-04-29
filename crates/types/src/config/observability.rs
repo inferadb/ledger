@@ -44,11 +44,6 @@ const fn default_otel_shutdown_timeout_ms() -> u64 {
     15000
 }
 
-/// Default trace Raft RPCs setting (true).
-const fn default_trace_raft_rpcs() -> bool {
-    true
-}
-
 /// Configuration for OpenTelemetry/OTLP trace export.
 ///
 /// Enables exporting request logs as OpenTelemetry traces to observability
@@ -90,15 +85,6 @@ pub struct OtelConfig {
     /// Graceful shutdown timeout in milliseconds. Default: 15000ms.
     #[serde(default = "default_otel_shutdown_timeout_ms")]
     pub shutdown_timeout_ms: u64,
-
-    /// Whether to propagate trace context in Raft RPCs. Default: true.
-    ///
-    /// When enabled, trace context is injected into AppendEntries, Vote, and
-    /// InstallSnapshot RPCs, enabling end-to-end distributed tracing across
-    /// the Raft cluster. Disable for performance-critical deployments where
-    /// the ~100 bytes overhead per RPC is unacceptable.
-    #[serde(default = "default_trace_raft_rpcs")]
-    pub trace_raft_rpcs: bool,
 }
 
 impl Default for OtelConfig {
@@ -111,7 +97,6 @@ impl Default for OtelConfig {
             batch_interval_ms: default_otel_batch_interval_ms(),
             timeout_ms: default_otel_timeout_ms(),
             shutdown_timeout_ms: default_otel_shutdown_timeout_ms(),
-            trace_raft_rpcs: default_trace_raft_rpcs(),
         }
     }
 }
@@ -133,7 +118,6 @@ impl OtelConfig {
         #[builder(default = default_otel_batch_interval_ms())] batch_interval_ms: u64,
         #[builder(default = default_otel_timeout_ms())] timeout_ms: u64,
         #[builder(default = default_otel_shutdown_timeout_ms())] shutdown_timeout_ms: u64,
-        #[builder(default = default_trace_raft_rpcs())] trace_raft_rpcs: bool,
     ) -> Result<Self, ConfigError> {
         let config = Self {
             enabled,
@@ -143,7 +127,6 @@ impl OtelConfig {
             batch_interval_ms,
             timeout_ms,
             shutdown_timeout_ms,
-            trace_raft_rpcs,
         };
         config.validate()?;
         Ok(config)
@@ -204,59 +187,6 @@ impl OtelConfig {
         }
 
         Ok(())
-    }
-}
-
-// =========================================================================
-// DogStatsdConfig
-// =========================================================================
-
-/// Default value for `use_distributions` (true).
-const fn default_use_distributions() -> bool {
-    true
-}
-
-/// DogStatsD exporter configuration.
-///
-/// When enabled, histograms are emitted as Datadog distributions in parallel
-/// with the Prometheus exporter. Distributions are 1 custom metric per
-/// `(name, tag_set)` vs. 8 for legacy histograms — an 8× cost reduction.
-///
-/// # Single-recorder constraint
-///
-/// The `metrics` crate permits only one global recorder. When this is enabled,
-/// the DogStatsD recorder replaces the Prometheus recorder. Deploy a Prometheus
-/// sidecar (e.g. `dogstatsd_exporter`) if you need both simultaneously, or use
-/// the OTLP pipeline to forward traces to Datadog alongside DogStatsD metrics.
-///
-/// # Example
-///
-/// ```no_run
-/// # use inferadb_ledger_types::config::DogStatsdConfig;
-/// let config = DogStatsdConfig::default();
-/// assert_eq!(config.endpoint, None);
-/// assert!(config.use_distributions);
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct DogStatsdConfig {
-    /// UDP endpoint for the DogStatsD agent (e.g., `"127.0.0.1:8125"`).
-    ///
-    /// When `None`, the exporter is disabled and no recorder is installed.
-    /// The default DogStatsD port is 8125.
-    pub endpoint: Option<std::net::SocketAddr>,
-
-    /// Emit histograms as Datadog distributions (default: `true`).
-    ///
-    /// Distributions are computed server-side by the Datadog agent and cost
-    /// 1 custom metric per `(name, tag_set)` instead of 8 for legacy
-    /// histogram buckets.
-    #[serde(default = "default_use_distributions")]
-    pub use_distributions: bool,
-}
-
-impl Default for DogStatsdConfig {
-    fn default() -> Self {
-        Self { endpoint: None, use_distributions: default_use_distributions() }
     }
 }
 

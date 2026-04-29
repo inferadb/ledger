@@ -322,6 +322,29 @@ mod tests {
         assert!(loaded.validation.is_none());
     }
 
+    /// Regression: a handle constructed via [`RuntimeConfigHandle::new`]
+    /// reflects the seeded operator config on the very first `load()`,
+    /// before any [`update`](RuntimeConfigHandle::update) is issued. Bootstrap
+    /// historically used [`RuntimeConfigHandle::default`] here, which silently
+    /// disabled rate limiting at the runtime-config layer until an admin
+    /// `UpdateConfig` RPC arrived — even when the operator had set
+    /// `rate_limit.enabled = true` in their server config.
+    #[test]
+    fn handle_seeded_from_initial_reflects_operator_rate_limit_enabled() {
+        let initial = RuntimeConfig::builder()
+            .rate_limit(RateLimitConfig::builder().enabled(true).build().unwrap())
+            .build();
+        let handle = RuntimeConfigHandle::new(initial);
+
+        let snapshot = handle.load();
+        let rate_limit = snapshot.rate_limit.as_ref().expect("rate_limit must be seeded");
+        assert!(
+            rate_limit.enabled,
+            "operator-set rate_limit.enabled must be visible on the first load() \
+             — no UpdateConfig RPC has been issued"
+        );
+    }
+
     // ── Concurrency Stress Tests ────────────────────────────────────────
 
     /// Stress test: concurrent reads via ArcSwap::load() during store() updates.

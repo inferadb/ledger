@@ -61,9 +61,6 @@ pub mod deadline;
 pub mod dek_rewrap;
 #[doc(hidden)]
 pub mod dependency_health;
-#[cfg(feature = "dogstatsd")]
-#[doc(hidden)]
-pub mod dogstatsd;
 #[doc(hidden)]
 pub mod entry_crypto;
 #[doc(hidden)]
@@ -92,7 +89,6 @@ pub mod logging;
 pub mod membership_queue;
 #[doc(hidden)]
 pub mod node_registry;
-#[cfg(feature = "observability")]
 #[doc(hidden)]
 pub mod otel;
 #[doc(hidden)]
@@ -186,9 +182,6 @@ pub use commit_dispatcher::CommitDispatcher;
 pub use consensus_handle::{ConsensusHandle, HandleError, ResponseMap, SpilloverMap};
 #[doc(hidden)]
 pub use consensus_transport::GrpcConsensusTransport;
-#[cfg(feature = "dogstatsd")]
-#[doc(hidden)]
-pub use dogstatsd::{DogStatsdError, init_dogstatsd};
 #[doc(hidden)]
 pub use events_gc::EventsGarbageCollector;
 #[doc(hidden)]

@@ -284,9 +284,6 @@ pub struct RaftManagerConfig {
     /// Maximum election timeout in milliseconds.
     #[builder(default = 600)]
     pub election_timeout_max_ms: u64,
-    /// Whether to inject trace context into Raft RPCs.
-    #[builder(default = true)]
-    pub trace_raft_rpcs: bool,
     /// Cap on concurrent snapshot-producing membership conf-changes per
     /// per-organization Raft group (Phase 5 / M2 of the centralised
     /// membership plan). Default `2`, matching TiKV's

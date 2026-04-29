@@ -22,7 +22,7 @@ Complete reference for Ledger configuration via environment variables and CLI ar
 | —                                    | `--log-format` | `auto`       | Log format (`text`/`json`/`auto`)                           |
 | `INFERADB__LEDGER__LOGGING__ENABLED` | —              | `true`       | Enable request logging                                      |
 
-Exactly one of `--data` or `--dev` is required at startup; supplying neither (or both) returns a CLI parse error before bootstrap. At least one of `--listen` or `--socket` must also be specified. CLI arguments take precedence over environment variables.
+Exactly one of `--data` or `--dev` is required when launching the server (i.e. running `inferadb-ledger` with no subcommand). Supplying neither aborts at the start of `main` with a clear error; supplying both returns a CLI parse error. Client subcommands (`init`, `vaults`, `config schema`, `restore apply`) do **not** require a storage flag — they either talk to a running server over gRPC or take their own arguments. At least one of `--listen` or `--socket` must also be specified for the server-launch path. CLI arguments take precedence over environment variables.
 
 ## Network Configuration
 
@@ -91,7 +91,9 @@ The `--join` flag accepts a comma-separated list of seed addresses. The new node
 
 ## Storage
 
-Exactly one of `--data <path>` or `--dev` must be supplied at startup. Supplying neither (or both) returns a clear CLI parse error before bootstrap — there is no implicit fallback.
+Exactly one of `--data <path>` or `--dev` must be supplied when launching the server (i.e. running `inferadb-ledger` with no subcommand). Supplying neither aborts at the start of `main` with a clear `ConfigError::NoStorageMode` error; supplying both returns a CLI parse error. There is no implicit fallback.
+
+Client subcommands (`init`, `vaults`, `config schema`, `restore apply`) are exempt — they either talk to a running server over gRPC (in which case local storage is meaningless) or carry their own arguments (e.g. `restore apply` takes `--data-dir`).
 
 ### Persistent (`--data <path>`)
 
@@ -129,7 +131,7 @@ INFERADB__LEDGER__DEV=true inferadb-ledger ...
 
 `--dev` is **not** an in-memory mode — the storage backend is the same `FileBackend` used in production. Only the path lifetime differs: data is lost on process exit, on tempdir purge (most Linux distros recycle `/tmp` on reboot via `tmpfiles.d`), and on every fresh launch (each restart picks a new tempdir suffix, so the previous run's directory is orphaned). Production deployments must use `--data <path>` instead.
 
-`--data` and `--dev` are mutually exclusive — clap rejects the invocation at parse time when both are supplied.
+`--data` and `--dev` are mutually exclusive — clap rejects the invocation at parse time when both are supplied (this check applies to every invocation, not just the server-launch path).
 
 ## Batching
 
@@ -373,7 +375,6 @@ Export request logs as OTLP traces for visualization in Jaeger, Tempo, or Honeyc
 | `INFERADB__LEDGER__LOGGING__OTEL__BATCH_INTERVAL_MS`   | u64   | `5000`  | Max time between flushes (ms)        |
 | `INFERADB__LEDGER__LOGGING__OTEL__TIMEOUT_MS`          | u64   | `10000` | Per-export timeout (ms)              |
 | `INFERADB__LEDGER__LOGGING__OTEL__SHUTDOWN_TIMEOUT_MS` | u64   | `15000` | Graceful shutdown timeout (ms)       |
-| `INFERADB__LEDGER__LOGGING__OTEL__TRACE_RAFT_RPCS`     | bool  | `true`  | Propagate trace context in Raft RPCs |
 
 ### Logging Example
 
