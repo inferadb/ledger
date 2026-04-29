@@ -8,7 +8,7 @@ publish = false
 aes-gcm = { workspace = true }
 crc32fast = { workspace = true }
 dashmap = { workspace = true }
-inferadb-ledger-fs-sync = { workspace = true }
+inferadb-ledger-fs = { workspace = true }
 metrics = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
@@ -18,10 +18,6 @@ serde = { workspace = true, features = ["rc"] }
 snafu = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "macros", "rt"] }
 tracing = { workspace = true }
-
-[features]
-default = []
-io-uring = []
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -28,7 +28,7 @@ These files are load-bearing — their invariants ripple beyond the local file. 
 - **Crypto**: per-vault key management in `src/crypto/`.
 - **`StoreError`** (`src/error.rs`) — I/O, page-corruption, WAL-checksum, transaction-conflict variants.
 - **`CrashInjector`** — exposed through `crates/test-utils/`, not from here; store wires the injection points.
-- **`Database::evict_page_cache`** — best-effort OS-page-cache eviction backed by `inferadb_ledger_fs_sync::evict_page_cache` (`posix_fadvise(POSIX_FADV_DONTNEED)` on Linux, no-op success elsewhere). Used by the O6 vault-hibernation path in raft (`RaftManager::sleep_vault`); the in-process [`PageCache`] is intentionally NOT cleared so wake p99 stays under 100ms via warm in-process cache hits. Always idempotent and `Ok(())` on unsupported platforms.
+- **`Database::evict_page_cache`** — best-effort OS-page-cache eviction backed by `inferadb_ledger_fs::evict_page_cache` (`posix_fadvise(POSIX_FADV_DONTNEED)` on Linux, no-op success elsewhere). Used by the O6 vault-hibernation path in raft (`RaftManager::sleep_vault`); the in-process [`PageCache`] is intentionally NOT cleared so wake p99 stays under 100ms via warm in-process cache hits. Always idempotent and `Ok(())` on unsupported platforms.
 
 ## Test Patterns
 

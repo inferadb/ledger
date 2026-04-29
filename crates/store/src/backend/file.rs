@@ -188,7 +188,7 @@ impl StorageBackend for FileBackend {
         // reads — `posix_fadvise(POSIX_FADV_DONTNEED)` does not invalidate
         // an in-flight `pread`, it only marks pages as eligible for
         // reclamation. No lock needed.
-        inferadb_ledger_fs_sync::evict_page_cache(&self.file)?;
+        inferadb_ledger_fs::evict_page_cache(&self.file)?;
         Ok(())
     }
 

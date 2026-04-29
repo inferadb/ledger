@@ -123,21 +123,23 @@ for concurrency in $SWEEP_CONCURRENCY_LIST; do
             echo "$concurrency,$pool_size,FAILED,FAILED,FAILED,FAILED,FAILED,FAILED,FAILED,FAILED" >> "$CSV"
             continue
         fi
-        # metrics.json fields are ns-precision latencies and ops/s throughput.
-        # Convert to microseconds for human-friendly tables.
+        # metrics.json schema: latency_ns.{p50_ns,p95_ns,p99_ns,p999_ns,max_ns}
+        # + throughput_ops_per_sec at the top level. Convert ns → µs for the
+        # human-friendly table. Emit a plain comma-joined row so awk lookups
+        # downstream don't have to strip @csv-style quotes.
         jq -r --arg c "$concurrency" --arg p "$pool_size" '
             [
                 $c,
                 $p,
-                (.throughput_ops_per_sec // .throughput // 0),
-                ((.latency_ns.p50 // 0) / 1000),
-                ((.latency_ns.p95 // 0) / 1000),
-                ((.latency_ns.p99 // 0) / 1000),
-                ((.latency_ns.p999 // 0) / 1000),
+                (.throughput_ops_per_sec // 0),
+                ((.latency_ns.p50_ns // 0) / 1000),
+                ((.latency_ns.p95_ns // 0) / 1000),
+                ((.latency_ns.p99_ns // 0) / 1000),
+                ((.latency_ns.p999_ns // 0) / 1000),
                 (.errors // 0),
                 (.operations // 0),
-                (.elapsed_secs // .elapsed // 0)
-            ] | @csv
+                (.elapsed_secs // 0)
+            ] | join(",")
         ' "$metrics" >> "$CSV" 2>/dev/null || {
             echo "$concurrency,$pool_size,PARSE_ERROR,PARSE_ERROR,PARSE_ERROR,PARSE_ERROR,PARSE_ERROR,PARSE_ERROR,PARSE_ERROR,PARSE_ERROR" >> "$CSV"
         }

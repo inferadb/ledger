@@ -1,6 +1,6 @@
 [package]
-name = "inferadb-ledger-fs-sync"
-description = "Barrier-fsync primitive for InferaDB Ledger. This is the only crate in the workspace that is permitted to use unsafe code."
+name = "inferadb-ledger-fs"
+description = "Low-level file-system primitives for InferaDB Ledger (barrier fsync, page-cache eviction). This is the only crate in the workspace that is permitted to use unsafe code."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,7 +20,7 @@ tempfile.workspace = true
 # wraps `fcntl(F_BARRIERFSYNC)` on Apple platforms, which no audited safe-
 # syscall crate (rustix, nix) currently exposes. All unsafe blocks are
 # isolated in this crate and documented with SAFETY comments. See
-# `crates/fs-sync/CLAUDE.md` for the escalation rationale.
+# `crates/fs/CLAUDE.md` for the escalation rationale.
 [lints.rust]
 unsafe_code = "allow"
 missing_docs = "warn"

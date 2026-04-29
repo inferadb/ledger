@@ -6,20 +6,23 @@ Complete reference for Ledger configuration via environment variables and CLI ar
 
 | Variable                             | CLI            | Default       | Description                                  |
 | ------------------------------------ | -------------- | ------------- | -------------------------------------------- |
-| `INFERADB__LEDGER__LISTEN`           | `--listen`     | _(none)_      | TCP address for gRPC API                     |
-| `INFERADB__LEDGER__SOCKET`           | `--socket`     | _(none)_      | Unix domain socket path for gRPC API         |
-| `INFERADB__LEDGER__METRICS`          | `--metrics`    | _(disabled)_  | Prometheus metrics address                   |
-| `INFERADB__LEDGER__DATA`             | `--data`       | _(ephemeral)_ | Data directory                               |
-| `INFERADB__LEDGER__JOIN`             | `--join`       | _(none)_      | Comma-separated seed addresses for discovery |
-| `INFERADB__LEDGER__REGION`           | `--region`     | `global`      | Geographic data residency region             |
-| `INFERADB__LEDGER__ADVERTISE`        | `--advertise`  | _(auto)_      | Address advertised to peers                  |
-| `INFERADB__LEDGER__MAX_CONCURRENT`   | `--concurrent` | `10000`       | Max concurrent requests                      |
-| `INFERADB__LEDGER__TIMEOUT`          | `--timeout`    | `30`          | Request timeout (seconds)                    |
-| `INFERADB__LEDGER__RATELIMIT`        | `--ratelimit`  | `false`       | Enable server-side rate limiting (opt-in)    |
-| —                                    | `--log-format` | `auto`        | Log format (`text`/`json`/`auto`)            |
-| `INFERADB__LEDGER__LOGGING__ENABLED` | —              | `true`        | Enable request logging                       |
+| `INFERADB__LEDGER__LISTEN`           | `--listen`     | _(none)_     | TCP address for gRPC API                                    |
+| `INFERADB__LEDGER__SOCKET`           | `--socket`     | _(none)_     | Unix domain socket path for gRPC API                        |
+| `INFERADB__LEDGER__METRICS`          | `--metrics`    | _(disabled)_ | Prometheus metrics address                                  |
+| `INFERADB__LEDGER__DATA`             | `--data`       | _(none)_     | Persistent data directory                                   |
+| `INFERADB__LEDGER__DEV`              | `--dev`        | `false`      | Ephemeral file-backed storage at an auto-generated tempdir  |
+| `INFERADB__LEDGER__JOIN`             | `--join`       | _(none)_     | Comma-separated seed addresses for discovery                |
+| `INFERADB__LEDGER__REGION`           | `--region`     | `global`     | Geographic data residency region                            |
+| `INFERADB__LEDGER__ADVERTISE`        | `--advertise`  | _(auto)_     | Address advertised to peers                                 |
+| `INFERADB__LEDGER__MAX_CONCURRENT`   | `--concurrent` | `10000`      | Max concurrent requests                                     |
+| `INFERADB__LEDGER__TIMEOUT`          | `--timeout`    | `30`         | Request timeout (seconds)                                   |
+| `INFERADB__LEDGER__RATELIMIT`        | `--ratelimit`  | _(unset → honor `rate_limit.enabled`)_ | Optional override for server-side rate limiting |
+| `INFERADB__LEDGER__VAULT_HIBERNATION` | `--vault-hibernation` | _(unset → honor `hibernation.enabled`)_ | Optional override for vault hibernation idle detector |
+| `INFERADB__LEDGER__VAULT_METRICS`    | `--vault-metrics` | _(unset → honor `observability.vault_metrics_enabled`)_ | Optional override for per-vault Prometheus series |
+| —                                    | `--log-format` | `auto`       | Log format (`text`/`json`/`auto`)                           |
+| `INFERADB__LEDGER__LOGGING__ENABLED` | —              | `true`       | Enable request logging                                      |
 
-At least one of `--listen` or `--socket` must be specified. CLI arguments take precedence over environment variables.
+Exactly one of `--data` or `--dev` is required at startup; supplying neither (or both) returns a CLI parse error before bootstrap. At least one of `--listen` or `--socket` must also be specified. CLI arguments take precedence over environment variables.
 
 ## Network Configuration
 
@@ -88,14 +91,16 @@ The `--join` flag accepts a comma-separated list of seed addresses. The new node
 
 ## Storage
 
-### Data Directory
+Exactly one of `--data <path>` or `--dev` must be supplied at startup. Supplying neither (or both) returns a clear CLI parse error before bootstrap — there is no implicit fallback.
+
+### Persistent (`--data <path>`)
 
 ```bash
-# Persistent storage
-INFERADB__LEDGER__DATA=/var/lib/ledger
+# CLI
+inferadb-ledger --data /var/lib/ledger ...
 
-# Ephemeral (temporary directory, data lost on shutdown)
-# Omit DATA or use --data without value
+# Environment variable
+INFERADB__LEDGER__DATA=/var/lib/ledger inferadb-ledger ...
 ```
 
 Contents:
@@ -104,15 +109,27 @@ Contents:
 - `raft/` - Raft log and snapshots
 - `state/` - State machine data
 
-### Ephemeral Mode
+This is the only supported mode for production.
 
-When `DATA` is not set, Ledger creates a temporary directory with a unique Snowflake ID. Useful for:
+### Ephemeral (`--dev`)
+
+```bash
+# CLI
+inferadb-ledger --dev ...
+
+# Environment variable
+INFERADB__LEDGER__DEV=true inferadb-ledger ...
+```
+
+`--dev` runs the server against an auto-generated tempdir under `std::env::temp_dir()` (e.g. `/tmp/ledger-{snowflake}`). Useful for:
 
 - Local development
 - Integration tests
 - CI/CD pipelines
 
-Data is lost when the process exits.
+`--dev` is **not** an in-memory mode — the storage backend is the same `FileBackend` used in production. Only the path lifetime differs: data is lost on process exit, on tempdir purge (most Linux distros recycle `/tmp` on reboot via `tmpfiles.d`), and on every fresh launch (each restart picks a new tempdir suffix, so the previous run's directory is orphaned). Production deployments must use `--data <path>` instead.
+
+`--data` and `--dev` are mutually exclusive — clap rejects the invocation at parse time when both are supplied.
 
 ## Batching
 
@@ -164,13 +181,22 @@ INFERADB__LEDGER__TIMEOUT=60
 
 ## Rate Limiting
 
-Three-tier token-bucket admission control. **Disabled by default — opt in with `--ratelimit`.**
+Three-tier token-bucket admission control. **Disabled by default — opt in by setting `rate_limit.enabled = true` in YAML, or with `--ratelimit` at startup.**
 
 | Variable                       | CLI           | Default | Description                                  |
 | ------------------------------ | ------------- | ------- | -------------------------------------------- |
-| `INFERADB__LEDGER__RATELIMIT`  | `--ratelimit` | `false` | Master opt-in switch for server-side throttling |
+| `INFERADB__LEDGER__RATELIMIT`  | `--ratelimit` | _(unset → honor `rate_limit.enabled`)_ | Optional startup override for server-side throttling |
 
-When `--ratelimit` is **not** set, every admission check fast-paths through a single relaxed atomic load — no token-bucket math, no per-call overhead, no rejections. The `client_burst`, `organization_burst`, etc. knobs below are still loaded into the runtime config, but they have no effect until the master switch is flipped on.
+The canonical master switch is `rate_limit.enabled` (defaults to `false`). The `--ratelimit` CLI flag is an optional **`Option<bool>` override**:
+
+| Operator input | Effective `enabled` |
+| -------------- | ------------------- |
+| flag absent (default) | honors `rate_limit.enabled` (canonical inner field) |
+| `--ratelimit` (bare) | `true` — forces limiter on |
+| `--ratelimit=true` / `--ratelimit true` | `true` |
+| `--ratelimit=false` | `false` — forces limiter off |
+
+When the resolved value is `false`, every admission check fast-paths through a single relaxed atomic load — no token-bucket math, no per-call overhead, no rejections. The `client_burst`, `organization_burst`, etc. knobs below are still loaded into the runtime config, but they have no effect until the master switch is flipped on.
 
 ### Why is rate limiting opt-in?
 
@@ -192,7 +218,7 @@ Once enabled, the limiter applies the default thresholds below (or values suppli
 
 | Field                    | Default  | Unit       | Rationale                                                                                        |
 | ------------------------ | -------- | ---------- | ------------------------------------------------------------------------------------------------ |
-| `enabled`                | `false`  | bool       | Master opt-in switch (mirrors `--ratelimit`).                                                     |
+| `enabled`                | `false`  | bool       | Master opt-in switch. Canonical source of truth; `--ratelimit` is an optional startup override.    |
 | `client_burst`           | `10000`  | tokens     | Per-client bucket capacity; bias-toward-throughput default. Tune down to enforce per-caller cap. |
 | `client_rate`            | `10000`  | requests/s | Per-client sustained refill.                                                                     |
 | `organization_burst`     | `100000` | tokens     | Per-organization bucket capacity across all callers in the org.                                  |
@@ -218,6 +244,69 @@ grpcurl -plaintext -d '{
 ```
 
 Flipping `enabled` `true → false → true` works without restart; the underlying token-bucket state survives the disabled window so re-enabling doesn't reset every caller's quota. Validation enforces `> 0` on every numeric field and caps (`client_*` ≤ 1,000,000; `organization_*` ≤ 10,000,000) — only `enabled` controls whether the values take effect.
+
+## Vault Hibernation
+
+Idle-vault Raft groups transition to a `Dormant` lifecycle state when they have not seen activity in `idle_secs`. **Disabled by default — opt in by setting `hibernation.enabled = true` in YAML, or with `--vault-hibernation` at startup.**
+
+| Variable                              | CLI                   | Default | Description                                       |
+| ------------------------------------- | --------------------- | ------- | ------------------------------------------------- |
+| `INFERADB__LEDGER__VAULT_HIBERNATION` | `--vault-hibernation` | _(unset → honor `hibernation.enabled`)_ | Optional startup override |
+
+The canonical master switch is `hibernation.enabled` (defaults to `false`). The `--vault-hibernation` CLI flag is an optional **`Option<bool>` override** with the same shape as `--ratelimit`:
+
+| Operator input | Effective `enabled` |
+| -------------- | ------------------- |
+| flag absent (default) | honors `hibernation.enabled` |
+| `--vault-hibernation` (bare) | `true` — activates the idle detector |
+| `--vault-hibernation=true` / `--vault-hibernation true` | `true` |
+| `--vault-hibernation=false` | `false` — forces the detector off |
+
+When activated, the [`RaftManager`](https://docs.rs/inferadb-ledger-raft) runs an idle-detector task that transitions per-vault Raft groups to `Dormant` after they have not seen activity in `idle_secs` (default 5 min). The next request to a dormant vault wakes it back to `Active`. Hibernation is opt-in to keep the disciplined "no surprise throttling" default model — operators must accept the wake-time budget consciously.
+
+```yaml
+# Example YAML (recommended): operators opt in via the canonical inner field.
+hibernation:
+  enabled: true
+  idle_secs: 300            # 5 minutes
+  max_warm: 10000           # active-vault budget per node
+  wake_threshold_ms: 100    # p99 wake budget (observability hint)
+  scan_interval_secs: 30    # idle detector cadence
+```
+
+Hibernation tuning knobs are restart-only — there is no `UpdateConfig` arm for `hibernation` today. Flip the master switch from the CLI for ad-hoc rollouts:
+
+```bash
+inferadb-ledger --vault-hibernation --listen 0.0.0.0:50051 --data /data
+```
+
+## Per-Vault Prometheus Metrics
+
+Per-vault metrics emit a fresh `vault_id` label set per metric, multiplying time-series count by the number of vaults per organization. **Disabled by default — opt in by setting `observability.vault_metrics_enabled = true` in YAML, or with `--vault-metrics` at startup.**
+
+| Variable                          | CLI               | Default | Description                                       |
+| --------------------------------- | ----------------- | ------- | ------------------------------------------------- |
+| `INFERADB__LEDGER__VAULT_METRICS` | `--vault-metrics` | _(unset → honor `observability.vault_metrics_enabled`)_ | Optional startup override |
+
+The canonical master switch is `observability.vault_metrics_enabled` (defaults to `false`). The `--vault-metrics` CLI flag is an optional **`Option<bool>` override** with the same shape as `--ratelimit`:
+
+| Operator input | Effective `vault_metrics_enabled` |
+| -------------- | --------------------------------- |
+| flag absent (default) | honors `observability.vault_metrics_enabled` |
+| `--vault-metrics` (bare) | `true` — emits per-vault series |
+| `--vault-metrics=true` / `--vault-metrics true` | `true` |
+| `--vault-metrics=false` | `false` — suppresses per-vault series |
+
+Per-vault metrics are **restart-only**. Flipping the gate at runtime would change the time-series shape mid-scrape and confuse dashboards, so the resolved value is set exactly once at startup. Organization-level rollups (`org_apply_throughput_ops_total`, `org_active_vault_count`) are always-on regardless of this flag.
+
+```yaml
+# Example YAML: opt in to per-vault series for environments where the
+# extra cardinality is acceptable (staging, small clusters, single-tenant deploys).
+observability:
+  vault_metrics_enabled: true
+```
+
+Verify your TSDB sizing covers the additional `vault_id` cardinality before deploying with this enabled in production: estimated cardinality is `(active vault count × number of per-vault metric families)` on top of the always-on org-level rollups.
 
 ## Logging
 

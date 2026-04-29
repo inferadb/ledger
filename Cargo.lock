@@ -1792,7 +1792,7 @@ dependencies = [
  "blake3",
  "crc32fast",
  "dashmap",
- "inferadb-ledger-fs-sync",
+ "inferadb-ledger-fs",
  "metrics",
  "parking_lot",
  "proptest",
@@ -1806,7 +1806,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "inferadb-ledger-fs-sync"
+name = "inferadb-ledger-fs"
 version = "0.1.0"
 dependencies = [
  "libc",
@@ -2075,7 +2075,7 @@ dependencies = [
  "bon",
  "byteorder",
  "chrono",
- "inferadb-ledger-fs-sync",
+ "inferadb-ledger-fs",
  "inferadb-ledger-types",
  "moka",
  "parking_lot",

@@ -186,7 +186,11 @@ impl CrashableNode {
             raft: Some(raft),
             saga: inferadb_ledger_types::config::SagaConfig { poll_interval_secs: 2 },
             token_maintenance_interval_secs: 3,
-            ratelimit: true,
+            // CLI override left as None; `rate_limit.enabled = true` is
+            // the canonical master-switch source of truth (see DSoT
+            // migration). The bootstrap path resolves
+            // `cli.unwrap_or(inner)`, so the inner `enabled` carries.
+            ratelimit: None,
             rate_limit: Some(rate_limit),
             email_blinding_key: Some(
                 "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),

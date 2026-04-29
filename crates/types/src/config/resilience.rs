@@ -162,6 +162,31 @@ impl RateLimitConfig {
 }
 
 impl RateLimitConfig {
+    /// Resolves the effective `enabled` value from a CLI override and the
+    /// configured inner field.
+    ///
+    /// The inner field is the canonical source of truth — it carries the
+    /// operator's YAML / env config (or the disabled default). The CLI
+    /// override exists for operator convenience: `--ratelimit` activates
+    /// the limiter without a YAML edit, `--ratelimit=false` forces it off
+    /// regardless of the inner setting. Used at server startup; the
+    /// runtime-reconfig path (`UpdateConfig`) reads the inner field
+    /// directly and is unaffected by the CLI override.
+    ///
+    /// # Resolution table
+    ///
+    /// | `cli_override` | `inner` | result |
+    /// | -------------- | ------- | ------ |
+    /// | `None`         | `false` | `false` |
+    /// | `None`         | `true`  | `true`  |
+    /// | `Some(true)`   | `_`     | `true`  |
+    /// | `Some(false)`  | `_`     | `false` |
+    #[inline]
+    #[must_use]
+    pub fn resolve_enabled(cli_override: Option<bool>, inner: bool) -> bool {
+        cli_override.unwrap_or(inner)
+    }
+
     /// Validates the configuration values.
     ///
     /// Call after deserialization to ensure values are within valid ranges.
@@ -903,72 +928,6 @@ impl MigrationConfig {
     }
 }
 
-// =============================================================================
-// Hibernation Configuration
-// =============================================================================
-
-/// Default for whether hibernation is enabled.
-fn default_hibernate_enabled() -> bool {
-    true
-}
-
-/// Default idle timeout before a region group hibernates.
-fn default_hibernate_idle_timeout_secs() -> u64 {
-    60
-}
-
-/// Configuration for Raft group hibernation.
-///
-/// When enabled, background jobs for idle region groups are stopped after
-/// `idle_timeout_secs` of inactivity, then restarted on the next request.
-/// The Raft instance itself remains alive — only background jobs are paused.
-///
-/// The system region (`GLOBAL`) is never hibernated.
-///
-/// ```no_run
-/// # use inferadb_ledger_types::config::HibernateConfig;
-/// let config = HibernateConfig::default();
-/// assert!(config.enabled);
-/// assert_eq!(config.idle_timeout_secs, 60);
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct HibernateConfig {
-    /// Whether hibernation is enabled.
-    #[serde(default = "default_hibernate_enabled")]
-    pub enabled: bool,
-
-    /// Seconds of inactivity before a group hibernates.
-    ///
-    /// Must be >= 10. Default: 60.
-    #[serde(default = "default_hibernate_idle_timeout_secs")]
-    pub idle_timeout_secs: u64,
-}
-
-impl Default for HibernateConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_hibernate_enabled(),
-            idle_timeout_secs: default_hibernate_idle_timeout_secs(),
-        }
-    }
-}
-
-impl HibernateConfig {
-    /// Validates the configuration values.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConfigError::Validation`] if `idle_timeout_secs` is less than 10.
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.idle_timeout_secs < 10 {
-            return Err(ConfigError::Validation {
-                message: "hibernate idle_timeout_secs must be >= 10".to_string(),
-            });
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::field_reassign_with_default)]
 mod tests {
@@ -1002,6 +961,22 @@ mod tests {
         let config = RateLimitConfig::builder().enabled(true).build().unwrap();
         assert!(config.enabled);
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn rate_limit_resolve_enabled_returns_inner_when_cli_unset() {
+        // The default-rate-limiting-off guarantee: when the operator has
+        // not explicitly opted in (CLI absent, YAML inner field at the
+        // disabled default), the resolved value must stay `false`.
+        assert!(!RateLimitConfig::resolve_enabled(None, false));
+        assert!(RateLimitConfig::resolve_enabled(None, true));
+    }
+
+    #[test]
+    fn rate_limit_resolve_enabled_cli_overrides_inner() {
+        // CLI wins on both directions when present.
+        assert!(RateLimitConfig::resolve_enabled(Some(true), false));
+        assert!(!RateLimitConfig::resolve_enabled(Some(false), true));
     }
 
     #[test]
@@ -1251,30 +1226,6 @@ mod tests {
     fn migration_config_at_minimum_succeeds() {
         let mut config = MigrationConfig::default();
         config.timeout_secs = 60;
-        assert!(config.validate().is_ok());
-    }
-
-    // HibernateConfig tests
-
-    #[test]
-    fn hibernate_config_below_minimum_fails() {
-        let mut config = HibernateConfig::default();
-        config.idle_timeout_secs = 9;
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn hibernate_config_at_minimum_succeeds() {
-        let mut config = HibernateConfig::default();
-        config.idle_timeout_secs = 10;
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn hibernate_config_serde_defaults() {
-        let config: HibernateConfig = serde_json::from_str("{}").unwrap();
-        assert!(config.enabled);
-        assert_eq!(config.idle_timeout_secs, 60);
         assert!(config.validate().is_ok());
     }
 }

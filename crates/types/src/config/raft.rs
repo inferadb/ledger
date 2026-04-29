@@ -604,6 +604,20 @@ impl HibernationConfig {
 }
 
 impl HibernationConfig {
+    /// Resolves the effective `enabled` value from a CLI override and the
+    /// configured inner field.
+    ///
+    /// Mirrors [`RateLimitConfig::resolve_enabled`](super::RateLimitConfig::resolve_enabled).
+    /// The inner field is the canonical source of truth (carries the
+    /// operator's YAML / env config or the disabled default); the CLI
+    /// override (`--vault-hibernation`) lets operators flip the master
+    /// switch without a YAML edit.
+    #[inline]
+    #[must_use]
+    pub fn resolve_enabled(cli_override: Option<bool>, inner: bool) -> bool {
+        cli_override.unwrap_or(inner)
+    }
+
     /// Validates the configuration values.
     ///
     /// # Errors
@@ -860,5 +874,17 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.idle_secs, 60);
         assert_eq!(config.max_warm, 500);
+    }
+
+    #[test]
+    fn hibernation_resolve_enabled_returns_inner_when_cli_unset() {
+        assert!(!HibernationConfig::resolve_enabled(None, false));
+        assert!(HibernationConfig::resolve_enabled(None, true));
+    }
+
+    #[test]
+    fn hibernation_resolve_enabled_cli_overrides_inner() {
+        assert!(HibernationConfig::resolve_enabled(Some(true), false));
+        assert!(!HibernationConfig::resolve_enabled(Some(false), true));
     }
 }

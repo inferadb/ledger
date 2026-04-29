@@ -149,12 +149,12 @@ impl CryptoSidecar {
     /// Hints to the OS that the sidecar's cached pages may be dropped.
     ///
     /// Best-effort, idempotent. The file-backed variant calls
-    /// [`inferadb_ledger_fs_sync::evict_page_cache`]; the in-memory variant
+    /// [`inferadb_ledger_fs::evict_page_cache`]; the in-memory variant
     /// is a no-op.
     pub fn evict_page_cache(&self) -> Result<()> {
         match self {
             Self::File { file, .. } => {
-                inferadb_ledger_fs_sync::evict_page_cache(file)?;
+                inferadb_ledger_fs::evict_page_cache(file)?;
                 Ok(())
             },
             Self::Memory { .. } => Ok(()),

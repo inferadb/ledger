@@ -283,7 +283,7 @@ Client Request (with idempotency_key)
 
 **Target latency**: <50ms at p99 under normal load.
 
-**Durability**: The response at step [14] is returned only after successful quorum commit (step [11]). `Reactor` batches WAL fsyncs across proposals — one barrier fsync per batch via `crates/fs-sync/src/lib.rs`, not per proposal — so write latency scales with batch cadence rather than per-operation disk work. See [Durability & Finality](#durability--finality) below for the complete contract and [docs/architecture/durability.md](docs/architecture/durability.md) for the operator-facing recovery matrix.
+**Durability**: The response at step [14] is returned only after successful quorum commit (step [11]). `Reactor` batches WAL fsyncs across proposals — one barrier fsync per batch via `crates/fs/src/lib.rs`, not per proposal — so write latency scales with batch cadence rather than per-operation disk work. See [Durability & Finality](#durability--finality) below for the complete contract and [docs/architecture/durability.md](docs/architecture/durability.md) for the operator-facing recovery matrix.
 
 **Consensus layering**: Steps 10–11 run inside `inferadb-ledger-consensus` (event-driven `Reactor` returns `Action`s: WAL fsync, peer sends, commit). Steps 12–13 run in `inferadb-ledger-raft`'s `ApplyPool` — one `ApplyWorker` per shard parallelizes state-machine application across shards while keeping each shard's apply deterministic.
 
@@ -627,7 +627,7 @@ During `Draining`, all mutating RPCs (write, create/delete org/vault, join/leave
 
 | Event                | Durability Guarantee                           | Enforced in                                                                                                                                                                                                                            |
 | -------------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Write acknowledged   | Persisted on majority (2f+1) nodes             | `Shard::handle_append_response` emits `Commit` only once quorum is reached (`crates/consensus/src/shard.rs`); `Reactor` issues a barrier fsync per batch (`crates/consensus/src/reactor.rs` via `crates/fs-sync/src/lib.rs`). Verified by `crates/consensus/src/simulation/multi_raft.rs`. |
+| Write acknowledged   | Persisted on majority (2f+1) nodes             | `Shard::handle_append_response` emits `Commit` only once quorum is reached (`crates/consensus/src/shard.rs`); `Reactor` issues a barrier fsync per batch (`crates/consensus/src/reactor.rs` via `crates/fs/src/lib.rs`). Verified by `crates/consensus/src/simulation/multi_raft.rs`. |
 | Block committed      | Cannot be reverted without majority corruption | No `Action` variant removes a committed entry; safety is exercised by the deterministic simulation harness in `crates/consensus/src/simulation/`.                                                                                      |
 | State root published | Independently verifiable by any client         | `BlockHeader.state_root` returned on write responses and via the `GetTip` / `VerifiedRead` / `GetBlock` RPCs; verification primitives in `crates/types/src/hash.rs` and `crates/types/src/merkle.rs`.                                  |
 
@@ -1362,7 +1362,7 @@ Every invariant below is named with its enforcement site (the code that establis
 
 11. **Snapshot consistency**: Loading a snapshot and applying subsequent blocks produces the current `state_root`. _Enforced by `SnapshotWriter` / `SyncSnapshotReader` in `crates/raft/src/snapshot.rs` and `RaftLogStore::install_snapshot` in `crates/raft/src/log_storage/raft_impl.rs`; verified by snapshot-determinism tests in `just test-stress-correctness`._
 12. **Historical accessibility**: Any committed block is readable with verifiable proofs. _Exposed via the `HistoricalRead`, `GetBlock`, and `GetBlockRange` RPCs in `proto/ledger/v1/ledger.proto`, served from `BlockArchive` in `crates/state/src/`._
-13. **Replication durability**: After Raft commit, data exists on quorum. _Enforced by batched barrier fsync in `crates/consensus/src/reactor.rs` (one fsync per batch via `crates/fs-sync/src/lib.rs`); contract detailed in [`docs/architecture/durability.md`](docs/architecture/durability.md); verified by crash-and-recover tests in `crates/consensus/src/simulation/`._
+13. **Replication durability**: After Raft commit, data exists on quorum. _Enforced by batched barrier fsync in `crates/consensus/src/reactor.rs` (one fsync per batch via `crates/fs/src/lib.rs`); contract detailed in [`docs/architecture/durability.md`](docs/architecture/durability.md); verified by crash-and-recover tests in `crates/consensus/src/simulation/`._
 
 ### Idempotency Invariants
 

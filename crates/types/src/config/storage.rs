@@ -1,13 +1,113 @@
 //! Storage engine, compaction, integrity, backup, tiered storage, and lifecycle purge
 //! configuration.
 
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::ConfigError;
 use crate::Region;
+
+/// Server-side storage mode, selected by the operator at startup.
+///
+/// Exactly one of `--data <path>` or `--dev` must be supplied at startup;
+/// neither / both is a configuration error. The CLI surface in
+/// `crates/server/src/config.rs` enforces mutual exclusion via clap's
+/// `ArgGroup`; programmatic constructors should consult
+/// `inferadb_ledger_server::config::Config::storage_mode` for the same
+/// check.
+///
+/// # Variants
+///
+/// - [`StorageMode::File`] — persistent file-system storage at the given path. Selected with
+///   `--data <path>`. The path is honored verbatim.
+/// - [`StorageMode::EphemeralTempDir`] — ephemeral file-backed storage at an auto-generated
+///   temporary directory. Selected with `--dev`. The storage backend is still [`FileBackend`]; the
+///   path lives under `std::env::temp_dir()` and is recreated on every restart, so the prior
+///   directory is orphaned (and tempdirs are typically purged on reboot via `tmpfiles.d` on Linux).
+///   This is **not** an in-memory mode — durability semantics are identical to
+///   [`StorageMode::File`] while the process is running; only the path lifetime differs.
+///
+/// [`FileBackend`]: https://docs.rs/inferadb-ledger-store/latest/inferadb_ledger_store/struct.FileBackend.html
+#[derive(Debug, Clone)]
+pub enum StorageMode {
+    /// Persistent file-system storage at the given path.
+    File {
+        /// The data directory passed via `--data <path>`.
+        data_dir: PathBuf,
+    },
+    /// Ephemeral file-backed storage at an auto-generated tempdir path.
+    ///
+    /// Data is lost on process exit, on tempdir purge, and on restart
+    /// (each fresh launch picks a new tempdir suffix). Use only for
+    /// development and testing.
+    EphemeralTempDir,
+}
+
+impl StorageMode {
+    /// Returns `true` when the server is running with ephemeral storage.
+    ///
+    /// Operators are warned at startup whenever this is `true`; long-lived
+    /// deployments must use [`StorageMode::File`].
+    #[must_use]
+    pub fn is_ephemeral(&self) -> bool {
+        matches!(self, StorageMode::EphemeralTempDir)
+    }
+
+    /// Resolves the on-disk path for this storage mode, creating the
+    /// tempdir for [`StorageMode::EphemeralTempDir`].
+    ///
+    /// For [`StorageMode::File`], returns the configured path verbatim
+    /// without touching the filesystem (the caller is expected to ensure
+    /// the directory exists or will be created during bootstrap).
+    ///
+    /// For [`StorageMode::EphemeralTempDir`], generates a Snowflake-suffixed
+    /// path under [`std::env::temp_dir`] and `mkdir -p`s it. The Snowflake
+    /// suffix means restarts pick a new directory and the previous run's
+    /// data is orphaned, so this mode is suitable only for development.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] when the Snowflake generator
+    /// fails (system clock before Unix epoch) or when the temporary
+    /// directory cannot be created.
+    pub fn resolve_data_dir(&self) -> Result<PathBuf, ConfigError> {
+        match self {
+            StorageMode::File { data_dir } => Ok(data_dir.clone()),
+            StorageMode::EphemeralTempDir => {
+                let id = crate::snowflake::generate().map_err(|e| ConfigError::Validation {
+                    message: format!("failed to generate ephemeral directory ID: {e}"),
+                })?;
+                let path = std::env::temp_dir().join(format!("ledger-{id}"));
+                std::fs::create_dir_all(&path).map_err(|e| ConfigError::Validation {
+                    message: format!(
+                        "failed to create ephemeral directory {}: {e}",
+                        path.display()
+                    ),
+                })?;
+                Ok(path)
+            },
+        }
+    }
+
+    /// Convenience accessor for the configured persistent path, if any.
+    ///
+    /// Returns `None` for [`StorageMode::EphemeralTempDir`] — the
+    /// resolved tempdir path is not stored on the variant; it is
+    /// produced lazily by [`Self::resolve_data_dir`].
+    #[must_use]
+    pub fn configured_path(&self) -> Option<&Path> {
+        match self {
+            StorageMode::File { data_dir } => Some(data_dir.as_path()),
+            StorageMode::EphemeralTempDir => None,
+        }
+    }
+}
 
 /// Minimum cache size: 1 MB.
 const MIN_CACHE_SIZE_BYTES: usize = 1024 * 1024;
@@ -648,11 +748,6 @@ fn default_hot_count() -> usize {
     3
 }
 
-/// Default days to keep in warm tier before cold demotion.
-fn default_warm_days() -> u32 {
-    30
-}
-
 /// Default demotion interval in seconds (1 hour).
 fn default_demote_interval_secs() -> u64 {
     3600
@@ -668,7 +763,6 @@ fn default_multipart_threshold_bytes() -> usize {
 /// Controls how snapshots are distributed across storage tiers:
 /// - **Hot**: Local SSD for fast access (most recent N snapshots)
 /// - **Warm**: Object storage (S3/GCS/Azure) for older snapshots
-/// - **Cold**: Archive storage (future, not yet implemented)
 ///
 /// When `warm_url` is `None`, operates in local-only mode with zero overhead.
 ///
@@ -698,18 +792,6 @@ pub struct TieredStorageConfig {
     /// `None` means local-only mode (no warm tier, zero overhead).
     #[serde(default)]
     pub warm_url: Option<String>,
-
-    /// Days to keep snapshots in warm tier before cold demotion.
-    ///
-    /// Only relevant when cold tier is enabled. Default: 30.
-    #[serde(default = "default_warm_days")]
-    pub warm_days: u32,
-
-    /// Whether cold tier archival is enabled.
-    ///
-    /// Cold tier support is not yet implemented. Default: false.
-    #[serde(default)]
-    pub cold_enabled: bool,
 
     /// Interval between demotion cycles in seconds.
     ///
@@ -769,8 +851,6 @@ impl Default for TieredStorageConfig {
         Self {
             hot_count: default_hot_count(),
             warm_url: None,
-            warm_days: default_warm_days(),
-            cold_enabled: false,
             demote_interval_secs: default_demote_interval_secs(),
             multipart_threshold_bytes: default_multipart_threshold_bytes(),
             region_overrides: HashMap::new(),
@@ -795,8 +875,6 @@ impl TieredStorageConfig {
     pub fn new(
         #[builder(default = default_hot_count())] hot_count: usize,
         warm_url: Option<String>,
-        #[builder(default = default_warm_days())] warm_days: u32,
-        #[builder(default)] cold_enabled: bool,
         #[builder(default = default_demote_interval_secs())] demote_interval_secs: u64,
         #[builder(default = default_multipart_threshold_bytes())] multipart_threshold_bytes: usize,
         #[builder(default)] region_overrides: HashMap<Region, RegionTieredStorageOverride>,
@@ -804,8 +882,6 @@ impl TieredStorageConfig {
         let config = Self {
             hot_count,
             warm_url,
-            warm_days,
-            cold_enabled,
             demote_interval_secs,
             multipart_threshold_bytes,
             region_overrides,
@@ -1574,5 +1650,62 @@ mod tiered_storage_tests {
         assert_eq!(drop_json, r#""drop""#);
         let block_json = serde_json::to_string(&EventOverflowBehavior::Block).unwrap();
         assert_eq!(block_json, r#""block""#);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod storage_mode_tests {
+    use super::*;
+
+    #[test]
+    fn file_mode_is_not_ephemeral() {
+        let mode = StorageMode::File { data_dir: PathBuf::from("/data/ledger") };
+        assert!(!mode.is_ephemeral());
+        assert_eq!(mode.configured_path(), Some(Path::new("/data/ledger")));
+    }
+
+    #[test]
+    fn ephemeral_mode_is_ephemeral_with_no_configured_path() {
+        let mode = StorageMode::EphemeralTempDir;
+        assert!(mode.is_ephemeral());
+        assert!(mode.configured_path().is_none());
+    }
+
+    #[test]
+    fn file_mode_resolve_returns_path_verbatim() {
+        let mode = StorageMode::File { data_dir: PathBuf::from("/data/ledger") };
+        let resolved = mode.resolve_data_dir().expect("resolve file mode");
+        assert_eq!(resolved, PathBuf::from("/data/ledger"));
+    }
+
+    #[test]
+    fn ephemeral_mode_resolve_creates_tempdir_with_ledger_prefix() {
+        let mode = StorageMode::EphemeralTempDir;
+        let resolved = mode.resolve_data_dir().expect("resolve ephemeral mode");
+        assert!(
+            resolved.starts_with(std::env::temp_dir()),
+            "resolved path {} should be under temp_dir {}",
+            resolved.display(),
+            std::env::temp_dir().display()
+        );
+        assert!(
+            resolved.file_name().and_then(|s| s.to_str()).unwrap().starts_with("ledger-"),
+            "resolved path {} should have a 'ledger-' prefix",
+            resolved.display()
+        );
+        assert!(resolved.exists(), "ephemeral data dir should exist after resolve");
+        // Cleanup; failure is non-fatal (tempdirs are reaped by the OS).
+        let _ = std::fs::remove_dir_all(&resolved);
+    }
+
+    #[test]
+    fn ephemeral_mode_resolve_picks_a_fresh_path_each_call() {
+        // The Snowflake suffix guarantees uniqueness across calls.
+        let first = StorageMode::EphemeralTempDir.resolve_data_dir().expect("resolve first");
+        let second = StorageMode::EphemeralTempDir.resolve_data_dir().expect("resolve second");
+        assert_ne!(first, second, "ephemeral resolves should produce distinct paths");
+        let _ = std::fs::remove_dir_all(&first);
+        let _ = std::fs::remove_dir_all(&second);
     }
 }

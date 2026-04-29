@@ -376,6 +376,11 @@ impl TestCluster {
         // defaults take effect; per-test overrides then narrow the bucket
         // via `with_rate_limit`.
         let rate_limit_cfg = rate_limit_override.clone().unwrap_or_else(test_rate_limit_config);
+        // Per the DSoT migration: the CLI override is left as `None` and
+        // the inner `RateLimitConfig::enabled` field on `rate_limit_cfg`
+        // drives the master switch. Tests that need to flip it on
+        // construct `RateLimitConfig::builder().enabled(true)…build()`
+        // directly via `with_rate_limit`.
         let config = inferadb_ledger_server::config::Config {
             listen,
             socket: socket_path.clone(),
@@ -385,7 +390,7 @@ impl TestCluster {
             raft: Some(test_raft_config()),
             saga: inferadb_ledger_types::config::SagaConfig { poll_interval_secs: 2 },
             token_maintenance_interval_secs: 3,
-            ratelimit: rate_limit_cfg.enabled,
+            ratelimit: None,
             rate_limit: Some(rate_limit_cfg),
             email_blinding_key: if include_blinding_key {
                 Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string())
@@ -1919,6 +1924,8 @@ async fn bootstrap_one_node_with_regions(
         .expect("valid backup config");
 
     let rate_limit_cfg = rate_limit_override.unwrap_or_else(test_rate_limit_config);
+    // Per the DSoT migration: the CLI override is left as `None` and the
+    // inner `RateLimitConfig::enabled` field drives the master switch.
     let config = inferadb_ledger_server::config::Config {
         listen,
         socket: socket_path.clone(),
@@ -1928,7 +1935,7 @@ async fn bootstrap_one_node_with_regions(
         raft: Some(test_raft_config()),
         saga: inferadb_ledger_types::config::SagaConfig { poll_interval_secs: 2 },
         token_maintenance_interval_secs: 3,
-        ratelimit: rate_limit_cfg.enabled,
+        ratelimit: None,
         rate_limit: Some(rate_limit_cfg),
         email_blinding_key: if include_blinding_key {
             Some(TEST_BLINDING_KEY_HEX.to_string())

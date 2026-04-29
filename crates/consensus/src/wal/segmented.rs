@@ -59,7 +59,7 @@ impl SegmentedWalBackend {
     /// Creates a new segmented WAL backend rooted at the given directory.
     ///
     /// `sync()` uses barrier semantics — `fcntl(F_BARRIERFSYNC)` on Apple,
-    /// `fdatasync` on Linux — via [`inferadb_ledger_fs_sync::sync`].
+    /// `fdatasync` on Linux — via [`inferadb_ledger_fs::sync`].
     ///
     /// On open, scans for existing segment files to resume from where we left off.
     pub fn open(dir: &Path) -> Result<Self, WalError> {
@@ -215,7 +215,7 @@ impl WalBackend for SegmentedWalBackend {
     #[tracing::instrument(level = "debug", skip_all)]
     fn sync(&mut self) -> Result<(), WalError> {
         if let Some(ref seg) = self.active {
-            inferadb_ledger_fs_sync::sync(&seg.file)
+            inferadb_ledger_fs::sync(&seg.file)
                 .map_err(|e| WalError::Io { kind: e.kind(), message: e.to_string() })?;
         }
         Ok(())

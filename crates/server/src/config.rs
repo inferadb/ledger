@@ -9,8 +9,8 @@
 use std::{net::SocketAddr, path::PathBuf};
 
 use bon::Builder;
-use clap::Parser;
-pub use inferadb_ledger_types::config::OtelConfig;
+use clap::{ArgGroup, Parser};
+pub use inferadb_ledger_types::config::{OtelConfig, StorageMode};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use snafu::Snafu;
@@ -72,11 +72,14 @@ pub enum LogFormat {
 /// # CLI Example
 ///
 /// ```bash
-/// # Start a node (listens for connections)
+/// # Persistent storage (production)
 /// inferadb-ledger --data /data
 ///
-/// # Start a node with seed peers
+/// # Persistent storage with seed peers
 /// inferadb-ledger --data /data --join node1:9090,node2:9090
+///
+/// # Ephemeral storage (development / one-off testing)
+/// inferadb-ledger --dev
 ///
 /// # Initialize the cluster (one-time, after nodes are running)
 /// inferadb-ledger init --host node1:9090
@@ -92,11 +95,17 @@ pub enum LogFormat {
 /// inferadb-ledger
 /// ```
 ///
-/// # Ephemeral Mode
+/// # Storage Mode
 ///
-/// When `--data` is not specified, the server runs in ephemeral mode using a
-/// temporary directory. All data is lost on shutdown. This is useful for
-/// development and testing.
+/// Exactly one of `--data <path>` or `--dev` must be supplied at startup.
+/// Neither / both produces a CLI parse error. `--data` selects persistent
+/// file-system storage at the given path. `--dev` selects ephemeral
+/// file-backed storage at an auto-generated tempdir under
+/// `std::env::temp_dir()`; the path changes on every restart, so the
+/// previous run's data is orphaned. `--dev` is **not** an in-memory mode —
+/// the storage backend is still `FileBackend`; only the path lifetime
+/// differs. Use `--dev` for development and testing only; production
+/// deployments must specify `--data <path>`.
 ///
 /// # Builder Example
 ///
@@ -111,6 +120,12 @@ pub enum LogFormat {
 /// ```
 #[derive(Debug, Clone, Deserialize, JsonSchema, Builder, Parser)]
 #[builder(derive(Debug))]
+#[command(group(
+    ArgGroup::new("storage")
+        .required(true)
+        .multiple(false)
+        .args(["data_dir", "dev"]),
+))]
 pub struct Config {
     /// TCP address to listen on for gRPC.
     ///
@@ -126,53 +141,85 @@ pub struct Config {
     #[serde(default)]
     pub metrics_addr: Option<SocketAddr>,
 
-    /// Emit per-vault Prometheus series.
+    /// Optional override for `observability.vault_metrics_enabled` at startup.
     ///
-    /// Defaults to `false` for cardinality control: every vault adds a
-    /// fresh `vault_id` label set, multiplying time-series count by the
-    /// number of vaults per organization. Organization-level rollups
+    /// `None` (the default — flag absent) honors the canonical
+    /// [`ObservabilityConfig::vault_metrics_enabled`](inferadb_ledger_types::config::ObservabilityConfig)
+    /// field on [`Config::observability`]. `Some(true)` (`--vault-metrics`,
+    /// `--vault-metrics=true`, `INFERADB__LEDGER__VAULT_METRICS=true`)
+    /// forces per-vault Prometheus series on regardless of the inner
+    /// field; `Some(false)` (`--vault-metrics=false`) forces them off.
+    ///
+    /// Per-vault metrics are restart-only: every vault adds a fresh
+    /// `vault_id` label set, multiplying time-series count by the number
+    /// of vaults per organization. Flipping the gate at runtime would
+    /// reshape the time-series mid-scrape, so the resolved value is set
+    /// exactly once at startup. Organization-level rollups
     /// (`org_apply_throughput_ops_total`, `org_active_vault_count`) are
     /// always-on regardless of this flag.
-    ///
-    /// Enable with `--vault-metrics` or
-    /// `INFERADB__LEDGER__VAULT_METRICS=true` for environments where the
-    /// extra cardinality is acceptable (staging, small clusters,
-    /// single-tenant deploys).
-    #[arg(long = "vault-metrics", env = "INFERADB__LEDGER__VAULT_METRICS")]
+    #[arg(
+        long = "vault-metrics",
+        env = "INFERADB__LEDGER__VAULT_METRICS",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = false,
+    )]
     #[serde(default)]
-    #[builder(default)]
-    pub vault_metrics: bool,
+    pub vault_metrics: Option<bool>,
 
-    /// Enable vault hibernation (Phase 7 / O1).
+    /// Optional override for `hibernation.enabled` at startup.
     ///
-    /// When `true`, the [`RaftManager`](inferadb_ledger_raft::RaftManager)
-    /// runs an idle-detector task that transitions per-vault Raft groups to
+    /// `None` (the default — flag absent) honors the canonical
+    /// [`HibernationConfig::enabled`](inferadb_ledger_types::config::HibernationConfig)
+    /// field on [`Config::hibernation`]. `Some(true)` (`--vault-hibernation`,
+    /// `--vault-hibernation=true`, `INFERADB__LEDGER__VAULT_HIBERNATION=true`)
+    /// activates the idle detector regardless of the inner field;
+    /// `Some(false)` (`--vault-hibernation=false`) forces it off.
+    ///
+    /// When the resolved value is `true`, the
+    /// [`RaftManager`](inferadb_ledger_raft::RaftManager) runs an
+    /// idle-detector task that transitions per-vault Raft groups to
     /// `Dormant` after they have not seen activity in `idle_secs`
     /// (default 5 min, see
     /// [`HibernationConfig`](inferadb_ledger_types::config::HibernationConfig)).
     /// The next request to a dormant vault wakes it back to `Active`.
-    /// Defaults to `false` — hibernation is opt-in to keep the
-    /// disciplined "no surprise throttling" default model (operators
-    /// must accept the wake-time budget consciously).
-    ///
-    /// When `false`, no idle detector runs, vault groups never transition
-    /// out of `Active`, and the `org_active_vault_count{status="dormant"}`
-    /// gauge stays at 0.
-    #[arg(long = "vault-hibernation", env = "INFERADB__LEDGER__VAULT_HIBERNATION")]
+    /// Hibernation is opt-in to keep the disciplined "no surprise
+    /// throttling" default model (operators must accept the wake-time
+    /// budget consciously).
+    #[arg(
+        long = "vault-hibernation",
+        env = "INFERADB__LEDGER__VAULT_HIBERNATION",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = false,
+    )]
     #[serde(default)]
-    #[builder(default)]
-    pub vault_hibernation: bool,
+    pub vault_hibernation: Option<bool>,
 
-    /// Vault hibernation policy. The top-level `vault_hibernation` flag
-    /// is the master enable switch; this struct carries the tuning knobs
+    /// Vault hibernation policy. The `vault_hibernation` CLI flag is an
+    /// optional override on
+    /// [`HibernationConfig::enabled`](inferadb_ledger_types::config::HibernationConfig);
+    /// this struct carries the canonical setting plus the tuning knobs
     /// (`idle_secs`, `max_warm`, `wake_threshold_ms`, `max_stall_secs`,
-    /// `scan_interval_secs`). The `enabled` field on
-    /// [`HibernationConfig`](inferadb_ledger_types::config::HibernationConfig)
-    /// is overridden by `vault_hibernation` at startup.
+    /// `scan_interval_secs`). When `vault_hibernation` is unset, the
+    /// `enabled` field here is honored as-is.
     #[arg(skip)]
     #[serde(default)]
     #[builder(default)]
     pub hibernation: inferadb_ledger_types::config::HibernationConfig,
+
+    /// Observability configuration. The `vault_metrics` CLI flag is an
+    /// optional override on
+    /// [`ObservabilityConfig::vault_metrics_enabled`](inferadb_ledger_types::config::ObservabilityConfig);
+    /// this struct carries the canonical setting and any future
+    /// per-emitter knobs. Fields here take effect at startup only —
+    /// flipping cardinality at runtime would reshape the time-series
+    /// mid-scrape, so observability stays restart-only (mirrors the
+    /// existing `RuntimeConfig` exclusion).
+    #[arg(skip)]
+    #[serde(default)]
+    #[builder(default)]
+    pub observability: inferadb_ledger_types::config::ObservabilityConfig,
 
     /// Log output format.
     ///
@@ -189,13 +236,29 @@ pub struct Config {
     #[builder(default)]
     pub log_format: LogFormat,
 
-    /// Data directory for Raft logs and snapshots.
+    /// Persistent data directory for Raft logs and snapshots.
     ///
-    /// If not specified, the server runs in ephemeral mode using a temporary
-    /// directory. All data is lost on shutdown.
+    /// Exactly one of `--data` or `--dev` must be specified at startup
+    /// (the CLI returns a parse error otherwise). When `--data` is set,
+    /// the server uses [`StorageMode::File`] and the path is honored
+    /// verbatim. For development / one-off testing without a path,
+    /// pass `--dev` instead.
     #[arg(long = "data", env = "INFERADB__LEDGER__DATA")]
     #[serde(default)]
     pub data_dir: Option<PathBuf>,
+
+    /// Run with ephemeral file-backed storage at an auto-generated tempdir.
+    ///
+    /// Selects [`StorageMode::EphemeralTempDir`]. The storage backend is
+    /// still `FileBackend` — this is **not** an in-memory mode. The path
+    /// lives under `std::env::temp_dir()` and changes on every restart;
+    /// the previous run's data is orphaned. Use only for development and
+    /// testing — production deployments must specify `--data <path>`.
+    /// Mutually exclusive with `--data`.
+    #[arg(long = "dev", env = "INFERADB__LEDGER__DEV")]
+    #[serde(default)]
+    #[builder(default)]
+    pub dev: bool,
 
     // === Region ===
     /// Geographic region this node belongs to.
@@ -403,30 +466,43 @@ pub struct Config {
     pub health_check: Option<inferadb_ledger_types::config::HealthCheckConfig>,
 
     // === Rate Limiting ===
-    /// Master opt-in switch for server-side rate limiting.
+    /// Optional override for `rate_limit.enabled` at startup.
     ///
-    /// Defaults to `false`. When `true`, the multi-tier token-bucket
-    /// rate limiter applies the thresholds in `rate_limit` (or sensible
-    /// production defaults when `rate_limit` is absent). When `false`,
-    /// rate-limit checks fast-path through a single relaxed atomic load —
-    /// `--client-rate-limit`, `--org-rate-limit`, etc. are silently inert.
+    /// `None` (the default — flag absent) honors the canonical
+    /// [`RateLimitConfig::enabled`](inferadb_ledger_types::config::RateLimitConfig)
+    /// field on [`Config::rate_limit`] (which itself defaults to `false`,
+    /// keeping rate limiting disabled out-of-the-box). `Some(true)`
+    /// (`--ratelimit`, `--ratelimit=true`,
+    /// `INFERADB__LEDGER__RATELIMIT=true`) forces the limiter on
+    /// regardless of the inner field; `Some(false)` (`--ratelimit=false`)
+    /// forces it off.
     ///
-    /// The default is disabled because surprise default throttling
-    /// combined with SDK silent retry hides the rate limit behind retry
-    /// backoff — a debugging trap that has historically cost more time
-    /// than the protection saved. Production deployments that need DoS
-    /// protection or per-tenant SLO enforcement opt in deliberately.
-    #[arg(long = "ratelimit", env = "INFERADB__LEDGER__RATELIMIT")]
+    /// Rate limiting defaults to disabled because surprise default
+    /// throttling combined with SDK silent retry hides the rate limit
+    /// behind retry backoff — a debugging trap that has historically
+    /// cost more time than the protection saved. Production deployments
+    /// that need DoS protection or per-tenant SLO enforcement opt in
+    /// deliberately. The runtime-reconfig path (`UpdateConfig`) reads the
+    /// inner field directly and is unaffected by this override.
+    #[arg(
+        long = "ratelimit",
+        env = "INFERADB__LEDGER__RATELIMIT",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = false,
+    )]
     #[serde(default)]
-    #[builder(default)]
-    pub ratelimit: bool,
+    pub ratelimit: Option<bool>,
 
     /// Rate limit configuration for per-client and per-organization request throttling.
     ///
     /// Controls token bucket capacities and refill rates. The `enabled`
-    /// field of this struct is overridden by the top-level `ratelimit`
-    /// CLI flag — set `--ratelimit` to activate the limiter, then tune
-    /// thresholds via this struct (or the runtime `UpdateConfig` RPC).
+    /// field of this struct is the canonical master switch; the
+    /// top-level `ratelimit` CLI flag is an optional startup override.
+    /// Set `enabled = true` here (or in YAML / env config) to activate
+    /// the limiter; `--ratelimit=false` at startup overrides it off, and
+    /// `--ratelimit` overrides it on. Tune thresholds via this struct or
+    /// the runtime `UpdateConfig` RPC.
     #[arg(skip)]
     #[serde(default)]
     pub rate_limit: Option<inferadb_ledger_types::config::RateLimitConfig>,
@@ -490,11 +566,13 @@ impl Default for Config {
         Self {
             listen: None,
             metrics_addr: None,
-            vault_metrics: false,
-            vault_hibernation: false,
+            vault_metrics: None,
+            vault_hibernation: None,
             hibernation: inferadb_ledger_types::config::HibernationConfig::default(),
+            observability: inferadb_ledger_types::config::ObservabilityConfig::default(),
             log_format: LogFormat::default(),
             data_dir: None,
+            dev: false,
             region: default_region(),
             regions: Vec::new(),
             advertise: None,
@@ -513,7 +591,7 @@ impl Default for Config {
             integrity: inferadb_ledger_types::config::IntegrityConfig::default(),
             tiered_storage: inferadb_ledger_types::config::TieredStorageConfig::default(),
             health_check: None,
-            ratelimit: false,
+            ratelimit: None,
             rate_limit: None,
             token_maintenance_interval_secs: default_token_maintenance_interval_secs(),
             email_blinding_key: None,
@@ -537,10 +615,12 @@ impl Config {
         Self {
             listen: Some(format!("127.0.0.1:{}", port).parse().unwrap()),
             metrics_addr: None,
-            vault_metrics: false,
-            vault_hibernation: false,
+            vault_metrics: None,
+            vault_hibernation: None,
             hibernation: inferadb_ledger_types::config::HibernationConfig::default(),
+            observability: inferadb_ledger_types::config::ObservabilityConfig::default(),
             data_dir: Some(data_dir),
+            dev: false,
             logging: LoggingConfig::for_test(),
             ..Self::default()
         }
@@ -568,40 +648,53 @@ impl Config {
         self.listen.map_or_else(String::new, |a| a.to_string())
     }
 
-    /// Returns true if the server is running in ephemeral mode.
+    /// Returns true if the server is running in ephemeral mode (`--dev`).
     ///
-    /// In ephemeral mode, data is stored in a temporary directory and
-    /// will be lost when the server shuts down.
+    /// In ephemeral mode, data is stored in a temporary directory and is
+    /// lost on process exit, on tempdir purge, and on every restart (each
+    /// fresh launch picks a new tempdir suffix). Equivalent to
+    /// `self.storage_mode().map_or(false, |m| m.is_ephemeral())`, except
+    /// that this method is infallible: it reports the ephemeral choice
+    /// directly without re-validating the mutual-exclusion invariant.
     pub fn is_ephemeral(&self) -> bool {
-        self.data_dir.is_none()
+        self.dev
     }
 
-    /// Resolves the data directory, creating an ephemeral one if needed.
+    /// Resolves the storage mode declared by the operator.
     ///
-    /// If `data_dir` is configured, returns it directly. Otherwise, creates
-    /// a unique temporary directory using a Snowflake ID for uniqueness.
+    /// The CLI surface enforces mutual exclusion of `--data` / `--dev` at
+    /// parse time via clap's `ArgGroup`. This method is the programmatic
+    /// equivalent — callers that construct `Config` directly (notably
+    /// tests) get the same invariant check here.
     ///
     /// # Errors
     ///
-    /// Returns an error if the ephemeral directory cannot be created.
-    pub fn resolve_data_dir(&self) -> Result<PathBuf, ConfigError> {
-        match &self.data_dir {
-            Some(dir) => Ok(dir.clone()),
-            None => {
-                let id = node_id::generate_snowflake_id().map_err(|e| ConfigError::Validation {
-                    message: format!("failed to generate ephemeral directory ID: {}", e),
-                })?;
-                let path = std::env::temp_dir().join(format!("ledger-{}", id));
-                std::fs::create_dir_all(&path).map_err(|e| ConfigError::Validation {
-                    message: format!(
-                        "failed to create ephemeral directory {}: {}",
-                        path.display(),
-                        e
-                    ),
-                })?;
-                Ok(path)
-            },
+    /// Returns [`ConfigError::NoStorageMode`] when neither `--data` nor
+    /// `--dev` is set; [`ConfigError::ConflictingStorageModes`] when
+    /// both are set.
+    pub fn storage_mode(&self) -> Result<StorageMode, ConfigError> {
+        match (&self.data_dir, self.dev) {
+            (Some(path), false) => Ok(StorageMode::File { data_dir: path.clone() }),
+            (None, true) => Ok(StorageMode::EphemeralTempDir),
+            (None, false) => NoStorageModeSnafu.fail(),
+            (Some(_), true) => ConflictingStorageModesSnafu.fail(),
         }
+    }
+
+    /// Resolves the data directory on disk for the current storage mode.
+    ///
+    /// For [`StorageMode::File`], returns the configured path verbatim.
+    /// For [`StorageMode::EphemeralTempDir`], generates a Snowflake-suffixed
+    /// path under [`std::env::temp_dir`] and `mkdir -p`s it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::NoStorageMode`] / [`ConfigError::ConflictingStorageModes`]
+    /// if the storage-mode invariant is violated, or
+    /// [`ConfigError::Validation`] if the ephemeral tempdir cannot be created.
+    pub fn resolve_data_dir(&self) -> Result<PathBuf, ConfigError> {
+        let mode = self.storage_mode()?;
+        mode.resolve_data_dir().map_err(Into::into)
     }
 
     /// Returns the node ID for this server.
@@ -656,6 +749,22 @@ pub enum ConfigError {
         /// Error description.
         message: String,
     },
+    /// Neither `--data` nor `--dev` was supplied at startup.
+    ///
+    /// The CLI surface enforces mutual exclusion via clap's `ArgGroup`,
+    /// so end users hit this only when constructing [`Config`]
+    /// programmatically (notably tests).
+    #[snafu(display(
+        "exactly one of `--data <path>` or `--dev` is required at startup; neither was supplied"
+    ))]
+    NoStorageMode,
+    /// Both `--data` and `--dev` were supplied at startup.
+    ///
+    /// The CLI surface enforces mutual exclusion via clap's `ArgGroup`,
+    /// so end users hit this only when constructing [`Config`]
+    /// programmatically (notably tests).
+    #[snafu(display("`--data` and `--dev` are mutually exclusive"))]
+    ConflictingStorageModes,
 }
 
 impl From<inferadb_ledger_types::config::ConfigError> for ConfigError {
@@ -842,12 +951,15 @@ mod tests {
         assert_eq!(config.timeout_secs, 30);
         assert!(config.join.is_none());
         assert!(config.data_dir.is_none());
+        assert!(!config.dev, "default Config has dev: false");
     }
 
     #[test]
-    fn default_config_is_ephemeral_and_not_localhost() {
+    fn default_config_has_no_storage_mode_and_not_localhost() {
+        // Neither --data nor --dev is set on the bare default — exactly
+        // the configuration the operator must explicitly choose between.
         let config = Config::default();
-        assert!(config.is_ephemeral());
+        assert!(matches!(config.storage_mode(), Err(ConfigError::NoStorageMode)));
         // listen is None by default, so is_localhost_only returns false
         assert!(!config.is_localhost_only());
     }
@@ -893,13 +1005,57 @@ mod tests {
 
     #[test]
     fn test_is_ephemeral() {
-        // Ephemeral when data_dir is None
-        let config = Config::default();
+        // Ephemeral only when --dev is explicitly set
+        let config = Config { dev: true, ..Config::default() };
         assert!(config.is_ephemeral());
 
-        // Not ephemeral when data_dir is set
+        // Not ephemeral when --data is set
         let config = Config { data_dir: Some(PathBuf::from("/data")), ..Config::default() };
         assert!(!config.is_ephemeral());
+
+        // Not ephemeral on the bare default (neither --data nor --dev) —
+        // storage_mode() will reject this configuration anyway.
+        let config = Config::default();
+        assert!(!config.is_ephemeral());
+    }
+
+    #[test]
+    fn test_storage_mode_file_when_only_data_dir_set() {
+        let config = Config { data_dir: Some(PathBuf::from("/data/ledger")), ..Config::default() };
+        let mode = config.storage_mode().expect("data_dir alone is a valid mode");
+        assert!(
+            matches!(mode, StorageMode::File { ref data_dir } if data_dir == &PathBuf::from("/data/ledger")),
+            "expected File {{ data_dir: /data/ledger }}, got {mode:?}"
+        );
+    }
+
+    #[test]
+    fn test_storage_mode_ephemeral_when_only_dev_set() {
+        let config = Config { dev: true, ..Config::default() };
+        let mode = config.storage_mode().expect("dev alone is a valid mode");
+        assert!(matches!(mode, StorageMode::EphemeralTempDir));
+    }
+
+    #[test]
+    fn test_storage_mode_errors_when_neither_set() {
+        let config = Config::default();
+        let err = config.storage_mode().expect_err("neither --data nor --dev is invalid");
+        assert!(matches!(err, ConfigError::NoStorageMode));
+        // Error message names both flags so operators know what to do.
+        let msg = err.to_string();
+        assert!(msg.contains("--data"), "error mentions --data: {msg}");
+        assert!(msg.contains("--dev"), "error mentions --dev: {msg}");
+    }
+
+    #[test]
+    fn test_storage_mode_errors_when_both_set() {
+        let config =
+            Config { data_dir: Some(PathBuf::from("/data")), dev: true, ..Config::default() };
+        let err = config.storage_mode().expect_err("--data + --dev is invalid");
+        assert!(matches!(err, ConfigError::ConflictingStorageModes));
+        let msg = err.to_string();
+        assert!(msg.contains("--data"), "error mentions --data: {msg}");
+        assert!(msg.contains("--dev"), "error mentions --dev: {msg}");
     }
 
     #[test]
@@ -911,7 +1067,7 @@ mod tests {
 
     #[test]
     fn test_resolve_data_dir_ephemeral() {
-        let config = Config::default();
+        let config = Config { dev: true, ..Config::default() };
         assert!(config.is_ephemeral());
 
         let resolved = config.resolve_data_dir().expect("resolve data_dir");
@@ -923,6 +1079,60 @@ mod tests {
 
         // Cleanup
         std::fs::remove_dir_all(&resolved).ok();
+    }
+
+    #[test]
+    fn test_resolve_data_dir_rejects_no_storage_mode() {
+        let config = Config::default();
+        let err = config.resolve_data_dir().expect_err("default has no storage mode");
+        assert!(matches!(err, ConfigError::NoStorageMode));
+    }
+
+    #[test]
+    fn test_resolve_data_dir_rejects_conflicting_storage_modes() {
+        let config =
+            Config { data_dir: Some(PathBuf::from("/data")), dev: true, ..Config::default() };
+        let err = config.resolve_data_dir().expect_err("--data + --dev is invalid");
+        assert!(matches!(err, ConfigError::ConflictingStorageModes));
+    }
+
+    #[test]
+    fn cli_rejects_invocation_without_storage_mode() {
+        // Bare `inferadb-ledger` (no subcommand, no storage flag) must
+        // fail at parse time so operators see a clear error from clap
+        // before the bootstrap path runs.
+        let err = Cli::try_parse_from(["inferadb-ledger"])
+            .expect_err("clap should reject missing storage mode");
+        let msg = err.to_string();
+        assert!(msg.contains("--data"), "clap error mentions --data: {msg}");
+        assert!(msg.contains("--dev"), "clap error mentions --dev: {msg}");
+    }
+
+    #[test]
+    fn cli_rejects_both_data_and_dev() {
+        let err = Cli::try_parse_from(["inferadb-ledger", "--data", "/tmp/ledger", "--dev"])
+            .expect_err("clap should reject --data + --dev");
+        // clap's mutual-exclusion message names the conflicting argument.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--dev") || msg.contains("--data"),
+            "clap error mentions one of the storage flags: {msg}"
+        );
+    }
+
+    #[test]
+    fn cli_accepts_data_alone() {
+        let cli = Cli::try_parse_from(["inferadb-ledger", "--data", "/tmp/ledger"])
+            .expect("--data alone is valid");
+        assert_eq!(cli.config.data_dir.as_deref(), Some(std::path::Path::new("/tmp/ledger")));
+        assert!(!cli.config.dev);
+    }
+
+    #[test]
+    fn cli_accepts_dev_alone() {
+        let cli = Cli::try_parse_from(["inferadb-ledger", "--dev"]).expect("--dev alone is valid");
+        assert!(cli.config.data_dir.is_none());
+        assert!(cli.config.dev);
     }
 
     // === Logging Config Tests ===
@@ -1079,10 +1289,13 @@ mod tests {
     #[test]
     fn test_regions_cli_parses_comma_list() {
         use clap::Parser;
+        // `--dev` satisfies the required storage-mode group so the parse
+        // exercises just the `--regions` knob.
         let cli = Cli::try_parse_from([
             "inferadb-ledger",
             "--listen",
             "127.0.0.1:9090",
+            "--dev",
             "--regions",
             "us-east-va,eu-west-de",
         ])
@@ -1093,7 +1306,8 @@ mod tests {
     #[test]
     fn test_regions_cli_default_empty() {
         use clap::Parser;
-        let cli = Cli::try_parse_from(["inferadb-ledger", "--listen", "127.0.0.1:9090"]).unwrap();
+        let cli = Cli::try_parse_from(["inferadb-ledger", "--listen", "127.0.0.1:9090", "--dev"])
+            .unwrap();
         assert!(cli.config.regions.is_empty());
     }
 
@@ -1109,5 +1323,158 @@ mod tests {
         let json = r#"{"listen": "127.0.0.1:50051", "regions": ["us-east-va", "eu-west-de"]}"#;
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.regions, vec!["us-east-va".to_string(), "eu-west-de".to_string()]);
+    }
+
+    // =========================================================================
+    // Option<bool> CLI flag parse tests (DSoT migration: --ratelimit,
+    // --vault-hibernation, --vault-metrics).
+    //
+    // Each flag uses `num_args = 0..=1` + `default_missing_value = "true"`
+    // + `require_equals = false`. Operator UX expectations:
+    //
+    //   flag absent           → None  (honor inner config field)
+    //   --flag                → Some(true)
+    //   --flag=true           → Some(true)
+    //   --flag true           → Some(true)
+    //   --flag=false          → Some(false)
+    //
+    // These tests guard against regressions on `default_missing_value`
+    // and `require_equals`.
+    // =========================================================================
+
+    /// Helper: parse a CLI invocation with `--dev` to satisfy the required
+    /// storage-mode group, returning the constructed `Config`.
+    fn parse_cli(extra_args: &[&str]) -> Config {
+        use clap::Parser;
+        let mut argv = vec!["inferadb-ledger", "--dev"];
+        argv.extend_from_slice(extra_args);
+        Cli::try_parse_from(argv).unwrap().config
+    }
+
+    // --- ratelimit ---
+
+    #[test]
+    fn cli_ratelimit_absent_is_none() {
+        let config = parse_cli(&[]);
+        assert_eq!(config.ratelimit, None);
+    }
+
+    #[test]
+    fn cli_ratelimit_bare_is_some_true() {
+        let config = parse_cli(&["--ratelimit"]);
+        assert_eq!(config.ratelimit, Some(true));
+    }
+
+    #[test]
+    fn cli_ratelimit_eq_true_is_some_true() {
+        let config = parse_cli(&["--ratelimit=true"]);
+        assert_eq!(config.ratelimit, Some(true));
+    }
+
+    #[test]
+    fn cli_ratelimit_space_true_is_some_true() {
+        // `require_equals = false` accepts the space-separated form.
+        let config = parse_cli(&["--ratelimit", "true"]);
+        assert_eq!(config.ratelimit, Some(true));
+    }
+
+    #[test]
+    fn cli_ratelimit_eq_false_is_some_false() {
+        let config = parse_cli(&["--ratelimit=false"]);
+        assert_eq!(config.ratelimit, Some(false));
+    }
+
+    // --- vault-hibernation ---
+
+    #[test]
+    fn cli_vault_hibernation_absent_is_none() {
+        let config = parse_cli(&[]);
+        assert_eq!(config.vault_hibernation, None);
+    }
+
+    #[test]
+    fn cli_vault_hibernation_bare_is_some_true() {
+        let config = parse_cli(&["--vault-hibernation"]);
+        assert_eq!(config.vault_hibernation, Some(true));
+    }
+
+    #[test]
+    fn cli_vault_hibernation_eq_true_is_some_true() {
+        let config = parse_cli(&["--vault-hibernation=true"]);
+        assert_eq!(config.vault_hibernation, Some(true));
+    }
+
+    #[test]
+    fn cli_vault_hibernation_space_true_is_some_true() {
+        let config = parse_cli(&["--vault-hibernation", "true"]);
+        assert_eq!(config.vault_hibernation, Some(true));
+    }
+
+    #[test]
+    fn cli_vault_hibernation_eq_false_is_some_false() {
+        let config = parse_cli(&["--vault-hibernation=false"]);
+        assert_eq!(config.vault_hibernation, Some(false));
+    }
+
+    // --- vault-metrics ---
+
+    #[test]
+    fn cli_vault_metrics_absent_is_none() {
+        let config = parse_cli(&[]);
+        assert_eq!(config.vault_metrics, None);
+    }
+
+    #[test]
+    fn cli_vault_metrics_bare_is_some_true() {
+        let config = parse_cli(&["--vault-metrics"]);
+        assert_eq!(config.vault_metrics, Some(true));
+    }
+
+    #[test]
+    fn cli_vault_metrics_eq_true_is_some_true() {
+        let config = parse_cli(&["--vault-metrics=true"]);
+        assert_eq!(config.vault_metrics, Some(true));
+    }
+
+    #[test]
+    fn cli_vault_metrics_space_true_is_some_true() {
+        let config = parse_cli(&["--vault-metrics", "true"]);
+        assert_eq!(config.vault_metrics, Some(true));
+    }
+
+    #[test]
+    fn cli_vault_metrics_eq_false_is_some_false() {
+        let config = parse_cli(&["--vault-metrics=false"]);
+        assert_eq!(config.vault_metrics, Some(false));
+    }
+
+    // --- defaults preserved ---
+
+    #[test]
+    fn default_config_preserves_rate_limiting_disabled() {
+        // Central guarantee: default Config must leave rate limiting off
+        // (CLI override `None` + inner default `false`). Resolved to
+        // `false` by `RateLimitConfig::resolve_enabled`.
+        let config = Config::default();
+        assert_eq!(config.ratelimit, None);
+        let resolved = inferadb_ledger_types::config::RateLimitConfig::resolve_enabled(
+            config.ratelimit,
+            false,
+        );
+        assert!(!resolved, "rate limiting must default to disabled");
+    }
+
+    #[test]
+    fn default_config_preserves_hibernation_disabled() {
+        let config = Config::default();
+        assert_eq!(config.vault_hibernation, None);
+        assert!(!config.hibernation.enabled);
+    }
+
+    #[test]
+    fn default_config_preserves_observability_disabled() {
+        let config = Config::default();
+        assert_eq!(config.vault_metrics, None);
+        assert!(!config.observability.vault_metrics_enabled);
     }
 }

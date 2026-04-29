@@ -126,7 +126,7 @@ pub trait StorageBackend: Send + Sync {
     /// Best-effort: backends that have no notion of an OS page cache (e.g.,
     /// the in-memory backend) return `Ok(())`. The default implementation is
     /// a no-op. The file-backed implementation calls
-    /// [`inferadb_ledger_fs_sync::evict_page_cache`] on the underlying file
+    /// [`inferadb_ledger_fs::evict_page_cache`] on the underlying file
     /// descriptor — `posix_fadvise(POSIX_FADV_DONTNEED)` on Linux, no-op
     /// success on Apple / Windows.
     ///

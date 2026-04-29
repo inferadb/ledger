@@ -240,7 +240,7 @@ Every CLI flag and environment variable — with defaults, safe ranges, and secu
 
 **Bootstrap in one line**: start every node with `--listen` + `--data` + (for joiners) `--join`, then run `inferadb-ledger init --host <any-node>` exactly once per cluster lifetime.
 
-**Ephemeral mode**: omit `--data` to run against a temp dir; useful for development, unsuitable for production.
+**Ephemeral mode**: pass `--dev` (instead of `--data <path>`) to run against an auto-generated tempdir; useful for development, unsuitable for production. Exactly one of `--data` or `--dev` is required — supplying neither or both returns a CLI parse error.
 
 **Unix domain sockets**: `--socket /path/to/ledger.sock` exposes a UDS listener in addition to TCP. Both can run simultaneously.
 

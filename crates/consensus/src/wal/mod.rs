@@ -1,7 +1,6 @@
 //! WAL implementations.
 
 pub mod encrypted;
-pub mod io_uring_backend;
 mod memory;
 pub mod segmented;
 

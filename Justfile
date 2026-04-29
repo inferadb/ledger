@@ -222,13 +222,13 @@ proto-lint:
 # Run
 # ============================================================================
 
-# Run the server in development mode
+# Run the server in development mode (ephemeral file-backed storage; data lost on restart)
 run:
-    cargo +{{rust}} run -p inferadb-ledger-server
+    cargo +{{rust}} run -p inferadb-ledger-server -- --dev --listen 127.0.0.1:50051
 
-# Run the server in release mode
+# Run the server in release mode (ephemeral file-backed storage; data lost on restart)
 run-release:
-    cargo +{{rust}} run -p inferadb-ledger-server --release
+    cargo +{{rust}} run -p inferadb-ledger-server --release -- --dev --listen 127.0.0.1:50051
 
 # ============================================================================
 # Maintenance
@@ -269,7 +269,7 @@ udeps:
 # `version.workspace = true`) and the `version = "..."` pin for each published
 # internal crate (currently types, proto, sdk) under [workspace.dependencies].
 # Path-only internal crates (store, state, raft, consensus, services, server,
-# test-utils, profile, fs-sync) have no version pin and are correctly skipped.
+# test-utils, profile, fs) have no version pin and are correctly skipped.
 # Validates semver; prints a diff; does NOT commit.
 # Run `cargo +{{rust}} build --workspace` after to refresh Cargo.lock.
 # Usage: just bump-version 0.2.0

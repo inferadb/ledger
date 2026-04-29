@@ -22,7 +22,7 @@
 //! - **Windows / other**: [`File::sync_data`].
 //!
 //! See `docs/architecture/durability.md` for the operator-facing durability
-//! matrix, and `crates/fs-sync/CLAUDE.md` for the escalation rationale
+//! matrix, and `crates/fs/CLAUDE.md` for the escalation rationale
 //! behind this crate's `unsafe` exception to the workspace-wide ban.
 //!
 //! # Page-cache eviction

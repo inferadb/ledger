@@ -5,17 +5,19 @@
 //! # Usage
 //!
 //! ```bash
-//! # Start single-node cluster
-//! inferadb-ledger --listen 0.0.0.0:50051 --data /tmp/ledger --single
+//! # Persistent storage (production)
+//! inferadb-ledger --listen 0.0.0.0:50051 --data /tmp/ledger
+//!
+//! # Ephemeral storage (development / one-off testing)
+//! inferadb-ledger --listen 0.0.0.0:50051 --dev
 //!
 //! # Start with environment variables
 //! INFERADB__LEDGER__LISTEN=0.0.0.0:50051 \
 //! INFERADB__LEDGER__DATA=/tmp/ledger \
-//! INFERADB__LEDGER__CLUSTER=1 \
 //! inferadb-ledger
 //!
-//! # CLI arguments override environment variables
-//! INFERADB__LEDGER__CLUSTER=3 inferadb-ledger --single
+//! # Initialize the cluster (one-time, after nodes are running)
+//! inferadb-ledger init --host node1:9090
 //! ```
 
 mod bootstrap;
@@ -162,12 +164,14 @@ async fn main() -> Result<(), ServerError> {
         );
     }
 
-    // Warn if running in ephemeral mode
+    // Warn if running with --dev (ephemeral file-backed storage)
     if config.is_ephemeral() {
         tracing::warn!(
             data_dir = %data_dir.display(),
-            "Running in ephemeral mode. All data will be lost on shutdown. \
-             Set --data or INFERADB__LEDGER__DATA for persistent storage."
+            "Running with --dev: ephemeral file-backed storage. \
+             Data will be lost on restart, on tempdir purge, and on every fresh \
+             launch (each restart picks a new tempdir suffix). \
+             Use --data <path> for persistent storage in production."
         );
     }
 
@@ -176,11 +180,18 @@ async fn main() -> Result<(), ServerError> {
     }
 
     // Phase 7 / O3: wire the per-vault Prometheus emission gate before any
-    // metric is sampled. Per-vault metrics default off for cardinality
-    // control; flipping the gate after startup would change the
-    // time-series shape mid-scrape, so it is set exactly once here.
-    inferadb_ledger_raft::metrics::set_vault_metrics_enabled(config.vault_metrics);
-    if config.vault_metrics {
+    // metric is sampled. `ObservabilityConfig::vault_metrics_enabled` is
+    // the canonical setting (defaults to `false` for cardinality control);
+    // the `--vault-metrics` CLI flag is an optional `Option<bool>` startup
+    // override. Per-vault metrics are restart-only — flipping the gate at
+    // runtime would change the time-series shape mid-scrape, so it is set
+    // exactly once here.
+    let vault_metrics_enabled = inferadb_ledger_types::config::ObservabilityConfig::resolve_enabled(
+        config.vault_metrics,
+        config.observability.vault_metrics_enabled,
+    );
+    inferadb_ledger_raft::metrics::set_vault_metrics_enabled(vault_metrics_enabled);
+    if vault_metrics_enabled {
         tracing::info!(
             "Per-vault Prometheus metrics enabled (vault_id labels active). \
              Cardinality scales with the number of vaults per organization."

@@ -24,7 +24,7 @@ These files are load-bearing — their invariants ripple beyond the local file. 
 
 - **`ConsensusEngine`** (`engine.rs`) — multi-shard API.
 - **`ConsensusState`** (`shard.rs`), **`Reactor`** (`reactor.rs`), **`Action`** (`action.rs`) — event-driven core.
-- **`WalBackend` trait** (`wal_backend.rs`) + impls under `wal/`: `segmented` (production), `encrypted`, `memory`, `io_uring_backend`.
+- **`WalBackend` trait** (`wal_backend.rs`) + impls under `wal/`: `segmented` (production), `encrypted`, `memory`.
 - **`StateMachine` trait** (`state_machine.rs`).
 - **Leadership + safety**: `leadership.rs`, `lease.rs`, `committed.rs`, `idempotency.rs`, `recovery.rs`, `split.rs`, `circuit_breaker.rs`.
 - **Transport**: `transport.rs`, `network_outbox.rs`, `router.rs`.
@@ -48,7 +48,7 @@ These files are load-bearing — their invariants ripple beyond the local file. 
 1. **`ConsensusState` returns `Action` values and performs no I/O** (root rule 10). Any blocking call, disk read, or network send inside `ConsensusState` is a correctness bug caught by `consensus-reviewer`.
 2. **`Reactor` is the only place I/O happens.** A background task spawned from `ConsensusState` or elsewhere to do fsync / send is a layering break.
 3. **WAL writes are batched with a single `fsync` per batch.** Never per proposal — destroys throughput and breaks batch ordering assumptions.
-4. **Production WAL is `wal/segmented.rs`.** `memory` and `io_uring_backend` are test/experiment backends. Don't default to `memory` in any production config path.
+4. **Production WAL is `wal/segmented.rs`.** `memory` is a test backend. Don't default to `memory` in any production config path.
 5. **`ConsensusEngine` lives in `engine.rs`.** `lib.rs` re-exports the public surface. Moving `ConsensusEngine` back into `lib.rs` is a layering regression.
 6. **No `openraft` imports, ever** (root rule 9). Grep must show zero dependency references.
 7. **Snapshots are encrypted end-to-end via `snapshot_crypto.rs`.** Never bypass this for "performance" — unencrypted snapshots on disk defeat the per-vault key rotation story.

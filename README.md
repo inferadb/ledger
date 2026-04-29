@@ -79,6 +79,14 @@ For Kubernetes, Docker Compose, or systemd deployments, see the [deployment guid
 inferadb-ledger --listen 0.0.0.0:50051 --data /var/lib/ledger
 ```
 
+`--data <path>` is mandatory for production deployments. For local development or one-off testing, swap it for `--dev`, which puts the database under an auto-generated tempdir and discards everything on restart:
+
+```bash
+inferadb-ledger --listen 0.0.0.0:50051 --dev
+```
+
+`--data` and `--dev` are mutually exclusive; the server refuses to start without exactly one of them.
+
 **Bootstrap the cluster (once, from any machine):**
 
 ```bash
@@ -110,16 +118,17 @@ See the [deployment guide](docs/how-to/deployment.md) for multi-node setup, Kube
 
 ## Configuration
 
-| CLI           | Purpose                                                                                               | Default         |
-| ------------- | ----------------------------------------------------------------------------------------------------- | --------------- |
-| `--data`      | Persistent [storage](docs/architecture/durability.md) (WAL, state, snapshots)                           | _(ephemeral)_   |
-| `--listen`    | TCP address for gRPC API                                                                              | _(none)_        |
-| `--socket`    | Unix domain socket path for gRPC API                                                                  | _(none)_        |
+| CLI           | Purpose                                                                                           | Default         |
+| ------------- | ------------------------------------------------------------------------------------------------- | --------------- |
+| `--data`      | Persistent [storage](docs/architecture/durability.md) (WAL, state, snapshots)                     | _(none)_        |
+| `--dev`       | Ephemeral file-backed storage at an auto-generated tempdir; data is lost on restart               | _(off)_         |
+| `--listen`    | TCP address for gRPC API                                                                          | _(none)_        |
+| `--socket`    | Unix domain socket path for gRPC API                                                              | _(none)_        |
 | `--join`      | Seed addresses for [cluster discovery](docs/how-to/deployment.md#adding-a-node) (comma-separated) | _(none)_        |
 | `--region`    | Geographic data residency [region](docs/how-to/deployment.md)                                     | `global`        |
 | `--advertise` | Address advertised to peers ([details](docs/how-to/deployment.md#advertise-address))              | _(auto-detect)_ |
 
-At least one of `--listen` or `--socket` must be specified. On restart, only `--data` is required. All other flags are persisted on first boot and ignored on subsequent starts.
+Exactly one of `--data` or `--dev` is required at startup; supplying neither (or both) returns a clear CLI error before bootstrap. At least one of `--listen` or `--socket` must also be specified. On restart, only the storage flag is required — all other flags are persisted on first boot and ignored on subsequent starts.
 
 See [Configuration Reference](docs/how-to/deployment.md#configuration-reference) for environment variables and all options including metrics, batching, and tuning.
 

@@ -163,7 +163,7 @@ Commodity consumer SSDs without capacitors may lose the last few seconds of buff
 - `consensus_pipelined_sync_failures_total` — counter. Non-zero means an fsync failed after the client had already received success. Alertable: any sustained non-zero rate is a durability regression.
 - Response latency histograms (`ledger_grpc_request_duration_seconds`) reflect the critical path *without* fsync; fsync latency is measured separately via the reactor's `wal_sync` span.
 
-The barrier-fsync syscall is isolated in `crates/fs-sync/` — the single workspace crate permitted `unsafe`, since no audited safe-syscall crate exposes `F_BARRIERFSYNC`.
+The barrier-fsync syscall is isolated in `crates/fs/` — the single workspace crate permitted `unsafe`, since no audited safe-syscall crate exposes `F_BARRIERFSYNC`.
 
 ## Tuning the StateCheckpointer
 

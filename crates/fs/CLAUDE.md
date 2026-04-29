@@ -1,23 +1,33 @@
-# CLAUDE.md — `inferadb-ledger-fs-sync`
+# CLAUDE.md — `inferadb-ledger-fs`
 
 ## Purpose
 
-File sync primitives with configurable durability modes. Wraps
-`fcntl(F_BARRIERFSYNC)` on Apple platforms so the rest of the workspace can
-select between "full" (non-volatile flush) and "barrier" (device write-cache
-ordering only) sync semantics.
+Low-level file-system primitives that justify FFI / `unsafe`: barrier fsync
+(`fcntl(F_BARRIERFSYNC)` on Apple platforms) plus best-effort OS page-cache
+eviction (`posix_fadvise(POSIX_FADV_DONTNEED)` on Linux). Lets the rest of
+the workspace select between "full" (non-volatile flush) and "barrier"
+(device write-cache ordering only) sync semantics, and lets the
+hibernation path release page-cache pressure on Dormant vaults — without
+spreading `unsafe` across the codebase.
 
 ## Why this crate exists — the unsafe exception
 
 The workspace `CLAUDE.md` golden rule #8 bans `unsafe` in production code.
 **This crate is the single narrowly-scoped exception.**
 
-Reason: `F_BARRIERFSYNC` (Apple's fast ordered-write primitive, ~2-5ms vs
-`F_FULLFSYNC`'s ~15-25ms on APFS SSDs) is the largest single lever for
-write throughput on macOS deployments. No audited safe-syscall crate —
-neither `rustix` nor `nix` as of 2026-04 — exposes a wrapper for it. The
-only path through the Rust ecosystem is `libc::fcntl` with an `unsafe`
-block.
+Reasons:
+
+1. `F_BARRIERFSYNC` (Apple's fast ordered-write primitive, ~2-5ms vs
+   `F_FULLFSYNC`'s ~15-25ms on APFS SSDs) is the largest single lever for
+   write throughput on macOS deployments. No audited safe-syscall crate —
+   neither `rustix` nor `nix` as of 2026-04 — exposes a wrapper for it.
+   The only path through the Rust ecosystem is `libc::fcntl` with an
+   `unsafe` block.
+2. `posix_fadvise(POSIX_FADV_DONTNEED)` is the primitive the O6 vault
+   hibernation path uses to release Linux page-cache pressure on Dormant
+   vaults. `rustix` only exposes `posix_fadvise` behind unstable
+   feature flags, so we still drop to `libc::posix_fadvise` with an
+   `unsafe` block.
 
 Rather than relax the workspace-wide ban, all unsafe code is confined here,
 audited, and documented. Any new `unsafe` block in this crate must:

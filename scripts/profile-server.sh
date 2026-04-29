@@ -349,7 +349,11 @@ fi
 # --- bootstrap cluster -------------------------------------------------------
 
 echo "==> running init subcommand"
-"$SERVER_BIN" init --host="127.0.0.1:${PORT}" || {
+# `init` is a client subcommand (gRPC against the running server) but the
+# top-level Cli struct's --data/--dev ArgGroup applies to every subcommand
+# as of 2026-04-29. Pass --data so the parser is satisfied; the value is
+# ignored by the init subcommand's logic.
+"$SERVER_BIN" --data "$DATA_DIR/node" init --host="127.0.0.1:${PORT}" || {
     echo "error: init failed; last server log lines:" >&2
     tail -30 "$DATA_DIR/server.log" >&2 || true
     exit 1

@@ -283,13 +283,18 @@ pub async fn bootstrap_node(
     let runtime_config = RuntimeConfigHandle::default();
     manager.set_runtime_config(runtime_config.clone());
 
-    // Phase 7 / O1: vault hibernation policy. The top-level
-    // `vault_hibernation` flag is the master enable switch; the
-    // `hibernation` struct on `Config` carries tuning. Plumb both into
-    // the manager BEFORE any vault group is started so the idle
-    // detector's reads-on-tick observe the operator-configured policy.
+    // Phase 7 / O1: vault hibernation policy. The `hibernation` struct on
+    // `Config` is the canonical source of truth for the master enable
+    // switch and the tuning knobs; the top-level `vault_hibernation` CLI
+    // flag is an optional `Option<bool>` startup override. Resolve the
+    // effective `enabled` value, then plumb the policy into the manager
+    // BEFORE any vault group is started so the idle detector's
+    // reads-on-tick observe the operator-configured values.
     let mut hibernation_cfg = config.hibernation.clone();
-    hibernation_cfg.enabled = config.vault_hibernation;
+    hibernation_cfg.enabled = inferadb_ledger_types::config::HibernationConfig::resolve_enabled(
+        config.vault_hibernation,
+        hibernation_cfg.enabled,
+    );
     manager.set_hibernation_config(hibernation_cfg.clone());
     if hibernation_cfg.enabled {
         manager.start_hibernation_idle_detector();
@@ -761,15 +766,19 @@ pub async fn bootstrap_node(
     // Create rate limiter and hot key detector.
     //
     // Rate limiting defaults to disabled (per the silent-throttling-defaults
-    // lesson). The top-level `--ratelimit` CLI flag is the master opt-in;
-    // `RateLimitConfig::enabled` mirrors it so the in-struct flag and the
-    // runtime-reconfig path stay coherent. When `ratelimit = false`, the
-    // existing tuning knobs (`client_burst`, etc.) are still loaded but the
-    // limiter's `check` fast-paths through a single atomic load — operators
-    // who later flip `ratelimit = true` (via `UpdateConfig`) get a sensible
-    // baseline without restart.
+    // lesson). `RateLimitConfig::enabled` is the canonical master switch
+    // (defaults to `false`); the `--ratelimit` CLI flag is an optional
+    // `Option<bool>` startup override. Resolution: `cli.unwrap_or(inner)`
+    // — operators who set `enabled: true` in YAML / env config but omit
+    // the CLI flag get the on they configured; operators who pass
+    // `--ratelimit=false` force it off. The runtime-reconfig path
+    // (`UpdateConfig`) reads the inner field directly and is unaffected
+    // by the CLI override.
     let mut rl = config.rate_limit.clone().unwrap_or_default();
-    rl.enabled = config.ratelimit;
+    rl.enabled = inferadb_ledger_types::config::RateLimitConfig::resolve_enabled(
+        config.ratelimit,
+        rl.enabled,
+    );
     let rate_limiter = Arc::new(RateLimiter::new(
         rl.enabled,
         rl.client_burst,

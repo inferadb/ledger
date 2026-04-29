@@ -310,6 +310,24 @@ impl Default for ObservabilityConfig {
     }
 }
 
+impl ObservabilityConfig {
+    /// Resolves the effective `vault_metrics_enabled` value from a CLI
+    /// override and the configured inner field.
+    ///
+    /// Mirrors [`RateLimitConfig::resolve_enabled`](super::RateLimitConfig::resolve_enabled).
+    /// The inner field is the canonical source of truth; the CLI override
+    /// (`--vault-metrics`) lets operators flip the per-vault Prometheus
+    /// emission gate without a YAML edit. Used at server startup;
+    /// per-vault metrics are intentionally restart-only — flipping
+    /// the gate at runtime would change the time-series shape mid-scrape
+    /// and confuse dashboards.
+    #[inline]
+    #[must_use]
+    pub fn resolve_enabled(cli_override: Option<bool>, inner: bool) -> bool {
+        cli_override.unwrap_or(inner)
+    }
+}
+
 // =========================================================================
 // HotKeyConfig
 // =========================================================================
@@ -682,6 +700,18 @@ mod tests {
         // Empty JSON should deserialize to default (vault_metrics_enabled = false).
         let config: ObservabilityConfig = serde_json::from_str("{}").unwrap();
         assert!(!config.vault_metrics_enabled);
+    }
+
+    #[test]
+    fn observability_resolve_enabled_returns_inner_when_cli_unset() {
+        assert!(!ObservabilityConfig::resolve_enabled(None, false));
+        assert!(ObservabilityConfig::resolve_enabled(None, true));
+    }
+
+    #[test]
+    fn observability_resolve_enabled_cli_overrides_inner() {
+        assert!(ObservabilityConfig::resolve_enabled(Some(true), false));
+        assert!(!ObservabilityConfig::resolve_enabled(Some(false), true));
     }
 
     // HotKeyConfig tests
