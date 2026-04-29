@@ -31,6 +31,17 @@
 #   VAULTS                only honored when workload=concurrent-writes-
 #                         multivault; number of vaults to fan writes across
 #                         (default 16). Ignored by every other workload.
+#   POOL_SIZE             only honored when workload=concurrent-writes-
+#                         multivault; SDK ClientConfig.connection_pool_size
+#                         override (default 0 = SDK default of 1). Higher
+#                         values let one client drive multiple parallel
+#                         tonic Buffer workers.
+#   SHARED_CLIENT         only honored when workload=concurrent-writes-
+#                         multivault; "true" forces every task to share one
+#                         LedgerClient (the realistic consumer pattern)
+#                         instead of one client per task. Default unset
+#                         (per-task client). Use with POOL_SIZE>1 to
+#                         reproduce the P10 throughput ceiling.
 #   ORGS                  only honored when workload=concurrent-writes-
 #                         multiorg; number of organizations to fan writes
 #                         across — orgs route to distinct Raft shards via
@@ -99,6 +110,8 @@ esac
 CONCURRENCY="${CONCURRENCY:-32}"
 VAULTS="${VAULTS:-16}"
 ORGS="${ORGS:-4}"
+POOL_SIZE="${POOL_SIZE:-0}"
+SHARED_CLIENT="${SHARED_CLIENT:-}"
 EXTRA_ARGS=()
 case "$WORKLOAD" in
     concurrent-writes|concurrent-reads)
@@ -106,6 +119,12 @@ case "$WORKLOAD" in
         ;;
     concurrent-writes-multivault)
         EXTRA_ARGS=(--concurrency "$CONCURRENCY" --vaults "$VAULTS")
+        if [[ "$POOL_SIZE" != "0" ]]; then
+            EXTRA_ARGS+=(--pool-size "$POOL_SIZE")
+        fi
+        if [[ "$SHARED_CLIENT" == "true" ]]; then
+            EXTRA_ARGS+=(--shared-client)
+        fi
         ;;
     concurrent-writes-multiorg)
         EXTRA_ARGS=(--concurrency "$CONCURRENCY" --orgs "$ORGS")

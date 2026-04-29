@@ -397,3 +397,14 @@ profile-server-spans WORKLOAD="throughput-writes" SECS="60":
 # flamegraph on Linux). Run `just doctor-profiling` to verify.
 profile-suite DURATION="30" MODE="sampling":
     ./scripts/profile-suite.sh {{DURATION}} {{MODE}}
+
+# Multivault throughput sweep — reproduces the P10 ceiling environment by
+# scanning concurrency × pool_size on `concurrent-writes-multivault` with
+# a shared client. Locks the workload knobs that matter; produces a
+# markdown grid + CSV at profiles/multivault-sweep-<ts>/.
+# DURATION: per-cell measured duration (default 30)
+# Override the matrix via env: SWEEP_CONCURRENCY="32 128 1024", SWEEP_POOL_SIZE="1 4 8".
+# Defaults: concurrency = "32 128 512 1024", pool_size = "1 4" (8 cells, ~6 min).
+# Requires: jq (for the aggregated table) + samply on macOS / flamegraph on Linux.
+profile-multivault-sweep DURATION="30":
+    ./scripts/profile-multivault-sweep.sh {{DURATION}}
