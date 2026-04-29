@@ -1446,6 +1446,308 @@ pub fn record_state_recovery_duration(
     );
 }
 
+// ─── Stage 5b — Per-Org Parallel WAL Replay (start_region) ──────────
+
+/// Wall-clock duration of `replay_shared_wal_for_org` invocations
+/// dispatched from `RaftManager::start_region` on restart (histogram,
+/// seconds). Labels: `region`, `organization_id`. Uses
+/// [`SLI_HISTOGRAM_BUCKETS`].
+///
+/// Fires once per `(region, organization_id)` per startup, **only on the
+/// success arm** — skip / error arms emit only the
+/// `_invocations_total` counter so dashboards distinguish "ran and
+/// finished" from "did not run / failed". Pathological replay durations
+/// alert at p99: a tail past ~30s on a healthy cluster usually means a
+/// vault apply pump is stuck on a blocking syscall, not that the WAL
+/// is large.
+pub const LEDGER_ORG_PARALLEL_REPLAY_DURATION_SECONDS: &str =
+    "ledger_org_parallel_replay_duration_seconds";
+
+/// Total entries applied across all vaults during a single
+/// `replay_shared_wal_for_org` invocation (counter). Labels: `region`,
+/// `organization_id`.
+///
+/// Sum across every per-vault apply closure that ran. Cross-checked
+/// against `ledger_vault_applied_durable_advanced_total` after the
+/// next `StateCheckpointer` tick — the steady-state delta of "applies
+/// that landed in the dual-slot" should at least cover the
+/// post-restart replay catch-up.
+pub const LEDGER_ORG_PARALLEL_REPLAY_ENTRIES_PROCESSED_TOTAL: &str =
+    "ledger_org_parallel_replay_entries_processed_total";
+
+/// Number of vault groups under this `(region, organization_id)` that
+/// had a non-zero replay gap at restart (gauge). Labels: `region`,
+/// `organization_id`.
+///
+/// A snapshot, not a counter — set on every replay invocation. On a
+/// clean shutdown the gauge is `0` (every vault's `applied_durable >=
+/// last_committed`, the skip-check fires). A non-zero value is the
+/// operator-visible signal of an unclean shutdown's per-vault impact;
+/// dashboards graph this alongside `_invocations_total{result=success}`
+/// to see the catch-up shape.
+pub const LEDGER_ORG_PARALLEL_REPLAY_VAULTS_ACTIVE: &str =
+    "ledger_org_parallel_replay_vaults_active";
+
+/// Outcome counter for `replay_shared_wal_for_org` invocations from
+/// `RaftManager::start_region` (counter). Labels: `region`,
+/// `organization_id`, `result`.
+///
+/// `result` ∈ `{"success", "error", "skipped_no_gap", "skipped_disabled"}`:
+/// - `success` — the replay ran end-to-end and at least one vault had a non-zero gap.
+/// - `error` — the replay returned a
+///   [`ParallelReplayError`](crate::log_storage::ParallelReplayError) (recovery / unknown-shard /
+///   vault-apply / join-error / cancellation). Startup falls through to the live commit pump, so
+///   the error is non-fatal.
+/// - `skipped_no_gap` — every per-vault `applied_durable >= last_committed`. Clean-shutdown path.
+/// - `skipped_disabled` — `enable_parallel_wal_replay = false`. Operator escape hatch.
+///
+/// Dashboards alert on a sustained non-zero `error` rate; the other
+/// arms are informational.
+pub const LEDGER_ORG_PARALLEL_REPLAY_INVOCATIONS_TOTAL: &str =
+    "ledger_org_parallel_replay_invocations_total";
+
+/// Result label for [`record_org_parallel_replay_invocation`].
+///
+/// Stringly-typed so the call site can pass a `&'static str` literal
+/// from the matching arm without dragging an extra enum into
+/// `start_region`'s already-dense control flow.
+pub mod org_parallel_replay_result {
+    /// Replay ran end-to-end with at least one vault catching up.
+    pub const SUCCESS: &str = "success";
+    /// Replay returned a [`ParallelReplayError`](crate::log_storage::ParallelReplayError);
+    /// startup falls through to the live commit pump.
+    pub const ERROR: &str = "error";
+    /// Every per-vault `applied_durable >= last_committed`; replay
+    /// skipped without scanning the WAL beyond the per-shard
+    /// `recover_from_wal` filter.
+    pub const SKIPPED_NO_GAP: &str = "skipped_no_gap";
+    /// `enable_parallel_wal_replay = false`; replay block bypassed
+    /// entirely.
+    pub const SKIPPED_DISABLED: &str = "skipped_disabled";
+}
+
+/// Records one `replay_shared_wal_for_org` invocation outcome.
+///
+/// Always emits the `_invocations_total{result}` counter; the
+/// success-only metrics
+/// ([`LEDGER_ORG_PARALLEL_REPLAY_DURATION_SECONDS`] /
+/// [`LEDGER_ORG_PARALLEL_REPLAY_ENTRIES_PROCESSED_TOTAL`] /
+/// [`LEDGER_ORG_PARALLEL_REPLAY_VAULTS_ACTIVE`]) are deliberately split
+/// into [`record_org_parallel_replay_success`] so the skip / error
+/// arms don't muddy the duration histogram.
+///
+/// Skip emission on cold-start with no vaults is the caller's
+/// responsibility — `start_region` short-circuits before this helper
+/// when `vaults_in_org.is_empty()`. See the no-op-org skip in
+/// `start_region` for the rationale.
+#[inline]
+pub fn record_org_parallel_replay_invocation(
+    region: &str,
+    organization_id: &str,
+    result: &'static str,
+) {
+    gated!(
+        LEDGER_ORG_PARALLEL_REPLAY_INVOCATIONS_TOTAL,
+        &[
+            (fields::REGION, region),
+            (fields::ORGANIZATION_ID, organization_id),
+            (fields::RESULT, result),
+        ],
+        {
+            counter!(
+                LEDGER_ORG_PARALLEL_REPLAY_INVOCATIONS_TOTAL,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+                fields::RESULT => result.to_string(),
+            )
+            .increment(1);
+        }
+    );
+}
+
+/// Records the success-only metrics for a `replay_shared_wal_for_org`
+/// invocation: duration histogram, entries-processed counter, and
+/// vaults-active gauge.
+///
+/// Called from `start_region` only on the
+/// [`org_parallel_replay_result::SUCCESS`] arm — skipped invocations
+/// (`SKIPPED_NO_GAP`, `SKIPPED_DISABLED`) and errored invocations
+/// (`ERROR`) emit only the invocation counter.
+#[inline]
+pub fn record_org_parallel_replay_success(
+    region: &str,
+    organization_id: &str,
+    duration: std::time::Duration,
+    entries_processed: u64,
+    vaults_active: u64,
+) {
+    gated!(
+        LEDGER_ORG_PARALLEL_REPLAY_DURATION_SECONDS,
+        &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id)],
+        {
+            histogram!(
+                LEDGER_ORG_PARALLEL_REPLAY_DURATION_SECONDS,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+            )
+            .record(duration.as_secs_f64());
+            counter!(
+                LEDGER_ORG_PARALLEL_REPLAY_ENTRIES_PROCESSED_TOTAL,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+            )
+            .increment(entries_processed);
+            gauge!(
+                LEDGER_ORG_PARALLEL_REPLAY_VAULTS_ACTIVE,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+            )
+            .set(vaults_active as f64);
+        }
+    );
+}
+
+// ─── Per-Vault Applied-Durable Observability ──────────
+
+/// Per-vault `applied_durable` lag gauge (`live_applied -
+/// last_synced_snapshot_id`). Labels: `region`, `organization_id`,
+/// `vault_id`.
+///
+/// Emitted once per [`StateCheckpointer`](crate::state_checkpointer::StateCheckpointer)
+/// tick after the per-vault `raft.db` `sync_state` returns. `live_applied`
+/// is read from the per-vault [`VaultAppliedState`](crate::log_storage::VaultAppliedState)
+/// `ArcSwap` (the in-memory live state); `last_synced_snapshot_id` is
+/// read from the per-vault `Database<FileBackend>` after sync. Steady
+/// state is small double digits (one apply batch per tick); a sustained
+/// triple-or-quadruple-digit lag is the operator-visible signal that
+/// the per-tick fan-out is falling behind apply throughput.
+///
+/// Dormant vaults are filtered out — the
+/// [`vault_raft_dbs_fn`](crate::state_checkpointer::VaultRaftDbsFn) closure
+/// already excludes Dormant vaults inline (apply pipeline is drained at
+/// the Active → Dormant boundary, so the `live_applied` value would be
+/// the trailing edge from before the transition). The lag emission
+/// mirrors that filter — emitting a sentinel "Dormant" lag would muddy
+/// the dashboards.
+///
+/// Per-vault label is opt-in (gated by
+/// [`vault_metrics_enabled`]); when
+/// off the lag emission is skipped entirely (cardinality cap, no rollup
+/// because lag at the org level is a meaningless aggregate).
+pub const LEDGER_VAULT_APPLIED_DURABLE_LAG: &str = "ledger_vault_applied_durable_lag";
+
+/// Successful per-vault `raft.db` `sync_state` advancements (counter).
+/// Labels: `region`, `organization_id`.
+///
+/// Always-on org-level rollup. Incremented once per successful per-vault
+/// `sync_state` per
+/// [`StateCheckpointer`](crate::state_checkpointer::StateCheckpointer) tick;
+/// per-vault breakdown is provided by the
+/// [`LEDGER_VAULT_APPLIED_DURABLE_LAG`] gauge so this counter intentionally
+/// drops `vault_id` to keep cardinality bounded.
+///
+/// Operators can chart `rate()` against `ledger_state_checkpoints_total`
+/// to see the average number of vaults advanced per tick — a useful
+/// signal for capacity planning across the per-vault fan-out.
+pub const LEDGER_VAULT_APPLIED_DURABLE_ADVANCED_TOTAL: &str =
+    "ledger_vault_applied_durable_advanced_total";
+
+/// Per-vault `raft.db` `sync_state` duration (histogram, seconds).
+/// Labels: `region`, `organization_id`, `vault_id`. Uses
+/// [`SLI_HISTOGRAM_BUCKETS`].
+///
+/// Emitted once per [`StateCheckpointer`](crate::state_checkpointer::StateCheckpointer)
+/// tick per Active vault (Dormant vaults filtered the same way as the lag
+/// gauge). Per-vault label is opt-in (gated by
+/// [`vault_metrics_enabled`]) — when
+/// off the histogram is skipped entirely. The org-level total checkpoint
+/// duration is already covered by
+/// [`LEDGER_STATE_CHECKPOINT_DURATION_SECONDS`]; this per-vault histogram
+/// exists so opt-in operators can identify hot vaults whose `sync_state`
+/// dominates the tick.
+pub const LEDGER_VAULT_APPLIED_DURABLE_ADVANCE_DURATION_SECONDS: &str =
+    "ledger_vault_applied_durable_advance_duration_seconds";
+
+/// Records the per-vault `applied_durable` lag observed at a successful
+/// per-vault [`Database::sync_state`](inferadb_ledger_store::Database::sync_state) tick.
+///
+/// Always-on org-level counter increment; the per-vault gauge emission is
+/// opt-in via [`vault_metrics_enabled`].
+///
+/// Called from [`StateCheckpointer::do_checkpoint`](crate::state_checkpointer::StateCheckpointer)
+/// once per Active vault after the per-vault `raft.db` `sync_state`
+/// resolves successfully. Failures do NOT call this helper — accumulators
+/// stay frozen so the next tick retries.
+///
+/// `lag` is `live_applied - last_synced_snapshot_id`, computed in the
+/// caller from the per-vault
+/// [`VaultAppliedState`](crate::log_storage::VaultAppliedState) `ArcSwap`
+/// and the per-vault `Database` snapshot id at the moment of emission.
+#[inline]
+pub fn record_vault_applied_durable_advance(
+    region: &str,
+    organization_id: &str,
+    vault: VaultId,
+    lag: u64,
+    duration_secs: f64,
+) {
+    // Always-on org-level rollup. Cardinality: region × organization.
+    gated!(
+        LEDGER_VAULT_APPLIED_DURABLE_ADVANCED_TOTAL,
+        &[(fields::REGION, region), (fields::ORGANIZATION_ID, organization_id)],
+        {
+            counter!(
+                LEDGER_VAULT_APPLIED_DURABLE_ADVANCED_TOTAL,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+            )
+            .increment(1);
+        }
+    );
+
+    // Opt-in per-vault gauge + histogram. Skip emission entirely when
+    // off so the series never registers — a hard cardinality cap rather
+    // than a sentinel-label emission.
+    if !vault_metrics_enabled() {
+        return;
+    }
+    let vault_label = vault.value().to_string();
+    gated!(
+        LEDGER_VAULT_APPLIED_DURABLE_LAG,
+        &[
+            (fields::REGION, region),
+            (fields::ORGANIZATION_ID, organization_id),
+            (fields::VAULT_ID, &vault_label),
+        ],
+        {
+            gauge!(
+                LEDGER_VAULT_APPLIED_DURABLE_LAG,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+                fields::VAULT_ID => vault_label.clone(),
+            )
+            .set(lag as f64);
+        }
+    );
+    gated!(
+        LEDGER_VAULT_APPLIED_DURABLE_ADVANCE_DURATION_SECONDS,
+        &[
+            (fields::REGION, region),
+            (fields::ORGANIZATION_ID, organization_id),
+            (fields::VAULT_ID, &vault_label),
+        ],
+        {
+            histogram!(
+                LEDGER_VAULT_APPLIED_DURABLE_ADVANCE_DURATION_SECONDS,
+                fields::REGION => region.to_string(),
+                fields::ORGANIZATION_ID => organization_id.to_string(),
+                fields::VAULT_ID => vault_label.clone(),
+            )
+            .record(duration_secs);
+        }
+    );
+}
+
 // ─── Handler-Phase Event Flusher ──────────────────────
 
 /// Total handler-phase event flushes by trigger reason (counter).
@@ -2773,6 +3075,27 @@ mod tests {
         set_state_page_cache_len("global", "0", 999);
         set_state_last_synced_snapshot_id("global", "0", 5);
         set_state_checkpoint_last_timestamp("global", "0", 1_700_000_000.0);
+    }
+
+    // --- Per-vault applied-durable observability ---
+
+    #[test]
+    fn test_record_vault_applied_durable_advance_off_emits_rollup_only() {
+        // With the per-vault gate off, only the always-on org rollup
+        // should record. The per-vault gauge + histogram are skipped
+        // entirely (cardinality cap).
+        set_vault_metrics_enabled(false);
+        record_vault_applied_durable_advance("us-east-va", "1", VaultId::new(7), 12, 0.001);
+        record_vault_applied_durable_advance("us-east-va", "1", VaultId::new(8), 0, 0.002);
+    }
+
+    #[test]
+    fn test_record_vault_applied_durable_advance_on_emits_per_vault() {
+        set_vault_metrics_enabled(true);
+        record_vault_applied_durable_advance("us-east-va", "1", VaultId::new(7), 12, 0.001);
+        record_vault_applied_durable_advance("us-east-va", "1", VaultId::new(8), 0, 0.002);
+        // Set back to default so other tests aren't affected.
+        set_vault_metrics_enabled(false);
     }
 
     // --- Handler-phase event flusher ---

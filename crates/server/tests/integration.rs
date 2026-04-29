@@ -31,6 +31,7 @@ mod region_opt_in;
 mod region_residency;
 mod replication;
 mod saga_orchestrator;
+mod snapshot_install;
 mod telemetry_context;
 mod three_tier_consensus;
 mod token_lifecycle;

@@ -99,6 +99,22 @@ use crate::{
 };
 
 // ============================================================================
+// Type Aliases
+// ============================================================================
+
+/// Triple returned by [`RaftManager::open_and_wire_vault_store`]:
+/// `(vault_log_store, vault_block_archive, vault_event_writer)`.
+///
+/// Used by both [`RaftManager::start_vault_group`] (production
+/// per-vault startup path) and the Stage 5b parallel-replay path
+/// inside [`RaftManager::start_region`]. The alias exists primarily
+/// to keep the helper's return type within clippy's
+/// `type_complexity` threshold; the field semantics are documented
+/// on `open_and_wire_vault_store` itself.
+pub(crate) type WiredVaultStore =
+    (RaftLogStore<FileBackend>, Arc<BlockArchive<FileBackend>>, Option<EventWriter<FileBackend>>);
+
+// ============================================================================
 // Error Types
 // ============================================================================
 
@@ -285,25 +301,38 @@ pub struct RaftManagerConfig {
     #[builder(default = crate::membership_queue::DEFAULT_MAX_CONCURRENT_SNAPSHOT_PRODUCING)]
     pub max_concurrent_snapshot_producing: usize,
 
-    /// Whether to use parallel shared-WAL replay for new-voter catch-up
-    /// (Phase 5 / M4 of the centralised membership plan).
+    /// Whether to drive per-vault parallel catch-up from the local
+    /// per-org WAL on restart (Stage 5b of the M6 reframed initiative).
     ///
-    /// When `true`, a node added as a voter to an organization with N
-    /// vault groups will receive a single shared-WAL snapshot from the
-    /// organization's leader and replay it locally — fanning out per-vault
-    /// apply tasks via
+    /// When `true`, `RaftManager::start_region` runs
     /// [`replay_shared_wal_for_org`](crate::log_storage::replay_shared_wal_for_org)
-    /// instead of running N concurrent per-vault `InstallSnapshot` RPCs.
-    /// When `false`, the legacy per-vault snapshot path is used.
+    /// after [`RaftLogStore::replay_crash_gap`](crate::log_storage::RaftLogStore::replay_crash_gap)
+    /// and BEFORE
+    /// [`ConsensusEngine::start_with_all_callbacks`](inferadb_ledger_consensus::ConsensusEngine::start_with_all_callbacks)
+    /// consumes the WAL by value. The per-vault stores are opened via
+    /// `RaftManager::open_and_wire_vault_store`, driven through one
+    /// coordinated parallel-apply pass, and dropped — `start_vault_group`
+    /// reopens them later. This closes the per-vault correctness gap that
+    /// motivated Stage 5b: per-vault `applied_durable_index` lives in the
+    /// page cache between [`StateCheckpointer`](crate::state_checkpointer::StateCheckpointer)
+    /// ticks; an unclean shutdown loses it, and without this replay the
+    /// only post-restart recovery path is AppendEntries-driven catch-up
+    /// from a healthy peer (which is unavailable in single-node /
+    /// majority-partitioned scenarios).
     ///
-    /// Default `true` — the legacy path is the snapshot storm the
-    /// primitive exists to eliminate. M4 ships the primitive only; the
-    /// production wire-in (replacing
-    /// [`RaftManager::start_vault_group`]'s bootstrap path with a
-    /// shared-WAL replay) is a follow-up. With `true` set today the
-    /// behaviour is unchanged (no callers wired); flipping to `false`
-    /// would only have an effect once the wire-in lands and would force
-    /// callers back onto the legacy path.
+    /// When `false`, the replay block in `start_region` is skipped
+    /// entirely. Per-vault catch-up falls back on the live commit pump,
+    /// which only re-applies entries that arrive AFTER the engine starts
+    /// — i.e., it does not close the gap on a single-node restart. This
+    /// disabled mode is preserved as a runtime escape hatch for
+    /// debugging the replay path itself; production deployments should
+    /// leave the default.
+    ///
+    /// Default `true`. The cost on a clean shutdown is one
+    /// `recover_from_wal` call per per-org WAL with all vaults at
+    /// applied_durable >= last_committed (skipped via `skipped_no_gap`),
+    /// so the no-op path is cheap and observable via
+    /// `ledger_org_parallel_replay_invocations_total{result=skipped_no_gap}`.
     #[builder(default = true)]
     pub enable_parallel_wal_replay: bool,
 
@@ -1599,6 +1628,24 @@ pub struct InnerVaultGroup {
     /// [`InnerVaultGroup::mark_membership_change_started`] /
     /// [`InnerVaultGroup::mark_membership_change_finished`].
     pub(crate) pending_membership_started_unix_secs: AtomicU64,
+    /// Sender side of the per-vault apply-command channel used by Stage 4's
+    /// `RaftManagerSnapshotInstaller` to route
+    /// [`ApplyCommand::InstallSnapshot`](crate::apply_command::ApplyCommand::InstallSnapshot)
+    /// onto the per-vault commit pump that owns this vault's
+    /// [`RaftLogStore`](crate::log_storage::RaftLogStore).
+    ///
+    /// The receiver side is held by the per-vault commit pump spawned in
+    /// [`RaftManager::start_vault_group`] and drained alongside the commit
+    /// channel via `tokio::select!`. Strict ordering: an install command
+    /// runs to completion before the next batch is processed (the install
+    /// arm awaits the synchronous `RaftLogStore::install_snapshot` call
+    /// before returning to the loop), preventing any race between an
+    /// in-flight batch apply and a wholesale state-replace. The channel is
+    /// sized for at most a handful of in-flight install commands
+    /// ([`APPLY_COMMAND_CHANNEL_CAPACITY`](crate::apply_command::APPLY_COMMAND_CHANNEL_CAPACITY))
+    /// — beyond that, drop-and-let-Raft-retry kicks in and the leader's
+    /// next heartbeat re-emits `Action::SendSnapshot`.
+    pub(crate) apply_command_tx: crate::apply_command::ApplyCommandSender,
 }
 
 impl InnerVaultGroup {
@@ -1652,6 +1699,15 @@ impl InnerVaultGroup {
         &self,
     ) -> &Arc<arc_swap::ArcSwap<crate::log_storage::VaultAppliedState>> {
         &self.vault_applied_state
+    }
+
+    /// Returns the per-vault apply-command sender used by Stage 4's
+    /// snapshot installer to route
+    /// [`ApplyCommand::InstallSnapshot`](crate::apply_command::ApplyCommand::InstallSnapshot)
+    /// onto the per-vault commit pump that owns this vault's
+    /// [`RaftLogStore`](crate::log_storage::RaftLogStore).
+    pub fn apply_command_tx(&self) -> &crate::apply_command::ApplyCommandSender {
+        &self.apply_command_tx
     }
 
     /// Returns the block announcements broadcast channel.
@@ -2446,6 +2502,62 @@ impl RaftManager {
         *self.self_weak.lock() = Arc::downgrade(self);
     }
 
+    /// Test-only helper: dispatches the snapshot-streaming send path for a
+    /// `(shard, follower)` pair the same way the consensus reactor would
+    /// when it processes [`Action::SendSnapshot`].
+    ///
+    /// Mirrors the production
+    /// [`SnapshotSender::send_snapshot`](inferadb_ledger_consensus::snapshot_sender::SnapshotSender::send_snapshot)
+    /// invocation: spawns a tokio task and returns immediately. The
+    /// caller is responsible for waiting for the staged file to land
+    /// (e.g. via [`SnapshotPersister::list_staged`](crate::snapshot_persister::SnapshotPersister::list_staged))
+    /// or for the install RPC to complete.
+    ///
+    /// Public solely so server-level integration tests can exercise the
+    /// full snapshot install chain (persist → stream → stage → install)
+    /// end-to-end without depending on long-running consensus protocol
+    /// behavior to trigger the action emission. Production callers go
+    /// through the registered [`SnapshotSender`] trait implementation
+    /// installed at engine start time.
+    pub fn send_snapshot_for_test(
+        self: &Arc<Self>,
+        shard_id: inferadb_ledger_consensus::types::ConsensusStateId,
+        follower_id: inferadb_ledger_consensus::types::NodeId,
+        snapshot_index: u64,
+    ) {
+        let sender = self.build_snapshot_sender();
+        // The trait implementation `tokio::spawn`s the dispatch internally
+        // so this returns immediately — same fire-and-forget contract the
+        // reactor uses.
+        sender.send_snapshot(shard_id, follower_id, snapshot_index);
+    }
+
+    /// Test-only helper: dispatches the snapshot install path for a shard
+    /// the same way the consensus reactor would when it processes
+    /// [`Action::InstallSnapshot`].
+    ///
+    /// Mirrors the production
+    /// [`SnapshotInstaller::install_snapshot`](inferadb_ledger_consensus::snapshot_installer::SnapshotInstaller::install_snapshot)
+    /// invocation: spawns a tokio task and returns immediately. The
+    /// caller is responsible for polling until the install lands (e.g.
+    /// by observing the shard's `last_applied` advance, or by querying
+    /// the metric `ledger_snapshot_install_total{result="success"}`).
+    ///
+    /// Public solely so server-level integration tests can exercise the
+    /// full snapshot install chain end-to-end. Production callers go
+    /// through the registered [`SnapshotInstaller`] trait implementation
+    /// installed at engine start time.
+    pub fn install_snapshot_for_test(
+        self: &Arc<Self>,
+        shard_id: inferadb_ledger_consensus::types::ConsensusStateId,
+        leader_term: u64,
+        last_included_index: u64,
+        last_included_term: u64,
+    ) {
+        let installer = self.build_snapshot_installer();
+        installer.install_snapshot(shard_id, leader_term, last_included_index, last_included_term);
+    }
+
     /// Returns a [`ShardWakeNotifier`](inferadb_ledger_consensus::wake::ShardWakeNotifier)
     /// bound to this manager's `self_weak`, suitable for passing to
     /// [`ConsensusEngine::start_with_wake_notifier`](inferadb_ledger_consensus::ConsensusEngine::start_with_wake_notifier).
@@ -2745,6 +2857,26 @@ impl RaftManager {
         organization_id: OrganizationId,
     ) -> Option<crate::apply_command::ApplyCommandSender> {
         let inner = self.regions.read().get(&(region, organization_id)).cloned()?;
+        Some(inner.apply_command_tx().clone())
+    }
+
+    /// Returns the per-vault apply-command sender for the vault group at
+    /// `(region, organization_id, vault_id)`, or `None` when the vault
+    /// group is not started on this node.
+    ///
+    /// Stage 4's installer uses this to route
+    /// [`ApplyCommand::InstallSnapshot`](crate::apply_command::ApplyCommand::InstallSnapshot)
+    /// onto the per-vault commit pump that owns this vault's
+    /// [`RaftLogStore`](crate::log_storage::RaftLogStore). Sister of
+    /// [`apply_command_sender`](Self::apply_command_sender) — same shape,
+    /// keyed by the per-vault triple instead of the org pair.
+    pub fn apply_command_sender_for_vault(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+        vault_id: VaultId,
+    ) -> Option<crate::apply_command::ApplyCommandSender> {
+        let inner = self.vault_groups.read().get(&(region, organization_id, vault_id)).cloned()?;
         Some(inner.apply_command_tx().clone())
     }
 
@@ -4156,6 +4288,165 @@ impl RaftManager {
         }
     }
 
+    /// Opens the per-vault `raft.db`, `blocks.db`, and (conditionally)
+    /// `events.db`, wires the resulting [`RaftLogStore`] with the
+    /// parent organization's shared component handles, and returns the
+    /// triple `(vault_log_store, vault_block_archive,
+    /// vault_event_writer)`.
+    ///
+    /// Used by both `Self::start_vault_group` (the production
+    /// per-vault startup path) and `Self::start_region` (the Stage 5b
+    /// parallel-replay-on-restart path). Identical wiring at both call
+    /// sites is load-bearing — `start_region` opens the store once for
+    /// replay, drops it, and `start_vault_group` reopens it later
+    /// against the same `raft.db` file. Any divergence between the two
+    /// would cause the post-replay reopen to observe a different
+    /// component-handle topology than the replay itself ran against.
+    ///
+    /// ## Component-handle topology
+    ///
+    /// - `state_layer` — shared with the parent org. The org's [`StateLayer`] already materialises
+    ///   per-vault `state.db` databases via its lazy factory (P2b.0); sharing the accessor lets
+    ///   vault apply land entity writes in the correct per-vault database without duplicating the
+    ///   layer.
+    /// - `block_archive` — **per-vault** (Phase 4.1.a). Vault writes append to the vault's own
+    ///   chain in its own `blocks.db`; the parent organization's `blocks.db` is no longer touched
+    ///   by vault apply. Returned alongside the store so callers can also stash it on
+    ///   `InnerVaultGroup` (in the start-vault path) or drop it (in the replay path).
+    /// - `block_announcements` — broadcast through the org's channel so subscribers see vault-shard
+    ///   commits alongside org-shard commits.
+    /// - `leader_lease` — vault groups run delegated leadership; the parent org's lease is the
+    ///   authoritative read-validity window.
+    /// - `event_writer` — **per-vault** (Phase 4.2). When the parent org has an event writer
+    ///   configured, we open a fresh `events.db` under
+    ///   `{data_dir}/{region}/{org_id}/state/vault-{vault_id}/events.db` and wrap it in a new
+    ///   [`EventWriter`] that inherits the org writer's [`EventConfig`]. Returned alongside the
+    ///   store (via the third tuple element) so the start-vault path can also stash a clone on
+    ///   `InnerVaultGroup`.
+    /// - `snapshot_key_provider` — wired from `self.config` so per-vault snapshots resolve to the
+    ///   right per-scope DEKs (root rule 18).
+    ///
+    /// ## Errors
+    ///
+    /// Returns [`RaftManagerError::RegionNotFound`] if the parent
+    /// `(region, organization_id)` group is not registered on this
+    /// node, or [`RaftManagerError::Storage`] for any I/O failure
+    /// opening the per-vault databases.
+    pub(crate) fn open_and_wire_vault_store(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+        vault_id: VaultId,
+        org_state_layer: Arc<StateLayer<FileBackend>>,
+        org_block_announcements: broadcast::Sender<BlockAnnouncement>,
+        org_leader_lease: Arc<crate::leader_lease::LeaderLease>,
+        org_event_writer: Option<&EventWriter<FileBackend>>,
+    ) -> Result<WiredVaultStore> {
+        // Compose the per-vault raft.db path under
+        // `{data_dir}/{region}/{organization_id}/state/vault-{vault_id}/raft.db`
+        // (P2b.0 layout). The org's `RegionStorage` already exposes the
+        // per-vault directory helper; we reuse it instead of re-composing.
+        let region_storage = self
+            .storage_manager
+            .get_organization(region, organization_id)
+            .ok_or(RaftManagerError::RegionNotFound { region })?;
+        let vault_dir = region_storage.vault_dir(vault_id);
+        std::fs::create_dir_all(&vault_dir).map_err(|e| RaftManagerError::Storage {
+            region,
+            message: format!("failed to create vault directory {}: {e}", vault_dir.display()),
+        })?;
+        let vault_raft_db_path = vault_dir.join("raft.db");
+
+        // Phase 4.1.a: open / create the per-vault `blocks.db` and wrap
+        // it in its own [`BlockArchive`]. Each vault owns its own
+        // Merkle chain — `append_block` lands in the per-vault file
+        // rather than sharing the parent organization's chain.
+        //
+        // Mirrors the per-org construction in `open_region_storage`:
+        // existing files reopen via `Database::open`; brand-new files
+        // are created with `ORGANIZATION_PAGE_SIZE` so vault DBs share
+        // the same Raft-batch-sized pages as the rest of the per-org
+        // store.
+        let vault_blocks_db_path =
+            self.storage_manager.vault_blocks_db_path(region, organization_id, vault_id);
+        let vault_blocks_db = if vault_blocks_db_path.exists() {
+            Database::<FileBackend>::open(&vault_blocks_db_path)
+        } else {
+            let blocks_db_config = inferadb_ledger_store::DatabaseConfig {
+                page_size: crate::region_storage::ORGANIZATION_PAGE_SIZE,
+                ..Default::default()
+            };
+            Database::<FileBackend>::create_with_config(&vault_blocks_db_path, blocks_db_config)
+        }
+        .map_err(|e| RaftManagerError::Storage {
+            region,
+            message: format!(
+                "failed to open vault blocks.db at {}: {e}",
+                vault_blocks_db_path.display()
+            ),
+        })?;
+        let vault_block_archive = Arc::new(BlockArchive::new(Arc::new(vault_blocks_db)));
+
+        // Open the per-vault Raft log store. `open_for_vault` stamps the
+        // store's residency identity (organization_id + vault_id) at
+        // construction time so downstream apply workers can't accidentally
+        // mutate another vault's state.
+        let mut vault_log_store = RaftLogStore::<FileBackend>::open_for_vault(
+            &vault_raft_db_path,
+            organization_id,
+            vault_id,
+        )
+        .map_err(|e| RaftManagerError::Storage {
+            region,
+            message: format!(
+                "failed to open vault raft.db at {}: {e}",
+                vault_raft_db_path.display()
+            ),
+        })?
+        .with_state_layer(org_state_layer)
+        .with_block_archive(Arc::clone(&vault_block_archive))
+        .with_block_announcements(org_block_announcements)
+        .with_region_config(
+            region,
+            NodeId::new(self.config.node_id.to_string()),
+            self.config.node_id,
+        )
+        .with_leader_lease(org_leader_lease)
+        .with_snapshot_key_provider(Arc::clone(&self.config.snapshot_key_provider));
+
+        // Phase 4.2: open / create the per-vault `events.db` and wrap it
+        // in a fresh per-vault [`EventWriter`]. Inherits its
+        // [`EventConfig`] from the parent org's writer so scope flags
+        // and TTL match. When the parent org has no event writer (e.g.
+        // test fixtures without events configuration), the vault store
+        // also runs without one and apply skips event emission.
+        //
+        // `EventsDatabase::open` joins `events.db` to its `data_dir`
+        // argument, so passing `vault_dir` materialises the file at
+        // `{vault_dir}/events.db` — the same path returned by
+        // [`RegionStorageManager::vault_events_db_path`].
+        let vault_event_writer = if let Some(org_writer) = org_event_writer {
+            let vault_events_db = inferadb_ledger_state::EventsDatabase::<FileBackend>::open(
+                &vault_dir,
+            )
+            .map_err(|e| RaftManagerError::Storage {
+                region,
+                message: format!(
+                    "failed to open vault events.db at {}: {e}",
+                    vault_dir.join("events.db").display()
+                ),
+            })?;
+            Some(EventWriter::new(Arc::new(vault_events_db), org_writer.config().clone()))
+        } else {
+            None
+        };
+        if let Some(writer) = vault_event_writer.clone() {
+            vault_log_store = vault_log_store.with_event_writer(writer);
+        }
+
+        Ok((vault_log_store, vault_block_archive, vault_event_writer))
+    }
+
     /// Starts a per-vault Raft group on this node.
     ///
     /// Creates a per-vault Raft group scoped to
@@ -4241,161 +4532,23 @@ impl RaftManager {
             "Starting vault group",
         );
 
-        // Compose the per-vault raft.db path under
-        // `{data_dir}/{region}/{organization_id}/state/vault-{vault_id}/raft.db`
-        // (P2b.0 layout). The org's `RegionStorage` already exposes the
-        // per-vault directory helper; we reuse it instead of re-composing.
-        let region_storage = self
-            .storage_manager
-            .get_organization(region, organization_id)
-            .ok_or(RaftManagerError::RegionNotFound { region })?;
-        let vault_dir = region_storage.vault_dir(vault_id);
-        std::fs::create_dir_all(&vault_dir).map_err(|e| RaftManagerError::Storage {
-            region,
-            message: format!("failed to create vault directory {}: {e}", vault_dir.display()),
-        })?;
-        let vault_raft_db_path = vault_dir.join("raft.db");
-
-        // Phase 4.1.a: open / create the per-vault `blocks.db` and wrap
-        // it in its own [`BlockArchive`]. Each vault now owns its own
-        // Merkle chain — `append_block` lands in the per-vault file
-        // rather than sharing the parent organization's chain. The chain
-        // starts fresh: `RaftLogStore::open_for_vault` seeds
-        // `region_chain` with `{ height: 0, previous_hash: ZERO_HASH }`
-        // by default, which is now correct for per-vault semantics
-        // (hard cutover; new installs only).
-        //
-        // Mirrors the per-org construction in `open_region_storage`:
-        // existing files reopen via `Database::open`; brand-new files
-        // are created with `ORGANIZATION_PAGE_SIZE` so vault DBs share
-        // the same Raft-batch-sized pages as the rest of the per-org
-        // store.
-        let vault_blocks_db_path =
-            self.storage_manager.vault_blocks_db_path(region, organization_id, vault_id);
-        let vault_blocks_db = if vault_blocks_db_path.exists() {
-            Database::<FileBackend>::open(&vault_blocks_db_path)
-        } else {
-            let blocks_db_config = inferadb_ledger_store::DatabaseConfig {
-                page_size: crate::region_storage::ORGANIZATION_PAGE_SIZE,
-                ..Default::default()
-            };
-            Database::<FileBackend>::create_with_config(&vault_blocks_db_path, blocks_db_config)
-        }
-        .map_err(|e| RaftManagerError::Storage {
-            region,
-            message: format!(
-                "failed to open vault blocks.db at {}: {e}",
-                vault_blocks_db_path.display()
-            ),
-        })?;
-        let vault_block_archive = Arc::new(BlockArchive::new(Arc::new(vault_blocks_db)));
-
-        // Open the per-vault Raft log store. `open_for_vault` stamps the
-        // store's residency identity (organization_id + vault_id) at
-        // construction time so downstream apply workers can't accidentally
-        // mutate another vault's state.
-        //
-        // Component handles are attached via the same `with_*` builder
-        // chain used by the org-side store in `open_region_storage`. Apply
-        // executes against these handles, so a bare store would silently
-        // drop entity writes (no `state_layer`), record no blocks (no
-        // `block_archive`), and emit no real-time announcements. Per-
-        // vault vs. shared:
-        //
-        // - `state_layer` — the org's `StateLayer` already materialises per-vault `state.db`
-        //   databases via its lazy factory (P2b.0). Sharing the accessor lets vault apply land
-        //   entity writes in the correct per-vault database without duplicating the layer.
-        // - `block_archive` — **per-vault** (Phase 4.1.a). Vault writes append to the vault's own
-        //   chain in its own `blocks.db`; the parent organization's `blocks.db` is no longer
-        //   touched by vault apply.
-        // - `block_announcements` — broadcast through the org's channel so subscribers see
-        //   vault-shard commits alongside org-shard commits.
-        // - `leader_lease` — vault groups run delegated leadership; the parent org's lease is the
-        //   authoritative read-validity window.
-        // - `region_config` — region + node identity match the parent.
-        // - `event_writer` — **per-vault** (Phase 4.2). Each vault opens its own `events.db` under
-        //   `{data_dir}/{region}/{org_id}/state/vault-{vault_id}/events.db` and wraps it in a fresh
-        //   [`EventWriter`]. Vault apply lands vault-scoped emissions in the per-vault file; the
-        //   parent organization's `events.db` is no longer touched by vault apply. The per-vault
-        //   writer inherits its [`EventConfig`] from the parent org's writer at construction time
-        //   so scope flags / TTL stay aligned. When the parent org has no event writer (e.g. test
-        //   fixtures without events configuration), the vault store also runs without one and apply
-        //   skips event emission.
-        //
-        // Not wired in this slice (acceptable; documented):
-        //
-        // - `divergence_sender` — divergence detection compares against piggybacked commitments;
-        //   the vault's chain starts at height 0 so there is nothing to compare yet. Wired
-        //   alongside per-vault commitment piggyback in a later slice.
-        // - `region_chain` pre-seed — left at the default `{height: 0, previous_hash: ZERO_HASH}`.
-        //   With a per-vault `BlockArchive`, the default is now the correct fresh-chain semantic
-        //   (the vault's chain is genuinely its own); no pre-seeding needed.
-        let mut vault_log_store = RaftLogStore::<FileBackend>::open_for_vault(
-            &vault_raft_db_path,
-            organization_id,
-            vault_id,
-        )
-        .map_err(|e| RaftManagerError::Storage {
-            region,
-            message: format!(
-                "failed to open vault raft.db at {}: {e}",
-                vault_raft_db_path.display()
-            ),
-        })?
-        .with_state_layer(Arc::clone(org_inner.state()))
-        .with_block_archive(Arc::clone(&vault_block_archive))
-        .with_block_announcements(org_inner.block_announcements().clone())
-        .with_region_config(
-            region,
-            NodeId::new(self.config.node_id.to_string()),
-            self.config.node_id,
-        )
-        .with_leader_lease(Arc::clone(org_inner.leader_lease()))
-        .with_snapshot_key_provider(Arc::clone(&self.config.snapshot_key_provider));
-
-        // Phase 4.2: open / create the per-vault `events.db` and wrap it
-        // in a fresh per-vault [`EventWriter`]. Each vault now owns its
-        // own apply-phase audit log under
-        // `{data_dir}/{region}/{org_id}/state/vault-{vault_id}/events.db`
-        // — vault-scoped emissions (Write, BatchWrite,
-        // IngestExternalEvents) land in the per-vault file rather than
-        // sharing the parent organization's `events.db`. Org-scoped
-        // emissions (CreateVault, AddOrganizationMember, etc.) continue
-        // to apply through the parent organization's apply pipeline and
-        // land in the org's `events.db` (the org's `RaftLogStore` retains
-        // its own writer; this slice does not touch that wiring).
-        //
-        // Inheritance rule: when the parent org has no `event_writer`
-        // (e.g. test fixtures without `events_config`), the vault also
-        // runs without one and apply skips event emission — preserving
-        // the pre-Phase-4.2 inheritance semantics. When the org *does*
-        // have a writer, we open a fresh per-vault `events.db` and reuse
-        // the org's `EventConfig` so scope flags and TTL match.
-        //
-        // `EventsDatabase::open` joins `events.db` to its `data_dir`
-        // argument, so passing `vault_dir` materialises the file at
-        // `{vault_dir}/events.db` — the same path returned by
-        // [`RegionStorageManager::vault_events_db_path`]. Keeping the
-        // join inside `EventsDatabase::open` mirrors the per-org
-        // construction in `open_region_storage`.
-        let vault_event_writer = if let Some(org_writer) = org_inner.event_writer() {
-            let vault_events_db = inferadb_ledger_state::EventsDatabase::<FileBackend>::open(
-                &vault_dir,
-            )
-            .map_err(|e| RaftManagerError::Storage {
+        // Open + wire the per-vault `raft.db` / `blocks.db` /
+        // `events.db` via the shared
+        // [`Self::open_and_wire_vault_store`] helper. The helper is
+        // also called from
+        // [`Self::start_region`]'s Stage 5b parallel-replay-on-restart
+        // path against the same `raft.db` file, so every wiring
+        // decision lives there in one place.
+        let (vault_log_store, vault_block_archive, vault_event_writer) = self
+            .open_and_wire_vault_store(
                 region,
-                message: format!(
-                    "failed to open vault events.db at {}: {e}",
-                    vault_dir.join("events.db").display()
-                ),
-            })?;
-            Some(EventWriter::new(Arc::new(vault_events_db), org_writer.config().clone()))
-        } else {
-            None
-        };
-        if let Some(writer) = vault_event_writer.clone() {
-            vault_log_store = vault_log_store.with_event_writer(writer);
-        }
+                organization_id,
+                vault_id,
+                Arc::clone(org_inner.state()),
+                org_inner.block_announcements().clone(),
+                Arc::clone(org_inner.leader_lease()),
+                org_inner.event_writer(),
+            )?;
 
         // Per-vault applied-state accessors, surfaced before the log store
         // is moved into the debug-stub worker task.
@@ -4575,6 +4728,15 @@ impl RaftManager {
         let stub_org = organization_id;
         let stub_vault = vault_id;
         let stub_shard_id = shard_id;
+        // Per-vault apply-command channel (Stage 4). Drained by the per-vault
+        // commit pump via `tokio::select!` alongside the commit channel; the
+        // sender side is stored on `InnerVaultGroup` so
+        // `RaftManagerSnapshotInstaller` can find it via the
+        // `(region, organization_id, vault_id)` key.
+        let (vault_apply_command_tx, mut vault_apply_command_rx) =
+            tokio::sync::mpsc::channel::<crate::apply_command::ApplyCommand>(
+                crate::apply_command::APPLY_COMMAND_CHANNEL_CAPACITY,
+            );
         // Per-vault response map + spillover, captured into the apply task
         // for response fan-out. Mirrors `ApplyWorker::run`'s discipline:
         // each committed entry's response is delivered to the registered
@@ -4601,11 +4763,19 @@ impl RaftManager {
             // here closes `applied_index_watch()` for every holder of
             // the receiver.
             //
-            // Per-vault raft.db is fsync'd by sync_all_state_dbs on graceful shutdown
-            // but is not yet ticked by the steady-state StateCheckpointer. On crash
-            // before shutdown, the vault's applied_durable on raft.db does not advance
-            // and full WAL replay is required on next boot. Production durability of
-            // per-vault raft.db at crash time is a deferred concern.
+            // Per-vault raft.db durability: every per-vault apply commit
+            // lands in the per-vault raft.db page cache via
+            // `commit_in_memory` (see `RaftLogStore::save_state_core`).
+            // The steady-state `StateCheckpointer` ticks the per-vault
+            // raft.db handle on every fire (Phase A fan-out, threaded
+            // via `vault_raft_dbs_fn` from `start_background_jobs`), so
+            // `applied_durable_index` advances independently per vault
+            // on the checkpoint cadence (~500ms default). On crash, the
+            // post-restart WAL-replay gap is bounded by checkpoint
+            // cadence × per-vault apply rate — `replay_crash_gap` runs
+            // only `(applied_durable, last_committed]`. `GracefulShutdown`
+            // Phase 5c additionally fsyncs every per-vault raft.db so
+            // clean shutdowns leave a zero-entry replay window.
             let mut vault_log_store = vault_log_store;
             let mut vault_batch_rx = vault_batch_rx;
             loop {
@@ -4630,6 +4800,51 @@ impl RaftManager {
                             "Vault commit pump exiting on per-vault cancellation",
                         );
                         break;
+                    }
+                    cmd = vault_apply_command_rx.recv() => {
+                        // Stage 4 install arm. Drained alongside the
+                        // commit channel under `biased;` so an install
+                        // wins over a concurrently-arriving batch — this
+                        // is correct because the install replaces the
+                        // state machine wholesale and any batch arriving
+                        // mid-flight is about to be invalidated by a
+                        // post-install fanout (Stage 5).
+                        //
+                        // Strict-ordering invariant: the install
+                        // `await`s `RaftLogStore::install_snapshot` to
+                        // completion inside this arm, so the next loop
+                        // iteration cannot poll `vault_batch_rx` until
+                        // the install has either landed or failed.
+                        // Concurrent batch apply during install is
+                        // therefore impossible — owning `&mut
+                        // vault_log_store` here, plus the synchronous
+                        // await, closes the only reachable race.
+                        match cmd {
+                            Some(crate::apply_command::ApplyCommand::InstallSnapshot {
+                                meta,
+                                plaintext,
+                                completion,
+                                _backend: _,
+                            }) => {
+                                let install_result =
+                                    vault_log_store.install_snapshot(&meta, plaintext).await;
+                                // The completion channel may be closed
+                                // if the installer task was cancelled
+                                // while we held the command — drop
+                                // silently in that case.
+                                let _ = completion.send(install_result);
+                                continue;
+                            }
+                            None => {
+                                // Control channel closed (manager
+                                // dropped). Continue draining the commit
+                                // channel until it closes too — `recv()`
+                                // returns `None` immediately on
+                                // subsequent polls so this arm becomes a
+                                // no-op fallthrough.
+                                continue;
+                            }
+                        }
                     }
                     maybe_batch = vault_batch_rx.recv() => {
                         match maybe_batch {
@@ -5081,6 +5296,7 @@ impl RaftManager {
             lifecycle_state: AtomicU8::new(VaultLifecycleState::Active as u8),
             last_activity_unix_secs: AtomicU64::new(current_unix_secs()),
             pending_membership_started_unix_secs: AtomicU64::new(0),
+            apply_command_tx: vault_apply_command_tx,
         });
 
         {
@@ -5317,6 +5533,455 @@ impl RaftManager {
             },
             Err(e) => Err(e),
         }
+    }
+
+    /// Stage 5b: re-drive per-vault apply for entries committed in the
+    /// per-org WAL but not yet synced to per-vault `raft.db` dual-slots.
+    ///
+    /// Called from [`Self::start_region`] after the org-level
+    /// [`RaftLogStore::replay_crash_gap`] returns and BEFORE
+    /// [`ConsensusEngine::start_with_all_callbacks`] consumes the WAL
+    /// by value. The replay path opens each child vault's store via
+    /// [`Self::open_and_wire_vault_store`], runs them through
+    /// [`replay_shared_wal_for_org`], and drops the stores —
+    /// [`Self::start_vault_group`] reopens them later when the org
+    /// apply pipeline starts driving vault creations.
+    ///
+    /// ## Error policy
+    ///
+    /// Errors are non-fatal. Logged + recorded as
+    /// `ledger_org_parallel_replay_invocations_total{result=error}`;
+    /// startup falls through to the live commit pump path. Failing to
+    /// catch up an unclean-shutdown gap is preferable to failing to
+    /// start at all — the live commit pump still receives entries
+    /// committed AFTER startup (matching the pre-Stage-5b behaviour),
+    /// so failure here is a degraded mode, not a hard stop.
+    ///
+    /// ## Skip arms
+    ///
+    /// Three skip arms each emit only the `_invocations_total` counter
+    /// (no duration / vaults-active / entries-processed):
+    /// - `RaftManagerConfig::enable_parallel_wal_replay = false` → `result=skipped_disabled`
+    ///   (operator escape hatch).
+    /// - The org has zero vaults → no metric is emitted (cold-start no-op).
+    /// - Every vault has `applied_durable >= last_committed` → `result=skipped_no_gap`
+    ///   (clean-shutdown path).
+    #[allow(clippy::too_many_arguments)]
+    async fn run_stage5b_parallel_replay(
+        &self,
+        region: Region,
+        organization_id: OrganizationId,
+        org_shard_id: inferadb_ledger_consensus::types::ConsensusStateId,
+        wal: &inferadb_ledger_consensus::wal::SegmentedWalBackend,
+        log_store: &RaftLogStore<FileBackend>,
+        org_state_layer: Arc<StateLayer<FileBackend>>,
+        org_block_announcements: broadcast::Sender<BlockAnnouncement>,
+        org_leader_lease: Arc<crate::leader_lease::LeaderLease>,
+        org_event_writer: Option<&EventWriter<FileBackend>>,
+    ) {
+        let region_label = region.as_str();
+        let org_label = organization_id.value().to_string();
+
+        // Operator escape hatch — skip the whole block when disabled.
+        if !self.config.enable_parallel_wal_replay {
+            metrics::record_org_parallel_replay_invocation(
+                region_label,
+                &org_label,
+                metrics::org_parallel_replay_result::SKIPPED_DISABLED,
+            );
+            debug!(
+                region = region_label,
+                organization_id = organization_id.value(),
+                "Stage 5b: parallel WAL replay disabled by config",
+            );
+            return;
+        }
+
+        // Enumerate vaults from the org's `applied_state`. Post-
+        // `replay_crash_gap` this map reflects every vault the org
+        // knows about — `list_vaults` returns the per-org vault metas
+        // exactly the way `rehydrate_vault_groups` consumes them.
+        let vault_metas = log_store.applied_state().load().vaults.clone();
+        let vaults_in_org: Vec<VaultId> = vault_metas
+            .iter()
+            .filter_map(|((org, vault), meta)| {
+                // Defensive: filter on org id even though every vault
+                // in a per-org `applied_state.vaults` map should belong
+                // to that org. Skip soft-deleted vaults (matches
+                // `rehydrate_vault_groups`'s effective behaviour
+                // through `start_vault_group`'s precondition checks).
+                if *org == organization_id && !meta.deleted { Some(*vault) } else { None }
+            })
+            .collect();
+
+        // Cold-start no-op: the org has zero vaults. Don't even emit
+        // a skip metric — the metric labels are designed for steady-
+        // state operator dashboards, and emitting on every cold start
+        // would muddy the rate() over deploys.
+        if vaults_in_org.is_empty() {
+            debug!(
+                region = region_label,
+                organization_id = organization_id.value(),
+                "Stage 5b: org has zero vaults; replay block skipped",
+            );
+            return;
+        }
+
+        // Read the WAL's last committed_index. This is the upper bound
+        // for the replay window. If the WAL has no checkpoint (fresh
+        // bootstrap), nothing to replay.
+        let committed_index = match wal.last_checkpoint() {
+            Ok(Some(cp)) => cp.committed_index,
+            Ok(None) => {
+                debug!(
+                    region = region_label,
+                    organization_id = organization_id.value(),
+                    "Stage 5b: WAL has no checkpoint; replay block skipped",
+                );
+                metrics::record_org_parallel_replay_invocation(
+                    region_label,
+                    &org_label,
+                    metrics::org_parallel_replay_result::SKIPPED_NO_GAP,
+                );
+                return;
+            },
+            Err(e) => {
+                warn!(
+                    region = region_label,
+                    organization_id = organization_id.value(),
+                    error = %e,
+                    "Stage 5b: failed to read WAL checkpoint; falling through to live pump",
+                );
+                metrics::record_org_parallel_replay_invocation(
+                    region_label,
+                    &org_label,
+                    metrics::org_parallel_replay_result::ERROR,
+                );
+                return;
+            },
+        };
+
+        // Open each vault's store via the shared wiring helper. We
+        // also derive the per-vault `ConsensusStateId` (matches the
+        // derivation in `start_vault_group`) so the WAL's per-shard
+        // routing can find the right apply closure.
+        let mut vault_stores: Vec<(
+            VaultId,
+            inferadb_ledger_consensus::types::ConsensusStateId,
+            RaftLogStore<FileBackend>,
+        )> = Vec::with_capacity(vaults_in_org.len());
+
+        for vault_id in &vaults_in_org {
+            let vault_shard_id = {
+                let mut bytes = Vec::with_capacity(region.as_str().len() + 16);
+                bytes.extend_from_slice(region.as_str().as_bytes());
+                bytes.extend_from_slice(&organization_id.value().to_le_bytes());
+                bytes.extend_from_slice(&vault_id.value().to_le_bytes());
+                inferadb_ledger_consensus::types::ConsensusStateId(seahash::hash(&bytes))
+            };
+
+            match self.open_and_wire_vault_store(
+                region,
+                organization_id,
+                *vault_id,
+                Arc::clone(&org_state_layer),
+                org_block_announcements.clone(),
+                Arc::clone(&org_leader_lease),
+                org_event_writer,
+            ) {
+                Ok((store, _block_archive, _event_writer)) => {
+                    vault_stores.push((*vault_id, vault_shard_id, store));
+                },
+                Err(e) => {
+                    warn!(
+                        region = region_label,
+                        organization_id = organization_id.value(),
+                        vault_id = vault_id.value(),
+                        error = %e,
+                        "Stage 5b: failed to open vault store for replay; \
+                         falling through to live pump",
+                    );
+                    metrics::record_org_parallel_replay_invocation(
+                        region_label,
+                        &org_label,
+                        metrics::org_parallel_replay_result::ERROR,
+                    );
+                    return;
+                },
+            }
+        }
+
+        // Build the per-shard `applied_durable` map. Includes the org
+        // shard set to `committed_index` so `recover_from_wal` filters
+        // out org-shard entries (already replayed by
+        // `replay_crash_gap`); without this, the org-shard batch would
+        // surface as `UnknownShard` since we're not registering an
+        // apply closure for it.
+        let mut applied_durable: std::collections::HashMap<
+            inferadb_ledger_consensus::types::ConsensusStateId,
+            u64,
+        > = std::collections::HashMap::new();
+        applied_durable.insert(org_shard_id, committed_index);
+
+        // Skip-check: are all vaults already caught up?
+        let mut vaults_with_gap: u64 = 0;
+        for (_, vault_shard_id, store) in &vault_stores {
+            let vault_applied =
+                store.applied_state().load().last_applied.as_ref().map_or(0, |id| id.index);
+            applied_durable.insert(*vault_shard_id, vault_applied);
+            if vault_applied < committed_index {
+                vaults_with_gap += 1;
+            }
+        }
+
+        if vaults_with_gap == 0 {
+            debug!(
+                region = region_label,
+                organization_id = organization_id.value(),
+                vault_count = vault_stores.len(),
+                committed_index,
+                "Stage 5b: all vaults caught up; replay skipped",
+            );
+            metrics::record_org_parallel_replay_invocation(
+                region_label,
+                &org_label,
+                metrics::org_parallel_replay_result::SKIPPED_NO_GAP,
+            );
+            return;
+        }
+
+        info!(
+            region = region_label,
+            organization_id = organization_id.value(),
+            vault_count = vault_stores.len(),
+            vaults_with_gap,
+            committed_index,
+            "Stage 5b: parallel WAL replay starting",
+        );
+
+        // Build apply_fns: one closure per vault. The store is moved
+        // into a per-vault `Arc<Mutex<Option<...>>>` so the `FnOnce`
+        // closure can `take()` it (the apply primitive's signature
+        // requires `FnOnce(CommittedBatch) -> BoxFuture<...>` and
+        // `apply_committed_entries` takes `&mut self`).
+        let mut apply_fns: std::collections::HashMap<
+            inferadb_ledger_consensus::types::ConsensusStateId,
+            (VaultId, crate::log_storage::VaultApplyFn),
+        > = std::collections::HashMap::new();
+
+        for (vault_id, vault_shard_id, store) in vault_stores {
+            let store_slot = Arc::new(parking_lot::Mutex::new(Some(store)));
+            let store_for_closure = Arc::clone(&store_slot);
+            let closure_region = region;
+            let closure_org = organization_id;
+            let closure_vault = vault_id;
+
+            let apply_fn: crate::log_storage::VaultApplyFn =
+                Box::new(move |batch: inferadb_ledger_consensus::committed::CommittedBatch| {
+                    let store = Arc::clone(&store_for_closure);
+                    Box::pin(async move {
+                        // Scope the lock guard so it drops before the
+                        // .await — parking_lot guards aren't Send, so
+                        // holding one across an await is a hard error.
+                        let store_inner = {
+                            store.lock().take().ok_or_else(|| {
+                                crate::log_storage::parallel_replay::VaultApplySnafu {
+                                    region: closure_region,
+                                    organization: closure_org,
+                                    vault: closure_vault,
+                                    message: "vault store taken twice during replay".to_string(),
+                                }
+                                .build()
+                            })?
+                        };
+
+                        let entry_count = batch.entries.len() as u64;
+                        // Bind to a local `mut` so the apply call has
+                        // a `&mut self` to operate on, then return the
+                        // store back into the slot regardless of
+                        // apply outcome.
+                        let mut store_inner = store_inner;
+                        let apply_result = store_inner
+                            .apply_committed_entries::<crate::types::OrganizationRequest>(
+                                &batch.entries,
+                                None,
+                            )
+                            .await
+                            .map_err(|e| {
+                                crate::log_storage::parallel_replay::VaultApplySnafu {
+                                    region: closure_region,
+                                    organization: closure_org,
+                                    vault: closure_vault,
+                                    message: format!("apply_committed_entries failed: {e}"),
+                                }
+                                .build()
+                            });
+
+                        // Sync the per-vault raft.db / blocks.db /
+                        // events.db while we still own the store.
+                        // `apply_committed_entries` lands every write
+                        // via `commit_in_memory`, which only mutates
+                        // the in-process page cache + the
+                        // `committed_state` ArcSwap on each
+                        // `Database`. When the `RaftLogStore` (and the
+                        // per-vault `BlockArchive` / `EventWriter`
+                        // wrapping each Database) drop at the end of
+                        // this replay, the in-process page cache for
+                        // those databases drops with them — the
+                        // recovered state lives in memory on dropped
+                        // handles, not on disk.
+                        // [`RaftLogStore::replay_crash_gap`] handles
+                        // the symmetric situation for the org-level
+                        // store with an explicit post-replay
+                        // `sync_state` fan-out; we mirror that here so
+                        // [`Self::start_vault_group`]'s subsequent
+                        // reopen reads the durable recovered state
+                        // instead of regressing to whatever the
+                        // dual-slot held before Stage 5b ran.
+                        //
+                        // Per-vault `state.db` is owned by the org's
+                        // long-lived [`StateLayer`] and stays in
+                        // `live_vault_dbs()` after the materialise that
+                        // `apply_request_with_events` triggered; the
+                        // first
+                        // [`StateCheckpointer`](crate::state_checkpointer::StateCheckpointer)
+                        // tick after engine startup picks it up via
+                        // the standard fan-out, so we don't sync it
+                        // explicitly here.
+                        //
+                        // Sync errors are converted to
+                        // [`ParallelReplayError::VaultApply`] — the
+                        // primitive's first-error short-circuit kicks
+                        // in and `start_region` falls through to the
+                        // live commit pump path (Stage 5b's
+                        // non-fatal-error semantics).
+                        let raft_db = store_inner.log_store_db();
+                        let blocks_db = store_inner.block_archive().map(|ba| Arc::clone(ba.db()));
+                        let events_db =
+                            store_inner.event_writer().map(|ew| Arc::clone(ew.events_db().db()));
+
+                        let raft_sync_fut = raft_db.sync_state();
+                        let blocks_sync_fut = async move {
+                            match blocks_db {
+                                Some(db) => Some(db.sync_state().await),
+                                None => None,
+                            }
+                        };
+                        let events_sync_fut = async move {
+                            match events_db {
+                                Some(db) => Some(db.sync_state().await),
+                                None => None,
+                            }
+                        };
+                        let (raft_sync, blocks_sync, events_sync) =
+                            tokio::join!(raft_sync_fut, blocks_sync_fut, events_sync_fut);
+
+                        // Return the store regardless of outcome
+                        // — even on failure, the post-replay drop
+                        // needs the slot populated so memory cleans up
+                        // deterministically.
+                        *store.lock() = Some(store_inner);
+
+                        apply_result?;
+
+                        if let Err(e) = raft_sync {
+                            return crate::log_storage::parallel_replay::VaultApplySnafu {
+                                region: closure_region,
+                                organization: closure_org,
+                                vault: closure_vault,
+                                message: format!("post-replay raft.db sync failed: {e}"),
+                            }
+                            .fail();
+                        }
+                        if let Some(Err(e)) = blocks_sync {
+                            return crate::log_storage::parallel_replay::VaultApplySnafu {
+                                region: closure_region,
+                                organization: closure_org,
+                                vault: closure_vault,
+                                message: format!("post-replay blocks.db sync failed: {e}"),
+                            }
+                            .fail();
+                        }
+                        if let Some(Err(e)) = events_sync {
+                            return crate::log_storage::parallel_replay::VaultApplySnafu {
+                                region: closure_region,
+                                organization: closure_org,
+                                vault: closure_vault,
+                                message: format!("post-replay events.db sync failed: {e}"),
+                            }
+                            .fail();
+                        }
+
+                        Ok(entry_count)
+                    })
+                });
+            apply_fns.insert(vault_shard_id, (vault_id, apply_fn));
+        }
+
+        let replay_config = crate::log_storage::ParallelReplayConfig::builder()
+            .max_concurrent(self.config.parallel_wal_replay_max_concurrent)
+            .build();
+
+        // The replay primitive is cancellation-aware. We bind to a
+        // child of the manager's cancellation token so process-wide
+        // shutdown surfaces here as `ParallelReplayError::Cancelled`,
+        // which is treated as a non-fatal error in the match below
+        // (startup already failed if shutdown beat it).
+        let cancel = self.cancellation_token.lock().child_token();
+
+        let started = std::time::Instant::now();
+        let result = crate::log_storage::replay_shared_wal_for_org(
+            wal,
+            region,
+            organization_id,
+            applied_durable,
+            apply_fns,
+            replay_config,
+            cancel,
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        match result {
+            Ok(stats) => {
+                info!(
+                    region = region_label,
+                    organization_id = organization_id.value(),
+                    vaults_replayed = stats.vaults_replayed,
+                    total_entries = stats.total_entries,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "Stage 5b: parallel WAL replay complete",
+                );
+                metrics::record_org_parallel_replay_success(
+                    region_label,
+                    &org_label,
+                    stats.duration,
+                    stats.total_entries,
+                    vaults_with_gap,
+                );
+                metrics::record_org_parallel_replay_invocation(
+                    region_label,
+                    &org_label,
+                    metrics::org_parallel_replay_result::SUCCESS,
+                );
+            },
+            Err(e) => {
+                warn!(
+                    region = region_label,
+                    organization_id = organization_id.value(),
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    error = %e,
+                    "Stage 5b: parallel WAL replay failed; falling through to live pump",
+                );
+                metrics::record_org_parallel_replay_invocation(
+                    region_label,
+                    &org_label,
+                    metrics::org_parallel_replay_result::ERROR,
+                );
+            },
+        }
+        // Per-vault stores fall out of scope here — `start_vault_group`
+        // reopens each one later from the same on-disk path.
     }
 
     /// Starts a Raft group for a specific `(region, organization_id)` pair.
@@ -5594,6 +6259,51 @@ impl RaftManager {
                     message: format!("crash-recovery replay failed: {e}"),
                 });
             },
+        }
+
+        // ────────────────────────────────────────────────────────────
+        // Stage 5b: parallel per-vault catch-up from the local WAL.
+        //
+        // Per-vault `applied_durable_index` lives in the page cache
+        // between [`StateCheckpointer`](crate::state_checkpointer::StateCheckpointer)
+        // ticks (~500ms default cadence). An unclean shutdown loses
+        // anything not yet synced to the per-vault `raft.db` dual-slot.
+        // The per-vault commit pump that runs once
+        // [`ConsensusEngine`] is started only re-applies entries that
+        // arrive AFTER startup; on a single-node restart there are no
+        // peers to push them, and the entries sit in the WAL forever.
+        //
+        // The replay block re-drives those entries through
+        // [`replay_shared_wal_for_org`](crate::log_storage::replay_shared_wal_for_org)
+        // before the engine consumes the WAL, fanning per-vault apply
+        // out across the same M4 primitive used for the new-voter
+        // bootstrap path. Per-vault stores are opened via
+        // [`Self::open_and_wire_vault_store`] (the same helper
+        // [`Self::start_vault_group`] uses), driven through the apply
+        // pipeline, and dropped — `start_vault_group` reopens them
+        // later when the org's apply pipeline starts driving vault
+        // creations. The reopen is cheap because the OS page cache is
+        // hot from the just-completed work.
+        //
+        // Dispatched only for per-organization groups (`org_id != 0`);
+        // the system and data-region control-plane groups
+        // (`org_id == 0`) have no vault children. Errors fall through
+        // to the live commit pump path so startup is never blocked
+        // on a replay failure — the metric labels record the outcome
+        // for operator triage.
+        if organization_id != OrganizationId::new(0) {
+            self.run_stage5b_parallel_replay(
+                region,
+                organization_id,
+                shard_id,
+                &wal,
+                &log_store,
+                Arc::clone(&state),
+                block_announcements.clone(),
+                leader_lease.clone(),
+                event_writer_for_inner.as_ref(),
+            )
+            .await;
         }
 
         let mut consensus_shard = inferadb_ledger_consensus::ConsensusState::new(
@@ -6119,6 +6829,38 @@ impl RaftManager {
                 .map(|((_, _, vid), _)| *vid)
                 .collect()
         });
+        // Closure for the per-tick per-vault `live_applied` snapshot —
+        // Stage 5a observability. Mirrors `vault_raft_dbs_fn`'s
+        // region+org+Dormant filter so the
+        // `ledger_vault_applied_durable_lag` gauge never disagrees with
+        // the sync-skip filter. Reads the in-memory
+        // `VaultAppliedState.last_applied.index` projection through
+        // `InnerVaultGroup::vault_applied_state()` — the live state the
+        // commit pump swaps in after each `apply_committed_entries` call.
+        let vault_groups_for_applied_state = Arc::clone(&self.vault_groups);
+        let region_for_applied_state = region;
+        let organization_id_for_applied_state = organization_id;
+        let vault_applied_state_fn: crate::state_checkpointer::VaultAppliedStateFn =
+            Arc::new(move || {
+                vault_groups_for_applied_state
+                    .read()
+                    .iter()
+                    .filter(|((r, o, _), inner)| {
+                        *r == region_for_applied_state
+                            && *o == organization_id_for_applied_state
+                            && inner.lifecycle_state() != VaultLifecycleState::Dormant
+                    })
+                    .map(|((_, _, vid), inner)| {
+                        let live_applied = inner
+                            .vault_applied_state()
+                            .load()
+                            .last_applied
+                            .as_ref()
+                            .map_or(0, |id| id.index);
+                        (*vid, live_applied)
+                    })
+                    .collect()
+            });
         let state_checkpointer = StateCheckpointer::from_config(
             Arc::clone(&state),
             raft_db,
@@ -6129,6 +6871,7 @@ impl RaftManager {
             vault_blocks_dbs_fn,
             vault_events_dbs_fn,
             dormant_vaults_fn,
+            vault_applied_state_fn,
             runtime_config,
             applied_index_rx,
             parent_token.child_token(),

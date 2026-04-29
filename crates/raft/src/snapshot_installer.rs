@@ -73,7 +73,7 @@ use inferadb_ledger_consensus::{
     snapshot_installer::SnapshotInstaller,
     types::ConsensusStateId,
 };
-use inferadb_ledger_types::{OrganizationId, Region, VaultId};
+use inferadb_ledger_types::{OrganizationId, Region};
 use snafu::{Location, ResultExt, Snafu};
 use tokio::io::AsyncWriteExt;
 
@@ -211,24 +211,6 @@ pub enum InstallError {
     ApplyCompletionDropped {
         /// Scope whose completion channel closed.
         scope: SnapshotScope,
-        /// Implicit location.
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    /// Per-vault install path is not yet wired. The per-vault apply task
-    /// (inlined in [`RaftManager::start_vault_group`]) does not yet drain
-    /// an apply-command channel; per-vault Stage 4 install lands in a
-    /// follow-up dispatch. For now we drop these requests and let the
-    /// leader's heartbeat keep retrying — when the per-vault wiring lands,
-    /// the next staged file lands automatically.
-    #[snafu(display(
-        "per-vault snapshot install not yet wired for vault_id={vault_id:?}; \
-         dropping (leader will retry)"
-    ))]
-    VaultPathNotWired {
-        /// Vault id whose install we tried to dispatch.
-        vault_id: VaultId,
         /// Implicit location.
         #[snafu(implicit)]
         location: Location,
@@ -457,18 +439,32 @@ async fn dispatch_install(
 
     // Route the install command onto the apply task that owns the
     // `RaftLogStore`. Org-level scopes route through `InnerGroup`'s
-    // `apply_command_tx`. Per-vault scopes are deferred — the per-vault
-    // apply pump (inlined in `start_vault_group`) does not yet drain an
-    // apply-command channel.
-    if let Some(vault_id) = vault_id {
-        return Err(InstallError::VaultPathNotWired { vault_id, location: snafu::location!() });
-    }
-
+    // `apply_command_tx`; per-vault scopes route through
+    // `InnerVaultGroup`'s `apply_command_tx`. Both senders are drained by
+    // a `tokio::select!` arm whose install branch awaits
+    // `RaftLogStore::install_snapshot` to completion before yielding back
+    // to the loop, preventing concurrent batch apply.
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
-    let apply_command_tx = match manager.apply_command_sender(region, organization_id) {
-        Some(tx) => tx,
-        None => {
-            return Err(InstallError::ApplyChannelClosed { scope, location: snafu::location!() });
+    let apply_command_tx = match vault_id {
+        Some(vault_id) => {
+            match manager.apply_command_sender_for_vault(region, organization_id, vault_id) {
+                Some(tx) => tx,
+                None => {
+                    return Err(InstallError::ApplyChannelClosed {
+                        scope,
+                        location: snafu::location!(),
+                    });
+                },
+            }
+        },
+        None => match manager.apply_command_sender(region, organization_id) {
+            Some(tx) => tx,
+            None => {
+                return Err(InstallError::ApplyChannelClosed {
+                    scope,
+                    location: snafu::location!(),
+                });
+            },
         },
     };
     apply_command_tx

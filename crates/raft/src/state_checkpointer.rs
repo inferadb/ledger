@@ -113,6 +113,28 @@ pub type VaultBlocksDbsFn =
 pub type VaultEventsDbsFn =
     Arc<dyn Fn() -> Vec<(VaultId, Arc<Database<FileBackend>>)> + Send + Sync>;
 
+/// Snapshot accessor for the per-vault `live_applied` index — the in-memory
+/// `last_applied.index` projected onto the vault's
+/// [`VaultAppliedState`](crate::log_storage::VaultAppliedState) `ArcSwap` by
+/// the vault's commit pump after each [`apply_committed_entries`] call.
+///
+/// Used exclusively for the per-tick per-vault `applied_durable_lag`
+/// observability emission in `do_checkpoint`'s success branch (Stage 5a).
+/// The closure mirrors [`VaultRaftDbsFn`]'s `(region, organization_id)`
+/// scope filter and Dormant-vault skip semantics so the metric emission
+/// stays consistent with the sync-skip filter — emitting a lag for a
+/// vault whose apply pipeline has been drained is misleading.
+///
+/// Returns the live `last_applied.index` per vault (zero when no entry
+/// has been applied yet), allowing the checkpointer to compute
+/// `lag = live_applied - last_synced_snapshot_id` per vault without
+/// holding a generic type parameter on the parent's internal map shape.
+///
+/// Vaults materialised mid-tick are simply picked up on the next tick.
+///
+/// [`apply_committed_entries`]: crate::log_storage::RaftLogStore::apply_committed_entries
+pub type VaultAppliedStateFn = Arc<dyn Fn() -> Vec<(VaultId, u64)> + Send + Sync>;
+
 /// Snapshot accessor for the set of vault IDs that are currently
 /// [`crate::raft_manager::VaultLifecycleState::Dormant`] in the manager's
 /// `vault_groups` map.
@@ -254,6 +276,17 @@ pub struct StateCheckpointer {
     /// thrash is avoided. The raft.db / blocks.db / events.db closures
     /// already filter inline (see [`crate::raft_manager::RaftManager`]).
     dormant_vaults_fn: DormantVaultsFn,
+    /// Snapshot accessor for the per-vault `live_applied` index — the
+    /// projected `last_applied.index` from each vault's
+    /// [`VaultAppliedState`](crate::log_storage::VaultAppliedState)
+    /// `ArcSwap`. Invoked once per tick in `do_checkpoint`'s success
+    /// branch to compute `lag = live_applied - last_synced_snapshot_id`
+    /// for the
+    /// [`record_vault_applied_durable_advance`](crate::metrics::record_vault_applied_durable_advance)
+    /// emission. Mirrors [`vault_raft_dbs_fn`](Self::vault_raft_dbs_fn)'s
+    /// region+org+Dormant filter so the metric never disagrees with the
+    /// sync-skip filter.
+    vault_applied_state_fn: VaultAppliedStateFn,
     /// Live runtime-config handle. Re-read on every wake-up so live
     /// `UpdateConfig` RPCs take effect on the next tick.
     runtime_config: RuntimeConfigHandle,
@@ -307,6 +340,7 @@ impl StateCheckpointer {
         vault_blocks_dbs_fn: VaultBlocksDbsFn,
         vault_events_dbs_fn: VaultEventsDbsFn,
         dormant_vaults_fn: DormantVaultsFn,
+        vault_applied_state_fn: VaultAppliedStateFn,
         runtime_config: RuntimeConfigHandle,
         applied_rx: watch::Receiver<u64>,
         cancellation_token: CancellationToken,
@@ -324,6 +358,7 @@ impl StateCheckpointer {
             vault_blocks_dbs_fn,
             vault_events_dbs_fn,
             dormant_vaults_fn,
+            vault_applied_state_fn,
             runtime_config,
             applied_rx,
             cancellation_token,
@@ -528,9 +563,19 @@ impl StateCheckpointer {
         // steady until every DB succeeds on a future tick.
         let vault_syncs =
             futures::future::join_all(vault_dbs.iter().map(|(_, db)| Arc::clone(db).sync_state()));
-        let vault_raft_syncs = futures::future::join_all(
-            vault_raft_dbs.iter().map(|(_, db)| Arc::clone(db).sync_state()),
-        );
+        // Wrap each per-vault raft.db sync in a timer so the success
+        // branch (below) can emit a per-vault advance-duration histogram
+        // alongside the lag gauge. The wrapper preserves the original
+        // `Result` shape so the all-ok / per-failure logging downstream
+        // is unchanged.
+        let vault_raft_syncs = futures::future::join_all(vault_raft_dbs.iter().map(|(_, db)| {
+            let db = Arc::clone(db);
+            async move {
+                let start = Instant::now();
+                let res = db.sync_state().await;
+                (res, start.elapsed().as_secs_f64())
+            }
+        }));
         let vault_blocks_syncs = futures::future::join_all(
             vault_blocks_dbs.iter().map(|(_, db)| Arc::clone(db).sync_state()),
         );
@@ -572,7 +617,11 @@ impl StateCheckpointer {
         let duration_secs = duration.as_secs_f64();
 
         let vault_all_ok = vault_results.iter().all(|r| r.is_ok());
-        let vault_raft_all_ok = vault_raft_results.iter().all(|r| r.is_ok());
+        // `vault_raft_results` is `Vec<(Result<…>, f64)>` — the f64 is the
+        // per-vault advance-duration the success branch reports as a
+        // histogram. Strip the duration here for the all-ok / per-failure
+        // logging; downstream emission re-zips against the timed pairs.
+        let vault_raft_all_ok = vault_raft_results.iter().all(|(r, _)| r.is_ok());
         let vault_blocks_all_ok = vault_blocks_results.iter().all(|r| r.is_ok());
         let vault_events_all_ok = vault_events_results.iter().all(|r| r.is_ok());
         let all_ok = vault_all_ok
@@ -603,7 +652,9 @@ impl StateCheckpointer {
         // Per-vault raft.db failures are logged on the same `db = "raft"`
         // label as the per-org raft.db; the `vault_id` field disambiguates
         // (matches Task #145's harmonized labeling on the shutdown path).
-        for ((vault_id, _db), res) in vault_raft_dbs.iter().zip(vault_raft_results.iter()) {
+        for ((vault_id, _db), (res, _duration)) in
+            vault_raft_dbs.iter().zip(vault_raft_results.iter())
+        {
             if let Err(e) = res {
                 warn!(
                     error = %e,
@@ -696,6 +747,53 @@ impl StateCheckpointer {
                 STATUS_OK,
                 duration_secs,
             );
+
+            // Stage 5a: per-vault `applied_durable` observability. For
+            // every vault whose raft.db sync just succeeded, emit
+            //   * `ledger_vault_applied_durable_advanced_total{region, organization_id}` (always-on
+            //     org rollup),
+            //   * `ledger_vault_applied_durable_lag{region, organization_id, vault_id}` (opt-in
+            //     gauge), and
+            //   * `ledger_vault_applied_durable_advance_duration_seconds{region, organization_id,
+            //     vault_id}` (opt-in histogram).
+            // Lag is computed as `live_applied - last_synced_snapshot_id`
+            // where `live_applied` is the in-memory
+            // `VaultAppliedState.last_applied.index` (read via
+            // `vault_applied_state_fn`) and `last_synced_snapshot_id` is
+            // the per-vault `Database` post-sync slot id. Steady-state
+            // lag is small double digits; sustained triple-digit lag is
+            // the operator-visible signal that the per-tick fan-out is
+            // falling behind apply throughput.
+            //
+            // The closure mirrors `vault_raft_dbs_fn`'s region+org+Dormant
+            // filter so the metric emission stays consistent with the
+            // sync-skip filter — emitting a sentinel "Dormant" lag would
+            // muddy dashboards.
+            let live_applied_by_vault: std::collections::HashMap<VaultId, u64> =
+                (self.vault_applied_state_fn)().into_iter().collect();
+            for ((vault_id, db), (sync_result, advance_duration_secs)) in
+                vault_raft_dbs.iter().zip(vault_raft_results.iter())
+            {
+                if sync_result.is_err() {
+                    // Skip emission on per-vault sync failure — the
+                    // accumulators stay frozen and the next tick retries
+                    // (mirrors the `all_ok` guard surrounding this block;
+                    // a per-vault failure inside an otherwise-ok tick is
+                    // structurally impossible because `all_ok` requires
+                    // every per-vault result to be Ok).
+                    continue;
+                }
+                let live_applied = live_applied_by_vault.get(vault_id).copied().unwrap_or(0);
+                let last_synced = db.last_synced_snapshot_id();
+                let lag = live_applied.saturating_sub(last_synced);
+                metrics::record_vault_applied_durable_advance(
+                    &self.region,
+                    &self.shard,
+                    *vault_id,
+                    lag,
+                    *advance_duration_secs,
+                );
+            }
             // Slice 2b: report the most-advanced snapshot id across the
             // live vault set. Operators looking at a single gauge value
             // want a deterministic proxy for "how fresh is the on-disk
@@ -977,6 +1075,10 @@ mod tests {
         // Active for the duration of the run, so the dormant snapshot is
         // empty.
         let dormant_vaults_fn: DormantVaultsFn = Arc::new(Vec::new);
+        // Default `live_applied = 0` per vault for fixtures that do not
+        // exercise the Stage 5a lag observability — emitting `lag = 0`
+        // is a benign no-op for assertions that do not read the gauge.
+        let vault_applied_state_fn: VaultAppliedStateFn = Arc::new(Vec::new);
         let cp = StateCheckpointer::from_config(
             state_layer,
             Arc::clone(&dbs.raft),
@@ -987,6 +1089,7 @@ mod tests {
             vault_blocks_dbs_fn,
             vault_events_dbs_fn,
             dormant_vaults_fn,
+            vault_applied_state_fn,
             runtime_config.clone(),
             rx,
             token.clone(),
@@ -1329,6 +1432,7 @@ mod tests {
         let vault_blocks_dbs_fn: VaultBlocksDbsFn = Arc::new(Vec::new);
         let vault_events_dbs_fn: VaultEventsDbsFn = Arc::new(Vec::new);
         let dormant_vaults_fn: DormantVaultsFn = Arc::new(Vec::new);
+        let vault_applied_state_fn: VaultAppliedStateFn = Arc::new(Vec::new);
         let cp = StateCheckpointer::from_config(
             state_layer,
             Arc::clone(&dbs.raft),
@@ -1339,6 +1443,7 @@ mod tests {
             vault_blocks_dbs_fn,
             vault_events_dbs_fn,
             dormant_vaults_fn,
+            vault_applied_state_fn,
             runtime_config,
             rx,
             token,
@@ -1721,6 +1826,7 @@ mod tests {
         let vault_blocks_dbs_fn: VaultBlocksDbsFn = Arc::new(Vec::new);
         let vault_events_dbs_fn: VaultEventsDbsFn = Arc::new(Vec::new);
         let dormant_vaults_fn: DormantVaultsFn = Arc::new(Vec::new);
+        let vault_applied_state_fn: VaultAppliedStateFn = Arc::new(Vec::new);
         let cp = StateCheckpointer::from_config(
             state_layer,
             Arc::clone(&dbs.raft),
@@ -1731,6 +1837,7 @@ mod tests {
             vault_blocks_dbs_fn,
             vault_events_dbs_fn,
             dormant_vaults_fn,
+            vault_applied_state_fn,
             runtime_config,
             rx,
             token,
@@ -1760,6 +1867,119 @@ mod tests {
         assert!(
             vault_raft.last_synced_snapshot_id() > 0,
             "vault raft.db must advance on the tick after it became visible to the closure",
+        );
+    }
+
+    /// Stage 5a regression test — post-crash, the per-vault raft.db's
+    /// `last_synced_snapshot_id` reflects the **last successful
+    /// `StateCheckpointer` tick**, not zero. Validates the bounded
+    /// crash-gap contract: post-restart `replay_crash_gap` only has to
+    /// re-drive `(applied_durable, last_committed]`, NOT the entire WAL
+    /// from boot.
+    ///
+    /// This is the property the original Stage 5a investigation traced
+    /// to commits 820c73c (per-vault raft.db threading into
+    /// `StateCheckpointer`) and f07d886 (per-vault raft.db inclusion in
+    /// the Phase A fan-out). The pre-fix behavior was: a vault's raft.db
+    /// only fsynced on graceful shutdown via `sync_all_state_dbs`; on
+    /// crash before shutdown, `applied_durable = 0` on the vault's
+    /// raft.db forced a full WAL replay even though state.db was caught
+    /// up. After the fix, every checkpointer tick advances per-vault
+    /// raft.db, bounding the crash gap by checkpoint cadence (~500ms
+    /// default) × per-vault apply rate.
+    ///
+    /// Test structure (no `CrashInjector` — its API targets the dual-slot
+    /// commit protocol, not the cross-subsystem "after tick / before
+    /// next apply" boundary; the simulated crash here is just dropping
+    /// the `Database` handle without a graceful shutdown sync):
+    ///
+    /// 1. Open a per-vault raft.db on disk.
+    /// 2. Drive several rounds of `commit_in_memory` writes on raft.db (mirrors the per-batch
+    ///    `save_state_core` `KEY_APPLIED_STATE` write the apply pump performs on every committed
+    ///    batch).
+    /// 3. Tick the StateCheckpointer between rounds — this is what the apply pump's per-tick fanout
+    ///    drives in production.
+    /// 4. Drive one more round of `commit_in_memory` WITHOUT a final tick — this models in-flight
+    ///    applies that have not yet been captured by the per-tick `sync_state`.
+    /// 5. Drop the Database without graceful shutdown — simulates crash.
+    /// 6. Reopen the raft.db file — assert `last_synced_snapshot_id` is >= the snapshot id captured
+    ///    at the last successful tick (NOT zero, NOT the most recent in-memory commit). The bounded
+    ///    gap is `(applied_durable_at_last_tick, last_committed]`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checkpoint_advances_persist_through_simulated_crash() {
+        let dbs = new_test_db();
+        let (vault_dir, vault_raft) = new_vault_raft_db();
+        let vault_path = vault_dir.path().join("raft.db");
+
+        let cfg = CheckpointConfig::builder()
+            .interval_ms(50)
+            .applies_threshold(1_000_000)
+            .dirty_pages_threshold(1_000_000)
+            .build()
+            .unwrap();
+        let vault_raft_dbs = vec![(VaultId::new(99), Arc::clone(&vault_raft))];
+        let (cp, _rc, _tok, _tx) =
+            new_checkpointer_with_vault_raft_dbs(&dbs, cfg.clone(), 0, vault_raft_dbs);
+
+        // Round 1: 50 in-memory commits, then a forced checkpoint tick.
+        // After the tick, raft.db's `last_synced_snapshot_id` advances
+        // past zero — this is the value that must survive a simulated
+        // crash. Each `commit_in_memory` advances the in-memory snapshot
+        // counter; only `sync_state` (driven by the tick) lands the
+        // dual-slot pointer on disk.
+        for i in 0..50u32 {
+            commit_in_memory_one(
+                &vault_raft,
+                format!("applied_state_{i}").as_bytes(),
+                format!("v{i}").as_bytes(),
+            );
+        }
+        *cp.last_checkpoint_at.lock() = Instant::now() - Duration::from_millis(500);
+        cp.tick(&cfg).await;
+        let synced_after_first_tick = vault_raft.last_synced_snapshot_id();
+        assert!(
+            synced_after_first_tick > 0,
+            "first tick must advance per-vault raft.db's last_synced_snapshot_id past zero",
+        );
+
+        // Round 2: 50 more in-memory commits (no tick between rounds).
+        // These pages are dirty in the vault's raft.db page cache;
+        // without a subsequent tick or graceful shutdown, they are NOT
+        // on disk. This models the steady-state where the apply pump is
+        // ahead of the next checkpointer tick.
+        for i in 50..100u32 {
+            commit_in_memory_one(
+                &vault_raft,
+                format!("applied_state_{i}").as_bytes(),
+                format!("v{i}").as_bytes(),
+            );
+        }
+
+        // Simulated crash: drop the Database without calling `sync_state`
+        // (no graceful-shutdown sync, no tick). On a real crash, the
+        // process exits before the next tick fires — same observable
+        // outcome.
+        drop(vault_raft);
+
+        // Reopen the per-vault raft.db. `last_synced_snapshot_id` must
+        // reflect the value captured at the previous tick's `sync_state`
+        // — NOT zero (which would indicate the pre-fix bug where the
+        // checkpointer never touched per-vault raft.db) and NOT the
+        // post-Round-2 in-memory state (which never reached disk).
+        let reopened = Arc::new(Database::open(&vault_path).expect("reopen vault raft.db"));
+        let synced_after_crash = reopened.last_synced_snapshot_id();
+        assert!(
+            synced_after_crash >= synced_after_first_tick,
+            "post-crash last_synced_snapshot_id ({synced_after_crash}) must reflect the \
+             last successful StateCheckpointer tick ({synced_after_first_tick}); a value \
+             of zero would indicate the regression where per-vault raft.db is fsynced \
+             only on graceful shutdown, forcing full WAL replay on every crash",
+        );
+        assert!(
+            synced_after_crash > 0,
+            "post-crash last_synced_snapshot_id must be non-zero — the bounded crash-gap \
+             contract requires `replay_crash_gap` to scan only \
+             `(applied_durable, last_committed]`, not the entire WAL since boot",
         );
     }
 

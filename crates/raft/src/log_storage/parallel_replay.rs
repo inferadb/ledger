@@ -541,11 +541,17 @@ mod tests {
     };
 
     use inferadb_ledger_consensus::{
-        wal::InMemoryWalBackend,
+        committed::CommittedEntry,
+        types::EntryKind,
+        wal::{InMemoryWalBackend, SegmentedWalBackend},
         wal_backend::{CheckpointFrame, WalFrame},
     };
+    use inferadb_ledger_store::FileBackend;
+    use inferadb_ledger_types::VaultId;
+    use tempfile::tempdir;
 
     use super::*;
+    use crate::log_storage::RaftLogStore;
 
     /// Small helper — synthesise a vault `ConsensusStateId` from a vault
     /// id. Mirrors how `start_vault_group` derives the shard id, but
@@ -1044,6 +1050,585 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(5),
             "100-vault primitive took {}ms (>5s)",
+            elapsed.as_millis(),
+        );
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Stage 5b — restart-recovery tests
+    //
+    // These tests pin down whether the per-vault `applied_durable_index`
+    // recovers across an unclean shutdown. They open per-vault
+    // `RaftLogStore` instances directly (skipping the full `RaftManager`
+    // bootstrap) and exercise the same `apply_committed_entries` →
+    // `commit_in_memory` path the production commit pump runs, then drop
+    // the store WITHOUT a `sync_state` to simulate a crash before the
+    // `StateCheckpointer` ticks.
+    //
+    // The Phase 1 verification test
+    // (`restart_loses_pre_crash_per_vault_commits_without_replay`)
+    // demonstrates the correctness gap: per-vault applied state lives in
+    // the page cache between checkpointer ticks, so an unclean shutdown
+    // throws it away. The Phase 2 wired-replay test
+    // (`replay_shared_wal_for_org_recovers_pre_crash_per_vault_commits`)
+    // confirms that running this primitive against the same WAL on
+    // restart restores the lost state. The two together are the
+    // before/after picture for Stage 5b.
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// Synthesise the per-org WAL shape `replay_shared_wal_for_org`
+    /// expects for a restart: org-shard frames at indices `1..=org_count`
+    /// followed by per-vault frames at the next contiguous indices,
+    /// then a checkpoint covering everything.
+    ///
+    /// Returns the org shard id, the map of vault id → vault shard id,
+    /// and the final committed index (so callers can assert the WAL
+    /// matches what the apply pumps were driven through).
+    fn build_org_wal_with_vault_frames(
+        wal_dir: &std::path::Path,
+        org_shard: ConsensusStateId,
+        org_committed_entries: u64,
+        vaults: &[(VaultId, ConsensusStateId)],
+        entries_per_vault: u64,
+    ) -> (u64, SegmentedWalBackend) {
+        let mut wal = SegmentedWalBackend::open(wal_dir).unwrap();
+        let mut next_index = 1u64;
+
+        // Org-shard frames first (matching the order `start_region` would
+        // have produced; the per-vault frames interleave only when vaults
+        // are added mid-org-life — for restart-recovery the simpler
+        // sequential layout exercises the same paths).
+        if org_committed_entries > 0 {
+            let mut frames = Vec::with_capacity(org_committed_entries as usize);
+            for _ in 0..org_committed_entries {
+                // Empty payload = Raft no-op (`EntryKind::Normal` with
+                // empty data). `apply_committed_entries` advances
+                // `last_applied` and returns `LedgerResponse::Empty`.
+                frames.push(WalFrame {
+                    shard_id: org_shard,
+                    index: next_index,
+                    term: 1,
+                    data: Arc::from(&[][..]),
+                });
+                next_index += 1;
+            }
+            wal.append(&frames).unwrap();
+        }
+
+        // Per-vault frames, one shard at a time.
+        for (_vault_id, shard) in vaults {
+            let mut frames = Vec::with_capacity(entries_per_vault as usize);
+            for _ in 0..entries_per_vault {
+                frames.push(WalFrame {
+                    shard_id: *shard,
+                    index: next_index,
+                    term: 1,
+                    data: Arc::from(&[][..]),
+                });
+                next_index += 1;
+            }
+            wal.append(&frames).unwrap();
+        }
+
+        let committed_index = next_index - 1;
+        wal.write_checkpoint(&CheckpointFrame { committed_index, term: 1, voted_for: None })
+            .unwrap();
+        wal.sync().unwrap();
+
+        (committed_index, wal)
+    }
+
+    /// Build the run of `CommittedEntry` (empty Normal entries) the
+    /// per-vault commit pump would receive for a contiguous range of
+    /// log indices.
+    fn empty_normal_entries(start_index: u64, count: u64, term: u64) -> Vec<CommittedEntry> {
+        (0..count)
+            .map(|i| CommittedEntry {
+                index: start_index + i,
+                term,
+                data: Arc::from(&[][..]),
+                kind: EntryKind::Normal,
+            })
+            .collect()
+    }
+
+    /// Phase 1 verification — drive K=20 commits per vault through the
+    /// production apply path WITHOUT triggering `StateCheckpointer`
+    /// (i.e. no `sync_state` between apply and crash), drop the store
+    /// without graceful shutdown, reopen, and observe what the per-vault
+    /// `applied_durable_index` recovers to.
+    ///
+    /// This test does NOT exercise Stage 5b's new replay path. It pins
+    /// down today's behaviour: if the per-vault `last_applied.index`
+    /// recovers to 20, the dispatch's Finding 1 is wrong (per-vault
+    /// recovery happens through some path we missed). If it recovers to
+    /// 0, Finding 1 is correct and Stage 5b is closing a real
+    /// correctness gap, not just a perf optimisation.
+    ///
+    /// Outcome to record in the implementer's final report.
+    #[tokio::test]
+    async fn restart_loses_pre_crash_per_vault_commits_without_replay() {
+        let dir = tempdir().unwrap();
+        let vault_path = dir.path().join("raft.db");
+
+        const K: u64 = 20;
+        let org = inferadb_ledger_types::OrganizationId::new(7);
+        let vault = VaultId::new(11);
+
+        // Phase A — open the per-vault store, drive K commits via
+        // `apply_committed_entries` (which calls `save_state_core` →
+        // `commit_in_memory`), but DO NOT call `sync_state`. This
+        // mirrors the steady-state per-vault commit pump between
+        // checkpointer ticks.
+        {
+            let mut store =
+                RaftLogStore::<FileBackend>::open_for_vault(&vault_path, org, vault).unwrap();
+
+            // Sanity: a fresh store starts at applied_durable = 0.
+            assert!(
+                store.applied_state().load().last_applied.is_none(),
+                "fresh open_for_vault must start with last_applied = None",
+            );
+
+            let entries = empty_normal_entries(1, K, 1);
+            let responses = store
+                .apply_committed_entries::<crate::types::OrganizationRequest>(&entries, None)
+                .await
+                .unwrap();
+            assert_eq!(responses.len(), K as usize);
+
+            // After apply, the in-memory state reflects the K commits.
+            let in_mem_index =
+                store.applied_state().load().last_applied.as_ref().map_or(0, |id| id.index);
+            assert_eq!(in_mem_index, K, "in-memory last_applied must reflect every applied entry");
+
+            // Drop the store WITHOUT calling `sync_state`. The page cache
+            // holds the K applies; the dual-slot is stale.
+        }
+
+        // Phase B — reopen the store. Because no `sync_state` ran, the
+        // dual-slot still reflects pre-apply state.
+        {
+            let store =
+                RaftLogStore::<FileBackend>::open_for_vault(&vault_path, org, vault).unwrap();
+
+            let recovered_index =
+                store.applied_state().load().last_applied.as_ref().map_or(0, |id| id.index);
+
+            // RECORD THIS OUTCOME IN THE REPORT.
+            //
+            // If `recovered_index == K` (20), then per-vault commits
+            // are recoverable today via some path the dispatch's
+            // Finding 1 missed. Stage 5b is a perf optimisation only.
+            //
+            // If `recovered_index == 0`, the gap is real — applied
+            // state lived in the page cache, the unclean shutdown lost
+            // it, and only Stage 5b's wired replay can restore it.
+            assert_eq!(
+                recovered_index, 0,
+                "VERIFICATION (Stage 5b Finding 1): per-vault applied state \
+                 lives in page cache between StateCheckpointer ticks; an \
+                 unclean shutdown loses it. Recovered={recovered_index}, \
+                 expected_pre_crash={K}. If this assertion ever flips to \
+                 `assert_eq!(recovered_index, K)` without Stage 5b's wiring \
+                 being involved, investigate which path closed the gap.",
+            );
+        }
+    }
+
+    /// Phase 2 wired-replay — same setup as the Phase 1 test, but on
+    /// restart we call `replay_shared_wal_for_org` against the per-org
+    /// WAL. Asserts the primitive drives the per-vault apply pipeline
+    /// correctly so the post-replay `applied_durable_index` matches the
+    /// pre-crash value.
+    ///
+    /// The dispatcher writes a checkpoint covering `K` entries per
+    /// vault into the per-org WAL, drops the per-vault store without
+    /// `sync_state`, reopens, and runs `replay_shared_wal_for_org` to
+    /// re-drive the apply pipeline. After the call, the per-vault
+    /// `applied_state` reflects all `K` commits — i.e. the same shape
+    /// the live commit pump would have produced before the crash.
+    #[tokio::test]
+    async fn replay_shared_wal_for_org_recovers_pre_crash_per_vault_commits() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+        let vault_dir = dir.path().join("vault-11");
+        std::fs::create_dir_all(&vault_dir).unwrap();
+        let vault_path = vault_dir.join("raft.db");
+
+        const K: u64 = 20;
+        let org = inferadb_ledger_types::OrganizationId::new(7);
+        let vault = VaultId::new(11);
+        let org_shard = ConsensusStateId(0xAAAA_AAAA);
+        let vault_shard_id = ConsensusStateId(0xBBBB_BBBB);
+
+        // Phase A — populate the per-org WAL with `K` committed
+        // entries for the vault shard, plus the org-shard checkpoint
+        // entries that cover them. No org-level apply work is needed
+        // for this test — we only assert the vault-side recovery.
+        let (committed_index, _wal_writer) = build_org_wal_with_vault_frames(
+            &wal_dir,
+            org_shard,
+            // org_committed_entries =
+            0,
+            &[(vault, vault_shard_id)],
+            K,
+        );
+        assert_eq!(committed_index, K, "checkpoint must cover every vault frame");
+
+        // Drive the vault apply pipeline once (mirroring the live
+        // commit pump's `apply_committed_entries` path), then drop
+        // without `sync_state` — this is the crash baseline.
+        //
+        // Why we drive apply at all in the "before" arm: the per-vault
+        // commit pump in production touches the in-memory ArcSwap +
+        // page cache on every batch, so the test mirrors that path
+        // even though the post-crash assertion only cares about the
+        // synced dual-slot. Without this call the test would conflate
+        // "no apply ever ran" with "apply ran, then crash lost it".
+        {
+            let mut store =
+                RaftLogStore::<FileBackend>::open_for_vault(&vault_path, org, vault).unwrap();
+            let entries = empty_normal_entries(1, K, 1);
+            store
+                .apply_committed_entries::<crate::types::OrganizationRequest>(&entries, None)
+                .await
+                .unwrap();
+            // Drop without sync_state.
+        }
+
+        // Phase B — reopen the WAL and run `replay_shared_wal_for_org`.
+        // The replay primitive scans the WAL, identifies entries past
+        // the per-shard `applied_durable` baseline, and dispatches
+        // them through the caller-supplied apply closure.
+        {
+            // Reopen the WAL read-side. `SegmentedWalBackend::open` is
+            // idempotent — opens the existing segment files for read.
+            let wal = SegmentedWalBackend::open(&wal_dir).unwrap();
+
+            // Reopen the vault store. `applied_durable` for this vault
+            // is whatever the dual-slot last persisted — i.e. 0 in
+            // the unclean-shutdown crash baseline. The store binding
+            // does not need `mut` because `apply_committed_entries`
+            // is invoked through the apply closure (which owns its
+            // moved store) rather than directly here.
+            let store =
+                RaftLogStore::<FileBackend>::open_for_vault(&vault_path, org, vault).unwrap();
+            let pre_replay_index =
+                store.applied_state().load().last_applied.as_ref().map_or(0, |id| id.index);
+            assert_eq!(
+                pre_replay_index, 0,
+                "pre-replay baseline: per-vault applied state must be lost \
+                 across the unclean shutdown",
+            );
+
+            // Per-shard `applied_durable` map. The org shard has no
+            // entries in this test (org_committed_entries = 0), so
+            // the `recover_from_wal` filter naturally returns nothing
+            // for it; no `applied_durable[org_shard]` entry is needed
+            // — empty batches are filtered upstream by the primitive.
+            let mut applied_durable: std::collections::HashMap<ConsensusStateId, u64> =
+                std::collections::HashMap::new();
+            applied_durable.insert(vault_shard_id, 0);
+
+            // Stage 5b apply closure shape — the production `start_region`
+            // path will use the same closure with `apply_committed_entries`.
+            // The closure consumes the store via `move` so the
+            // `&mut self` requirement of `apply_committed_entries` is
+            // satisfied without sharing.
+            //
+            // Per-vault `RaftLogStore` is captured into an `Option<...>`
+            // and `take()`n inside the closure so the borrow checker
+            // is happy with the `FnOnce` signature; this also matches
+            // the production path where each vault's store is owned
+            // by exactly one apply task.
+            let store_slot_ref = std::sync::Arc::new(parking_lot::Mutex::new(Some(store)));
+            let mut apply_fns: HashMap<ConsensusStateId, (VaultId, VaultApplyFn)> = HashMap::new();
+            let store_for_closure = std::sync::Arc::clone(&store_slot_ref);
+            let apply_fn: VaultApplyFn =
+                Box::new(move |batch: inferadb_ledger_consensus::committed::CommittedBatch| {
+                    let store_slot = std::sync::Arc::clone(&store_for_closure);
+                    Box::pin(async move {
+                        let mut store = store_slot
+                            .lock()
+                            .take()
+                            .expect("vault store taken twice during replay");
+                        let n = batch.entries.len() as u64;
+                        store
+                            .apply_committed_entries::<crate::types::OrganizationRequest>(
+                                &batch.entries,
+                                None,
+                            )
+                            .await
+                            .map_err(|e| {
+                                super::VaultApplySnafu {
+                                    region: inferadb_ledger_types::Region::US_EAST_VA,
+                                    organization: org,
+                                    vault,
+                                    message: format!("apply failed: {e}"),
+                                }
+                                .build()
+                            })?;
+                        // Return the store so the post-replay
+                        // assertion can observe the recovered
+                        // applied_state.
+                        *store_slot.lock() = Some(store);
+                        Ok(n)
+                    })
+                });
+            apply_fns.insert(vault_shard_id, (vault, apply_fn));
+
+            let stats = replay_shared_wal_for_org(
+                &wal,
+                inferadb_ledger_types::Region::US_EAST_VA,
+                org,
+                applied_durable,
+                apply_fns,
+                ParallelReplayConfig::default(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(stats.vaults_replayed, 1);
+            assert_eq!(stats.total_entries, K);
+            assert_eq!(stats.committed_index, committed_index);
+
+            // In-memory check: the K commits are reflected in
+            // `applied_state.last_applied.index` on the same store
+            // the closure used.
+            let store = store_slot_ref
+                .lock()
+                .take()
+                .expect("vault store must be returned by the apply closure");
+            let in_memory_index =
+                store.applied_state().load().last_applied.as_ref().map_or(0, |id| id.index);
+            assert_eq!(
+                in_memory_index, K,
+                "post-replay (in-memory): per-vault applied state must reflect every \
+                 committed-but-pre-crash entry",
+            );
+
+            // Durability check: this is the load-bearing assertion for
+            // Stage 5b. `apply_committed_entries` writes via
+            // `commit_in_memory`, so the recovered state lives in the
+            // store's in-process page cache. If we drop the store and
+            // reopen it WITHOUT calling `sync_state`, the dual-slot on
+            // disk hasn't moved and the reopened store regresses to
+            // the pre-Stage-5b state. Stage 5b's apply closure (in
+            // `RaftManager::run_stage5b_parallel_replay`) runs an
+            // explicit `sync_state` on the per-vault raft.db / blocks.db /
+            // events.db before returning the store; mirror that here so
+            // the test exercises the same durability boundary the
+            // production path crosses. Without this sync, the assertion
+            // below regresses to 0 and the test surfaces the bug.
+            store.log_store_db().sync_state().await.unwrap();
+            drop(store);
+
+            let reopened =
+                RaftLogStore::<FileBackend>::open_for_vault(&vault_path, org, vault).unwrap();
+            let durable_index =
+                reopened.applied_state().load().last_applied.as_ref().map_or(0, |id| id.index);
+            assert_eq!(
+                durable_index, K,
+                "post-replay (durable): a reopen after sync_state must observe \
+                 every recovered entry — Stage 5b syncs raft.db / blocks.db / events.db \
+                 inside the apply closure for exactly this reason",
+            );
+        }
+    }
+
+    /// Replay-off regression guard. Same setup as the
+    /// recovers-pre-crash test, but skip the replay call entirely
+    /// (mirroring `enable_parallel_wal_replay = false` /
+    /// `start_region`'s skip arm). Asserts the gap remains — i.e.
+    /// the disabled mode preserves the pre-Stage-5b behaviour.
+    #[tokio::test]
+    async fn replay_disabled_leaves_pre_crash_gap_intact() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+        let vault_dir = dir.path().join("vault-11");
+        std::fs::create_dir_all(&vault_dir).unwrap();
+        let vault_path = vault_dir.join("raft.db");
+
+        const K: u64 = 20;
+        let org = inferadb_ledger_types::OrganizationId::new(7);
+        let vault = VaultId::new(11);
+        let org_shard = ConsensusStateId(0xAAAA_AAAA);
+        let vault_shard_id = ConsensusStateId(0xBBBB_BBBB);
+
+        let _ =
+            build_org_wal_with_vault_frames(&wal_dir, org_shard, 0, &[(vault, vault_shard_id)], K);
+
+        // Crash baseline: apply K entries, drop without sync_state.
+        {
+            let mut store =
+                RaftLogStore::<FileBackend>::open_for_vault(&vault_path, org, vault).unwrap();
+            let entries = empty_normal_entries(1, K, 1);
+            store
+                .apply_committed_entries::<crate::types::OrganizationRequest>(&entries, None)
+                .await
+                .unwrap();
+        }
+
+        // Phase B — reopen WITHOUT running replay. Confirm the gap.
+        let store = RaftLogStore::<FileBackend>::open_for_vault(&vault_path, org, vault).unwrap();
+        let recovered_index =
+            store.applied_state().load().last_applied.as_ref().map_or(0, |id| id.index);
+        assert_eq!(
+            recovered_index, 0,
+            "replay disabled: per-vault applied state stays at 0 after restart \
+             (pre-Stage-5b behaviour)",
+        );
+    }
+
+    /// All caught up — the skip-check arm that fires on a clean
+    /// shutdown. Synthesise the WAL with K=10 vault entries, but
+    /// also drive the per-vault apply through a `sync_state` so the
+    /// dual-slot is current. On reopen, `applied_durable_index ==
+    /// committed_index`, so `replay_shared_wal_for_org` returns
+    /// zero entries replayed.
+    #[tokio::test]
+    async fn replay_skip_no_gap_when_all_vaults_caught_up() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+        let vault_dir = dir.path().join("vault-11");
+        std::fs::create_dir_all(&vault_dir).unwrap();
+        let vault_path = vault_dir.join("raft.db");
+
+        const K: u64 = 10;
+        let org = inferadb_ledger_types::OrganizationId::new(7);
+        let vault = VaultId::new(11);
+        let org_shard = ConsensusStateId(0xAAAA_AAAA);
+        let vault_shard_id = ConsensusStateId(0xBBBB_BBBB);
+
+        let _ =
+            build_org_wal_with_vault_frames(&wal_dir, org_shard, 0, &[(vault, vault_shard_id)], K);
+
+        // Apply + force sync_state so dual-slot reflects K commits.
+        {
+            let mut store =
+                RaftLogStore::<FileBackend>::open_for_vault(&vault_path, org, vault).unwrap();
+            let entries = empty_normal_entries(1, K, 1);
+            store
+                .apply_committed_entries::<crate::types::OrganizationRequest>(&entries, None)
+                .await
+                .unwrap();
+            // Force sync via the public log_store_db API. Mirrors
+            // the StateCheckpointer's per-tick fan-out through the
+            // per-vault raft.db.
+            store.log_store_db().sync_state().await.unwrap();
+        }
+
+        // Reopen — applied_durable on disk reflects K commits.
+        let wal = SegmentedWalBackend::open(&wal_dir).unwrap();
+        let store = RaftLogStore::<FileBackend>::open_for_vault(&vault_path, org, vault).unwrap();
+        let pre_replay_index =
+            store.applied_state().load().last_applied.as_ref().map_or(0, |id| id.index);
+        assert_eq!(
+            pre_replay_index, K,
+            "clean-shutdown baseline: applied_durable must reflect every commit",
+        );
+
+        // applied_durable[vault] = K → recover_from_wal filters out
+        // every frame for the vault → primitive returns zero.
+        let mut applied_durable: std::collections::HashMap<ConsensusStateId, u64> =
+            std::collections::HashMap::new();
+        applied_durable.insert(vault_shard_id, K);
+
+        // No closure registered for the vault — recover_from_wal
+        // emits no batch for it, so the `UnknownShard` arm is
+        // unreachable. `apply_fns` can stay empty.
+        let apply_fns: HashMap<ConsensusStateId, (VaultId, VaultApplyFn)> = HashMap::new();
+
+        let stats = replay_shared_wal_for_org(
+            &wal,
+            inferadb_ledger_types::Region::US_EAST_VA,
+            org,
+            applied_durable,
+            apply_fns,
+            ParallelReplayConfig::default(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            stats.vaults_replayed, 0,
+            "all-caught-up: replay primitive must return zero vaults replayed",
+        );
+        assert_eq!(stats.total_entries, 0);
+
+        // The store binding is held only for the assertion above —
+        // dropping it here mirrors what `start_region` does after
+        // the replay block (drop the per-vault stores; reopen later
+        // via `start_vault_group`).
+        drop(store);
+    }
+
+    /// Comparative timing — N=10 vaults × K=1000 lagging entries.
+    /// Measures the wall-clock time to drive the replay through
+    /// `replay_shared_wal_for_org` against in-memory closures (no
+    /// real apply work — strictly the fan-out plumbing). Records
+    /// the timing in the test output via `eprintln!` so the
+    /// implementer's report can quote it.
+    ///
+    /// This is a sanity-check on the primitive's overhead, not a
+    /// performance regression guard — the real-world numbers depend
+    /// on per-vault apply work (B+ tree writes, sync_state, event
+    /// emission). Even so, the in-memory baseline catches a
+    /// regression in the fan-out plumbing itself (semaphore,
+    /// JoinSet, channel-free dispatch).
+    #[tokio::test]
+    async fn timing_10_vaults_1000_entries_each() {
+        const VAULT_COUNT: i64 = 10;
+        const K: u64 = 1000;
+        let wal = build_shared_wal(VAULT_COUNT, K);
+
+        let mut apply_fns: HashMap<ConsensusStateId, (VaultId, VaultApplyFn)> = HashMap::new();
+        for v in 1..=VAULT_COUNT {
+            let f: VaultApplyFn =
+                Box::new(move |batch| Box::pin(async move { Ok(batch.entries.len() as u64) }));
+            apply_fns.insert(vault_shard(v), (VaultId::new(v), f));
+        }
+
+        let started = std::time::Instant::now();
+        let stats = replay_shared_wal_for_org(
+            &wal,
+            inferadb_ledger_types::Region::US_EAST_VA,
+            inferadb_ledger_types::OrganizationId::new(7),
+            HashMap::new(),
+            apply_fns,
+            ParallelReplayConfig::default(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(stats.vaults_replayed, VAULT_COUNT as usize);
+        assert_eq!(stats.total_entries, VAULT_COUNT as u64 * K);
+
+        // Print the timing for the implementer's report.
+        eprintln!(
+            "STAGE 5B TIMING: {} vaults × {} entries via parallel replay = \
+             {} ms (avg {:.2} µs/entry)",
+            VAULT_COUNT,
+            K,
+            elapsed.as_millis(),
+            elapsed.as_micros() as f64 / (VAULT_COUNT as f64 * K as f64),
+        );
+
+        // Generous bound — this is the in-memory primitive with no
+        // apply work; real apply latency dominates in production.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "fan-out plumbing for {} vaults × {} entries took {} ms (>2s)",
+            VAULT_COUNT,
+            K,
             elapsed.as_millis(),
         );
     }
