@@ -16,7 +16,7 @@ Complete reference for Ledger configuration via environment variables and CLI ar
 | `INFERADB__LEDGER__ADVERTISE`        | `--advertise`  | _(auto)_     | Address advertised to peers                                 |
 | `INFERADB__LEDGER__MAX_CONCURRENT`   | `--concurrent` | `10000`      | Max concurrent requests                                     |
 | `INFERADB__LEDGER__TIMEOUT`          | `--timeout`    | `30`         | Request timeout (seconds)                                   |
-| `INFERADB__LEDGER__RATELIMIT`        | `--ratelimit`  | _(unset → honor `rate_limit.enabled`)_ | Optional override for server-side rate limiting |
+| `INFERADB__LEDGER__RATE_LIMIT`       | `--rate-limit` | _(unset → honor `rate_limit.enabled`)_ | Optional override for server-side rate limiting |
 | `INFERADB__LEDGER__VAULT_HIBERNATION` | `--vault-hibernation` | _(unset → honor `hibernation.enabled`)_ | Optional override for vault hibernation idle detector |
 | `INFERADB__LEDGER__VAULT_METRICS`    | `--vault-metrics` | _(unset → honor `observability.vault_metrics_enabled`)_ | Optional override for per-vault Prometheus series |
 | —                                    | `--log-format` | `auto`       | Log format (`text`/`json`/`auto`)                           |
@@ -183,20 +183,20 @@ INFERADB__LEDGER__TIMEOUT=60
 
 ## Rate Limiting
 
-Three-tier token-bucket admission control. **Disabled by default — opt in by setting `rate_limit.enabled = true` in YAML, or with `--ratelimit` at startup.**
+Three-tier token-bucket admission control. **Disabled by default — opt in by setting `rate_limit.enabled = true` in YAML, or with `--rate-limit` at startup.**
 
-| Variable                       | CLI           | Default | Description                                  |
-| ------------------------------ | ------------- | ------- | -------------------------------------------- |
-| `INFERADB__LEDGER__RATELIMIT`  | `--ratelimit` | _(unset → honor `rate_limit.enabled`)_ | Optional startup override for server-side throttling |
+| Variable                       | CLI            | Default | Description                                  |
+| ------------------------------ | -------------- | ------- | -------------------------------------------- |
+| `INFERADB__LEDGER__RATE_LIMIT` | `--rate-limit` | _(unset → honor `rate_limit.enabled`)_ | Optional startup override for server-side throttling |
 
-The canonical master switch is `rate_limit.enabled` (defaults to `false`). The `--ratelimit` CLI flag is an optional **`Option<bool>` override**:
+The canonical master switch is `rate_limit.enabled` (defaults to `false`). The `--rate-limit` CLI flag is an optional **`Option<bool>` override**:
 
 | Operator input | Effective `enabled` |
 | -------------- | ------------------- |
 | flag absent (default) | honors `rate_limit.enabled` (canonical inner field) |
-| `--ratelimit` (bare) | `true` — forces limiter on |
-| `--ratelimit=true` / `--ratelimit true` | `true` |
-| `--ratelimit=false` | `false` — forces limiter off |
+| `--rate-limit` (bare) | `true` — forces limiter on |
+| `--rate-limit=true` / `--rate-limit true` | `true` |
+| `--rate-limit=false` | `false` — forces limiter off |
 
 When the resolved value is `false`, every admission check fast-paths through a single relaxed atomic load — no token-bucket math, no per-call overhead, no rejections. The `client_burst`, `organization_burst`, etc. knobs below are still loaded into the runtime config, but they have no effect until the master switch is flipped on.
 
@@ -210,17 +210,17 @@ InferaDB Ledger's [trust posture](#network-configuration) — services run behin
 
 ```bash
 # Enable with built-in defaults
-inferadb-ledger --ratelimit --listen 0.0.0.0:50051 --data /data
+inferadb-ledger --rate-limit --listen 0.0.0.0:50051 --data /data
 
 # Or via env var
-INFERADB__LEDGER__RATELIMIT=true inferadb-ledger --listen 0.0.0.0:50051 --data /data
+INFERADB__LEDGER__RATE_LIMIT=true inferadb-ledger --listen 0.0.0.0:50051 --data /data
 ```
 
 Once enabled, the limiter applies the default thresholds below (or values supplied via `UpdateConfig`).
 
 | Field                    | Default  | Unit       | Rationale                                                                                        |
 | ------------------------ | -------- | ---------- | ------------------------------------------------------------------------------------------------ |
-| `enabled`                | `false`  | bool       | Master opt-in switch. Canonical source of truth; `--ratelimit` is an optional startup override.    |
+| `enabled`                | `false`  | bool       | Master opt-in switch. Canonical source of truth; `--rate-limit` is an optional startup override.   |
 | `client_burst`           | `10000`  | tokens     | Per-client bucket capacity; bias-toward-throughput default. Tune down to enforce per-caller cap. |
 | `client_rate`            | `10000`  | requests/s | Per-client sustained refill.                                                                     |
 | `organization_burst`     | `100000` | tokens     | Per-organization bucket capacity across all callers in the org.                                  |
@@ -255,7 +255,7 @@ Idle-vault Raft groups transition to a `Dormant` lifecycle state when they have 
 | ------------------------------------- | --------------------- | ------- | ------------------------------------------------- |
 | `INFERADB__LEDGER__VAULT_HIBERNATION` | `--vault-hibernation` | _(unset → honor `hibernation.enabled`)_ | Optional startup override |
 
-The canonical master switch is `hibernation.enabled` (defaults to `false`). The `--vault-hibernation` CLI flag is an optional **`Option<bool>` override** with the same shape as `--ratelimit`:
+The canonical master switch is `hibernation.enabled` (defaults to `false`). The `--vault-hibernation` CLI flag is an optional **`Option<bool>` override** with the same shape as `--rate-limit`:
 
 | Operator input | Effective `enabled` |
 | -------------- | ------------------- |
@@ -276,10 +276,17 @@ hibernation:
   scan_interval_secs: 30    # idle detector cadence
 ```
 
-Hibernation tuning knobs are restart-only — there is no `UpdateConfig` arm for `hibernation` today. Flip the master switch from the CLI for ad-hoc rollouts:
+Hibernation is **runtime-flippable** via the `AdminService::UpdateConfig` RPC — the entire `hibernation` section (master switch and tuning knobs) takes effect on the next idle-detector scan tick. Unlike per-vault metrics, hibernation has no time-series cardinality concern: the apply path is unchanged, only the idle-detector behavior switches on or off. A disabled-to-enabled transition spawns the detector task on the next `UpdateConfig`; a enabled-to-disabled transition leaves the task running but causes its scan to early-return without sleeping any vaults.
 
 ```bash
+# Startup: bare flag enables the detector (overriding the YAML inner value)
 inferadb-ledger --vault-hibernation --listen 0.0.0.0:50051 --data /data
+
+# Runtime: flip on without a restart
+ledger admin update-config --json '{"hibernation":{"enabled":true,"idle_secs":300}}'
+
+# Runtime: flip off
+ledger admin update-config --json '{"hibernation":{"enabled":false}}'
 ```
 
 ## Per-Vault Prometheus Metrics
@@ -290,7 +297,7 @@ Per-vault metrics emit a fresh `vault_id` label set per metric, multiplying time
 | --------------------------------- | ----------------- | ------- | ------------------------------------------------- |
 | `INFERADB__LEDGER__VAULT_METRICS` | `--vault-metrics` | _(unset → honor `observability.vault_metrics_enabled`)_ | Optional startup override |
 
-The canonical master switch is `observability.vault_metrics_enabled` (defaults to `false`). The `--vault-metrics` CLI flag is an optional **`Option<bool>` override** with the same shape as `--ratelimit`:
+The canonical master switch is `observability.vault_metrics_enabled` (defaults to `false`). The `--vault-metrics` CLI flag is an optional **`Option<bool>` override** with the same shape as `--rate-limit`:
 
 | Operator input | Effective `vault_metrics_enabled` |
 | -------------- | --------------------------------- |

@@ -2038,9 +2038,36 @@ impl inferadb_ledger_proto::proto::admin_service_server::AdminService for AdminS
             }));
         }
 
+        // Build the hibernation reconfig callback. The runtime arm fires
+        // when `RuntimeConfig.hibernation` differs between the current
+        // snapshot and the incoming update; the callback plumbs the new
+        // policy into the manager and (re)spawns the idle detector if the
+        // master switch flipped on. When no manager is wired in (test
+        // harnesses), the callback is `None` and `RuntimeConfigHandle::update`
+        // logs a warning instead of silently dropping the change.
+        let hibernation_manager = self.raft_manager.clone();
+        let hibernation_closure = hibernation_manager.map(|mgr| {
+            move |new_policy: &inferadb_ledger_types::config::HibernationConfig| {
+                mgr.set_hibernation_config(new_policy.clone());
+                if new_policy.enabled {
+                    mgr.start_hibernation_idle_detector();
+                }
+            }
+        });
+        let hibernation_cb: Option<
+            inferadb_ledger_raft::runtime_config::HibernationReconfigCallback,
+        > = hibernation_closure.as_ref().map(|f| {
+            f as &(dyn Fn(&inferadb_ledger_types::config::HibernationConfig) + Send + Sync)
+        });
+
         // Apply the update.
         let changed = runtime_config
-            .update(new_config, self.rate_limiter.as_ref(), self.hot_key_detector.as_ref())
+            .update(
+                new_config,
+                self.rate_limiter.as_ref(),
+                self.hot_key_detector.as_ref(),
+                hibernation_cb,
+            )
             .map_err(|e| Status::invalid_argument(format!("Config update failed: {e}")))?;
 
         // Emit ConfigurationChanged handler-phase event

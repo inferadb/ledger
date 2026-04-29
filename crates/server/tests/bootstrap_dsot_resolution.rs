@@ -1,6 +1,6 @@
 //! Bootstrap-time DSoT resolution tests.
 //!
-//! Verifies that `--ratelimit`, `--vault-hibernation`, and `--vault-metrics`
+//! Verifies that `--rate-limit`, `--vault-hibernation`, and `--vault-metrics`
 //! CLI overrides honor the canonical inner config field when the override
 //! is `None`. Pre-fix the inner field was silently overwritten by the CLI
 //! flag at startup; post-fix it is honored as the source of truth.
@@ -130,7 +130,7 @@ async fn bootstrap_default_keeps_rate_limiting_disabled() {
     let socket_dir = data_dir.join("sockets");
     std::fs::create_dir_all(&socket_dir).expect("mk socket dir");
     let unique = allocate_ports(1);
-    let socket_path = socket_dir.join(format!("ratelimit-default-{unique}.sock"));
+    let socket_path = socket_dir.join(format!("rate-limit-default-{unique}.sock"));
 
     let config = Config {
         // Both CLI override and inner config left at default; the

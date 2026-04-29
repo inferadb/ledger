@@ -11168,6 +11168,53 @@ mod tests {
         manager.start_hibernation_idle_detector();
     }
 
+    /// Runtime flip path: bootstrap with hibernation disabled (the default),
+    /// then flip the master switch on through `set_hibernation_config` +
+    /// `start_hibernation_idle_detector` — exactly the sequence the
+    /// `RuntimeConfigHandle` hibernation reconfig callback drives on the
+    /// AdminService::UpdateConfig RPC. The next `run_hibernation_scan_once`
+    /// must transition the idle vault to `Dormant`.
+    #[tokio::test]
+    async fn test_runtime_flip_enables_idle_detection_after_disabled_bootstrap() {
+        let temp = TestDir::new();
+        let manager = test_manager(create_test_config(&temp));
+        manager.install_self_weak();
+        let vault = start_test_vault(&manager, OrganizationId::new(1009), VaultId::new(1)).await;
+
+        // Phase 1 — bootstrap-equivalent: hibernation disabled. A scan with
+        // a backdated activity timestamp must NOT transition the vault.
+        vault.last_activity_unix_secs.store(0, Ordering::Relaxed);
+        manager.run_hibernation_scan_once();
+        assert_eq!(vault.lifecycle_state(), VaultLifecycleState::Active);
+
+        // Phase 2 — runtime flip: enable + start the detector. This is the
+        // sequence the AdminService callback runs on UpdateConfig.
+        manager.set_hibernation_config(
+            inferadb_ledger_types::config::HibernationConfig::builder()
+                .enabled(true)
+                .idle_secs(1)
+                .scan_interval_secs(1)
+                .build()
+                .unwrap(),
+        );
+        manager.start_hibernation_idle_detector();
+
+        // The next sync scan now sees the policy as enabled and dispatches
+        // the sleep on a tokio task. Poll for the transition.
+        manager.run_hibernation_scan_once();
+        for _ in 0..50 {
+            if vault.lifecycle_state() == VaultLifecycleState::Dormant {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            vault.lifecycle_state(),
+            VaultLifecycleState::Dormant,
+            "runtime-flip-on must drive idle vaults to Dormant on the next scan",
+        );
+    }
+
     /// `sleep_vault` is idempotent and lands the load-bearing observable
     /// changes: lifecycle Active → Dormant, shard pause flag set, and the
     /// per-vault DB page-cache eviction calls all return `Ok(())` (which on
@@ -11265,6 +11312,17 @@ mod tests {
     /// finds them still hot on Apple / Windows where eviction was a no-op).
     /// The test does not exercise the read; the wake measurement is the
     /// engine-resume + lifecycle-transition path that the budget covers.
+    ///
+    /// **Sample count + p99 estimation**: 100 sleep/wake cycles, then
+    /// `latencies_ms[98]` is taken as the p99 estimate. With only 20
+    /// samples (the original cycle count), `p99 = max(samples)` — a single
+    /// scheduling stall (tokio runtime work-stealing imbalance under
+    /// workspace-parallel cargo test, occasionally hits ~120ms on
+    /// contended hosts) blows the budget. With 100 samples, the p99
+    /// estimate is the 99th-percentile rank rather than the absolute max,
+    /// so a single tail outlier no longer fails the test. The wall-time
+    /// cost is still sub-second because each cycle is a control-channel
+    /// round-trip plus an atomic store.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_wake_latency_p99_budget() {
         let temp = TestDir::new();
@@ -11274,9 +11332,11 @@ mod tests {
         let vault_id = VaultId::new(1);
         let _vault = start_test_vault(&manager, org_id, vault_id).await;
 
-        // 20 sleep/wake cycles. Single vault avoids cross-shard scheduling
-        // noise from the reactor.
-        const ITERATIONS: usize = 20;
+        // 100 sleep/wake cycles. Single vault avoids cross-shard scheduling
+        // noise from the reactor; the larger sample count makes p99
+        // (sample[98]) a genuine 99th-percentile rank rather than the
+        // absolute max — robust to a single runtime-scheduling outlier.
+        const ITERATIONS: usize = 100;
         let mut latencies_ms: Vec<f64> = Vec::with_capacity(ITERATIONS);
 
         for _ in 0..ITERATIONS {
@@ -11293,15 +11353,19 @@ mod tests {
         }
 
         latencies_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        // p99 across 20 samples = the highest sample. p95 = sample[18].
-        let p99 = latencies_ms[ITERATIONS - 1];
-        let p50 = latencies_ms[ITERATIONS / 2];
+        // 100 samples: p99 = sample[98] (rank-99 of 100, 0-indexed). p50 =
+        // sample[49]. Robust to a single tail outlier from runtime
+        // scheduling jitter — the wake hot-path itself is sub-millisecond.
+        let p99 = latencies_ms[98];
+        let p50 = latencies_ms[49];
+        let max = latencies_ms[ITERATIONS - 1];
         // 100ms budget. Generous because CI runners under load can spike
         // the resume_shard control-channel round-trip; the practical
         // observed value on dev hardware is sub-millisecond.
         assert!(
             p99 < 100.0,
-            "wake p99 budget: {p99:.3}ms exceeds 100ms (p50 = {p50:.3}ms; samples {latencies_ms:?})"
+            "wake p99 budget: {p99:.3}ms exceeds 100ms (p50 = {p50:.3}ms, max = {max:.3}ms; \
+             samples {latencies_ms:?})"
         );
     }
 }

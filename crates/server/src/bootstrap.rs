@@ -203,7 +203,7 @@ pub struct BootstrappedNode {
 /// - `rate_limit`: cloned from [`Config::rate_limit`] (default-constructed if absent), with
 ///   `enabled` resolved through
 ///   [`RateLimitConfig::resolve_enabled`](inferadb_ledger_types::config::RateLimitConfig::resolve_enabled)
-///   so the `--ratelimit` CLI override takes precedence over the inner field — matching the
+///   so the `--rate-limit` CLI override takes precedence over the inner field — matching the
 ///   dedicated [`RateLimiter`] construction site later in `bootstrap_node`.
 /// - `integrity`: cloned from [`Config::integrity`] (always present — it's a non-`Option` field on
 ///   `Config`).
@@ -225,10 +225,22 @@ fn build_initial_runtime_config(config: &Config) -> inferadb_ledger_types::confi
         config.ratelimit,
         rl.enabled,
     );
+    // Resolve hibernation the same way: the inner `enabled` field on
+    // `Config::hibernation` is the canonical source of truth, with the
+    // optional `--vault-hibernation` CLI flag overriding it. The same
+    // resolved value is later mirrored into `RaftManager` via
+    // `set_hibernation_config` so the parking_lot fallback (used by tests
+    // and by the idle detector's per-tick read) matches the runtime view.
+    let mut hibernation = config.hibernation.clone();
+    hibernation.enabled = inferadb_ledger_types::config::HibernationConfig::resolve_enabled(
+        config.vault_hibernation,
+        hibernation.enabled,
+    );
     inferadb_ledger_types::config::RuntimeConfig {
         rate_limit: Some(rl),
         integrity: Some(config.integrity.clone()),
         jwt: Some(config.jwt.clone()),
+        hibernation: Some(hibernation),
         ..Default::default()
     }
 }
@@ -341,18 +353,15 @@ pub async fn bootstrap_node(
     let runtime_config = RuntimeConfigHandle::new(build_initial_runtime_config(config));
     manager.set_runtime_config(runtime_config.clone());
 
-    // Phase 7 / O1: vault hibernation policy. The `hibernation` struct on
-    // `Config` is the canonical source of truth for the master enable
-    // switch and the tuning knobs; the top-level `vault_hibernation` CLI
-    // flag is an optional `Option<bool>` startup override. Resolve the
-    // effective `enabled` value, then plumb the policy into the manager
-    // BEFORE any vault group is started so the idle detector's
-    // reads-on-tick observe the operator-configured values.
-    let mut hibernation_cfg = config.hibernation.clone();
-    hibernation_cfg.enabled = inferadb_ledger_types::config::HibernationConfig::resolve_enabled(
-        config.vault_hibernation,
-        hibernation_cfg.enabled,
-    );
+    // Phase 7 / O1: vault hibernation policy. The resolved policy was
+    // already stamped into the runtime config above by
+    // `build_initial_runtime_config`; mirror it onto the parking_lot
+    // fallback on `RaftManager` so the idle detector's per-tick read sees
+    // the same value, then start the detector if hibernation is enabled
+    // at boot. Subsequent runtime flips arrive via the `UpdateConfig` RPC,
+    // which fires the hibernation reconfig callback on `AdminService` and
+    // re-spawns the detector if the master switch transitions to enabled.
+    let hibernation_cfg = runtime_config.load().hibernation.clone().unwrap_or_default();
     manager.set_hibernation_config(hibernation_cfg.clone());
     if hibernation_cfg.enabled {
         manager.start_hibernation_idle_detector();
@@ -825,11 +834,11 @@ pub async fn bootstrap_node(
     //
     // Rate limiting defaults to disabled (per the silent-throttling-defaults
     // lesson). `RateLimitConfig::enabled` is the canonical master switch
-    // (defaults to `false`); the `--ratelimit` CLI flag is an optional
+    // (defaults to `false`); the `--rate-limit` CLI flag is an optional
     // `Option<bool>` startup override. Resolution: `cli.unwrap_or(inner)`
     // — operators who set `enabled: true` in YAML / env config but omit
     // the CLI flag get the on they configured; operators who pass
-    // `--ratelimit=false` force it off. The runtime-reconfig path
+    // `--rate-limit=false` force it off. The runtime-reconfig path
     // (`UpdateConfig`) reads the inner field directly and is unaffected
     // by the CLI override.
     let mut rl = config.rate_limit.clone().unwrap_or_default();
@@ -2258,7 +2267,7 @@ mod tests {
         let runtime = build_initial_runtime_config(&config);
 
         let rl = runtime.rate_limit.expect("rate_limit must be seeded");
-        assert!(rl.enabled, "--ratelimit=true must override inner field");
+        assert!(rl.enabled, "--rate-limit=true must override inner field");
 
         // CLI override = Some(false) wins regardless of inner field.
         let mut config = Config::default();
@@ -2271,7 +2280,7 @@ mod tests {
         let runtime = build_initial_runtime_config(&config);
 
         let rl = runtime.rate_limit.expect("rate_limit must be seeded");
-        assert!(!rl.enabled, "--ratelimit=false must override inner field");
+        assert!(!rl.enabled, "--rate-limit=false must override inner field");
     }
 
     #[test]

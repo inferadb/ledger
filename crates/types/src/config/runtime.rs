@@ -7,6 +7,7 @@ use super::{
     ConfigError,
     jwt::JwtConfig,
     observability::{HotKeyConfig, MetricsCardinalityConfig},
+    raft::HibernationConfig,
     resilience::{RateLimitConfig, ValidationConfig},
     storage::{BTreeCompactionConfig, CheckpointConfig, EventWriterBatchConfig, IntegrityConfig},
 };
@@ -67,6 +68,14 @@ pub struct RuntimeConfig {
     /// JWT token configuration (TTLs, clock skew, issuer).
     #[serde(default)]
     pub jwt: Option<JwtConfig>,
+    /// Vault hibernation policy. `None` leaves the master switch and tuning
+    /// knobs untouched (the dedicated parking_lot mirror on `RaftManager`
+    /// remains the source of truth in that case). Setting `Some(...)` is the
+    /// runtime path: the next `UpdateConfig` propagates the change to the
+    /// idle detector via `RaftManager::set_hibernation_config`, and a
+    /// disabled-to-enabled transition spawns the detector task.
+    #[serde(default)]
+    pub hibernation: Option<HibernationConfig>,
 }
 
 /// Runtime-reconfigurable subset of event logging configuration.
@@ -230,6 +239,9 @@ impl RuntimeConfig {
         }
         if let Some(ref j) = self.jwt {
             j.validate()?;
+        }
+        if let Some(ref h) = self.hibernation {
+            h.validate()?;
         }
         Ok(())
     }

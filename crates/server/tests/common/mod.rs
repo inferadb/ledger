@@ -211,7 +211,7 @@ impl TestNode {
 /// CPU contention from parallel test execution.
 fn test_rate_limit_config() -> inferadb_ledger_types::config::RateLimitConfig {
     // Enable the limiter for tests that exercise it. Tests that rely on the
-    // disabled fast path build their own config (or omit `--ratelimit`).
+    // disabled fast path build their own config (or omit `--rate-limit`).
     inferadb_ledger_types::config::RateLimitConfig::builder()
         .enabled(true)
         .client_burst(10_000_u64)

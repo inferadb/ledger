@@ -20,7 +20,7 @@ use super::ConfigError;
 //
 // The master `enabled` switch defaults to `false` — see the field's
 // doc-comment for the rationale. Existing thresholds remain configured but
-// inert until rate-limiting is opted-in via `--ratelimit` (or the runtime
+// inert until rate-limiting is opted-in via `--rate-limit` (or the runtime
 // `UpdateConfig` RPC).
 
 /// Default master switch — rate limiting is disabled by default.
@@ -95,7 +95,7 @@ pub struct RateLimitConfig {
     /// Past perf investigations spent multiple weeks chasing phantom
     /// bottlenecks before the actual cause turned out to be the default
     /// per-client throttle hitting the test harness. The defaults below stay
-    /// configured (so an opt-in via `--ratelimit` activates a sensible
+    /// configured (so an opt-in via `--rate-limit` activates a sensible
     /// baseline) but are inert until `enabled = true`.
     ///
     /// Production deployments that need DoS protection or per-tenant SLO
@@ -167,8 +167,8 @@ impl RateLimitConfig {
     ///
     /// The inner field is the canonical source of truth — it carries the
     /// operator's YAML / env config (or the disabled default). The CLI
-    /// override exists for operator convenience: `--ratelimit` activates
-    /// the limiter without a YAML edit, `--ratelimit=false` forces it off
+    /// override exists for operator convenience: `--rate-limit` activates
+    /// the limiter without a YAML edit, `--rate-limit=false` forces it off
     /// regardless of the inner setting. Used at server startup; the
     /// runtime-reconfig path (`UpdateConfig`) reads the inner field
     /// directly and is unaffected by the CLI override.

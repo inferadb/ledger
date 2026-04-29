@@ -489,9 +489,9 @@ pub struct Config {
     /// [`RateLimitConfig::enabled`](inferadb_ledger_types::config::RateLimitConfig)
     /// field on [`Config::rate_limit`] (which itself defaults to `false`,
     /// keeping rate limiting disabled out-of-the-box). `Some(true)`
-    /// (`--ratelimit`, `--ratelimit=true`,
-    /// `INFERADB__LEDGER__RATELIMIT=true`) forces the limiter on
-    /// regardless of the inner field; `Some(false)` (`--ratelimit=false`)
+    /// (`--rate-limit`, `--rate-limit=true`,
+    /// `INFERADB__LEDGER__RATE_LIMIT=true`) forces the limiter on
+    /// regardless of the inner field; `Some(false)` (`--rate-limit=false`)
     /// forces it off.
     ///
     /// Rate limiting defaults to disabled because surprise default
@@ -501,9 +501,15 @@ pub struct Config {
     /// that need DoS protection or per-tenant SLO enforcement opt in
     /// deliberately. The runtime-reconfig path (`UpdateConfig`) reads the
     /// inner field directly and is unaffected by this override.
+    ///
+    /// The Rust field is named `ratelimit` (not `rate_limit`) because the
+    /// sibling `Config::rate_limit` field already owns the canonical
+    /// [`RateLimitConfig`](inferadb_ledger_types::config::RateLimitConfig).
+    /// The CLI flag is `--rate-limit` for kebab-case consistency with
+    /// `--vault-hibernation` and `--vault-metrics`.
     #[arg(
-        long = "ratelimit",
-        env = "INFERADB__LEDGER__RATELIMIT",
+        long = "rate-limit",
+        env = "INFERADB__LEDGER__RATE_LIMIT",
         num_args = 0..=1,
         default_missing_value = "true",
         require_equals = false,
@@ -515,10 +521,10 @@ pub struct Config {
     ///
     /// Controls token bucket capacities and refill rates. The `enabled`
     /// field of this struct is the canonical master switch; the
-    /// top-level `ratelimit` CLI flag is an optional startup override.
+    /// top-level `--rate-limit` CLI flag is an optional startup override.
     /// Set `enabled = true` here (or in YAML / env config) to activate
-    /// the limiter; `--ratelimit=false` at startup overrides it off, and
-    /// `--ratelimit` overrides it on. Tune thresholds via this struct or
+    /// the limiter; `--rate-limit=false` at startup overrides it off, and
+    /// `--rate-limit` overrides it on. Tune thresholds via this struct or
     /// the runtime `UpdateConfig` RPC.
     #[arg(skip)]
     #[serde(default)]
@@ -1407,7 +1413,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Option<bool> CLI flag parse tests (DSoT migration: --ratelimit,
+    // Option<bool> CLI flag parse tests (DSoT migration: --rate-limit,
     // --vault-hibernation, --vault-metrics).
     //
     // Each flag uses `num_args = 0..=1` + `default_missing_value = "true"`
@@ -1432,37 +1438,49 @@ mod tests {
         Cli::try_parse_from(argv).unwrap().config
     }
 
-    // --- ratelimit ---
+    // --- rate-limit ---
 
     #[test]
-    fn cli_ratelimit_absent_is_none() {
+    fn cli_rate_limit_absent_is_none() {
         let config = parse_cli(&[]);
         assert_eq!(config.ratelimit, None);
     }
 
     #[test]
-    fn cli_ratelimit_bare_is_some_true() {
-        let config = parse_cli(&["--ratelimit"]);
+    fn cli_rate_limit_bare_is_some_true() {
+        let config = parse_cli(&["--rate-limit"]);
         assert_eq!(config.ratelimit, Some(true));
     }
 
     #[test]
-    fn cli_ratelimit_eq_true_is_some_true() {
-        let config = parse_cli(&["--ratelimit=true"]);
+    fn cli_rate_limit_eq_true_is_some_true() {
+        let config = parse_cli(&["--rate-limit=true"]);
         assert_eq!(config.ratelimit, Some(true));
     }
 
     #[test]
-    fn cli_ratelimit_space_true_is_some_true() {
+    fn cli_rate_limit_space_true_is_some_true() {
         // `require_equals = false` accepts the space-separated form.
-        let config = parse_cli(&["--ratelimit", "true"]);
+        let config = parse_cli(&["--rate-limit", "true"]);
         assert_eq!(config.ratelimit, Some(true));
     }
 
     #[test]
-    fn cli_ratelimit_eq_false_is_some_false() {
-        let config = parse_cli(&["--ratelimit=false"]);
+    fn cli_rate_limit_eq_false_is_some_false() {
+        let config = parse_cli(&["--rate-limit=false"]);
         assert_eq!(config.ratelimit, Some(false));
+    }
+
+    /// The legacy `--ratelimit` (no separator) flag must no longer parse —
+    /// the kebab-case rename is intentionally a hard break (no alias).
+    /// Operators migrate via `s/--ratelimit/--rate-limit/g` in launch
+    /// scripts; the CHANGELOG documents the migration.
+    #[test]
+    fn cli_legacy_ratelimit_no_longer_parses() {
+        use clap::Parser;
+        let argv = vec!["inferadb-ledger", "--dev", "--ratelimit"];
+        let result = Cli::try_parse_from(argv);
+        assert!(result.is_err(), "--ratelimit must no longer parse after the kebab-case rename");
     }
 
     // --- vault-hibernation ---

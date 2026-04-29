@@ -950,14 +950,28 @@ async fn test_vault_hibernation_sleep_and_wake() {
     assert_eq!(vault_group.lifecycle_state(), VaultLifecycleState::Active);
 
     // Backdate the vault's last-activity stamp so the next scan sees it as
-    // long-idle, then trigger the scan synchronously.
+    // long-idle, then trigger the scan. The Active → Dormant arm of
+    // `run_hibernation_scan_once` dispatches `tokio::spawn(sleep_vault(..))`
+    // (so the sync scan loop is not blocked on `engine.pause_shard` + the
+    // page-cache eviction syscalls). The spawned task — not the scan call —
+    // performs the lifecycle transition, so the test must poll for the
+    // transition to land instead of asserting it synchronously.
     vault_group.force_last_activity_for_test(0);
     leader.manager.run_hibernation_scan_once();
-    assert_eq!(
-        vault_group.lifecycle_state(),
-        VaultLifecycleState::Dormant,
-        "vault must sleep after idle scan with stale last_activity",
-    );
+    let dormant_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if vault_group.lifecycle_state() == VaultLifecycleState::Dormant {
+            break;
+        }
+        if tokio::time::Instant::now() >= dormant_deadline {
+            panic!(
+                "vault did not transition to Dormant within 2s after run_hibernation_scan_once; \
+                 final state = {:?}",
+                vault_group.lifecycle_state(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
     // Wake path — `touch_activity()` is what the proposal handler calls on
     // every request; assert it transitions back to Active and that the

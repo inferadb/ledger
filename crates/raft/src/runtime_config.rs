@@ -8,10 +8,21 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use inferadb_ledger_types::config::{ConfigChange, ConfigError, RuntimeConfig};
+use inferadb_ledger_types::config::{ConfigChange, ConfigError, HibernationConfig, RuntimeConfig};
 use tracing::{info, warn};
 
 use crate::{hot_key_detector::HotKeyDetector, rate_limit::RateLimiter};
+
+/// Callback invoked when the `hibernation` arm of a runtime config update is
+/// detected. Receives the new policy resolved from the update; the callback
+/// is responsible for plumbing the value into `RaftManager::set_hibernation_config`
+/// and (re)starting the idle detector if the master switch flipped on.
+///
+/// Lives behind a closure rather than a typed `&Arc<RaftManager>` so the
+/// runtime-config layer stays decoupled from the manager's full surface — the
+/// only contract is "if the next snapshot's hibernation policy differs from
+/// the current one, propagate it".
+pub type HibernationReconfigCallback<'a> = &'a (dyn Fn(&HibernationConfig) + Send + Sync);
 
 /// Thread-safe handle to the current runtime configuration.
 ///
@@ -56,12 +67,14 @@ impl RuntimeConfigHandle {
     /// # Side Effects
     ///
     /// After swapping the config, this method propagates changes to
-    /// dependent components (rate limiter, hot key detector) if provided.
+    /// dependent components (rate limiter, hot key detector, hibernation
+    /// policy) if the corresponding callback / arc is provided.
     pub fn update(
         &self,
         new_config: RuntimeConfig,
         rate_limiter: Option<&Arc<RateLimiter>>,
         hot_key_detector: Option<&Arc<HotKeyDetector>>,
+        on_hibernation_change: Option<HibernationReconfigCallback<'_>>,
     ) -> Result<Vec<String>, ConfigError> {
         new_config.validate()?;
 
@@ -155,6 +168,38 @@ impl RuntimeConfigHandle {
             );
         }
 
+        // Propagate hibernation policy changes to the live RaftManager via
+        // the supplied callback. Unlike rate-limit / hot-key (which carry
+        // atomic state on the limiter / detector itself), hibernation lives
+        // on a parking_lot::Mutex on the manager, and a disabled-to-enabled
+        // transition needs to spawn the idle-detector task. The callback
+        // owns both responsibilities.
+        if changed.contains(&"hibernation".to_string()) {
+            if let Some(cb) = on_hibernation_change {
+                if let Some(ref h) = new_config.hibernation {
+                    cb(h);
+                    info!(
+                        enabled = h.enabled,
+                        idle_secs = h.idle_secs,
+                        scan_interval_secs = h.scan_interval_secs,
+                        max_warm = h.max_warm,
+                        max_stall_secs = h.max_stall_secs,
+                        "Hibernation policy updated"
+                    );
+                } else {
+                    // `hibernation` was set but is now `None` — fall back
+                    // to a disabled default so the idle detector goes
+                    // dormant on the next scan tick. We do not stop the
+                    // background task: the next runtime flip-on must spawn
+                    // a fresh task, and that path is already idempotent.
+                    cb(&HibernationConfig::default());
+                    info!("Hibernation policy cleared — falling back to disabled default");
+                }
+            } else {
+                warn!("Hibernation config changed but no reconfig callback was supplied");
+            }
+        }
+
         // Atomic swap — all subsequent load() calls see the new config.
         self.inner.store(Arc::new(new_config));
 
@@ -194,7 +239,9 @@ impl Default for RuntimeConfigHandle {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
 mod tests {
-    use inferadb_ledger_types::config::{HotKeyConfig, RateLimitConfig, ValidationConfig};
+    use inferadb_ledger_types::config::{
+        HibernationConfig, HotKeyConfig, RateLimitConfig, ValidationConfig,
+    };
 
     use super::*;
 
@@ -213,7 +260,7 @@ mod tests {
 
         let new_config = RuntimeConfig::builder().rate_limit(RateLimitConfig::default()).build();
 
-        let changed = handle.update(new_config.clone(), None, None).unwrap();
+        let changed = handle.update(new_config.clone(), None, None, None).unwrap();
         assert!(changed.contains(&"rate_limit".to_string()));
 
         let loaded = handle.load();
@@ -225,7 +272,7 @@ mod tests {
         let config = RuntimeConfig::default();
         let handle = RuntimeConfigHandle::new(config.clone());
 
-        let changed = handle.update(config, None, None).unwrap();
+        let changed = handle.update(config, None, None, None).unwrap();
         assert!(changed.is_empty());
     }
 
@@ -240,7 +287,7 @@ mod tests {
             })
             .build();
 
-        let result = handle.update(bad_config, None, None);
+        let result = handle.update(bad_config, None, None, None);
         assert!(result.is_err());
     }
 
@@ -283,19 +330,19 @@ mod tests {
         let cfg = RuntimeConfig::builder()
             .rate_limit(RateLimitConfig::builder().enabled(true).build().unwrap())
             .build();
-        handle.update(cfg, Some(&limiter), None).unwrap();
+        handle.update(cfg, Some(&limiter), None, None).unwrap();
         assert!(limiter.is_enabled(), "update_config must flip enabled to true");
 
         // Disable by clearing the rate_limit section.
         let cfg = RuntimeConfig::default();
-        handle.update(cfg, Some(&limiter), None).unwrap();
+        handle.update(cfg, Some(&limiter), None, None).unwrap();
         assert!(!limiter.is_enabled(), "clearing rate_limit must disable the limiter");
 
         // Re-enable.
         let cfg = RuntimeConfig::builder()
             .rate_limit(RateLimitConfig::builder().enabled(true).build().unwrap())
             .build();
-        handle.update(cfg, Some(&limiter), None).unwrap();
+        handle.update(cfg, Some(&limiter), None, None).unwrap();
         assert!(limiter.is_enabled());
     }
 
@@ -343,6 +390,119 @@ mod tests {
             "operator-set rate_limit.enabled must be visible on the first load() \
              — no UpdateConfig RPC has been issued"
         );
+    }
+
+    // ── Hibernation runtime arm ────────────────────────────────────────
+
+    /// A handle constructed with `hibernation = Some(...)` reflects the
+    /// seeded operator policy on the first `load()` — same invariant as
+    /// the rate-limit regression test above.
+    #[test]
+    fn handle_seeded_from_initial_reflects_operator_hibernation_enabled() {
+        let initial = RuntimeConfig::builder()
+            .hibernation(HibernationConfig::builder().enabled(true).idle_secs(60).build().unwrap())
+            .build();
+        let handle = RuntimeConfigHandle::new(initial);
+
+        let snapshot = handle.load();
+        let hibernation = snapshot.hibernation.as_ref().expect("hibernation must be seeded");
+        assert!(
+            hibernation.enabled,
+            "operator-set hibernation.enabled must be visible on the first load() \
+             — no UpdateConfig RPC has been issued"
+        );
+        assert_eq!(hibernation.idle_secs, 60);
+    }
+
+    /// A live `update` call with a new hibernation policy:
+    /// 1. fires the reconfig callback exactly once with the new policy
+    /// 2. produces a `"hibernation"` entry in the changed-fields list
+    /// 3. swaps the snapshot so the next `load()` observes the update
+    #[test]
+    fn update_propagates_hibernation_change_via_callback() {
+        let handle = RuntimeConfigHandle::new(RuntimeConfig::default());
+        let captured: Arc<parking_lot::Mutex<Vec<HibernationConfig>>> =
+            Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        let cb = move |h: &HibernationConfig| {
+            captured_clone.lock().push(h.clone());
+        };
+
+        let new_cfg = RuntimeConfig::builder()
+            .hibernation(HibernationConfig::builder().enabled(true).idle_secs(120).build().unwrap())
+            .build();
+        let changed = handle.update(new_cfg, None, None, Some(&cb)).unwrap();
+        assert!(changed.contains(&"hibernation".to_string()));
+
+        let captured_calls = captured.lock();
+        assert_eq!(captured_calls.len(), 1, "callback must fire exactly once per update");
+        assert!(captured_calls[0].enabled);
+        assert_eq!(captured_calls[0].idle_secs, 120);
+        drop(captured_calls);
+
+        let snapshot = handle.load();
+        let h = snapshot.hibernation.as_ref().expect("hibernation must be in snapshot");
+        assert!(h.enabled);
+        assert_eq!(h.idle_secs, 120);
+    }
+
+    /// Clearing `hibernation` (setting it back to `None`) fires the
+    /// callback with the `Default::default()` (disabled) policy so the
+    /// idle detector goes dormant on the next scan tick.
+    #[test]
+    fn update_clearing_hibernation_passes_disabled_default_to_callback() {
+        let initial = RuntimeConfig::builder()
+            .hibernation(HibernationConfig::builder().enabled(true).idle_secs(60).build().unwrap())
+            .build();
+        let handle = RuntimeConfigHandle::new(initial);
+
+        let captured: Arc<parking_lot::Mutex<Vec<HibernationConfig>>> =
+            Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        let cb = move |h: &HibernationConfig| {
+            captured_clone.lock().push(h.clone());
+        };
+
+        // Clear the section.
+        handle.update(RuntimeConfig::default(), None, None, Some(&cb)).unwrap();
+
+        let calls = captured.lock();
+        assert_eq!(calls.len(), 1);
+        assert!(!calls[0].enabled, "clearing hibernation must hand the callback a disabled policy");
+    }
+
+    /// `update` succeeds when no hibernation callback is wired in — the
+    /// arm logs a warning and the snapshot still swaps. Mirrors the
+    /// `rate_limit` no-limiter behaviour.
+    #[test]
+    fn update_without_hibernation_callback_still_swaps_snapshot() {
+        let handle = RuntimeConfigHandle::new(RuntimeConfig::default());
+        let new_cfg = RuntimeConfig::builder()
+            .hibernation(HibernationConfig::builder().enabled(true).build().unwrap())
+            .build();
+        let changed = handle.update(new_cfg, None, None, None).unwrap();
+        assert!(changed.contains(&"hibernation".to_string()));
+
+        let snapshot = handle.load();
+        let h = snapshot.hibernation.as_ref().expect("hibernation must be in snapshot");
+        assert!(h.enabled);
+    }
+
+    /// Validation rejects an invalid hibernation policy before any swap or
+    /// callback is invoked.
+    #[test]
+    fn update_rejects_invalid_hibernation_config() {
+        let handle = RuntimeConfigHandle::new(RuntimeConfig::default());
+        let bad = RuntimeConfig {
+            hibernation: Some(HibernationConfig {
+                idle_secs: 0, // invalid
+                ..HibernationConfig::default()
+            }),
+            ..RuntimeConfig::default()
+        };
+        let result = handle.update(bad, None, None, None);
+        assert!(result.is_err(), "invalid hibernation policy must be rejected by validate()");
+        assert!(handle.load().hibernation.is_none(), "rejected update must not swap the snapshot");
     }
 
     // ── Concurrency Stress Tests ────────────────────────────────────────
