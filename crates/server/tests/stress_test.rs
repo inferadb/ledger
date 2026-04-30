@@ -41,6 +41,10 @@
 //!    consensus, enabling parallel writes. RegionTestCluster is implemented (see
 //!    test_stress_multi_region_*). NOTE: Organization→region assignment needed for true parallel
 //!    writes.
+//!
+//! Uses the wire-protocol test helpers (`wire_create_test_organization`,
+//! `wire_create_test_vault`, `wire_write_client`, `wire_read_client`) from
+//! `tests/common/`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
@@ -53,11 +57,21 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bytes::Bytes;
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use inferadb_ledger_wire::{
+    error::ErrorCode,
+    services::{read as wr, shared as ws, write as ww},
+};
+use inferadb_ledger_wire_services::{ReadServiceClient, WriteServiceClient};
+use inferadb_ledger_wire_transport::RpcError;
 use parking_lot::Mutex;
 use tokio::sync::Semaphore;
 
-use crate::common::TestCluster;
+use crate::common::{
+    TestCluster, wire_create_test_organization, wire_create_test_vault, wire_read_client,
+    wire_write_client,
+};
 
 // ---------------------------------------------------------------------------
 // Performance targets — advisory thresholds, not pass/fail criteria.
@@ -110,33 +124,6 @@ impl Default for StressConfig {
     }
 }
 
-/// Extracts leader address from a forwarding error message.
-///
-/// Error format varies - may have escaped or unescaped quotes:
-/// - Unescaped: addr: "127.0.0.1:50187"
-/// - Escaped: addr: \"127.0.0.1:50187\"
-fn extract_leader_addr_from_error(error_msg: &str) -> Option<String> {
-    // Try escaped quotes first (more common in error strings)
-    if let Some(start) = error_msg.find("addr: \\\"") {
-        let addr_start = start + "addr: \\\"".len();
-        let remaining = &error_msg[addr_start..];
-        if let Some(end) = remaining.find("\\\"") {
-            return Some(remaining[..end].to_string());
-        }
-    }
-
-    // Fall back to unescaped quotes
-    if let Some(start) = error_msg.find("addr: \"") {
-        let addr_start = start + "addr: \"".len();
-        let remaining = &error_msg[addr_start..];
-        if let Some(end) = remaining.find('"') {
-            return Some(remaining[..end].to_string());
-        }
-    }
-
-    None
-}
-
 /// Written value with its location for multi-region consistency verification.
 #[derive(Debug, Clone)]
 struct WrittenValue {
@@ -180,37 +167,28 @@ struct RegionAssignment {
 
 /// Setup multiple organizations across different regions for true multi-region stress testing.
 ///
-/// Creates one admin user + organization per data region using `setup_org_with_admin`,
-/// then creates a vault in each. This enables parallel writes since each region has
-/// independent Raft consensus.
+/// Creates one admin user + organization per data region using
+/// `wire_create_test_organization`, then creates a vault in each via
+/// `wire_create_test_vault`. This enables parallel writes since each region
+/// has independent Raft consensus.
 async fn setup_multi_region_organizations(
-    leader_addr: &str,
+    cluster: &TestCluster,
+    leader_id: u64,
     num_regions: usize,
-    node: &crate::common::TestNode,
 ) -> Result<Vec<RegionAssignment>, String> {
-    let channel = crate::common::connect_channel(leader_addr);
-    let mut vault_client =
-        inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient::new(channel);
-
     let mut assignments = Vec::with_capacity(num_regions);
 
     for region in 1..=num_regions {
         let region_u32 = region as u32;
+        let name = format!("stress-region-{}-ns", region);
 
-        // Create admin user + organization via direct Raft write
-        let (org_slug, admin_slug) = crate::common::setup_org_with_admin(
-            leader_addr,
-            &format!("stress-region-{}-ns", region),
-            &format!("stress-region-{}-admin@test.local", region),
-            node,
-        )
-        .await;
-        let organization = OrganizationSlug::new(org_slug);
+        let (organization, _admin_slug) = wire_create_test_organization(cluster, leader_id, &name)
+            .await
+            .map_err(|e| format!("create organization {region}: {e}"))?;
 
-        // Create vault with the admin user as caller (retries internally)
-        let vault =
-            crate::common::create_vault_with_retry(&mut vault_client, organization, admin_slug)
-                .await;
+        let vault = wire_create_test_vault(cluster, leader_id, organization)
+            .await
+            .map_err(|e| format!("create vault for region {region}: {e}"))?;
 
         assignments.push(RegionAssignment { region_index: region_u32, organization, vault });
     }
@@ -287,86 +265,80 @@ impl StressMetrics {
         let (w_p50, w_p95, w_p99, w_max) = Self::compute_percentiles(&mut write_lats);
         let (r_p50, r_p95, r_p99, r_max) = Self::compute_percentiles(&mut read_lats);
 
-        println!("\n╔══════════════════════════════════════════════════════════════╗");
-        println!("║                      STRESS TEST RESULTS                     ║");
-        println!("╠══════════════════════════════════════════════════════════════╣");
-        println!("║ Duration: {:>10.2}s                                        ║", secs);
-        println!("╠══════════════════════════════════════════════════════════════╣");
-        println!("║                            WRITES                            ║");
-        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!("\n+==============================================================+");
+        println!("|                      STRESS TEST RESULTS                     |");
+        println!("+==============================================================+");
+        println!("| Duration: {:>10.2}s                                        |", secs);
+        println!("+==============================================================+");
+        println!("|                            WRITES                            |");
+        println!("+==============================================================+");
         println!(
-            "║ Total:     {:>10}  │  Throughput: {:>10.0} ops/sec     ║",
+            "| Total:     {:>10}  |  Throughput: {:>10.0} ops/sec     |",
             writes, write_throughput
         );
         println!(
-            "║ Errors:    {:>10}  │  Error Rate: {:>10.2}%            ║",
+            "| Errors:    {:>10}  |  Error Rate: {:>10.2}%            |",
             write_errors,
             if writes > 0 { write_errors as f64 / writes as f64 * 100.0 } else { 0.0 }
         );
-        println!("║ Latency (µs):                                                ║");
-        println!("║   p50: {:>8}  │  p95: {:>8}  │  p99: {:>8}          ║", w_p50, w_p95, w_p99);
-        println!("║   max: {:>8}                                              ║", w_max);
-        println!("╠══════════════════════════════════════════════════════════════╣");
-        println!("║                             READS                            ║");
-        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!("| Latency (us):                                                |");
+        println!("|   p50: {:>8}  |  p95: {:>8}  |  p99: {:>8}          |", w_p50, w_p95, w_p99);
+        println!("|   max: {:>8}                                              |", w_max);
+        println!("+==============================================================+");
+        println!("|                             READS                            |");
+        println!("+==============================================================+");
         println!(
-            "║ Total:     {:>10}  │  Throughput: {:>10.0} ops/sec     ║",
+            "| Total:     {:>10}  |  Throughput: {:>10.0} ops/sec     |",
             reads, read_throughput
         );
         println!(
-            "║ Errors:    {:>10}  │  Error Rate: {:>10.2}%            ║",
+            "| Errors:    {:>10}  |  Error Rate: {:>10.2}%            |",
             read_errors,
             if reads > 0 { read_errors as f64 / reads as f64 * 100.0 } else { 0.0 }
         );
-        println!("║ Latency (µs):                                                ║");
-        println!("║   p50: {:>8}  │  p95: {:>8}  │  p99: {:>8}          ║", r_p50, r_p95, r_p99);
-        println!("║   max: {:>8}                                              ║", r_max);
-        println!("╠══════════════════════════════════════════════════════════════╣");
-        println!("║                            TARGETS                           ║");
-        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!("| Latency (us):                                                |");
+        println!("|   p50: {:>8}  |  p95: {:>8}  |  p99: {:>8}          |", r_p50, r_p95, r_p99);
+        println!("|   max: {:>8}                                              |", r_max);
+        println!("+==============================================================+");
+        println!("|                            TARGETS                           |");
+        println!("+==============================================================+");
 
         let write_latency_pass = w_p99 <= WRITE_P99_TARGET_US;
         let read_latency_pass = r_p99 <= READ_P99_TARGET_US;
         let write_throughput_pass = write_throughput >= WRITE_THROUGHPUT_TARGET;
 
         println!(
-            "║ Write p99 <50ms:   {:>5}ms  │  Target: 50ms    │  {}  ║",
+            "| Write p99 <50ms:   {:>5}ms  |  Target: 50ms    |  {}  |",
             w_p99 / 1000,
-            if write_latency_pass { "✅ PASS" } else { "⚠ MISS" }
+            if write_latency_pass { "PASS" } else { "MISS" }
         );
         println!(
-            "║ Read p99 <2ms:     {:>5}ms  │  Target: 2ms     │  {}  ║",
+            "| Read p99 <2ms:     {:>5}ms  |  Target: 2ms     |  {}  |",
             r_p99 / 1000,
-            if read_latency_pass { "✅ PASS" } else { "⚠ MISS" }
+            if read_latency_pass { "PASS" } else { "MISS" }
         );
         println!(
-            "║ Write throughput:  {:>5.0}/s  │  Target: 5000/s  │  {}  ║",
+            "| Write throughput:  {:>5.0}/s  |  Target: 5000/s  |  {}  |",
             write_throughput,
-            if write_throughput_pass { "✅ PASS" } else { "⚠ MISS" }
+            if write_throughput_pass { "PASS" } else { "MISS" }
         );
-        println!("╚══════════════════════════════════════════════════════════════╝\n");
+        println!("+==============================================================+\n");
     }
 }
 
 /// Writes worker that sends write requests to the leader.
 ///
 /// Issues `batch_size` sequential per-vault `Write` RPCs per outer loop
-/// iteration. The legacy `BatchWrite` RPC is deprecated as of Phase 6 of the
-/// per-vault consensus migration (A5); throughput now relies on the Raft
-/// `BatchWriter` to coalesce concurrent in-flight proposals.
+/// iteration. The legacy `BatchWrite` RPC is deprecated; throughput now relies
+/// on the Raft `BatchWriter` to coalesce concurrent in-flight proposals.
 async fn write_worker(
     worker_id: usize,
-    leader_addr: String,
+    client: Arc<WriteServiceClient>,
     config: StressConfig,
     metrics: Arc<StressMetrics>,
     running: Arc<AtomicBool>,
     semaphore: Arc<Semaphore>,
 ) {
-    let mut current_addr = leader_addr.to_string();
-    let channel = crate::common::connect_channel(&current_addr);
-    let mut client =
-        inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::new(channel);
-
     let client_id = format!("stress-writer-{}", worker_id);
     let mut batch_counter = 0u64;
     let mut consecutive_errors = 0u32;
@@ -380,11 +352,8 @@ async fn write_worker(
         if consecutive_errors > 3 {
             tokio::time::sleep(Duration::from_millis(100 * consecutive_errors as u64)).await;
             if consecutive_errors > 10 {
-                // Reset and try reconnecting
+                // Reset counter — the wire client tolerates transient failures internally.
                 consecutive_errors = 0;
-                let ch = crate::common::connect_channel(&current_addr);
-                client =
-                    inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::new(ch);
             }
         }
 
@@ -408,33 +377,28 @@ async fn write_worker(
         // `Write` calls and records per-op latency directly.
         for (key, value) in keys_and_values {
             let op_start = Instant::now();
-            let request = inferadb_ledger_proto::proto::WriteRequest {
-                client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.clone() }),
-                idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-                organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                    slug: config.organization.value(),
-                }),
-                vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: config.vault.value() }),
-                operations: vec![inferadb_ledger_proto::proto::Operation {
-                    op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
-                        inferadb_ledger_proto::proto::SetEntity {
-                            key: key.clone(),
-                            value: value.clone(),
-                            expires_at: None,
-                            condition: None,
-                        },
-                    )),
+            let request = ww::WriteRequest {
+                client_id: Some(ws::ClientIdMessage { id: client_id.clone() }),
+                idempotency_key: Bytes::copy_from_slice(uuid::Uuid::new_v4().as_bytes()),
+                organization: Some(config.organization),
+                vault: Some(config.vault),
+                operations: vec![ws::Operation {
+                    op: Some(ws::OperationKind::SetEntity(ws::SetEntity {
+                        key: key.clone(),
+                        value: Bytes::from(value.clone()),
+                        expires_at: None,
+                        condition: None,
+                    })),
                 }],
                 include_tx_proof: false,
                 caller: None,
             };
 
-            match client.write(request).await {
+            match client.write(request, rand::random::<u128>()).await {
                 Ok(response) => {
                     let latency = op_start.elapsed();
-                    let inner = response.into_inner();
-                    match inner.result {
-                        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => {
+                    match response.result {
+                        Some(ww::WriteResponseResult::Success(_)) => {
                             if config.track_write_locations {
                                 metrics.record_write_with_location(
                                     latency,
@@ -448,7 +412,7 @@ async fn write_worker(
                             }
                             consecutive_errors = 0;
                         },
-                        Some(inferadb_ledger_proto::proto::write_response::Result::Error(_e)) => {
+                        Some(ww::WriteResponseResult::Error(_e)) => {
                             metrics.record_write_error();
                             consecutive_errors += 1;
                         },
@@ -458,32 +422,23 @@ async fn write_worker(
                         },
                     }
                 },
-                Err(e) => {
-                    let error_msg = e.to_string();
-
-                    // Check if this is a forwarding error and extract the leader address
-                    if let Some(leader_addr) = extract_leader_addr_from_error(&error_msg) {
-                        // Don't count forwarding as error - just reconnect to leader
-                        if current_addr != leader_addr {
-                            current_addr = leader_addr;
-                            let ch = crate::common::connect_channel(&current_addr);
-                            client = inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::new(ch);
-                        }
-                        // Retry immediately without counting as error
-                        continue;
+                Err(RpcError::WireError(wire_err)) if wire_err.code == ErrorCode::StaleRouting => {
+                    // Leader-routing redirect: the wire stack does not auto-follow
+                    // `LeaderHint` on the bare `WireServiceClient` (the SDK's
+                    // `RegionLeaderCache` does that); for stress tests we rely on
+                    // colocation between system + region leaders enforced by
+                    // `TestCluster::create_data_region`. Treat as transient.
+                    consecutive_errors += 1;
+                    if consecutive_errors <= 3 {
+                        eprintln!("Write worker {} stale-routing: {}", worker_id, wire_err.message);
                     }
-
-                    // Other errors are real errors
+                },
+                Err(e) => {
                     metrics.record_write_error();
                     consecutive_errors += 1;
                     if consecutive_errors <= 3 {
                         eprintln!("Write worker {} error: {}", worker_id, e);
                     }
-                    let ch = crate::common::connect_channel(&current_addr);
-                    client =
-                        inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::new(
-                            ch,
-                        );
                 },
             }
         }
@@ -494,22 +449,18 @@ async fn write_worker(
 
 /// Reads worker that sends read requests to a node.
 ///
-/// Uses BatchRead API when read_batch_size > 1 to amortize gRPC overhead.
-/// Connection pooling via tonic's keep-alive prevents reconnection overhead.
+/// Uses BatchRead API when read_batch_size > 1 to amortize wire overhead.
+/// The wire client maintains a long-lived QUIC connection per `WireClient`
+/// instance, so reusing a single client across iterations avoids per-call
+/// connection overhead.
 async fn read_worker(
     worker_id: usize,
-    node_addr: String,
+    client: Arc<ReadServiceClient>,
     config: StressConfig,
     metrics: Arc<StressMetrics>,
     running: Arc<AtomicBool>,
     semaphore: Arc<Semaphore>,
 ) {
-    // Create a channel with keep-alive to reuse the TCP connection.
-    // This is more efficient than creating new connections per request.
-    let channel = crate::common::connect_channel(&node_addr);
-
-    let mut client =
-        inferadb_ledger_proto::proto::read_service_client::ReadServiceClient::new(channel);
     let mut key_counter = 0u64;
     let read_batch_size = config.read_batch_size;
 
@@ -533,20 +484,18 @@ async fn read_worker(
                 })
                 .collect();
 
-            let request = inferadb_ledger_proto::proto::BatchReadRequest {
-                organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                    slug: config.organization.value(),
-                }),
-                vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: config.vault.value() }),
+            let request = wr::BatchReadRequest {
+                organization: Some(config.organization),
+                vault: Some(config.vault),
                 keys,
-                consistency: inferadb_ledger_proto::proto::ReadConsistency::Eventual as i32,
+                consistency: ws::ReadConsistency::Eventual,
                 caller: None,
             };
 
-            match client.batch_read(request).await {
+            match client.batch_read(request, rand::random::<u128>()).await {
                 Ok(response) => {
                     let latency = start.elapsed();
-                    let batch_size = response.into_inner().results.len();
+                    let batch_size = response.results.len();
                     // Record amortized latency per read
                     let per_read_latency =
                         Duration::from_nanos(latency.as_nanos() as u64 / batch_size.max(1) as u64);
@@ -554,21 +503,18 @@ async fn read_worker(
                         metrics.record_read(per_read_latency);
                     }
                 },
-                Err(e) => {
-                    // Only count real errors, not NOT_FOUND
-                    if e.code() != tonic::Code::NotFound {
-                        for _ in 0..read_batch_size {
-                            metrics.record_read_error();
-                        }
-                    } else {
-                        // NOT_FOUND counts as successful reads
-                        let latency = start.elapsed();
-                        let per_read_latency = Duration::from_nanos(
-                            latency.as_nanos() as u64 / read_batch_size as u64,
-                        );
-                        for _ in 0..read_batch_size {
-                            metrics.record_read(per_read_latency);
-                        }
+                Err(RpcError::WireError(wire_err)) if wire_err.code == ErrorCode::NotFound => {
+                    // NOT_FOUND counts as successful reads
+                    let latency = start.elapsed();
+                    let per_read_latency =
+                        Duration::from_nanos(latency.as_nanos() as u64 / read_batch_size as u64);
+                    for _ in 0..read_batch_size {
+                        metrics.record_read(per_read_latency);
+                    }
+                },
+                Err(_) => {
+                    for _ in 0..read_batch_size {
+                        metrics.record_read_error();
                     }
                 },
             }
@@ -578,26 +524,23 @@ async fn read_worker(
             let key =
                 format!("stress-key-{}-{}-0", worker_id % config.write_workers, key_counter % 1000);
 
-            let request = inferadb_ledger_proto::proto::ReadRequest {
-                organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                    slug: config.organization.value(),
-                }),
-                vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: config.vault.value() }),
+            let request = wr::ReadRequest {
+                organization: Some(config.organization),
+                vault: Some(config.vault),
                 key,
-                consistency: inferadb_ledger_proto::proto::ReadConsistency::Eventual as i32,
+                consistency: ws::ReadConsistency::Eventual,
                 caller: None,
             };
 
-            match client.read(request).await {
+            match client.read(request, rand::random::<u128>()).await {
                 Ok(_) => {
                     metrics.record_read(start.elapsed());
                 },
-                Err(e) => {
-                    if e.code() != tonic::Code::NotFound {
-                        metrics.record_read_error();
-                    } else {
-                        metrics.record_read(start.elapsed());
-                    }
+                Err(RpcError::WireError(wire_err)) if wire_err.code == ErrorCode::NotFound => {
+                    metrics.record_read(start.elapsed());
+                },
+                Err(_) => {
+                    metrics.record_read_error();
                 },
             }
             key_counter += 1;
@@ -607,15 +550,11 @@ async fn read_worker(
 
 /// Verifies consistency of written values by reading them back.
 async fn verify_consistency(
-    leader_addr: &str,
+    client: &ReadServiceClient,
     config: &StressConfig,
     metrics: &StressMetrics,
 ) -> Result<(), String> {
-    println!("\n🔍 Verifying consistency of written values...");
-
-    let channel = crate::common::connect_channel(leader_addr);
-    let mut client =
-        inferadb_ledger_proto::proto::read_service_client::ReadServiceClient::new(channel);
+    println!("\nVerifying consistency of written values...");
 
     let written = metrics.written_values.lock().clone();
     let total = written.len();
@@ -624,33 +563,34 @@ async fn verify_consistency(
     let sample_size = std::cmp::min(1000, total); // Sample up to 1000 keys
 
     for (i, (key, expected_value)) in written.iter().take(sample_size).enumerate() {
-        let request = inferadb_ledger_proto::proto::ReadRequest {
-            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: config.organization.value(),
-            }),
-            vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: config.vault.value() }),
+        let request = wr::ReadRequest {
+            organization: Some(config.organization),
+            vault: Some(config.vault),
             key: key.clone(),
             // Use eventual consistency for verification - linearizable reads require
             // additional Raft configuration that isn't always enabled in test clusters.
             // Eventual consistency is sufficient here since we wait for cluster sync.
-            consistency: inferadb_ledger_proto::proto::ReadConsistency::Eventual as i32,
+            consistency: ws::ReadConsistency::Eventual,
             caller: None,
         };
 
         // Add timeout to prevent hanging if server is unresponsive
-        let read_result = tokio::time::timeout(Duration::from_secs(5), client.read(request)).await;
+        let read_result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.read(request, rand::random::<u128>()),
+        )
+        .await;
 
         match read_result {
             Ok(Ok(response)) => {
-                let inner = response.into_inner();
-                if let Some(value) = inner.value {
-                    if value == *expected_value {
+                if let Some(value) = response.value {
+                    if value.as_ref() == expected_value.as_slice() {
                         _verified += 1;
                     } else {
                         mismatches += 1;
                         if mismatches <= 5 {
                             eprintln!(
-                                "  ❌ Mismatch for key '{}': expected {} bytes, got {} bytes",
+                                "  Mismatch for key '{}': expected {} bytes, got {} bytes",
                                 key,
                                 expected_value.len(),
                                 value.len()
@@ -660,25 +600,25 @@ async fn verify_consistency(
                 } else {
                     mismatches += 1;
                     if mismatches <= 5 {
-                        eprintln!("  ❌ Key '{}' not found but was written", key);
+                        eprintln!("  Key '{}' not found but was written", key);
                     }
                 }
             },
             Ok(Err(e)) => {
                 mismatches += 1;
                 if mismatches <= 5 {
-                    eprintln!("  ❌ Error reading key '{}': {}", key, e);
+                    eprintln!("  Error reading key '{}': {}", key, e);
                 }
             },
             Err(_) => {
                 // Timeout - server is unresponsive
                 mismatches += 1;
                 if mismatches <= 5 {
-                    eprintln!("  ❌ Timeout reading key '{}' (server unresponsive)", key);
+                    eprintln!("  Timeout reading key '{}' (server unresponsive)", key);
                 }
                 // Skip remaining verifications if we're timing out
                 if mismatches > 3 {
-                    eprintln!("  ⚠️  Too many timeouts, skipping remaining verifications");
+                    eprintln!("  Too many timeouts, skipping remaining verifications");
                     break;
                 }
             },
@@ -697,7 +637,7 @@ async fn verify_consistency(
             mismatches, sample_size
         ))
     } else {
-        println!("  ✅ All {} sampled keys verified successfully", sample_size);
+        println!("  All {} sampled keys verified successfully", sample_size);
         Ok(())
     }
 }
@@ -707,20 +647,16 @@ async fn verify_consistency(
 /// Unlike single-region verification, this reads from the correct organization/vault
 /// for each key based on where it was written.
 async fn verify_multi_region_consistency(
-    leader_addr: &str,
+    client: &ReadServiceClient,
     metrics: &StressMetrics,
 ) -> Result<(), String> {
-    println!("\n🔍 Verifying consistency across all regions...");
-
-    let channel = crate::common::connect_channel(leader_addr);
-    let mut client =
-        inferadb_ledger_proto::proto::read_service_client::ReadServiceClient::new(channel);
+    println!("\nVerifying consistency across all regions...");
 
     let written = metrics.written_values_with_location.lock().clone();
     let total = written.len();
 
     if total == 0 {
-        println!("  ⚠️  No values recorded for verification");
+        println!("  No values recorded for verification");
         return Ok(());
     }
 
@@ -734,31 +670,30 @@ async fn verify_multi_region_consistency(
     for (i, key) in keys_to_verify.iter().enumerate() {
         let written_value = written.get(key).unwrap();
 
-        let request = inferadb_ledger_proto::proto::ReadRequest {
-            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: written_value.organization.value(),
-            }),
-            vault: Some(inferadb_ledger_proto::proto::VaultSlug {
-                slug: written_value.vault.value(),
-            }),
+        let request = wr::ReadRequest {
+            organization: Some(written_value.organization),
+            vault: Some(written_value.vault),
             key: key.clone(),
-            consistency: inferadb_ledger_proto::proto::ReadConsistency::Eventual as i32,
+            consistency: ws::ReadConsistency::Eventual,
             caller: None,
         };
 
-        let read_result = tokio::time::timeout(Duration::from_secs(5), client.read(request)).await;
+        let read_result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.read(request, rand::random::<u128>()),
+        )
+        .await;
 
         match read_result {
             Ok(Ok(response)) => {
-                let inner = response.into_inner();
-                if let Some(value) = inner.value {
-                    if value == written_value.value {
+                if let Some(value) = response.value {
+                    if value.as_ref() == written_value.value.as_slice() {
                         verified += 1;
                     } else {
                         mismatches += 1;
                         if mismatches <= 5 {
                             eprintln!(
-                                "  ❌ Mismatch for key '{}' (ns={}, vault={}): expected {} bytes, got {} bytes",
+                                "  Mismatch for key '{}' (ns={}, vault={}): expected {} bytes, got {} bytes",
                                 key,
                                 written_value.organization,
                                 written_value.vault,
@@ -771,7 +706,7 @@ async fn verify_multi_region_consistency(
                     mismatches += 1;
                     if mismatches <= 5 {
                         eprintln!(
-                            "  ❌ Key '{}' not found in ns={}, vault={} (was written)",
+                            "  Key '{}' not found in ns={}, vault={} (was written)",
                             key, written_value.organization, written_value.vault
                         );
                     }
@@ -781,7 +716,7 @@ async fn verify_multi_region_consistency(
                 mismatches += 1;
                 if mismatches <= 5 {
                     eprintln!(
-                        "  ❌ Error reading key '{}' from ns={}, vault={}: {}",
+                        "  Error reading key '{}' from ns={}, vault={}: {}",
                         key, written_value.organization, written_value.vault, e
                     );
                 }
@@ -789,10 +724,10 @@ async fn verify_multi_region_consistency(
             Err(_) => {
                 mismatches += 1;
                 if mismatches <= 5 {
-                    eprintln!("  ❌ Timeout reading key '{}'", key);
+                    eprintln!("  Timeout reading key '{}'", key);
                 }
                 if mismatches > 3 {
-                    eprintln!("  ⚠️  Too many timeouts, skipping remaining verifications");
+                    eprintln!("  Too many timeouts, skipping remaining verifications");
                     break;
                 }
             },
@@ -814,7 +749,7 @@ async fn verify_multi_region_consistency(
             mismatches, sample_size
         ))
     } else {
-        println!("  ✅ All {} sampled keys verified successfully across all regions", sample_size);
+        println!("  All {} sampled keys verified successfully across all regions", sample_size);
         Ok(())
     }
 }
@@ -826,7 +761,7 @@ async fn run_stress_test(config: StressConfig) {
 
 /// Run the full stress test with configurable cluster size.
 async fn run_stress_test_with_cluster_size(cluster_size: usize, mut config: StressConfig) {
-    println!("\n🚀 Starting Stress Test");
+    println!("\nStarting Stress Test");
     println!("   Cluster size: {} node(s)", cluster_size);
     println!("   Write workers: {}", config.write_workers);
     println!("   Read workers: {}", config.read_workers);
@@ -834,46 +769,49 @@ async fn run_stress_test_with_cluster_size(cluster_size: usize, mut config: Stre
     println!("   Batch size: {}", config.batch_size);
     println!();
 
-    // Start cluster
-    println!("📦 Creating {}-node cluster...", cluster_size);
-    let cluster = TestCluster::with_tcp(cluster_size).await;
+    // Start cluster on the wire transport (single data region — `with_tcp`
+    // semantics shifted to wire-mode in F.1.f.2.S1f).
+    println!("Creating {}-node cluster...", cluster_size);
+    let cluster = TestCluster::with_wire_transport_and_size(1, cluster_size).await;
     let leader_id = cluster.wait_for_leader().await;
     println!("   Leader elected: node {}", leader_id);
 
     // Allow cluster to fully stabilize before stress testing
-    // This prevents OpenRaft internal state race conditions
     println!("   Waiting for cluster stabilization...");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let leader = cluster.leader().expect("should have leader");
-    let leader_addr = &leader.addr;
-    let all_addrs: Vec<String> = cluster.addrs();
+    let leader_node_id = leader.id;
+    let node_ids: Vec<u64> = cluster.nodes().iter().map(|n| n.id).collect();
 
     // Setup: Create admin user + organization + vault for the stress test.
-    // Uses setup_org_with_admin which creates a user via direct Raft write
-    // (immediate, no saga), then creates the org with that user as admin.
-    println!("🔧 Setting up organization and vault...");
-    let (org_slug, admin_slug) = crate::common::setup_org_with_admin(
-        leader_addr,
+    println!("Setting up organization and vault...");
+    let (org_slug, _admin_slug) = wire_create_test_organization(
+        &cluster,
+        leader_node_id,
         &format!("stress-ns-{}", config.organization.value()),
-        &format!("stress-admin-{}@test.local", config.organization.value()),
-        leader,
     )
-    .await;
-    config.organization = OrganizationSlug::new(org_slug);
+    .await
+    .expect("create test organization");
+    config.organization = org_slug;
 
-    // Create vault (retry — org provisioning saga may still be running)
-    let ch = crate::common::connect_channel(leader_addr);
-    let mut vault_client =
-        inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient::new(ch);
-    let vault =
-        crate::common::create_vault_with_retry(&mut vault_client, config.organization, admin_slug)
-            .await;
+    let vault = wire_create_test_vault(&cluster, leader_node_id, config.organization)
+        .await
+        .expect("create test vault");
     config.vault = vault;
     println!(
-        "   ✅ Organization (slug={}) and vault (slug={}) created",
+        "   Organization (slug={}) and vault (slug={}) created",
         config.organization, config.vault
     );
+
+    // Build a single write client (per leader) shared across write workers.
+    // Wire QUIC streams multiplex over one connection, so a shared client
+    // is the canonical pattern.
+    let write_client = Arc::new(wire_write_client(&cluster, leader_node_id));
+
+    // Build per-node read clients to spread reads across all nodes.
+    let read_clients: Vec<Arc<ReadServiceClient>> =
+        node_ids.iter().map(|nid| Arc::new(wire_read_client(&cluster, *nid))).collect();
 
     // Metrics and control
     let metrics = Arc::new(StressMetrics::new());
@@ -883,29 +821,30 @@ async fn run_stress_test_with_cluster_size(cluster_size: usize, mut config: Stre
     let read_semaphore = Arc::new(Semaphore::new(config.max_concurrent_reads));
 
     // Spawn write workers
-    println!("🖊️  Spawning {} write workers...", config.write_workers);
+    println!("Spawning {} write workers...", config.write_workers);
     let mut handles = Vec::new();
     for i in 0..config.write_workers {
         let m = metrics.clone();
         let r = running.clone();
         let s = write_semaphore.clone();
         let c = config.clone();
-        handles.push(tokio::spawn(write_worker(i, leader_addr.to_string(), c, m, r, s)));
+        let wc = write_client.clone();
+        handles.push(tokio::spawn(write_worker(i, wc, c, m, r, s)));
     }
 
     // Spawn read workers (distributed across all nodes)
-    println!("📖 Spawning {} read workers...", config.read_workers);
+    println!("Spawning {} read workers...", config.read_workers);
     for i in 0..config.read_workers {
-        let node_addr = all_addrs[i % all_addrs.len()].clone();
+        let rc = read_clients[i % read_clients.len()].clone();
         let m = metrics.clone();
         let r = running.clone();
         let s = read_semaphore.clone();
         let c = config.clone();
-        handles.push(tokio::spawn(read_worker(i, node_addr, c, m, r, s)));
+        handles.push(tokio::spawn(read_worker(i, rc, c, m, r, s)));
     }
 
     // Run for the specified duration
-    println!("⏱️  Running stress test for {:?}...\n", config.duration);
+    println!("Running stress test for {:?}...\n", config.duration);
     let start = Instant::now();
 
     // Progress updates - print every 2 seconds or at end of test
@@ -929,7 +868,7 @@ async fn run_stress_test_with_cluster_size(cluster_size: usize, mut config: Stre
     running.store(false, Ordering::Relaxed);
 
     // Wait for workers to finish (with timeout)
-    println!("\n⏳ Waiting for workers to finish...");
+    println!("\nWaiting for workers to finish...");
     let _ = tokio::time::timeout(Duration::from_secs(5), async {
         for handle in handles {
             let _ = handle.await;
@@ -941,16 +880,16 @@ async fn run_stress_test_with_cluster_size(cluster_size: usize, mut config: Stre
     let actual_duration = start.elapsed();
     metrics.report(actual_duration);
 
-    // Verify consistency
-    let consistency_result = verify_consistency(leader_addr, &config, &metrics).await;
+    // Verify consistency via leader's read client.
+    let consistency_result = verify_consistency(&read_clients[0], &config, &metrics).await;
 
     // Final sync check
-    println!("\n🔄 Checking cluster sync...");
+    println!("\nChecking cluster sync...");
     let synced = cluster.wait_for_sync(Duration::from_secs(10)).await;
     if synced {
-        println!("   ✅ All nodes synchronized");
+        println!("   All nodes synchronized");
     } else {
-        println!("   ⚠️  Nodes may not be fully synchronized");
+        println!("   Nodes may not be fully synchronized");
     }
 
     // Final assertions
@@ -1080,7 +1019,7 @@ async fn test_stress_standard() {
 /// writes across multiple independent Raft groups. Each region has its own
 /// organization, and workers are distributed across regions for parallel consensus.
 async fn run_multi_region_stress_test(num_nodes: usize, num_regions: usize, config: StressConfig) {
-    println!("\n🚀 Starting Multi-Region Stress Test (PARALLEL WRITES)");
+    println!("\nStarting Multi-Region Stress Test (PARALLEL WRITES)");
     println!("   Nodes: {}", num_nodes);
     println!("   Data regions: {}", num_regions);
     println!(
@@ -1093,33 +1032,32 @@ async fn run_multi_region_stress_test(num_nodes: usize, num_regions: usize, conf
     println!("   Batch size: {}", config.batch_size);
     println!();
 
-    // Start multi-region cluster
-    println!("📦 Creating {}-node, {}-region cluster...", num_nodes, num_regions);
-    let cluster = TestCluster::with_tcp_data_regions(num_nodes, num_regions).await;
+    // Start multi-region cluster on the wire transport.
+    println!("Creating {}-node, {}-region cluster...", num_nodes, num_regions);
+    let cluster = TestCluster::with_wire_transport_and_size(num_regions, num_nodes).await;
 
     // Wait for all regions to have leaders
     let leaders_ready = cluster.wait_for_leaders(Duration::from_secs(10)).await;
     if !leaders_ready {
         panic!("Failed to elect leaders on all regions");
     }
-    println!("   ✅ Leaders elected on all {} regions", num_regions + 1); // +1 for system region
+    println!("   Leaders elected on all {} regions", num_regions + 1); // +1 for system region
 
     // Allow cluster to stabilize
     println!("   Waiting for cluster stabilization...");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let node = cluster.any_node();
-    let leader_addr = node.addr.clone();
-    let all_addrs = cluster.addrs();
+    let leader_node_id = cluster.any_node().id;
+    let node_ids: Vec<u64> = cluster.nodes().iter().map(|n| n.id).collect();
 
     // Setup organizations across all regions - one organization per region
-    println!("🔧 Setting up {} organizations (one per region)...", num_regions);
+    println!("Setting up {} organizations (one per region)...", num_regions);
     let region_assignments =
-        match setup_multi_region_organizations(&leader_addr, num_regions, node).await {
+        match setup_multi_region_organizations(&cluster, leader_node_id, num_regions).await {
             Ok(assignments) => {
                 for assignment in &assignments {
                     println!(
-                        "   ✅ Region {} → Organization {} → Vault {}",
+                        "   Region {} -> Organization {} -> Vault {}",
                         assignment.region_index, assignment.organization, assignment.vault
                     );
                 }
@@ -1130,6 +1068,14 @@ async fn run_multi_region_stress_test(num_nodes: usize, num_regions: usize, conf
             },
         };
 
+    // Build a single shared write client (leader-rooted) and per-node read
+    // clients. With true multi-region writes, the leader for each
+    // organization may differ; the wire stack returns `StaleRouting` for
+    // cross-leader writes and the worker treats them as transient.
+    let write_client = Arc::new(wire_write_client(&cluster, leader_node_id));
+    let read_clients: Vec<Arc<ReadServiceClient>> =
+        node_ids.iter().map(|nid| Arc::new(wire_read_client(&cluster, *nid))).collect();
+
     // Metrics and control
     let metrics = Arc::new(StressMetrics::new());
     let running = Arc::new(AtomicBool::new(true));
@@ -1138,10 +1084,7 @@ async fn run_multi_region_stress_test(num_nodes: usize, num_regions: usize, conf
 
     // Spawn write workers - DISTRIBUTED ACROSS REGIONS
     // Each worker is assigned to a specific region to enable parallel consensus
-    println!(
-        "🔥 Spawning {} write workers across {} regions...",
-        config.write_workers, num_regions
-    );
+    println!("Spawning {} write workers across {} regions...", config.write_workers, num_regions);
     let mut handles = Vec::new();
     for i in 0..config.write_workers {
         // Distribute workers round-robin across regions
@@ -1155,9 +1098,9 @@ async fn run_multi_region_stress_test(num_nodes: usize, num_regions: usize, conf
         let metrics = metrics.clone();
         let running = running.clone();
         let semaphore = write_semaphore.clone();
-        let addr = leader_addr.clone();
+        let wc = write_client.clone();
         handles.push(tokio::spawn(async move {
-            write_worker(i, addr, worker_config, metrics, running, semaphore).await;
+            write_worker(i, wc, worker_config, metrics, running, semaphore).await;
         }));
     }
 
@@ -1169,18 +1112,15 @@ async fn run_multi_region_stress_test(num_nodes: usize, num_regions: usize, conf
     };
 
     // Spawn read workers - distribute across all nodes for load balancing
-    // Note: reads go to the first region's organization. For read testing, this is fine
-    // since read throughput isn't limited by Raft consensus.
-    println!("📖 Spawning {} read workers...", read_config.read_workers);
+    println!("Spawning {} read workers...", read_config.read_workers);
     for i in 0..read_config.read_workers {
         let worker_config = read_config.clone();
         let metrics = metrics.clone();
         let running = running.clone();
         let semaphore = read_semaphore.clone();
-        // Distribute read workers across all nodes
-        let node_addr = all_addrs[i % all_addrs.len()].clone();
+        let rc = read_clients[i % read_clients.len()].clone();
         handles.push(tokio::spawn(async move {
-            read_worker(i, node_addr, worker_config, metrics, running, semaphore).await;
+            read_worker(i, rc, worker_config, metrics, running, semaphore).await;
         }));
     }
 
@@ -1206,7 +1146,7 @@ async fn run_multi_region_stress_test(num_nodes: usize, num_regions: usize, conf
     running.store(false, Ordering::Relaxed);
 
     // Wait for workers to finish (with timeout)
-    println!("\n⏳ Waiting for workers to finish...");
+    println!("\nWaiting for workers to finish...");
     let _ = tokio::time::timeout(Duration::from_secs(5), async {
         for handle in handles {
             let _ = handle.await;
@@ -1216,16 +1156,13 @@ async fn run_multi_region_stress_test(num_nodes: usize, num_regions: usize, conf
 
     // Report metrics - reuse existing report() for detailed output
     let actual_duration = start.elapsed();
-    println!(
-        "\n📊 Multi-Region Stress Test Results ({} nodes, {} regions)",
-        num_nodes, num_regions
-    );
+    println!("\nMulti-Region Stress Test Results ({} nodes, {} regions)", num_nodes, num_regions);
     metrics.report(actual_duration);
 
     // Verify consistency across all regions - reads from each key's recorded organization/vault
-    let consistency_result = verify_multi_region_consistency(&leader_addr, &metrics).await;
+    let consistency_result = verify_multi_region_consistency(&read_clients[0], &metrics).await;
     if let Err(e) = &consistency_result {
-        eprintln!("  ❌ Multi-region consistency verification failed: {}", e);
+        eprintln!("  Multi-region consistency verification failed: {}", e);
     }
 
     // Final assertions
@@ -1241,13 +1178,13 @@ async fn run_multi_region_stress_test(num_nodes: usize, num_regions: usize, conf
     assert!(error_rate < 0.01, "Write error rate should be <1%, was {:.2}%", error_rate * 100.0);
 
     // Report multi-region specific summary
-    println!("\n🎯 Multi-Region Summary:");
+    println!("\nMulti-Region Summary:");
     println!("   Regions: {} data regions + 1 system region", num_regions);
     println!("   Per-region throughput: {:.0} ops/sec", ops_per_sec / num_regions as f64);
     println!("   Total throughput: {:.0} ops/sec", ops_per_sec);
     println!(
         "   Target (5000 ops/sec): {}",
-        if ops_per_sec >= MULTI_REGION_THROUGHPUT_TARGET { "✅ PASS" } else { "⚠ MISS" }
+        if ops_per_sec >= MULTI_REGION_THROUGHPUT_TARGET { "PASS" } else { "MISS" }
     );
 }
 

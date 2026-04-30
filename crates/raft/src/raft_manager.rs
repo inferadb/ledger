@@ -1,30 +1,40 @@
-//! Raft Manager for coordinating multiple independent region groups.
+//! Central lifecycle manager for multi-tier Raft consensus groups.
 //!
-//! InferaDB uses a region-per-Raft-group architecture where
-//! each region is an independent Raft consensus group. The `_system` region handles
-//! global coordination, while data regions handle organization workloads.
-//!
-//! ## Architecture
+//! [`RaftManager`] owns every active Raft group in the process. Groups are keyed by
+//! tier:
 //!
 //! ```text
 //! RaftManager
-//! ├── _system region (OrganizationGroup 0)
-//! │   ├── Raft instance
-//! │   ├── RaftLogStore + StateLayer
-//! │   ├── BlockArchive
-//! │   └── Background jobs
-//! ├── data region 1 (OrganizationGroup 1)
-//! │   └── ... (same structure)
-//! └── data region N (OrganizationGroup N)
-//!     └── ...
+//! ├── (GLOBAL, 0)           → SystemGroup  (cluster control plane)
+//! ├── (region, 0)           → RegionGroup  (regional control plane)
+//! ├── (region, org_id > 0)  → OrganizationGroup (per-org data plane)
+//! └── (region, org_id, vault_id) → VaultGroup (per-vault data plane)
 //! ```
 //!
-//! ## Region Isolation
+//! `regions` is keyed by `(Region, OrganizationId)`; `vault_groups` is keyed by
+//! `(Region, OrganizationId, VaultId)`. Every iteration site must scan the full
+//! keyspace — filtering on `OrganizationId(0)` alone silently skips per-org groups.
 //!
-//! Each region group is fully isolated:
-//! - Separate Raft consensus (independent elections, log replication)
-//! - Separate storage files (state.db, blocks.db, raft.db per region)
-//! - Separate background jobs (GC, compaction, recovery)
+//! ## Tier isolation
+//!
+//! Each tier owns disjoint request variants and disjoint storage. Cross-tier writes
+//! are a compile error enforced by the typed `apply_worker` parameter. Groups at
+//! the organization and vault tiers run under
+//! [`LeadershipMode::Delegated`](inferadb_ledger_consensus::LeadershipMode): org
+//! groups follow the parent region leader; vault groups follow the parent org leader.
+//! Per-vault shards share the parent org's
+//! [`ConsensusEngine`](inferadb_ledger_consensus::ConsensusEngine) and
+//! [`WireConsensusTransport`](crate::wire_consensus_transport::WireConsensusTransport)
+//! — they do **not** get their own engines.
+//!
+//! ## Shutdown order
+//!
+//! Teardown is reverse construction: vaults → per-org groups → region groups. Each
+//! vault calls `commit_dispatcher.deregister` and `engine.remove_shard` before the
+//! parent org engine is torn down. Inverting any step leaves H2 streams open on the
+//! shared
+//! [`NodeConnectionRegistry`](crate::node_registry::NodeConnectionRegistry)
+//! channel.
 //!
 //! ## Usage
 //!
@@ -64,7 +74,6 @@ use std::{
 };
 
 use inferadb_ledger_consensus::WalBackend as _;
-use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_state::{
     BlockArchive, StateLayer,
     system::{
@@ -74,6 +83,7 @@ use inferadb_ledger_state::{
 };
 use inferadb_ledger_store::{Database, FileBackend};
 use inferadb_ledger_types::{NodeId, OrganizationId, Region, VaultId};
+use inferadb_ledger_wire::services::shared::BlockAnnouncement;
 use parking_lot::RwLock;
 use snafu::Snafu;
 use tokio::{sync::broadcast, task::JoinHandle};
@@ -157,11 +167,9 @@ pub enum RaftManagerError {
     /// Vault group not found on this node.
     ///
     /// Returned by [`RaftManager::get_vault_group`] when the requested
-    /// `(region, organization_id, vault_id)` triple has no registered
-    /// vault group on this node. Under Slice 2a of per-vault consensus
-    /// Phase 2, no vault groups are started yet, so every lookup returns
-    /// this variant; Slice 2b wires `CreateVault` to
-    /// `start_vault_group` and populates the map.
+    /// `(region, organization_id, vault_id)` triple has no registered vault group
+    /// on this node. The map is populated by `start_vault_group` when a
+    /// `CreateVault` operation applies in the parent [`OrganizationGroup`].
     #[snafu(display(
         "Vault group {vault_id} (organization {organization_id}, region {region}) not found"
     ))]
@@ -285,21 +293,16 @@ pub struct RaftManagerConfig {
     #[builder(default = 600)]
     pub election_timeout_max_ms: u64,
     /// Cap on concurrent snapshot-producing membership conf-changes per
-    /// per-organization Raft group (Phase 5 / M2 of the centralised
-    /// membership plan). Default `2`, matching TiKV's
-    /// `max_snapshot_per_store` default.
+    /// per-organization Raft group.
     ///
-    /// Plumbed onto every per-organization
-    /// [`InnerGroup`]'s `membership_queue` when the group is
-    /// constructed; M2 only adds the primitive (the cascade still
-    /// fires through the existing
-    /// [`RaftManager::cascade_membership_to_children`] path), so this
-    /// value has no observable effect until M3 wires the watcher.
+    /// Default `2`, matching TiKV's `max_snapshot_per_store` default.
+    /// Plumbed onto every per-organization [`InnerGroup`]'s `membership_queue`
+    /// at construction and enforced by the
+    /// [`MembershipDispatcher`](crate::region_membership_watcher::MembershipDispatcher).
     #[builder(default = crate::membership_queue::DEFAULT_MAX_CONCURRENT_SNAPSHOT_PRODUCING)]
     pub max_concurrent_snapshot_producing: usize,
 
-    /// Whether to drive per-vault parallel catch-up from the local
-    /// per-org WAL on restart (Stage 5b of the M6 reframed initiative).
+    /// Whether to drive per-vault parallel catch-up from the local per-org WAL on restart.
     ///
     /// When `true`, `RaftManager::start_region` runs
     /// [`replay_shared_wal_for_org`](crate::log_storage::replay_shared_wal_for_org)
@@ -307,28 +310,21 @@ pub struct RaftManagerConfig {
     /// and BEFORE
     /// [`ConsensusEngine::start_with_all_callbacks`](inferadb_ledger_consensus::ConsensusEngine::start_with_all_callbacks)
     /// consumes the WAL by value. The per-vault stores are opened via
-    /// `RaftManager::open_and_wire_vault_store`, driven through one
-    /// coordinated parallel-apply pass, and dropped — `start_vault_group`
-    /// reopens them later. This closes the per-vault correctness gap that
-    /// motivated Stage 5b: per-vault `applied_durable_index` lives in the
-    /// page cache between [`StateCheckpointer`](crate::state_checkpointer::StateCheckpointer)
-    /// ticks; an unclean shutdown loses it, and without this replay the
-    /// only post-restart recovery path is AppendEntries-driven catch-up
-    /// from a healthy peer (which is unavailable in single-node /
-    /// majority-partitioned scenarios).
+    /// `RaftManager::open_and_wire_vault_store`, driven through one coordinated parallel-apply
+    /// pass, and then dropped — `start_vault_group` reopens them later.
     ///
-    /// When `false`, the replay block in `start_region` is skipped
-    /// entirely. Per-vault catch-up falls back on the live commit pump,
-    /// which only re-applies entries that arrive AFTER the engine starts
-    /// — i.e., it does not close the gap on a single-node restart. This
-    /// disabled mode is preserved as a runtime escape hatch for
-    /// debugging the replay path itself; production deployments should
-    /// leave the default.
+    /// This closes a correctness gap on single-node / majority-partitioned restarts:
+    /// per-vault `applied_durable_index` lives in the page cache between
+    /// [`StateCheckpointer`](crate::state_checkpointer::StateCheckpointer) ticks; an unclean
+    /// shutdown loses it, and without this replay the only post-restart recovery path is
+    /// AppendEntries-driven catch-up from a healthy peer.
     ///
-    /// Default `true`. The cost on a clean shutdown is one
-    /// `recover_from_wal` call per per-org WAL with all vaults at
-    /// applied_durable >= last_committed (skipped via `skipped_no_gap`),
-    /// so the no-op path is cheap and observable via
+    /// When `false`, the replay block is skipped; per-vault catch-up falls back to the
+    /// live commit pump, which only re-applies entries that arrive after engine startup.
+    /// Disable only to debug the replay path itself; production deployments should leave
+    /// the default.
+    ///
+    /// Default `true`. The no-op path on a clean shutdown is cheap and observable via
     /// `ledger_org_parallel_replay_invocations_total{result=skipped_no_gap}`.
     #[builder(default = true)]
     pub enable_parallel_wal_replay: bool,
@@ -341,50 +337,46 @@ pub struct RaftManagerConfig {
     #[builder(default = crate::log_storage::DEFAULT_MAX_CONCURRENT_REPLAY)]
     pub parallel_wal_replay_max_concurrent: usize,
 
-    /// Per-vault conf-change timeout in seconds (Phase 5 / M5 of the
-    /// centralised membership plan).
+    /// Per-vault conf-change timeout in seconds.
     ///
     /// Each entry the
     /// [`MembershipDispatcher`](crate::region_membership_watcher::MembershipDispatcher)
     /// pops off the per-org [`MembershipQueue`](crate::membership_queue::MembershipQueue)
-    /// is wrapped in a [`tokio::time::timeout`] of this duration. If the
-    /// per-vault `apply_cascade_action_for_vault` call has not completed
-    /// when the timer fires, the dispatcher logs a WARN with full
-    /// context, increments
-    /// `ledger_vault_conf_change_stalled_total`, and drops the request.
-    /// The cascade is best-effort — the next region-state delta the
+    /// is wrapped in a [`tokio::time::timeout`] of this duration. When the timer fires
+    /// before the per-vault conf-change completes, the dispatcher logs a WARN, increments
+    /// `ledger_vault_conf_change_stalled_total`, and drops the request. The cascade is
+    /// best-effort — the next region-state delta the
     /// [`RegionMembershipWatcher`](crate::region_membership_watcher::RegionMembershipWatcher)
-    /// observes will re-derive any membership change the dropped entry
-    /// failed to propagate.
+    /// observes re-derives any change the dropped entry failed to propagate.
     ///
-    /// Default `60` — long enough that healthy Raft proposals never
-    /// trip it. Operators on unusually-slow networks can raise it; the
-    /// trade-off is a longer dispatcher stall on a truly broken vault
-    /// before the queue advances.
+    /// Default `60` — long enough that healthy Raft proposals never trip it. Raising it
+    /// reduces false-positive stall counts on slow networks; lowering it makes a truly
+    /// broken vault visible faster.
     #[builder(default = 60)]
     pub vault_conf_change_timeout_secs: u64,
 
-    /// Per-scope snapshot encryption key provider (Stage 1a scaffolding).
+    /// Per-scope snapshot encryption key provider.
     ///
-    /// Threaded onto every [`RaftLogStore`](crate::log_storage::RaftLogStore)
-    /// constructed by [`RaftManager`] (org-scoped at `start_region`,
-    /// per-vault at `start_vault_group`) so that
-    /// [`LedgerSnapshotBuilder`](crate::log_storage::LedgerSnapshotBuilder)
-    /// can resolve a `(region, organization, Option<vault>)` triple to a
-    /// snapshot DEK. Stage 1a stores the provider; Stage 1b's bifurcated
-    /// `build_snapshot` paths and Stage 2's `SnapshotPersister` are the
-    /// first consumers.
+    /// Threaded onto every [`RaftLogStore`](crate::log_storage::RaftLogStore) constructed by
+    /// [`RaftManager`] (org-scoped at `start_region`, per-vault at `start_vault_group`) so that
+    /// [`LedgerSnapshotBuilder`](crate::log_storage::LedgerSnapshotBuilder) can resolve a
+    /// `(region, organization, Option<vault>)` triple to a snapshot DEK for AES-256-GCM
+    /// encryption.
     ///
-    /// Defaults to [`NoopSnapshotKeyProvider`](crate::NoopSnapshotKeyProvider),
-    /// which always returns `None`. The Stage 2 persister will skip the
-    /// encryption envelope when the provider returns `None` — only valid
-    /// for tests / unencrypted local-dev configurations.
+    /// Defaults to [`NoopSnapshotKeyProvider`](crate::NoopSnapshotKeyProvider), which always
+    /// returns `None`. The snapshot persister skips the encryption envelope when the provider
+    /// returns `None` — only valid for tests or unencrypted local-dev configurations.
     #[builder(default = Arc::new(crate::snapshot_key_provider::NoopSnapshotKeyProvider))]
     pub snapshot_key_provider: Arc<dyn crate::snapshot_key_provider::SnapshotKeyProvider>,
 }
 
 impl RaftManagerConfig {
     /// Creates a new configuration with default timing parameters.
+    ///
+    /// The wire-protocol transport is the only inter-node Raft transport
+    /// — production callers (notably
+    /// [`bootstrap_node`](../../../server/src/bootstrap.rs)) build the
+    /// config via [`Self::builder`].
     pub fn new(data_dir: PathBuf, node_id: LedgerNodeId, local_region: Region) -> Self {
         Self::builder().data_dir(data_dir).node_id(node_id).local_region(local_region).build()
     }
@@ -565,6 +557,76 @@ impl Drop for RegionBackgroundJobs {
 /// because the Raft gRPC wire dispatches by `ConsensusStateId` and genuinely
 /// does not know which tier owns the shard. That's the one documented
 /// cross-tier escape hatch.
+///
+/// Inter-node Raft transport.
+///
+/// Thin newtype wrapper over [`crate::wire_consensus_transport::WireConsensusTransport`].
+/// The wrapper survives the F.1.f tonic-to-wire migration to keep the call-site
+/// API stable; the legacy multi-variant shape is gone now that the gRPC arm has
+/// been deleted. The transport is [`Clone`]: the instance handed to
+/// [`inferadb_ledger_consensus::ConsensusEngine::start_with_all_callbacks`] is
+/// moved by value, and the clone retained on [`InnerGroup`] services later
+/// peer-registration calls from membership cascades and discovery.
+#[derive(Clone)]
+pub struct ConsensusTransportImpl(crate::wire_consensus_transport::WireConsensusTransport);
+
+impl ConsensusTransportImpl {
+    /// Constructs a wire-transport-backed `ConsensusTransportImpl`.
+    pub fn new(inner: crate::wire_consensus_transport::WireConsensusTransport) -> Self {
+        Self(inner)
+    }
+
+    /// Returns a reference to the inner
+    /// [`crate::wire_consensus_transport::WireConsensusTransport`].
+    pub fn inner(&self) -> &crate::wire_consensus_transport::WireConsensusTransport {
+        &self.0
+    }
+
+    /// Consumes the wrapper and returns the inner transport.
+    pub fn into_inner(self) -> crate::wire_consensus_transport::WireConsensusTransport {
+        self.0
+    }
+
+    /// Stamps the local node's address into outbound message metadata so
+    /// receivers can auto-register a return channel.
+    pub fn set_local_address(&self, addr: String) {
+        self.0.set_local_address(addr);
+    }
+
+    /// Registers a peer by address.
+    ///
+    /// Resolves an [`Arc<inferadb_ledger_wire_transport::WireClient>`] from
+    /// the shared [`crate::node_registry::NodeConnectionRegistry`] and spawns
+    /// a per-peer `WirePeerSender` against it. Requires a
+    /// [`crate::node_registry::WireClientTemplate`] installed on the registry
+    /// before the first call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::node_registry::RegistryError`] when the address
+    /// cannot be parsed, or
+    /// [`crate::node_registry::RegistryError::WireTemplateUnconfigured`]
+    /// when the registry has no template installed, or
+    /// [`crate::node_registry::RegistryError::WireClientNew`] when
+    /// [`inferadb_ledger_wire_transport::WireClient::new`] fails.
+    pub async fn set_peer_via_registry(
+        &self,
+        node: LedgerNodeId,
+        addr: &str,
+    ) -> std::result::Result<(), crate::node_registry::RegistryError> {
+        self.0.set_peer_via_registry(node, addr).await
+    }
+
+    /// Returns the registered peer node IDs.
+    ///
+    /// Used by Raft service handlers that auto-register a sender's transport
+    /// channel only when the peer is not yet known.
+    #[must_use]
+    pub fn peers(&self) -> Vec<LedgerNodeId> {
+        self.0.peers()
+    }
+}
+
 pub struct InnerGroup {
     /// Region this group belongs to.
     pub(crate) region: Region,
@@ -617,7 +679,13 @@ pub struct InnerGroup {
     /// Watch channel receiver for applied index (ReadIndex protocol).
     pub(crate) applied_index_rx: tokio::sync::watch::Receiver<u64>,
     /// Consensus transport for dynamic peer channel management.
-    pub(crate) consensus_transport: Option<crate::consensus_transport::GrpcConsensusTransport>,
+    ///
+    /// Wired into membership-cascade peer registration
+    /// (`apply_cascade_action`, `RegionMembershipWatcher`) so the org's
+    /// transport learns about new voters as they join. Vault groups share
+    /// the parent org's transport (root rule 17), so this is `None` on
+    /// `InnerVaultGroup` and only `Some` on per-org `InnerGroup` instances.
+    pub(crate) consensus_transport: Option<ConsensusTransportImpl>,
     /// Events database.
     pub(crate) events_db: Option<Arc<inferadb_ledger_state::EventsDatabase<FileBackend>>>,
     /// Apply-phase event writer cloned from the org's `RaftLogStore`.
@@ -757,9 +825,7 @@ impl InnerGroup {
     }
 
     /// Returns the consensus transport.
-    pub fn consensus_transport(
-        &self,
-    ) -> Option<&crate::consensus_transport::GrpcConsensusTransport> {
+    pub fn consensus_transport(&self) -> Option<&ConsensusTransportImpl> {
         self.consensus_transport.as_ref()
     }
 
@@ -1035,9 +1101,7 @@ impl SystemGroup {
 
     /// Returns the consensus transport.
     #[must_use]
-    pub fn consensus_transport(
-        &self,
-    ) -> Option<&crate::consensus_transport::GrpcConsensusTransport> {
+    pub fn consensus_transport(&self) -> Option<&ConsensusTransportImpl> {
         self.0.consensus_transport()
     }
 
@@ -1198,9 +1262,7 @@ impl RegionGroup {
 
     /// Returns the consensus transport.
     #[must_use]
-    pub fn consensus_transport(
-        &self,
-    ) -> Option<&crate::consensus_transport::GrpcConsensusTransport> {
+    pub fn consensus_transport(&self) -> Option<&ConsensusTransportImpl> {
         self.0.consensus_transport()
     }
 
@@ -1347,9 +1409,7 @@ impl OrganizationGroup {
     /// Returns the consensus transport (shared with the parent region
     /// group).
     #[must_use]
-    pub fn consensus_transport(
-        &self,
-    ) -> Option<&crate::consensus_transport::GrpcConsensusTransport> {
+    pub fn consensus_transport(&self) -> Option<&ConsensusTransportImpl> {
         self.0.consensus_transport()
     }
 
@@ -1905,27 +1965,16 @@ fn current_unix_secs() -> u64 {
 /// Vault-tier Raft group — data plane scoped to a single vault within an
 /// organization.
 ///
-/// Owns entity writes (`Write`, `BatchWrite`, `IngestExternalEvents`) for
-/// one vault. Under the Phase 2 design, leadership is delegated from the
-/// parent [`OrganizationGroup`] via [`ConsensusHandle::adopt_leader`] — vault
-/// groups never run independent elections. Storage (state.db, blocks.db,
-/// events.db, raft.db, WAL) is per-vault under
+/// Owns entity writes (`Write`, `BatchWrite`, `IngestExternalEvents`) for one
+/// vault. Leadership is delegated from the parent [`OrganizationGroup`] via
+/// `ConsensusHandle::adopt_leader` — vault groups never run independent elections.
+/// Storage (state.db, blocks.db, events.db, raft.db, WAL) is per-vault under
 /// `{data_dir}/{region}/{organization_id}/state/vault-{vault_id}/`.
 ///
 /// Variant validation at the apply worker rejects org-scoped variants
 /// (`CreateVault`, `AddOrganizationMember`, team / invitation / app
-/// lifecycle, etc.) with a tier-violation error — those continue to apply
+/// lifecycle, etc.) with a tier-violation error — those variants apply
 /// through the parent [`OrganizationGroup`].
-///
-/// ## Slice 2a scope
-///
-/// Slice 2a introduces the type and the [`RaftManager`] read-side lookup
-/// surface. `start_vault_group` / `stop_vault_group` and the
-/// `CreateVault` → start-group wiring arrive in Slice 2b. Until Slice 2b
-/// lands, the `RaftManager` holds no vault groups — `get_vault_group`
-/// returns [`RaftManagerError::RegionNotFound`] and `list_vault_groups`
-/// returns an empty [`Vec`]. The Write path continues to propose through
-/// the parent [`OrganizationGroup`]; Slice 2c flips the routing key.
 #[derive(Clone)]
 pub struct VaultGroup(pub(crate) Arc<InnerVaultGroup>);
 
@@ -2048,7 +2097,7 @@ impl VaultGroup {
         self.0.current_leader()
     }
 
-    /// Returns the lifecycle state (Phase 7 / O1).
+    /// Returns the lifecycle state (`Active`, `Dormant`, or `Stalled`).
     #[must_use]
     pub fn lifecycle_state(&self) -> VaultLifecycleState {
         self.0.lifecycle_state()
@@ -2287,12 +2336,10 @@ pub struct RaftManager {
     regions: RwLock<HashMap<(Region, OrganizationId), Arc<InnerGroup>>>,
     /// Per-vault Raft groups indexed by `(region, organization_id, vault_id)`.
     ///
-    /// Introduced by Slice 2a of per-vault consensus Phase 2; populated
-    /// by Slice 2b's `start_vault_group` when `CreateVault` applies in
-    /// the parent `OrganizationGroup`. Each vault group runs under
-    /// [`inferadb_ledger_consensus::LeadershipMode::Delegated`] — its
-    /// leader is adopted from the parent `OrganizationGroup` rather than
-    /// elected independently.
+    /// Populated by `start_vault_group` when a `CreateVault` operation applies in
+    /// the parent [`OrganizationGroup`]. Each vault group runs under
+    /// [`inferadb_ledger_consensus::LeadershipMode::Delegated`] — its leader is
+    /// adopted from the parent [`OrganizationGroup`] rather than elected independently.
     vault_groups: VaultGroupMap,
     /// Shared peer address map (node ID → network address).
     ///
@@ -2605,9 +2652,9 @@ impl RaftManager {
     fn build_snapshot_sender(
         &self,
     ) -> Arc<dyn inferadb_ledger_consensus::snapshot_sender::SnapshotSender> {
-        Arc::new(crate::snapshot_streamer::RaftManagerSnapshotSender {
+        Arc::new(crate::wire_consensus_transport::snapshot::WireSnapshotSender {
             manager: Arc::clone(&self.self_weak),
-            chunk_size_bytes: crate::snapshot_streamer::DEFAULT_CHUNK_SIZE_BYTES,
+            chunk_size_bytes: crate::wire_consensus_transport::snapshot::DEFAULT_CHUNK_SIZE_BYTES,
         })
     }
 
@@ -2665,16 +2712,13 @@ impl RaftManager {
         None
     }
 
-    /// Builds the snapshot file for a `(region, org, vault?)` scope, persists
-    /// it via the manager's [`SnapshotPersister`], then notifies the engine
-    /// so the shard's `last_snapshot_index` advances.
+    /// Builds the snapshot for a `(region, org, vault?)` scope, persists it via
+    /// the manager's [`SnapshotPersister`](crate::snapshot_persister::SnapshotPersister),
+    /// then notifies the engine so the shard's `last_snapshot_index` advances.
     ///
-    /// Stage 2's first production caller of
-    /// [`ConsensusEngine::notify_snapshot_completed`](inferadb_ledger_consensus::ConsensusEngine::notify_snapshot_completed).
     /// `last_included_term` is the term reported by
     /// [`Action::TriggerSnapshot`](inferadb_ledger_consensus::action::Action::TriggerSnapshot)
-    /// — used purely as snapshot metadata; the actual covered index is
-    /// resolved from the produced snapshot's
+    /// — used as snapshot metadata; the covered index is resolved from the produced snapshot's
     /// [`SnapshotMeta`](crate::log_storage::SnapshotMeta).
     ///
     /// # Errors
@@ -2841,10 +2885,9 @@ impl RaftManager {
     }
 
     /// Returns the per-shard apply-command sender for the org-level group at
-    /// `(region, organization_id)`, or `None` when the group is not started
-    /// on this node.
+    /// `(region, organization_id)`, or `None` when the group is not started on this node.
     ///
-    /// Stage 4's installer uses this to route
+    /// Used by the snapshot installer (see [`crate::snapshot_installer`]) to route
     /// [`ApplyCommand::InstallSnapshot`](crate::apply_command::ApplyCommand::InstallSnapshot)
     /// onto the apply task that owns the org's
     /// [`RaftLogStore`](crate::log_storage::RaftLogStore).
@@ -2861,12 +2904,11 @@ impl RaftManager {
     /// `(region, organization_id, vault_id)`, or `None` when the vault
     /// group is not started on this node.
     ///
-    /// Stage 4's installer uses this to route
+    /// Used by the snapshot installer (see [`crate::snapshot_installer`]) to route
     /// [`ApplyCommand::InstallSnapshot`](crate::apply_command::ApplyCommand::InstallSnapshot)
     /// onto the per-vault commit pump that owns this vault's
-    /// [`RaftLogStore`](crate::log_storage::RaftLogStore). Sister of
-    /// [`apply_command_sender`](Self::apply_command_sender) — same shape,
-    /// keyed by the per-vault triple instead of the org pair.
+    /// [`RaftLogStore`](crate::log_storage::RaftLogStore). See also
+    /// [`apply_command_sender`](Self::apply_command_sender) for the org-level variant.
     pub fn apply_command_sender_for_vault(
         &self,
         region: Region,
@@ -2880,13 +2922,10 @@ impl RaftManager {
     /// Returns `(leader_term, leader_node_id)` for the shard backing
     /// `shard_id`, or `None` if the shard does not resolve on this node.
     ///
-    /// Used by Stage 3's leader-side
-    /// [`RaftManagerSnapshotSender`](crate::snapshot_streamer::RaftManagerSnapshotSender)
-    /// to stamp the streaming `InstallSnapshotHeader` with the leader's
-    /// current term + node id without plumbing those fields through the
-    /// `SnapshotSender::send_snapshot` trait surface (which keeps the
-    /// trait shape identical to the wake notifier and snapshot
-    /// coordinator).
+    /// Used by the leader-side snapshot streamer
+    /// ([`crate::wire_consensus_transport::snapshot::WireSnapshotSender`]) to stamp the
+    /// `InstallSnapshotHeader` with the leader's current term + node ID without
+    /// plumbing those fields through the `SnapshotSender` trait surface.
     ///
     /// `leader_term` reads from the shard's state-watch channel — same
     /// source as `ConsensusHandle::current_term`. `leader_node_id` returns
@@ -2907,33 +2946,6 @@ impl RaftManager {
                 let inner = self.regions.read().get(&(region, organization_id)).cloned()?;
                 Some((inner.handle().current_term(), inner.handle().node_id()))
             },
-        }
-    }
-
-    /// Returns the current Raft term for an explicit scope, or `None` if
-    /// the scope's group is not registered on this node.
-    ///
-    /// Used by Stage 3's follower-side
-    /// [`snapshot_receiver`](crate::snapshot_receiver) to stamp the
-    /// `InstallSnapshotStreamResponse.follower_term` field — the follower
-    /// reports the local term so the leader can step down if it's stale.
-    pub fn current_term_for_scope(
-        &self,
-        region: Region,
-        organization_id: OrganizationId,
-        vault_id: Option<VaultId>,
-    ) -> Option<u64> {
-        match vault_id {
-            Some(vault_id) => self
-                .vault_groups
-                .read()
-                .get(&(region, organization_id, vault_id))
-                .map(|g| g.handle().current_term()),
-            None => self
-                .regions
-                .read()
-                .get(&(region, organization_id))
-                .map(|g| g.handle().current_term()),
         }
     }
 
@@ -2983,7 +2995,7 @@ impl RaftManager {
         *self.runtime_config.lock() = Some(handle);
     }
 
-    /// Sets the vault hibernation policy (Phase 7 / O1).
+    /// Sets the vault hibernation policy.
     ///
     /// Called during bootstrap from the server's `Config`. The
     /// idle-detector task picks the new policy up on its next scan
@@ -2999,7 +3011,7 @@ impl RaftManager {
         self.hibernation_config.lock().clone()
     }
 
-    /// Spawns the hibernation idle-detector task (Phase 7 / O1).
+    /// Spawns the hibernation idle-detector task.
     ///
     /// The task wakes up every `scan_interval_secs` seconds, scans
     /// `vault_groups`, and transitions idle vaults to
@@ -3013,25 +3025,6 @@ impl RaftManager {
     /// No-ops when hibernation is disabled at the time of the call.
     /// Idempotent: re-invocation is a no-op once the task is running.
     /// Cancels via the manager-level cancellation token.
-    ///
-    /// ## Current scope (smaller, lower-risk version)
-    ///
-    /// This implementation tracks lifecycle state, fires metrics + log
-    /// lines on transitions, and exposes the dormant / stalled
-    /// observability that downstream tooling (operator dashboards, O5
-    /// docs) needs. It does **not** yet:
-    ///
-    /// - pause the per-shard scheduler tick on the parent [`ConsensusEngine`]
-    /// - drop the per-vault `state.db` / `raft.db` / `blocks.db` / `events.db` file handles
-    ///
-    /// Both optimizations are deliberate follow-ups: they require
-    /// invasive changes to consensus internals (vault shards share the
-    /// parent org's reactor — pausing the tick per-vault is a
-    /// reactor-level surgery) and to the storage layer's ownership
-    /// model. The bookkeeping landed here is the foundation those
-    /// optimizations build on; once the per-shard tick can be paused,
-    /// the dormant arm in this scan is the natural place to call
-    /// `engine.pause_shard(shard_id)` and friends.
     pub fn start_hibernation_idle_detector(self: &Arc<Self>) {
         let config = self.hibernation_config();
         if !config.enabled {
@@ -3556,14 +3549,10 @@ impl RaftManager {
         self.regions.read().keys().copied().collect()
     }
 
-    /// Lists all active per-vault `(region, organization_id, vault_id)`
-    /// triples registered on this node.
+    /// Lists all active per-vault `(region, organization_id, vault_id)` triples registered
+    /// on this node.
     ///
-    /// Returns an empty [`Vec`] under Slice 2a — no vault groups are
-    /// started until Slice 2b wires `CreateVault` to
-    /// [`RaftManager::start_vault_group`]. Used by backup, monitoring,
-    /// and the consensus-transport dispatch layer once vault groups are
-    /// live.
+    /// Used by backup, monitoring, and the consensus-transport dispatch layer.
     pub fn list_vault_groups(&self) -> Vec<(Region, OrganizationId, VaultId)> {
         self.vault_groups.read().keys().copied().collect()
     }
@@ -3572,10 +3561,9 @@ impl RaftManager {
     ///
     /// # Errors
     ///
-    /// Returns [`RaftManagerError::VaultGroupNotFound`] if no vault group
-    /// with the given triple is registered on this node. Under Slice 2a
-    /// this is always the case; Slice 2b begins populating the map from
-    /// `CreateVault` apply.
+    /// Returns [`RaftManagerError::VaultGroupNotFound`] if no vault group with the given
+    /// triple is registered on this node. The map is populated by `start_vault_group`
+    /// when `CreateVault` applies in the parent organization group.
     pub fn get_vault_group(
         &self,
         region: Region,
@@ -3588,10 +3576,8 @@ impl RaftManager {
         )
     }
 
-    /// Checks if a specific `(region, organization_id, vault_id)` vault
-    /// group is active on this node.
-    ///
-    /// Returns `false` for every triple under Slice 2a.
+    /// Checks if a specific `(region, organization_id, vault_id)` vault group is
+    /// active on this node.
     pub fn has_vault_group(
         &self,
         region: Region,
@@ -5580,27 +5566,25 @@ impl RaftManager {
         }
     }
 
-    /// Stage 5b: re-drive per-vault apply for entries committed in the
-    /// per-org WAL but not yet synced to per-vault `raft.db` dual-slots.
+    /// Re-drives per-vault apply for entries committed in the per-org WAL
+    /// but not yet synced to per-vault `raft.db` dual-slots.
     ///
     /// Called from [`Self::start_region`] after the org-level
     /// [`RaftLogStore::replay_crash_gap`] returns and BEFORE
-    /// [`ConsensusEngine::start_with_all_callbacks`] consumes the WAL
-    /// by value. The replay path opens each child vault's store via
+    /// [`ConsensusEngine::start_with_all_callbacks`] consumes the WAL by value.
+    /// The replay path opens each child vault's store via
     /// [`Self::open_and_wire_vault_store`], runs them through
     /// [`replay_shared_wal_for_org`], and drops the stores —
-    /// [`Self::start_vault_group`] reopens them later when the org
-    /// apply pipeline starts driving vault creations.
+    /// [`Self::start_vault_group`] reopens them later when the org apply
+    /// pipeline drives vault creation.
     ///
     /// ## Error policy
     ///
-    /// Errors are non-fatal. Logged + recorded as
-    /// `ledger_org_parallel_replay_invocations_total{result=error}`;
-    /// startup falls through to the live commit pump path. Failing to
-    /// catch up an unclean-shutdown gap is preferable to failing to
-    /// start at all — the live commit pump still receives entries
-    /// committed AFTER startup (matching the pre-Stage-5b behaviour),
-    /// so failure here is a degraded mode, not a hard stop.
+    /// Errors are non-fatal — logged and recorded as
+    /// `ledger_org_parallel_replay_invocations_total{result=error}`. Startup falls
+    /// through to the live commit pump. Failing to close an unclean-shutdown gap is
+    /// preferable to a hard start failure; the live commit pump still receives
+    /// entries committed after startup, so failure here is a degraded mode.
     ///
     /// ## Skip arms
     ///
@@ -6367,17 +6351,27 @@ impl RaftManager {
                 .set_leadership_mode(inferadb_ledger_consensus::LeadershipMode::Delegated);
         }
 
-        let consensus_transport = crate::consensus_transport::GrpcConsensusTransport::new(
-            self.config.node_id,
-            region,
-            Arc::clone(&self.registry),
+        // Construct the wire-protocol consensus transport. The engine moves it
+        // by value (it's generic over `T: NetworkTransport`); we keep a clone
+        // wrapped in [`ConsensusTransportImpl`] on the [`InnerGroup`] so
+        // cascading membership operations can reach the running transport
+        // later.
+        let local_address = initial_members
+            .iter()
+            .find(|(id, _)| *id == self.config.node_id)
+            .map(|(_, addr)| addr.clone());
+        let consensus_transport_for_group = ConsensusTransportImpl::new(
+            crate::wire_consensus_transport::WireConsensusTransport::new(
+                self.config.node_id,
+                region,
+                Arc::clone(&self.registry),
+            ),
         );
         // Set the local address from initial_members so outbound messages include
         // the sender's address for auto-registration on the receiving end.
-        if let Some((_, addr)) = initial_members.iter().find(|(id, _)| *id == self.config.node_id) {
-            consensus_transport.set_local_address(addr.clone());
+        if let Some(addr) = local_address {
+            consensus_transport_for_group.set_local_address(addr);
         }
-        let consensus_transport_for_group = consensus_transport.clone();
 
         // Register peer channels for initial members and populate the shared
         // peer address map so services can resolve addresses for forwarding.
@@ -6386,7 +6380,9 @@ impl RaftManager {
         for (node_id, addr) in &initial_members {
             if *node_id != self.config.node_id {
                 self.peer_addresses.insert(*node_id, addr.clone());
-                if let Err(e) = consensus_transport.set_peer_via_registry(*node_id, addr).await {
+                if let Err(e) =
+                    consensus_transport_for_group.set_peer_via_registry(*node_id, addr).await
+                {
                     warn!(node_id, addr, error = %e, "Failed to register peer via registry");
                 }
             }
@@ -6413,7 +6409,7 @@ impl RaftManager {
                 continue;
             }
             if let Some(addr) = self.peer_addresses.get(voter_id) {
-                match consensus_transport.set_peer_via_registry(voter_id, &addr).await {
+                match consensus_transport_for_group.set_peer_via_registry(voter_id, &addr).await {
                     Ok(()) => {
                         debug!(
                             voter_id,
@@ -6432,12 +6428,15 @@ impl RaftManager {
                 }
             }
         }
+        // Hand the transport into the engine. The engine moves it by value;
+        // `consensus_transport_for_group` retains its clone for
+        // [`InnerGroup::consensus_transport`].
         let (engine, commit_rx, state_watchers) =
             inferadb_ledger_consensus::ConsensusEngine::start_with_all_callbacks(
                 vec![consensus_shard],
                 wal,
                 inferadb_ledger_consensus::SystemClock,
-                consensus_transport,
+                consensus_transport_for_group.clone().into_inner(),
                 std::time::Duration::from_millis(2),
                 self.build_wake_notifier(),
                 self.build_snapshot_coordinator(),
@@ -7209,15 +7208,16 @@ impl RaftManager {
     /// data-plane group keyed by `(region, organization_id)` where
     /// `organization_id != OrganizationId::new(0)`. Cancels the org's
     /// background jobs, requests its consensus engine reactor to shut
-    /// down (which drops the engine's [`GrpcConsensusTransport`] —
-    /// dropping in turn cancels every per-peer
-    /// [`PeerSender`](crate::consensus_transport::peer_sender::PeerSender)
+    /// down (which drops the engine's
+    /// [`WireConsensusTransport`](crate::wire_consensus_transport::WireConsensusTransport)
+    /// — dropping in turn cancels every per-peer
+    /// [`WirePeerSender`](crate::wire_consensus_transport::peer_sender::WirePeerSender)
     /// drain task tied to that transport), removes the entry from
     /// `self.regions`, and closes the organization's storage.
     ///
     /// This method is **load-bearing for graceful restart**: without it,
     /// per-organization engines never exit during [`Self::shutdown`],
-    /// leaving their bidirectional gRPC `Replicate` streams attached to
+    /// leaving their bidirectional `Replicate` streams attached to
     /// the shared [`NodeConnectionRegistry`](crate::node_registry::NodeConnectionRegistry)
     /// channel. Subsequent restarts re-use the channel through fresh
     /// transports and observe the channel's H2 state in a stuck condition
@@ -7263,11 +7263,11 @@ impl RaftManager {
         }
 
         // Shut down the consensus engine reactor for this organization.
-        // The engine owns the `GrpcConsensusTransport`; on reactor exit
-        // the transport's per-peer `PeerSender` drain tasks are cancelled
-        // via their `Drop` impl (cancels `shutdown_token`, aborts the
-        // task), which closes any in-flight `client.replicate()` stream
-        // open against the shared `NodeConnectionRegistry` channel.
+        // The engine owns the `WireConsensusTransport`; on reactor exit
+        // the transport's per-peer `WirePeerSender` drain tasks are
+        // cancelled via their `Drop` impl (cancels `shutdown_token`,
+        // aborts the task), which closes any in-flight `Replicate` stream
+        // open against the shared `NodeConnectionRegistry` client.
         let handle = org_group.handle().clone();
         tokio::spawn(async move {
             handle.request_shutdown().await;
@@ -7303,12 +7303,13 @@ impl RaftManager {
     ///    engine before deregistering the vault leaves stale dispatcher entries pointing at dropped
     ///    channels.
     /// 2. **Per-organization groups** next (those with `org_id != 0`). Each org owns its own
-    ///    [`ConsensusEngine`] and [`GrpcConsensusTransport`]. Dropping the transport cancels its
-    ///    `PeerSender` drain tasks, closing any open `Replicate` streams. **Without this step the
-    ///    H2 streams persist across a graceful restart**, leaving the shared
-    ///    [`NodeConnectionRegistry`](crate::node_registry::NodeConnectionRegistry) channel in a
-    ///    state where the next `client.replicate()` call blocks until KeepAliveTimedOut — see Task
-    ///    #172.
+    ///    [`ConsensusEngine`] and
+    ///    [`WireConsensusTransport`](crate::wire_consensus_transport::WireConsensusTransport).
+    ///    Dropping the transport cancels its `WirePeerSender` drain tasks, closing any open
+    ///    `Replicate` streams. **Without this step the QUIC streams persist across a graceful
+    ///    restart**, leaving the shared
+    ///    [`NodeConnectionRegistry`](crate::node_registry::NodeConnectionRegistry) wire client in a
+    ///    state where the next `replicate()` call blocks — see Task #172.
     /// 3. **Region (control-plane) groups** last via [`Self::stop_region`]. These hold the system /
     ///    data-region control-plane state and have always been stopped here.
     ///
@@ -8178,7 +8179,7 @@ async fn apply_cascade_action(
     action: CascadeMembershipAction,
     manager: &RaftManager,
     handle: &Arc<crate::ConsensusHandle>,
-    transport: Option<&crate::consensus_transport::GrpcConsensusTransport>,
+    transport: Option<&ConsensusTransportImpl>,
     target: inferadb_ledger_consensus::types::NodeId,
     node_id: u64,
     region: Region,
@@ -8340,8 +8341,7 @@ async fn apply_cascade_action(
 /// Applies a single cascade action to a per-organization shard.
 ///
 /// Thin wrapper over [`apply_cascade_action`] for the org-tier path
-/// — pre-registers the peer on the org's
-/// [`GrpcConsensusTransport`](crate::consensus_transport::GrpcConsensusTransport)
+/// — pre-registers the peer on the org's [`ConsensusTransportImpl`]
 /// (when `transport` is `Some`) and proposes the conf-change against
 /// the org's Raft group. Used by the M3
 /// [`RegionMembershipWatcher`](crate::region_membership_watcher::RegionMembershipWatcher)
@@ -8354,7 +8354,7 @@ pub(crate) async fn apply_cascade_action_for_org(
     action: CascadeMembershipAction,
     manager: &RaftManager,
     handle: &Arc<crate::ConsensusHandle>,
-    transport: Option<&crate::consensus_transport::GrpcConsensusTransport>,
+    transport: Option<&ConsensusTransportImpl>,
     target: inferadb_ledger_consensus::types::NodeId,
     node_id: u64,
     region: Region,
@@ -8421,6 +8421,11 @@ mod tests {
     use super::*;
 
     fn create_test_config(temp_dir: &TestDir) -> RaftManagerConfig {
+        // The wire-protocol transport is the only inter-node Raft transport.
+        // Tests that exercise full peer registration must install a
+        // [`crate::node_registry::WireClientTemplate`] on the shared
+        // registry; tests that only need the manager + a single-voter
+        // region (no peer reachability) work with the stock registry.
         RaftManagerConfig::new(temp_dir.path().to_path_buf(), 1, Region::GLOBAL)
     }
 
@@ -11415,5 +11420,97 @@ mod tests {
             "wake p99 budget: {p99:.3}ms exceeds 100ms (p50 = {p50:.3}ms, max = {max:.3}ms; \
              samples {latencies_ms:?})"
         );
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Consensus transport (wire-protocol) tests
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// `start_region` installs a wire-protocol consensus transport on the
+    /// region group; the registry stays empty in this fixture (no
+    /// initial members beyond self), so the transport is constructed but
+    /// has no peers registered.
+    #[tokio::test]
+    async fn start_region_installs_wire_transport() {
+        let temp = TestDir::new();
+        let config = create_test_config(&temp);
+
+        let manager = test_manager(config);
+        let system_config =
+            RegionConfig::system(1, "127.0.0.1:50051".to_string()).without_background_jobs();
+        manager.start_system_region(system_config).await.expect("start system region");
+
+        let group = manager.get_region_group(Region::GLOBAL).expect("region group");
+        let transport = group.consensus_transport().expect("transport installed");
+        // No initial peers (only self) — peer count is 0 until membership cascades fire.
+        assert!(transport.peers().is_empty(), "fresh region has no registered peers");
+    }
+
+    /// [`ConsensusTransportImpl::set_peer_via_registry`] resolves an
+    /// `Arc<WireClient>` from the shared registry and registers a
+    /// `WirePeerSender`. With a wire-client template installed the call
+    /// succeeds and the transport observes the new peer; without a
+    /// template the registry surfaces `WireTemplateUnconfigured`.
+    #[tokio::test]
+    async fn set_peer_via_registry_uses_registry() {
+        use bytes::Bytes;
+        use inferadb_ledger_wire_transport::tls;
+
+        use crate::{
+            node_registry::{NodeConnectionRegistry, RegistryError, WireClientTemplate},
+            wire_consensus_transport::WireConsensusTransport,
+        };
+
+        // Registry without a template — wire path errors loudly.
+        let bare_registry = Arc::new(NodeConnectionRegistry::new());
+        let bare_transport = ConsensusTransportImpl::new(WireConsensusTransport::new(
+            1,
+            Region::GLOBAL,
+            Arc::clone(&bare_registry),
+        ));
+        let err = bare_transport.set_peer_via_registry(2, "127.0.0.1:5000").await;
+        assert!(
+            matches!(err, Err(RegistryError::WireTemplateUnconfigured)),
+            "no template must surface WireTemplateUnconfigured, got {err:?}",
+        );
+        assert!(bare_transport.peers().is_empty(), "no peer registered on the error path");
+
+        // Registry with a permissive test template — wire path succeeds
+        // and the transport observes the new peer.
+        let template = Arc::new(WireClientTemplate {
+            quic: tls::client_config(tls::rustls_client_crypto_skip_verify()),
+            server_name: "localhost".to_string(),
+            auth_payload: Bytes::new(),
+            connect_timeout: std::time::Duration::from_millis(100),
+        });
+        let registry = Arc::new(NodeConnectionRegistry::with_wire_template(template));
+        let transport = ConsensusTransportImpl::new(WireConsensusTransport::new(
+            1,
+            Region::GLOBAL,
+            Arc::clone(&registry),
+        ));
+        transport
+            .set_peer_via_registry(2, "127.0.0.1:5000")
+            .await
+            .expect("registers via template-equipped registry");
+        assert_eq!(transport.peers(), vec![2], "wire transport observes the new peer");
+        assert_eq!(registry.wire_client_len(), 1, "registry cached the wire client");
+    }
+
+    /// `set_local_address` must survive multiple calls without panicking.
+    #[test]
+    fn consensus_transport_impl_set_local_address_idempotent() {
+        use crate::{
+            node_registry::NodeConnectionRegistry, wire_consensus_transport::WireConsensusTransport,
+        };
+
+        let transport = ConsensusTransportImpl::new(WireConsensusTransport::new(
+            1,
+            Region::GLOBAL,
+            Arc::new(NodeConnectionRegistry::new()),
+        ));
+        transport.set_local_address("127.0.0.1:5000".to_string());
+        // Idempotent re-set must not panic.
+        transport.set_local_address("10.0.0.1:6000".to_string());
     }
 }

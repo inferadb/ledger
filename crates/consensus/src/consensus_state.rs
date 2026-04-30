@@ -241,14 +241,14 @@ impl<C: Clock + Clone, R: RngSource> ConsensusState<C, R> {
             // own log, not the parent's, so the per-org / per-vault
             // shard's `handle_membership_change` would reject every
             // proposal with `LeaderNotReady` until some unrelated
-            // proposal landed. The DR scheduler's membership cascade
-            // (`RaftManager::cascade_membership_to_children`) hit this
-            // immediately after every leader transfer — surfaced by
-            // the lifecycle Phase 5 regression where vault group
-            // removal failed with "Leader has not yet committed an
-            // entry in its current term". Appending a no-op here is
-            // cheap (single empty entry per term transition) and
-            // restores the §4.1 invariant per shard.
+            // proposal landed. This surfaced as a regression in vault-
+            // group removal during graceful shutdown: the membership
+            // cascade `RaftManager::cascade_membership_to_children`
+            // ran immediately after every leader transfer and failed
+            // with "Leader has not yet committed an entry in its
+            // current term". Appending a no-op here is cheap (single
+            // empty entry per term transition) and restores the §4.1
+            // invariant per shard.
             self.state = NodeState::Leader;
             // `next` is the index peers should next receive — the no-op
             // appended below sits at `log.len() + 1`, so peer next-index

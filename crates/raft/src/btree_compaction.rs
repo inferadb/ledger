@@ -69,11 +69,10 @@ impl<B: StorageBackend + 'static> BTreeCompactor<B> {
 
     /// Runs a single compaction cycle across every live vault DB.
     ///
-    /// Slice 2c routes B+ tree compaction per-vault — `compact_tables`
-    /// addresses one vault at a time so a corruption or contention
-    /// spike in one vault DB does not block compaction of the rest.
-    /// Aggregates per-vault `pages_merged` / `pages_freed` for the
-    /// cycle metric.
+    /// Compaction is routed per-vault — `compact_tables` addresses one vault
+    /// at a time so a corruption or contention spike in one vault does not
+    /// block compaction of the rest. Aggregates per-vault `pages_merged` /
+    /// `pages_freed` for the cycle metric.
     fn run_cycle(&self) {
         if !self.is_leader() {
             debug!("Skipping B+ tree compaction cycle (not leader)");

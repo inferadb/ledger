@@ -1,38 +1,17 @@
 //! Per-organization rate-limited queue for vault membership conf-changes.
 //!
-//! [`MembershipQueue`] is the **M2 deliverable** of the Phase 5 centralised
-//! membership plan
-//! (`docs/superpowers/specs/2026-04-27-phase-5-centralised-membership.md`).
-//! It is the primitive that later phases (M3 watcher, M4 dispatcher, M5
-//! per-vault timeout) build on top of.
+//! Serialises per-vault conf-changes through a bounded
+//! [`Semaphore`](tokio::sync::Semaphore) to prevent snapshot storms. Without this
+//! queue a single voter join or leave cascades to every vault simultaneously
+//! (potentially thousands of conf-changes at 1000 vaults × 3 voters), each capable
+//! of triggering a snapshot RPC if the vault's log is stale.
 //!
-//! ## What it does
-//!
-//! Today, [`crate::raft_manager::RaftManager::cascade_membership_to_children`]
-//! fans an `AddLearner` / `PromoteVoter` / `Remove` change out to every
-//! per-organization and per-vault Raft shard in the affected region in
-//! parallel. At 1000 vaults × 3 voters per org, that is ~3000 conf-changes in
-//! flight simultaneously, each capable of triggering a snapshot RPC if the
-//! vault's log is stale. The resulting **snapshot storm** dominates cluster
-//! bandwidth and CPU for minutes.
-//!
-//! Phase 5 layers a per-org `MembershipQueue` between the cascade primitive
-//! and the per-vault shards. The queue serialises in-flight conf-changes
-//! through a [`Semaphore`] of capacity `max_concurrent_snapshot_producing`
-//! (default `2`, matching TiKV's `max_snapshot_per_store` default), and
-//! buffers backlog up to `max_backlog` (default `1000`) before refusing new
-//! enqueues. Cancellation is wired through a [`CancellationToken`] so a
-//! graceful shutdown drains the queue cleanly without leaking pending
-//! tasks.
-//!
-//! ## What M2 ships
-//!
-//! Just the primitive. The cascade in
-//! [`crate::raft_manager::RaftManager::cascade_membership_to_children`]
-//! still fires synchronously through the existing path; the queue
-//! receives no entries yet. M3 wires the
-//! `RegionMembershipWatcher` task that produces entries; M4 wires the
-//! `MembershipDispatcher` consumer that drains them.
+//! The queue gates in-flight conf-changes through a semaphore of capacity
+//! `max_concurrent_snapshot_producing` (default `2`, matching TiKV's
+//! `max_snapshot_per_store` default) and buffers backlog up to `max_backlog`
+//! (default `1000`) before refusing new enqueues. Cancellation is wired through a
+//! [`CancellationToken`] so a graceful shutdown drains cleanly without leaking
+//! pending tasks.
 //!
 //! ## Design notes
 //!

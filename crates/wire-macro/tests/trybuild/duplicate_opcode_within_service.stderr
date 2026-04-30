@@ -1,0 +1,5 @@
+error: duplicate rpc opcode 0x0100 within service `Foo`
+ --> tests/trybuild/duplicate_opcode_within_service.rs:7:13
+  |
+7 |         rpc 0x0100 b(R) -> S;
+  |             ^^^^^^

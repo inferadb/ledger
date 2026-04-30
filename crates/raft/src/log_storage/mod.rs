@@ -1,25 +1,23 @@
-//! Raft storage implementation using inferadb-ledger-store.
+//! Raft log storage backed by [`inferadb_ledger_store`].
 //!
-//! Persistent storage for Raft log entries,
-//! vote state, committed log tracking, and state machine state.
+//! Persists Raft log entries, vote state, committed-log tracking, and the
+//! dual-slot `applied_durable_index` that bounds crash-recovery replay.
 //!
-//! We use the deprecated but non-sealed `RaftStorage` trait which combines
-//! log storage and state machine into one implementation. The v2 traits
-//! (`RaftLogStorage`, `RaftStateMachine`) are sealed in OpenRaft 0.9.
+//! Each Raft group has its own storage rooted at
+//! `{data_dir}/{region}/{organization_id}/raft/`.
 //!
-//! Each region group has its own storage located at:
-//! `regions/{region}/raft/log.db`
+//! The central type is [`RaftLogStore`]. [`RaftLogStore::replay_crash_gap`]
+//! re-drives the `(applied_durable, last_committed]` WAL window after an
+//! unclean shutdown and **must run before the apply worker is spawned** —
+//! concurrent replay and live apply double-apply entries.
 //!
-//! # Lock Ordering Convention
+//! # Lock Ordering
 //!
-//! To prevent deadlocks, locks in this module must be acquired in the following order:
+//! Acquire locks in this order to avoid deadlock:
 //!
-//! 1. `applied_state` - Raft state machine state
-//! 2. `region_chain` - Region chain tracking (height + previous hash)
-//! 3. `vote_cache`, `last_purged_cache` - Caches (independent, no ordering requirement)
-//!
-//! The `region_chain` lock consolidates `region_height` and `previous_region_hash`
-//! into a single lock to eliminate internal ordering issues.
+//! 1. `applied_state` — Raft state-machine state
+//! 2. `region_chain` — block height + previous hash (consolidated lock)
+//! 3. `vote_cache`, `last_purged_cache` — independent, no relative ordering
 
 mod accessor;
 pub mod operations;
@@ -2701,9 +2699,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_block_announcements_sender_stored() {
-        use inferadb_ledger_proto::proto::{
-            BlockAnnouncement, Hash, OrganizationSlug as ProtoOrganizationSlug,
-            VaultSlug as ProtoVaultSlug,
+        use bytes::Bytes;
+        use inferadb_ledger_wire::services::shared::{
+            BlockAnnouncement, Hash, OrganizationSlug, VaultSlug,
         };
 
         let dir = tempdir().expect("create temp dir");
@@ -2727,12 +2725,12 @@ mod tests {
 
         // Verify we can send through the stored sender
         let announcement = BlockAnnouncement {
-            organization: Some(ProtoOrganizationSlug { slug: 1 }),
-            vault: Some(ProtoVaultSlug { slug: 2 }),
+            organization: Some(OrganizationSlug::new(1)),
+            vault: Some(VaultSlug::new(2)),
             height: 3,
-            block_hash: Some(Hash { value: vec![0u8; 32] }),
-            state_root: Some(Hash { value: vec![0u8; 32] }),
-            timestamp: None, // Optional field
+            block_hash: Some(Hash { value: Bytes::from(vec![0u8; 32]) }),
+            state_root: Some(Hash { value: Bytes::from(vec![0u8; 32]) }),
+            timestamp: 0, // Sentinel for unset wire timestamp.
         };
 
         store.block_announcements().unwrap().send(announcement.clone()).expect("send");
@@ -2748,9 +2746,8 @@ mod tests {
     async fn test_apply_to_state_machine_broadcasts_block_announcements() {
         use std::time::{Duration, Instant};
 
-        use inferadb_ledger_proto::proto::{
-            BlockAnnouncement, OrganizationSlug as ProtoOrganizationSlug,
-            VaultSlug as ProtoVaultSlug,
+        use inferadb_ledger_wire::services::shared::{
+            BlockAnnouncement, OrganizationSlug, VaultSlug,
         };
         // openraft trait removed — tests use apply_committed_entries directly
 
@@ -2833,12 +2830,12 @@ mod tests {
             .expect("should receive announcement");
 
         // Verify announcement contents
-        assert_eq!(received.organization, Some(ProtoOrganizationSlug { slug: 42 }));
-        assert_eq!(received.vault, Some(ProtoVaultSlug { slug: 1 }));
+        assert_eq!(received.organization, Some(OrganizationSlug::new(42)));
+        assert_eq!(received.vault, Some(VaultSlug::new(1)));
         assert_eq!(received.height, 1);
         assert!(received.block_hash.is_some(), "block_hash should be set");
         assert!(received.state_root.is_some(), "state_root should be set");
-        assert!(received.timestamp.is_some(), "timestamp should be set");
+        assert!(received.timestamp > 0, "timestamp should be set");
     }
 
     #[tokio::test]
@@ -2987,7 +2984,7 @@ mod tests {
         // Verify that RegionBlock timestamp also comes from proposed_at,
         // not a separate Utc::now() call.
         use chrono::TimeZone;
-        use inferadb_ledger_proto::proto::BlockAnnouncement;
+        use inferadb_ledger_wire::services::shared::BlockAnnouncement;
         // openraft trait removed — tests use apply_committed_entries directly
 
         let dir = tempdir().expect("create temp dir");
@@ -3046,9 +3043,12 @@ mod tests {
         // Check the broadcast announcement timestamp
         let announcement = receiver.try_recv().expect("should have received block announcement");
 
-        let ts = announcement.timestamp.expect("timestamp should be set");
+        // Wire `BlockAnnouncement.timestamp` is UNIX nanoseconds. Reduce back
+        // to seconds so the assertion compares the same units `far_future`
+        // produces.
+        let ts_seconds = (announcement.timestamp / 1_000_000_000) as i64;
         assert_eq!(
-            ts.seconds,
+            ts_seconds,
             far_future.timestamp(),
             "RegionBlock timestamp should use proposed_at (2099), not Utc::now()"
         );

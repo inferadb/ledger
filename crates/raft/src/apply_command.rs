@@ -1,27 +1,23 @@
-//! Out-of-band commands routed alongside committed batches into the apply
-//! pipeline.
+//! Out-of-band commands routed alongside committed batches into the apply pipeline.
 //!
-//! Stage 4 of the snapshot install path. The apply worker (org-level via
-//! [`ApplyWorker::run`](crate::apply_worker::ApplyWorker::run) and per-vault
-//! via the inlined commit pump in
+//! The apply worker (org-level via
+//! [`ApplyWorker::run`](crate::apply_worker::ApplyWorker::run) and per-vault via the inlined
+//! commit pump in
 //! [`RaftManager::start_vault_group`](crate::raft_manager::RaftManager::start_vault_group))
-//! drains a typed [`ApplyCommand`] channel via `tokio::select!` alongside
-//! its `mpsc::Receiver<CommittedBatch>`. The ordering guarantee is strict:
-//! a command observed in a select round runs to completion before the next
-//! batch is processed, preventing any race between an in-flight batch
-//! apply and a snapshot install.
+//! drains a typed [`ApplyCommand`] channel via `tokio::select!` alongside its
+//! `mpsc::Receiver<CommittedBatch>`. The ordering guarantee is strict: a command observed
+//! in a select round runs to completion before the next batch is processed, preventing any
+//! race between an in-flight batch apply and a snapshot install.
 //!
 //! ## Why a separate channel?
 //!
 //! The reactor's commit channel carries only `CommittedBatch` values
-//! (`inferadb_ledger_consensus::committed::CommittedBatch`), keyed by
-//! shard. Repurposing it to carry control messages would require
-//! widening `CommittedBatch` (cascading through the
-//! [`CommitDispatcher`](crate::commit_dispatcher) fan-out and every
-//! downstream consumer) and would leak Stage 4 concepts into the consensus
-//! crate. The dedicated control channel keeps the consensus-crate boundary
-//! clean: `RaftManagerSnapshotInstaller` (Stage 4) emits the command into a
-//! per-shard `ApplyCommand` channel that lives entirely in the raft crate.
+//! (`inferadb_ledger_consensus::committed::CommittedBatch`), keyed by shard. Repurposing
+//! it to carry control messages would require widening `CommittedBatch` (cascading through
+//! the [`CommitDispatcher`](crate::commit_dispatcher) fan-out and every downstream consumer)
+//! and would leak snapshot-install concepts into the consensus crate. The dedicated control
+//! channel keeps the consensus-crate boundary clean: the snapshot installer emits the
+//! command into a per-shard `ApplyCommand` channel that lives entirely in this crate.
 //!
 //! ## Receiver contract
 //!

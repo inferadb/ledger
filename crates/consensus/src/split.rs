@@ -65,9 +65,10 @@ pub enum SplitPhase {
 
 /// Drives the two-phase split lifecycle.
 ///
-/// Phase 1 (Frozen): Routes updated, writes frozen for migrated orgs.
-/// Phase 2 (Migrating): Background state migration in progress.
-/// Complete: Migration finished, old shard data can be cleaned up.
+/// Transitions: `None` → `Frozen` (routes updated, writes frozen for the
+/// migrated key range) → `Migrating` (background state transfer in progress)
+/// → `Complete` (both shards serving traffic; old shard data can be cleaned
+/// up).
 pub struct SplitStateMachine {
     phase: SplitPhase,
     /// Organizations that were migrated (tracked for cleanup).

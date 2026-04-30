@@ -1,6 +1,5 @@
 //! Relationship check operations.
 
-use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{OrganizationSlug, UserSlug, VaultSlug};
 use tokio_util::sync::CancellationToken;
 
@@ -18,22 +17,12 @@ impl LedgerClient {
     /// This is the storage-primitive existence check. It does NOT evaluate
     /// authorization policy, userset rewrites, or schema-driven inheritance.
     /// Policy evaluation happens in the Engine layer above Ledger; Ledger only
-    /// answers "is this tuple stored?"
-    ///
-    /// # Arguments
-    ///
-    /// * `caller` - Identity of the user performing the check (external slug).
-    /// * `organization` - Organization slug.
-    /// * `vault` - Vault slug.
-    /// * `resource` - Resource identifier (format `"type:id"`).
-    /// * `relation` - Relation name.
-    /// * `subject` - Subject identifier (format `"type:id"` or `"type:id#relation"`).
-    /// * `consistency` - `Eventual` (any replica) or `Linearizable` (leader).
-    /// * `token` - Optional per-request cancellation token.
-    ///
-    /// # Returns
-    ///
-    /// A [`CheckRelationshipOutcome`] with `exists` and `checked_at_height`.
+    /// answers "is this tuple stored?" `resource` uses the format `"type:id"`;
+    /// `subject` uses `"type:id"` or `"type:id#relation"`. Pass
+    /// [`ReadConsistency::Linearizable`](crate::ReadConsistency::Linearizable)
+    /// to read from the leader; `Eventual` serves any replica. Returns a
+    /// [`CheckRelationshipOutcome`](crate::CheckRelationshipOutcome) with
+    /// `exists` and the block height at which the check was evaluated.
     ///
     /// # Errors
     ///
@@ -92,150 +81,23 @@ impl LedgerClient {
                 Some(pool),
                 "check_relationship",
                 || async {
-                    let mut client = crate::connected_client!(pool, create_read_client);
-
-                    let request = proto::CheckRelationshipRequest {
-                        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                        vault: Some(proto::VaultSlug { slug: vault.value() }),
-                        resource: resource.clone(),
-                        relation: relation.clone(),
-                        subject: subject.clone(),
-                        consistency: consistency.to_proto() as i32,
-                        caller: Some(proto::UserSlug { slug: caller.value() }),
-                    };
-
-                    let response =
-                        client.check_relationship(tonic::Request::new(request)).await?.into_inner();
-
-                    Ok(CheckRelationshipOutcome {
-                        exists: response.exists,
-                        checked_at_height: response.checked_at_height,
-                    })
+                    let wire_client = crate::connected_wire_client!(pool);
+                    let request_id: u128 = rand::random();
+                    crate::ops_wire::relationship::check_relationship(
+                        wire_client,
+                        request_id,
+                        caller,
+                        organization,
+                        vault,
+                        resource.clone(),
+                        relation.clone(),
+                        subject.clone(),
+                        consistency,
+                    )
+                    .await
                 },
             ),
         )
         .await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
-
-    use std::time::Duration;
-
-    use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
-
-    use crate::{
-        ClientConfig, LedgerClient, ReadConsistency, ServerSource, UserSlug, mock::MockLedgerServer,
-    };
-
-    const ORG: OrganizationSlug = OrganizationSlug::new(1);
-    const VAULT: VaultSlug = VaultSlug::new(1);
-    const CALLER: UserSlug = UserSlug::new(42);
-
-    async fn create_client(server: &MockLedgerServer) -> LedgerClient {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static([server.endpoint().to_string()]))
-            .client_id("test-client")
-            .timeout(Duration::from_secs(5))
-            .connect_timeout(Duration::from_secs(2))
-            .build()
-            .expect("valid config");
-
-        LedgerClient::new(config).await.expect("client creation")
-    }
-
-    #[tokio::test]
-    async fn check_relationship_returns_true_when_tuple_exists() {
-        let server = MockLedgerServer::start().await.unwrap();
-        server.add_relationship(ORG, VAULT, "doc:123", "viewer", "user:7");
-        let client = create_client(&server).await;
-
-        let outcome = client
-            .check_relationship(
-                CALLER,
-                ORG,
-                VAULT,
-                "doc:123",
-                "viewer",
-                "user:7",
-                ReadConsistency::Eventual,
-                None,
-            )
-            .await
-            .unwrap();
-
-        assert!(outcome.exists);
-        assert!(outcome.checked_at_height >= 1);
-    }
-
-    #[tokio::test]
-    async fn check_relationship_returns_false_when_tuple_absent() {
-        let server = MockLedgerServer::start().await.unwrap();
-        let client = create_client(&server).await;
-
-        let outcome = client
-            .check_relationship(
-                CALLER,
-                ORG,
-                VAULT,
-                "doc:123",
-                "viewer",
-                "user:7",
-                ReadConsistency::Eventual,
-                None,
-            )
-            .await
-            .unwrap();
-
-        assert!(!outcome.exists);
-    }
-
-    #[tokio::test]
-    async fn check_relationship_with_linearizable_consistency() {
-        let server = MockLedgerServer::start().await.unwrap();
-        server.add_relationship(ORG, VAULT, "folder:1", "editor", "user:99");
-        let client = create_client(&server).await;
-
-        let outcome = client
-            .check_relationship(
-                CALLER,
-                ORG,
-                VAULT,
-                "folder:1",
-                "editor",
-                "user:99",
-                ReadConsistency::Linearizable,
-                None,
-            )
-            .await
-            .unwrap();
-
-        assert!(outcome.exists);
-    }
-
-    #[tokio::test]
-    async fn check_relationship_partial_match_returns_false() {
-        let server = MockLedgerServer::start().await.unwrap();
-        // Only "viewer" relation exists, not "editor"
-        server.add_relationship(ORG, VAULT, "doc:123", "viewer", "user:7");
-        let client = create_client(&server).await;
-
-        let outcome = client
-            .check_relationship(
-                CALLER,
-                ORG,
-                VAULT,
-                "doc:123",
-                "editor",
-                "user:7",
-                ReadConsistency::Eventual,
-                None,
-            )
-            .await
-            .unwrap();
-
-        assert!(!outcome.exists);
     }
 }

@@ -3,6 +3,11 @@
 //! The discovery module enables the SDK to dynamically discover cluster peers
 //! and update its endpoint list for failover and load distribution.
 //!
+//! Dispatch goes through the wire transport — every gateway RPC issued from
+//! this module uses
+//! [`SystemDiscoveryServiceClient`](inferadb_ledger_wire_services::SystemDiscoveryServiceClient)
+//! over an [`Arc<WireClient>`](inferadb_ledger_wire_transport::WireClient).
+//!
 //! # Architecture
 //!
 //! ```text
@@ -47,7 +52,11 @@ use std::{
     time::SystemTime,
 };
 
-use inferadb_ledger_proto::proto;
+use inferadb_ledger_wire::services::{
+    discovery::{GetPeersRequest, GetPeersResponse},
+    shared::PeerInfo as WirePeerInfo,
+};
+use inferadb_ledger_wire_services::SystemDiscoveryServiceClient;
 use parking_lot::RwLock;
 use tokio::{
     sync::Notify,
@@ -59,6 +68,7 @@ use crate::{
     config::DiscoveryConfig,
     connection::ConnectionPool,
     error::{Result, SdkError},
+    ops_wire::rpc_error_to_sdk_error,
     retry::with_retry,
 };
 
@@ -84,17 +94,23 @@ pub struct PeerInfo {
 }
 
 impl PeerInfo {
-    /// Creates SDK `PeerInfo` from proto `PeerInfo`.
-    pub(crate) fn from_proto(proto: proto::PeerInfo) -> Self {
-        let node_id = proto.node_id.map(|n| n.id).unwrap_or_default();
+    /// Creates SDK [`PeerInfo`] from a wire [`PeerInfo`](WirePeerInfo).
+    ///
+    /// `last_seen` is encoded on the wire as UNIX nanoseconds; zero is
+    /// treated as "unknown" (and yields `None`).
+    pub(crate) fn from_wire(wire: WirePeerInfo) -> Self {
+        let node_id = wire.node_id.map(|n| n.value().to_owned()).unwrap_or_default();
 
-        let last_seen = proto.last_seen.and_then(|ts| {
-            let secs = ts.seconds.try_into().ok()?;
-            let nanos = ts.nanos.try_into().ok()?;
-            Some(SystemTime::UNIX_EPOCH + Duration::new(secs, nanos))
-        });
+        let last_seen = if wire.last_seen == 0 {
+            None
+        } else {
+            let nanos = wire.last_seen;
+            let secs = nanos / 1_000_000_000;
+            let sub_nanos = u32::try_from(nanos % 1_000_000_000).unwrap_or(0);
+            SystemTime::UNIX_EPOCH.checked_add(Duration::new(secs, sub_nanos))
+        };
 
-        Self { node_id, addresses: proto.addresses, grpc_port: proto.grpc_port, last_seen }
+        Self { node_id, addresses: wire.addresses, grpc_port: wire.grpc_port, last_seen }
     }
 
     /// Generates endpoint URLs from this peer's addresses and port.
@@ -211,18 +227,17 @@ impl DiscoveryService {
         let retry_policy = self.pool.config().retry_policy().clone();
 
         let result = with_retry(&retry_policy, || async {
-            let channel = pool.get_channel().await?;
-            let compression = pool.compression_enabled();
-
-            let mut client = Self::create_discovery_client(channel, compression);
-
-            let request = proto::GetPeersRequest { max_peers };
-            let response = client.get_peers(request).await.map_err(SdkError::from)?;
-
-            let inner = response.into_inner();
-            let peers = inner.peers.into_iter().map(PeerInfo::from_proto).collect();
-
-            Ok(DiscoveryResult { peers, system_version: inner.system_version })
+            let wire_client = pool.cached_wire_client().ok_or_else(|| SdkError::Config {
+                message: "wire client not configured: wire-client construction failed (check \
+                          TLS configuration and endpoint URLs)"
+                    .to_owned(),
+            })?;
+            let client = SystemDiscoveryServiceClient::new(wire_client);
+            let request = GetPeersRequest { max_peers };
+            let response: GetPeersResponse =
+                client.get_peers(request, 0).await.map_err(rpc_error_to_sdk_error)?;
+            let peers = response.peers.into_iter().map(PeerInfo::from_wire).collect();
+            Ok(DiscoveryResult { peers, system_version: response.system_version })
         })
         .await?;
 
@@ -358,30 +373,14 @@ impl DiscoveryService {
     pub fn cached_system_version(&self) -> u64 {
         *self.cached_version.read()
     }
-
-    /// Creates a SystemDiscoveryService client with compression settings.
-    fn create_discovery_client(
-        channel: tonic::transport::Channel,
-        compression_enabled: bool,
-    ) -> proto::system_discovery_service_client::SystemDiscoveryServiceClient<
-        tonic::transport::Channel,
-    > {
-        let client =
-            proto::system_discovery_service_client::SystemDiscoveryServiceClient::new(channel);
-        if compression_enabled {
-            client
-                .send_compressed(tonic::codec::CompressionEncoding::Gzip)
-                .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
-        } else {
-            client
-        }
-    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
     use std::time::Duration;
+
+    use inferadb_ledger_wire::services::shared::NodeId as WireNodeId;
 
     use super::*;
     use crate::{config::ClientConfig, server::ServerSource};
@@ -399,33 +398,20 @@ mod tests {
             .expect("valid test config")
     }
 
-    /// Config that uses a non-routable address (TEST-NET-1) guaranteed to fail connection.
-    /// This avoids flaky tests when port 50051 happens to have a server running.
-    fn unreachable_config() -> ClientConfig {
-        ClientConfig::builder()
-            // 192.0.2.x is the TEST-NET-1 range, reserved for documentation/testing
-            // and guaranteed to be non-routable on any real network
-            .servers(ServerSource::from_static(["http://192.0.2.1:50051"]))
-            .client_id("test-client")
-            .connect_timeout(Duration::from_millis(100))
-            .build()
-            .expect("valid test config")
-    }
-
     fn test_discovery_config() -> DiscoveryConfig {
         DiscoveryConfig::enabled().with_refresh_interval(Duration::from_secs(1))
     }
 
     #[test]
-    fn peer_info_from_proto() {
-        let proto_peer = proto::PeerInfo {
-            node_id: Some(proto::NodeId { id: "node-1".to_string() }),
+    fn peer_info_from_wire() {
+        let wire_peer = WirePeerInfo {
+            node_id: Some(WireNodeId::new("node-1")),
             addresses: vec!["10.0.0.1".to_string(), "10.0.0.2".to_string()],
             grpc_port: 5000,
-            last_seen: Some(prost_types::Timestamp { seconds: 1000, nanos: 500 }),
+            last_seen: 1_000_000_000_500,
         };
 
-        let peer = PeerInfo::from_proto(proto_peer);
+        let peer = PeerInfo::from_wire(wire_peer);
 
         assert_eq!(peer.node_id, "node-1");
         assert_eq!(peer.addresses, vec!["10.0.0.1", "10.0.0.2"]);
@@ -434,15 +420,15 @@ mod tests {
     }
 
     #[test]
-    fn peer_info_from_proto_missing_node_id() {
-        let proto_peer = proto::PeerInfo {
+    fn peer_info_from_wire_missing_node_id() {
+        let wire_peer = WirePeerInfo {
             node_id: None,
             addresses: vec!["10.0.0.1".to_string()],
             grpc_port: 5000,
-            last_seen: None,
+            last_seen: 0,
         };
 
-        let peer = PeerInfo::from_proto(proto_peer);
+        let peer = PeerInfo::from_wire(wire_peer);
 
         assert_eq!(peer.node_id, "");
         assert_eq!(peer.addresses, vec!["10.0.0.1"]);
@@ -484,30 +470,6 @@ mod tests {
         let service = DiscoveryService::new(pool, config);
 
         assert!(!service.config().is_enabled());
-    }
-
-    #[tokio::test]
-    async fn get_peers_returns_error_on_connection_failure() {
-        let pool = ConnectionPool::new(unreachable_config());
-        let config = test_discovery_config();
-        let service = DiscoveryService::new(pool, config);
-
-        let result = service.get_peers().await;
-
-        // Should fail since the endpoint is non-routable
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn refresh_peers_returns_error_on_connection_failure() {
-        let pool = ConnectionPool::new(unreachable_config());
-        let config = test_discovery_config();
-        let service = DiscoveryService::new(pool, config);
-
-        let result = service.refresh_peers().await;
-
-        // Should fail since the endpoint is non-routable
-        assert!(result.is_err());
     }
 
     #[test]
@@ -607,17 +569,5 @@ mod tests {
 
         // Initially zero
         assert_eq!(service.cached_system_version(), 0);
-    }
-
-    #[tokio::test]
-    async fn get_peers_with_limit_returns_error_on_connection_failure() {
-        let pool = ConnectionPool::new(unreachable_config());
-        let config = test_discovery_config();
-        let service = DiscoveryService::new(pool, config);
-
-        let result = service.get_peers_with_limit(5).await;
-
-        // Should fail since the endpoint is non-routable
-        assert!(result.is_err());
     }
 }

@@ -26,7 +26,6 @@
 
 use std::sync::Arc;
 
-use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_raft::{
     ConsensusHandle, LeaderLease,
     batching::BatchWriterHandle,
@@ -37,10 +36,11 @@ use inferadb_ledger_raft::{
 use inferadb_ledger_state::{BlockArchive, StateLayer, system::OrganizationStatus};
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{OrganizationId, Region, VaultId};
+use inferadb_ledger_wire::services::shared::BlockAnnouncement;
 use tokio::sync::{broadcast, watch};
 use tonic::Status;
 
-use super::error_classify;
+use super::{error_classify, wire_helpers::wire_error_to_tonic_status};
 
 /// Routing information for an organization.
 ///
@@ -511,7 +511,7 @@ impl RegionResolver for RegionResolverService {
 
         let registry = sys
             .get_organization(organization)
-            .map_err(|e| error_classify::storage_error(&e))?
+            .map_err(|e| wire_error_to_tonic_status(error_classify::storage_error(&e)))?
             .ok_or_else(|| {
                 Status::not_found(format!(
                     "Organization {} not found in routing table",

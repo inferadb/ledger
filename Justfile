@@ -15,7 +15,6 @@ default:
     @echo ""
     @echo "Before a PR:"
     @echo "  just ci             # full pre-PR gate (adds doc-check)"
-    @echo "  just proto          # regenerate proto code (run after .proto edits)"
     @echo ""
     @echo "Troubleshooting:"
     @echo "  just doctor             # check toolchain, ports, disk"
@@ -87,19 +86,6 @@ test-stress:
 test-stress-ff:
     cargo +{{rust}} test -p inferadb-ledger-server --test stress -- --test-threads=4 --fail-fast
 
-# Run external tests against a live cluster (requires LEDGER_ENDPOINTS env var).
-# Skips gracefully if no cluster is available.
-test-external:
-    cargo +{{rust}} test -p inferadb-ledger-server --test external -- --test-threads=1 --nocapture
-
-# Start a local cluster and run server external tests against it.
-test-external-cluster:
-    ./scripts/run-integration-tests.sh server
-
-# Start a local cluster and run SDK e2e tests against it.
-test-sdk-cluster:
-    ./scripts/run-integration-tests.sh sdk
-
 # Stress: smoke-level throughput tests (~1 min).
 test-stress-quick:
     ./scripts/stress-quick.sh
@@ -119,10 +105,6 @@ test-cluster-lifecycle:
 # Binary-level crash recovery drill: SIGKILL a node mid-write, verify convergence.
 test-crash-recovery-drill:
     ./scripts/crash-recovery.sh
-
-# gRPC channel caching regression test (TIME_WAIT accumulation).
-test-port-consumption:
-    ./scripts/check-port-consumption.sh
 
 # Run crash recovery tests — dual-slot commit protocol verification in the store crate.
 test-store-recovery:
@@ -192,33 +174,6 @@ doc-open:
     cargo +{{rust}} doc --workspace --no-deps --open
 
 # ============================================================================
-# Protobuf
-# ============================================================================
-
-# Regenerate proto bindings from proto/ledger/v1/*.proto and copy to crates/proto/src/generated/.
-proto:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    cargo +{{rust}} clean -p inferadb-ledger-proto
-    cargo +{{rust}} build -p inferadb-ledger-proto
-    shopt -s nullglob
-    dirs=(target/debug/build/inferadb-ledger-proto-*/out)
-    if [ "${#dirs[@]}" -ne 1 ]; then
-        echo "error: expected exactly one build output dir, found ${#dirs[@]}:" >&2
-        printf '  %s\n' "${dirs[@]}" >&2
-        echo "hint: run 'cargo clean -p inferadb-ledger-proto' and retry" >&2
-        exit 1
-    fi
-    out="${dirs[0]}"
-    cp "$out/ledger.v1.rs" crates/proto/src/generated/
-    cp "$out/ledger_v1_descriptor.bin" crates/proto/src/generated/
-    echo "proto code regenerated from $out"
-
-# Lint protobuf definitions
-proto-lint:
-    cd proto && buf lint
-
-# ============================================================================
 # Run
 # ============================================================================
 
@@ -267,7 +222,7 @@ udeps:
 # Bump the workspace version and every published internal crate's dependency pin.
 # Rewrites [workspace.package].version (member crates inherit via
 # `version.workspace = true`) and the `version = "..."` pin for each published
-# internal crate (currently types, proto, sdk) under [workspace.dependencies].
+# internal crate (currently types, sdk) under [workspace.dependencies].
 # Path-only internal crates (store, state, raft, consensus, services, server,
 # test-utils, profile, fs) have no version pin and are correctly skipped.
 # Validates semver; prints a diff; does NOT commit.

@@ -1,9 +1,6 @@
 //! Application domain types: apps, credentials, assertions, vault connections.
 
-use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{AppSlug, ClientAssertionId as DomainClientAssertionId, VaultSlug};
-
-use crate::proto_util::proto_timestamp_to_system_time;
 
 /// SDK representation of a client application.
 #[derive(Debug, Clone)]
@@ -109,57 +106,4 @@ pub enum AppCredentialType {
     MtlsSelfSigned,
     /// Client assertion (private key JWT).
     ClientAssertion,
-}
-
-impl AppCredentialType {
-    pub(crate) fn to_proto(self) -> i32 {
-        match self {
-            AppCredentialType::ClientSecret => proto::AppCredentialType::ClientSecret as i32,
-            AppCredentialType::MtlsCa => proto::AppCredentialType::MtlsCa as i32,
-            AppCredentialType::MtlsSelfSigned => proto::AppCredentialType::MtlsSelfSigned as i32,
-            AppCredentialType::ClientAssertion => proto::AppCredentialType::ClientAssertion as i32,
-        }
-    }
-}
-
-/// Creates an [`AppInfo`] from a protobuf message.
-pub(crate) fn app_info_from_proto(p: &proto::AppInfo) -> AppInfo {
-    AppInfo {
-        slug: AppSlug::new(p.slug.as_ref().map_or(0, |s| s.slug)),
-        name: p.name.clone(),
-        description: p.description.clone(),
-        enabled: p.enabled,
-        credentials: p.credentials.as_ref().map(|c| AppCredentialsInfo {
-            client_secret_enabled: c.client_secret_enabled,
-            mtls_ca_enabled: c.mtls_ca_enabled,
-            mtls_self_signed_enabled: c.mtls_self_signed_enabled,
-            client_assertion_enabled: c.client_assertion_enabled,
-        }),
-        created_at: p.created_at.as_ref().and_then(proto_timestamp_to_system_time),
-        updated_at: p.updated_at.as_ref().and_then(proto_timestamp_to_system_time),
-    }
-}
-
-/// Creates an [`AppClientAssertionInfo`] from a protobuf message.
-pub(crate) fn assertion_info_from_proto(
-    p: &proto::AppClientAssertionInfo,
-) -> AppClientAssertionInfo {
-    AppClientAssertionInfo {
-        id: DomainClientAssertionId::new(p.id.as_ref().map_or(0, |id| id.id)),
-        name: p.name.clone(),
-        enabled: p.enabled,
-        expires_at: p.expires_at.as_ref().and_then(proto_timestamp_to_system_time),
-        created_at: p.created_at.as_ref().and_then(proto_timestamp_to_system_time),
-    }
-}
-
-/// Creates an [`AppVaultConnectionInfo`] from a protobuf message.
-pub(crate) fn vault_connection_from_proto(
-    p: &proto::AppVaultConnectionInfo,
-) -> AppVaultConnectionInfo {
-    AppVaultConnectionInfo {
-        vault_slug: VaultSlug::new(p.vault.as_ref().map_or(0, |s| s.slug)),
-        allowed_scopes: p.allowed_scopes.clone(),
-        created_at: p.created_at.as_ref().and_then(proto_timestamp_to_system_time),
-    }
 }

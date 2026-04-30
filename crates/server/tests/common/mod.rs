@@ -17,6 +17,7 @@
 )]
 
 use std::{
+    net::SocketAddr,
     sync::{
         Arc,
         atomic::{AtomicU16, Ordering},
@@ -50,33 +51,15 @@ pub enum TestTransport {
     Tcp,
 }
 
-/// Creates a gRPC channel — UDS for paths starting with `/`, TCP otherwise.
-pub fn connect_channel(addr: &str) -> tonic::transport::Channel {
-    if addr.starts_with('/') {
-        let path = std::path::PathBuf::from(addr);
-        tonic::transport::Endpoint::try_from("http://[::]:50051")
-            .unwrap()
-            .connect_with_connector_lazy(tower::service_fn(move |_: tonic::transport::Uri| {
-                let path = path.clone();
-                async move {
-                    Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(
-                        tokio::net::UnixStream::connect(&path).await?,
-                    ))
-                }
-            }))
-    } else {
-        let endpoint = format!("http://{}", addr);
-        tonic::transport::Channel::from_shared(endpoint).unwrap().connect_lazy()
-    }
-}
-
-use inferadb_ledger_proto::proto::{JoinClusterRequest, admin_service_client::AdminServiceClient};
 use inferadb_ledger_raft::{
     ConsensusHandle, OrganizationGroup, RaftManager, RegionConfig, RegionGroup, SystemGroup,
 };
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::{FileBackend, crypto::InMemoryKeyManager};
 use inferadb_ledger_test_utils::TestDir;
+use inferadb_ledger_wire_transport::{
+    ClientConfig as WireClientConfig, WireClient, tls as wire_tls,
+};
 use tokio::time::timeout;
 
 /// A test node in a cluster.
@@ -88,6 +71,15 @@ pub struct TestNode {
     pub id: u64,
     /// The gRPC address (UDS socket path or TCP "ip:port").
     pub addr: String,
+    /// The wire-transport (QUIC over UDP) bind address. `Some(_)` only when
+    /// the cluster was constructed with [`TestCluster::with_wire_transport`]
+    /// — the default Grpc-mode cluster leaves this `None`.
+    ///
+    /// F.1.f.2 migration scaffold: tests that opted into the wire builder
+    /// reach the same backend as the legacy tonic helpers, but on the wire
+    /// listener. Stage F.1.f.2.Final deletes this field once every test has
+    /// been migrated and the legacy tonic surface is removed.
+    pub wire_addr: Option<SocketAddr>,
     /// The GLOBAL consensus handle.
     pub handle: Arc<ConsensusHandle>,
     /// The GLOBAL state layer (internally thread-safe via inferadb-ledger-store MVCC).
@@ -161,10 +153,9 @@ impl TestNode {
     /// Returns every per-organization shard group registered for `region`
     /// on this node.
     ///
-    /// Under Task 3's tier split the data-region group at
-    /// `OrganizationId::new(0)` is the regional control plane
-    /// ([`RegionGroup`]), not a data-plane shard, so it is excluded from
-    /// this collection. Callers iterating "every shard" mean the
+    /// The data-region group at `OrganizationId::new(0)` is the regional
+    /// control plane ([`RegionGroup`]), not a data-plane shard, so it is
+    /// excluded from this collection. Callers iterating "every shard" mean the
     /// per-organization groups; the data-region group is reachable via
     /// [`region_group`].
     pub fn shard_groups(
@@ -258,6 +249,21 @@ pub struct TestCluster {
     /// manager; a fresh manager after restart would not unseal any existing
     /// vault.
     key_manager: Arc<dyn inferadb_ledger_store::crypto::RegionKeyManager>,
+    /// rcgen-generated server cert chain held alive for the cluster's
+    /// lifetime when the cluster was constructed via
+    /// [`TestCluster::with_wire_transport`]. Each wire-mode node runs its
+    /// `LedgerServer` against this PEM material; the same cert is also
+    /// loaded into the cluster's [`Self::wire_client_quic`] template so
+    /// `wire_client_for` can connect to any node without bundling a CA.
+    /// `None` for the default Grpc-mode cluster.
+    ///
+    /// F.1.f.2 migration scaffold: deleted in stage F.1.f.2.Final alongside
+    /// the legacy tonic helpers.
+    _wire_server_cert: Option<rustls::pki_types::CertificateDer<'static>>,
+    /// Pre-built quinn client config used by [`Self::wire_client_for`].
+    /// `Some(_)` only in wire mode (built once at construction so each
+    /// `wire_client_for` call doesn't re-derive rustls roots).
+    wire_client_quic: Option<quinn::ClientConfig>,
 }
 
 impl TestCluster {
@@ -270,36 +276,79 @@ impl TestCluster {
     /// explicitly — this matches production, where data regions are created
     /// through cluster consensus rather than being pinned at startup.
     pub async fn new(size: usize) -> Self {
-        Self::build(size, 0, true).await
+        Self::build_wire(size, 0, true, None).await
     }
 
     /// Creates a new test cluster with the given number of nodes and data regions.
-    ///
-    /// Each node gets a full production bootstrap (saga, blinding key, background
-    /// jobs) plus `num_data_regions` data regions in addition to the GLOBAL region.
     pub async fn with_data_regions(size: usize, num_data_regions: usize) -> Self {
-        Self::build(size, num_data_regions, true).await
+        Self::build_wire(size, num_data_regions, true, None).await
     }
 
     /// Creates a cluster without the email blinding key configured.
-    ///
-    /// Used to test that onboarding RPCs return `FAILED_PRECONDITION` when
-    /// the server is started without a blinding key.
     pub async fn without_blinding_key(size: usize, num_data_regions: usize) -> Self {
-        Self::build(size, num_data_regions, false).await
+        Self::build_wire(size, num_data_regions, false, None).await
     }
 
-    /// Creates a cluster using TCP transport instead of UDS.
-    ///
-    /// Required for tests that need `SocketAddr` (e.g., `discover_node_info`)
-    /// or TCP channel caching validation (port consumption tests).
+    /// Creates a multi-region cluster on the wire transport. Retained as a
+    /// thin alias for [`Self::with_data_regions`] now that wire is the only
+    /// transport.
     pub async fn with_tcp(size: usize) -> Self {
-        Self::build_full(size, 1, true, None, TestTransport::Tcp).await
+        Self::build_wire(size, 1, true, None).await
     }
 
-    /// Creates a multi-region cluster using TCP transport.
+    /// Multi-region wire cluster (legacy alias).
     pub async fn with_tcp_data_regions(size: usize, num_data_regions: usize) -> Self {
-        Self::build_full(size, num_data_regions, true, None, TestTransport::Tcp).await
+        Self::build_wire(size, num_data_regions, true, None).await
+    }
+
+    /// Creates a single-node cluster running on the in-house wire
+    /// transport (QUIC over UDP) instead of the legacy tonic gRPC server.
+    ///
+    /// F.1.f.2 migration scaffold. The legacy [`Self::new`] /
+    /// [`Self::with_tcp`] path pins [`crate::config::TransportKind::Grpc`]
+    /// because [`inferadb_ledger_services::server::LedgerServer::serve`] is
+    /// either-or — it binds tonic XOR wire, never both. Tests that opt
+    /// into the wire stack call this builder; they get a real
+    /// `LedgerServer` whose `transport_kind = Wire` and whose listener is
+    /// the QUIC port. The bootstrap path generates an rcgen self-signed
+    /// `localhost` cert and feeds it through `--tls-cert` / `--tls-key`,
+    /// same as production wire deployments.
+    ///
+    /// Multi-node wire bootstrap lives on
+    /// [`Self::with_wire_transport_and_size`] — `with_wire_transport` is
+    /// the single-node entry point retained for callers that don't need
+    /// to reason about cluster size.
+    ///
+    /// Stage F.1.f.2.Final deletes this builder alongside the legacy
+    /// Grpc-mode `TestCluster` once every test has migrated.
+    pub async fn with_wire_transport(num_data_regions: usize) -> Self {
+        Self::build_wire(1, num_data_regions, true, None).await
+    }
+
+    /// Creates a multi-node cluster running on the in-house wire transport.
+    ///
+    /// F.1.f.2.Stage1b — companion to [`Self::with_wire_transport`] for
+    /// tests that need a multi-node cluster on the wire surface. Each
+    /// node binds `LedgerServer::serve_wire`; subsequent nodes join
+    /// the cluster via the wire-side `AdminServiceClient::join_cluster`
+    /// RPC against node 0's wire listener (no tonic listeners anywhere).
+    ///
+    /// Inter-node Raft uses
+    /// [`inferadb_ledger_raft::wire_consensus_transport::WireConsensusTransport`]
+    /// — the bootstrap path automatically installs a
+    /// [`inferadb_ledger_raft::node_registry::WireClientTemplate`] on
+    /// each node's [`inferadb_ledger_raft::node_registry::NodeConnectionRegistry`]
+    /// when `transport = Wire`.
+    ///
+    /// All nodes share a single self-signed cert with `localhost` +
+    /// `127.0.0.1` SANs — sufficient for loopback peer dials because
+    /// the cert is also loaded as the trust anchor on every node's
+    /// outgoing client config (see `crates/server/src/tls.rs`).
+    ///
+    /// Stage F.1.f.2.Final deletes this builder alongside the legacy
+    /// Grpc-mode `TestCluster` once every test has migrated.
+    pub async fn with_wire_transport_and_size(num_data_regions: usize, size: usize) -> Self {
+        Self::build_wire(size, num_data_regions, true, None).await
     }
 
     /// Creates a cluster with a custom rate limit config.
@@ -310,337 +359,363 @@ impl TestCluster {
         size: usize,
         rate_limit: inferadb_ledger_types::config::RateLimitConfig,
     ) -> Self {
-        Self::build_full(size, 1, true, Some(rate_limit), TestTransport::Uds).await
+        Self::build_wire(size, 1, true, Some(rate_limit)).await
     }
 
-    async fn build(size: usize, num_data_regions: usize, include_blinding_key: bool) -> Self {
-        Self::build_full(size, num_data_regions, include_blinding_key, None, TestTransport::Uds)
-            .await
-    }
-
-    async fn build_full(
+    /// Bootstraps a single-node wire-mode cluster.
+    ///
+    /// Mirrors the wire-mode handling on
+    /// [`crate::common::wire_cluster::WireTestCluster::start`] but runs
+    /// the *full* `LedgerServer::serve_wire` pipeline (all 14 services
+    /// dispatched through `LedgerWireDispatcher`), not the
+    /// HealthService-only scaffold the standalone harness uses.
+    ///
+    /// F.1.f.2 migration scaffold; deleted in stage F.1.f.2.Final
+    /// alongside the rest of the dual-track wire infrastructure.
+    async fn build_wire(
         size: usize,
         num_data_regions: usize,
         include_blinding_key: bool,
         rate_limit_override: Option<inferadb_ledger_types::config::RateLimitConfig>,
-        transport: TestTransport,
     ) -> Self {
-        assert!(size >= 1, "cluster must have at least 1 node");
+        use std::io::Write as _;
+
+        assert!(size >= 1, "wire-mode cluster must have at least 1 node");
 
         let socket_dir = TestDir::new();
-        let cluster_id = next_cluster_id();
-        let base_port = match transport {
-            TestTransport::Tcp => allocate_ports(size as u16),
-            TestTransport::Uds => 0, // unused
-        };
+        // Tracked via the same global counter as the legacy harness so
+        // troubleshooting log lines stay aligned across builders.
+        let _cluster_id = next_cluster_id();
+        let base_port = allocate_ports(size as u16);
         let mut nodes = Vec::with_capacity(size);
 
         // Shared key manager for all nodes (enables TokenService with JWT support).
-        // Uses ALL_REGIONS to cover both GLOBAL (user sessions) and org-scoped keys.
         let key_manager: Arc<dyn inferadb_ledger_store::crypto::RegionKeyManager> =
             Arc::new(InMemoryKeyManager::generate_for_regions(&inferadb_ledger_types::ALL_REGIONS));
 
-        // Step 1: Start the bootstrap node with cluster_id pre-written so it
-        // takes the restart path (immediate startup). It becomes leader, then
-        // we dynamically add nodes.
-        let (node_addr, socket_path, listen) = match transport {
-            TestTransport::Uds => {
-                let sp = socket_dir.path().join(format!("c{cluster_id}-n0.sock"));
-                let addr = sp.to_string_lossy().to_string();
-                (addr, Some(sp), None)
-            },
-            TestTransport::Tcp => {
-                let tcp_addr: std::net::SocketAddr =
-                    format!("127.0.0.1:{base_port}").parse().unwrap();
-                (tcp_addr.to_string(), None, Some(tcp_addr))
-            },
-        };
-        let temp_dir = TestDir::new();
-        let data_dir = temp_dir.path().to_path_buf();
+        // Generate ONE self-signed cert+key shared across every node.
+        // SANs: `localhost` (matches `tls_server_name` defaulted on
+        // every `Config` literal below) and `127.0.0.1` so peer dials
+        // by IP also satisfy SNI verification. Each node loads the
+        // same PEM into both server crypto (incoming connections) and
+        // client crypto (outgoing peer dials), making any pair of
+        // loopback nodes able to mutually trust each other without a
+        // separate CA.
+        let cert = rcgen::generate_simple_self_signed(vec![
+            "localhost".to_string(),
+            "127.0.0.1".to_string(),
+        ])
+        .expect("rcgen self-signed cert with localhost+IP SAN");
+        let cert_pem = cert.cert.pem();
+        let key_pem = cert.key_pair.serialize_pem();
+        let cert_der = rustls::pki_types::CertificateDer::from(cert.cert.der().to_vec());
 
-        // Bootstrap node: write cluster_id so bootstrap_node takes the restart
-        // path (starts background jobs, marks ready) instead of the fresh path
-        // (which blocks waiting for InitCluster RPC).
-        inferadb_ledger_server::cluster_id::write_cluster_id(&data_dir, 1)
-            .expect("write cluster_id for bootstrap node");
+        // Pre-compute every node's wire address so subsequent nodes
+        // know node 0's listener at the moment they bootstrap.
+        let wire_addrs: Vec<std::net::SocketAddr> = (0..size)
+            .map(|i| {
+                format!("127.0.0.1:{}", base_port + i as u16)
+                    .parse()
+                    .expect("parse loopback wire addr")
+            })
+            .collect();
 
-        // Uses auto-generated Snowflake ID for realistic testing.
-        let backup_config = inferadb_ledger_types::config::BackupConfig::builder()
-            .destination(data_dir.join("backups").to_string_lossy().to_string())
+        // Build the shared QUIC client config once — used by every
+        // `wire_client_for` invocation (test-side wire clients) and by
+        // the inline wire-side `AdminServiceClient::join_cluster`
+        // call below. Trust-skip is gated by the `insecure-skip-verify`
+        // feature on the wire-transport dev-dependency in
+        // `crates/server/Cargo.toml`; mirrors the pattern in
+        // `WireTestCluster::wire_client_for`.
+        let client_crypto = wire_tls::rustls_client_crypto_skip_verify();
+        let client_quic = wire_tls::client_config(client_crypto);
+
+        // Step 1: bootstrap the leader node.
+        let bootstrap_temp = TestDir::new();
+        let bootstrap_data_dir = bootstrap_temp.path().to_path_buf();
+        let bootstrap_cert_path = bootstrap_data_dir.join("wire-cert.pem");
+        let bootstrap_key_path = bootstrap_data_dir.join("wire-key.pem");
+        std::fs::File::create(&bootstrap_cert_path)
+            .expect("create cert pem (bootstrap)")
+            .write_all(cert_pem.as_bytes())
+            .expect("write cert pem (bootstrap)");
+        std::fs::File::create(&bootstrap_key_path)
+            .expect("create key pem (bootstrap)")
+            .write_all(key_pem.as_bytes())
+            .expect("write key pem (bootstrap)");
+
+        let bootstrap_wire_listen = wire_addrs[0];
+        let bootstrap_node_addr = bootstrap_wire_listen.to_string();
+
+        inferadb_ledger_server::cluster_id::write_cluster_id(&bootstrap_data_dir, 1)
+            .expect("write cluster_id for wire bootstrap node");
+
+        let bootstrap_backup_config = inferadb_ledger_types::config::BackupConfig::builder()
+            .destination(bootstrap_data_dir.join("backups").to_string_lossy().to_string())
             .build()
             .expect("valid backup config");
 
-        // Tests historically expect rate limiting to be wired up (a few of
-        // them assert it rejects with `ResourceExhausted`). Mirror the master
-        // switch from the rate-limit struct so the existing high-burst
-        // defaults take effect; per-test overrides then narrow the bucket
-        // via `with_rate_limit`.
         let rate_limit_cfg = rate_limit_override.clone().unwrap_or_else(test_rate_limit_config);
-        // Per the DSoT migration: the CLI override is left as `None` and
-        // the inner `RateLimitConfig::enabled` field on `rate_limit_cfg`
-        // drives the master switch. Tests that need to flip it on
-        // construct `RateLimitConfig::builder().enabled(true)…build()`
-        // directly via `with_rate_limit`.
-        let config = inferadb_ledger_server::config::Config {
-            listen,
-            socket: socket_path.clone(),
+        let bootstrap_config = inferadb_ledger_server::config::Config {
+            listen: Some(bootstrap_wire_listen),
+            socket: None,
             metrics_addr: None,
-            data_dir: Some(data_dir.clone()),
-            backup: Some(backup_config),
+            data_dir: Some(bootstrap_data_dir.clone()),
+            backup: Some(bootstrap_backup_config),
             raft: Some(test_raft_config()),
             saga: inferadb_ledger_types::config::SagaConfig { poll_interval_secs: 2 },
             token_maintenance_interval_secs: 3,
             ratelimit: None,
-            rate_limit: Some(rate_limit_cfg),
+            rate_limit: Some(rate_limit_cfg.clone()),
             email_blinding_key: if include_blinding_key {
                 Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string())
             } else {
                 None
             },
+            // Drive the full wire bind path: LedgerServer::serve_wire +
+            // WireConsensusTransport for inter-node Raft.
+            transport: inferadb_ledger_server::config::TransportKind::Wire,
+            tls_cert_path: Some(bootstrap_cert_path.clone()),
+            tls_key_path: Some(bootstrap_key_path.clone()),
+            tls_server_name: Some("localhost".to_string()),
             ..inferadb_ledger_server::config::Config::default()
         };
 
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-
-        let health_state = inferadb_ledger_raft::HealthState::new();
+        let (bootstrap_shutdown_tx, bootstrap_shutdown_rx) = tokio::sync::watch::channel(false);
+        let bootstrap_health_state = inferadb_ledger_raft::HealthState::new();
+        // Pass `Some(key_manager)` so `bootstrap_node` constructs a
+        // `TokenServiceConfig`. Required because `build_wire_dispatcher`
+        // refuses to bind without `token_service` set on the bundle (it
+        // needs a `TokenServiceImpl` to route the TokenService opcode
+        // block). The runtime-auth boundary is a separate decision: the
+        // `permissive-wire-auth` feature on the services crate makes
+        // `serve_wire` use `PermissiveVerifier` regardless of whether
+        // `token_service` is configured, so the test `WireClient` can
+        // still send an empty `auth_payload` without `JwtAuthVerifier`
+        // rejecting it. See `LedgerServer::serve_wire`.
         let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(
-            &config,
-            &data_dir,
-            health_state.clone(),
-            shutdown_rx,
+            &bootstrap_config,
+            &bootstrap_data_dir,
+            bootstrap_health_state.clone(),
+            bootstrap_shutdown_rx,
             Some(key_manager.clone()),
         )
         .await
-        .expect("bootstrap node");
+        .expect("bootstrap wire-mode node");
 
-        // Mark node as ready (mirrors main.rs post-bootstrap behavior)
-        health_state.mark_ready();
+        bootstrap_health_state.mark_ready();
 
-        // Get the auto-generated Snowflake ID from the consensus handle
-        let node_id = bootstrapped.handle.node_id();
-
-        // Server is already running and accepting TCP connections from bootstrap_node().
-        // Extract fields before moving server_handle into the spawned task.
-        let handle_clone = bootstrapped.handle.clone();
-        let state_clone = bootstrapped.state.clone();
-        let manager_clone = bootstrapped.manager.clone();
-        let coordinator = bootstrapped.coordinator.clone();
-        let bg_server_handle = bootstrapped.server_handle;
-        let server_handle = tokio::spawn(async move {
-            let _ = bg_server_handle.await;
+        let bootstrap_node_id = bootstrapped.handle.node_id();
+        let bootstrap_handle = bootstrapped.handle.clone();
+        let bootstrap_state = bootstrapped.state.clone();
+        let bootstrap_manager = bootstrapped.manager.clone();
+        let bootstrap_coordinator = bootstrapped.coordinator.clone();
+        let bootstrap_bg_server_handle = bootstrapped.server_handle;
+        let bootstrap_server_handle = tokio::spawn(async move {
+            let _ = bootstrap_bg_server_handle.await;
         });
 
-        let leader_handle = handle_clone.clone();
-        let leader_addr = node_addr.clone();
         nodes.push(TestNode {
-            id: node_id,
-            addr: node_addr.clone(),
-            handle: handle_clone,
-            state: state_clone,
-            manager: manager_clone.clone(),
-            _temp_dir: Some(temp_dir),
-            _server_handle: Some(server_handle),
-            _shutdown_tx: Some(shutdown_tx),
-            coordinator: Some(coordinator),
-            socket_path: socket_path.clone(),
-            listen,
+            id: bootstrap_node_id,
+            // Tonic-side `addr` is unused on the wire path but retained
+            // so the `TestNode` shape stays uniform across builders.
+            // String-formatted to match the legacy field semantics.
+            addr: bootstrap_node_addr.clone(),
+            wire_addr: Some(bootstrap_wire_listen),
+            handle: bootstrap_handle.clone(),
+            state: bootstrap_state,
+            manager: bootstrap_manager.clone(),
+            _temp_dir: Some(bootstrap_temp),
+            _server_handle: Some(bootstrap_server_handle),
+            _shutdown_tx: Some(bootstrap_shutdown_tx),
+            coordinator: Some(bootstrap_coordinator),
+            socket_path: None,
+            listen: Some(bootstrap_wire_listen),
         });
 
-        // Wait for the bootstrap node to become GLOBAL leader first.
-        // With test config (300-600ms election timeout on localhost), 10 seconds
-        // is generous budget for parallel test runs under CPU contention.
+        // Wait for the wire bootstrap node to become GLOBAL leader.
         let start = tokio::time::Instant::now();
         let timeout_duration = Duration::from_secs(10);
         while start.elapsed() < timeout_duration {
-            if leader_handle.current_leader() == Some(node_id) {
+            if bootstrap_handle.current_leader() == Some(bootstrap_node_id) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-
-        // Verify GLOBAL leader election succeeded
-        if leader_handle.current_leader() != Some(node_id) {
-            panic!("Bootstrap node failed to become GLOBAL leader within timeout");
+        if bootstrap_handle.current_leader() != Some(bootstrap_node_id) {
+            panic!("Wire bootstrap node failed to become GLOBAL leader within timeout");
         }
 
-        // Start data regions AFTER GLOBAL leader election so the two don't interfere.
+        // Optionally start data regions on the bootstrap node, mirroring
+        // the legacy build_full data-region setup.
         let data_regions = &inferadb_ledger_types::ALL_REGIONS[1..];
         for &data_region in data_regions.iter().take(num_data_regions) {
             let data_region_config = RegionConfig {
                 region: data_region,
-                initial_members: vec![(node_id, node_addr.clone())],
+                initial_members: vec![(bootstrap_node_id, bootstrap_node_addr.clone())],
                 bootstrap: true,
                 enable_background_jobs: true,
                 batch_writer_config: None,
                 event_writer: None,
                 events_config: None,
                 delegated_leadership: false,
-                // Test fixture: bypasses the `CreateDataRegion` apply path,
-                // so no directory entry exists. Default to non-protected so
-                // single-node test setups don't trip the protected-region
-                // quorum check.
                 requires_residency_hint: false,
             };
-            manager_clone
+            bootstrap_manager
                 .start_data_region(data_region_config)
                 .await
                 .unwrap_or_else(|e| panic!("start data region {:?}: {e}", data_region));
         }
 
-        // Wait for all data region leader elections.
+        // Step 2: bootstrap each subsequent node and join via the
+        // wire-side AdminService::join_cluster RPC.
         //
-        // Phase A multi-shard: each region runs N independent Raft groups,
-        // each with its own election. Writes route to a specific shard via
-        // `ShardRouter`, so a test write that lands on shard 5 will fail
-        // with "no leader" if we only waited for shard 0. Iterate every
-        // `(region, shard)` pair the manager has registered.
-        let data_region_wait_start = tokio::time::Instant::now();
-        'data_wait: while data_region_wait_start.elapsed() < Duration::from_secs(30) {
-            let mut all_ready = true;
-            for &dr in data_regions.iter().take(num_data_regions) {
-                let shards =
-                    manager_clone.list_organization_groups().into_iter().filter(|(r, _)| *r == dr);
-                let mut any_shard = false;
-                for (r, shard) in shards {
-                    any_shard = true;
-                    match manager_clone.get_organization_group(r, shard) {
-                        Ok(rg) if rg.handle().current_leader().is_some() => continue,
-                        _ => {
-                            all_ready = false;
-                            break;
-                        },
-                    }
-                }
-                if !any_shard || !all_ready {
-                    all_ready = false;
-                    break;
-                }
-            }
-            if all_ready {
-                break 'data_wait;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        // Why a wire-side join (not a manager.add_learner shortcut):
+        // join_cluster is the production code path — it (a) replicates
+        // the joining node's address through GLOBAL Raft via
+        // `RegisterPeerAddress`, (b) registers the joiner in the
+        // leader's WireConsensusTransport via `set_peer_via_registry`,
+        // (c) drives the add_learner -> promote_voter sequence under
+        // configuration-change retry. Bypassing it would leave us
+        // populating internal state by hand and skipping the very
+        // surface this stage is meant to exercise.
+        for &join_wire_listen in wire_addrs.iter().take(size).skip(1) {
+            let join_temp = TestDir::new();
+            let join_data_dir = join_temp.path().to_path_buf();
+            let join_cert_path = join_data_dir.join("wire-cert.pem");
+            let join_key_path = join_data_dir.join("wire-key.pem");
+            std::fs::File::create(&join_cert_path)
+                .expect("create cert pem (join)")
+                .write_all(cert_pem.as_bytes())
+                .expect("write cert pem (join)");
+            std::fs::File::create(&join_key_path)
+                .expect("create key pem (join)")
+                .write_all(key_pem.as_bytes())
+                .expect("write key pem (join)");
+            let join_node_addr = join_wire_listen.to_string();
 
-        // Step 2: Start remaining nodes and have them join the cluster dynamically
-        for i in 1..size {
-            let (join_addr, join_socket, join_listen) = match transport {
-                TestTransport::Uds => {
-                    let sp = socket_dir.path().join(format!("c{cluster_id}-n{i}.sock"));
-                    let addr = sp.to_string_lossy().to_string();
-                    (addr, Some(sp), None)
-                },
-                TestTransport::Tcp => {
-                    let tcp_addr: std::net::SocketAddr =
-                        format!("127.0.0.1:{}", base_port + i as u16).parse().unwrap();
-                    (tcp_addr.to_string(), None, Some(tcp_addr))
-                },
-            };
-            let temp_dir = TestDir::new();
-            let data_dir = temp_dir.path().to_path_buf();
+            inferadb_ledger_server::cluster_id::write_cluster_id(&join_data_dir, 1)
+                .expect("write cluster_id for joining wire node");
 
-            inferadb_ledger_server::cluster_id::write_cluster_id(&data_dir, 1)
-                .expect("write cluster_id for joining node");
-
-            let backup_config = inferadb_ledger_types::config::BackupConfig::builder()
-                .destination(data_dir.join("backups").to_string_lossy().to_string())
+            let join_backup_config = inferadb_ledger_types::config::BackupConfig::builder()
+                .destination(join_data_dir.join("backups").to_string_lossy().to_string())
                 .build()
                 .expect("valid backup config");
 
-            let config = inferadb_ledger_server::config::Config {
-                listen: join_listen,
-                socket: join_socket.clone(),
+            let join_config = inferadb_ledger_server::config::Config {
+                listen: Some(join_wire_listen),
+                socket: None,
                 metrics_addr: None,
-                data_dir: Some(data_dir.clone()),
-                backup: Some(backup_config),
+                data_dir: Some(join_data_dir.clone()),
+                backup: Some(join_backup_config),
                 raft: Some(test_raft_config()),
                 saga: inferadb_ledger_types::config::SagaConfig { poll_interval_secs: 2 },
                 token_maintenance_interval_secs: 3,
-                rate_limit: Some(
-                    rate_limit_override.clone().unwrap_or_else(test_rate_limit_config),
-                ),
-                email_blinding_key: Some(
-                    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
-                ),
+                ratelimit: None,
+                rate_limit: Some(rate_limit_cfg.clone()),
+                email_blinding_key: if include_blinding_key {
+                    Some(
+                        "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+                            .to_string(),
+                    )
+                } else {
+                    None
+                },
+                transport: inferadb_ledger_server::config::TransportKind::Wire,
+                tls_cert_path: Some(join_cert_path.clone()),
+                tls_key_path: Some(join_key_path.clone()),
+                tls_server_name: Some("localhost".to_string()),
                 ..inferadb_ledger_server::config::Config::default()
             };
-            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-            let health_state = inferadb_ledger_raft::HealthState::new();
+            let (join_shutdown_tx, join_shutdown_rx) = tokio::sync::watch::channel(false);
+            let join_health_state = inferadb_ledger_raft::HealthState::new();
+            // Same key_manager as the bootstrap node — without it,
+            // `build_wire_dispatcher` refuses to bind the wire server
+            // (token / events services missing on the bundle). See the
+            // bootstrap-node call above for the full rationale.
             let bootstrapped = inferadb_ledger_server::bootstrap::bootstrap_node(
-                &config,
-                &data_dir,
-                health_state.clone(),
-                shutdown_rx,
+                &join_config,
+                &join_data_dir,
+                join_health_state.clone(),
+                join_shutdown_rx,
                 Some(key_manager.clone()),
             )
             .await
-            .expect("bootstrap node");
+            .expect("bootstrap joining wire-mode node");
 
-            // Mark node as ready (mirrors main.rs post-bootstrap behavior)
-            health_state.mark_ready();
+            join_health_state.mark_ready();
 
-            // Get the auto-generated Snowflake ID from the consensus handle
-            let node_id = bootstrapped.handle.node_id();
-
-            // Server is already running and accepting TCP connections from bootstrap_node().
-            // Extract fields before moving server_handle into the spawned task.
-            let handle_clone = bootstrapped.handle.clone();
-            let state_clone = bootstrapped.state.clone();
-            let manager_clone = bootstrapped.manager.clone();
-            let coordinator = bootstrapped.coordinator.clone();
-            let bg_server_handle = bootstrapped.server_handle;
-            let server_handle = tokio::spawn(async move {
-                let _ = bg_server_handle.await;
+            let joining_node_id = bootstrapped.handle.node_id();
+            let joining_handle = bootstrapped.handle.clone();
+            let joining_state = bootstrapped.state.clone();
+            let joining_manager = bootstrapped.manager.clone();
+            let joining_coordinator = bootstrapped.coordinator.clone();
+            let joining_bg_server_handle = bootstrapped.server_handle;
+            let joining_server_handle = tokio::spawn(async move {
+                let _ = joining_bg_server_handle.await;
             });
 
-            // Join the cluster via the current leader's AdminService.
-            // Under parallel test execution, leader re-elections can occur, so we
-            // discover the actual leader from Raft metrics on each attempt rather
-            // than assuming the bootstrap node is still leader.
+            // Issue the wire-side JoinCluster RPC against the current
+            // leader. Discover the leader on each attempt — under
+            // parallel test load the bootstrap node may have shed
+            // leadership during the join's startup window.
             let mut join_success = false;
             let mut last_error = String::new();
-            let max_attempts = 40;
-
+            let max_attempts: usize = 40;
             for attempt in 0..max_attempts {
-                // Discover the current leader by checking all existing nodes' metrics.
-                // This handles the case where the bootstrap node lost leadership
-                // during cluster formation under heavy parallel test load.
-                let current_leader_addr = nodes
+                // Prefer whichever already-registered node holds the
+                // leader hint; fall back to node 0.
+                let leader_addr = nodes
                     .iter()
                     .find_map(|n| {
                         let leader_id = n.handle.current_leader()?;
-                        nodes.iter().find(|n2| n2.id == leader_id).map(|n2| n2.addr.clone())
+                        nodes.iter().find(|n2| n2.id == leader_id).and_then(|n2| n2.wire_addr)
                     })
-                    .unwrap_or_else(|| leader_addr.clone());
+                    .unwrap_or(bootstrap_wire_listen);
 
-                let channel = connect_channel(&current_leader_addr);
-                let mut client = AdminServiceClient::new(channel);
+                let admin_client_config = WireClientConfig {
+                    server_addr: leader_addr,
+                    server_name: "localhost".to_string(),
+                    quic: client_quic.clone(),
+                    auth_payload: bytes::Bytes::new(),
+                    connect_timeout: Duration::from_secs(2),
+                };
+                let wire_client = match WireClient::new(admin_client_config) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        last_error = format!("WireClient::new: {e}");
+                        tokio::time::sleep(Duration::from_millis(50 * (attempt + 1) as u64)).await;
+                        continue;
+                    },
+                };
+                let admin =
+                    inferadb_ledger_wire_services::AdminServiceClient::new(Arc::new(wire_client));
 
-                let join_request = JoinClusterRequest { node_id, address: join_addr.clone() };
-
-                match client.join_cluster(join_request).await {
-                    Ok(response) => {
-                        let resp = response.into_inner();
+                let join_request = inferadb_ledger_wire::services::admin::JoinClusterRequest {
+                    node_id: joining_node_id,
+                    address: join_node_addr.clone(),
+                };
+                // Per-attempt request_id; arbitrary stable seed.
+                let request_id: u128 = (attempt as u128 + 1) * (joining_node_id as u128 + 1);
+                match admin.join_cluster(join_request, request_id).await {
+                    Ok(resp) => {
                         if resp.success {
                             join_success = true;
                             break;
-                        } else {
-                            last_error = resp.message.clone();
-                            // Membership conflicts and timeouts need backoff to let
-                            // the cluster stabilize before retrying
-                            let backoff = if resp.message.contains("membership")
-                                || resp.message.contains("Timeout")
-                            {
-                                Duration::from_millis(100 * (attempt + 1) as u64)
-                            } else {
-                                Duration::from_millis(25 * (attempt + 1) as u64)
-                            };
-                            tokio::time::sleep(backoff).await;
                         }
+                        last_error = resp.message.clone();
+                        let backoff = if resp.message.contains("membership")
+                            || resp.message.contains("Timeout")
+                        {
+                            Duration::from_millis(100 * (attempt + 1) as u64)
+                        } else {
+                            Duration::from_millis(25 * (attempt + 1) as u64)
+                        };
+                        tokio::time::sleep(backoff).await;
                     },
                     Err(e) => {
-                        last_error = format!("join RPC failed: {}", e);
+                        last_error = format!("join RPC failed: {e}");
                         tokio::time::sleep(Duration::from_millis(50 * (attempt + 1) as u64)).await;
                     },
                 }
@@ -648,94 +723,91 @@ impl TestCluster {
 
             if !join_success {
                 panic!(
-                    "Node {} failed to join cluster after {} attempts: {}",
-                    node_id, max_attempts, last_error
+                    "Node {} failed to join wire cluster after {} attempts: {}",
+                    joining_node_id, max_attempts, last_error
                 );
             }
 
-            let new_handle = handle_clone.clone();
             nodes.push(TestNode {
-                id: node_id,
-                addr: join_addr.clone(),
-                handle: handle_clone,
-                state: state_clone,
-                manager: manager_clone,
-                _temp_dir: Some(temp_dir),
-                _server_handle: Some(server_handle),
-                _shutdown_tx: Some(shutdown_tx),
-                coordinator: Some(coordinator),
-                socket_path: join_socket.clone(),
-                listen: join_listen,
+                id: joining_node_id,
+                addr: join_node_addr.clone(),
+                wire_addr: Some(join_wire_listen),
+                handle: joining_handle.clone(),
+                state: joining_state,
+                manager: joining_manager.clone(),
+                _temp_dir: Some(join_temp),
+                _server_handle: Some(joining_server_handle),
+                _shutdown_tx: Some(join_shutdown_tx),
+                coordinator: Some(joining_coordinator),
+                socket_path: None,
+                listen: Some(join_wire_listen),
             });
 
             // Wait for the new node to see a leader after joining.
             let sync_start = tokio::time::Instant::now();
             let sync_timeout = Duration::from_secs(10);
             while sync_start.elapsed() < sync_timeout {
-                if new_handle.current_leader().is_some() {
+                if joining_handle.current_leader().is_some() {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
 
-            // Wait for the membership change to fully commit before adding
-            // the next node. Raft allows only one membership change at a time.
-            // Poll until the new node appears as a voter in the leader's state.
-            let target_node = inferadb_ledger_consensus::types::NodeId(node_id);
+            // Wait for the membership change to fully commit before
+            // adding the next node — Raft allows only one membership
+            // change at a time. Poll until the new node appears as a
+            // voter in the leader's GLOBAL state.
+            let target_node = inferadb_ledger_consensus::types::NodeId(joining_node_id);
             let stabilize_start = tokio::time::Instant::now();
             let stabilize_timeout = Duration::from_secs(10);
             while stabilize_start.elapsed() < stabilize_timeout {
-                let state = leader_handle.shard_state();
+                let state = bootstrap_handle.shard_state();
                 if state.voters.contains(&target_node) {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
 
-            // Ensure full-mesh GLOBAL transport between the new node and ALL
-            // existing nodes (not just the bootstrap node). Without this, after
-            // leader removal the remaining nodes can't communicate for elections.
-            let joining_manager_ref = nodes.last().unwrap().manager.clone();
-            if let Ok(joining_global) = joining_manager_ref.system_region()
+            // Ensure full-mesh GLOBAL transport between the joining
+            // node and ALL existing nodes (not just the bootstrap node)
+            // — `join_cluster` only registered the bootstrap-leader ↔
+            // joiner direction. Without this, if the bootstrap node
+            // sheds leadership later, remaining nodes can't reach the
+            // joiner for the next election.
+            let joiner_idx = nodes.len() - 1;
+            if let Ok(joining_global) = nodes[joiner_idx].manager.system_region()
                 && let Some(jt) = joining_global.consensus_transport()
             {
-                for existing in &nodes[..nodes.len() - 1] {
-                    // Skip bootstrap node — already connected via JoinCluster RPC.
-                    if existing.id == nodes[0].id {
+                for existing in nodes.iter().take(joiner_idx) {
+                    let existing_id = existing.id;
+                    let existing_addr =
+                        existing.wire_addr.map(|a| a.to_string()).unwrap_or_default();
+                    if existing_addr.is_empty() {
                         continue;
                     }
-                    let addr_str = existing.addr.to_string();
-                    let _ = jt.set_peer_via_registry(existing.id, &addr_str).await;
-                    // Reverse direction: existing node → joining node.
+                    let _ = jt.set_peer_via_registry(existing_id, &existing_addr).await;
                     if let Ok(existing_global) = existing.manager.system_region()
                         && let Some(et) = existing_global.consensus_transport()
                     {
-                        let join_addr_str = join_addr.clone();
-                        let _ = et.set_peer_via_registry(node_id, &join_addr_str).await;
+                        let _ = et.set_peer_via_registry(joining_node_id, &join_node_addr).await;
                     }
                 }
             }
 
-            // Start data regions on the joining node WITHOUT bootstrap (bootstrap: false).
-            // The joining node creates the Raft group but doesn't initialize it — it will
-            // receive the cluster membership from the leader via Raft log replication.
-            let joining_manager = nodes.last().unwrap().manager.clone();
-            let joining_node_id = node_id;
-            let _joining_addr = join_addr.clone();
+            // Start data regions on the joining node WITHOUT bootstrap
+            // (bootstrap: false). The joining node creates the Raft
+            // group but doesn't initialize it — it will receive cluster
+            // membership from the leader via Raft log replication.
             for &data_region in data_regions.iter().take(num_data_regions) {
                 let data_region_config = RegionConfig {
                     region: data_region,
-                    initial_members: vec![], // empty — will be added via change_membership
-                    bootstrap: false,        // don't bootstrap — join existing cluster
+                    initial_members: vec![],
+                    bootstrap: false,
                     enable_background_jobs: true,
                     batch_writer_config: None,
                     event_writer: None,
                     events_config: None,
                     delegated_leadership: false,
-                    // Test fixture: bypasses the `CreateDataRegion` apply
-                    // path. Default to non-protected so the protected-region
-                    // quorum check doesn't fire on the joining node's empty
-                    // initial-members vec.
                     requires_residency_hint: false,
                 };
                 joining_manager.start_data_region(data_region_config).await.unwrap_or_else(|e| {
@@ -745,15 +817,11 @@ impl TestCluster {
                     )
                 });
 
-                // Add this joining node to EVERY shard's Raft cluster via
-                // membership change. Phase A multi-shard: each shard runs an
-                // independent Raft group, so a single `add_learner` against
-                // shard 0 only joins shard 0. Writes routed to other shards
-                // (via `ShardRouter`) would never replicate to the joining
-                // node, breaking read-after-failover assertions. Iterate
-                // every `(region, shard)` pair the bootstrap node has
-                // registered.
-                let bootstrap_manager = &nodes[0].manager;
+                // Per-shard transport registration + add_learner /
+                // promote_voter cascade against the BOOTSTRAP node's
+                // per-shard groups. Mirrors `build_full`'s data-region
+                // join path exactly — multi-shard regions need every
+                // shard to know about the joiner.
                 let shards: Vec<inferadb_ledger_types::OrganizationId> = bootstrap_manager
                     .list_organization_groups()
                     .into_iter()
@@ -761,72 +829,42 @@ impl TestCluster {
                     .map(|(_, s)| s)
                     .collect();
 
-                // Register transport once per node pair — channels are
-                // multiplexed across shards by the consensus engine.
-                let joining_addr_str = join_addr.clone();
-                let bootstrap_addr_str = nodes[0].addr.clone();
                 if let Ok(bootstrap_rg_zero) =
                     bootstrap_manager.get_organization_group(data_region, shards[0])
                     && let Some(bt) = bootstrap_rg_zero.consensus_transport()
                 {
-                    let _ = bt.set_peer_via_registry(joining_node_id, &joining_addr_str).await;
+                    let _ = bt.set_peer_via_registry(joining_node_id, &join_node_addr).await;
                 }
                 if let Ok(joining_rg_zero) =
                     joining_manager.get_organization_group(data_region, shards[0])
                     && let Some(jt) = joining_rg_zero.consensus_transport()
                 {
-                    let _ = jt.set_peer_via_registry(nodes[0].id, &bootstrap_addr_str).await;
+                    let _ = jt.set_peer_via_registry(bootstrap_node_id, &bootstrap_node_addr).await;
                 }
 
                 for shard in shards {
                     if let Ok(bootstrap_rg) =
                         bootstrap_manager.get_organization_group(data_region, shard)
                     {
-                        let bootstrap_handle = bootstrap_rg.handle();
-
-                        // Per-shard transport registration — each shard's
-                        // consensus engine owns its own peer routing table.
+                        let bootstrap_handle_inner = bootstrap_rg.handle();
                         if let Some(bt) = bootstrap_rg.consensus_transport() {
                             let _ =
-                                bt.set_peer_via_registry(joining_node_id, &joining_addr_str).await;
+                                bt.set_peer_via_registry(joining_node_id, &join_node_addr).await;
                         }
                         if let Ok(joining_rg) =
                             joining_manager.get_organization_group(data_region, shard)
                             && let Some(jt) = joining_rg.consensus_transport()
                         {
-                            let _ =
-                                jt.set_peer_via_registry(nodes[0].id, &bootstrap_addr_str).await;
+                            let _ = jt
+                                .set_peer_via_registry(bootstrap_node_id, &bootstrap_node_addr)
+                                .await;
                         }
-
-                        let _ = bootstrap_handle.add_learner(joining_node_id, true).await;
+                        let _ = bootstrap_handle_inner.add_learner(joining_node_id, true).await;
                         tokio::time::sleep(Duration::from_millis(100)).await;
-                        let _ = bootstrap_handle.promote_voter(joining_node_id).await;
+                        let _ = bootstrap_handle_inner.promote_voter(joining_node_id).await;
                     }
                 }
-                // Wait once for all per-shard memberships to stabilize.
                 tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-
-            // Wait for data region leader elections on this joining node (it should
-            // see a leader from the bootstrap node's cluster after membership change)
-            let dr_wait_start = tokio::time::Instant::now();
-            while dr_wait_start.elapsed() < Duration::from_secs(10) {
-                let mut all_ready = true;
-                for &dr in data_regions.iter().take(num_data_regions) {
-                    if let Ok(rg) = joining_manager.get_region_group(dr) {
-                        if rg.handle().current_leader().is_none() {
-                            all_ready = false;
-                            break;
-                        }
-                    } else {
-                        all_ready = false;
-                        break;
-                    }
-                }
-                if all_ready {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
             }
         }
 
@@ -834,11 +872,61 @@ impl TestCluster {
             nodes,
             num_data_regions,
             _socket_dir: socket_dir,
-            transport,
+            // The wire path runs over TCP-shaped UDP loopback. The legacy
+            // `transport` enum doesn't model wire — pin Tcp so any helper
+            // that branches on `transport` keeps treating the cluster as
+            // TCP-shaped (port allocation, socket-file cleanup) rather
+            // than UDS-shaped.
+            transport: TestTransport::Tcp,
             include_blinding_key,
             rate_limit_override,
             key_manager,
+            _wire_server_cert: Some(cert_der),
+            wire_client_quic: Some(client_quic),
         }
+    }
+
+    /// Returns a [`WireClient`] pre-configured to talk to the given
+    /// wire-mode node.
+    ///
+    /// F.1.f.2 migration scaffold. Mirrors
+    /// [`crate::common::wire_cluster::WireTestCluster::wire_client_for`]
+    /// but reaches into the legacy [`TestCluster`] directly so tests can
+    /// migrate one-helper-at-a-time without re-bootstrapping a separate
+    /// harness. Panics if the cluster was constructed via a Grpc-mode
+    /// builder ([`Self::new`], [`Self::with_tcp`], etc.) — the wire
+    /// listener simply doesn't exist on those paths.
+    ///
+    /// Stage F.1.f.2.Final deletes this method once every test has
+    /// migrated.
+    #[must_use]
+    pub fn wire_client_for(&self, node_id: u64) -> WireClient {
+        let node = self
+            .nodes
+            .iter()
+            .find(|n| n.id == node_id)
+            .unwrap_or_else(|| panic!("TestCluster: no node with node_id={node_id}"));
+        let wire_addr = node.wire_addr.unwrap_or_else(|| {
+            panic!(
+                "TestCluster::wire_client_for called against node {node_id} on a Grpc-mode \
+                 cluster; construct the cluster via TestCluster::with_wire_transport instead"
+            )
+        });
+        let client_quic = self.wire_client_quic.clone().expect(
+            "wire_client_quic must be populated whenever a node has a wire_addr; \
+             both fields are set together by build_wire",
+        );
+
+        let client_config = WireClientConfig {
+            server_addr: wire_addr,
+            server_name: "localhost".to_string(),
+            quic: client_quic,
+            // Permissive verifier accepts every payload — see
+            // `LedgerServer::serve_wire`'s `permissive-wire-auth` arm.
+            auth_payload: bytes::Bytes::new(),
+            connect_timeout: Duration::from_secs(2),
+        };
+        WireClient::new(client_config).expect("WireClient::new")
     }
 
     /// Waits for a leader to be elected AND all nodes to agree.
@@ -992,7 +1080,7 @@ impl TestCluster {
     /// rather than commit index: EVENTUAL reads serve from applied state,
     /// so callers need apply-level convergence.
     ///
-    /// Phase A multi-shard: each region runs N independent Raft groups.
+    /// In multi-shard mode, each region runs N independent Raft groups.
     /// Convergence is a per-`(region, shard)` property — waiting for shard
     /// 0 alone leaves writes routed to other shards racing the assertion.
     /// `applied_index` for a shard with no traffic is `0`; we skip that
@@ -1267,18 +1355,17 @@ impl TestCluster {
 
         // Colocate the region leader with the system (GLOBAL) leader.
         //
-        // Tests use `.leader().addr` (the system leader) as the entry point
-        // for writes that ultimately route through the per-organization
-        // groups. Per-organization groups default to `Delegated` leadership
-        // and follow their parent `RegionGroup`'s leader via
-        // `adopt_leader`, so if the region leader is a different node than
-        // the system leader, per-org writes on the system leader return
-        // `NotLeader` — the test helpers that use direct tonic clients
-        // (e.g. `create_test_vault`, `write_entity`) don't follow
+        // Tests use the leader as the entry point for writes that ultimately
+        // route through the per-organization groups. Per-organization groups
+        // default to `Delegated` leadership and follow their parent
+        // `RegionGroup`'s leader via `adopt_leader`, so if the region leader
+        // is a different node than the system leader, per-org writes on the
+        // system leader return `NotLeader` — the test helpers that use
+        // direct wire clients (e.g. `wire_create_test_vault`) don't follow
         // `LeaderHint` redirects, so the test hangs/fails.
         //
         // The production SDK (`RegionLeaderCache`) DOES follow redirects;
-        // this colocation step is only needed for the direct-tonic-client
+        // this colocation step is only needed for the direct-wire-client
         // test harness. Transfer is a no-op when the leaders are already
         // colocated.
         let system_leader_id = self
@@ -1418,8 +1505,8 @@ impl TestCluster {
 
     /// Returns the region control-plane group on `node_idx` for `region`.
     ///
-    /// Returns `Arc<RegionGroup>` (B.1 Task 3 — three-tier type split).
-    /// `region_group_at(node, GLOBAL)` now refers to the same regional
+    /// Returns `Arc<RegionGroup>` for the regional control-plane group.
+    /// `region_group_at(node, GLOBAL)` refers to the same regional
     /// control-plane storage as the system tier's organization-0 record,
     /// but the returned wrapper exposes only regional-tier accessors; if
     /// a test needs system-tier accessors it should call
@@ -1583,8 +1670,8 @@ impl TestCluster {
     ///      the cluster_id file already exists, `bootstrap_node` takes the restart path, which
     ///      rediscovers and restarts data regions via `discover_existing_regions`, rediscovers and
     ///      rehydrates per-organization Raft groups via `discover_existing_organizations` +
-    ///      `rehydrate_organization_group` (Task #151), and rehydrates per-vault Raft groups inside
-    ///      `start_organization_group` (Task #146).
+    ///      `rehydrate_organization_group`, and rehydrates per-vault Raft groups inside
+    ///      `start_organization_group`.
     ///
     /// The restart intentionally does NOT pre-populate
     /// `RaftManager::peer_addresses` — that map starts empty on each
@@ -1624,6 +1711,8 @@ impl TestCluster {
             include_blinding_key,
             rate_limit_override,
             key_manager,
+            _wire_server_cert: _,
+            wire_client_quic: _,
         } = self;
 
         // Phase 1: drain background tasks, flush WAL, sync state DBs, then
@@ -1861,6 +1950,8 @@ impl TestCluster {
             include_blinding_key,
             rate_limit_override,
             key_manager,
+            _wire_server_cert: None,
+            wire_client_quic: None,
         }
     }
 }
@@ -1926,6 +2017,15 @@ async fn bootstrap_one_node_with_regions(
     let rate_limit_cfg = rate_limit_override.unwrap_or_else(test_rate_limit_config);
     // Per the DSoT migration: the CLI override is left as `None` and the
     // inner `RateLimitConfig::enabled` field drives the master switch.
+    //
+    // Wire-mode bootstrap requires `--tls-cert` / `--tls-key`. The original
+    // cluster builder (`with_wire_transport`) wrote the rcgen self-signed
+    // PEM material to `{data_dir}/wire-cert.pem` + `{data_dir}/wire-key.pem`
+    // and the restart blueprint preserves the `data_dir` tempdir. Re-point
+    // at those same paths so the restarted node honours the same trust
+    // anchor as the rest of the cluster.
+    let cert_path = data_dir.join("wire-cert.pem");
+    let key_path = data_dir.join("wire-key.pem");
     let config = inferadb_ledger_server::config::Config {
         listen,
         socket: socket_path.clone(),
@@ -1944,6 +2044,10 @@ async fn bootstrap_one_node_with_regions(
         },
         join: join_seeds,
         regions,
+        transport: inferadb_ledger_server::config::TransportKind::Wire,
+        tls_cert_path: Some(cert_path),
+        tls_key_path: Some(key_path),
+        tls_server_name: Some("localhost".to_string()),
         ..inferadb_ledger_server::config::Config::default()
     };
 
@@ -1986,6 +2090,7 @@ async fn bootstrap_one_node_with_regions(
     TestNode {
         id: node_id,
         addr,
+        wire_addr: None,
         handle: handle_clone,
         state: state_clone,
         manager: manager_clone,
@@ -1998,308 +2103,173 @@ async fn bootstrap_one_node_with_regions(
     }
 }
 
-/// Helper to create a gRPC write client for a node.
-#[allow(dead_code)]
-pub async fn create_write_client(
-    addr: &str,
-) -> Result<
-    inferadb_ledger_proto::proto::write_service_client::WriteServiceClient<
-        tonic::transport::Channel,
-    >,
-    tonic::transport::Error,
-> {
-    let channel = connect_channel(addr);
-    Ok(inferadb_ledger_proto::proto::write_service_client::WriteServiceClient::new(channel))
-}
+// ---------------------------------------------------------------------------
+// Test client helpers — gRPC + wire dual-track (F.1.f.2 migration)
+//
+// `create_*_client` helpers return tonic `Channel`-backed clients (legacy);
+// `wire_*_client` helpers return wire-services clients pointing at the same
+// cluster's wire listener. Both helpers coexist during the F.1.f.2 staged
+// test migration. Stage F.1.f.2.Final deletes the `create_*_client` helpers
+// and renames `wire_*_client` to drop the prefix.
+// ---------------------------------------------------------------------------
 
-/// Helper to create a read client for a node.
-#[allow(dead_code)]
-pub async fn create_read_client(
-    addr: &str,
-) -> Result<
-    inferadb_ledger_proto::proto::read_service_client::ReadServiceClient<tonic::transport::Channel>,
-    tonic::transport::Error,
-> {
-    let channel = connect_channel(addr);
-    Ok(inferadb_ledger_proto::proto::read_service_client::ReadServiceClient::new(channel))
-}
+// ---- Wire-shaped sibling helpers (F.1.f.2 migration scaffold) ---------------
+//
+// One helper per service the legacy harness exposes a tonic client for, plus
+// `events` and `discovery` (which never grew tonic-side helpers but are part
+// of the 14-service surface). Each takes the wire-mode `TestCluster` and a
+// node ID, vends a `WireClient` via `TestCluster::wire_client_for`, and
+// wraps it in the typed wire-services client. Helpers panic on Grpc-mode
+// clusters — opt in via `TestCluster::with_wire_transport` to use them.
+//
+// Stage F.1.f.2.Final deletes these alongside the `create_*_client` block
+// once every test has migrated.
 
-/// Helper to create a health client for a node.
+/// Helper to construct a wire-side `WriteServiceClient` for a cluster
+/// node. F.1.f.2 migration scaffold; deleted in stage F.1.f.2.Final.
 #[allow(dead_code)]
-pub async fn create_health_client(
-    addr: &str,
-) -> Result<
-    inferadb_ledger_proto::proto::health_service_client::HealthServiceClient<
-        tonic::transport::Channel,
-    >,
-    tonic::transport::Error,
-> {
-    let channel = connect_channel(addr);
-    Ok(inferadb_ledger_proto::proto::health_service_client::HealthServiceClient::new(channel))
-}
-
-/// Helper to create an admin client for a node.
-#[allow(dead_code)]
-pub async fn create_admin_client(
-    addr: &str,
-) -> Result<
-    inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient<
-        tonic::transport::Channel,
-    >,
-    tonic::transport::Error,
-> {
-    let channel = connect_channel(addr);
-    Ok(inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::new(channel))
-}
-
-/// Helper to create an organization client for a node.
-#[allow(dead_code)]
-pub async fn create_organization_client(
-    addr: &str,
-) -> Result<
-    inferadb_ledger_proto::proto::organization_service_client::OrganizationServiceClient<
-        tonic::transport::Channel,
-    >,
-    tonic::transport::Error,
-> {
-    let channel = connect_channel(addr);
-    Ok(inferadb_ledger_proto::proto::organization_service_client::OrganizationServiceClient::new(
-        channel,
+pub fn wire_write_client(
+    cluster: &TestCluster,
+    node_id: u64,
+) -> inferadb_ledger_wire_services::WriteServiceClient {
+    inferadb_ledger_wire_services::WriteServiceClient::new(Arc::new(
+        cluster.wire_client_for(node_id),
     ))
 }
 
-// ============================================================================
-// External Cluster Infrastructure (for integration tests against running cluster)
-// ============================================================================
+/// Helper to construct a wire-side `ReadServiceClient` for a cluster
+/// node. F.1.f.2 migration scaffold; deleted in stage F.1.f.2.Final.
+#[allow(dead_code)]
+pub fn wire_read_client(
+    cluster: &TestCluster,
+    node_id: u64,
+) -> inferadb_ledger_wire_services::ReadServiceClient {
+    inferadb_ledger_wire_services::ReadServiceClient::new(Arc::new(
+        cluster.wire_client_for(node_id),
+    ))
+}
 
-/// An external cluster started by a shell script.
+/// Helper to construct a wire-side `HealthServiceClient` for a cluster
+/// node. F.1.f.2 migration scaffold; deleted in stage F.1.f.2.Final.
+#[allow(dead_code)]
+pub fn wire_health_client(
+    cluster: &TestCluster,
+    node_id: u64,
+) -> inferadb_ledger_wire_services::HealthServiceClient {
+    inferadb_ledger_wire_services::HealthServiceClient::new(Arc::new(
+        cluster.wire_client_for(node_id),
+    ))
+}
+
+/// Helper to construct a wire-side `AdminServiceClient` for a cluster
+/// node. F.1.f.2 migration scaffold; deleted in stage F.1.f.2.Final.
+#[allow(dead_code)]
+pub fn wire_admin_client(
+    cluster: &TestCluster,
+    node_id: u64,
+) -> inferadb_ledger_wire_services::AdminServiceClient {
+    inferadb_ledger_wire_services::AdminServiceClient::new(Arc::new(
+        cluster.wire_client_for(node_id),
+    ))
+}
+
+/// Helper to construct a wire-side `OrganizationServiceClient` for a
+/// cluster node. F.1.f.2 migration scaffold; deleted in stage F.1.f.2.Final.
+#[allow(dead_code)]
+pub fn wire_organization_client(
+    cluster: &TestCluster,
+    node_id: u64,
+) -> inferadb_ledger_wire_services::OrganizationServiceClient {
+    inferadb_ledger_wire_services::OrganizationServiceClient::new(Arc::new(
+        cluster.wire_client_for(node_id),
+    ))
+}
+
+/// Helper to construct a wire-side `VaultServiceClient` for a cluster
+/// node. F.1.f.2 migration scaffold; deleted in stage F.1.f.2.Final.
+#[allow(dead_code)]
+pub fn wire_vault_client(
+    cluster: &TestCluster,
+    node_id: u64,
+) -> inferadb_ledger_wire_services::VaultServiceClient {
+    inferadb_ledger_wire_services::VaultServiceClient::new(Arc::new(
+        cluster.wire_client_for(node_id),
+    ))
+}
+
+/// Helper to construct a wire-side `AppServiceClient` for a cluster
+/// node. F.1.f.2 migration scaffold; deleted in stage F.1.f.2.Final.
+#[allow(dead_code)]
+pub fn wire_app_client(
+    cluster: &TestCluster,
+    node_id: u64,
+) -> inferadb_ledger_wire_services::AppServiceClient {
+    inferadb_ledger_wire_services::AppServiceClient::new(Arc::new(cluster.wire_client_for(node_id)))
+}
+
+/// Helper to construct a wire-side `TokenServiceClient` for a cluster
+/// node. F.1.f.2 migration scaffold; deleted in stage F.1.f.2.Final.
+#[allow(dead_code)]
+pub fn wire_token_client(
+    cluster: &TestCluster,
+    node_id: u64,
+) -> inferadb_ledger_wire_services::TokenServiceClient {
+    inferadb_ledger_wire_services::TokenServiceClient::new(Arc::new(
+        cluster.wire_client_for(node_id),
+    ))
+}
+
+/// Helper to construct a wire-side `UserServiceClient` for a cluster
+/// node. F.1.f.2 migration scaffold; deleted in stage F.1.f.2.Final.
+#[allow(dead_code)]
+pub fn wire_user_client(
+    cluster: &TestCluster,
+    node_id: u64,
+) -> inferadb_ledger_wire_services::UserServiceClient {
+    inferadb_ledger_wire_services::UserServiceClient::new(Arc::new(
+        cluster.wire_client_for(node_id),
+    ))
+}
+
+/// Helper to construct a wire-side `InvitationServiceClient` for a
+/// cluster node. F.1.f.2 migration scaffold; deleted in stage F.1.f.2.Final.
+#[allow(dead_code)]
+pub fn wire_invitation_client(
+    cluster: &TestCluster,
+    node_id: u64,
+) -> inferadb_ledger_wire_services::InvitationServiceClient {
+    inferadb_ledger_wire_services::InvitationServiceClient::new(Arc::new(
+        cluster.wire_client_for(node_id),
+    ))
+}
+
+/// Helper to construct a wire-side `EventsServiceClient` for a cluster
+/// node. F.1.f.2 migration scaffold; deleted in stage F.1.f.2.Final.
 ///
-/// Reads endpoints from the `LEDGER_ENDPOINTS` environment variable.
-/// Returns `None` from `from_env()` if the variable is unset, allowing
-/// tests to gracefully skip when no cluster is available.
-pub struct ExternalCluster {
-    endpoints: Vec<String>,
-}
-
-impl ExternalCluster {
-    /// Reads `LEDGER_ENDPOINTS` env var (comma-separated `http://host:port`).
-    ///
-    /// Returns `None` if the variable is unset, allowing tests to skip.
-    pub fn from_env() -> Option<Self> {
-        let raw = std::env::var("LEDGER_ENDPOINTS").ok()?;
-        let endpoints: Vec<String> =
-            raw.split(',').map(|e| e.trim().to_string()).filter(|e| !e.is_empty()).collect();
-
-        if endpoints.is_empty() {
-            return None;
-        }
-
-        Some(Self { endpoints })
-    }
-
-    /// Returns all cluster endpoints.
-    pub fn endpoints(&self) -> &[String] {
-        &self.endpoints
-    }
-
-    /// Returns the first endpoint (convenience for single-endpoint operations).
-    pub fn any_endpoint(&self) -> &str {
-        &self.endpoints[0]
-    }
-
-    /// Poll `GetClusterInfo` until a leader exists, with timeout.
-    ///
-    /// Returns the leader's endpoint URL.
-    pub async fn wait_for_leader(&self, timeout_duration: Duration) -> String {
-        let start = tokio::time::Instant::now();
-
-        while start.elapsed() < timeout_duration {
-            for endpoint in &self.endpoints {
-                if let Ok(info) = Self::get_cluster_info(endpoint).await
-                    && info.leader_id > 0
-                    && let Some(leader_ep) = Self::leader_endpoint_from_info(&info, &self.endpoints)
-                {
-                    return leader_ep;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-
-        panic!("No leader elected within {:?}", timeout_duration);
-    }
-
-    /// Call `GetClusterInfo` on the given endpoint.
-    pub async fn get_cluster_info(
-        endpoint: &str,
-    ) -> Result<
-        inferadb_ledger_proto::proto::GetClusterInfoResponse,
-        Box<dyn std::error::Error + Send + Sync>,
-    > {
-        let mut client =
-            inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::connect(
-                endpoint.to_string(),
-            )
-            .await?;
-
-        let response =
-            client.get_cluster_info(inferadb_ledger_proto::proto::GetClusterInfoRequest {}).await?;
-
-        Ok(response.into_inner())
-    }
-
-    /// Finds the leader's endpoint URL by matching leader address from
-    /// `GetClusterInfoResponse` against known endpoints.
-    pub fn leader_endpoint_from_info(
-        info: &inferadb_ledger_proto::proto::GetClusterInfoResponse,
-        endpoints: &[String],
-    ) -> Option<String> {
-        let leader_member = info.members.iter().find(|m| m.is_leader)?;
-        let leader_addr = &leader_member.address;
-
-        // Match against endpoints: endpoint is "http://host:port", address is "host:port"
-        endpoints.iter().find(|ep| ep.ends_with(leader_addr) || ep.contains(leader_addr)).cloned()
-    }
-
-    /// Finds non-leader endpoint URLs.
-    pub fn non_leader_endpoints(
-        info: &inferadb_ledger_proto::proto::GetClusterInfoResponse,
-        endpoints: &[String],
-    ) -> Vec<String> {
-        let leader_member = info.members.iter().find(|m| m.is_leader);
-        let leader_addr = leader_member.map(|m| m.address.as_str()).unwrap_or("");
-
-        endpoints
-            .iter()
-            .filter(|ep| !ep.ends_with(leader_addr) && !ep.contains(leader_addr))
-            .cloned()
-            .collect()
-    }
-}
-
-/// Helper to create a vault client for a node.
+/// Note: the legacy tonic harness has no `create_events_client` sibling —
+/// this helper has no Grpc twin in the dual-track block below.
 #[allow(dead_code)]
-pub async fn create_vault_client(
-    addr: &str,
-) -> Result<
-    inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient<
-        tonic::transport::Channel,
-    >,
-    tonic::transport::Error,
-> {
-    let channel = connect_channel(addr);
-    Ok(inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient::new(channel))
+pub fn wire_events_client(
+    cluster: &TestCluster,
+    node_id: u64,
+) -> inferadb_ledger_wire_services::EventsServiceClient {
+    inferadb_ledger_wire_services::EventsServiceClient::new(Arc::new(
+        cluster.wire_client_for(node_id),
+    ))
 }
 
-/// Helper to create a vault client from a URL string.
+/// Helper to construct a wire-side `SystemDiscoveryServiceClient` for a
+/// cluster node. F.1.f.2 migration scaffold; deleted in stage F.1.f.2.Final.
+///
+/// Note: the legacy tonic harness has no `create_discovery_client`
+/// sibling — this helper has no Grpc twin in the dual-track block below.
 #[allow(dead_code)]
-pub async fn create_vault_client_from_url(
-    endpoint: &str,
-) -> Result<
-    inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient<
-        tonic::transport::Channel,
-    >,
-    tonic::transport::Error,
-> {
-    inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient::connect(
-        endpoint.to_string(),
-    )
-    .await
-}
-
-/// Helper to create an organization client from a URL string.
-#[allow(dead_code)]
-pub async fn create_organization_client_from_url(
-    endpoint: &str,
-) -> Result<
-    inferadb_ledger_proto::proto::organization_service_client::OrganizationServiceClient<
-        tonic::transport::Channel,
-    >,
-    tonic::transport::Error,
-> {
-    inferadb_ledger_proto::proto::organization_service_client::OrganizationServiceClient::connect(
-        endpoint.to_string(),
-    )
-    .await
-}
-
-/// Helper to create a health client from a URL string.
-pub async fn create_health_client_from_url(
-    endpoint: &str,
-) -> Result<
-    inferadb_ledger_proto::proto::health_service_client::HealthServiceClient<
-        tonic::transport::Channel,
-    >,
-    tonic::transport::Error,
-> {
-    inferadb_ledger_proto::proto::health_service_client::HealthServiceClient::connect(
-        endpoint.to_string(),
-    )
-    .await
-}
-
-/// Helper to create a user service client from a URL string.
-#[allow(dead_code)]
-pub async fn create_user_client_from_url(
-    endpoint: &str,
-) -> Result<
-    inferadb_ledger_proto::proto::user_service_client::UserServiceClient<tonic::transport::Channel>,
-    tonic::transport::Error,
-> {
-    inferadb_ledger_proto::proto::user_service_client::UserServiceClient::connect(
-        endpoint.to_string(),
-    )
-    .await
-}
-
-/// Helper to create an app service client for a node.
-#[allow(dead_code)]
-pub async fn create_app_client(
-    addr: &str,
-) -> Result<
-    inferadb_ledger_proto::proto::app_service_client::AppServiceClient<tonic::transport::Channel>,
-    tonic::transport::Error,
-> {
-    let channel = connect_channel(addr);
-    Ok(inferadb_ledger_proto::proto::app_service_client::AppServiceClient::new(channel))
-}
-
-pub async fn create_token_client(
-    addr: &str,
-) -> Result<
-    inferadb_ledger_proto::proto::token_service_client::TokenServiceClient<
-        tonic::transport::Channel,
-    >,
-    tonic::transport::Error,
-> {
-    let channel = connect_channel(addr);
-    Ok(inferadb_ledger_proto::proto::token_service_client::TokenServiceClient::new(channel))
-}
-
-/// Helper to create a user service client for a node.
-#[allow(dead_code)]
-pub async fn create_user_client(
-    addr: &str,
-) -> Result<
-    inferadb_ledger_proto::proto::user_service_client::UserServiceClient<tonic::transport::Channel>,
-    tonic::transport::Error,
-> {
-    let channel = connect_channel(addr);
-    Ok(inferadb_ledger_proto::proto::user_service_client::UserServiceClient::new(channel))
-}
-
-/// Helper to create an invitation service client for a node.
-#[allow(dead_code)]
-pub async fn create_invitation_client(
-    addr: &str,
-) -> Result<
-    inferadb_ledger_proto::proto::invitation_service_client::InvitationServiceClient<
-        tonic::transport::Channel,
-    >,
-    tonic::transport::Error,
-> {
-    let channel = connect_channel(addr);
-    Ok(inferadb_ledger_proto::proto::invitation_service_client::InvitationServiceClient::new(
-        channel,
+pub fn wire_discovery_client(
+    cluster: &TestCluster,
+    node_id: u64,
+) -> inferadb_ledger_wire_services::SystemDiscoveryServiceClient {
+    inferadb_ledger_wire_services::SystemDiscoveryServiceClient::new(Arc::new(
+        cluster.wire_client_for(node_id),
     ))
 }
 
@@ -2307,76 +2277,115 @@ pub async fn create_invitation_client(
 // Shared Organization & Vault Helpers (saga-aware)
 // ============================================================================
 
-/// Creates an organization and waits for the saga to reach Active status.
+// ---- Wire organization / vault setup helpers --------------------------------
+//
+// `wire_create_test_organization` and `wire_create_test_vault` dial the
+// wire-mode `LedgerServer` via `wire_organization_client` /
+// `wire_vault_client`. They take `(&TestCluster, node_id, ...)`.
+//
+// `setup_user` proposes through the local node's `ConsensusHandle` (no
+// transport involved), so it works identically across helpers.
+//
+// Retry classification translates the legacy `tonic::Code` shape into wire
+// `ErrorCode`s:
+//
+// * Saga-orchestrator-not-ready: wire returns `WireError(StaleRouting)`
+//   (`organization_wire.rs::create_organization`).
+// * Vault-create against a still-provisioning org: legacy returned `NotFound` ("Organization not
+//   found") or `FailedPrecondition`; wire returns `WireError(NotFound)` /
+//   `WireError(FailedPrecondition)`.
+// * Per-vault Raft delegated-leader adoption race: legacy returned `Unavailable` + "Not the
+//   leader"; wire returns `WireError(StaleRouting)` (Raft leadership errors map there per
+//   `error_classify::classify_raft_error_wire`).
+//
+// Stage F.1.f.2.Final deletes both these helpers and their legacy
+// `create_test_*` siblings once every test has migrated.
+
+/// Creates an organization through the wire-mode
+/// `OrganizationService::CreateOrganization` RPC and waits for the saga
+/// to drive the entry to `OrganizationStatus::Active`. Returns the
+/// organization's external slug + the admin user's slug.
 ///
-/// Returns the organization's external slug. Retries if the saga orchestrator
-/// isn't ready yet and polls `GetOrganization` until the status is Active.
+/// Routes its admin-user setup through `setup_user`, which proposes
+/// directly into the local node's `ConsensusHandle` (no transport
+/// involved).
 #[allow(dead_code)]
-pub async fn create_test_organization(
-    addr: &str,
+pub async fn wire_create_test_organization(
+    cluster: &TestCluster,
+    node_id: u64,
     name: &str,
-    node: &TestNode,
 ) -> Result<(inferadb_ledger_types::OrganizationSlug, u64), Box<dyn std::error::Error>> {
+    use inferadb_ledger_wire::{
+        error::ErrorCode,
+        services::{organization as wo, shared as ws},
+    };
+
+    let node = cluster
+        .node(node_id)
+        .ok_or_else(|| format!("wire_create_test_organization: no node {node_id}"))?;
+
     let start = tokio::time::Instant::now();
     let timeout_dur = Duration::from_secs(30);
 
     // Create an admin user for the organization (direct Raft write, bypasses saga)
     let admin_email = format!("admin-{}@test.example.com", name.to_lowercase().replace(' ', "-"));
-    let admin_slug = setup_user(addr, "Admin", &admin_email, node).await;
+    let admin_slug = setup_user(&node.addr, "Admin", &admin_email, node).await;
 
     // Slug generated once — retries reuse it so CreateOrganization
     // idempotency-by-slug returns the same OrganizationId on network
     // retry, matching production SDK behaviour.
     let org_slug = inferadb_ledger_types::snowflake::generate_organization_slug()?;
 
+    let client = wire_organization_client(cluster, node_id);
+
+    // Per-attempt request_id base; combined with attempt counter below.
+    let request_id_base: u128 =
+        (node_id as u128).wrapping_mul(1_000_003) ^ (org_slug.value() as u128);
+
     // Create org with admin (retry if saga orchestrator not ready)
+    let mut attempt: u128 = 0;
     let slug = loop {
-        let mut client = create_organization_client(addr).await?;
-        let result = client
-            .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
-                name: name.to_string(),
-                region: "us-east-va".to_string(),
-                tier: None,
-                caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: admin_slug }),
-                slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                    slug: org_slug.value(),
-                }),
-            })
-            .await;
+        attempt = attempt.wrapping_add(1);
+        let request = wo::CreateOrganizationRequest {
+            name: name.to_string(),
+            region: "us-east-va".to_string(),
+            tier: None,
+            caller: Some(ws::UserSlug::new(admin_slug)),
+            slug: Some(org_slug),
+        };
+        let result =
+            client.create_organization(request, request_id_base.wrapping_add(attempt)).await;
 
         match result {
             Ok(resp) => {
-                break resp
-                    .into_inner()
-                    .slug
-                    .map(|n| inferadb_ledger_types::OrganizationSlug::new(n.slug))
-                    .ok_or("No organization slug in response")?;
+                break resp.slug.ok_or("No organization slug in response")?;
             },
-            Err(status) if status.code() == tonic::Code::Unavailable => {
+            Err(inferadb_ledger_wire_transport::RpcError::WireError(wire_err))
+                if wire_err.code == ErrorCode::StaleRouting =>
+            {
+                // Saga orchestrator not ready / leadership in flux.
                 if start.elapsed() > timeout_dur {
-                    return Err(format!("org creation not ready: {}", status.message()).into());
+                    return Err(format!("org creation not ready: {}", wire_err.message).into());
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             },
-            Err(status) => return Err(format!("create org failed: {status}").into()),
+            Err(e) => return Err(format!("create org failed: {e}").into()),
         }
     };
 
     // Poll until Active (using the admin as caller for GetOrganization auth)
     loop {
-        let mut client = create_organization_client(addr).await?;
-        let result = client
-            .get_organization(inferadb_ledger_proto::proto::GetOrganizationRequest {
-                slug: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: slug.value() }),
-                caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: admin_slug }),
-            })
-            .await;
+        attempt = attempt.wrapping_add(1);
+        let request = wo::GetOrganizationRequest {
+            slug: Some(slug),
+            caller: Some(ws::UserSlug::new(admin_slug)),
+        };
+        let result = client.get_organization(request, request_id_base.wrapping_add(attempt)).await;
 
-        if let Ok(resp) = result {
-            // OrganizationStatus::Active = 1
-            if resp.into_inner().status == 1 {
-                return Ok((slug, admin_slug));
-            }
+        if let Ok(resp) = result
+            && resp.status == ws::OrganizationStatus::Active
+        {
+            return Ok((slug, admin_slug));
         }
         if start.elapsed() > timeout_dur {
             return Err(format!(
@@ -2389,14 +2398,18 @@ pub async fn create_test_organization(
     }
 }
 
-/// Creates a vault in an organization and returns its slug.
-///
-/// Retries if the organization is not yet ready (saga still provisioning).
+/// Creates a vault through the wire-mode `VaultService::CreateVault` RPC,
+/// retrying on `WireError(NotFound)` (org not yet ready) and
+/// `WireError(FailedPrecondition)` / `WireError(StaleRouting)` (delegated-
+/// leader adoption race in the per-org Raft group).
 #[allow(dead_code)]
-pub async fn create_test_vault(
-    addr: &str,
+pub async fn wire_create_test_vault(
+    cluster: &TestCluster,
+    node_id: u64,
     organization: inferadb_ledger_types::OrganizationSlug,
 ) -> Result<inferadb_ledger_types::VaultSlug, Box<dyn std::error::Error>> {
+    use inferadb_ledger_wire::{error::ErrorCode, services::vault as wv};
+
     let start = tokio::time::Instant::now();
     let timeout_dur = Duration::from_secs(15);
 
@@ -2405,49 +2418,47 @@ pub async fn create_test_vault(
     // production SDK behaviour.
     let vault_slug = inferadb_ledger_types::snowflake::generate_vault_slug()?;
 
+    let client = wire_vault_client(cluster, node_id);
+
+    let request_id_base: u128 =
+        (node_id as u128).wrapping_mul(2_000_003) ^ (vault_slug.value() as u128);
+    let mut attempt: u128 = 0;
+
     loop {
-        let mut client = create_vault_client(addr).await?;
-        let result = client
-            .create_vault(inferadb_ledger_proto::proto::CreateVaultRequest {
-                organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                    slug: organization.value(),
-                }),
-                replication_factor: 0,
-                initial_nodes: vec![],
-                retention_policy: None,
-                caller: None,
-                slug: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug.value() }),
-            })
-            .await;
+        attempt = attempt.wrapping_add(1);
+        let request = wv::CreateVaultRequest {
+            organization: Some(organization),
+            replication_factor: 0,
+            initial_nodes: vec![],
+            retention_policy: None,
+            caller: None,
+            slug: Some(vault_slug),
+        };
+        let result = client.create_vault(request, request_id_base.wrapping_add(attempt)).await;
 
         match result {
             Ok(resp) => {
-                return resp
-                    .into_inner()
-                    .vault
-                    .map(|v| inferadb_ledger_types::VaultSlug::new(v.slug))
-                    .ok_or_else(|| "No vault slug in response".into());
+                return resp.vault.ok_or_else(|| "No vault slug in response".into());
             },
-            Err(status)
-                if status.code() == tonic::Code::NotFound
-                    || status.code() == tonic::Code::FailedPrecondition
-                    || (status.code() == tonic::Code::Unavailable
-                        && status.message().contains("Not the leader")) =>
+            Err(inferadb_ledger_wire_transport::RpcError::WireError(wire_err))
+                if matches!(
+                    wire_err.code,
+                    ErrorCode::NotFound | ErrorCode::FailedPrecondition | ErrorCode::StaleRouting
+                ) =>
             {
-                // Org not yet ready — retry. The `Unavailable` + "Not the leader"
-                // arm matches production SDK behavior: the per-org Raft group's
-                // delegated-leader adoption watcher is `tokio::spawn`'d and may
-                // not have observed the parent region group's leader yet at the
-                // moment the saga finishes. Production clients retry through the
-                // SDK's `with_retry_cancellable`; tests must do the same.
+                // Org not yet ready, or per-org Raft group's delegated-leader
+                // adoption watcher hasn't observed the parent region group's
+                // leader yet at the moment the saga finishes. Production
+                // clients retry through the SDK's `with_retry_cancellable`;
+                // tests must do the same.
                 if start.elapsed() > timeout_dur {
                     return Err(
-                        format!("vault creation failed after retry: {}", status.message()).into()
+                        format!("vault creation failed after retry: {}", wire_err.message).into()
                     );
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             },
-            Err(status) => return Err(format!("create vault failed: {status}").into()),
+            Err(e) => return Err(format!("create vault failed: {e}").into()),
         }
     }
 }
@@ -2595,187 +2606,6 @@ pub async fn setup_user(_addr: &str, _name: &str, email: &str, node: &TestNode) 
         },
         Err(e) => panic!("setup_user: consensus write failed: {e}"),
     }
-}
-
-/// Creates an organization with a real admin user and waits for it to become Active.
-///
-/// Returns `(org_slug, admin_user_slug)`. The admin user is created via
-/// `setup_user` first, then the org is created with that user as admin.
-#[allow(dead_code)]
-pub async fn setup_org_with_admin(
-    addr: &str,
-    org_name: &str,
-    admin_email: &str,
-    node: &TestNode,
-) -> (u64, u64) {
-    // Create a user to serve as org admin (direct Raft write, bypasses saga)
-    let admin_slug = setup_user(addr, "Admin", admin_email, node).await;
-
-    let start = tokio::time::Instant::now();
-    let timeout = Duration::from_secs(30);
-
-    // Slug generated once — retries reuse it so CreateOrganization
-    // idempotency-by-slug returns the same OrganizationId on network
-    // retry, matching production SDK behaviour.
-    let requested_slug = inferadb_ledger_types::snowflake::generate_organization_slug()
-        .expect("generate organization slug");
-
-    // Create org with the admin user
-    let org_slug = loop {
-        let mut client = create_organization_client(addr).await.expect("connect org");
-        let result = client
-            .create_organization(inferadb_ledger_proto::proto::CreateOrganizationRequest {
-                name: org_name.to_string(),
-                region: "us-east-va".to_string(),
-                tier: None,
-                caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: admin_slug }),
-                slug: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                    slug: requested_slug.value(),
-                }),
-            })
-            .await;
-
-        match result {
-            Ok(resp) => break resp.into_inner().slug.expect("org slug").slug,
-            Err(status) if status.code() == tonic::Code::Unavailable => {
-                if start.elapsed() > timeout {
-                    panic!("org creation not ready after {timeout:?}: {}", status.message());
-                }
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            },
-            Err(status) => panic!("create org '{org_name}' failed: {status}"),
-        }
-    };
-
-    // Poll until org is Active
-    loop {
-        let mut client = create_organization_client(addr).await.expect("connect org");
-        let result = client
-            .get_organization(inferadb_ledger_proto::proto::GetOrganizationRequest {
-                slug: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: org_slug }),
-                caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: admin_slug }),
-            })
-            .await;
-
-        if let Ok(resp) = result {
-            // OrganizationStatus::Active = 1
-            if resp.into_inner().status == 1 {
-                return (org_slug, admin_slug);
-            }
-        }
-
-        if start.elapsed() > timeout {
-            panic!("org {org_slug} did not become Active within {timeout:?}");
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-}
-
-/// Creates a vault with retry — the organization may still be provisioning.
-///
-/// Retries on "not found", "provisioned", "provisioning", and "Not the
-/// leader" errors. The pinned-client variant is sufficient when the
-/// caller already knows it has the regional leader; tests that don't
-/// should prefer [`create_vault_with_retry_endpoints`] which iterates
-/// every cluster endpoint per attempt to absorb GLOBAL-vs-region leader
-/// splits under multi-tier consensus.
-pub async fn create_vault_with_retry(
-    vault_client: &mut inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient<
-        tonic::transport::Channel,
-    >,
-    organization: inferadb_ledger_types::OrganizationSlug,
-    caller_slug: u64,
-) -> inferadb_ledger_types::VaultSlug {
-    // Single client-generated slug reused across retries (matches SDK).
-    let vault_slug =
-        inferadb_ledger_types::snowflake::generate_vault_slug().expect("generate vault slug");
-    for attempt in 0..60 {
-        let request = inferadb_ledger_proto::proto::CreateVaultRequest {
-            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: organization.value(),
-            }),
-            replication_factor: 0,
-            initial_nodes: vec![],
-            retention_policy: None,
-            caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: caller_slug }),
-            slug: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug.value() }),
-        };
-        match vault_client.create_vault(request).await {
-            Ok(response) => {
-                return response
-                    .into_inner()
-                    .vault
-                    .map(|v| inferadb_ledger_types::VaultSlug::new(v.slug))
-                    .expect("vault slug in response");
-            },
-            Err(e)
-                if (e.message().contains("not found")
-                    || e.message().contains("provisioned")
-                    || e.message().contains("provisioning")
-                    || e.message().contains("Not the leader"))
-                    && attempt < 59 =>
-            {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            },
-            Err(e) => panic!("create vault: {e}"),
-        }
-    }
-    panic!("create vault timed out after 60 attempts");
-}
-
-/// Multi-endpoint variant of [`create_vault_with_retry`]. Iterates every
-/// endpoint in `endpoints` per attempt, so a GLOBAL-vs-regional leader
-/// split (the common pattern after `setup_user_and_org` lands the
-/// initial flow on the GLOBAL leader while the data-region leader is on
-/// a different node) absorbs cleanly without panicking. Use this from
-/// `external` integration tests where the caller has the cluster's
-/// endpoint list available.
-pub async fn create_vault_with_retry_endpoints(
-    endpoints: &[String],
-    organization: inferadb_ledger_types::OrganizationSlug,
-    caller_slug: u64,
-) -> inferadb_ledger_types::VaultSlug {
-    let vault_slug =
-        inferadb_ledger_types::snowflake::generate_vault_slug().expect("generate vault slug");
-    for _attempt in 0..60 {
-        for ep in endpoints {
-            let mut vault_client = match inferadb_ledger_proto::proto::vault_service_client::VaultServiceClient::connect(ep.to_string()).await {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let request = inferadb_ledger_proto::proto::CreateVaultRequest {
-                organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                    slug: organization.value(),
-                }),
-                replication_factor: 0,
-                initial_nodes: vec![],
-                retention_policy: None,
-                caller: Some(inferadb_ledger_proto::proto::UserSlug { slug: caller_slug }),
-                slug: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug.value() }),
-            };
-            match vault_client.create_vault(request).await {
-                Ok(response) => {
-                    return response
-                        .into_inner()
-                        .vault
-                        .map(|v| inferadb_ledger_types::VaultSlug::new(v.slug))
-                        .expect("vault slug in response");
-                },
-                Err(e)
-                    if e.message().contains("not found")
-                        || e.message().contains("provisioned")
-                        || e.message().contains("provisioning")
-                        || e.message().contains("Not the leader")
-                        || e.code() == tonic::Code::Unavailable =>
-                {
-                    continue;
-                },
-                Err(e) => panic!("create vault: {e}"),
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    panic!("create vault timed out after 60 attempts (all endpoints)");
 }
 
 // ============================================================================

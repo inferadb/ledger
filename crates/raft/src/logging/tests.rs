@@ -1234,31 +1234,82 @@ fn test_increment_raft_round_trips_without_timer() {
 }
 
 #[test]
-fn test_extract_transport_metadata() {
-    let mut ctx = RequestContext::new("WriteService", "write");
+fn test_from_wire_context_populates_transport_metadata() {
+    use std::sync::Arc;
 
-    let mut metadata = tonic::metadata::MetadataMap::new();
-    metadata.insert("x-sdk-version", tonic::metadata::MetadataValue::from_static("rust-sdk/0.2.0"));
-    metadata.insert(
-        "x-forwarded-for",
-        tonic::metadata::MetadataValue::from_static("10.0.0.1, 192.168.1.1"),
-    );
+    use inferadb_ledger_wire::{AuthMethod, CallerIdentity, ConnectionMetrics};
+    use tokio_util::sync::CancellationToken;
 
-    ctx.extract_transport_metadata(&metadata);
+    let wire_ctx = inferadb_ledger_wire::RequestContext {
+        request_id: 0xDEAD_BEEF_CAFE_F00D_DEAD_BEEF_CAFE_F00D,
+        idempotency_token: [0u8; 16],
+        trace_id: [0u8; 16],
+        span_id: [0u8; 8],
+        trace_flags: 0,
+        causality_commit_index: 0,
+        deadline: None,
+        caller_identity: CallerIdentity {
+            user_id: None,
+            app_id: None,
+            organization_id: None,
+            auth_method: AuthMethod::Anonymous,
+            token_expiry: std::time::Instant::now(),
+            revocation_epoch: 0,
+        },
+        peer_addr: std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            0,
+        ),
+        sdk_version: Some("rust-sdk/0.2.0".to_string()),
+        forwarded_for: Some("10.0.0.1".to_string()),
+        correlation_id: 0xDEAD_BEEF_CAFE_F00D_DEAD_BEEF_CAFE_F00D,
+        cancellation: CancellationToken::new(),
+        conn_metrics: Arc::new(ConnectionMetrics),
+    };
+
+    let mut ctx = RequestContext::from_wire_context("WriteService", "write", &wire_ctx, None);
 
     assert_eq!(ctx.sdk_version.as_deref(), Some("rust-sdk/0.2.0"));
-    // extract_transport_metadata takes the first IP from x-forwarded-for (client IP)
     assert_eq!(ctx.source_ip.as_deref(), Some("10.0.0.1"));
 
     ctx.suppress_emission();
 }
 
 #[test]
-fn test_extract_transport_metadata_empty() {
-    let mut ctx = RequestContext::new("WriteService", "write");
+fn test_from_wire_context_missing_transport_metadata() {
+    use std::sync::Arc;
 
-    let metadata = tonic::metadata::MetadataMap::new();
-    ctx.extract_transport_metadata(&metadata);
+    use inferadb_ledger_wire::{AuthMethod, CallerIdentity, ConnectionMetrics};
+    use tokio_util::sync::CancellationToken;
+
+    let wire_ctx = inferadb_ledger_wire::RequestContext {
+        request_id: 0,
+        idempotency_token: [0u8; 16],
+        trace_id: [0u8; 16],
+        span_id: [0u8; 8],
+        trace_flags: 0,
+        causality_commit_index: 0,
+        deadline: None,
+        caller_identity: CallerIdentity {
+            user_id: None,
+            app_id: None,
+            organization_id: None,
+            auth_method: AuthMethod::Anonymous,
+            token_expiry: std::time::Instant::now(),
+            revocation_epoch: 0,
+        },
+        peer_addr: std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            0,
+        ),
+        sdk_version: None,
+        forwarded_for: None,
+        correlation_id: 0,
+        cancellation: CancellationToken::new(),
+        conn_metrics: Arc::new(ConnectionMetrics),
+    };
+
+    let mut ctx = RequestContext::from_wire_context("WriteService", "write", &wire_ctx, None);
 
     assert!(ctx.sdk_version.is_none());
     assert!(ctx.source_ip.is_none());

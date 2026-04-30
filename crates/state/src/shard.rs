@@ -139,16 +139,14 @@ pub struct ShardManager<B: StorageBackend> {
 impl<B: StorageBackend> ShardManager<B> {
     /// Creates a new shard manager.
     ///
-    /// `meta_db` is the per-organization `_meta.db` coordinator. Slice 1 of
-    /// per-vault consensus introduced this as a separate database alongside
-    /// state.db; callers constructing a `ShardManager` must supply both.
-    /// Slice 2b note: pre-Slice-2b this constructor accepted a singleton
-    /// `Arc<Database<B>>` shared between `StateLayer`, `BlockArchive`,
-    /// and `ShardManager`. With per-vault `StateLayer`, this transitional
-    /// shard-manager helper (used by the in-crate test suite only) routes
-    /// the shared `db` into `BlockArchive` and `ShardManager` itself, and
-    /// hands an in-memory-per-vault factory to `StateLayer`. Production
-    /// wiring flows through `RegionStorageManager::open_organization` +
+    /// `meta_db` is the per-organization `_meta.db` coordinator, kept separate
+    /// from state.db so the crash-recovery sentinel can be synced independently
+    /// of per-vault entity data.
+    ///
+    /// This constructor is used by the in-crate test suite only. It routes the
+    /// shared `db` into `BlockArchive` and `ShardManager` and provides an
+    /// in-memory per-vault factory to `StateLayer`. Production wiring flows
+    /// through `RegionStorageManager::open_organization` +
     /// `RaftManager::open_region_storage`, not this helper.
     ///
     /// # Errors
@@ -165,10 +163,9 @@ impl<B: StorageBackend> ShardManager<B> {
     where
         B: 'static,
     {
-        // Transitional-only factory: route every vault to the same shared
-        // `Arc<Database<B>>`. This preserves the legacy test semantics
-        // where `ShardManager` + `StateLayer` + `BlockArchive` all point
-        // at one DB. Slice 2c removes this shim entirely.
+        // Test-only factory: route every vault to the same shared
+        // `Arc<Database<B>>` so `ShardManager` + `StateLayer` + `BlockArchive`
+        // all share one in-memory database.
         let shared_db = Arc::clone(&db);
         let factory = move |_vault: VaultId| -> crate::state::Result<Arc<Database<B>>> {
             Ok(Arc::clone(&shared_db))

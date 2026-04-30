@@ -21,7 +21,6 @@
 #   ./scripts/crash-recovery.sh --scenario A   # Run only scenario A
 #   ./scripts/crash-recovery.sh --scenario B   # Run only scenario B
 
-# shellcheck source=./lib/cluster-bootstrap.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # shellcheck source=scripts/lib/cluster-bootstrap.sh
@@ -61,7 +60,7 @@ done
 # Preflight
 # ---------------------------------------------------------------------------
 
-for cmd in grpcurl jq uuidgen; do
+for cmd in jq uuidgen; do
   if ! command -v "$cmd" &>/dev/null; then
     log_error "$cmd is required. Install: brew install $cmd"
     exit 1
@@ -72,7 +71,22 @@ trap cleanup_cluster EXIT
 build_ledger_binary "$PROFILE"
 
 # ---------------------------------------------------------------------------
-# gRPC helpers
+# Admin CLI helper
+# ---------------------------------------------------------------------------
+
+# Run an `inferadb-ledger admin <subcommand>` invocation with the cluster's
+# TLS material applied as top-level flags. clap rejects --tls-cert /
+# --tls-server-name when placed after the `admin` subcommand, so they go
+# before it.
+admin_cli() {
+  "$LEDGER_BINARY" \
+    --tls-cert "$LEDGER_TLS_CERT" \
+    --tls-server-name "$LEDGER_TLS_SERVER_NAME" \
+    admin "$@"
+}
+
+# ---------------------------------------------------------------------------
+# Wire helpers
 # ---------------------------------------------------------------------------
 
 ORG_SLUG=""
@@ -81,6 +95,16 @@ VAULT_SLUG=""
 
 node_addr() { echo "127.0.0.1:$((BASE_PORT + $1 - 1))"; }
 node_port() { echo $((BASE_PORT + $1 - 1)); }
+
+# Decode a `Bytes` field from an admin-CLI JSON response into its raw UTF-8
+# string. The wire types serialize `bytes::Bytes` as a numeric `[u8, ...]`
+# array; jq's `implode` materializes that into a string. Returns empty when
+# the field is null or absent.
+decode_bytes_field() {
+  local json=$1
+  local field=$2
+  echo "$json" | jq -r --arg f "$field" 'if .[$f] == null then "" else .[$f] | implode end' 2>/dev/null || true
+}
 
 create_org_and_vault() {
   local email
@@ -96,10 +120,10 @@ create_org_and_vault() {
       local addr
       addr=$(node_addr "$i")
       local init_result
-      init_result=$(grpcurl -plaintext \
-        -d "{\"email\": \"$email\", \"region\": \"us-east-va\"}" \
-        "$addr" \
-        ledger.v1.UserService/InitiateEmailVerification 2>&1 || true)
+      init_result=$(admin_cli initiate-email-verification \
+        --host "$addr" \
+        --email "$email" \
+        --region us-east-va 2>&1) || true
       code=$(echo "$init_result" | jq -r '.code // empty' 2>/dev/null || true)
       [[ -n "$code" ]] && break
     done
@@ -118,11 +142,13 @@ create_org_and_vault() {
     for ((i=1; i<=NODE_COUNT; i++)); do
       local addr
       addr=$(node_addr "$i")
-      verify_result=$(grpcurl -plaintext \
-        -d "{\"email\": \"$email\", \"code\": \"$code\", \"region\": \"us-east-va\"}" \
-        "$addr" \
-        ledger.v1.UserService/VerifyEmailCode 2>&1 || true)
-      token=$(echo "$verify_result" | jq -r '.newUser.onboardingToken // empty' 2>/dev/null || true)
+      verify_result=$(admin_cli verify-email-code \
+        --host "$addr" \
+        --email "$email" \
+        --code "$code" \
+        --region us-east-va 2>&1) || true
+      # Wire shape: { result: { NewUser: { onboarding_token: "..." } } }
+      token=$(echo "$verify_result" | jq -r '.result.NewUser.onboarding_token // empty' 2>/dev/null || true)
       [[ -n "$token" ]] && break
     done
     [[ -z "$token" ]] && { verify_attempt=$((verify_attempt + 1)); sleep 1; }
@@ -139,12 +165,17 @@ create_org_and_vault() {
       local addr
       addr=$(node_addr "$i")
       local reg_result
-      reg_result=$(grpcurl -plaintext \
-        -d "{\"onboarding_token\": \"$token\", \"email\": \"$email\", \"region\": \"us-east-va\", \"name\": \"Crash Test\", \"organization_name\": \"crash-recovery-org\"}" \
-        "$addr" \
-        ledger.v1.UserService/CompleteRegistration 2>&1 || true)
-      ORG_SLUG=$(echo "$reg_result" | jq -r '.organization.slug // empty' 2>/dev/null || true)
-      USER_SLUG=$(echo "$reg_result" | jq -r '.user.slug.slug // empty' 2>/dev/null || true)
+      reg_result=$(admin_cli complete-registration \
+        --host "$addr" \
+        --onboarding-token "$token" \
+        --email "$email" \
+        --region us-east-va \
+        --name "Crash Test" \
+        --organization-name crash-recovery-org 2>&1) || true
+      # `OrganizationSlug` and `UserSlug` are #[serde(transparent)] over u64,
+      # so they appear as bare numbers (or null when absent) in JSON.
+      ORG_SLUG=$(echo "$reg_result" | jq -r '.organization // empty' 2>/dev/null || true)
+      USER_SLUG=$(echo "$reg_result" | jq -r '.user.slug // empty' 2>/dev/null || true)
       if [[ -n "$ORG_SLUG" && -n "$USER_SLUG" ]]; then
         break 2
       fi
@@ -157,9 +188,9 @@ create_org_and_vault() {
   # Retry vault creation across all nodes — the org may still be provisioning
   # and CreateVault is a GLOBAL operation that requires the GLOBAL leader.
   #
-  # CreateVaultRequest requires a client-supplied Snowflake slug; reuse the same
-  # slug across retries so the per-org idempotency check returns the existing
-  # vault instead of allocating a new one.
+  # CreateVaultRequest takes an optional client-supplied Snowflake slug; reuse
+  # the same slug across retries so the per-org idempotency check returns the
+  # existing vault instead of allocating a new one.
   local client_slug
   client_slug=$(generate_snowflake_slug)
 
@@ -170,11 +201,13 @@ create_org_and_vault() {
       local addr
       addr=$(node_addr "$i")
       local result
-      result=$(grpcurl -plaintext \
-        -d "{\"organization\": {\"slug\": \"$ORG_SLUG\"}, \"caller\": {\"slug\": \"$USER_SLUG\"}, \"slug\": {\"slug\": \"$client_slug\"}}" \
-        "$addr" \
-        ledger.v1.VaultService/CreateVault 2>&1 || true)
-      VAULT_SLUG=$(echo "$result" | jq -r '.vault.slug // empty' 2>/dev/null || true)
+      result=$(admin_cli create-vault \
+        --host "$addr" \
+        --organization "$ORG_SLUG" \
+        --caller "$USER_SLUG" \
+        --slug "$client_slug" \
+        --replication-factor "$NODE_COUNT" 2>&1) || true
+      VAULT_SLUG=$(echo "$result" | jq -r '.vault // empty' 2>/dev/null || true)
       [[ -n "$VAULT_SLUG" ]] && { log_success "Created org $ORG_SLUG / vault $VAULT_SLUG"; return 0; }
     done
     attempt2=$((attempt2 + 1))
@@ -208,17 +241,22 @@ write_one() {
   local idx=$2
   local key
   key="crash-key-$(printf '%06d' "$idx")"
-  local value_b64
-  value_b64=$(echo -n "value-$idx" | base64)
-  local idem_b64
-  idem_b64=$(printf '%032x' "$idx" | xxd -r -p | base64)
-  local payload="{\"caller\": {\"slug\": \"$USER_SLUG\"}, \"organization\": {\"slug\": \"$ORG_SLUG\"}, \"vault\": {\"slug\": \"$VAULT_SLUG\"}, \"clientId\": {\"id\": \"crash-test\"}, \"idempotencyKey\": \"$idem_b64\", \"operations\": [{\"setEntity\": {\"key\": \"$key\", \"value\": \"$value_b64\"}}]}"
+  local idem_key
+  idem_key=$(printf '%032x' "$idx")
 
   # Try the preferred node first.
   local addr result
   addr=$(node_addr "$node_num")
-  result=$(grpcurl -plaintext -d "$payload" "$addr" ledger.v1.WriteService/Write 2>/dev/null || true)
-  if echo "$result" | jq -e '.success.blockHeight' &>/dev/null; then
+  result=$(admin_cli write \
+    --host "$addr" \
+    --organization "$ORG_SLUG" \
+    --vault "$VAULT_SLUG" \
+    --caller "$USER_SLUG" \
+    --key "$key" \
+    --value "value-$idx" \
+    --idempotency-key "$idem_key" 2>/dev/null) || true
+  # Wire shape: { result: { Success: { block_height: N, ... } } } on success.
+  if echo "$result" | jq -e '.result.Success' &>/dev/null; then
     echo "ok:$key"
     return 0
   fi
@@ -228,8 +266,15 @@ write_one() {
   for ((i=1; i<=NODE_COUNT; i++)); do
     [[ "$i" -eq "$node_num" ]] && continue
     addr=$(node_addr "$i")
-    result=$(grpcurl -plaintext -d "$payload" "$addr" ledger.v1.WriteService/Write 2>/dev/null || true)
-    if echo "$result" | jq -e '.success.blockHeight' &>/dev/null; then
+    result=$(admin_cli write \
+      --host "$addr" \
+      --organization "$ORG_SLUG" \
+      --vault "$VAULT_SLUG" \
+      --caller "$USER_SLUG" \
+      --key "$key" \
+      --value "value-$idx" \
+      --idempotency-key "$idem_key" 2>/dev/null) || true
+    if echo "$result" | jq -e '.result.Success' &>/dev/null; then
       echo "ok:$key"
       return 0
     fi
@@ -276,16 +321,16 @@ find_leader() {
     local addr
     addr=$(node_addr "$i")
     local info
-    info=$(grpcurl -plaintext "$addr" ledger.v1.AdminService/GetClusterInfo 2>/dev/null || true)
+    info=$(admin_cli cluster-info --host "$addr" 2>/dev/null) || true
     local leader_id
-    leader_id=$(echo "$info" | jq -r '.leaderId // empty' 2>/dev/null || true)
+    leader_id=$(echo "$info" | jq -r '.leader_id // empty' 2>/dev/null || true)
     [[ -z "$leader_id" || "$leader_id" == "0" ]] && continue
 
     local j
     for ((j=1; j<=NODE_COUNT; j++)); do
       local check_addr node_id
       check_addr=$(node_addr "$j")
-      node_id=$(grpcurl -plaintext "$check_addr" ledger.v1.AdminService/GetNodeInfo 2>/dev/null | jq -r '.nodeId // empty' 2>/dev/null || true)
+      node_id=$(admin_cli node-info --host "$check_addr" 2>/dev/null | jq -r '.node_id // empty' 2>/dev/null || true)
       if [[ "$node_id" == "$leader_id" ]]; then
         echo "$j"
         return 0
@@ -295,13 +340,14 @@ find_leader() {
   echo ""
 }
 
-# Kill a node by listen-port (SIGKILL — simulates crash).
+# Kill a node by listen-port (SIGKILL — simulates crash). The wire transport
+# is QUIC, so the listening socket is UDP.
 kill_node_hard() {
   local node_num=$1
   local port
   port=$(node_port "$node_num")
   local pid
-  pid=$(lsof -ti "tcp:$port" -sTCP:LISTEN 2>/dev/null || true)
+  pid=$(lsof -ti "udp:$port" 2>/dev/null || true)
   if [[ -n "$pid" ]]; then
     kill -9 "$pid" 2>/dev/null || true
     log_warn "SIGKILL'd node $node_num (PID $pid, port $port)"
@@ -312,7 +358,7 @@ kill_node_hard() {
     done
     CLUSTER_PIDS=("${new_pids[@]}")
   else
-    log_warn "No LISTEN PID for node $node_num (already dead?)"
+    log_warn "No UDP listener for node $node_num (already dead?)"
   fi
 }
 
@@ -334,48 +380,99 @@ restart_node() {
     --listen "127.0.0.1:$port" \
     --data "$node_data" \
     --join "$first_addr" \
+    --tls-cert "$LEDGER_TLS_CERT" \
+    --tls-key "$LEDGER_TLS_KEY" \
+    --tls-server-name "$LEDGER_TLS_SERVER_NAME" \
     --email-blinding-key "$blinding_key" \
     --log-format text \
     > "$DATA_ROOT/node$node_num.restart.log" 2>&1 &
   CLUSTER_PIDS+=("$!")
   log_info "Restarted node $node_num (PID $!)"
 
-  # Wait for listen port
+  # Wait for the listen port (QUIC = UDP) AND for the wire dispatcher to
+  # serve admin RPCs. The UDP socket binds very early in the binary's
+  # lifecycle — before raft state replay and before the wire dispatcher
+  # is wired up — so a UDP-only check returns true while RPCs still
+  # error out. `admin node-info` is the cheapest readiness probe.
   local elapsed=0
+  local addr="127.0.0.1:$port"
   while (( elapsed < 30 )); do
-    nc -z 127.0.0.1 "$port" 2>/dev/null && { log_success "Node $node_num listening again"; return 0; }
+    if port_is_listening "$port" \
+        && admin_cli node-info --host "$addr" >/dev/null 2>&1; then
+      log_success "Node $node_num listening + RPC-ready again"
+      return 0
+    fi
     sleep 1
     elapsed=$((elapsed + 1))
   done
-  log_error "Node $node_num did not start listening within 30s"
+  log_error "Node $node_num did not become RPC-ready within 30s"
   return 1
 }
 
-# Verify convergence by reading a baseline key from every node with EVENTUAL
-# consistency. GetTip requires the regional leader (redirect model), so we
-# use point reads instead — data availability on all nodes proves replication.
+# Verify convergence by reading a baseline key from every node that hosts
+# the vault, with EVENTUAL consistency. GetTip requires the regional
+# leader (redirect model), so we use point reads instead.
+#
+# Non-hosting nodes (the data-region placement controller may pick fewer
+# than NODE_COUNT voters for any given region) return
+# `{value: null, block_height: 0}` — that's "vault not on this node",
+# not data loss. We skip such nodes and verify convergence only across
+# the hosting subset. A hosting node with `value: null` and
+# `block_height > 0` would indicate genuine data loss and fails the test.
 verify_convergence() {
   log_info "Waiting for convergence (timeout: ${CONVERGENCE_TIMEOUT}s)..."
   local elapsed=0
 
   while (( elapsed < CONVERGENCE_TIMEOUT )); do
-    local all_readable=true i
+    local hosting_nodes=0 hosting_with_value=0 i
     for ((i=1; i<=NODE_COUNT; i++)); do
-      local addr read_result val
+      local addr read_result height val
       addr=$(node_addr "$i")
-      read_result=$(grpcurl -plaintext \
-        -d "{\"caller\": {\"slug\": \"$USER_SLUG\"}, \"organization\": {\"slug\": \"$ORG_SLUG\"}, \"vault\": {\"slug\": \"$VAULT_SLUG\"}, \"key\": \"crash-key-000001\", \"consistency\": \"READ_CONSISTENCY_EVENTUAL\"}" \
-        "$addr" \
-        ledger.v1.ReadService/Read 2>/dev/null || true)
-      val=$(echo "$read_result" | jq -r '.value // empty' 2>/dev/null || true)
-      if [[ -z "$val" ]]; then
-        all_readable=false
-        break
+      # Capture stderr so we can distinguish "non-hosting node" from
+      # "transient RPC error" — the former returns an `Organization …
+      # not found` WireError on stderr; the latter returns a genuine
+      # transport / unavailable error that should retry.
+      read_result=$(admin_cli read \
+        --host "$addr" \
+        --organization "$ORG_SLUG" \
+        --vault "$VAULT_SLUG" \
+        --caller "$USER_SLUG" \
+        --key "crash-key-000001" \
+        --consistency eventual 2>&1) || true
+
+      # Non-hosting node: the data-region placement controller may pick
+      # fewer than NODE_COUNT voters for any given region, so a node
+      # that is not a voter for `us-east-va` either:
+      #   1) Returns `{value: null, block_height: 0}` (vault entry not
+      #      registered locally), or
+      #   2) Returns a `NotFound` WireError naming the missing
+      #      organization / vault (region state machine has no entry).
+      # Both are "vault not on this node", not data loss; skip.
+      if echo "$read_result" | grep -qE '"code": ?"NotFound"|not found'; then
+        continue
+      fi
+      if ! echo "$read_result" | jq -e . &>/dev/null; then
+        # Unparseable response (transient RPC error) — treat as
+        # not-yet-converged and retry on the next loop tick.
+        hosting_nodes=$((hosting_nodes + 1))
+        continue
+      fi
+
+      height=$(echo "$read_result" | jq -r '.block_height // 0' 2>/dev/null || echo 0)
+      val=$(decode_bytes_field "$read_result" value)
+
+      if [[ "$height" == "0" && -z "$val" ]]; then
+        continue
+      fi
+
+      hosting_nodes=$((hosting_nodes + 1))
+      if [[ -n "$val" ]]; then
+        hosting_with_value=$((hosting_with_value + 1))
       fi
     done
 
-    if [[ "$all_readable" == "true" ]]; then
-      log_success "Convergence: baseline key readable on all $NODE_COUNT nodes"
+    if (( hosting_nodes > 0 && hosting_with_value == hosting_nodes )); then
+      log_success "Convergence: baseline key readable on all $hosting_nodes hosting node(s)"
       return 0
     fi
 
@@ -387,9 +484,15 @@ verify_convergence() {
   for ((i=1; i<=NODE_COUNT; i++)); do
     local addr read_result
     addr=$(node_addr "$i")
-    read_result=$(grpcurl -plaintext \
-      -d "{\"caller\": {\"slug\": \"$USER_SLUG\"}, \"organization\": {\"slug\": \"$ORG_SLUG\"}, \"vault\": {\"slug\": \"$VAULT_SLUG\"}, \"key\": \"crash-key-000001\", \"consistency\": \"READ_CONSISTENCY_EVENTUAL\"}" \
-      "$addr" ledger.v1.ReadService/Read 2>/dev/null || true)
+    # Capture stderr too — when the wire RPC errors, stdout is empty and
+    # the actual diagnosis is on stderr.
+    read_result=$(admin_cli read \
+      --host "$addr" \
+      --organization "$ORG_SLUG" \
+      --vault "$VAULT_SLUG" \
+      --caller "$USER_SLUG" \
+      --key "crash-key-000001" \
+      --consistency eventual 2>&1) || true
     log_error "  Node $i read: $read_result"
   done
   return 1
@@ -417,15 +520,25 @@ verify_no_data_loss() {
   : > "$missing_file"
 
   export ORG_SLUG USER_SLUG VAULT_SLUG NODE_COUNT BASE_PORT
+  export LEDGER_BINARY LEDGER_TLS_CERT LEDGER_TLS_SERVER_NAME
   # shellcheck disable=SC2016
   xargs -P 10 -I {} bash -c '
     key="$1"
     for ((n=1; n<=NODE_COUNT; n++)); do
       addr="127.0.0.1:$((BASE_PORT + n - 1))"
-      val=$(grpcurl -plaintext \
-        -d "{\"caller\": {\"slug\": \"$ORG_SLUG\"}, \"organization\": {\"slug\": \"$ORG_SLUG\"}, \"vault\": {\"slug\": \"$VAULT_SLUG\"}, \"key\": \"$key\", \"consistency\": \"READ_CONSISTENCY_EVENTUAL\"}" \
-        "$addr" ledger.v1.ReadService/Read 2>/dev/null | jq -r ".value // empty" 2>/dev/null || true)
-      [[ -n "$val" ]] && exit 0
+      response=$("$LEDGER_BINARY" \
+        --tls-cert "$LEDGER_TLS_CERT" \
+        --tls-server-name "$LEDGER_TLS_SERVER_NAME" \
+        admin read \
+        --host "$addr" \
+        --organization "$ORG_SLUG" \
+        --vault "$VAULT_SLUG" \
+        --caller "$USER_SLUG" \
+        --key "$key" \
+        --consistency eventual 2>/dev/null || true)
+      if echo "$response" | jq -e ".value != null" &>/dev/null; then
+        exit 0
+      fi
     done
     echo "$key" >> '"$missing_file"'
   ' _ {} < "$keys_file"
@@ -450,7 +563,7 @@ run_scenario() {
   local name=$1
   local kill_target_role=$2  # "follower" | "leader"
 
-  log_info "═══ Scenario $name: kill $kill_target_role mid-write ═══"
+  log_info "Scenario $name: kill $kill_target_role mid-write"
 
   # Use longer settle time for debug builds (saga orchestrator is slower).
   local settle_time=2

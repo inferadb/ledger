@@ -1,6 +1,6 @@
 ---
 name: documentation-reviewer
-description: Use PROACTIVELY on documentation changes or significant source-code changes that affect user-facing surface. Sentinel paths — `proto/ledger/v1/**/*.proto`, `Justfile`, root `Cargo.toml`, `crates/services/src/services/**`, `crates/server/src/main.rs`, `crates/server/src/config.rs`, `crates/types/src/config/**`, `crates/types/src/error_code.rs`, `crates/sdk/src/lib.rs`, `crates/sdk/src/client.rs`, root docs (`README.md`, `CONTRIBUTING.md`, `DESIGN.md`, `WHITEPAPER.md`, `PII.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`), and any file under `docs/**`. Reviews user-facing documentation for (1) factual accuracy against current code, (2) operator-journey coverage (evaluate → install → configure → bootstrap → observe → operate → troubleshoot → recover), (3) Diátaxis type fit (tutorial / how-to / reference / explanation), and (4) audience fit for Ledger's two primary readers: operators (primary) and internals-readers (secondary). Dispatches parallel Explore subagents with audience-tagged briefings across doc partitions, then aggregates findings. Read-only.
+description: Use PROACTIVELY on documentation changes or significant source-code changes that affect user-facing surface. Sentinel paths — `crates/wire/src/services/**`, `crates/wire-services/src/lib.rs`, `Justfile`, root `Cargo.toml`, `crates/services/src/services/**`, `crates/server/src/main.rs`, `crates/server/src/config.rs`, `crates/types/src/config/**`, `crates/types/src/error_code.rs`, `crates/sdk/src/lib.rs`, `crates/sdk/src/client.rs`, root docs (`README.md`, `CONTRIBUTING.md`, `DESIGN.md`, `WHITEPAPER.md`, `PII.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`), and any file under `docs/**`. Reviews user-facing documentation for (1) factual accuracy against current code, (2) operator-journey coverage (evaluate → install → configure → bootstrap → observe → operate → troubleshoot → recover), (3) Diátaxis type fit (tutorial / how-to / reference / explanation), and (4) audience fit for Ledger's two primary readers: operators (primary) and internals-readers (secondary). Dispatches parallel Explore subagents with audience-tagged briefings across doc partitions, then aggregates findings. Read-only.
 tools: Read, Grep, Glob, Bash, WebFetch, Agent, mcp__plugin_serena_serena__get_symbols_overview, mcp__plugin_serena_serena__find_symbol, mcp__plugin_serena_serena__find_referencing_symbols, mcp__plugin_serena_serena__search_for_pattern
 ---
 
@@ -113,13 +113,13 @@ Collect the facts every partition verifies against. **Run only these Bash comman
 
 Use the dedicated tools for everything else:
 
-- `Grep` for proto / source scans, metric names, error-code references.
+- `Grep` for source scans, metric names, error-code references, wire-protocol RPC names.
 - `Glob` for file existence.
 - `find_symbol` / `search_for_pattern` for Rust symbols, types, methods, defaults.
 
 Additionally pre-gather these canonical lists so subagents do not each re-scan:
 
-- gRPC services + RPCs from `proto/ledger/v1/*.proto`.
+- Wire services + RPCs from `crates/wire-services/src/lib.rs` (the `define_protocol!` invocation), with per-service request/response types in `crates/wire/src/services/*.rs`.
 - Prometheus metric names from `crates/raft/src/metrics.rs` (and SDK counterparts in `crates/sdk/src/metrics.rs`).
 - Error codes from `crates/types/src/error_code.rs` (the `ErrorCode` enum variants).
 - Config defaults — scan `crates/types/src/config/**` for `Default` impls and `#[builder(default = …)]`; scan `crates/server/src/config.rs` and `crates/server/src/main.rs` for clap `default_value`.
@@ -174,7 +174,7 @@ Secondary audience: {{…}}
 ## Ground truth (pre-gathered — do not re-run)
 - `just --list` recipes: {{paste}}
 - cargo metadata crate names: {{paste}}
-- gRPC services / RPCs: {{paste}}
+- Wire services / RPCs (from `crates/wire-services/src/lib.rs`): {{paste}}
 - Prometheus metric names (server + SDK): {{paste}}
 - ErrorCode variants: {{paste}}
 - Known config defaults (flag → default → source file:line): {{paste}}
@@ -185,7 +185,7 @@ Secondary audience: {{…}}
 
 ## Invariants to check
 All invariants are defined in the parent agent prompt. Summary:
-- BLOCK (Accuracy): command/path/symbol exists; proto surface matches; defaults
+- BLOCK (Accuracy): command/path/symbol exists; wire-RPC surface matches; defaults
   match code; dashboard metric references resolve; terminology consistency;
   tooling matches reality (+1.92 / +nightly pins, no `cargo nextest`).
 - FIX (Operator-journey coverage): per-stage gaps — evaluate / install /
@@ -258,7 +258,7 @@ Merge subagent reports. Deduplicate findings that reproduce across docs — the 
 1. **Command exists** — every `just <recipe>` referenced in a doc appears in `just --list`. Every `cargo …`, `inferadb-ledger …`, `grpcurl …`, `kubectl …`, `helm …`, `mise …`, or raw shell command uses a real subcommand and real flags.
 2. **Path exists** — every file / directory / crate path referenced in docs resolves on disk.
 3. **Symbol exists** — every Rust type, function, trait, method, module, RPC, metric, config field, CLI flag, or environment variable named in docs is findable via `find_symbol` / `search_for_pattern` / `Grep`.
-4. **Proto surface matches** — every gRPC service and RPC referenced in docs exists in `proto/ledger/v1/*.proto`. Renamed or removed RPCs are flagged. `ForwardRegionalProposal` or `SubmitRegionalProposal` anywhere is a BLOCK — the RPC is named `RegionalProposal`.
+4. **Wire-RPC surface matches** — every service and RPC referenced in docs exists in the `define_protocol!` invocation in `crates/wire-services/src/lib.rs`, with request/response types defined in `crates/wire/src/services/*.rs`. Renamed or removed RPCs are flagged. `ForwardRegionalProposal` or `SubmitRegionalProposal` anywhere is a BLOCK — the RPC is named `RegionalProposal`.
 5. **Dashboard metric references resolve** — every `expr:` or metric name in shipped dashboard JSON / NDJSON under `docs/dashboards/**` resolves to a live Prometheus metric registered in `crates/raft/src/metrics.rs` or SDK `crates/sdk/src/metrics.rs`. Missing metric → BLOCK.
 6. **Defaults match code** — for any flag / env var / config field whose default value is stated in docs, the value matches the Rust source of truth (struct `Default`, clap `default_value`, serde default, or `#[builder(default = …)]`). Mismatch → BLOCK. This is the highest-value check for the Operator audience.
 7. **Terminology consistency** — the rename trail is respected. "Namespace" where code says "organization" is BLOCK (Kubernetes-namespace references in `deploy/` and K8s-operator docs are legitimate; distinguish context). "Single-Raft" is BLOCK — the system is multi-Raft in production. "openraft" in current architecture descriptions is BLOCK — consensus is custom in-house. Only historical / migration contexts may mention legacy terms, and must frame them as historical.
@@ -329,7 +329,7 @@ Top-level structure:
 ## Ground truth
 - N recipes in `just --list`
 - N crates in `cargo metadata`
-- N gRPC services / M RPCs in proto/ledger/v1/
+- N wire services / M RPCs in crates/wire-services/src/lib.rs
 - N Prometheus metrics in code
 - N ErrorCode variants
 - churn window: <dates>

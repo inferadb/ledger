@@ -8,75 +8,68 @@
 
 use std::{fmt::Write, sync::Arc, time::Duration};
 
-use inferadb_ledger_proto::proto::{
-    TxId, WriteError, WriteErrorCode, WriteRequest, WriteResponse, WriteSuccess,
-};
 use inferadb_ledger_raft::{
-    event_writer::EventEmitter,
     idempotency::IdempotencyCache,
-    logging::{OperationType, RequestContext, Sampler},
+    logging::Sampler,
     metrics,
     proof::{self, ProofError},
     raft_manager::RaftManager,
     rate_limit::RateLimiter,
-    types::{LedgerResponse, OrganizationRequest},
+    types::OrganizationRequest,
 };
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{OrganizationId, SetCondition, VaultId, config::ValidationConfig};
-use tonic::{Request, Response, Status};
+use inferadb_ledger_wire::services::write::WriteErrorCode;
+use tonic::Status;
 use tracing::{debug, warn};
-use uuid::Uuid;
 
-pub(crate) use super::metadata::{response_with_correlation, status_with_correlation};
-use super::{
-    region_resolver::{RegionContext, RegionResolver, ResolveResult},
-    slug_resolver::SlugResolver,
-};
+use super::region_resolver::{RegionContext, RegionResolver};
 
 /// gRPC handler for transaction submission.
 #[derive(bon::Builder)]
 #[builder(on(_, required))]
 pub struct WriteService {
     /// Region resolver for routing requests to the correct region.
-    resolver: Arc<dyn RegionResolver>,
+    pub(super) resolver: Arc<dyn RegionResolver>,
     /// Raft manager for creating forward clients when needed.
     #[builder(default)]
-    manager: Option<Arc<RaftManager>>,
+    pub(super) manager: Option<Arc<RaftManager>>,
     /// Typed proposal service used to route per-vault writes through the
     /// shared `ProposalService` abstraction.
-    proposal_service: Arc<dyn crate::proposal::ProposalService>,
+    pub(super) proposal_service: Arc<dyn crate::proposal::ProposalService>,
     /// Idempotency cache for duplicate detection.
-    idempotency: Arc<IdempotencyCache>,
+    pub(super) idempotency: Arc<IdempotencyCache>,
     /// Per-organization rate limiter.
     #[builder(default)]
-    rate_limiter: Option<Arc<RateLimiter>>,
+    pub(super) rate_limiter: Option<Arc<RateLimiter>>,
     /// Sampler for log tail sampling.
     #[builder(default)]
-    sampler: Option<Sampler>,
+    pub(super) sampler: Option<Sampler>,
     /// Node ID for logging system context.
     #[builder(default)]
-    node_id: Option<u64>,
+    pub(super) node_id: Option<u64>,
     /// Hot key detector for identifying frequently accessed keys.
     #[builder(default)]
-    hot_key_detector: Option<Arc<inferadb_ledger_raft::hot_key_detector::HotKeyDetector>>,
+    pub(super) hot_key_detector:
+        Option<Arc<inferadb_ledger_raft::hot_key_detector::HotKeyDetector>>,
     /// Input validation configuration for request field limits.
     #[builder(default = Arc::new(ValidationConfig::default()))]
-    validation_config: Arc<ValidationConfig>,
+    pub(super) validation_config: Arc<ValidationConfig>,
     /// Maximum time to wait for a Raft proposal to commit.
     ///
     /// If a gRPC deadline is shorter, the deadline takes precedence.
     #[builder(default = Duration::from_secs(30))]
-    proposal_timeout: Duration,
+    pub(super) proposal_timeout: Duration,
     /// Handler-phase event handle for recording denial events.
     #[builder(default)]
-    event_handle: Option<inferadb_ledger_raft::event_writer::EventHandle<FileBackend>>,
+    pub(super) event_handle: Option<inferadb_ledger_raft::event_writer::EventHandle<FileBackend>>,
     /// Health state for drain-phase write rejection.
     #[builder(default)]
-    health_state: Option<inferadb_ledger_raft::graceful_shutdown::HealthState>,
+    pub(super) health_state: Option<inferadb_ledger_raft::graceful_shutdown::HealthState>,
     /// Shared peer address map for resolving peer endpoints in `NotLeader`
     /// hint responses returned to clients on follower nodes.
     #[builder(default)]
-    peer_addresses: Option<inferadb_ledger_raft::PeerAddressMap>,
+    pub(super) peer_addresses: Option<inferadb_ledger_raft::PeerAddressMap>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -137,7 +130,7 @@ impl WriteService {
     /// Returns `Ok(())` if the organization is not migrating (or doesn't exist yet).
     /// Returns `Err(Status::FailedPrecondition)` with structured error details
     /// if the organization is actively migrating to another region.
-    fn check_not_migrating(
+    pub(super) fn check_not_migrating(
         &self,
         system: &RegionContext,
         organization_id: OrganizationId,
@@ -150,7 +143,7 @@ impl WriteService {
             if let Some(pending) = org_meta.pending_region {
                 context.insert("target_region".to_string(), pending.as_str().to_string());
             }
-            let details = super::error_details::build_error_details(
+            let mut wire_err = super::error_details::build_error_details(
                 inferadb_ledger_types::DiagnosticCode::AppOrganizationMigrating.as_u16(),
                 true,
                 Some(30_000),
@@ -160,38 +153,41 @@ impl WriteService {
                         .suggested_action(),
                 ),
             );
-            let encoded = prost::Message::encode_to_vec(&details);
-            return Err(Status::with_details(
-                tonic::Code::FailedPrecondition,
-                "Organization is being migrated to another region; writes are temporarily blocked",
-                encoded.into(),
-            ));
+            wire_err.code = inferadb_ledger_wire::ErrorCode::FailedPrecondition;
+            wire_err.message =
+                "Organization is being migrated to another region; writes are temporarily blocked"
+                    .to_string();
+            return Err(super::wire_helpers::wire_error_to_tonic_status(wire_err));
         }
         Ok(())
     }
 
-    /// Validates all operations in a proto operation list.
-    fn validate_operations(
+    /// Validates all operations in a wire operation list.
+    /// Validates operations against the configured limits, returning the
+    /// wire-native [`inferadb_ledger_wire::WireError`] on failure.
+    pub(super) fn validate_operations_wire(
         &self,
-        operations: &[inferadb_ledger_proto::proto::Operation],
-    ) -> Result<(), Status> {
+        operations: &[inferadb_ledger_wire::services::shared::Operation],
+    ) -> Result<(), inferadb_ledger_wire::WireError> {
         super::helpers::validate_operations(operations, &self.validation_config)
     }
 
-    /// Checks all rate limit tiers (backpressure, organization, client).
-    fn check_rate_limit(
+    /// Checks all rate limit tiers (backpressure, organization, client),
+    /// returning the wire-native [`inferadb_ledger_wire::WireError`] on
+    /// failure.
+    pub(super) fn check_rate_limit_wire(
         &self,
         client_id: &str,
         organization: OrganizationId,
-    ) -> Result<(), Status> {
+    ) -> Result<(), inferadb_ledger_wire::WireError> {
         super::helpers::check_rate_limit(self.rate_limiter.as_ref(), client_id, organization)
     }
 
     /// Records key accesses from operations for hot key detection.
-    fn record_hot_keys(
+    pub(super) fn record_hot_keys(
         &self,
         vault: VaultId,
-        operations: &[inferadb_ledger_proto::proto::Operation],
+        operations: &[inferadb_ledger_wire::services::shared::Operation],
     ) {
         super::helpers::record_hot_keys(self.hot_key_detector.as_ref(), vault, operations);
     }
@@ -205,7 +201,7 @@ impl WriteService {
     /// - VersionEquals failed with missing key → KEY_NOT_FOUND
     /// - ValueEquals failed with existing key → VALUE_MISMATCH
     /// - ValueEquals failed with missing key → KEY_NOT_FOUND
-    fn map_condition_to_error_code(
+    pub(super) fn map_condition_to_error_code(
         condition: Option<&SetCondition>,
         key_exists: bool,
     ) -> WriteErrorCode {
@@ -240,52 +236,54 @@ impl WriteService {
     }
 
     /// Converts bytes to hex string for request logging.
-    fn bytes_to_hex(bytes: &[u8]) -> String {
+    pub(super) fn bytes_to_hex(bytes: &[u8]) -> String {
         bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut acc, b| {
             let _ = write!(acc, "{b:02x}");
             acc
         })
     }
 
-    /// Extracts operation type names from proto operations for request logging.
-    fn extract_operation_types(
-        operations: &[inferadb_ledger_proto::proto::Operation],
+    /// Extracts operation type names from wire operations for request logging.
+    pub(super) fn extract_operation_types(
+        operations: &[inferadb_ledger_wire::services::shared::Operation],
     ) -> Vec<&'static str> {
-        use inferadb_ledger_proto::proto::operation::Op;
+        use inferadb_ledger_wire::services::shared::OperationKind;
 
         operations
             .iter()
             .filter_map(|op| op.op.as_ref())
             .map(|op| match op {
-                Op::CreateRelationship(_) => "create_relationship",
-                Op::DeleteRelationship(_) => "delete_relationship",
-                Op::SetEntity(_) => "set_entity",
-                Op::DeleteEntity(_) => "delete_entity",
-                Op::ExpireEntity(_) => "expire_entity",
+                OperationKind::CreateRelationship(_) => "create_relationship",
+                OperationKind::DeleteRelationship(_) => "delete_relationship",
+                OperationKind::SetEntity(_) => "set_entity",
+                OperationKind::DeleteEntity(_) => "delete_entity",
+                OperationKind::ExpireEntity(_) => "expire_entity",
             })
             .collect()
     }
 
-    /// Estimates the total payload bytes across all operations.
+    /// Estimates the total payload bytes across all wire operations.
     ///
     /// Sums key and value sizes for entity operations, and resource/relation/subject
     /// lengths for relationship operations.
-    fn estimate_operations_bytes(operations: &[inferadb_ledger_proto::proto::Operation]) -> usize {
-        use inferadb_ledger_proto::proto::operation::Op;
+    pub(super) fn estimate_operations_bytes(
+        operations: &[inferadb_ledger_wire::services::shared::Operation],
+    ) -> usize {
+        use inferadb_ledger_wire::services::shared::OperationKind;
 
         operations
             .iter()
             .filter_map(|op| op.op.as_ref())
             .map(|op| match op {
-                Op::CreateRelationship(cr) => {
+                OperationKind::CreateRelationship(cr) => {
                     cr.resource.len() + cr.relation.len() + cr.subject.len()
                 },
-                Op::DeleteRelationship(dr) => {
+                OperationKind::DeleteRelationship(dr) => {
                     dr.resource.len() + dr.relation.len() + dr.subject.len()
                 },
-                Op::SetEntity(se) => se.key.len() + se.value.len(),
-                Op::DeleteEntity(de) => de.key.len(),
-                Op::ExpireEntity(ee) => ee.key.len(),
+                OperationKind::SetEntity(se) => se.key.len() + se.value.len(),
+                OperationKind::DeleteEntity(de) => de.key.len(),
+                OperationKind::ExpireEntity(ee) => ee.key.len(),
             })
             .sum()
     }
@@ -300,14 +298,14 @@ impl WriteService {
     /// On failure, `block_header` and `tx_proof` are `None` and `proof_error_reason`
     /// carries a stable label describing why proof generation failed. The write
     /// itself committed; the proof is a post-commit enrichment step.
-    fn generate_write_proof(
+    pub(super) fn generate_write_proof(
         &self,
         organization: OrganizationId,
         vault: VaultId,
         vault_height: u64,
     ) -> (
-        Option<inferadb_ledger_proto::proto::BlockHeader>,
-        Option<inferadb_ledger_proto::proto::MerkleProof>,
+        Option<inferadb_ledger_wire::services::shared::BlockHeader>,
+        Option<inferadb_ledger_wire::services::shared::MerkleProof>,
         Option<&'static str>,
     ) {
         let ctx = match self.resolver.resolve(organization) {
@@ -381,35 +379,34 @@ impl WriteService {
         }
     }
 
-    /// Converts proto operations to `OrganizationRequest`.
+    /// Converts wire operations to an [`OrganizationRequest`] for Raft.
     ///
-    /// Server-assigned sequences: The transaction's sequence is set to 0 here;
-    /// the actual sequence will be assigned by the Raft state machine at apply time.
+    /// Server-assigned sequences: The transaction's sequence is set to 0
+    /// here; the actual sequence will be assigned by the Raft state machine
+    /// at apply time.
     ///
     /// `organization_slug` / `vault_slug` are the external Snowflake slugs
-    /// carried from the incoming gRPC request. They're stamped onto the
+    /// carried from the incoming wire request. They're stamped onto the
     /// emitted `VaultEntry` at apply time (γ Phase 3a) so the
     /// block-announcement formatter can read them directly without
     /// consulting per-region `AppliedState` slug maps.
     #[allow(clippy::too_many_arguments)]
-    fn operations_to_request(
+    pub(super) fn operations_to_request_wire(
         &self,
         organization: OrganizationId,
         vault: Option<VaultId>,
-        operations: &[inferadb_ledger_proto::proto::Operation],
+        operations: &[inferadb_ledger_wire::services::shared::Operation],
         client_id: &str,
         idempotency_key: [u8; 16],
         request_hash: u64,
         organization_slug: inferadb_ledger_types::OrganizationSlug,
         vault_slug: inferadb_ledger_types::VaultSlug,
-    ) -> Result<OrganizationRequest, Status> {
-        let internal_ops: Vec<inferadb_ledger_types::Operation> = operations
-            .iter()
-            .map(inferadb_ledger_types::Operation::try_from)
-            .collect::<Result<Vec<_>, Status>>()?;
+    ) -> Result<OrganizationRequest, inferadb_ledger_wire::WireError> {
+        let internal_ops: Vec<inferadb_ledger_types::Operation> =
+            operations.iter().map(wire_operation_to_internal).collect::<Result<Vec<_>, _>>()?;
 
         let transaction = inferadb_ledger_types::Transaction {
-            id: *Uuid::new_v4().as_bytes(),
+            id: *uuid::Uuid::new_v4().as_bytes(),
             client_id: inferadb_ledger_types::ClientId::new(client_id),
             sequence: 0,
             operations: internal_ops,
@@ -428,801 +425,140 @@ impl WriteService {
     }
 }
 
-#[tonic::async_trait]
-impl inferadb_ledger_proto::proto::write_service_server::WriteService for WriteService {
-    /// Processes a single write transaction containing entity and relationship operations.
-    ///
-    /// Slug-to-ID resolution occurs at the service boundary via `SlugResolver`.
-    /// In multi-region deployments, requests are routed to the correct region
-    /// based on organization, with cross-region forwarding when needed.
-    async fn write(
-        &self,
-        request: Request<WriteRequest>,
-    ) -> Result<Response<WriteResponse>, Status> {
-        // Reject requests with insufficient remaining deadline
-        inferadb_ledger_raft::deadline::check_near_deadline(&request)?;
-        // Reject if node is draining
-        super::helpers::check_not_draining(self.health_state.as_ref())?;
-
-        // Build unified request context before consuming the request body.
-        // from_request extracts transport metadata and trace context from gRPC headers.
-        let event_handle: Option<Arc<dyn EventEmitter>> =
-            self.event_handle.as_ref().map(|h| Arc::new(h.clone()) as _);
-        let grpc_metadata = request.metadata().clone();
-        let mut ctx = RequestContext::from_request("WriteService", "write", &request, event_handle);
-        ctx.set_operation_type(OperationType::Write);
-        if let Some(ref sampler) = self.sampler {
-            ctx.set_sampler(sampler.clone());
-        }
-        if let Some(node_id) = self.node_id {
-            ctx.set_node_id(node_id);
-        }
-
-        let req = request.into_inner();
-
-        // Extract client ID
-        let client_id = req.client_id.as_ref().map(|c| c.id.clone()).unwrap_or_default();
-
-        // Resolve organization slug → internal ID via system region
-        let system = self.resolver.system_region()?;
-        let organization_id = SlugResolver::new(system.applied_state.clone())
-            .extract_and_resolve(&req.organization)?;
-
-        // Set organization slug on context for event emission in early-exit paths.
-        ctx.set_organization(req.organization.as_ref().map_or(0, |n| n.slug));
-
-        // Reject writes to organizations undergoing migration
-        self.check_not_migrating(&system, organization_id)?;
-
-        // Check for cross-region forwarding — if the organization is on a remote
-        // region, run pre-flight checks and forward the raw request.
-        if self.resolver.supports_forwarding()
-            && let ResolveResult::Redirect(remote) =
-                self.resolver.resolve_with_redirect(organization_id)?
-        {
-            // Pre-flight: validation on originating node
-            if let Err(status) = self.validate_operations(&req.operations) {
-                ctx.record_event(
-                    inferadb_ledger_types::events::EventAction::RequestValidationFailed,
-                    inferadb_ledger_types::events::EventOutcome::Denied {
-                        reason: status.message().to_string(),
-                    },
-                    &[],
-                );
-                return Err(status);
+/// Converts a wire [`Operation`](inferadb_ledger_wire::services::shared::Operation)
+/// to the domain [`Operation`](inferadb_ledger_types::Operation), validating that
+/// the `op` oneof is present.
+fn wire_operation_to_internal(
+    wire_op: &inferadb_ledger_wire::services::shared::Operation,
+) -> Result<inferadb_ledger_types::Operation, inferadb_ledger_wire::WireError> {
+    use inferadb_ledger_wire::services::shared::{OperationKind, SetConditionKind};
+    let op = wire_op.op.as_ref().ok_or_else(|| {
+        super::wire_helpers::build_wire_error(
+            inferadb_ledger_wire::ErrorCode::InvalidArgument,
+            "Operation missing op field",
+            "",
+            false,
+            0,
+            std::collections::BTreeMap::new(),
+            "",
+        )
+    })?;
+    Ok(match op {
+        OperationKind::CreateRelationship(cr) => {
+            inferadb_ledger_types::Operation::CreateRelationship {
+                resource: cr.resource.clone(),
+                relation: cr.relation.clone(),
+                subject: cr.subject.clone(),
             }
-
-            // Pre-flight: rate limit on originating node
-            if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
-                ctx.record_event(
-                    inferadb_ledger_types::events::EventAction::RequestRateLimited,
-                    inferadb_ledger_types::events::EventOutcome::Denied {
-                        reason: "rate_limited".to_string(),
-                    },
-                    &[],
-                );
-                return Err(status_with_correlation(status, &ctx.request_id(), ctx.trace_id()));
+        },
+        OperationKind::DeleteRelationship(dr) => {
+            inferadb_ledger_types::Operation::DeleteRelationship {
+                resource: dr.resource.clone(),
+                relation: dr.relation.clone(),
+                subject: dr.subject.clone(),
             }
-
-            // Redirect cross-region writes — clients reconnect against the remote
-            // region's leader using the hint attached to the NotLeader status.
-            let source_region =
-                self.manager.as_ref().map(|m| m.local_region().as_str()).unwrap_or("unknown");
-            debug!(
-                organization_id = organization_id.value(),
-                target_region = remote.region.as_str(),
-                source_region,
-                "Redirecting write to remote region"
-            );
-            return Err(status_with_correlation(
-                super::metadata::not_leader_remote_region(
-                    &remote,
-                    "Organization hosted by a remote region; reconnect to that region",
-                ),
-                &ctx.request_id(),
-                ctx.trace_id(),
-            ));
-        }
-
-        // Ensure GLOBAL state is replicated before resolving vault slugs.
-        super::helpers::ensure_global_consistency(self.manager.as_deref()).await;
-
-        // Local processing: resolve vault slug via GLOBAL applied state.
-        // Vault slug indexes are maintained in the GLOBAL Raft group (CreateVault
-        // is a GLOBAL operation), not in the data region's applied state.
-        let mut region = self.resolver.resolve(organization_id)?;
-        let vault_id = SlugResolver::new(system.applied_state.clone())
-            .extract_and_resolve_vault(&req.vault)?;
-
-        // Per-vault apply records `ClientSequenceEntry` and vault height
-        // updates in the per-vault Raft group's `AppliedState`; the
-        // org-scoped accessor never sees those writes. Attach the
-        // per-vault accessor when the vault group is live so the
-        // cross-failover idempotency check below routes through it.
-        // `attach_vault_group` pairs `vault_applied_state` with
-        // `vault_applied_index_rx` — see [`RegionContext::attach_vault_group`]
-        // for the invariant.
-        if let Some(manager) = &self.manager
-            && let Ok(vault_group) =
-                manager.get_vault_group(region.region, organization_id, vault_id)
-        {
-            region.attach_vault_group(&vault_group);
-        }
-
-        // Reject on followers — clients use the NotLeader hint to retry
-        // against the within-region leader directly. The leader check is
-        // on the region/org handle (vaults inherit leadership in
-        // `Delegated` mode), so the hint is region-scoped — no vault hint.
-        if !region.handle.is_leader() {
-            return Err(status_with_correlation(
-                super::metadata::not_leader_status_from_handle(
-                    region.handle.as_ref(),
-                    self.peer_addresses.as_ref(),
-                    "Not the leader for this region",
-                    None,
-                    None,
-                    None,
-                ),
-                &ctx.request_id(),
-                ctx.trace_id(),
-            ));
-        }
-
-        // Extract caller identity for canonical log line
-        super::helpers::extract_caller(&mut ctx, &req.caller);
-
-        // Parse idempotency key (must be exactly 16 bytes for UUID)
-        let idempotency_key: [u8; 16] =
-            req.idempotency_key.as_slice().try_into().map_err(|_| {
-                Status::invalid_argument("idempotency_key must be exactly 16 bytes")
-            })?;
-
-        // Validate all operations before any processing
-        if let Err(status) = self.validate_operations(&req.operations) {
-            ctx.record_event(
-                inferadb_ledger_types::events::EventAction::RequestValidationFailed,
-                inferadb_ledger_types::events::EventOutcome::Denied {
-                    reason: status.message().to_string(),
-                },
-                &[],
-            );
-            return Err(status);
-        }
-
-        // Compute request hash for payload comparison (detects key reuse with different payload)
-        let request_hash = seahash::hash(&super::helpers::hash_operations(&req.operations));
-
-        // Populate logging context with request metadata
-        ctx.set_client_info(&client_id, 0);
-        let organization = req.organization.as_ref().map_or(0, |n| n.slug);
-        let vault = req.vault.as_ref().map_or(0, |v| v.slug);
-        ctx.set_target(organization, vault);
-
-        // Populate write operation fields
-        let operation_types = Self::extract_operation_types(&req.operations);
-        ctx.set_write_operation(req.operations.len(), operation_types, req.include_tx_proof);
-        ctx.set_bytes_written(Self::estimate_operations_bytes(&req.operations));
-
-        // Serialize concurrent requests with the same idempotency key.
-        //
-        // Without this, during leader failover the moka cache is cold and two
-        // concurrent requests can both pass the replicated-state check before
-        // either commits, resulting in duplicate Raft proposals. The in-flight
-        // guard ensures only one request proceeds; others wait and re-check.
-        use inferadb_ledger_raft::idempotency::{
-            IdempotencyCheckResult, IdempotencyKey, InFlightStatus,
-        };
-        let _inflight_guard = loop {
-            let inflight_key =
-                IdempotencyKey::new(organization_id, vault_id, client_id.as_str(), idempotency_key);
-            match self.idempotency.try_acquire_inflight(inflight_key) {
-                InFlightStatus::Acquired(guard) => break guard,
-                InFlightStatus::Waiting(notify) => {
-                    // Register the waiter synchronously before any yield point.
-                    // tokio::sync::Notify::notify_waiters() does not store a permit
-                    // for future .notified() calls; a waiter that registers after
-                    // notify_waiters() fires would miss the wakeup. The acquirer
-                    // inserts the cached result BEFORE releasing, so a late waiter's
-                    // cache re-check is always safe.
-                    let notified = notify.notified();
-                    tokio::pin!(notified);
-                    notified.as_mut().enable();
-
-                    // Short-circuit: if notify_waiters() already fired before we
-                    // registered, the cache is populated and we can return immediately.
-                    match self.idempotency.check(
-                        organization_id,
-                        vault_id,
-                        &client_id,
-                        idempotency_key,
-                        request_hash,
-                    ) {
-                        IdempotencyCheckResult::Duplicate(cached) => {
-                            ctx.set_idempotency_hit(true);
-                            ctx.set_cached();
-                            if let Some(ref header) = cached.block_header
-                                && let Some(ref state_root) = header.state_root
-                            {
-                                ctx.set_state_root(&Self::bytes_to_hex(&state_root.value));
-                            }
-                            ctx.set_block_height(cached.block_height);
-                            metrics::record_idempotency_operation("coalesced_fast");
-                            metrics::record_idempotency_operation("hit");
-                            return Ok(response_with_correlation(
-                                WriteResponse {
-                                    result: Some(
-                                        inferadb_ledger_proto::proto::write_response::Result::Success(
-                                            cached,
-                                        ),
-                                    ),
-                                },
-                                &ctx.request_id(),
-                                ctx.trace_id(),
-                            ));
-                        },
-                        IdempotencyCheckResult::KeyReused => {
-                            ctx.set_error(
-                                "IdempotencyKeyReused",
-                                "Idempotency key reused with different payload",
-                            );
-                            return Ok(response_with_correlation(
-                                WriteResponse {
-                                    result: Some(
-                                        inferadb_ledger_proto::proto::write_response::Result::Error(
-                                            WriteError {
-                                                code: WriteErrorCode::IdempotencyKeyReused.into(),
-                                                key: String::new(),
-                                                current_version: None,
-                                                current_value: None,
-                                                message:
-                                                    "Idempotency key was already used with a different request payload"
-                                                        .to_string(),
-                                                committed_tx_id: None,
-                                                committed_block_height: None,
-                                                assigned_sequence: None,
-                                            },
-                                        ),
-                                    ),
-                                },
-                                &ctx.request_id(),
-                                ctx.trace_id(),
-                            ));
-                        },
-                        IdempotencyCheckResult::NewRequest => {
-                            // Acquirer is still in-flight (or crashed mid-insert).
-                            // Wait on the notification, then re-check.
-                            notified.await;
-                            metrics::record_idempotency_operation("coalesced");
-
-                            match self.idempotency.check(
-                                organization_id,
-                                vault_id,
-                                &client_id,
-                                idempotency_key,
-                                request_hash,
-                            ) {
-                                IdempotencyCheckResult::Duplicate(cached) => {
-                                    ctx.set_idempotency_hit(true);
-                                    ctx.set_cached();
-                                    if let Some(ref header) = cached.block_header
-                                        && let Some(ref state_root) = header.state_root
-                                    {
-                                        ctx.set_state_root(&Self::bytes_to_hex(&state_root.value));
-                                    }
-                                    ctx.set_block_height(cached.block_height);
-                                    metrics::record_idempotency_operation("hit");
-                                    return Ok(response_with_correlation(
-                                        WriteResponse {
-                                            result: Some(
-                                                inferadb_ledger_proto::proto::write_response::Result::Success(
-                                                    cached,
-                                                ),
-                                            ),
-                                        },
-                                        &ctx.request_id(),
-                                        ctx.trace_id(),
-                                    ));
-                                },
-                                IdempotencyCheckResult::KeyReused => {
-                                    ctx.set_error(
-                                        "IdempotencyKeyReused",
-                                        "Idempotency key reused with different payload",
-                                    );
-                                    return Ok(response_with_correlation(
-                                        WriteResponse {
-                                            result: Some(
-                                                inferadb_ledger_proto::proto::write_response::Result::Error(
-                                                    WriteError {
-                                                        code: WriteErrorCode::IdempotencyKeyReused
-                                                            .into(),
-                                                        key: String::new(),
-                                                        current_version: None,
-                                                        current_value: None,
-                                                        message:
-                                                            "Idempotency key was already used with a different request payload"
-                                                                .to_string(),
-                                                        committed_tx_id: None,
-                                                        committed_block_height: None,
-                                                        assigned_sequence: None,
-                                                    },
-                                                ),
-                                            ),
-                                        },
-                                        &ctx.request_id(),
-                                        ctx.trace_id(),
-                                    ));
-                                },
-                                IdempotencyCheckResult::NewRequest => {
-                                    // Acquirer released its guard without inserting
-                                    // (crash path). Retry the outer loop.
-                                    continue;
-                                },
-                            }
-                        },
-                    }
-                },
+        },
+        OperationKind::SetEntity(se) => {
+            let condition = se.condition.as_ref().and_then(|c| {
+                c.condition.as_ref().map(|kind| match kind {
+                    SetConditionKind::NotExists(_) => SetCondition::MustNotExist,
+                    SetConditionKind::MustExists(_) => SetCondition::MustExist,
+                    SetConditionKind::Version(v) => SetCondition::VersionEquals(*v),
+                    SetConditionKind::ValueEquals(v) => SetCondition::ValueEquals(v.to_vec()),
+                })
+            });
+            inferadb_ledger_types::Operation::SetEntity {
+                key: se.key.clone(),
+                value: se.value.to_vec(),
+                condition,
+                expires_at: se.expires_at,
             }
-        };
-
-        // Check idempotency cache for duplicate (fast path — moka hit)
-        match self.idempotency.check(
-            organization_id,
-            vault_id,
-            &client_id,
-            idempotency_key,
-            request_hash,
-        ) {
-            IdempotencyCheckResult::Duplicate(cached) => {
-                ctx.set_idempotency_hit(true);
-                ctx.set_cached();
-                if let Some(ref header) = cached.block_header
-                    && let Some(ref state_root) = header.state_root
-                {
-                    ctx.set_state_root(&Self::bytes_to_hex(&state_root.value));
-                }
-                ctx.set_block_height(cached.block_height);
-                metrics::record_idempotency_operation("hit");
-                return Ok(response_with_correlation(
-                    WriteResponse {
-                        result: Some(
-                            inferadb_ledger_proto::proto::write_response::Result::Success(cached),
-                        ),
-                    },
-                    &ctx.request_id(),
-                    ctx.trace_id(),
-                ));
-            },
-            IdempotencyCheckResult::KeyReused => {
-                ctx.set_error(
-                    "IdempotencyKeyReused",
-                    "Idempotency key reused with different payload",
-                );
-                return Ok(response_with_correlation(
-                    WriteResponse {
-                        result: Some(inferadb_ledger_proto::proto::write_response::Result::Error(WriteError {
-                            code: WriteErrorCode::IdempotencyKeyReused.into(),
-                            key: String::new(),
-                            current_version: None,
-                            current_value: None,
-                            message:
-                                "Idempotency key was already used with a different request payload"
-                                    .to_string(),
-                            committed_tx_id: None,
-                            committed_block_height: None,
-                            assigned_sequence: None,
-                        })),
-                    },
-                    &ctx.request_id(),
-                    ctx.trace_id(),
-                ));
-            },
-            IdempotencyCheckResult::NewRequest => {
-                // Moka miss — check replicated state for cross-failover dedup
-                ctx.set_idempotency_hit(false);
-                {
-                    use inferadb_ledger_raft::log_storage::IdempotencyCheckResult as ReplicatedCheck;
-                    match region.client_idempotency_check(
-                        organization_id,
-                        vault_id,
-                        &client_id,
-                        &idempotency_key,
-                        request_hash,
-                    ) {
-                        ReplicatedCheck::AlreadyCommitted { sequence } => {
-                            metrics::record_idempotency_operation("hit");
-                            return Ok(response_with_correlation(
-                                WriteResponse {
-                                    result: Some(
-                                        inferadb_ledger_proto::proto::write_response::Result::Error(
-                                            WriteError {
-                                                code: WriteErrorCode::AlreadyCommitted.into(),
-                                                key: String::new(),
-                                                current_version: None,
-                                                current_value: None,
-                                                message: "Request already committed (cross-failover dedup)".to_string(),
-                                                committed_tx_id: None,
-                                                committed_block_height: None,
-                                                assigned_sequence: Some(sequence),
-                                            },
-                                        ),
-                                    ),
-                                },
-                                &ctx.request_id(),
-                                ctx.trace_id(),
-                            ));
-                        },
-                        ReplicatedCheck::KeyReused => {
-                            ctx.set_error(
-                                "IdempotencyKeyReused",
-                                "Idempotency key reused with different payload (cross-failover)",
-                            );
-                            return Ok(response_with_correlation(
-                                WriteResponse {
-                                    result: Some(
-                                        inferadb_ledger_proto::proto::write_response::Result::Error(
-                                            WriteError {
-                                                code: WriteErrorCode::IdempotencyKeyReused.into(),
-                                                key: String::new(),
-                                                current_version: None,
-                                                current_value: None,
-                                                message: "Idempotency key was already used with a different request payload".to_string(),
-                                                committed_tx_id: None,
-                                                committed_block_height: None,
-                                                assigned_sequence: None,
-                                            },
-                                        ),
-                                    ),
-                                },
-                                &ctx.request_id(),
-                                ctx.trace_id(),
-                            ));
-                        },
-                        ReplicatedCheck::Miss => {},
-                    }
-                }
-                metrics::record_idempotency_operation("miss");
-            },
-        }
-
-        // Check rate limits (backpressure, organization, client)
-        if let Err(status) = self.check_rate_limit(&client_id, organization_id) {
-            ctx.set_rate_limited();
-            ctx.record_event(
-                inferadb_ledger_types::events::EventAction::RequestRateLimited,
-                inferadb_ledger_types::events::EventOutcome::Denied {
-                    reason: "rate_limited".to_string(),
-                },
-                &[],
-            );
-            return Err(status_with_correlation(status, &ctx.request_id(), ctx.trace_id()));
-        }
-
-        // Track key access frequency for hot key detection.
-        self.record_hot_keys(vault_id, &req.operations);
-
-        // Server-assigned sequences: no gap check needed
-
-        // γ Phase 3a: capture the external slugs from the incoming request
-        // so the apply handler can stamp them onto the emitted `VaultEntry`.
-        // The SDK sends `{Entity}Slug { slug: u64 }` in `req.organization`
-        // and `req.vault`; we already resolved them to internal ids above,
-        // so the slug values here are authoritative.
-        let organization_slug = inferadb_ledger_types::OrganizationSlug::new(
-            req.organization.as_ref().map_or(0, |o| o.slug),
-        );
-        let vault_slug =
-            inferadb_ledger_types::VaultSlug::new(req.vault.as_ref().map_or(0, |v| v.slug));
-
-        let ledger_request = self.operations_to_request(
-            organization_id,
-            Some(vault_id),
-            &req.operations,
-            &client_id,
-            idempotency_key,
-            request_hash,
-            organization_slug,
-            vault_slug,
-        )?;
-
-        // Re-validate vault slug before proposal submission.
-        // Between the initial resolution and now (leader check, rate limiting,
-        // idempotency check), the GLOBAL state may have changed (e.g., vault
-        // migrated to a different shard during region migration). A mismatch
-        // means the request would be routed to a stale shard.
-        let revalidated_vault_id = SlugResolver::new(system.applied_state.clone())
-            .extract_and_resolve_vault(&req.vault)?;
-        if revalidated_vault_id != vault_id {
-            warn!(
-                vault_id = vault_id.value(),
-                revalidated_vault_id = revalidated_vault_id.value(),
-                "Vault routing changed during request processing"
-            );
-            return Err(status_with_correlation(
-                super::helpers::error_code_to_status(
-                    inferadb_ledger_types::ErrorCode::StaleRouting,
-                    "Stale routing: vault routing changed during request processing. Retry."
-                        .to_string(),
-                ),
-                &ctx.request_id(),
-                ctx.trace_id(),
-            ));
-        }
-
-        // Compute effective timeout: min(proposal_timeout, grpc_deadline)
-        let grpc_deadline =
-            inferadb_ledger_raft::deadline::extract_deadline_from_metadata(&grpc_metadata);
-        let timeout =
-            inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline);
-
-        // P2c.3.b.2 / P2c.3.b.4: route the proposal to the vault's per-vault
-        // Raft shard, not the parent organization shard. The `VaultGroup`'s
-        // apply pipeline runs the vault-scoped tier-validation gate (P2c.1)
-        // and advances the per-vault `last_applied` counter.
-        //
-        // Per task #164 (option (a)): the typed
-        // `propose_organization_request_to_vault` helper handles the
-        // batch-writer-vs-direct-propose split internally — it prefers the
-        // per-vault batch writer when present (so concurrent writes
-        // amortize the WAL fsync cost) and falls back to a direct propose
-        // through `vault_group.handle()` otherwise. Both paths drain the
-        // per-vault `commitment_buffer` automatically. Errors come back as
-        // raw `tonic::Status` so the gRPC handler can wrap them with
-        // `status_with_correlation` and stamp the canonical-log-line
-        // outcome locally.
-        ctx.start_raft_timer();
-        ctx.set_batch_info(false, 1);
-        // Forward the request slugs into the proposal so a `NotLeader`
-        // hint carries `(OrganizationSlug, VaultSlug)` — the keys the SDK's
-        // `VaultLeaderCache` uses. Both fields are `Some` here because the
-        // handler resolved both slugs above.
-        let organization_slug_hint = req.organization.as_ref().map(|o| o.slug);
-        let vault_slug_hint = req.vault.as_ref().map(|v| v.slug);
-        let response = match self
-            .proposal_service
-            .propose_organization_request_to_vault(
-                region.region,
-                organization_id,
-                vault_id,
-                organization_slug_hint,
-                vault_slug_hint,
-                ledger_request,
-                ctx.caller_or_zero(),
-                timeout,
-            )
-            .await
-        {
-            Ok(response) => response,
-            Err(status) => {
-                ctx.end_raft_timer();
-                if status.code() == tonic::Code::DeadlineExceeded {
-                    ctx.set_error("ProposalTimeout", "Raft proposal timed out");
-                } else {
-                    ctx.set_error("RaftError", status.message());
-                }
-                return Err(status_with_correlation(status, &ctx.request_id(), ctx.trace_id()));
-            },
-        };
-        ctx.end_raft_timer();
-
-        match response {
-            LedgerResponse::Write { block_height, block_hash, assigned_sequence } => {
-                // Generate proof and block header if requested
-                let (block_header, tx_proof, proof_error_reason) = if req.include_tx_proof {
-                    self.generate_write_proof(organization_id, vault_id, block_height)
-                } else {
-                    (None, None, None)
-                };
-
-                let success = WriteSuccess {
-                    tx_id: Some(TxId { id: Uuid::new_v4().as_bytes().to_vec() }),
-                    block_height,
-                    block_header: block_header.clone(),
-                    tx_proof,
-                    assigned_sequence,
-                };
-
-                // Cache the result for idempotency
-                self.idempotency.insert(
-                    organization_id,
-                    vault_id,
-                    client_id.clone(),
-                    idempotency_key,
-                    request_hash,
-                    success.clone(),
-                );
-                metrics::set_idempotency_cache_size(self.idempotency.len());
-
-                // Set success outcome with block info
-                ctx.set_success();
-                ctx.set_block_height(block_height);
-                ctx.set_block_hash(&Self::bytes_to_hex(&block_hash));
-                if let Some(ref header) = block_header
-                    && let Some(ref state_root) = header.state_root
-                {
-                    ctx.set_state_root(&Self::bytes_to_hex(&state_root.value));
-                }
-
-                let elapsed = ctx.elapsed_secs();
-                metrics::record_organization_latency(organization_id, "write", elapsed);
-
-                let mut response = response_with_correlation(
-                    WriteResponse {
-                        result: Some(
-                            inferadb_ledger_proto::proto::write_response::Result::Success(success),
-                        ),
-                    },
-                    &ctx.request_id(),
-                    ctx.trace_id(),
-                );
-                if let Some(reason) = proof_error_reason
-                    && let Ok(val) = tonic::metadata::MetadataValue::try_from(reason)
-                {
-                    response.metadata_mut().insert("x-proof-unavailable-reason", val);
-                }
-                Ok(response)
-            },
-            LedgerResponse::Error { code, message } => {
-                ctx.set_error(code.grpc_code_name(), &message);
-
-                Ok(response_with_correlation(
-                    WriteResponse {
-                        result: Some(inferadb_ledger_proto::proto::write_response::Result::Error(
-                            WriteError {
-                                code: WriteErrorCode::Unspecified.into(),
-                                key: String::new(),
-                                current_version: None,
-                                current_value: None,
-                                message,
-                                committed_tx_id: None,
-                                committed_block_height: None,
-                                assigned_sequence: None,
-                            },
-                        )),
-                    },
-                    &ctx.request_id(),
-                    ctx.trace_id(),
-                ))
-            },
-            LedgerResponse::PreconditionFailed {
-                key,
-                current_version,
-                current_value,
-                failed_condition,
-            } => {
-                // Return current state for client-side conflict resolution
-                // Key exists if we have a current_version (which is the version when entity was
-                // last modified)
-                let key_exists = current_version.is_some();
-                let error_code =
-                    Self::map_condition_to_error_code(failed_condition.as_ref(), key_exists);
-
-                ctx.set_precondition_failed(Some(&key));
-
-                Ok(response_with_correlation(
-                    WriteResponse {
-                        result: Some(inferadb_ledger_proto::proto::write_response::Result::Error(
-                            WriteError {
-                                code: error_code.into(),
-                                key,
-                                current_version,
-                                current_value,
-                                message: "Precondition failed".to_string(),
-                                committed_tx_id: None,
-                                committed_block_height: None,
-                                assigned_sequence: None,
-                            },
-                        )),
-                    },
-                    &ctx.request_id(),
-                    ctx.trace_id(),
-                ))
-            },
-            _ => {
-                ctx.set_error("UnexpectedResponse", "Unexpected response type");
-                Err(status_with_correlation(
-                    Status::internal("Unexpected response type"),
-                    &ctx.request_id(),
-                    ctx.trace_id(),
-                ))
-            },
-        }
-    }
+        },
+        OperationKind::DeleteEntity(de) => {
+            inferadb_ledger_types::Operation::DeleteEntity { key: de.key.clone() }
+        },
+        OperationKind::ExpireEntity(ee) => inferadb_ledger_types::Operation::ExpireEntity {
+            key: ee.key.clone(),
+            expired_at: ee.expired_at,
+        },
+    })
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
-    use inferadb_ledger_proto::proto::{self, WriteErrorCode};
-    use inferadb_ledger_types::{config::ValidationConfig, validation};
-    use tonic::Status;
+    use bytes::Bytes;
+    use inferadb_ledger_types::config::ValidationConfig;
+    use inferadb_ledger_wire::services::shared as ws;
 
-    use super::WriteService;
+    use super::{WriteErrorCode, WriteService};
 
-    /// Helper: run the same validate-and-map-to-Status logic the service uses.
-    fn validate_proto_operations(
-        operations: &[proto::Operation],
-        config: &ValidationConfig,
-    ) -> Result<(), Status> {
-        validation::validate_operations_count(operations.len(), config)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
-
-        let mut total_bytes: usize = 0;
-        for proto_op in operations {
-            let Some(ref op) = proto_op.op else {
-                return Err(Status::invalid_argument("Operation missing op field"));
-            };
-            match op {
-                proto::operation::Op::SetEntity(se) => {
-                    validation::validate_key(&se.key, config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    validation::validate_value(&se.value, config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    total_bytes += se.key.len() + se.value.len();
-                },
-                proto::operation::Op::DeleteEntity(de) => {
-                    validation::validate_key(&de.key, config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    total_bytes += de.key.len();
-                },
-                proto::operation::Op::ExpireEntity(ee) => {
-                    validation::validate_key(&ee.key, config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    total_bytes += ee.key.len();
-                },
-                proto::operation::Op::CreateRelationship(cr) => {
-                    validation::validate_relationship_string(&cr.resource, "resource", config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    validation::validate_relationship_string(&cr.relation, "relation", config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    validation::validate_relationship_string(&cr.subject, "subject", config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    total_bytes += cr.resource.len() + cr.relation.len() + cr.subject.len();
-                },
-                proto::operation::Op::DeleteRelationship(dr) => {
-                    validation::validate_relationship_string(&dr.resource, "resource", config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    validation::validate_relationship_string(&dr.relation, "relation", config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    validation::validate_relationship_string(&dr.subject, "subject", config)
-                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                    total_bytes += dr.resource.len() + dr.relation.len() + dr.subject.len();
-                },
-            }
-        }
-
-        validation::validate_batch_payload_bytes(total_bytes, config)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
-
-        Ok(())
-    }
-
-    fn make_set_entity(key: &str, value: &[u8]) -> proto::Operation {
-        proto::Operation {
-            op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
+    fn wire_set_entity(key: &str, value: &[u8]) -> ws::Operation {
+        ws::Operation {
+            op: Some(ws::OperationKind::SetEntity(ws::SetEntity {
                 key: key.to_string(),
-                value: value.to_vec(),
+                value: Bytes::copy_from_slice(value),
                 expires_at: None,
                 condition: None,
             })),
         }
     }
 
-    fn make_delete_entity(key: &str) -> proto::Operation {
-        proto::Operation {
-            op: Some(proto::operation::Op::DeleteEntity(proto::DeleteEntity {
+    fn wire_delete_entity(key: &str) -> ws::Operation {
+        ws::Operation {
+            op: Some(ws::OperationKind::DeleteEntity(ws::DeleteEntity { key: key.to_string() })),
+        }
+    }
+
+    fn wire_expire_entity(key: &str, expired_at: u64) -> ws::Operation {
+        ws::Operation {
+            op: Some(ws::OperationKind::ExpireEntity(ws::ExpireEntity {
                 key: key.to_string(),
+                expired_at,
             })),
         }
     }
 
-    fn make_create_relationship(resource: &str, relation: &str, subject: &str) -> proto::Operation {
-        proto::Operation {
-            op: Some(proto::operation::Op::CreateRelationship(proto::CreateRelationship {
+    fn wire_create_relationship(resource: &str, relation: &str, subject: &str) -> ws::Operation {
+        ws::Operation {
+            op: Some(ws::OperationKind::CreateRelationship(ws::CreateRelationship {
                 resource: resource.to_string(),
                 relation: relation.to_string(),
                 subject: subject.to_string(),
             })),
         }
+    }
+
+    fn wire_delete_relationship(resource: &str, relation: &str, subject: &str) -> ws::Operation {
+        ws::Operation {
+            op: Some(ws::OperationKind::DeleteRelationship(ws::DeleteRelationship {
+                resource: resource.to_string(),
+                relation: relation.to_string(),
+                subject: subject.to_string(),
+            })),
+        }
+    }
+
+    /// Helper: drives the wire-native validation entry point used by the
+    /// service. Mirrors the original `validate_wire_operations` helper but
+    /// works directly with [`inferadb_ledger_wire::services::shared::Operation`].
+    fn validate_wire_operations(
+        operations: &[ws::Operation],
+        config: &ValidationConfig,
+    ) -> Result<(), inferadb_ledger_wire::WireError> {
+        super::super::helpers::validate_operations(operations, config)
+    }
+
+    fn make_set_entity(key: &str, value: &[u8]) -> ws::Operation {
+        wire_set_entity(key, value)
+    }
+
+    fn make_delete_entity(key: &str) -> ws::Operation {
+        wire_delete_entity(key)
+    }
+
+    fn make_create_relationship(resource: &str, relation: &str, subject: &str) -> ws::Operation {
+        wire_create_relationship(resource, relation, subject)
     }
 
     // =========================================================================
@@ -1233,56 +569,68 @@ mod tests {
     fn valid_set_entity_passes_validation() {
         let config = ValidationConfig::default();
         let ops = vec![make_set_entity("user:123", b"data")];
-        assert!(validate_proto_operations(&ops, &config).is_ok());
+        assert!(validate_wire_operations(&ops, &config).is_ok());
     }
 
     #[test]
     fn valid_delete_entity_passes_validation() {
         let config = ValidationConfig::default();
         let ops = vec![make_delete_entity("user:123")];
-        assert!(validate_proto_operations(&ops, &config).is_ok());
+        assert!(validate_wire_operations(&ops, &config).is_ok());
     }
 
     #[test]
     fn valid_relationship_passes_validation() {
         let config = ValidationConfig::default();
         let ops = vec![make_create_relationship("doc:456", "viewer", "user:123")];
-        assert!(validate_proto_operations(&ops, &config).is_ok());
+        assert!(validate_wire_operations(&ops, &config).is_ok());
     }
 
     #[test]
     fn empty_key_returns_invalid_argument() {
         let config = ValidationConfig::default();
         let ops = vec![make_set_entity("", b"data")];
-        let err = validate_proto_operations(&ops, &config).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("key"), "Error should mention key: {}", err.message());
+        let err = validate_wire_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code, inferadb_ledger_wire::ErrorCode::InvalidArgument);
+        assert!(
+            err.message.as_str().contains("key"),
+            "Error should mention key: {}",
+            err.message.as_str()
+        );
     }
 
     #[test]
     fn key_with_invalid_chars_returns_invalid_argument() {
         let config = ValidationConfig::default();
         let ops = vec![make_set_entity("user 123", b"data")];
-        let err = validate_proto_operations(&ops, &config).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        let err = validate_wire_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code, inferadb_ledger_wire::ErrorCode::InvalidArgument);
     }
 
     #[test]
     fn key_exceeding_max_size_returns_invalid_argument() {
         let config = ValidationConfig::builder().max_key_bytes(10).build().unwrap();
         let ops = vec![make_set_entity(&"a".repeat(11), b"data")];
-        let err = validate_proto_operations(&ops, &config).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("key"), "Error should mention key: {}", err.message());
+        let err = validate_wire_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code, inferadb_ledger_wire::ErrorCode::InvalidArgument);
+        assert!(
+            err.message.as_str().contains("key"),
+            "Error should mention key: {}",
+            err.message.as_str()
+        );
     }
 
     #[test]
     fn value_exceeding_max_size_returns_invalid_argument() {
         let config = ValidationConfig::builder().max_value_bytes(4).build().unwrap();
         let ops = vec![make_set_entity("key", &[0u8; 5])];
-        let err = validate_proto_operations(&ops, &config).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("value"), "Error should mention value: {}", err.message());
+        let err = validate_wire_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code, inferadb_ledger_wire::ErrorCode::InvalidArgument);
+        assert!(
+            err.message.as_str().contains("value"),
+            "Error should mention value: {}",
+            err.message.as_str()
+        );
     }
 
     #[test]
@@ -1293,46 +641,46 @@ mod tests {
             make_set_entity("b", b"2"),
             make_set_entity("c", b"3"),
         ];
-        let err = validate_proto_operations(&ops, &config).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        let err = validate_wire_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code, inferadb_ledger_wire::ErrorCode::InvalidArgument);
         assert!(
-            err.message().contains("operations"),
+            err.message.as_str().contains("operations"),
             "Error should mention operations: {}",
-            err.message()
+            err.message.as_str()
         );
     }
 
     #[test]
     fn test_zero_operations_returns_invalid_argument() {
         let config = ValidationConfig::default();
-        let ops: Vec<proto::Operation> = vec![];
-        let err = validate_proto_operations(&ops, &config).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        let ops: Vec<ws::Operation> = vec![];
+        let err = validate_wire_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code, inferadb_ledger_wire::ErrorCode::InvalidArgument);
     }
 
     #[test]
     fn test_payload_exceeding_max_bytes_returns_invalid_argument() {
         let config = ValidationConfig::builder().max_batch_payload_bytes(10).build().unwrap();
         let ops = vec![make_set_entity("key", &[0u8; 11])];
-        let err = validate_proto_operations(&ops, &config).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        let err = validate_wire_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code, inferadb_ledger_wire::ErrorCode::InvalidArgument);
         assert!(
-            err.message().contains("payload"),
+            err.message.as_str().contains("payload"),
             "Error should mention payload: {}",
-            err.message()
+            err.message.as_str()
         );
     }
 
     #[test]
     fn test_missing_op_field_returns_invalid_argument() {
         let config = ValidationConfig::default();
-        let ops = vec![proto::Operation { op: None }];
-        let err = validate_proto_operations(&ops, &config).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        let ops = vec![ws::Operation { op: None }];
+        let err = validate_wire_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code, inferadb_ledger_wire::ErrorCode::InvalidArgument);
         assert!(
-            err.message().contains("missing"),
+            err.message.as_str().contains("missing"),
             "Error should mention missing: {}",
-            err.message()
+            err.message.as_str()
         );
     }
 
@@ -1340,37 +688,37 @@ mod tests {
     fn test_relationship_invalid_chars_returns_invalid_argument() {
         let config = ValidationConfig::default();
         let ops = vec![make_create_relationship("doc 456", "viewer", "user:123")];
-        let err = validate_proto_operations(&ops, &config).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        let err = validate_wire_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code, inferadb_ledger_wire::ErrorCode::InvalidArgument);
     }
 
     #[test]
     fn test_relationship_empty_field_returns_invalid_argument() {
         let config = ValidationConfig::default();
         let ops = vec![make_create_relationship("doc:456", "", "user:123")];
-        let err = validate_proto_operations(&ops, &config).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        let err = validate_wire_operations(&ops, &config).unwrap_err();
+        assert_eq!(err.code, inferadb_ledger_wire::ErrorCode::InvalidArgument);
     }
 
     #[test]
     fn test_key_at_exact_limit_passes() {
         let config = ValidationConfig::builder().max_key_bytes(5).build().unwrap();
         let ops = vec![make_set_entity("abcde", b"v")];
-        assert!(validate_proto_operations(&ops, &config).is_ok());
+        assert!(validate_wire_operations(&ops, &config).is_ok());
     }
 
     #[test]
     fn test_value_at_exact_limit_passes() {
         let config = ValidationConfig::builder().max_value_bytes(5).build().unwrap();
         let ops = vec![make_set_entity("k", &[0u8; 5])];
-        assert!(validate_proto_operations(&ops, &config).is_ok());
+        assert!(validate_wire_operations(&ops, &config).is_ok());
     }
 
     #[test]
     fn test_operations_at_exact_limit_passes() {
         let config = ValidationConfig::builder().max_operations_per_write(2).build().unwrap();
         let ops = vec![make_set_entity("a", b"1"), make_set_entity("b", b"2")];
-        assert!(validate_proto_operations(&ops, &config).is_ok());
+        assert!(validate_wire_operations(&ops, &config).is_ok());
     }
 
     // =========================================================================
@@ -1472,7 +820,7 @@ mod tests {
 
     #[test]
     fn extract_operation_types_empty() {
-        let ops: Vec<proto::Operation> = vec![];
+        let ops: Vec<ws::Operation> = vec![];
         let types = WriteService::extract_operation_types(&ops);
         assert!(types.is_empty());
     }
@@ -1480,22 +828,11 @@ mod tests {
     #[test]
     fn extract_operation_types_all_variants() {
         let ops = vec![
-            make_set_entity("k", b"v"),
-            make_delete_entity("k"),
-            proto::Operation {
-                op: Some(proto::operation::Op::ExpireEntity(proto::ExpireEntity {
-                    key: "k".to_string(),
-                    expired_at: 100,
-                })),
-            },
-            make_create_relationship("r", "rel", "s"),
-            proto::Operation {
-                op: Some(proto::operation::Op::DeleteRelationship(proto::DeleteRelationship {
-                    resource: "r".to_string(),
-                    relation: "rel".to_string(),
-                    subject: "s".to_string(),
-                })),
-            },
+            wire_set_entity("k", b"v"),
+            wire_delete_entity("k"),
+            wire_expire_entity("k", 100),
+            wire_create_relationship("r", "rel", "s"),
+            wire_delete_relationship("r", "rel", "s"),
         ];
         let types = WriteService::extract_operation_types(&ops);
         assert_eq!(
@@ -1512,7 +849,7 @@ mod tests {
 
     #[test]
     fn extract_operation_types_skips_none_op() {
-        let ops = vec![proto::Operation { op: None }, make_set_entity("k", b"v")];
+        let ops = vec![ws::Operation { op: None }, wire_set_entity("k", b"v")];
         let types = WriteService::extract_operation_types(&ops);
         assert_eq!(types, vec!["set_entity"]);
     }
@@ -1523,66 +860,55 @@ mod tests {
 
     #[test]
     fn estimate_operations_bytes_empty() {
-        let ops: Vec<proto::Operation> = vec![];
+        let ops: Vec<ws::Operation> = vec![];
         assert_eq!(WriteService::estimate_operations_bytes(&ops), 0);
     }
 
     #[test]
     fn estimate_operations_bytes_set_entity() {
-        let ops = vec![make_set_entity("key", b"value")];
+        let ops = vec![wire_set_entity("key", b"value")];
         // "key" = 3 bytes, "value" = 5 bytes
         assert_eq!(WriteService::estimate_operations_bytes(&ops), 8);
     }
 
     #[test]
     fn estimate_operations_bytes_delete_entity() {
-        let ops = vec![make_delete_entity("entity:1")];
+        let ops = vec![wire_delete_entity("entity:1")];
         assert_eq!(WriteService::estimate_operations_bytes(&ops), 8);
     }
 
     #[test]
     fn estimate_operations_bytes_expire_entity() {
-        let ops = vec![proto::Operation {
-            op: Some(proto::operation::Op::ExpireEntity(proto::ExpireEntity {
-                key: "abc".to_string(),
-                expired_at: 100,
-            })),
-        }];
+        let ops = vec![wire_expire_entity("abc", 100)];
         assert_eq!(WriteService::estimate_operations_bytes(&ops), 3);
     }
 
     #[test]
     fn estimate_operations_bytes_create_relationship() {
-        let ops = vec![make_create_relationship("doc:1", "viewer", "user:1")];
+        let ops = vec![wire_create_relationship("doc:1", "viewer", "user:1")];
         // "doc:1" = 5, "viewer" = 6, "user:1" = 6
         assert_eq!(WriteService::estimate_operations_bytes(&ops), 17);
     }
 
     #[test]
     fn estimate_operations_bytes_delete_relationship() {
-        let ops = vec![proto::Operation {
-            op: Some(proto::operation::Op::DeleteRelationship(proto::DeleteRelationship {
-                resource: "doc:1".to_string(),
-                relation: "viewer".to_string(),
-                subject: "user:1".to_string(),
-            })),
-        }];
+        let ops = vec![wire_delete_relationship("doc:1", "viewer", "user:1")];
         assert_eq!(WriteService::estimate_operations_bytes(&ops), 17);
     }
 
     #[test]
     fn estimate_operations_bytes_mixed_operations() {
         let ops = vec![
-            make_set_entity("k", b"v"),              // 1 + 1 = 2
-            make_delete_entity("dk"),                // 2
-            make_create_relationship("r", "x", "s"), // 1 + 1 + 1 = 3
+            wire_set_entity("k", b"v"),              // 1 + 1 = 2
+            wire_delete_entity("dk"),                // 2
+            wire_create_relationship("r", "x", "s"), // 1 + 1 + 1 = 3
         ];
         assert_eq!(WriteService::estimate_operations_bytes(&ops), 7);
     }
 
     #[test]
     fn estimate_operations_bytes_skips_none_op() {
-        let ops = vec![proto::Operation { op: None }, make_set_entity("k", b"v")];
+        let ops = vec![ws::Operation { op: None }, wire_set_entity("k", b"v")];
         assert_eq!(WriteService::estimate_operations_bytes(&ops), 2);
     }
 }

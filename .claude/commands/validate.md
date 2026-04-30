@@ -50,7 +50,7 @@ cargo +1.92 build --workspace --all-targets --no-default-features
 
 For each of these crates, run the three feature variants below:
 
-Crates: `inferadb-ledger-types`, `inferadb-ledger-store`, `inferadb-ledger-proto`, `inferadb-ledger-state`, `inferadb-ledger-raft`, `inferadb-ledger-services`, `inferadb-ledger-sdk`.
+Crates: `inferadb-ledger-types`, `inferadb-ledger-store`, `inferadb-ledger-state`, `inferadb-ledger-raft`, `inferadb-ledger-wire`, `inferadb-ledger-wire-services`, `inferadb-ledger-wire-transport`, `inferadb-ledger-services`, `inferadb-ledger-sdk`.
 
 ```bash
 cargo +1.92 build -p <crate>

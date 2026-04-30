@@ -1,12 +1,20 @@
-//! Shared test utilities for InferaDB Ledger crates.
+//! Shared test scaffolding for InferaDB Ledger crates.
 //!
-//! This crate provides common test helpers to reduce boilerplate across test modules:
+//! Add this crate as a `[dev-dependency]` to avoid duplicating test boilerplate.
+//! It exposes four building blocks:
 //!
-//! - [`TestDir`] - Managed temporary directory with path helpers
-//! - [`test_batch_config`] - Default batch configuration for tests
-//! - [`CrashInjector`] - Crash injection for testing crash recovery
-//! - [`CrashPoint`] - Enumeration of crash points in commit protocol
-//! - [`strategies`] - Proptest strategies for domain types
+//! - [`TestDir`] — temporary directory that auto-deletes on drop; use instead of hand-rolling
+//!   `tempfile::TempDir` in every test.
+//! - [`test_batch_config`] — a [`types::config::BatchConfig`] tuned for fast, deterministic test
+//!   runs (small batches, 10ms timeout, serial flushing).
+//! - [`CrashInjector`] / [`CrashPoint`] — deterministic crash simulation for the B+ tree dual-slot
+//!   commit protocol. Wire the injector into a store backend's I/O hooks to verify recovery at each
+//!   commit boundary.
+//! - [`strategies`] — composable proptest strategies for every domain type (`Operation`,
+//!   `Transaction`, `VaultBlock`, `EventEntry`, slugs, IDs, …). Run with `just test-proptest`;
+//!   control iteration count via `PROPTEST_CASES`.
+//!
+//! [`types::config::BatchConfig`]: inferadb_ledger_types::config::BatchConfig
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]

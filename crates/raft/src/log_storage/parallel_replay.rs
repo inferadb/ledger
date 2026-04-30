@@ -1,26 +1,26 @@
-//! Parallel per-vault WAL replay for newly-joined organization voters.
+//! Parallel per-vault WAL replay for crash recovery and newly-joined voters.
 //!
 //! ## Background
 //!
-//! Today, when a node is added as a voter to an organization with N vault
-//! groups, every vault group independently catches up via its own
-//! `InstallSnapshot` RPC: at 1000 vaults that is a 1000-snapshot storm
-//! per voter add. The Phase 5 spec (M4 deliverable —
-//! `docs/superpowers/specs/2026-04-27-phase-5-centralised-membership.md`)
-//! replaces that storm with a single shared-WAL transfer: the new voter
-//! receives the per-org WAL up to the conf-change index once, then
-//! replays it locally — fanning out per-vault apply tasks in parallel
-//! against the same WAL bytes.
+//! When a node joins an organization with N vault groups, each vault would
+//! independently catch up via its own `InstallSnapshot` RPC — a potential
+//! snapshot storm at scale. This module replaces that storm with a single
+//! shared-WAL transfer: the new voter receives the per-org WAL once, then
+//! replays it locally, fanning out per-vault apply tasks in parallel against
+//! the same WAL bytes.
 //!
-//! The per-org shared WAL already tags every frame with its
+//! The per-org shared WAL tags every frame with its
 //! [`ConsensusStateId`](inferadb_ledger_consensus::types::ConsensusStateId)
-//! (see `crates/consensus/src/wal/segmented.rs`); per-vault and per-org
-//! groups share the same WAL within an organization (root rule 17, the
-//! shared `ConsensusEngine` per `(Region, OrganizationId)` tuple). That
-//! sharing is what makes a single-pass WAL scan sufficient to recover
-//! every vault group on the new voter.
+//! (see `crates/consensus/src/wal/segmented.rs`); per-vault and per-org groups
+//! share the same WAL within an organization (root rule 17, shared
+//! `ConsensusEngine` per `(Region, OrganizationId)` tuple). That sharing makes a
+//! single-pass WAL scan sufficient to recover every vault group.
 //!
-//! ## What this module ships (M4)
+//! The same primitive also serves crash recovery: see
+//! `RaftManager::start_region` for the per-vault catch-up path that runs before
+//! engine startup.
+//!
+//! ## Core primitive
 //!
 //! [`replay_shared_wal_for_org`] — the cancellation-aware primitive that:
 //!

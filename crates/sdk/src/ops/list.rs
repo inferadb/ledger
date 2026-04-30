@@ -1,12 +1,10 @@
 //! Entity, relationship, and resource listing operations.
 
-use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{OrganizationSlug, UserSlug, VaultSlug};
 
 use crate::{
     LedgerClient,
     error::Result,
-    proto_util::non_empty,
     types::query::{
         Entity, ListEntitiesOpts, ListRelationshipsOpts, ListResourcesOpts, PagedResult,
         Relationship,
@@ -20,19 +18,14 @@ impl LedgerClient {
 
     /// Lists entities matching a key prefix.
     ///
-    /// Returns a paginated list of entities with keys starting with the given prefix.
-    /// Use the `next_page_token` to fetch additional pages.
-    ///
-    /// # Arguments
-    ///
-    /// * `caller` - Identity of the user performing this operation (external slug).
-    /// * `organization` - Organization slug (external identifier).
-    /// * `opts` - Query options including prefix filter, pagination, and consistency.
+    /// Returns a paginated list of entities with keys starting with the prefix
+    /// specified in `opts`. Use the `next_page_token` in the result to fetch
+    /// additional pages.
     ///
     /// # Errors
     ///
-    /// Returns `SdkError::Shutdown` if the client has been shut down.
-    /// Returns `SdkError::Rpc` if the query fails after retry attempts.
+    /// Returns [`crate::SdkError::Shutdown`] if the client has been shut down,
+    /// or [`crate::SdkError::Rpc`] if the query fails after retry attempts.
     ///
     /// # Example
     ///
@@ -65,32 +58,21 @@ impl LedgerClient {
         opts: ListEntitiesOpts,
     ) -> Result<PagedResult<Entity>> {
         let pool = self.pool.clone();
+
         self.call_with_retry("list_entities", || {
             let pool = pool.clone();
             let opts = opts.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_read_client);
-
-                let request = proto::ListEntitiesRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    key_prefix: opts.key_prefix.clone(),
-                    at_height: opts.at_height,
-                    include_expired: opts.include_expired,
-                    limit: opts.limit,
-                    page_token: opts.page_token.clone().unwrap_or_default(),
-                    consistency: opts.consistency.to_proto() as i32,
-                    vault: opts.vault.map(|v| proto::VaultSlug { slug: v.value() }),
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                let response =
-                    client.list_entities(tonic::Request::new(request)).await?.into_inner();
-
-                let items = response.entities.into_iter().map(Entity::from_proto).collect();
-
-                let next_page_token = non_empty(response.next_page_token);
-
-                Ok(PagedResult { items, next_page_token, block_height: response.block_height })
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::list::list_entities(
+                    wire_client,
+                    request_id,
+                    caller,
+                    organization,
+                    opts,
+                )
+                .await
             }
         })
         .await
@@ -98,20 +80,14 @@ impl LedgerClient {
 
     /// Lists relationships in a vault with optional filters.
     ///
-    /// Returns a paginated list of relationships matching the filter criteria.
-    /// All filter fields are optional; omitting a filter matches all values.
-    ///
-    /// # Arguments
-    ///
-    /// * `caller` - Identity of the user performing this operation (external slug).
-    /// * `organization` - Organization slug (external identifier).
-    /// * `vault` - Vault slug (external identifier).
-    /// * `opts` - Query options including filters, pagination, and consistency.
+    /// Returns a paginated list of relationships matching the filter criteria
+    /// in `opts`. All filter fields are optional; omitting a filter matches all
+    /// values. Use the `next_page_token` in the result to fetch additional pages.
     ///
     /// # Errors
     ///
-    /// Returns `SdkError::Shutdown` if the client has been shut down.
-    /// Returns `SdkError::Rpc` if the query fails after retry attempts.
+    /// Returns [`crate::SdkError::Shutdown`] if the client has been shut down,
+    /// or [`crate::SdkError::Rpc`] if the query fails after retry attempts.
     ///
     /// # Example
     ///
@@ -142,34 +118,22 @@ impl LedgerClient {
         opts: ListRelationshipsOpts,
     ) -> Result<PagedResult<Relationship>> {
         let pool = self.pool.clone();
+
         self.call_with_retry("list_relationships", || {
             let pool = pool.clone();
             let opts = opts.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_read_client);
-
-                let request = proto::ListRelationshipsRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    vault: Some(proto::VaultSlug { slug: vault.value() }),
-                    resource: opts.resource.clone(),
-                    relation: opts.relation.clone(),
-                    subject: opts.subject.clone(),
-                    at_height: opts.at_height,
-                    limit: opts.limit,
-                    page_token: opts.page_token.clone().unwrap_or_default(),
-                    consistency: opts.consistency.to_proto() as i32,
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                let response =
-                    client.list_relationships(tonic::Request::new(request)).await?.into_inner();
-
-                let items =
-                    response.relationships.into_iter().map(Relationship::from_proto).collect();
-
-                let next_page_token = non_empty(response.next_page_token);
-
-                Ok(PagedResult { items, next_page_token, block_height: response.block_height })
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::list::list_relationships(
+                    wire_client,
+                    request_id,
+                    caller,
+                    organization,
+                    vault,
+                    opts,
+                )
+                .await
             }
         })
         .await
@@ -177,20 +141,15 @@ impl LedgerClient {
 
     /// Lists distinct resource IDs matching a type prefix.
     ///
-    /// Returns a paginated list of unique resource identifiers that match the given
-    /// type prefix (e.g., "document" matches "document:1", "document:2", etc.).
-    ///
-    /// # Arguments
-    ///
-    /// * `caller` - Identity of the user performing this operation (external slug).
-    /// * `organization` - Organization slug (external identifier).
-    /// * `vault` - Vault slug (external identifier).
-    /// * `opts` - Query options including type filter, pagination, and consistency.
+    /// Returns a paginated list of unique resource identifiers that match the
+    /// type prefix specified in `opts` (e.g., `"document"` matches
+    /// `"document:1"`, `"document:2"`, etc.). Use the `next_page_token` in
+    /// the result to fetch additional pages.
     ///
     /// # Errors
     ///
-    /// Returns `SdkError::Shutdown` if the client has been shut down.
-    /// Returns `SdkError::Rpc` if the query fails after retry attempts.
+    /// Returns [`crate::SdkError::Shutdown`] if the client has been shut down,
+    /// or [`crate::SdkError::Rpc`] if the query fails after retry attempts.
     ///
     /// # Example
     ///
@@ -221,33 +180,22 @@ impl LedgerClient {
         opts: ListResourcesOpts,
     ) -> Result<PagedResult<String>> {
         let pool = self.pool.clone();
+
         self.call_with_retry("list_resources", || {
             let pool = pool.clone();
             let opts = opts.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_read_client);
-
-                let request = proto::ListResourcesRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    vault: Some(proto::VaultSlug { slug: vault.value() }),
-                    resource_type: opts.resource_type.clone(),
-                    at_height: opts.at_height,
-                    limit: opts.limit,
-                    page_token: opts.page_token.clone().unwrap_or_default(),
-                    consistency: opts.consistency.to_proto() as i32,
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                let response =
-                    client.list_resources(tonic::Request::new(request)).await?.into_inner();
-
-                let next_page_token = non_empty(response.next_page_token);
-
-                Ok(PagedResult {
-                    items: response.resources,
-                    next_page_token,
-                    block_height: response.block_height,
-                })
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::list::list_resources(
+                    wire_client,
+                    request_id,
+                    caller,
+                    organization,
+                    vault,
+                    opts,
+                )
+                .await
             }
         })
         .await

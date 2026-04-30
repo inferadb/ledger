@@ -129,15 +129,14 @@ pub(super) fn require_tier(key: &str, expected: KeyTier) -> Result<()> {
 
 /// Process-wide cache for signing keys keyed by kid (UUID).
 ///
-/// Created once per process (typically on `RaftManager` and the
-/// `ServiceContext`) and shared across every `SystemOrganizationService`
-/// constructed on the hot path. The kid namespace is globally unique so
-/// sharing the cache across regions and call sites is correct.
+/// Created once per process (on `RaftManager` and `ServiceContext`) and
+/// shared across every `SystemOrganizationService` on the hot path.
+/// The kid namespace is globally unique, so sharing the cache across regions
+/// and call sites is correct.
 ///
 /// Constructing a fresh `moka::sync::Cache` per request triggers
-/// `crossbeam_epoch::Global::try_advance` GC churn that dominated CPU
-/// self-time on the write path before this type was introduced — see
-/// `docs/superpowers/specs/2026-04-27-reactor-wal-investigation.md`.
+/// `crossbeam_epoch::Global::try_advance` GC churn that dominates CPU
+/// self-time on the JWT-verification path.
 pub type SigningKeyCache = Arc<moka::sync::Cache<String, SigningKey>>;
 
 /// Builds a fresh process-wide [`SigningKeyCache`] with the standard

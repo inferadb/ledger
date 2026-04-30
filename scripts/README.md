@@ -17,10 +17,8 @@ invocation (`./scripts/foo.sh`) is always supported and equivalent.
 | `stress-quick.sh`           | `just test-stress-quick`                               | Smoke-level throughput tests (~1 min, release build).                               |
 | `stress-throughput.sh`      | `just test-stress-throughput`                          | Batched + multi-region throughput against advisory targets.                         |
 | `stress-correctness.sh`     | `just test-stress-correctness`                         | Scale-level correctness: state root parity, snapshot determinism, watch streaming.  |
-| `check-port-consumption.sh` | `just test-port-consumption`                           | Regression test for gRPC channel caching via TIME_WAIT accounting.                  |
 | `cluster-lifecycle-test.sh` | `just test-cluster-lifecycle`                          | 6-phase e2e: bootstrap → join → replication → leader transfer → shutdown → rebuild. |
 | `crash-recovery.sh`         | `just test-crash-recovery-drill`                       | SIGKILL a node mid-write, restart, verify convergence + zero data loss.             |
-| `run-integration-tests.sh`  | `just test-external-cluster` / `just test-sdk-cluster` | Spawn a local cluster and run server or SDK integration tests against it.           |
 | `update-dependencies.sh`    | —                                                      | Update `Cargo.lock` against crates.io (disables `[patch.crates-io]` temporarily).   |
 | `lib/cluster-bootstrap.sh`  | —                                                      | Shared helpers for spawning/tearing down a local cluster. Sourced, not executed.    |
 

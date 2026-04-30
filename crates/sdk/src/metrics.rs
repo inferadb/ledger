@@ -142,40 +142,79 @@ pub trait SdkMetrics: Send + Sync + fmt::Debug {
         let _ = (endpoint, event);
     }
 
-    /// Called when a region leader cache read returns a fresh or stale-but-usable entry.
+    /// Records a region leader cache hit.
+    ///
+    /// Called when the cache returned a fresh or stale-but-usable entry,
+    /// avoiding a full resolve round-trip.
+    ///
+    /// - `region`: The logical region name.
     fn leader_cache_hit(&self, _region: &str) {}
 
-    /// Called when a region leader cache read needed a resolve (entry absent or past `hard_ttl`).
+    /// Records a region leader cache miss.
+    ///
+    /// Called when the cache had no entry or the entry was past the hard TTL,
+    /// requiring a blocking resolve.
+    ///
+    /// - `region`: The logical region name.
     fn leader_cache_miss(&self, _region: &str) {}
 
+    /// Records a region leader change detected on resolve.
+    ///
     /// Called when a successful resolve returned a different endpoint than
-    /// what was previously cached — indicates a leader change.
+    /// what was previously cached.
+    ///
+    /// - `region`: The logical region name.
     fn leader_cache_flap(&self, _region: &str) {}
 
-    /// Called when a resolve coalesced onto an in-flight future (single-flight win).
+    /// Records a resolve that coalesced onto an already in-flight resolve.
+    ///
+    /// Called when the single-flight deduplicator joined a concurrent resolve
+    /// rather than starting a new one.
+    ///
+    /// - `region`: The logical region name.
     fn region_resolve_coalesced(&self, _region: &str) {}
 
-    /// Called when a stale-but-usable entry was served while a background refresh was triggered.
+    /// Records a stale cache entry served while a background refresh ran.
+    ///
+    /// Called when the entry was past the soft TTL but not yet past the hard
+    /// TTL, so the stale value was returned immediately while the refresh
+    /// proceeded asynchronously.
+    ///
+    /// - `region`: The logical region name.
     fn region_resolve_stale_served(&self, _region: &str) {}
 
-    /// Called when the leader watch stream receives a push update.
+    /// Records a push update received from the leader-watch stream.
+    ///
+    /// - `region`: The logical region name.
     fn leader_watch_update(&self, _region: &str) {}
 
-    /// Called when the leader watch stream reconnects after an error or EOF.
+    /// Records a leader-watch stream reconnect attempt.
+    ///
+    /// Called when the watch stream reconnects after an error or EOF.
+    ///
+    /// - `region`: The logical region name.
     fn leader_watch_reconnect(&self, _region: &str) {}
 
-    /// Called when a cache write was rejected because the incoming term is
-    /// stale relative to the currently-cached term. `source` is one of
-    /// `"hint"` or `"watch"`.
+    /// Records a cache write that was rejected due to a stale term.
+    ///
+    /// Called when an incoming hint or watch update carries a term that is
+    /// older than the currently-cached term, preventing a stale-leader
+    /// overwrite.
+    ///
+    /// - `region`: The logical region name.
+    /// - `source`: `"hint"` for `NotLeader` redirect hints, `"watch"` for leader-watch stream
+    ///   updates.
     fn leader_stale_term_rejected(&self, _region: &str, _source: &'static str) {}
 
-    /// Called when a retry is triggered by a leader redirect hint.
+    /// Records a retry triggered by a leader redirect hint.
     ///
-    /// Observes the cost of redirect-based routing: how often clients
-    /// receive `NotLeader` + hint responses and have to reconnect to the
-    /// correct regional leader. Expected to be non-zero on cold-start
-    /// for cross-region writes; should trend toward zero on warm paths
-    /// with `preferred_region` configured.
+    /// Called when the client receives a `NotLeader` response with a
+    /// [`LeaderHint`](crate::LeaderHint) and retries the request against the
+    /// indicated leader. On warm paths with
+    /// [`ClientConfig::preferred_region`](crate::ClientConfig::preferred_region)
+    /// set, this counter should trend toward zero.
+    ///
+    /// - `region`: The logical region name.
     fn redirect_retry(&self, _region: &str) {}
 }
 

@@ -1,11 +1,21 @@
-//! System organization (`_system`) for global data.
+//! System organization (`_system`) for cluster-wide shared data.
 //!
-//! The `_system` organization stores global entities that span all organizations:
-//! - User accounts (global identity)
-//! - Email addresses (with uniqueness enforcement)
-//! - Organization routing table
-//! - Cluster node membership
-//! - Cross-organization sagas
+//! `organization_id = 0`, `vault_id = 0`. Stores entities that span all
+//! organizations:
+//!
+//! - **User accounts** — identity, credentials, email addresses (REGIONAL, Pattern 1).
+//! - **Organizations** — GLOBAL skeleton + REGIONAL profile overlay (Pattern 2).
+//! - **Applications** — GLOBAL skeleton + REGIONAL profile overlay (Pattern 2).
+//! - **Signing keys, refresh tokens** — GLOBAL-only, no PII (Pattern 3).
+//! - **Organization routing table** — `_dir:org_registry:{id}` (GLOBAL).
+//! - **Cluster node membership** — `_meta:node:{id}` (GLOBAL).
+//! - **Cross-organization sagas** — `_meta:saga:{id}` (GLOBAL).
+//!
+//! Key builders live in [`SystemKeys`](crate::system::SystemKeys); tier
+//! classification is enforced by
+//! [`SystemKeys::validate_key_tier`](crate::system::SystemKeys::validate_key_tier)
+//! and audited against
+//! [`SystemKeys::KEY_REGISTRY`](crate::system::SystemKeys::KEY_REGISTRY).
 
 mod cluster;
 mod keys;

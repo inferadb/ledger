@@ -15,10 +15,10 @@ use inferadb_ledger_raft::{
 use inferadb_ledger_state::{StateLayer, system::SigningKeyCache};
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{EmailBlindingKey, OrganizationId, Region, config::ValidationConfig};
-use tonic::Status;
+use inferadb_ledger_wire::{ErrorCode, RequestContext as WireRequestContext, WireError};
 
-use super::{error_classify, metadata::status_with_correlation};
-use crate::proposal::{ProposalService, serialize_payload};
+use super::{error_classify, wire_helpers};
+use crate::proposal::{ProposalService, serialize_payload_wire};
 
 /// Shared infrastructure for gRPC services that propose writes through Raft.
 ///
@@ -90,10 +90,8 @@ pub(crate) struct ServiceContext {
     /// MUST clone this `Arc` and pass it to
     /// [`SystemOrganizationService::with_signing_key_cache`] rather than
     /// constructing a fresh cache via `SystemOrganizationService::new`.
-    /// Per-request cache construction triggered the
-    /// `crossbeam_epoch::Global::try_advance` GC churn this field
-    /// eliminates — see
-    /// `docs/superpowers/specs/2026-04-27-reactor-wal-investigation.md`.
+    /// Per-request cache construction triggers `crossbeam_epoch` GC churn;
+    /// sharing the process-wide cache via this field eliminates that overhead.
     pub(crate) signing_key_cache: SigningKeyCache,
 }
 
@@ -103,7 +101,7 @@ pub(crate) struct ServiceContext {
 /// to the GLOBAL `(GLOBAL, 0)` group (cluster control plane); `Region` routes
 /// to the target region's regional control-plane group (`(region, 0)`);
 /// `Organization` routes to a specific `(region, organization_id)` per-
-/// organization group (data plane, γ Phase 3b).
+/// organization data-plane group.
 enum ProposalRoute {
     /// GLOBAL Raft group (cluster control plane).
     Global,
@@ -114,24 +112,23 @@ enum ProposalRoute {
 }
 
 impl ServiceContext {
-    /// Creates a unified `RequestContext` using the `from_request` constructor.
+    /// Creates a unified `RequestContext` rooted at a wire `RequestContext`.
     ///
-    /// Unlike [`make_request_context`](Self::make_request_context), this variant:
-    /// - Extracts trace context directly from the request (no separate `TraceContext` variable
-    ///   needed)
-    /// - Enables automatic gRPC metric emission on Drop
-    /// - Attaches the event handle so `ctx.record_event()` works
-    ///
-    /// Must be called **before** `request.into_inner()`.
-    pub(crate) fn make_request_context_from<T>(
+    /// Wire-shaped sibling of the legacy `from_request` constructor — used
+    /// by tonic handlers after they synthesize a wire `RequestContext` via
+    /// [`super::wire_helpers::tonic_request_to_wire_context`], and by
+    /// future wire-trait handlers directly. Enables automatic gRPC metric
+    /// emission on Drop and attaches the event handle so `ctx.record_event()`
+    /// works.
+    pub(crate) fn make_request_context_from(
         &self,
         service: &'static str,
         method: &'static str,
-        request: &tonic::Request<T>,
+        wire_ctx: &WireRequestContext,
     ) -> RequestContext {
         let event_handle: Option<Arc<dyn inferadb_ledger_raft::event_writer::EventEmitter>> =
             self.event_handle.as_ref().map(|h| Arc::new(h.clone()) as _);
-        let mut ctx = RequestContext::from_request(service, method, request, event_handle);
+        let mut ctx = RequestContext::from_wire_context(service, method, wire_ctx, event_handle);
         ctx.set_operation_type(OperationType::Admin);
         ctx.set_admin_action(method);
         if let Some(ref sampler) = self.sampler {
@@ -144,7 +141,8 @@ impl ServiceContext {
     }
 
     /// Shared proposal path: serialize `request` as `RaftPayload<R>`, drive
-    /// the timer, submit through `route`, stamp correlation on errors.
+    /// the timer, submit through `route`, stamp wire-frame correlation on
+    /// errors.
     ///
     /// All tier-typed propose helpers funnel through here so the timer +
     /// error-correlation wrapping stays identical across `SystemRequest`,
@@ -154,14 +152,17 @@ impl ServiceContext {
         &self,
         request: R,
         route: ProposalRoute,
-        grpc_metadata: &tonic::metadata::MetadataMap,
-        ctx: &mut RequestContext,
-    ) -> Result<LedgerResponse, Status> {
-        let timeout = self.effective_timeout(grpc_metadata);
-        let payload = RaftPayload::new(request, ctx.caller_or_zero());
-        let bytes = serialize_payload(payload)?;
+        wire_ctx: &WireRequestContext,
+        log_ctx: &mut RequestContext,
+    ) -> Result<LedgerResponse, WireError> {
+        let timeout = self.effective_timeout(wire_ctx);
+        let payload = RaftPayload::new(request, log_ctx.caller_or_zero());
+        let bytes = serialize_payload_wire(payload)?;
 
-        ctx.start_raft_timer();
+        log_ctx.start_raft_timer();
+        // ProposalService methods still return `tonic::Status`; bridge into
+        // `WireError` here so this helper's signature is wire-shaped. F.1.f.2
+        // pushes the conversion down into the trait itself.
         let result = match route {
             ProposalRoute::Global => self.proposer.propose_bytes(bytes, timeout).await,
             ProposalRoute::Region(region) => {
@@ -173,12 +174,13 @@ impl ServiceContext {
                     .await
             },
         };
-        ctx.end_raft_timer();
+        log_ctx.end_raft_timer();
 
-        let result =
-            result.map_err(|e| status_with_correlation(e, &ctx.request_id(), ctx.trace_id()));
+        let result = result.map_err(|e| {
+            wire_helpers::wire_error_with_correlation(e, wire_ctx.request_id, wire_ctx.trace_id)
+        });
         if let Err(ref e) = result {
-            ctx.set_error("ProposalError", e.message());
+            log_ctx.set_error("ProposalError", &e.message);
         }
         result
     }
@@ -193,10 +195,10 @@ impl ServiceContext {
     pub(crate) async fn propose_system_request(
         &self,
         system_request: SystemRequest,
-        grpc_metadata: &tonic::metadata::MetadataMap,
-        ctx: &mut RequestContext,
-    ) -> Result<LedgerResponse, Status> {
-        self.propose_serialized(system_request, ProposalRoute::Global, grpc_metadata, ctx).await
+        wire_ctx: &WireRequestContext,
+        log_ctx: &mut RequestContext,
+    ) -> Result<LedgerResponse, WireError> {
+        self.propose_serialized(system_request, ProposalRoute::Global, wire_ctx, log_ctx).await
     }
 
     /// Proposes an [`OrganizationRequest`] as org-tier metadata to the GLOBAL
@@ -218,15 +220,15 @@ impl ServiceContext {
         _region: Region,
         _organization: OrganizationId,
         organization_request: OrganizationRequest,
-        grpc_metadata: &tonic::metadata::MetadataMap,
-        ctx: &mut RequestContext,
-    ) -> Result<LedgerResponse, Status> {
+        wire_ctx: &WireRequestContext,
+        log_ctx: &mut RequestContext,
+    ) -> Result<LedgerResponse, WireError> {
         let wrapped = SystemRequest::OrganizationMetadata(Box::new(organization_request));
-        self.propose_serialized(wrapped, ProposalRoute::Global, grpc_metadata, ctx).await
+        self.propose_serialized(wrapped, ProposalRoute::Global, wire_ctx, log_ctx).await
     }
 
     /// Proposes an [`OrganizationRequest`] directly to the per-organization
-    /// Raft group (γ Phase 3b routing).
+    /// Raft group.
     ///
     /// Unlike [`propose_organization_request`](Self::propose_organization_request) —
     /// which wraps in `SystemRequest::OrganizationMetadata` and lands in
@@ -237,23 +239,23 @@ impl ServiceContext {
     /// against the owning organization's `AppliedState`.
     ///
     /// Used by the vault service for `CreateVault` / `UpdateVault` /
-    /// `DeleteVault` after γ Phase 3b: the record body lands on per-org
-    /// state (via this helper), then the vault service follows up with a
-    /// GLOBAL `SystemRequest::RegisterVaultDirectoryEntry` /
+    /// `DeleteVault`: the record body lands on per-org state (via this
+    /// helper), then the vault service follows up with a GLOBAL
+    /// `SystemRequest::RegisterVaultDirectoryEntry` /
     /// `UnregisterVaultDirectoryEntry` to maintain the slug index.
     pub(crate) async fn propose_to_organization_request(
         &self,
         region: Region,
         organization: OrganizationId,
         organization_request: OrganizationRequest,
-        grpc_metadata: &tonic::metadata::MetadataMap,
-        ctx: &mut RequestContext,
-    ) -> Result<LedgerResponse, Status> {
+        wire_ctx: &WireRequestContext,
+        log_ctx: &mut RequestContext,
+    ) -> Result<LedgerResponse, WireError> {
         self.propose_serialized(
             organization_request,
             ProposalRoute::Organization(region, organization),
-            grpc_metadata,
-            ctx,
+            wire_ctx,
+            log_ctx,
         )
         .await
     }
@@ -261,21 +263,26 @@ impl ServiceContext {
     /// Proposes a [`RegionRequest`] to the target region's Raft group
     /// (regional control plane tier).
     ///
-    /// **Not yet active in B.1.** The `(region, 0)` apply worker is
-    /// `ApplyWorker<SystemRequest>` until the B.1.6 RegionGroup storage
-    /// split ships. Calling this method today returns a
-    /// `FAILED_PRECONDITION` error; future work will wire the region's
-    /// `ApplyWorker<RegionRequest>` and remove this guard.
+    /// **Not yet active.** The `(region, 0)` apply worker does not yet
+    /// decode `RegionRequest` payloads. Calling this method today always
+    /// returns `FailedPrecondition`; the guard will be removed once the
+    /// `RegionGroup` storage split ships.
     #[allow(dead_code)]
     pub(crate) async fn propose_region_request(
         &self,
         _region: Region,
         _region_request: RegionRequest,
-        _grpc_metadata: &tonic::metadata::MetadataMap,
-        _ctx: &mut RequestContext,
-    ) -> Result<LedgerResponse, Status> {
-        Err(Status::failed_precondition(
+        _wire_ctx: &WireRequestContext,
+        _log_ctx: &mut RequestContext,
+    ) -> Result<LedgerResponse, WireError> {
+        Err(wire_helpers::build_wire_error(
+            ErrorCode::FailedPrecondition,
             "RegionRequest routing is not yet active (pending B.1.6 RegionGroup split)",
+            "",
+            false,
+            0,
+            std::collections::BTreeMap::new(),
+            "",
         ))
     }
 
@@ -288,18 +295,18 @@ impl ServiceContext {
     ///
     /// # Errors
     ///
-    /// - `FAILED_PRECONDITION` if the `RaftManager` is not configured.
-    /// - `UNAVAILABLE` if the region's Raft group is not active on this node.
-    /// - `DEADLINE_EXCEEDED` if the proposal times out.
-    /// - `INTERNAL` / `UNAVAILABLE` for Raft errors (via `classify_raft_error`).
+    /// - `FailedPrecondition` if the `RaftManager` is not configured.
+    /// - `StaleRouting` if the region's Raft group is not active on this node.
+    /// - `FailedPrecondition` if the proposal times out.
+    /// - `Internal` / `StaleRouting` for Raft errors.
     pub(crate) async fn propose_regional(
         &self,
         region: Region,
         system_request: SystemRequest,
-        grpc_metadata: &tonic::metadata::MetadataMap,
-        ctx: &mut RequestContext,
-    ) -> Result<LedgerResponse, Status> {
-        self.propose_serialized(system_request, ProposalRoute::Region(region), grpc_metadata, ctx)
+        wire_ctx: &WireRequestContext,
+        log_ctx: &mut RequestContext,
+    ) -> Result<LedgerResponse, WireError> {
+        self.propose_serialized(system_request, ProposalRoute::Region(region), wire_ctx, log_ctx)
             .await
     }
 
@@ -315,8 +322,10 @@ impl ServiceContext {
     pub(crate) fn regional_state(
         &self,
         region: Region,
-    ) -> Result<Arc<StateLayer<FileBackend>>, Status> {
-        self.proposer.regional_state(region)
+    ) -> Result<Arc<StateLayer<FileBackend>>, tonic::Status> {
+        self.proposer
+            .regional_state(region)
+            .map_err(super::wire_helpers::wire_error_to_tonic_status)
     }
 
     /// Proposes a user-scoped `SystemRequest` to a region with PII encryption.
@@ -326,7 +335,7 @@ impl ServiceContext {
     /// state. When the user is erased and their `UserShredKey` is destroyed, all
     /// historical log entries become cryptographically unrecoverable (crypto-shredding).
     ///
-    /// Returns `NOT_FOUND` if the `UserShredKey` is absent — the user may have been
+    /// Returns `NotFound` if the `UserShredKey` is absent — the user may have been
     /// erased or is not yet provisioned. This function must only be called for
     /// post-registration operations where the `UserShredKey` is guaranteed to exist.
     pub(crate) async fn propose_regional_encrypted(
@@ -334,12 +343,13 @@ impl ServiceContext {
         region: Region,
         system_request: SystemRequest,
         user_id: inferadb_ledger_types::UserId,
-        grpc_metadata: &tonic::metadata::MetadataMap,
-        ctx: &mut RequestContext,
-    ) -> Result<LedgerResponse, Status> {
+        wire_ctx: &WireRequestContext,
+        log_ctx: &mut RequestContext,
+    ) -> Result<LedgerResponse, WireError> {
         // UserShredKey is stored in REGIONAL state (written during user creation).
         // Read from the region's state layer, not the GLOBAL one.
-        let regional_state = self.regional_state(region)?;
+        let regional_state =
+            self.regional_state(region).map_err(wire_helpers::tonic_status_to_wire_error)?;
         let sys_svc =
             inferadb_ledger_state::system::SystemOrganizationService::with_signing_key_cache(
                 regional_state,
@@ -349,9 +359,15 @@ impl ServiceContext {
             sys_svc.get_user_shred_key(user_id).map_err(|e| error_classify::crypto_error(&e))?;
 
         let shred_key = shred_key.ok_or_else(|| {
-            Status::not_found(format!(
-                "UserShredKey not found for user {user_id}: user may have been erased"
-            ))
+            wire_helpers::build_wire_error(
+                ErrorCode::NotFound,
+                format!("UserShredKey not found for user {user_id}: user may have been erased"),
+                "",
+                false,
+                0,
+                std::collections::BTreeMap::new(),
+                "",
+            )
         })?;
 
         let encrypted = inferadb_ledger_raft::entry_crypto::encrypt_user_system_request(
@@ -364,8 +380,8 @@ impl ServiceContext {
         self.propose_regional(
             region,
             SystemRequest::EncryptedUserSystem(encrypted),
-            grpc_metadata,
-            ctx,
+            wire_ctx,
+            log_ctx,
         )
         .await
     }
@@ -378,19 +394,20 @@ impl ServiceContext {
     /// destroyed, all historical log entries become cryptographically
     /// unrecoverable (crypto-shredding).
     ///
-    /// Returns `NOT_FOUND` if the `OrgShredKey` is absent — the organization may
+    /// Returns `NotFound` if the `OrgShredKey` is absent — the organization may
     /// have been purged or is not yet provisioned.
     pub(crate) async fn propose_regional_org_encrypted(
         &self,
         region: Region,
         system_request: SystemRequest,
         organization: inferadb_ledger_types::OrganizationId,
-        grpc_metadata: &tonic::metadata::MetadataMap,
-        ctx: &mut RequestContext,
-    ) -> Result<LedgerResponse, Status> {
+        wire_ctx: &WireRequestContext,
+        log_ctx: &mut RequestContext,
+    ) -> Result<LedgerResponse, WireError> {
         // OrgShredKey is stored in REGIONAL state (written by CreateOrganization saga).
         // Read from the region's state layer, not the GLOBAL one.
-        let regional_state = self.regional_state(region)?;
+        let regional_state =
+            self.regional_state(region).map_err(wire_helpers::tonic_status_to_wire_error)?;
         let sys_svc =
             inferadb_ledger_state::system::SystemOrganizationService::with_signing_key_cache(
                 regional_state,
@@ -401,9 +418,17 @@ impl ServiceContext {
             .map_err(|e| error_classify::crypto_error(&e))?;
 
         let shred_key = shred_key.ok_or_else(|| {
-            Status::not_found(format!(
-                "OrgShredKey not found for organization {organization}: organization may have been purged"
-            ))
+            wire_helpers::build_wire_error(
+                ErrorCode::NotFound,
+                format!(
+                    "OrgShredKey not found for organization {organization}: organization may have been purged"
+                ),
+                "",
+                false,
+                0,
+                std::collections::BTreeMap::new(),
+                "",
+            )
         })?;
 
         let encrypted = inferadb_ledger_raft::entry_crypto::encrypt_org_system_request(
@@ -416,8 +441,8 @@ impl ServiceContext {
         self.propose_regional(
             region,
             SystemRequest::EncryptedOrgSystem(encrypted),
-            grpc_metadata,
-            ctx,
+            wire_ctx,
+            log_ctx,
         )
         .await
     }
@@ -458,77 +483,30 @@ impl ServiceContext {
         self.proposer.raft_metrics()
     }
 
-    /// Computes the effective Raft proposal timeout, respecting gRPC deadlines.
-    fn effective_timeout(&self, grpc_metadata: &tonic::metadata::MetadataMap) -> Duration {
-        let grpc_deadline =
-            inferadb_ledger_raft::deadline::extract_deadline_from_metadata(grpc_metadata);
-        inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, grpc_deadline)
+    /// Computes the effective Raft proposal timeout, respecting client
+    /// deadlines.
+    ///
+    /// Reads the deadline directly off the wire `RequestContext` (the
+    /// dispatcher derived it from `FrameHeader::deadline_unix_nanos` /
+    /// the bridge derived it from the tonic `grpc-timeout` header). When
+    /// the wire context carries no deadline, the configured proposal
+    /// timeout is used as-is.
+    fn effective_timeout(&self, wire_ctx: &WireRequestContext) -> Duration {
+        let remaining = wire_ctx
+            .deadline
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
+        inferadb_ledger_raft::deadline::effective_timeout(self.proposal_timeout, remaining)
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 pub(crate) mod tests {
-    use arc_swap::ArcSwap;
-    use inferadb_ledger_raft::{
-        log_storage::AppliedState,
-        raft_manager::{RaftManager, RaftManagerConfig, RegionConfig},
-    };
+    use inferadb_ledger_raft::raft_manager::{RaftManager, RaftManagerConfig, RegionConfig};
     use inferadb_ledger_test_utils::TestDir;
 
     use super::*;
     use crate::proposal::RaftProposalService;
-
-    /// Creates a `ServiceContext` backed by a [`MockProposalService`] and a
-    /// real (empty) `StateLayer<FileBackend>` for state reads.
-    ///
-    /// The returned `AppliedState` is wrapped in `Arc<ArcSwap<_>>` so tests
-    /// can populate slug indexes, org metadata, and other applied state before
-    /// calling handlers.
-    ///
-    /// [`MockProposalService`]: crate::proposal::mock::MockProposalService
-    pub(crate) fn test_service_context_with_mock(
-        proposer: Arc<dyn crate::proposal::ProposalService>,
-        temp: &TestDir,
-    ) -> (ServiceContext, Arc<ArcSwap<AppliedState>>) {
-        let db_path = temp.path().join("test_mock.db");
-        let db = Arc::new(
-            inferadb_ledger_store::Database::create(&db_path).expect("create test database"),
-        );
-        let meta_db_path = temp.path().join("test_mock_meta.db");
-        let meta_db = Arc::new(
-            inferadb_ledger_store::Database::create(&meta_db_path)
-                .expect("create test meta database"),
-        );
-        let state = Arc::new(
-            inferadb_ledger_state::new_state_layer_shared(db, meta_db)
-                .expect("build shared StateLayer for test mock"),
-        );
-        let applied_state_inner = Arc::new(ArcSwap::from_pointee(AppliedState::default()));
-        let applied_state = inferadb_ledger_raft::log_storage::AppliedStateAccessor::new_for_test(
-            applied_state_inner.clone(),
-        );
-
-        let ctx = ServiceContext {
-            proposer,
-            state,
-            applied_state,
-            sampler: None,
-            node_id: None,
-            validation_config: Arc::new(ValidationConfig::default()),
-            proposal_timeout: Duration::from_secs(5),
-            event_handle: None,
-            health_state: None,
-            email_blinding_key: None,
-            jwt_engine: None,
-            jwt_config: None,
-            key_manager: None,
-            manager: None,
-            saga_handle: Arc::new(tokio::sync::OnceCell::new()),
-            signing_key_cache: inferadb_ledger_state::system::new_signing_key_cache(),
-        };
-        (ctx, applied_state_inner)
-    }
 
     /// Creates a `ServiceContext` with a proposer that has no manager,
     /// for testing FAILED_PRECONDITION error paths.
@@ -656,21 +634,28 @@ pub(crate) mod tests {
         }
     }
 
+    /// Builds an empty wire `RequestContext` suitable for unit tests of
+    /// the propose_* helpers — no headers, no deadline, anonymous caller.
+    fn empty_wire_request_context() -> inferadb_ledger_wire::RequestContext {
+        let req: tonic::Request<()> = tonic::Request::new(());
+        super::super::wire_helpers::tonic_request_to_wire_context(&req)
+    }
+
     #[tokio::test]
     async fn propose_regional_without_manager_returns_failed_precondition() {
         let (ctx, _temp) = create_test_context_without_manager().await;
 
-        let metadata = tonic::metadata::MetadataMap::new();
+        let wire_ctx = empty_wire_request_context();
         let mut req_ctx =
             inferadb_ledger_raft::logging::RequestContext::new("test", "propose_regional");
 
         let err = ctx
-            .propose_regional(Region::US_EAST_VA, test_system_request(), &metadata, &mut req_ctx)
+            .propose_regional(Region::US_EAST_VA, test_system_request(), &wire_ctx, &mut req_ctx)
             .await
             .unwrap_err();
 
-        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-        assert!(err.message().contains("RaftManager"));
+        assert_eq!(err.code, inferadb_ledger_wire::ErrorCode::FailedPrecondition);
+        assert!(err.message.contains("RaftManager"));
     }
 
     #[tokio::test]
@@ -680,7 +665,7 @@ pub(crate) mod tests {
         // Verify the region doesn't exist yet.
         assert!(!manager.has_region(Region::US_EAST_VA), "region should not exist before propose");
 
-        let metadata = tonic::metadata::MetadataMap::new();
+        let wire_ctx = empty_wire_request_context();
         let mut req_ctx =
             inferadb_ledger_raft::logging::RequestContext::new("test", "propose_regional");
 
@@ -690,7 +675,7 @@ pub(crate) mod tests {
         // when the region is missing, rather than creating locally.
         // Full end-to-end region creation is validated in integration tests.
         let result = ctx
-            .propose_regional(Region::US_EAST_VA, test_system_request(), &metadata, &mut req_ctx)
+            .propose_regional(Region::US_EAST_VA, test_system_request(), &wire_ctx, &mut req_ctx)
             .await;
 
         // The proposal should fail (timeout or unavailable) since the full

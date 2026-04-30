@@ -11,23 +11,30 @@ authors.workspace = true
 [dependencies]
 # Internal
 inferadb-ledger-types.workspace = true
-inferadb-ledger-proto.workspace = true
 inferadb-ledger-state.workspace = true
 inferadb-ledger-store.workspace = true
 inferadb-ledger-raft.workspace = true
 inferadb-ledger-consensus.workspace = true
+inferadb-ledger-wire.workspace = true
+inferadb-ledger-wire-services.workspace = true
+inferadb-ledger-wire-transport.workspace = true
 
-# gRPC
+# QUIC TLS — the wire transport's `serve_wire` path consumes a
+# `rustls::ServerConfig` directly (not behind a tonic facade). Already a
+# transitive dependency through `inferadb-ledger-wire-transport`, but
+# named explicitly so `LedgerServer` can hold a `wire_tls_config` field.
+rustls.workspace = true
+
+# gRPC types — tonic provides Status / Request / Response shells used by
+# `wire_helpers` and a few adapter shims that bridge legacy code paths into
+# `WireError`. The full gRPC server transport, codegen, and reflection were
+# dropped in F.2.h.23; only the lightweight `Status` / `Code` types remain.
 tonic.workspace = true
-tonic-prost.workspace = true
-tonic-reflection.workspace = true
-prost.workspace = true
-prost-types.workspace = true
-tower.workspace = true
 
 # Async
 tokio.workspace = true
 tokio-stream = { version = "0.1", features = ["net", "sync"] }
+tokio-util.workspace = true
 futures = "0.3"
 
 # Concurrency
@@ -66,6 +73,7 @@ tempfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 postcard.workspace = true
+bytes.workspace = true
 
 # Error handling
 snafu.workspace = true
@@ -73,6 +81,17 @@ snafu.workspace = true
 [dev-dependencies]
 inferadb-ledger-test-utils.workspace = true
 proptest.workspace = true
+# Self-signed cert generator for the `serve_wire` TLS-bridge unit test.
+# Production builds never see this — it lives behind `[dev-dependencies]`.
+rcgen.workspace = true
+
+[features]
+# F.1.b placeholder. Exposes `services::permissive_verifier::PermissiveVerifier`,
+# a wide-open `AuthVerifier` impl used to bring up the wire transport before
+# the production `JwtAuthVerifier` lands in F.1.c. Off by default — production
+# builds must NOT enable this. Tests automatically pull it in via `cfg(test)`
+# regardless of feature state.
+permissive-wire-auth = []
 
 [lints]
 workspace = true

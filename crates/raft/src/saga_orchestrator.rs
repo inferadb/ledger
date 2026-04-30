@@ -1,20 +1,22 @@
-//! Saga orchestrator for cross-organization operations.
+//! Orchestrator for cross-organization saga operations.
 //!
-//! Sagas coordinate operations spanning multiple organizations
-//! using eventual consistency. The orchestrator polls for pending sagas and
-//! drives state transitions.
+//! Sagas coordinate operations that span multiple organizations using
+//! eventual consistency. The orchestrator polls for pending sagas and drives
+//! state transitions.
 //!
-//! ## Saga Storage
+//! ## Storage
 //!
-//! Sagas are stored in `_system` organization under `_meta:saga:{saga_id}` keys.
-//! The orchestrator polls every 30 seconds for incomplete sagas.
+//! Saga state records are stored under `_meta:saga:{saga_id}` keys (GLOBAL tier).
+//! PII scratch data for in-flight sagas is stored separately at
+//! `_tmp:saga_pii:{saga_id}` (REGIONAL tier, TTL-bound) and is never written to
+//! GLOBAL keys.
 //!
 //! ## Execution Model
 //!
-//! - Only the leader executes sagas (followers skip)
-//! - Each saga step is idempotent for crash recovery
-//! - Exponential backoff on failures (1s, 2s, 4s... up to 5 min)
-//! - Max 10 retries before marking saga as permanently failed
+//! - Only the leader executes sagas (followers skip).
+//! - Each saga step is idempotent for crash recovery.
+//! - Exponential backoff on failures (1 s, 2 s, 4 s … up to 5 min).
+//! - After 10 retries the saga is marked permanently failed.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -54,7 +56,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use zeroize::Zeroizing;
 
-/// Whether a tonic `Status` from `RegionalProposal` is worth retrying.
+/// Whether a wire `RpcError` from `RegionalProposal` is worth retrying.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RegionalProposalClassification {
     /// Transient infrastructure error — safe to retry with backoff.
@@ -63,38 +65,36 @@ enum RegionalProposalClassification {
     Permanent,
 }
 
-/// Classifies a tonic `Status` code for `propose_to_region` retry logic.
+/// Classifies a wire `RpcError` for `propose_to_region` retry logic.
 ///
-/// Retryable codes indicate transient infrastructure failures (leader election,
-/// network blip, back-pressure). Permanent codes indicate a logical error in
-/// the request or the server's invariants — retrying would be pointless.
-fn classify_regional_proposal_status(status: &tonic::Status) -> RegionalProposalClassification {
-    match status.code() {
-        tonic::Code::Unavailable
-        | tonic::Code::DeadlineExceeded
-        | tonic::Code::ResourceExhausted
-        | tonic::Code::Aborted
-        | tonic::Code::Internal => RegionalProposalClassification::Retryable,
+/// Transport-layer failures and server-side `Internal` / `RateLimited` /
+/// `StaleRouting` errors are treated as transient (the leader may be
+/// transitioning, the network may have flapped, or the server is throttling).
+/// Every other `WireError` code maps to permanent — the request, not the
+/// infrastructure, is wrong.
+fn classify_regional_proposal_error(
+    error: &inferadb_ledger_wire_transport::RpcError,
+) -> RegionalProposalClassification {
+    use inferadb_ledger_wire::ErrorCode;
+    use inferadb_ledger_wire_transport::RpcError;
+    match error {
+        // Transport-level failures (connection lost, frame I/O, opcode
+        // mismatch) are by definition transient.
+        RpcError::Transport(_)
+        | RpcError::OpcodeMismatch { .. }
+        | RpcError::ProtocolViolation(_)
+        | RpcError::DecodeWireError(_) => RegionalProposalClassification::Retryable,
+        RpcError::WireError(err) => match err.code {
+            ErrorCode::Internal
+            | ErrorCode::RateLimited
+            | ErrorCode::StaleRouting
+            | ErrorCode::TooManyAttempts => RegionalProposalClassification::Retryable,
+            _ => RegionalProposalClassification::Permanent,
+        },
+        // `RpcError` is `#[non_exhaustive]`; fall back to "permanent" so an
+        // unknown variant doesn't trigger an unbounded retry loop.
         _ => RegionalProposalClassification::Permanent,
     }
-}
-
-/// Builds a gRPC request metadata map carrying a W3C `traceparent` header
-/// for cross-region saga proposals.
-///
-/// Returns a `MetadataMap` with the `traceparent` header set when
-/// `traceparent` is `Some` and the value is a parseable ASCII header value;
-/// returns an empty `MetadataMap` otherwise. A malformed value is silently
-/// dropped rather than failing the RPC — the saga still needs to make
-/// progress even if trace propagation is broken.
-fn build_regional_proposal_metadata(traceparent: Option<&str>) -> tonic::metadata::MetadataMap {
-    let mut metadata = tonic::metadata::MetadataMap::new();
-    if let Some(tp) = traceparent
-        && let Ok(value) = tp.parse()
-    {
-        metadata.insert(inferadb_ledger_types::trace_context::TRACEPARENT_HEADER, value);
-    }
-    metadata
 }
 
 use inferadb_ledger_types::trace_context::TraceContext;
@@ -464,16 +464,19 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                                 }
                             })?;
 
-                        // Forward the pre-serialized bytes directly to the remote leader.
+                        // Forward the pre-serialized bytes directly to the
+                        // remote leader via the wire-transport `RaftServiceClient`.
                         let request_payload = request_bytes.clone();
                         let region_slug = region.as_str().to_string();
 
-                        // Obtain the leader's peer connection from the shared
-                        // registry. HTTP/2 multiplexes all subsystems over a
-                        // single channel per peer.
-                        let peer = manager
+                        // Resolve the leader's wire client through the shared
+                        // registry. The wire-aware cache keys on
+                        // `(node_id, addr)` and shares a single QUIC
+                        // connection across every subsystem (Raft replication,
+                        // saga forwarding, snapshots, etc.).
+                        let wire_client = manager
                             .registry()
-                            .get_or_register(leader_id, &leader_addr)
+                            .wire_client_for(leader_id, &leader_addr)
                             .await
                             .map_err(|e| SagaError::SagaRaftWrite {
                                 message: format!(
@@ -481,34 +484,35 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                                 ),
                                 backtrace: snafu::Backtrace::generate(),
                             })?;
-                        let mut client = peer.raft_client();
+                        let client =
+                            inferadb_ledger_wire_services::RaftServiceClient::new(wire_client);
 
                         const MAX_ATTEMPTS: u32 = 3;
                         const BASE_BACKOFF_MS: u64 = 100;
+
+                        // The wire `RaftServiceClient` does not yet surface
+                        // a slot for the W3C traceparent on the request frame
+                        // (the server-side handler ignores `_ctx` for
+                        // regional proposals). Trace propagation across the
+                        // saga forwarding hop is suppressed until the
+                        // wire-services macro exposes per-request trace
+                        // context; preserved as `_traceparent` so the call
+                        // site keeps the parameter live for that follow-up.
+                        let _traceparent = traceparent;
 
                         let mut attempt = 0u32;
                         let resp = loop {
                             attempt += 1;
 
-                            let mut rpc_request = tonic::Request::new(
-                                inferadb_ledger_proto::proto::RegionalProposalRequest {
+                            let rpc_request =
+                                inferadb_ledger_wire::services::raft::RegionalProposalRequest {
                                     region: Some(region_slug.clone()),
-                                    request_payload: request_payload.clone(),
+                                    request_payload: bytes::Bytes::from(request_payload.clone()),
                                     caller: 0,
                                     timeout_ms: 30_000,
-                                },
-                            );
-                            // Propagate the saga's originating W3C trace context
-                            // into the regional proposal so downstream spans
-                            // link back to the initiating gRPC request.
-                            let tp_metadata = build_regional_proposal_metadata(traceparent);
-                            for kv in tp_metadata.iter() {
-                                if let tonic::metadata::KeyAndValueRef::Ascii(k, v) = kv {
-                                    rpc_request.metadata_mut().insert(k, v.clone());
-                                }
-                            }
+                                };
 
-                            let rpc_result = client.regional_proposal(rpc_request).await;
+                            let rpc_result = client.regional_proposal(rpc_request, 0).await;
 
                             match rpc_result {
                                 Ok(response) => {
@@ -517,11 +521,11 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                                         "classification" => "success"
                                     )
                                     .increment(1);
-                                    break response.into_inner();
+                                    break response;
                                 },
-                                Err(ref status)
+                                Err(ref err)
                                     if attempt < MAX_ATTEMPTS
-                                        && classify_regional_proposal_status(status)
+                                        && classify_regional_proposal_error(err)
                                             == RegionalProposalClassification::Retryable =>
                                 {
                                     metrics::counter!(
@@ -536,7 +540,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                                         attempt,
                                         region = region.as_str(),
                                         leader_id,
-                                        error = %status,
+                                        error = %err,
                                         backoff_ms = backoff.as_millis(),
                                         "Transient error forwarding saga proposal; retrying"
                                     );
@@ -549,14 +553,14 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                                     }
                                     tokio::time::sleep(backoff).await;
                                 },
-                                Err(status) => {
+                                Err(err) => {
                                     metrics::counter!(
                                         "saga_regional_proposal_attempts_total",
                                         "classification" => "permanent_failure"
                                     )
                                     .increment(1);
                                     return Err(SagaError::SagaRaftWrite {
-                                        message: format!("forward to leader: {status}"),
+                                        message: format!("forward to leader: {err}"),
                                         backtrace: snafu::Backtrace::generate(),
                                     });
                                 },
@@ -583,7 +587,7 @@ impl<B: StorageBackend + 'static> SagaOrchestrator<B> {
                                 tracing::warn!(
                                     region = region.as_str(),
                                     committed_index = resp.committed_index,
-                                    error = %e,
+                                    error = ?e,
                                     "Timed out waiting for local replication after forwarded saga write"
                                 );
                             }
@@ -3437,36 +3441,6 @@ mod tests {
     // Task 6.3: Saga trace-context propagation
     // =============================================================================
 
-    /// `build_regional_proposal_metadata` copies a valid W3C `traceparent` header
-    /// value into the metadata map unchanged, so downstream regional spans can
-    /// link back to the originating trace.
-    #[test]
-    fn build_regional_proposal_metadata_injects_traceparent() {
-        let tp = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
-        let metadata = build_regional_proposal_metadata(Some(tp));
-        let got = metadata
-            .get(inferadb_ledger_types::trace_context::TRACEPARENT_HEADER)
-            .and_then(|v| v.to_str().ok());
-        assert_eq!(got, Some(tp));
-    }
-
-    /// `build_regional_proposal_metadata` emits an empty map when no trace
-    /// context is provided — keeps the happy path free of stray headers.
-    #[test]
-    fn build_regional_proposal_metadata_is_empty_without_traceparent() {
-        let metadata = build_regional_proposal_metadata(None);
-        assert!(metadata.get(inferadb_ledger_types::trace_context::TRACEPARENT_HEADER).is_none());
-    }
-
-    /// A malformed traceparent value must not abort the RPC: the helper drops
-    /// the header silently so the saga still makes progress.
-    #[test]
-    fn build_regional_proposal_metadata_drops_malformed_value() {
-        // Embedded newline is not a valid header value — `.parse()` rejects it.
-        let metadata = build_regional_proposal_metadata(Some("bad\nvalue"));
-        assert!(metadata.get(inferadb_ledger_types::trace_context::TRACEPARENT_HEADER).is_none());
-    }
-
     /// `SagaSubmission.traceparent` must be stamped onto the persisted saga
     /// record so subsequent poll cycles (after crash + reload) can propagate
     /// the trace context into regional proposals.
@@ -3494,6 +3468,11 @@ mod tests {
     /// The trace context set on the parent saga's record must match the
     /// trace-id chosen by the originating request — a full saga trace
     /// never silently generates its own trace_id.
+    ///
+    /// Trace propagation across the regional-proposal hop itself is
+    /// suppressed in stage F.1.f.2.5c (the wire `RaftServiceClient` does
+    /// not yet expose a per-request traceparent slot); this test continues
+    /// to guard the saga-record persistence half of the chain.
     #[test]
     fn persisted_saga_traceparent_matches_origin_trace_id() {
         // Trace-id chosen by the originating request.
@@ -3513,27 +3492,25 @@ mod tests {
             .with_traceparent(Some(tp.clone())),
         );
 
-        // Simulate the server building the outgoing RegionalProposal metadata
-        // from the persisted saga's trace context.
-        let metadata = build_regional_proposal_metadata(saga.traceparent());
-        let injected = metadata
-            .get(inferadb_ledger_types::trace_context::TRACEPARENT_HEADER)
-            .and_then(|v| v.to_str().ok())
-            .expect("traceparent should be present");
-        // The downstream span's parent trace_id matches the saga's origin.
+        // The persisted saga record carries the originating trace header
+        // verbatim — `propose_to_region` re-reads it from this field on
+        // every retry attempt (per stage 5c the value is held until the
+        // wire client gains a per-request traceparent slot).
+        let injected = saga.traceparent().expect("traceparent should be present");
         let parts: Vec<&str> = injected.split('-').collect();
         assert_eq!(parts.len(), 4);
         assert_eq!(parts[1], origin_trace_id);
     }
 
     /// End-to-end chain: a `SagaSubmission` carrying a `traceparent` is
-    /// stamped onto the saga record (mirroring `drain_submissions`), the
-    /// record is round-tripped through the JSON encoding `save_saga` uses
-    /// for `_meta:saga:` persistence, and the persisted record produces a
-    /// `RegionalProposal` metadata map carrying the same header.
+    /// stamped onto the saga record (mirroring `drain_submissions`) and
+    /// round-tripped through the JSON encoding `save_saga` uses for
+    /// `_meta:saga:` persistence.
     ///
-    /// This guards the full `submit_saga → drain_submissions → save_saga →
-    /// propose_to_region` seam without requiring real Raft or gRPC transport.
+    /// This guards the `submit_saga → drain_submissions → save_saga`
+    /// seam. The downstream `propose_to_region → wire RaftServiceClient`
+    /// hop does not yet propagate traceparent over the wire frame; that
+    /// is a Phase 0.0.E follow-up.
     #[test]
     fn submission_traceparent_flows_through_persistence_to_regional_metadata() {
         let origin_trace_id = "4bf92f3577b34da6a3ce929d0e0e4736";
@@ -3565,14 +3542,11 @@ mod tests {
         let persisted: Saga = serde_json::from_slice(&encoded).expect("saga deserializes");
         assert_eq!(persisted.traceparent(), Some(tp.as_str()));
 
-        // Step 4 — `propose_to_region` builds the outgoing metadata from the
-        // persisted record's trace context. The downstream `RegionalProposal`
-        // RPC carries the originating trace header end-to-end.
-        let metadata = build_regional_proposal_metadata(persisted.traceparent());
-        let injected = metadata
-            .get(inferadb_ledger_types::trace_context::TRACEPARENT_HEADER)
-            .and_then(|v| v.to_str().ok())
-            .expect("traceparent should survive the full chain");
+        // Step 4 — the persisted record carries the originating header
+        // verbatim. `propose_to_region` reads `traceparent()` on every
+        // retry; the wire client surface itself does not yet ship a
+        // per-request traceparent slot (stage 5c, follow-up tracked).
+        let injected = persisted.traceparent().expect("traceparent should survive the full chain");
         assert_eq!(injected, tp);
         let parts: Vec<&str> = injected.split('-').collect();
         assert_eq!(parts.len(), 4);

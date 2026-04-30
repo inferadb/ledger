@@ -182,14 +182,13 @@ impl ConsensusEngine {
     /// disk (so the shard advances `last_snapshot_index` and the next
     /// threshold check uses the correct baseline).
     ///
-    /// Existing call sites that do not wire up Stage 2 snapshot
-    /// persistence should continue to use [`Self::start_with_wake_notifier`]
-    /// or [`Self::start`], which install
+    /// Call sites that do not wire up snapshot persistence should use
+    /// [`Self::start_with_wake_notifier`] or [`Self::start`], which install
     /// [`NoopSnapshotCoordinator`].
     ///
     /// Installs the no-op snapshot sender ([`NoopSnapshotSender`]) — see
-    /// [`Self::start_with_full_coordinators`] for the variant that accepts
-    /// a real [`SnapshotSender`] for Stage 3 wire transfer.
+    /// [`Self::start_with_full_coordinators`] for the variant that wires up
+    /// snapshot wire transfer to followers.
     ///
     /// [`ReactorEvent::PeerMessage`]: crate::reactor::ReactorEvent::PeerMessage
     pub fn start_with_coordinators<C, R, W, T>(
@@ -238,9 +237,9 @@ impl ConsensusEngine {
     /// re-emits the action, so transient failures self-heal without
     /// explicit retry state in the reactor.
     ///
-    /// Existing call sites that do not wire up Stage 3 snapshot wire
-    /// transfer should continue to use [`Self::start_with_coordinators`],
-    /// which installs [`NoopSnapshotSender`].
+    /// Call sites that do not wire up snapshot wire transfer should use
+    /// [`Self::start_with_coordinators`], which installs
+    /// [`NoopSnapshotSender`].
     ///
     /// [`ReactorEvent::PeerMessage`]: crate::reactor::ReactorEvent::PeerMessage
     pub fn start_with_full_coordinators<C, R, W, T>(
@@ -288,18 +287,18 @@ impl ConsensusEngine {
     /// dispatch the install I/O asynchronously and return immediately — the
     /// reactor's event loop is on hold until the callback returns. Failures
     /// are dropped (logged + metric); the leader's next heartbeat retry
-    /// re-emits `Action::SendSnapshot` (re-staging the file via Stage 3),
-    /// which then re-emits this action, so transient failures self-heal
-    /// without explicit retry state in the reactor.
+    /// re-emits `Action::SendSnapshot` (re-staging the file via the sender
+    /// callback), which then re-emits this action, so transient failures
+    /// self-heal without explicit retry state in the reactor.
     ///
     /// On install completion the implementor calls back into
     /// [`Self::notify_snapshot_installed`] so the shard's `last_applied` /
     /// `last_snapshot_index` advance and the log prefix subsumed by the
     /// snapshot is truncated.
     ///
-    /// Existing call sites that do not wire up Stage 4 snapshot install
-    /// should continue to use [`Self::start_with_full_coordinators`], which
-    /// installs [`NoopSnapshotInstaller`].
+    /// Call sites that do not wire up snapshot install should use
+    /// [`Self::start_with_full_coordinators`], which installs
+    /// [`NoopSnapshotInstaller`].
     ///
     /// [`ReactorEvent::PeerMessage`]: crate::reactor::ReactorEvent::PeerMessage
     #[allow(clippy::too_many_arguments)]

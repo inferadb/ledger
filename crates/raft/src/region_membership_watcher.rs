@@ -1,78 +1,48 @@
-//! Per-organization watcher + dispatcher for the Phase 5 centralised
-//! membership cascade.
+//! Rate-limited membership cascade from region to per-vault Raft groups.
 //!
-//! This module is the **M3 deliverable** of the Phase 5 plan
-//! (`docs/superpowers/specs/2026-04-27-phase-5-centralised-membership.md`).
-//! It moves cascade-decision authority off the data-region's
-//! [`PlacementController`] and onto the per-organization
-//! [`OrganizationGroup`](crate::raft_manager::OrganizationGroup) leader,
-//! using the [`MembershipQueue`](crate::membership_queue::MembershipQueue)
-//! primitive that landed in M2.
+//! When a voter joins or leaves a data region, a naive fan-out to every
+//! per-vault shard in the region (potentially thousands of conf-changes in
+//! flight simultaneously) saturates cluster bandwidth with snapshot RPCs.
+//! This module prevents that storm by serialising per-vault membership
+//! changes through a bounded, rate-limited queue.
 //!
-//! ## Background
+//! ## Pipeline
 //!
-//! Today, when a voter joins or leaves a data region, the
-//! [`crate::raft_manager::RaftManager::cascade_membership_to_children`]
-//! function fans the change out to every per-organization and per-vault
-//! Raft shard in the affected region in parallel. At 1000 vaults × 3
-//! voters per org, that is ~3000 conf-changes in flight simultaneously,
-//! each capable of triggering a snapshot RPC. The resulting **snapshot
-//! storm** dominates cluster bandwidth and CPU for minutes.
+//! Two background tasks collaborate:
 //!
-//! Phase 5 layers a per-org [`MembershipQueue`] between the data-region
-//! cascade and the per-vault shards. M3 supplies two background tasks
-//! that turn that primitive into an end-to-end pipeline:
-//!
-//! * [`RegionMembershipWatcher::run`] — observes the parent data-region group's
-//!   [`watch::Receiver<ShardState>`](tokio::sync::watch::Receiver) for voter / learner deltas. On
-//!   each delta, applies the conf-change synchronously to the org group itself (so the per-org
-//!   transport learns about the new peer first — vault groups share that transport per root rule
-//!   17) and then enqueues one
+//! * [`RegionMembershipWatcher::run`] — watches the parent
+//!   [`RegionGroup`](crate::raft_manager::RegionGroup)'s shard state for voter / learner deltas. On
+//!   each delta it applies the conf-change synchronously to the org group itself (so the per-org
+//!   transport learns about the new peer before any vault shard tries to replicate to it — vault
+//!   groups share that transport), then enqueues one
 //!   [`MembershipChangeRequest`](crate::membership_queue::MembershipChangeRequest) per affected
-//!   vault into the org's queue.
-//! * [`MembershipDispatcher::run`] — drains the queue (one entry at a time, gated by the queue's
-//!   [`Semaphore`](tokio::sync::Semaphore) of capacity `max_concurrent_snapshot_producing`), looks
-//!   up the target vault group via [`crate::raft_manager::RaftManager::get_vault_group`], and
-//!   applies the membership change through `apply_cascade_action_for_vault` — the same primitive
-//!   the legacy cascade uses, so no-op / "already undergoing" handling is identical.
+//!   vault into the org's [`MembershipQueue`](crate::membership_queue::MembershipQueue).
+//! * [`MembershipDispatcher::run`] — drains the queue one entry at a time, gated by the queue's
+//!   concurrency cap (`max_concurrent_snapshot_producing`). For each entry it looks up the target
+//!   vault group via [`crate::raft_manager::RaftManager::get_vault_group`] and applies the
+//!   membership change through `apply_cascade_action_for_vault`. Entries that exceed
+//!   `vault_conf_change_timeout_secs` (default 60 s) are dropped with a WARN and a
+//!   `ledger_vault_conf_change_stalled_total` increment; the next region-state delta re-derives the
+//!   change.
 //!
-//! ## Migration discipline
-//!
-//! M3 lands sub-stages **5b (dual-cascade)** and **5c (cascade ownership
-//! shift)** of the plan. Sub-stage 5b kept the legacy cascade running
-//! alongside the new pipeline; sub-stage 5c removes the legacy call
-//! sites in `dr_scheduler.rs` and `admin.rs`. The
-//! [`crate::raft_manager::RaftManager::cascade_membership_to_children`]
-//! function itself is preserved as a public API — useful for tests and
-//! for emergency operator tooling — but is no longer invoked from
+//! [`RaftManager::cascade_membership_to_children`](crate::raft_manager::RaftManager::cascade_membership_to_children)
+//! is preserved as a public API for tests and operator tooling but is not called from
 //! production code paths.
 //!
 //! ## Cancellation
 //!
-//! Both tasks are tied to a child of
-//! [`crate::raft_manager::RaftManager`]'s parent
-//! [`CancellationToken`]. On shutdown the token is cancelled, the
-//! watcher exits, the dispatcher's
-//! [`MembershipQueue::take_next`](crate::membership_queue::MembershipQueue::take_next)
-//! returns `None`, and the dispatcher exits without leaking pending
-//! requests.
+//! Both tasks are tied to a child of the [`RaftManager`](crate::raft_manager::RaftManager)'s
+//! parent [`CancellationToken`]. On shutdown the token is cancelled, the watcher exits, and the
+//! dispatcher's [`MembershipQueue::take_next`](crate::membership_queue::MembershipQueue::take_next)
+//! returns `None`, draining cleanly without leaking pending requests.
 //!
 //! ## Lifecycle
 //!
-//! Spawned in
-//! [`crate::raft_manager::RaftManager::start_organization_group`]
-//! immediately after the per-org vault-lifecycle watcher. Both tasks
-//! hold a [`Weak<RaftManager>`] reference, upgraded on every
-//! iteration. The manager owns every group and outlives every task it
-//! spawns by construction (see the comment on the vault-lifecycle
-//! watcher in `raft_manager.rs`); the `Weak` exists only to break the
-//! reference cycle the manager would otherwise have with the tasks it
-//! spawned, since both tasks are stored implicitly in the tokio
-//! runtime keyed off the manager's cancellation token. Each upgrade
-//! is expected to succeed for the lifetime of the watcher; a failed
-//! upgrade is treated as a graceful shutdown signal.
-//!
-//! [`PlacementController`]: ../../server/src/placement.rs
+//! Both tasks are spawned from
+//! [`RaftManager::start_organization_group`](crate::raft_manager::RaftManager::start_organization_group)
+//! immediately after the per-org vault-lifecycle watcher. Each holds a
+//! `Weak<RaftManager>` reference, upgraded on every iteration; a failed upgrade signals
+//! graceful shutdown.
 
 use std::{
     collections::BTreeSet,

@@ -1,15 +1,41 @@
 //! State management for InferaDB Ledger.
 //!
 //! This crate sits between the raw B+ tree storage engine (`inferadb-ledger-store`)
-//! and the Raft consensus layer (`inferadb-ledger-raft`), providing:
+//! and the Raft consensus layer (`inferadb-ledger-raft`). It owns every domain
+//! write path: keys are constructed, tier-validated, and written here; no crate
+//! above calls `store` directly.
 //!
-//! - State layer with bucket-based incremental hashing (256 buckets per vault)
-//! - Entity and relationship CRUD with conditional writes
-//! - Snapshot creation and restoration
-//! - Dual indexes for relationship queries (object-centric and subject-centric)
-//! - System types for routing and cluster membership
-//! - Time-travel index for historical queries
-//! - Block archive for committed block storage
+//! # Core abstractions
+//!
+//! - [`StorageEngine`] — file-backed B+ tree wrapper; [`InMemoryStorageEngine`] for tests.
+//! - [`StateLayer`] — per-vault entity/relationship CRUD with incremental state-root computation
+//!   (256-bucket dirty tracking) and two apply entry points: [`StateLayer::apply_operations`]
+//!   (strict-durable, for admin/recovery callers) and `apply_operations_lazy` (lazy via
+//!   `commit_in_memory`, for the in-apply-pipeline path).
+//! - [`system::SystemKeys`] — all storage-key builders for the `_system` organization. Keys are
+//!   classified by [`system::KeyTier`] (Global vs Regional) and validated at write time by
+//!   [`system::SystemKeys::validate_key_tier`].
+//! - [`ShardManager`] — per-organization coordinator: block archive, snapshots, and vault-level
+//!   state routing. Rebuilt from GLOBAL directory state on each start.
+//!
+//! # Data-residency patterns
+//!
+//! Every key written through this crate targets exactly one tier:
+//!
+//! - **Pattern 1** — REGIONAL-only bare key; no GLOBAL counterpart (e.g. `user:`, `team:`).
+//! - **Pattern 2** — GLOBAL skeleton with no PII + REGIONAL `{entity}_profile:` overlay; merged on
+//!   read (e.g. `app:` + `app_profile:`, `org:` + `org_profile:`).
+//! - **Pattern 3** — GLOBAL-only, no PII (e.g. `signing_key:`, `refresh_token:`).
+//!
+//! PII must always go to REGIONAL. When residency is unclear, treat it as REGIONAL.
+//! See [`system::SystemKeys::KEY_REGISTRY`] for the authoritative per-constant classification.
+//!
+//! # Other subsystems
+//!
+//! - [`BlockArchive`] — append-only per-vault block store with compaction support.
+//! - [`SnapshotManager`] — point-in-time state snapshots (zstd-compressed).
+//! - [`RelationshipIndex`] — in-memory O(1) relationship existence index, evicted on hibernate.
+//! - [`EventStore`] / [`EventsDatabase`] — audit-event storage in a dedicated `events.db`.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]

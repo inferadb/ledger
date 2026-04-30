@@ -28,7 +28,7 @@ use crate::common::TestCluster;
 /// hardcoding falls through.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn us_region_persists_non_residency_contract() {
-    let cluster = TestCluster::new(3).await;
+    let cluster = TestCluster::with_wire_transport_and_size(0, 3).await;
 
     let region = Region::US_EAST_VA;
     cluster
@@ -61,7 +61,7 @@ async fn us_region_persists_non_residency_contract() {
 /// honour the operator-supplied contract, regardless of slug.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn eu_region_persists_gdpr_thirty_day_retention() {
-    let cluster = TestCluster::new(3).await;
+    let cluster = TestCluster::with_wire_transport_and_size(0, 3).await;
 
     // Use a *custom* EU slug to prove the registry — not the slug — is the
     // source of truth. Pre-R6 behaviour for `"eu-custom"` would have
@@ -96,7 +96,7 @@ async fn eu_region_persists_gdpr_thirty_day_retention() {
 /// `requires_residency = false, retention_days = 0` as a tripwire.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn global_region_short_circuits_residency_lookup() {
-    let cluster = TestCluster::new(1).await;
+    let cluster = TestCluster::with_wire_transport_and_size(0, 1).await;
     let node = cluster.nodes().first().expect("at least one node");
     let group = node.manager.system_region().expect("system region");
 
@@ -118,7 +118,7 @@ async fn global_region_short_circuits_residency_lookup() {
 /// where pre-existing directory entries decoded without the new fields.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unknown_region_uses_disciplined_default() {
-    let cluster = TestCluster::new(1).await;
+    let cluster = TestCluster::with_wire_transport_and_size(0, 1).await;
     let node = cluster.nodes().first().expect("at least one node");
     let group = node.manager.system_region().expect("system region");
 

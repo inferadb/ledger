@@ -7,10 +7,10 @@
 
 use std::time::Duration;
 
-use inferadb_ledger_proto::proto::GetNodeInfoRequest;
 use inferadb_ledger_server::discovery::discover_node_info;
+use inferadb_ledger_wire::services::admin as w;
 
-use crate::common::{TestCluster, create_admin_client};
+use crate::common::{TestCluster, wire_admin_client};
 
 /// Tests GetNodeInfo returns correct node ID before bootstrap.
 ///
@@ -18,14 +18,16 @@ use crate::common::{TestCluster, create_admin_client};
 /// Snowflake ID even before the cluster is fully bootstrapped.
 #[tokio::test]
 async fn test_get_node_info_returns_node_id() {
-    let cluster = TestCluster::new(1).await;
+    let cluster = TestCluster::with_wire_transport_and_size(0, 1).await;
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
-    let mut client = create_admin_client(&leader.addr).await.expect("connect to admin service");
+    let client = wire_admin_client(&cluster, leader.id);
 
-    let response = client.get_node_info(GetNodeInfoRequest {}).await.expect("get_node_info RPC");
-    let info = response.into_inner();
+    let info = client
+        .get_node_info(w::GetNodeInfoRequest {}, /* request_id = */ leader.id as u128)
+        .await
+        .expect("get_node_info RPC");
 
     // Node ID should be the configured ID (1 for first node in test cluster)
     assert_eq!(info.node_id, leader.id, "node_id should match");
@@ -40,14 +42,16 @@ async fn test_get_node_info_returns_node_id() {
 /// is_cluster_member flag should be true.
 #[tokio::test]
 async fn test_get_node_info_shows_cluster_member_after_bootstrap() {
-    let cluster = TestCluster::new(1).await;
+    let cluster = TestCluster::with_wire_transport_and_size(0, 1).await;
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
-    let mut client = create_admin_client(&leader.addr).await.expect("connect to admin service");
+    let client = wire_admin_client(&cluster, leader.id);
 
-    let response = client.get_node_info(GetNodeInfoRequest {}).await.expect("get_node_info RPC");
-    let info = response.into_inner();
+    let info = client
+        .get_node_info(w::GetNodeInfoRequest {}, /* request_id = */ leader.id as u128)
+        .await
+        .expect("get_node_info RPC");
 
     // Node should be a cluster member after bootstrap
     assert!(info.is_cluster_member, "node should be a cluster member after bootstrap");
@@ -62,7 +66,7 @@ async fn test_get_node_info_shows_cluster_member_after_bootstrap() {
 /// consistent cluster membership after joining.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_get_node_info_three_node_cluster() {
-    let cluster = TestCluster::new(3).await;
+    let cluster = TestCluster::with_wire_transport_and_size(0, 3).await;
     let _leader_id = cluster.wait_for_leader().await;
 
     // Wait for cluster to stabilize
@@ -70,11 +74,12 @@ async fn test_get_node_info_three_node_cluster() {
 
     // Query each node
     for node in cluster.nodes() {
-        let mut client = create_admin_client(&node.addr).await.expect("connect to admin service");
+        let client = wire_admin_client(&cluster, node.id);
 
-        let response =
-            client.get_node_info(GetNodeInfoRequest {}).await.expect("get_node_info RPC");
-        let info = response.into_inner();
+        let info = client
+            .get_node_info(w::GetNodeInfoRequest {}, /* request_id = */ node.id as u128)
+            .await
+            .expect("get_node_info RPC");
 
         // Each node should return its own ID
         assert_eq!(info.node_id, node.id, "node {} should return its own ID", node.id);
@@ -105,14 +110,16 @@ async fn test_get_node_info_three_node_cluster() {
 /// from the node's metrics.
 #[tokio::test]
 async fn test_get_node_info_term_matches_raft_metrics() {
-    let cluster = TestCluster::new(1).await;
+    let cluster = TestCluster::with_wire_transport_and_size(0, 1).await;
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
-    let mut client = create_admin_client(&leader.addr).await.expect("connect to admin service");
+    let client = wire_admin_client(&cluster, leader.id);
 
-    let response = client.get_node_info(GetNodeInfoRequest {}).await.expect("get_node_info RPC");
-    let info = response.into_inner();
+    let info = client
+        .get_node_info(w::GetNodeInfoRequest {}, /* request_id = */ leader.id as u128)
+        .await
+        .expect("get_node_info RPC");
 
     // Term from GetNodeInfo should match the node's current Raft term
     let raft_term = leader.current_term();
@@ -122,23 +129,26 @@ async fn test_get_node_info_term_matches_raft_metrics() {
 /// Tests discover_node_info function against a running node.
 ///
 /// Verifies that the discovery helper function correctly queries a node
-/// via the GetNodeInfo RPC and returns a DiscoveredNode.
-///
-/// Uses TCP transport since `discover_node_info` requires `SocketAddr`.
+/// via the GetNodeInfo RPC over the wire transport and returns a
+/// `DiscoveredNode`. Reuses the running cluster's
+/// `NodeConnectionRegistry` so the discovery dial uses the same TLS
+/// material the cluster's Raft transport uses.
 #[tokio::test]
 async fn test_discover_node_info_against_running_node() {
-    let cluster = TestCluster::with_tcp(1).await;
+    let cluster = TestCluster::with_wire_transport_and_size(1, 1).await;
     let _leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("should have leader");
 
-    let tcp_addr: std::net::SocketAddr = leader.addr.parse().expect("parse addr as SocketAddr");
-    let discovered = discover_node_info(tcp_addr, Duration::from_secs(5)).await;
+    let wire_addr: std::net::SocketAddr =
+        leader.wire_addr.expect("wire cluster nodes carry a wire_addr");
+    let registry = leader.manager.registry();
+    let discovered = discover_node_info(&registry, wire_addr, Duration::from_secs(5)).await;
 
     let node = discovered.expect("should discover node");
 
     assert_eq!(node.node_id, leader.id, "node_id should match");
-    assert_eq!(node.addr.to_string(), leader.addr, "addr should match");
+    assert_eq!(node.addr, wire_addr, "addr should match");
     assert!(node.is_cluster_member, "should be cluster member after bootstrap");
     assert!(node.term > 0, "term should be > 0 after bootstrap");
 }
@@ -146,13 +156,21 @@ async fn test_discover_node_info_against_running_node() {
 /// Tests discover_node_info returns None for unreachable peers.
 ///
 /// When a peer is not reachable, discover_node_info should return None
-/// rather than failing with an error.
+/// rather than failing with an error. We need a real cluster (and thus a
+/// real `NodeConnectionRegistry` with a wire template installed) to
+/// exercise the construction path, but the dial itself targets a
+/// guaranteed-unreachable address.
 #[tokio::test]
 async fn test_discover_node_info_unreachable_returns_none() {
-    // Try to discover a node at an address that's not running
+    let cluster = TestCluster::with_wire_transport_and_size(1, 1).await;
+    let _leader_id = cluster.wait_for_leader().await;
+    let leader = cluster.leader().expect("should have leader");
+    let registry = leader.manager.registry();
+
+    // Try to discover a node at an address that's not running.
     let fake_addr: std::net::SocketAddr = "127.0.0.1:59998".parse().expect("valid addr");
 
-    let result = discover_node_info(fake_addr, Duration::from_millis(200)).await;
+    let result = discover_node_info(&registry, fake_addr, Duration::from_millis(200)).await;
 
     // Should return None for unreachable peer
     assert!(result.is_none(), "should return None for unreachable peer");

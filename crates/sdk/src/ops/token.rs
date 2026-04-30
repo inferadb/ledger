@@ -1,9 +1,8 @@
 //! Token service operations: sessions, validation, refresh, and signing keys.
 
-use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{AppSlug, OrganizationSlug, UserSlug, VaultSlug};
 
-use crate::{LedgerClient, error::Result, proto_util::missing_response_field};
+use crate::{LedgerClient, error::Result};
 
 impl LedgerClient {
     // =========================================================================
@@ -16,22 +15,9 @@ impl LedgerClient {
         self.call_with_retry("create_user_session", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_token_client);
-
-                let request = proto::CreateUserSessionRequest {
-                    user: Some(proto::UserSlug { slug: user.value() }),
-                    credential_used: None,
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                };
-
-                let response =
-                    client.create_user_session(tonic::Request::new(request)).await?.into_inner();
-
-                let tokens = response
-                    .tokens
-                    .ok_or_else(|| missing_response_field("tokens", "TokenResponse"))?;
-
-                Ok(crate::token::TokenPair::from_proto(tokens))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::token::create_user_session(wire_client, request_id, user).await
             }
         })
         .await
@@ -51,18 +37,10 @@ impl LedgerClient {
             let audience = audience.clone();
             let token = token.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_token_client);
-
-                let request = proto::ValidateTokenRequest {
-                    token: token.clone(),
-                    expected_audience: audience.clone(),
-                };
-
-                let response =
-                    client.validate_token(tonic::Request::new(request)).await?.into_inner();
-
-                crate::token::ValidatedToken::from_proto(response)
-                    .ok_or_else(|| missing_response_field("claims", "ValidateTokenResponse"))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::token::validate_token(wire_client, request_id, token, audience)
+                    .await
             }
         })
         .await
@@ -76,19 +54,10 @@ impl LedgerClient {
         self.call_with_retry("revoke_all_user_sessions", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_token_client);
-
-                let request = proto::RevokeAllUserSessionsRequest {
-                    user: Some(proto::UserSlug { slug: user.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                };
-
-                let response = client
-                    .revoke_all_user_sessions(tonic::Request::new(request))
-                    .await?
-                    .into_inner();
-
-                Ok(response.revoked_count)
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::token::revoke_all_user_sessions(wire_client, request_id, user)
+                    .await
             }
         })
         .await
@@ -102,19 +71,9 @@ impl LedgerClient {
         self.call_with_retry("revoke_all_app_sessions", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_token_client);
-
-                let request = proto::RevokeAllAppSessionsRequest {
-                    organization: None,
-                    app: Some(proto::AppSlug { slug: app.value() }),
-                };
-
-                let response = client
-                    .revoke_all_app_sessions(tonic::Request::new(request))
-                    .await?
-                    .into_inner();
-
-                Ok(response.revoked_count)
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::token::revoke_all_app_sessions(wire_client, request_id, app).await
             }
         })
         .await
@@ -130,18 +89,9 @@ impl LedgerClient {
             let pool = pool.clone();
             let refresh = refresh.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_token_client);
-
-                let request = proto::RefreshTokenRequest { refresh_token: refresh.clone() };
-
-                let response =
-                    client.refresh_token(tonic::Request::new(request)).await?.into_inner();
-
-                let tokens = response
-                    .tokens
-                    .ok_or_else(|| missing_response_field("tokens", "TokenResponse"))?;
-
-                Ok(crate::token::TokenPair::from_proto(tokens))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::token::refresh_token(wire_client, request_id, refresh).await
             }
         })
         .await
@@ -155,13 +105,9 @@ impl LedgerClient {
             let pool = pool.clone();
             let refresh = refresh.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_token_client);
-
-                let request = proto::RevokeTokenRequest { refresh_token: refresh.clone() };
-
-                client.revoke_token(tonic::Request::new(request)).await?;
-
-                Ok(())
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::token::revoke_token(wire_client, request_id, refresh).await
             }
         })
         .await
@@ -181,23 +127,17 @@ impl LedgerClient {
             let pool = pool.clone();
             let scopes = scopes.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_token_client);
-
-                let request = proto::CreateVaultTokenRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    app: Some(proto::AppSlug { slug: app.value() }),
-                    vault: Some(proto::VaultSlug { slug: vault.value() }),
-                    scopes: scopes.clone(),
-                };
-
-                let response =
-                    client.create_vault_token(tonic::Request::new(request)).await?.into_inner();
-
-                let tokens = response
-                    .tokens
-                    .ok_or_else(|| missing_response_field("tokens", "TokenResponse"))?;
-
-                Ok(crate::token::TokenPair::from_proto(tokens))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::token::create_vault_token(
+                    wire_client,
+                    request_id,
+                    organization,
+                    app,
+                    vault,
+                    scopes,
+                )
+                .await
             }
         })
         .await
@@ -223,25 +163,17 @@ impl LedgerClient {
             let assertion_jwt = assertion_jwt.clone();
             let scopes = scopes.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_token_client);
-
-                let request = proto::AuthenticateClientAssertionRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    vault: Some(proto::VaultSlug { slug: vault.value() }),
-                    assertion_jwt: assertion_jwt.clone(),
-                    scopes: scopes.clone(),
-                };
-
-                let response = client
-                    .authenticate_client_assertion(tonic::Request::new(request))
-                    .await?
-                    .into_inner();
-
-                let tokens = response.tokens.ok_or_else(|| {
-                    missing_response_field("tokens", "AuthenticateClientAssertionResponse")
-                })?;
-
-                Ok(crate::token::TokenPair::from_proto(tokens))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::token::authenticate_client_assertion(
+                    wire_client,
+                    request_id,
+                    organization,
+                    vault,
+                    assertion_jwt,
+                    scopes,
+                )
+                .await
             }
         })
         .await
@@ -249,9 +181,8 @@ impl LedgerClient {
 
     /// Creates a new signing key for the given scope.
     ///
-    /// # Arguments
-    ///
-    /// * `caller` - Identity of the user performing this operation (external slug).
+    /// `scope` must be `"global"` or `"organization"`. Supply `organization`
+    /// when `scope` is `"organization"`; it is ignored for `"global"` keys.
     pub async fn create_signing_key(
         &self,
         caller: UserSlug,
@@ -264,28 +195,16 @@ impl LedgerClient {
             let pool = pool.clone();
             let scope_str = scope_str.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_token_client);
-
-                let scope_i32 = match scope_str.as_str() {
-                    "global" => proto::SigningKeyScope::Global as i32,
-                    "organization" => proto::SigningKeyScope::Organization as i32,
-                    _ => proto::SigningKeyScope::Unspecified as i32,
-                };
-
-                let request = proto::CreateSigningKeyRequest {
-                    scope: scope_i32,
-                    organization: organization.map(|o| proto::OrganizationSlug { slug: o.value() }),
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                let response =
-                    client.create_signing_key(tonic::Request::new(request)).await?.into_inner();
-
-                let key = response
-                    .key
-                    .ok_or_else(|| missing_response_field("key", "CreateSigningKeyResponse"))?;
-
-                Ok(crate::token::PublicKeyInfo::from_proto(key))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::token::create_signing_key(
+                    wire_client,
+                    request_id,
+                    caller,
+                    &scope_str,
+                    organization,
+                )
+                .await
             }
         })
         .await
@@ -293,9 +212,10 @@ impl LedgerClient {
 
     /// Rotates a signing key, creating a new key and marking the old one as rotated.
     ///
-    /// # Arguments
-    ///
-    /// * `caller` - Identity of the user performing this operation (external slug).
+    /// `kid` identifies the key to rotate. `grace_period_secs` controls how
+    /// long the old key remains valid for verification after rotation (0 =
+    /// immediate). Set `force_revoke` to `true` to revoke the old key
+    /// immediately regardless of grace period.
     pub async fn rotate_signing_key(
         &self,
         caller: UserSlug,
@@ -309,33 +229,23 @@ impl LedgerClient {
             let pool = pool.clone();
             let kid = kid.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_token_client);
-
-                let request = proto::RotateSigningKeyRequest {
-                    kid: kid.clone(),
-                    grace_period_secs: grace_period_secs.unwrap_or(0),
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::token::rotate_signing_key(
+                    wire_client,
+                    request_id,
+                    caller,
+                    kid,
+                    grace_period_secs,
                     force_revoke,
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                let response =
-                    client.rotate_signing_key(tonic::Request::new(request)).await?.into_inner();
-
-                let key = response
-                    .new_key
-                    .ok_or_else(|| missing_response_field("new_key", "RotateSigningKeyResponse"))?;
-
-                Ok(crate::token::PublicKeyInfo::from_proto(key))
+                )
+                .await
             }
         })
         .await
     }
 
-    /// Revokes a signing key by its kid.
-    ///
-    /// # Arguments
-    ///
-    /// * `caller` - Identity of the user performing this operation (external slug).
+    /// Revokes a signing key by its `kid`.
     pub async fn revoke_signing_key(&self, caller: UserSlug, kid: &str) -> Result<()> {
         let kid = kid.to_owned();
         let pool = self.pool.clone();
@@ -343,16 +253,10 @@ impl LedgerClient {
             let pool = pool.clone();
             let kid = kid.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_token_client);
-
-                let request = proto::RevokeSigningKeyRequest {
-                    kid: kid.clone(),
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                client.revoke_signing_key(tonic::Request::new(request)).await?;
-
-                Ok(())
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::token::revoke_signing_key(wire_client, request_id, caller, kid)
+                    .await
             }
         })
         .await
@@ -360,9 +264,8 @@ impl LedgerClient {
 
     /// Gets active public keys for token verification.
     ///
-    /// # Arguments
-    ///
-    /// * `caller` - Identity of the user performing this operation (external slug).
+    /// Supply `organization` to retrieve organization-scoped keys; pass `None`
+    /// for global keys.
     pub async fn get_public_keys(
         &self,
         caller: UserSlug,
@@ -372,17 +275,15 @@ impl LedgerClient {
         self.call_with_retry("get_public_keys", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_token_client);
-
-                let request = proto::GetPublicKeysRequest {
-                    organization: organization.map(|o| proto::OrganizationSlug { slug: o.value() }),
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                let response =
-                    client.get_public_keys(tonic::Request::new(request)).await?.into_inner();
-
-                Ok(response.keys.into_iter().map(crate::token::PublicKeyInfo::from_proto).collect())
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::token::get_public_keys(
+                    wire_client,
+                    request_id,
+                    caller,
+                    organization,
+                )
+                .await
             }
         })
         .await

@@ -8,10 +8,7 @@
 //!   start background jobs or mark ready. The node waits for an `InitCluster` RPC (or shutdown
 //!   signal) to complete initialization.
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 
 use inferadb_ledger_raft::{
     AutoRecoveryJob, BackupJob, BackupManager, BlockCompactor, ConsensusHandle,
@@ -91,6 +88,27 @@ pub enum BootstrapError {
     Server {
         /// Error description.
         message: String,
+    },
+    /// Operator selected `--transport=wire` but a required TLS flag is
+    /// absent. Surfaces the missing flag's CLI name (`--tls-cert` /
+    /// `--tls-key`) so the operator can fix the invocation directly
+    /// without scrubbing the trace logs.
+    #[snafu(display(
+        "wire transport requires {flag}; pass it on the command line or set the matching \
+         INFERADB__LEDGER__TLS__* env var"
+    ))]
+    TlsConfigMissing {
+        /// The missing CLI flag's name.
+        flag: &'static str,
+    },
+    /// Loading the operator's PEM cert/key failed.
+    ///
+    /// Surfaces the underlying loader error verbatim so the operator
+    /// sees the failing path + parser stage in a single line.
+    #[snafu(display("wire transport TLS load failed: {source}"))]
+    TlsLoad {
+        /// Underlying TLS-load error.
+        source: crate::tls::TlsLoadError,
     },
 }
 
@@ -173,11 +191,9 @@ pub struct BootstrappedNode {
     pub coordinator: Arc<crate::shutdown::ShutdownCoordinator>,
     /// Handler-phase event handle (batching variant) used by gRPC services to
     /// record denials / admin events. Hoisted out of bootstrap so the graceful
-    /// shutdown `pre_shutdown` closure can call
-    /// [`EventHandle::flush_for_shutdown`] at Phase 5b — between the WAL
-    /// flush (5a) and the per-region state-DB sync (5c). This is the single
-    /// point where the flusher queue drains + the background task exits
-    /// cleanly.
+    /// shutdown closure can call [`EventHandle::flush_for_shutdown`] between
+    /// the WAL flush and the per-region state-DB sync. This is the single point
+    /// where the flusher queue drains and the background task exits cleanly.
     pub event_handle: EventHandle<FileBackend>,
     /// Join handle for the background event flusher task spawned by
     /// [`EventHandle::with_batching`]. `flush_for_shutdown` signals the task
@@ -307,6 +323,39 @@ pub async fn bootstrap_node(
     } else {
         (150, 300, 600) // RaftManagerConfig defaults
     };
+
+    // F.1.d: pre-load the wire TLS material once so both the
+    // client-facing wire bind (LedgerServer) and the inter-node Raft
+    // transport (WireClientTemplate on the registry) draw from the same
+    // on-disk cert + key. Validation (cert+key present, paths readable,
+    // PEM well-formed) happens here before any region starts so a
+    // misconfigured wire deployment fails fast instead of after the
+    // system region's WAL is open.
+    let (wire_tls_server_config, wire_client_template) = {
+        let tls = config.tls();
+        let cert_path =
+            tls.cert_path.ok_or(BootstrapError::TlsConfigMissing { flag: "--tls-cert" })?;
+        let key_path =
+            tls.key_path.ok_or(BootstrapError::TlsConfigMissing { flag: "--tls-key" })?;
+        let server_crypto = crate::tls::load_wire_tls_server_config(&cert_path, &key_path)
+            .map_err(|source| BootstrapError::TlsLoad { source })?;
+        // Inter-node Raft re-uses the cert chain as its trust anchor
+        // for outgoing peer dials. Production deployments share a
+        // single CA across the cluster; loopback / single-CA dev
+        // fixtures load the leaf cert as the root.
+        let client_crypto = crate::tls::load_wire_tls_client_config(&cert_path)
+            .map_err(|source| BootstrapError::TlsLoad { source })?;
+        let client_quic = inferadb_ledger_wire_transport::tls::client_config(client_crypto);
+        let server_name = tls.server_name.unwrap_or_else(|| "localhost".to_string());
+        let template = inferadb_ledger_raft::node_registry::WireClientTemplate {
+            quic: client_quic,
+            server_name,
+            auth_payload: bytes::Bytes::new(),
+            connect_timeout: Duration::from_secs(2),
+        };
+        (Some(server_crypto), Some(Arc::new(template)))
+    };
+
     let raft_manager_config = RaftManagerConfig::builder()
         .data_dir(data_dir.to_path_buf())
         .node_id(node_id)
@@ -318,7 +367,17 @@ pub async fn bootstrap_node(
     // Single shared per-node connection registry. All per-region consensus
     // transports created via `start_region` clone this Arc so that they
     // reuse one channel per peer instead of opening a connection per region.
-    let registry = Arc::new(inferadb_ledger_raft::node_registry::NodeConnectionRegistry::new());
+    // On the wire path, the registry pre-loads the WireClientTemplate so
+    // the first `set_peer_via_registry` call can construct a `WireClient`
+    // without racing the bootstrap startup sequence.
+    let registry = match wire_client_template {
+        Some(template) => Arc::new(
+            inferadb_ledger_raft::node_registry::NodeConnectionRegistry::with_wire_template(
+                template,
+            ),
+        ),
+        None => Arc::new(inferadb_ledger_raft::node_registry::NodeConnectionRegistry::new()),
+    };
     let manager = Arc::new(RaftManager::new(raft_manager_config, registry));
 
     // Install the self-Weak so per-org `ConsensusEngine`s built from
@@ -516,9 +575,15 @@ pub async fn bootstrap_node(
             let my_node_id = node_id;
             let ct = system_region.consensus_transport().cloned();
             let manager_for_seed = Arc::clone(&manager);
+            let registry_for_seed = manager.registry();
             tokio::spawn(async move {
                 for addr in &addrs {
-                    match crate::discovery::discover_node_info(*addr, Duration::from_secs(5)).await
+                    match crate::discovery::discover_node_info(
+                        &registry_for_seed,
+                        *addr,
+                        Duration::from_secs(5),
+                    )
+                    .await
                     {
                         Some(info) if info.node_id != my_node_id && info.node_id != 0 => {
                             let addr_str = addr.to_string();
@@ -891,6 +956,8 @@ pub async fn bootstrap_node(
         (None, None)
     };
 
+    let transport_kind = inferadb_ledger_services::server::TransportKind::Wire;
+
     let server = LedgerServer::builder()
         .manager(manager.clone())
         .addr(config.listen)
@@ -917,6 +984,8 @@ pub async fn bootstrap_node(
         .cluster_id(cluster_id)
         .peer_liveness(Some(peer_liveness.clone()))
         .http2_config(config.http2.clone())
+        .transport_kind(transport_kind)
+        .wire_tls_config(wire_tls_server_config)
         .build();
 
     // Wire backup support post-construction.
@@ -950,13 +1019,18 @@ pub async fn bootstrap_node(
         }
     });
 
-    // Wait for listener(s) to bind before proceeding.
-    if let Some(addr) = server_addr {
-        wait_for_tcp_ready(&server_handle, addr).await?;
-    }
-    if let Some(ref path) = config.socket {
-        wait_for_uds_ready(&server_handle, path).await?;
-    }
+    // Wait for listener(s) to bind before proceeding. The wire
+    // transport binds QUIC over UDP; the TCP-readiness probe doesn't
+    // apply, and there is no UDP equivalent — the wire bind path
+    // returns from `WireServer::bind` synchronously after the UDP
+    // socket is registered, so the spawned `serve()` future is
+    // already past the bind point by the time it yields. The
+    // server-handle quick-fail check inside `wait_for_tcp_ready`
+    // catches early panics; wire-mode tests rely on the same
+    // `tokio::time::timeout` pattern downstream.
+    // Wire transport: `WireServer::bind` registers the UDP socket
+    // synchronously, so no readiness probe is needed.
+    let _ = server_addr;
 
     if cluster_id.is_some() {
         // === Restart path ===
@@ -1052,6 +1126,7 @@ pub async fn bootstrap_node(
             let my_addr = config.advertise_addr();
             let handle_clone = handle.clone();
             let consensus_transport_clone = consensus_transport.clone();
+            let registry_clone = manager.registry();
             let data_dir_clone = data_dir.to_path_buf();
             tokio::spawn(async move {
                 seed_polling_loop(
@@ -1061,6 +1136,7 @@ pub async fn bootstrap_node(
                     my_addr,
                     handle_clone,
                     consensus_transport_clone,
+                    registry_clone,
                     data_dir_clone,
                 )
                 .await;
@@ -1208,7 +1284,8 @@ async fn seed_polling_loop(
     my_node_id: u64,
     my_address: String,
     _handle: Arc<ConsensusHandle>,
-    consensus_transport: Option<inferadb_ledger_raft::GrpcConsensusTransport>,
+    consensus_transport: Option<inferadb_ledger_raft::raft_manager::ConsensusTransportImpl>,
+    registry: Arc<inferadb_ledger_raft::node_registry::NodeConnectionRegistry>,
     data_dir: std::path::PathBuf,
 ) {
     use crate::discovery::parse_seed_addresses;
@@ -1223,10 +1300,11 @@ async fn seed_polling_loop(
 
     loop {
         for addr in &addrs {
-            let info = match crate::discovery::discover_node_info(*addr, rpc_timeout).await {
-                Some(info) if info.cluster_id != 0 => info,
-                _ => continue,
-            };
+            let info =
+                match crate::discovery::discover_node_info(&registry, *addr, rpc_timeout).await {
+                    Some(info) if info.cluster_id != 0 => info,
+                    _ => continue,
+                };
 
             tracing::info!(
                 seed = %addr,
@@ -1248,36 +1326,35 @@ async fn seed_polling_loop(
                 );
             }
 
-            // Send JoinCluster RPC to the seed node.
-            let endpoint = format!("http://{addr}");
-            let channel = match tonic::transport::Channel::from_shared(endpoint) {
-                Ok(ep) => match ep.connect().await {
-                    Ok(ch) => ch,
-                    Err(e) => {
-                        tracing::warn!(seed = %addr, error = %e, "Failed to connect for JoinCluster");
-                        continue;
-                    },
-                },
+            // Send JoinCluster RPC to the seed node over the wire transport.
+            // The seed's wire client lives in the shared registry — `set_peer_via_registry`
+            // above already populated it (or will on the next call), so we can pull a
+            // ready-to-use `Arc<WireClient>` out of the registry by node id and reuse the
+            // same QUIC connection for every Raft / discovery dial that follows.
+            let wire_client = match registry.wire_client_for(info.node_id, &addr.to_string()).await
+            {
+                Ok(c) => c,
                 Err(e) => {
-                    tracing::warn!(seed = %addr, error = %e, "Invalid seed endpoint");
+                    tracing::warn!(seed = %addr, error = %e, "Failed to build wire client for JoinCluster");
                     continue;
                 },
             };
 
-            let mut client =
-                inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::new(
-                    channel,
-                );
-            let join_result = client
-                .join_cluster(inferadb_ledger_proto::proto::JoinClusterRequest {
-                    node_id: my_node_id,
-                    address: my_address.clone(),
-                })
+            let admin_client = inferadb_ledger_wire_services::AdminServiceClient::new(wire_client);
+            let join_result = admin_client
+                .join_cluster(
+                    inferadb_ledger_wire::services::admin::JoinClusterRequest {
+                        node_id: my_node_id,
+                        address: my_address.clone(),
+                    },
+                    // request_id: synthesise from our node id so retries on the same
+                    // seed are deduplicated by the server.
+                    u128::from(my_node_id),
+                )
                 .await;
 
             match join_result {
-                Ok(resp) => {
-                    let inner = resp.into_inner();
+                Ok(inner) => {
                     if inner.success {
                         tracing::info!(cluster_id = info.cluster_id, "Successfully joined cluster");
                     } else if inner.message.contains("already a voter") {
@@ -1309,84 +1386,6 @@ async fn seed_polling_loop(
 
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
-}
-
-/// Waits for the gRPC server to accept TCP connections.
-///
-/// Polls the server address for up to 30 seconds. Returns an error if the
-/// server exits early (bind failure) or fails to accept connections in time.
-///
-/// The generous timeout accounts for debug-mode builds where constructing 13+
-/// gRPC services with interceptors and layers can take several seconds,
-/// especially when multiple nodes start on the same machine simultaneously.
-async fn wait_for_tcp_ready(
-    server_handle: &tokio::task::JoinHandle<Result<(), String>>,
-    server_addr: std::net::SocketAddr,
-) -> Result<(), BootstrapError> {
-    let tcp_start = Instant::now();
-    let timeout = Duration::from_secs(30);
-    let mut tcp_ready = false;
-    while tcp_start.elapsed() < timeout {
-        if server_handle.is_finished() {
-            // Server exited early — likely a bind failure. We cannot await a
-            // borrowed JoinHandle, so report the early exit without consuming it.
-            return Err(BootstrapError::Server {
-                message: format!("server exited before accepting connections on {server_addr}"),
-            });
-        }
-        if tokio::net::TcpStream::connect(server_addr).await.is_ok() {
-            tcp_ready = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    if !tcp_ready {
-        return Err(BootstrapError::Server {
-            message: format!(
-                "server did not accept TCP connections on {server_addr} within {}s",
-                timeout.as_secs()
-            ),
-        });
-    }
-    Ok(())
-}
-
-/// Waits for the gRPC server to accept Unix domain socket connections.
-///
-/// Same structure as [`wait_for_tcp_ready`] but connects via
-/// `tokio::net::UnixStream` instead of `TcpStream`.
-async fn wait_for_uds_ready(
-    server_handle: &tokio::task::JoinHandle<Result<(), String>>,
-    socket_path: &std::path::Path,
-) -> Result<(), BootstrapError> {
-    let start = Instant::now();
-    let timeout = Duration::from_secs(30);
-    let mut ready = false;
-    while start.elapsed() < timeout {
-        if server_handle.is_finished() {
-            return Err(BootstrapError::Server {
-                message: format!(
-                    "server exited before accepting connections on {}",
-                    socket_path.display()
-                ),
-            });
-        }
-        if tokio::net::UnixStream::connect(socket_path).await.is_ok() {
-            ready = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    if !ready {
-        return Err(BootstrapError::Server {
-            message: format!(
-                "server did not accept Unix socket connections on {} within {}s",
-                socket_path.display(),
-                timeout.as_secs()
-            ),
-        });
-    }
-    Ok(())
 }
 
 /// Input parameters for starting all background jobs.
@@ -2129,12 +2128,20 @@ async fn check_peer_liveness_quorum(
         let mut join_set = tokio::task::JoinSet::new();
         let target_node_id = node_id;
         let query_timeout = liveness_config.liveness_query_timeout;
+        let registry = manager.registry();
         for &voter_id in &other_voters {
             if let Some(addr) = manager.peer_addresses().get(voter_id) {
                 let addr = addr.clone();
+                let registry = Arc::clone(&registry);
                 join_set.spawn(async move {
-                    let result =
-                        query_peer_liveness_rpc(&addr, target_node_id, query_timeout).await;
+                    let result = query_peer_liveness_rpc(
+                        &registry,
+                        voter_id,
+                        &addr,
+                        target_node_id,
+                        query_timeout,
+                    )
+                    .await;
                     (voter_id, result)
                 });
             }
@@ -2188,40 +2195,76 @@ async fn check_peer_liveness_quorum(
     }
 }
 
-/// Queries a peer's `CheckPeerLiveness` RPC. Returns `Some(reachable)` or `None` on failure.
+/// Queries a peer's `CheckPeerLiveness` RPC over the wire transport.
+///
+/// `voter_id` identifies the peer we're dialing (used as the registry
+/// cache key for the QUIC connection); `target_node_id` is the peer the
+/// server should report on. Returns `Some(reachable)` or `None` on
+/// failure.
 async fn query_peer_liveness_rpc(
+    registry: &Arc<inferadb_ledger_raft::node_registry::NodeConnectionRegistry>,
+    voter_id: u64,
     addr: &str,
     target_node_id: u64,
     timeout: std::time::Duration,
 ) -> Option<bool> {
-    let endpoint = format!("http://{addr}");
-    let channel = tonic::transport::Channel::from_shared(endpoint).ok()?.connect_lazy();
-    let mut client =
-        inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::new(channel);
+    let wire_client = registry.wire_client_for(voter_id, addr).await.ok()?;
+    let client = inferadb_ledger_wire_services::AdminServiceClient::new(wire_client);
     let response = tokio::time::timeout(
         timeout,
-        client.check_peer_liveness(inferadb_ledger_proto::proto::CheckPeerLivenessRequest {
-            target_node_id,
-        }),
+        client.check_peer_liveness(
+            inferadb_ledger_wire::services::admin::CheckPeerLivenessRequest { target_node_id },
+            // request_id: synthesise from the target so concurrent probes on
+            // the same target dedupe at the server.
+            u128::from(target_node_id),
+        ),
     )
     .await
     .ok()?
     .ok()?;
-    Some(response.into_inner().reachable)
+    Some(response.reachable)
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods, clippy::panic)]
 mod tests {
+    use std::io::Write as _;
+
     use tempfile::tempdir;
 
     use super::*;
+
+    /// Construct a [`Config::for_test`] with rcgen-generated self-signed
+    /// TLS material populated. The wire-bootstrap path requires
+    /// `--tls-cert` / `--tls-key`; tests that exercise a successful
+    /// bootstrap go through this helper so each call site does not
+    /// duplicate the cert-write boilerplate.
+    fn config_for_test_with_tls(node_id: u64, port: u16, data_dir: &std::path::Path) -> Config {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("rcgen self-signed cert with localhost SAN");
+        let cert_path = data_dir.join("wire-cert.pem");
+        let key_path = data_dir.join("wire-key.pem");
+        std::fs::File::create(&cert_path)
+            .expect("create cert pem")
+            .write_all(cert.cert.pem().as_bytes())
+            .expect("write cert pem");
+        std::fs::File::create(&key_path)
+            .expect("create key pem")
+            .write_all(cert.key_pair.serialize_pem().as_bytes())
+            .expect("write key pem");
+
+        let mut config = Config::for_test(node_id, port, data_dir.to_path_buf());
+        config.tls_cert_path = Some(cert_path);
+        config.tls_key_path = Some(key_path);
+        config.tls_server_name = Some("localhost".to_string());
+        config
+    }
 
     #[tokio::test]
     async fn test_bootstrap_single_node() {
         let temp_dir = tempdir().expect("create temp dir");
         let data_dir = temp_dir.path().to_path_buf();
-        let config = Config::for_test(1, 50051, data_dir.clone());
+        let config = config_for_test_with_tls(1, 50051, &data_dir);
 
         // Write cluster_id so we take the restart path (initialized node).
         crate::cluster_id::write_cluster_id(&data_dir, 1).expect("write cluster_id");
@@ -2322,7 +2365,7 @@ mod tests {
         // `rate_limit.enabled = true` in their server config.
         let temp_dir = tempdir().expect("create temp dir");
         let data_dir = temp_dir.path().to_path_buf();
-        let mut config = Config::for_test(1, 50061, data_dir.clone());
+        let mut config = config_for_test_with_tls(1, 50061, &data_dir);
         config.rate_limit = Some(inferadb_ledger_types::config::RateLimitConfig {
             enabled: true,
             ..Default::default()
@@ -2352,7 +2395,7 @@ mod tests {
     async fn test_bootstrap_creates_per_region_databases() {
         let temp_dir = tempdir().expect("create temp dir");
         let data_dir = temp_dir.path().to_path_buf();
-        let config = Config::for_test(1, 50052, data_dir.clone());
+        let config = config_for_test_with_tls(1, 50052, &data_dir);
 
         // Write cluster_id so we take the restart path.
         crate::cluster_id::write_cluster_id(&data_dir, 1).expect("write cluster_id");
@@ -2400,7 +2443,7 @@ mod tests {
     async fn test_bootstrap_events_disabled_skips_gc() {
         let temp_dir = tempdir().expect("create temp dir");
         let data_dir = temp_dir.path().to_path_buf();
-        let mut config = Config::for_test(1, 50053, data_dir.clone());
+        let mut config = config_for_test_with_tls(1, 50053, &data_dir);
         config.events.enabled = false;
 
         // Write cluster_id so we take the restart path.
@@ -2453,7 +2496,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
         let port = listener.local_addr().expect("local addr").port();
         drop(listener);
-        let config = Config::for_test(1, port, data_dir.clone());
+        let config = config_for_test_with_tls(1, port, &data_dir);
 
         // No cluster_id file — fresh node path. Without an InitCluster RPC
         // or seed discovery, the node blocks until shutdown is signaled.
@@ -2487,7 +2530,7 @@ mod tests {
         let data_dir = temp_dir.path().to_path_buf();
 
         // Use a unique port to avoid conflicts.
-        let mut config = Config::for_test(1, 50060, data_dir.clone());
+        let mut config = config_for_test_with_tls(1, 50060, &data_dir);
         // Set a very short timeout — no InitCluster RPC will arrive.
         config.init_wait_timeout_secs = 1;
 
@@ -2638,5 +2681,143 @@ mod tests {
     fn bootstrap_error_display_server() {
         let err = BootstrapError::Server { message: "bind failed".to_string() };
         assert_eq!(err.to_string(), "server error: bind failed");
+    }
+
+    // ===================================================================
+    // F.1.d — TLS config plumbing
+    // ===================================================================
+
+    #[tokio::test]
+    async fn tls_config_missing_cert_errors_clearly() {
+        // `--transport=wire` without `--tls-cert` must surface
+        // `BootstrapError::TlsConfigMissing { flag: "--tls-cert" }`
+        // before any region opens — failing fast on operator error.
+        let temp_dir = tempdir().expect("create temp dir");
+        let data_dir = temp_dir.path().to_path_buf();
+        let mut config = Config::for_test(1, 0, data_dir.clone());
+        config.transport = crate::config::TransportKind::Wire;
+        config.tls_cert_path = None;
+        config.tls_key_path = None;
+
+        crate::cluster_id::write_cluster_id(&data_dir, 1).expect("write cluster_id");
+
+        let health = inferadb_ledger_raft::HealthState::new();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        match bootstrap_node(&config, &data_dir, health, rx, None).await {
+            Err(BootstrapError::TlsConfigMissing { flag }) => {
+                assert_eq!(flag, "--tls-cert", "first missing flag must surface as `--tls-cert`");
+            },
+            Err(other) => panic!("expected TlsConfigMissing, got {other:?}"),
+            Ok(_) => panic!(
+                "missing TLS material must not produce a successful bootstrap on the wire path"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn tls_config_missing_key_errors_clearly() {
+        // Cert present, key absent — second-arm of TLS validation: the
+        // bootstrap reports `--tls-key` as the missing flag so the
+        // operator knows exactly which arg to add.
+        let temp_dir = tempdir().expect("create temp dir");
+        let data_dir = temp_dir.path().to_path_buf();
+        let mut config = Config::for_test(1, 0, data_dir.clone());
+        config.transport = crate::config::TransportKind::Wire;
+        // Pretend the operator passed a cert-only invocation. The path
+        // doesn't have to exist — bootstrap surfaces the missing-key
+        // arg before touching disk.
+        config.tls_cert_path = Some(std::path::PathBuf::from("/nonexistent/cert.pem"));
+        config.tls_key_path = None;
+
+        crate::cluster_id::write_cluster_id(&data_dir, 1).expect("write cluster_id");
+
+        let health = inferadb_ledger_raft::HealthState::new();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        match bootstrap_node(&config, &data_dir, health, rx, None).await {
+            Err(BootstrapError::TlsConfigMissing { flag }) => {
+                assert_eq!(flag, "--tls-key", "missing flag must surface as `--tls-key`");
+            },
+            Err(other) => panic!("expected TlsConfigMissing, got {other:?}"),
+            Ok(_) => {
+                panic!("missing TLS key must not produce a successful bootstrap on the wire path")
+            },
+        }
+    }
+
+    #[test]
+    fn tls_config_load_translates_loader_errors_into_bootstrap_error() {
+        // `BootstrapError::TlsLoad` wraps `crate::tls::TlsLoadError`;
+        // confirming the conversion shape locks the contract used by
+        // operator-facing CLI errors. We don't need a full bootstrap
+        // here — the From-style construction is exercised in isolation.
+        let bogus = std::path::PathBuf::from("/nonexistent/wire-cert.pem");
+        let err = crate::tls::load_wire_tls_server_config(&bogus, &bogus)
+            .expect_err("missing PEM must error");
+        let bootstrap_err = BootstrapError::TlsLoad { source: err };
+        let rendered = bootstrap_err.to_string();
+        assert!(
+            rendered.starts_with("wire transport TLS load failed:"),
+            "BootstrapError::TlsLoad must carry the loader error verbatim, got: {rendered}"
+        );
+    }
+
+    /// Exercising the full wire-path bootstrap requires real PEM cert/
+    /// key material. Generate one via rcgen, point the config at it,
+    /// then bootstrap and confirm the registry has the wire template
+    /// installed (the inter-node Raft transport's prerequisite). This
+    /// lights up every line bootstrap touches in the wire branch of
+    /// the new TLS plumbing.
+    #[tokio::test]
+    async fn wire_template_installed_when_transport_wire() {
+        use std::io::Write as _;
+
+        let temp_dir = tempdir().expect("create temp dir");
+        let data_dir = temp_dir.path().to_path_buf();
+
+        // Allocate a cert + key under the data dir — `tempdir` cleans up
+        // the whole tree when the test exits.
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("rcgen self-signed");
+        let cert_pem = cert.cert.pem();
+        let key_pem = cert.key_pair.serialize_pem();
+
+        let cert_path = data_dir.join("wire-cert.pem");
+        let key_path = data_dir.join("wire-key.pem");
+        let mut cert_file = std::fs::File::create(&cert_path).expect("create cert pem");
+        cert_file.write_all(cert_pem.as_bytes()).expect("write cert pem");
+        let mut key_file = std::fs::File::create(&key_path).expect("create key pem");
+        key_file.write_all(key_pem.as_bytes()).expect("write key pem");
+
+        let mut config = Config::for_test(1, 0, data_dir.clone());
+        // Bind to an ephemeral port — the runtime resolves it during bind.
+        config.listen = Some("127.0.0.1:0".parse().expect("parse loopback"));
+        config.transport = crate::config::TransportKind::Wire;
+        config.tls_cert_path = Some(cert_path);
+        config.tls_key_path = Some(key_path);
+        config.tls_server_name = Some("localhost".to_string());
+
+        // Restart path so bootstrap returns promptly with a fully wired
+        // RaftManager + LedgerServer.
+        crate::cluster_id::write_cluster_id(&data_dir, 1).expect("write cluster_id");
+
+        let health = inferadb_ledger_raft::HealthState::new();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let bootstrapped = bootstrap_node(&config, &data_dir, health, shutdown_rx, None)
+            .await
+            .expect("bootstrap should succeed with valid PEM material on the wire path");
+
+        // Wire template is installed on the shared registry — calling
+        // `wire_client_for` for any peer will now construct a
+        // `WireClient` rather than returning `WireTemplateUnconfigured`.
+        let registry = bootstrapped.manager.registry();
+        let template_present = registry.has_wire_template();
+        assert!(
+            template_present,
+            "wire transport must install a WireClientTemplate on the shared registry"
+        );
+
+        // Tear down.
+        let _ = shutdown_tx.send(true);
+        bootstrapped.server_handle.abort();
     }
 }

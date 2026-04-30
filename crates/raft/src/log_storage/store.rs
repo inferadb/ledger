@@ -6,7 +6,6 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use inferadb_ledger_proto::proto::BlockAnnouncement;
 use inferadb_ledger_state::{
     BlockArchive, StateLayer,
     system::{AppProfile, SYSTEM_VAULT_ID, SystemKeys, Team},
@@ -113,7 +112,8 @@ pub struct RaftLogStore<B: StorageBackend = FileBackend> {
     ///
     /// When set, announcements are broadcast after each successful block commit.
     /// Receivers subscribe via `WatchBlocks` gRPC streaming endpoint.
-    pub(super) block_announcements: Option<broadcast::Sender<BlockAnnouncement>>,
+    pub(super) block_announcements:
+        Option<broadcast::Sender<inferadb_ledger_wire::services::shared::BlockAnnouncement>>,
     /// Event writer for persisting apply-phase audit events to `events.db`.
     ///
     /// When set, the state machine apply path emits deterministic events
@@ -406,7 +406,7 @@ impl<B: StorageBackend> RaftLogStore<B> {
     /// after each successful block commit in `apply_to_state_machine`.
     pub fn with_block_announcements(
         mut self,
-        sender: broadcast::Sender<BlockAnnouncement>,
+        sender: broadcast::Sender<inferadb_ledger_wire::services::shared::BlockAnnouncement>,
     ) -> Self {
         self.block_announcements = Some(sender);
         self
@@ -521,7 +521,9 @@ impl<B: StorageBackend> RaftLogStore<B> {
     }
 
     /// Returns a reference to the block announcements sender (if configured).
-    pub fn block_announcements(&self) -> Option<&broadcast::Sender<BlockAnnouncement>> {
+    pub fn block_announcements(
+        &self,
+    ) -> Option<&broadcast::Sender<inferadb_ledger_wire::services::shared::BlockAnnouncement>> {
         self.block_announcements.as_ref()
     }
 

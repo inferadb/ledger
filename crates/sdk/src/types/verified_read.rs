@@ -1,9 +1,6 @@
 //! Cryptographic verification types: Merkle proofs, block headers, chain proofs.
 
-use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
-
-use crate::proto_util::proto_timestamp_to_system_time;
 
 /// Direction of a sibling in a Merkle proof.
 ///
@@ -19,16 +16,6 @@ pub enum Direction {
     Right,
 }
 
-impl Direction {
-    /// Converts from protobuf enum value.
-    pub(crate) fn from_proto(value: i32) -> Self {
-        match proto::Direction::try_from(value) {
-            Ok(proto::Direction::Left) => Direction::Left,
-            _ => Direction::Right, // Default to right for unspecified
-        }
-    }
-}
-
 /// A sibling node in a Merkle proof path.
 ///
 /// Each sibling contains the hash of the neighboring node and which side
@@ -40,16 +27,6 @@ pub struct MerkleSibling {
     pub hash: Vec<u8>,
     /// Direction (left or right) relative to the current node.
     pub direction: Direction,
-}
-
-impl MerkleSibling {
-    /// Converts from protobuf message.
-    pub(crate) fn from_proto(proto: proto::MerkleSibling) -> Self {
-        Self {
-            hash: proto.hash.map(|h| h.value).unwrap_or_default(),
-            direction: Direction::from_proto(proto.direction),
-        }
-    }
 }
 
 /// Merkle proof for verifying state inclusion.
@@ -66,14 +43,6 @@ pub struct MerkleProof {
 }
 
 impl MerkleProof {
-    /// Converts from protobuf message.
-    pub(crate) fn from_proto(proto: proto::MerkleProof) -> Self {
-        Self {
-            leaf_hash: proto.leaf_hash.map(|h| h.value).unwrap_or_default(),
-            siblings: proto.siblings.into_iter().map(MerkleSibling::from_proto).collect(),
-        }
-    }
-
     /// Verifies this proof against an expected state root.
     ///
     /// Recomputes the root hash from the leaf through the sibling path and
@@ -151,27 +120,6 @@ pub struct BlockHeader {
     pub block_hash: Vec<u8>,
 }
 
-impl BlockHeader {
-    /// Converts from protobuf message.
-    pub(crate) fn from_proto(proto: proto::BlockHeader) -> Self {
-        let timestamp = proto.timestamp.and_then(|ts| proto_timestamp_to_system_time(&ts));
-
-        Self {
-            height: proto.height,
-            organization: OrganizationSlug::new(proto.organization.map_or(0, |n| n.slug)),
-            vault: VaultSlug::new(proto.vault.map_or(0, |v| v.slug)),
-            previous_hash: proto.previous_hash.map(|h| h.value).unwrap_or_default(),
-            tx_merkle_root: proto.tx_merkle_root.map(|h| h.value).unwrap_or_default(),
-            state_root: proto.state_root.map(|h| h.value).unwrap_or_default(),
-            timestamp,
-            leader_id: proto.leader_id.map(|n| n.id).unwrap_or_default(),
-            term: proto.term,
-            committed_index: proto.committed_index,
-            block_hash: proto.block_hash.map(|h| h.value).unwrap_or_default(),
-        }
-    }
-}
-
 /// Chain proof linking a trusted height to a response height.
 ///
 /// Used to verify that a block at response_height descends from trusted_height.
@@ -184,11 +132,6 @@ pub struct ChainProof {
 }
 
 impl ChainProof {
-    /// Converts from protobuf message.
-    pub(crate) fn from_proto(proto: proto::ChainProof) -> Self {
-        Self { headers: proto.headers.into_iter().map(BlockHeader::from_proto).collect() }
-    }
-
     /// Verifies the chain of blocks links correctly.
     ///
     /// Checks that each block's `previous_hash` matches the server-provided
@@ -244,32 +187,9 @@ pub struct Transaction {
     pub timestamp: Option<std::time::SystemTime>,
 }
 
-impl Transaction {
-    /// Converts from protobuf message.
-    pub(crate) fn from_proto(proto: proto::Transaction) -> Self {
-        use std::fmt::Write;
-        let tx_id = proto
-            .id
-            .map(|t| {
-                t.id.iter().fold(String::with_capacity(t.id.len() * 2), |mut acc, b| {
-                    let _ = write!(acc, "{b:02x}");
-                    acc
-                })
-            })
-            .unwrap_or_default();
-        let timestamp = proto.timestamp.and_then(|ts| proto_timestamp_to_system_time(&ts));
-        Self {
-            tx_id,
-            client_id: proto.client_id.map(|c| c.id).unwrap_or_default(),
-            sequence: proto.sequence,
-            timestamp,
-        }
-    }
-}
-
 /// A complete block including its header and all transactions.
 ///
-/// Returned by [`crate::LedgerClient::get_block`] and [`crate::LedgerClient::get_block_range`].
+/// Returned by `crate::LedgerClient::get_block` and `crate::LedgerClient::get_block_range`.
 /// Contains the full transaction set committed in a single Raft round.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -280,19 +200,9 @@ pub struct Block {
     pub transactions: Vec<Transaction>,
 }
 
-impl Block {
-    /// Converts from protobuf message.
-    pub(crate) fn from_proto(proto: proto::Block) -> Self {
-        Self {
-            header: proto.header.map(BlockHeader::from_proto),
-            transactions: proto.transactions.into_iter().map(Transaction::from_proto).collect(),
-        }
-    }
-}
-
 /// Result of a historical read at a specific block height.
 ///
-/// Returned by [`crate::LedgerClient::historical_read`]. Contains the value at the
+/// Returned by `crate::LedgerClient::historical_read`. Contains the value at the
 /// requested height, and optionally Merkle and chain proofs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -311,7 +221,7 @@ pub struct HistoricalRead {
 
 /// Current chain tip information for a vault.
 ///
-/// Returned by [`crate::LedgerClient::get_tip`]. Contains the latest committed block
+/// Returned by `crate::LedgerClient::get_tip`. Contains the latest committed block
 /// height and its cryptographic commitments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

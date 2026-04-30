@@ -1,6 +1,5 @@
 //! App CRUD, credentials, client assertions, and vault connection operations.
 
-use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{
     AppSlug, ClientAssertionId as DomainClientAssertionId, OrganizationSlug, UserSlug, VaultSlug,
 };
@@ -8,11 +7,9 @@ use inferadb_ledger_types::{
 use crate::{
     LedgerClient,
     error::Result,
-    proto_util::{missing_response_field, system_time_to_proto_timestamp},
     types::app::{
         AppClientAssertionInfo, AppClientSecretStatus, AppCredentialType, AppInfo,
-        AppVaultConnectionInfo, CreateAppClientAssertionResult, app_info_from_proto,
-        assertion_info_from_proto, vault_connection_from_proto,
+        AppVaultConnectionInfo, CreateAppClientAssertionResult,
     },
 };
 
@@ -44,22 +41,18 @@ impl LedgerClient {
             let description = description.clone();
             let name = name.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_app_client);
-
-                let request = proto::CreateAppRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                    name: name.clone(),
-                    description: description.clone(),
-                    slug: Some(proto::AppSlug { slug: app_slug.value() }),
-                };
-
-                let response = client.create_app(tonic::Request::new(request)).await?.into_inner();
-
-                response
-                    .app
-                    .map(|a| app_info_from_proto(&a))
-                    .ok_or_else(|| missing_response_field("app", "CreateAppResponse"))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::app::create_app(
+                    wire_client,
+                    request_id,
+                    organization,
+                    user,
+                    name,
+                    description,
+                    app_slug,
+                )
+                .await
             }
         })
         .await
@@ -76,20 +69,10 @@ impl LedgerClient {
         self.call_with_retry("get_app", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_app_client);
-
-                let request = proto::GetAppRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                    app: Some(proto::AppSlug { slug: app.value() }),
-                };
-
-                let response = client.get_app(tonic::Request::new(request)).await?.into_inner();
-
-                response
-                    .app
-                    .map(|a| app_info_from_proto(&a))
-                    .ok_or_else(|| missing_response_field("app", "GetAppResponse"))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::app::get_app(wire_client, request_id, organization, user, app)
+                    .await
             }
         })
         .await
@@ -105,16 +88,9 @@ impl LedgerClient {
         self.call_with_retry("list_apps", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_app_client);
-
-                let request = proto::ListAppsRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                };
-
-                let response = client.list_apps(tonic::Request::new(request)).await?.into_inner();
-
-                Ok(response.apps.iter().map(app_info_from_proto).collect())
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::app::list_apps(wire_client, request_id, organization, user).await
             }
         })
         .await
@@ -135,22 +111,18 @@ impl LedgerClient {
             let description = description.clone();
             let name = name.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_app_client);
-
-                let request = proto::UpdateAppRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                    app: Some(proto::AppSlug { slug: app.value() }),
-                    name: name.clone(),
-                    description: description.clone(),
-                };
-
-                let response = client.update_app(tonic::Request::new(request)).await?.into_inner();
-
-                response
-                    .app
-                    .map(|a| app_info_from_proto(&a))
-                    .ok_or_else(|| missing_response_field("app", "UpdateAppResponse"))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::app::update_app(
+                    wire_client,
+                    request_id,
+                    organization,
+                    user,
+                    app,
+                    name,
+                    description,
+                )
+                .await
             }
         })
         .await
@@ -167,16 +139,10 @@ impl LedgerClient {
         self.call_with_retry("delete_app", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_app_client);
-
-                let request = proto::DeleteAppRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                    app: Some(proto::AppSlug { slug: app.value() }),
-                };
-
-                client.delete_app(tonic::Request::new(request)).await?;
-                Ok(())
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::app::delete_app(wire_client, request_id, organization, user, app)
+                    .await
             }
         })
         .await
@@ -213,22 +179,17 @@ impl LedgerClient {
         self.call_with_retry("set_app_enabled", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_app_client);
-
-                let request = proto::SetAppEnabledRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                    app: Some(proto::AppSlug { slug: app.value() }),
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::app::set_app_enabled(
+                    wire_client,
+                    request_id,
+                    organization,
+                    user,
+                    app,
                     enabled,
-                };
-
-                let response =
-                    client.set_app_enabled(tonic::Request::new(request)).await?.into_inner();
-
-                response
-                    .app
-                    .map(|a| app_info_from_proto(&a))
-                    .ok_or_else(|| missing_response_field("app", "SetAppEnabledResponse"))
+                )
+                .await
             }
         })
         .await
@@ -247,30 +208,22 @@ impl LedgerClient {
         credential_type: AppCredentialType,
         enabled: bool,
     ) -> Result<AppInfo> {
-        let credential_type_i32 = credential_type.to_proto();
         let pool = self.pool.clone();
         self.call_with_retry("set_app_credential_enabled", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_app_client);
-
-                let request = proto::SetAppCredentialEnabledRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                    app: Some(proto::AppSlug { slug: app.value() }),
-                    credential_type: credential_type_i32,
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::app::set_app_credential_enabled(
+                    wire_client,
+                    request_id,
+                    organization,
+                    user,
+                    app,
+                    credential_type,
                     enabled,
-                };
-
-                let response = client
-                    .set_app_credential_enabled(tonic::Request::new(request))
-                    .await?
-                    .into_inner();
-
-                response
-                    .app
-                    .map(|a| app_info_from_proto(&a))
-                    .ok_or_else(|| missing_response_field("app", "SetAppCredentialEnabledResponse"))
+                )
+                .await
             }
         })
         .await
@@ -287,21 +240,16 @@ impl LedgerClient {
         self.call_with_retry("get_app_client_secret", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_app_client);
-
-                let request = proto::GetAppClientSecretRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                    app: Some(proto::AppSlug { slug: app.value() }),
-                };
-
-                let response =
-                    client.get_app_client_secret(tonic::Request::new(request)).await?.into_inner();
-
-                Ok(AppClientSecretStatus {
-                    enabled: response.enabled,
-                    has_secret: response.has_secret,
-                })
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::app::get_app_client_secret(
+                    wire_client,
+                    request_id,
+                    organization,
+                    user,
+                    app,
+                )
+                .await
             }
         })
         .await
@@ -322,23 +270,18 @@ impl LedgerClient {
 
         self.call_with_retry("rotate_app_client_secret", || {
             let pool = pool.clone();
-
             async move {
-                let mut client = crate::connected_client!(pool, create_app_client);
-
-                let request = proto::RotateAppClientSecretRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                    app: Some(proto::AppSlug { slug: app.value() }),
-                    idempotency_key: idempotency_key.to_vec(),
-                };
-
-                let response = client
-                    .rotate_app_client_secret(tonic::Request::new(request))
-                    .await?
-                    .into_inner();
-
-                Ok(response.secret)
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::app::rotate_app_client_secret(
+                    wire_client,
+                    request_id,
+                    organization,
+                    user,
+                    app,
+                    idempotency_key,
+                )
+                .await
             }
         })
         .await
@@ -359,20 +302,16 @@ impl LedgerClient {
         self.call_with_retry("list_app_client_assertions", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_app_client);
-
-                let request = proto::ListAppClientAssertionsRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                    app: Some(proto::AppSlug { slug: app.value() }),
-                };
-
-                let response = client
-                    .list_app_client_assertions(tonic::Request::new(request))
-                    .await?
-                    .into_inner();
-
-                Ok(response.assertions.iter().map(assertion_info_from_proto).collect())
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::app::list_app_client_assertions(
+                    wire_client,
+                    request_id,
+                    organization,
+                    user,
+                    app,
+                )
+                .await
             }
         })
         .await
@@ -396,23 +335,17 @@ impl LedgerClient {
         self.call_with_retry("get_app_client_assertion", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_app_client);
-
-                let request = proto::GetAppClientAssertionRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                    app: Some(proto::AppSlug { slug: app.value() }),
-                    assertion: Some(proto::ClientAssertionId { id: assertion.value() }),
-                };
-
-                let response = client
-                    .get_app_client_assertion(tonic::Request::new(request))
-                    .await?
-                    .into_inner();
-
-                response.assertion.as_ref().map(assertion_info_from_proto).ok_or_else(|| {
-                    missing_response_field("assertion", "GetAppClientAssertionResponse")
-                })
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::app::get_app_client_assertion(
+                    wire_client,
+                    request_id,
+                    organization,
+                    user,
+                    app,
+                    assertion,
+                )
+                .await
             }
         })
         .await
@@ -433,38 +366,31 @@ impl LedgerClient {
         let name = name.into();
         let pool = self.pool.clone();
         let idempotency_key: [u8; 16] = rand::random();
-        let expires_at_proto = system_time_to_proto_timestamp(&expires_at);
+        // Wire transport uses UNIX-nanos `u64` directly. Pre-clamp negative
+        // (pre-epoch) values to 0 to mirror the proto path's behavior on
+        // malformed inputs.
+        let expires_at_unix_nanos: u64 = expires_at
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
 
         self.call_with_retry("create_app_client_assertion", || {
             let pool = pool.clone();
-
             let name = name.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_app_client);
-
-                let request = proto::CreateAppClientAssertionRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                    app: Some(proto::AppSlug { slug: app.value() }),
-                    name: name.clone(),
-                    expires_at: Some(expires_at_proto),
-                    idempotency_key: idempotency_key.to_vec(),
-                };
-
-                let response = client
-                    .create_app_client_assertion(tonic::Request::new(request))
-                    .await?
-                    .into_inner();
-
-                let assertion =
-                    response.assertion.map(|a| assertion_info_from_proto(&a)).ok_or_else(|| {
-                        missing_response_field("assertion", "CreateAppClientAssertionResponse")
-                    })?;
-
-                Ok(CreateAppClientAssertionResult {
-                    assertion,
-                    private_key_pem: response.private_key_pem,
-                })
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::app::create_app_client_assertion(
+                    wire_client,
+                    request_id,
+                    organization,
+                    user,
+                    app,
+                    name,
+                    expires_at_unix_nanos,
+                    idempotency_key,
+                )
+                .await
             }
         })
         .await
@@ -482,17 +408,17 @@ impl LedgerClient {
         self.call_with_retry("delete_app_client_assertion", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_app_client);
-
-                let request = proto::DeleteAppClientAssertionRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                    app: Some(proto::AppSlug { slug: app.value() }),
-                    assertion: Some(proto::ClientAssertionId { id: assertion.value() }),
-                };
-
-                client.delete_app_client_assertion(tonic::Request::new(request)).await?;
-                Ok(())
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::app::delete_app_client_assertion(
+                    wire_client,
+                    request_id,
+                    organization,
+                    user,
+                    app,
+                    assertion,
+                )
+                .await
             }
         })
         .await
@@ -511,18 +437,18 @@ impl LedgerClient {
         self.call_with_retry("set_app_client_assertion_enabled", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_app_client);
-
-                let request = proto::SetAppClientAssertionEnabledRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                    app: Some(proto::AppSlug { slug: app.value() }),
-                    assertion: Some(proto::ClientAssertionId { id: assertion.value() }),
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::app::set_app_client_assertion_enabled(
+                    wire_client,
+                    request_id,
+                    organization,
+                    user,
+                    app,
+                    assertion,
                     enabled,
-                };
-
-                client.set_app_client_assertion_enabled(tonic::Request::new(request)).await?;
-                Ok(())
+                )
+                .await
             }
         })
         .await
@@ -543,18 +469,16 @@ impl LedgerClient {
         self.call_with_retry("list_app_vaults", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_app_client);
-
-                let request = proto::ListAppVaultsRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                    app: Some(proto::AppSlug { slug: app.value() }),
-                };
-
-                let response =
-                    client.list_app_vaults(tonic::Request::new(request)).await?.into_inner();
-
-                Ok(response.vaults.iter().map(vault_connection_from_proto).collect())
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::app::list_app_vaults(
+                    wire_client,
+                    request_id,
+                    organization,
+                    user,
+                    app,
+                )
+                .await
             }
         })
         .await
@@ -574,23 +498,18 @@ impl LedgerClient {
             let pool = pool.clone();
             let allowed_scopes = allowed_scopes.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_app_client);
-
-                let request = proto::AddAppVaultRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                    app: Some(proto::AppSlug { slug: app.value() }),
-                    vault: Some(proto::VaultSlug { slug: vault.value() }),
-                    allowed_scopes: allowed_scopes.clone(),
-                };
-
-                let response =
-                    client.add_app_vault(tonic::Request::new(request)).await?.into_inner();
-
-                response
-                    .vault
-                    .map(|v| vault_connection_from_proto(&v))
-                    .ok_or_else(|| missing_response_field("vault", "AddAppVaultResponse"))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::app::add_app_vault(
+                    wire_client,
+                    request_id,
+                    organization,
+                    user,
+                    app,
+                    vault,
+                    allowed_scopes,
+                )
+                .await
             }
         })
         .await
@@ -610,23 +529,18 @@ impl LedgerClient {
             let pool = pool.clone();
             let allowed_scopes = allowed_scopes.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_app_client);
-
-                let request = proto::UpdateAppVaultRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                    app: Some(proto::AppSlug { slug: app.value() }),
-                    vault: Some(proto::VaultSlug { slug: vault.value() }),
-                    allowed_scopes: allowed_scopes.clone(),
-                };
-
-                let response =
-                    client.update_app_vault(tonic::Request::new(request)).await?.into_inner();
-
-                response
-                    .vault
-                    .map(|v| vault_connection_from_proto(&v))
-                    .ok_or_else(|| missing_response_field("vault", "UpdateAppVaultResponse"))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::app::update_app_vault(
+                    wire_client,
+                    request_id,
+                    organization,
+                    user,
+                    app,
+                    vault,
+                    allowed_scopes,
+                )
+                .await
             }
         })
         .await
@@ -644,17 +558,17 @@ impl LedgerClient {
         self.call_with_retry("remove_app_vault", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_app_client);
-
-                let request = proto::RemoveAppVaultRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                    app: Some(proto::AppSlug { slug: app.value() }),
-                    vault: Some(proto::VaultSlug { slug: vault.value() }),
-                };
-
-                client.remove_app_vault(tonic::Request::new(request)).await?;
-                Ok(())
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::app::remove_app_vault(
+                    wire_client,
+                    request_id,
+                    organization,
+                    user,
+                    app,
+                    vault,
+                )
+                .await
             }
         })
         .await

@@ -1,4 +1,4 @@
-//! inferadb-ledger-store: A purpose-built embedded storage engine for InferaDB.
+//! Purpose-built embedded storage engine for InferaDB Ledger.
 //!
 //! B+ tree storage engine designed for InferaDB's specific requirements:
 //!
@@ -7,6 +7,7 @@
 //! - **Raft-friendly**: Optimized for append-heavy Raft log access patterns
 //! - **Checksummed pages**: Crash safety with XXH3-64 verification
 //! - **Dual-slot commit**: Atomic commits via shadow paging (no WAL)
+//! - **Envelope encryption**: Per-vault AES-256-GCM via [`crypto::EncryptedBackend`]
 //!
 //! ## Architecture
 //!

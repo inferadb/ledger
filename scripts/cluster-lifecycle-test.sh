@@ -22,6 +22,8 @@
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck source=scripts/lib/cluster-bootstrap.sh
+source "$(dirname "$0")/lib/cluster-bootstrap.sh"
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -32,16 +34,13 @@ DATA_ROOT="/tmp/ledger-lifecycle-test-$$"
 PROFILE="release"
 BINARY="target/release/inferadb-ledger"
 SKIP_BUILD=false
+TLS_ROOT=""
+USER_SLUG=""
 
 # Timeouts
 HEALTH_TIMEOUT=60
 SYNC_TIMEOUT=180
 JOIN_TIMEOUT=60
-
-# Bulk write tuning — operations per Write RPC in write_batch.
-# Each RPC = one Raft log entry, so smaller values create more entries
-# and stress replication catch-up harder.
-BATCH_CHUNK_SIZE=10
 
 # Tracking
 ALL_PIDS=()
@@ -52,16 +51,20 @@ ORG_SLUG=""
 VAULT_SLUG=""
 
 # ---------------------------------------------------------------------------
-# Colors
+# Colors (only the ones not provided by cluster-bootstrap.sh)
 # ---------------------------------------------------------------------------
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+if [[ -t 1 ]]; then
+  GREEN='\033[0;32m'
+  CYAN='\033[0;36m'
+  BOLD='\033[1m'
+  NC='\033[0m'
+else
+  GREEN=''
+  CYAN=''
+  BOLD=''
+  NC=''
+fi
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -100,18 +103,36 @@ done
 # Helpers
 # ---------------------------------------------------------------------------
 
-log_info()    { echo -e "${BLUE}[INFO]${NC}  $1"; }
-log_success() { echo -e "${GREEN}[OK]${NC}    $1"; }
-log_warn()    { echo -e "${YELLOW}[WARN]${NC}  $1"; }
-log_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
-log_phase()   { echo -e "\n${BOLD}${CYAN}═══════════════════════════════════════════════════════${NC}"; echo -e "${BOLD}${CYAN}  $1${NC}"; echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════════${NC}\n"; }
-log_step()    { echo -e "  ${BOLD}→${NC} $1"; }
+# log_info / log_success / log_warn / log_error come from cluster-bootstrap.sh.
+log_phase() { echo -e "\n${BOLD}${CYAN}=======================================================${NC}"; echo -e "${BOLD}${CYAN}  $1${NC}"; echo -e "${BOLD}${CYAN}=======================================================${NC}\n"; }
+log_step()  { echo -e "  ${BOLD}->${NC} $1"; }
 
-# Generate a deterministic base64-encoded 16-byte UUID for idempotency keys.
-# Uses the counter argument to produce unique keys per write.
+# Run an `inferadb-ledger admin <subcommand>` invocation with the cluster's
+# TLS material applied as top-level flags. clap rejects --tls-cert /
+# --tls-server-name when placed after the `admin` subcommand, so they go
+# before it.
+admin_cli() {
+  "$BINARY" \
+    --tls-cert "$LEDGER_TLS_CERT" \
+    --tls-server-name "$LEDGER_TLS_SERVER_NAME" \
+    admin "$@"
+}
+
+# Generate a hex-encoded 16-byte idempotency key (the admin CLI accepts hex,
+# not base64 like the old gRPC payloads).
 generate_idempotency_key() {
   local counter=$1
-  printf '%032x' "$counter" | xxd -r -p | base64
+  printf '%032x' "$counter"
+}
+
+# Decode a `Bytes` field from an admin-CLI JSON response into its raw UTF-8
+# string. The wire types serialize `bytes::Bytes` as a numeric `[u8, ...]`
+# array; jq's `implode` materializes that into a string. Returns empty when
+# the field is null or absent.
+decode_bytes_field() {
+  local json=$1
+  local field=$2
+  echo "$json" | jq -r --arg f "$field" 'if .[$f] == null then "" else .[$f] | implode end' 2>/dev/null || true
 }
 
 # Get the port for a given node number.
@@ -204,6 +225,9 @@ start_node() {
     --listen "127.0.0.1:$port" \
     --data "$node_data" \
     "${join_args[@]+"${join_args[@]}"}" \
+    --tls-cert "$LEDGER_TLS_CERT" \
+    --tls-key "$LEDGER_TLS_KEY" \
+    --tls-server-name "$LEDGER_TLS_SERVER_NAME" \
     --email-blinding-key "$blinding_key" \
     --log-format text \
     > "$DATA_ROOT/node$node_num.log" 2>&1 &
@@ -230,7 +254,8 @@ wait_for_ports() {
     for node_num in "${nodes[@]}"; do
       local port
       port=$(node_port "$node_num")
-      if ! nc -z 127.0.0.1 "$port" 2>/dev/null; then
+      # QUIC = UDP. port_is_listening lives in cluster-bootstrap.sh.
+      if ! port_is_listening "$port"; then
         all_listening=false
         break
       fi
@@ -281,9 +306,9 @@ wait_for_leader() {
       local addr
       addr=$(node_addr "$node_num")
       local result
-      result=$(grpcurl -plaintext "$addr" ledger.v1.AdminService/GetClusterInfo 2>/dev/null || true)
+      result=$(admin_cli cluster-info --host "$addr" 2>/dev/null) || true
       local leader_id
-      leader_id=$(echo "$result" | jq -r '.leaderId // empty' 2>/dev/null || true)
+      leader_id=$(echo "$result" | jq -r '.leader_id // empty' 2>/dev/null || true)
       if [[ -n "$leader_id" && "$leader_id" != "0" ]]; then
         log_success "Leader elected (reported by node $node_num)"
         # Brief settle for cluster stabilization after election
@@ -313,18 +338,18 @@ find_leader() {
     local addr
     addr=$(node_addr "$node_num")
     local result
-    result=$(grpcurl -plaintext "$addr" ledger.v1.AdminService/GetClusterInfo 2>/dev/null || true)
+    result=$(admin_cli cluster-info --host "$addr" 2>/dev/null) || true
     local leader_id
-    leader_id=$(echo "$result" | jq -r '.leaderId // empty' 2>/dev/null || true)
+    leader_id=$(echo "$result" | jq -r '.leader_id // empty' 2>/dev/null || true)
     if [[ -n "$leader_id" && "$leader_id" != "0" ]]; then
       # Find which node number corresponds to this leader_id
       for check_num in "${nodes[@]}"; do
         local check_addr
         check_addr=$(node_addr "$check_num")
         local node_info
-        node_info=$(grpcurl -plaintext "$check_addr" ledger.v1.AdminService/GetNodeInfo 2>/dev/null || true)
+        node_info=$(admin_cli node-info --host "$check_addr" 2>/dev/null) || true
         local node_id
-        node_id=$(echo "$node_info" | jq -r '.nodeId // empty' 2>/dev/null || true)
+        node_id=$(echo "$node_info" | jq -r '.node_id // empty' 2>/dev/null || true)
         if [[ "$node_id" == "$leader_id" ]]; then
           echo "$check_num"
           return 0
@@ -345,8 +370,8 @@ get_node_id() {
   local addr
   addr=$(node_addr "$node_num")
   local result
-  result=$(grpcurl -plaintext "$addr" ledger.v1.AdminService/GetNodeInfo 2>/dev/null) || true
-  echo "$result" | jq -r '.nodeId'
+  result=$(admin_cli node-info --host "$addr" 2>/dev/null) || true
+  echo "$result" | jq -r '.node_id'
 }
 
 # Add a node to the cluster via JoinCluster RPC.
@@ -364,18 +389,30 @@ join_node_to_cluster() {
   log_step "Requesting join: node $joining_num (ID: $joining_id) via leader node $leader_num"
 
   local result
-  result=$(grpcurl -plaintext \
-    -d "{\"node_id\": $joining_id, \"address\": \"$joining_addr\"}" \
-    "$leader_addr" \
-    ledger.v1.AdminService/JoinCluster 2>&1) || true
+  result=$(admin_cli join-cluster \
+    --host "$leader_addr" \
+    --node-id "$joining_id" \
+    --address "$joining_addr" 2>&1) || true
 
   local success
   success=$(echo "$result" | jq -r '.success // false' 2>/dev/null || echo "false")
-  if [[ "$success" != "true" ]]; then
-    log_error "JoinCluster failed: $result"
-    return 1
+  if [[ "$success" == "true" ]]; then
+    log_success "Node $joining_num joined the cluster"
+    return 0
   fi
-  log_success "Node $joining_num joined the cluster"
+
+  # Tolerate the benign "no-op" race: when a node starts with `--join`,
+  # bootstrap auto-adds it as a learner before the explicit JoinCluster
+  # RPC arrives. The second add then fails with `AddLearnerFailed:
+  # membership change is a no-op`. wait_for_voter still proves the node
+  # caught up, so treat this as success.
+  if echo "$result" | grep -qE 'membership change is a no-op|AddLearnerFailed'; then
+    log_warn "JoinCluster: node $joining_num already a learner (--join auto-added). Continuing."
+    return 0
+  fi
+
+  log_error "JoinCluster failed: $result"
+  return 1
 }
 
 # Wait for a node to become a voter (fully caught up).
@@ -394,14 +431,16 @@ wait_for_voter() {
     local query_addr
     query_addr=$(node_addr "$query_num")
     local result
-    result=$(grpcurl -plaintext "$query_addr" ledger.v1.AdminService/GetClusterInfo 2>/dev/null || true)
+    result=$(admin_cli cluster-info --host "$query_addr" 2>/dev/null) || true
 
-    # Check if target node is a VOTER
+    # Check if target node is a Voter. The wire `ClusterMemberRole` enum
+    # serializes its variant name verbatim (default serde derive): "Voter",
+    # "Learner", "Unspecified". The `node_id` field is a u64 number.
     local role
-    role=$(echo "$result" | jq -r ".members[] | select(.nodeId == \"$target_id\") | .role" 2>/dev/null || true)
-    if [[ "$role" == "CLUSTER_MEMBER_ROLE_VOTER" ]]; then
+    role=$(echo "$result" | jq -r ".members[] | select(.node_id == $target_id) | .role" 2>/dev/null || true)
+    if [[ "$role" == "Voter" ]]; then
       local voter_count
-      voter_count=$(echo "$result" | jq '[.members[] | select(.role == "CLUSTER_MEMBER_ROLE_VOTER")] | length' 2>/dev/null || echo "0")
+      voter_count=$(echo "$result" | jq '[.members[] | select(.role == "Voter")] | length' 2>/dev/null || echo "0")
       if [[ "$voter_count" -ge "$expected_voters" ]]; then
         log_success "Node $target_num is now a voter ($voter_count voters total)"
         return 0
@@ -432,10 +471,9 @@ leave_cluster() {
   local max_attempts=15
   while [[ $attempts -lt $max_attempts ]]; do
     local result
-    result=$(grpcurl -plaintext \
-      -d "{\"node_id\": $leaving_id}" \
-      "$leader_addr" \
-      ledger.v1.AdminService/LeaveCluster 2>&1 || true)
+    result=$(admin_cli leave-cluster \
+      --host "$leader_addr" \
+      --node-id "$leaving_id" 2>&1) || true
 
     # Success
     local success
@@ -452,9 +490,9 @@ leave_cluster() {
       attempts=$((attempts + 1))
       log_info "    Leader transferred, finding new leader ($attempts/$max_attempts)..."
       sleep 1
-      # Try each listening port to find the new leader
+      # Try each listening port to find the new leader (UDP / QUIC).
       for port in $(seq "$BASE_PORT" $((BASE_PORT + 9))); do
-        if nc -z 127.0.0.1 "$port" 2>/dev/null; then
+        if port_is_listening "$port"; then
           leader_addr="127.0.0.1:$port"
           break
         fi
@@ -479,7 +517,7 @@ leave_cluster() {
       attempts=$((attempts + 1))
       sleep 0.5
       for port in $(seq "$BASE_PORT" $((BASE_PORT + 9))); do
-        if nc -z 127.0.0.1 "$port" 2>/dev/null; then
+        if port_is_listening "$port"; then
           leader_addr="127.0.0.1:$port"
           break
         fi
@@ -511,11 +549,11 @@ wait_for_member_removed() {
     local query_addr
     query_addr=$(node_addr "$query_num")
     local result
-    result=$(grpcurl -plaintext "$query_addr" ledger.v1.AdminService/GetClusterInfo 2>/dev/null || true)
+    result=$(admin_cli cluster-info --host "$query_addr" 2>/dev/null) || true
 
-    # Check if the removed node is still listed
+    # Check if the removed node is still listed (numeric node_id)
     local found
-    found=$(echo "$result" | jq -r ".members[] | select(.nodeId == \"$removed_id\") | .nodeId" 2>/dev/null || true)
+    found=$(echo "$result" | jq -r ".members[] | select(.node_id == $removed_id) | .node_id" 2>/dev/null || true)
     if [[ -z "$found" ]]; then
       return 0
     fi
@@ -549,9 +587,9 @@ kill_node() {
     fi
   done
 
-  # Fallback: kill by port (LISTEN only — avoid killing nodes with client connections)
+  # Fallback: kill by UDP port (the wire transport binds QUIC).
   local pid
-  pid=$(lsof -ti "tcp:$port" -sTCP:LISTEN 2>/dev/null || true)
+  pid=$(lsof -ti "udp:$port" 2>/dev/null || true)
   if [[ -n "$pid" ]]; then
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
@@ -567,14 +605,13 @@ kill_nodes_parallel() {
   local nodes=("$@")
   local pids_to_wait=()
 
-  # Phase 1: send SIGTERM to each node by finding its LISTEN PID.
-  # Using lsof -sTCP:LISTEN avoids killing nodes that merely have
-  # client connections to the target port.
+  # Phase 1: send SIGKILL to each node by finding the UDP-bound PID.
+  # The wire transport is QUIC, so the listening socket is UDP.
   for node_num in "${nodes[@]}"; do
     local port
     port=$(node_port "$node_num")
     local pid
-    pid=$(lsof -ti "tcp:$port" -sTCP:LISTEN 2>/dev/null || true)
+    pid=$(lsof -ti "udp:$port" 2>/dev/null || true)
     if [[ -n "$pid" ]]; then
       kill -9 "$pid" 2>/dev/null || true
       pids_to_wait+=("$pid")
@@ -611,16 +648,17 @@ create_org() {
   local attempt=0
   while [[ -z "$code" && $attempt -lt 30 ]]; do
     # Try each listening port in the cluster
+    local port
     for port in $(seq "$BASE_PORT" $((BASE_PORT + 9))); do
-      if ! nc -z 127.0.0.1 "$port" 2>/dev/null; then
+      if ! port_is_listening "$port"; then
         continue
       fi
       local addr="127.0.0.1:$port"
       local result
-      result=$(grpcurl -plaintext \
-        -d "{\"email\": \"$email\", \"region\": \"$region\"}" \
-        "$addr" \
-        ledger.v1.UserService/InitiateEmailVerification 2>&1) || true
+      result=$(admin_cli initiate-email-verification \
+        --host "$addr" \
+        --email "$email" \
+        --region "$region" 2>&1) || true
       local extracted_code
       extracted_code=$(echo "$result" | jq -r '.code // empty' 2>/dev/null || true)
       if [[ -n "$extracted_code" ]]; then
@@ -641,17 +679,20 @@ create_org() {
   local onboarding_token=""
   local verify_attempt=0
   while [[ -z "$onboarding_token" && $verify_attempt -lt 30 ]]; do
+    local port
     for port in $(seq "$BASE_PORT" $((BASE_PORT + 9))); do
-      if ! nc -z 127.0.0.1 "$port" 2>/dev/null; then
+      if ! port_is_listening "$port"; then
         continue
       fi
       local vaddr="127.0.0.1:$port"
       local verify_result
-      verify_result=$(grpcurl -plaintext \
-        -d "{\"email\": \"$email\", \"code\": \"$code\", \"region\": \"$region\"}" \
-        "$vaddr" \
-        ledger.v1.UserService/VerifyEmailCode 2>&1) || true
-      onboarding_token=$(echo "$verify_result" | jq -r '.newUser.onboardingToken // empty' 2>/dev/null || true)
+      verify_result=$(admin_cli verify-email-code \
+        --host "$vaddr" \
+        --email "$email" \
+        --code "$code" \
+        --region "$region" 2>&1) || true
+      # Wire shape: { result: { NewUser: { onboarding_token: "..." } } }
+      onboarding_token=$(echo "$verify_result" | jq -r '.result.NewUser.onboarding_token // empty' 2>/dev/null || true)
       if [[ -n "$onboarding_token" ]]; then
         break 2
       fi
@@ -669,18 +710,24 @@ create_org() {
   # Retry across all cluster nodes until we hit the GLOBAL leader.
   local reg_attempt=0
   while [[ $reg_attempt -lt 15 ]]; do
+    local port
     for port in $(seq "$BASE_PORT" $((BASE_PORT + 9))); do
-      if ! nc -z 127.0.0.1 "$port" 2>/dev/null; then
+      if ! port_is_listening "$port"; then
         continue
       fi
       local reg_addr="127.0.0.1:$port"
       local reg_result
-      reg_result=$(grpcurl -plaintext \
-        -d "{\"onboarding_token\": \"$onboarding_token\", \"email\": \"$email\", \"region\": \"$region\", \"name\": \"Test Admin\", \"organization_name\": \"$name\"}" \
-        "$reg_addr" \
-        ledger.v1.UserService/CompleteRegistration 2>&1) || true
-      ORG_SLUG=$(echo "$reg_result" | jq -r '.organization.slug // empty' 2>/dev/null || true)
-      USER_SLUG=$(echo "$reg_result" | jq -r '.user.slug.slug // empty' 2>/dev/null || true)
+      reg_result=$(admin_cli complete-registration \
+        --host "$reg_addr" \
+        --onboarding-token "$onboarding_token" \
+        --email "$email" \
+        --region "$region" \
+        --name "Test Admin" \
+        --organization-name "$name" 2>&1) || true
+      # `OrganizationSlug` and `UserSlug` are #[serde(transparent)] over u64,
+      # so they appear as bare numbers (or null when absent) in JSON.
+      ORG_SLUG=$(echo "$reg_result" | jq -r '.organization // empty' 2>/dev/null || true)
+      USER_SLUG=$(echo "$reg_result" | jq -r '.user.slug // empty' 2>/dev/null || true)
       if [[ -n "$ORG_SLUG" && -n "$USER_SLUG" ]]; then
         break 2
       fi
@@ -723,7 +770,11 @@ create_vault() {
   client_slug=$(generate_snowflake_slug)
 
   local attempt=0
-  local max_attempts=30
+  # 60s budget — the per-org Raft group can take several seconds to
+  # elect a leader after CreateOrganization commits, especially under
+  # the placement-controller-scheduled bootstrap path. Each iteration
+  # cycles every listening node before sleeping, so 60 attempts ≈ 60s.
+  local max_attempts=60
   while [[ $attempt -lt $max_attempts ]]; do
     # Try all listening cluster ports (preferred node first) to find the leader.
     local tried_preferred=false
@@ -734,17 +785,21 @@ create_vault() {
         [[ "$tried_preferred" == "true" ]] && continue
         tried_preferred=true
       fi
-      if ! nc -z 127.0.0.1 "$port" 2>/dev/null; then
+      if ! port_is_listening "$port"; then
         continue
       fi
       local addr="127.0.0.1:$port"
       local result
-      result=$(grpcurl -plaintext \
-        -d "{\"organization\": {\"slug\": \"$ORG_SLUG\"}, \"caller\": {\"slug\": \"$USER_SLUG\"}, \"slug\": {\"slug\": \"$client_slug\"}}" \
-        "$addr" \
-        ledger.v1.VaultService/CreateVault 2>&1) || true
+      result=$(admin_cli create-vault \
+        --host "$addr" \
+        --organization "$ORG_SLUG" \
+        --caller "$USER_SLUG" \
+        --slug "$client_slug" \
+        --replication-factor 3 2>&1) || true
 
-      VAULT_SLUG=$(echo "$result" | jq -r '.vault.slug // empty' 2>/dev/null || true)
+      # `vault` is `Option<VaultSlug>` (transparent u64), so it appears as a
+      # bare number (or null) in JSON — not a nested `slug.slug` object.
+      VAULT_SLUG=$(echo "$result" | jq -r '.vault // empty' 2>/dev/null || true)
       if [[ -n "$VAULT_SLUG" ]]; then
         log_step "Created vault (slug: $VAULT_SLUG)"
         return 0
@@ -784,29 +839,19 @@ write_entity() {
   idem_key=$(generate_idempotency_key $IDEM_COUNTER)
   IDEM_COUNTER=$((IDEM_COUNTER + 1))
 
-  # base64-encode the value for protobuf bytes field
-  local value_b64
-  value_b64=$(echo -n "$value" | base64)
-
-  local payload="{
-    \"caller\": {\"slug\": \"$USER_SLUG\"},
-    \"organization\": {\"slug\": \"$ORG_SLUG\"},
-    \"vault\": {\"slug\": \"$VAULT_SLUG\"},
-    \"clientId\": {\"id\": \"lifecycle-test\"},
-    \"idempotencyKey\": \"$idem_key\",
-    \"operations\": [{
-      \"setEntity\": {
-        \"key\": \"$key\",
-        \"value\": \"$value_b64\"
-      }
-    }]
-  }"
-
   # Try the preferred node first.
   local addr result block_height
   addr=$(node_addr "$node_num")
-  result=$(grpcurl -plaintext -d "$payload" "$addr" ledger.v1.WriteService/Write 2>&1) || true
-  block_height=$(echo "$result" | jq -r '.success.blockHeight // empty' 2>/dev/null || true)
+  result=$(admin_cli write \
+    --host "$addr" \
+    --organization "$ORG_SLUG" \
+    --vault "$VAULT_SLUG" \
+    --caller "$USER_SLUG" \
+    --key "$key" \
+    --value "$value" \
+    --idempotency-key "$idem_key" 2>&1) || true
+  # Wire shape on success: { result: { Success: { block_height: N, ... } } }
+  block_height=$(echo "$result" | jq -r '.result.Success.block_height // empty' 2>/dev/null || true)
   if [[ -n "$block_height" ]]; then
     log_step "Wrote '$key' = '$value' (block $block_height) via node $node_num"
     return 0
@@ -816,8 +861,15 @@ write_entity() {
   local hint_addr
   hint_addr=$(echo "$result" | sed -n 's/.*leader_endpoint=http:\/\/\([0-9.:]*\).*/\1/p' 2>/dev/null | head -1)
   if [[ -n "$hint_addr" ]]; then
-    result=$(grpcurl -plaintext -d "$payload" "$hint_addr" ledger.v1.WriteService/Write 2>&1) || true
-    block_height=$(echo "$result" | jq -r '.success.blockHeight // empty' 2>/dev/null || true)
+    result=$(admin_cli write \
+      --host "$hint_addr" \
+      --organization "$ORG_SLUG" \
+      --vault "$VAULT_SLUG" \
+      --caller "$USER_SLUG" \
+      --key "$key" \
+      --value "$value" \
+      --idempotency-key "$idem_key" 2>&1) || true
+    block_height=$(echo "$result" | jq -r '.result.Success.block_height // empty' 2>/dev/null || true)
     if [[ -n "$block_height" ]]; then
       log_step "Wrote '$key' = '$value' (block $block_height) via hinted leader $hint_addr"
       return 0
@@ -827,12 +879,19 @@ write_entity() {
   # Fall back to trying all listening cluster ports.
   local port
   for port in $(seq "$BASE_PORT" $((BASE_PORT + 9))); do
-    if ! nc -z 127.0.0.1 "$port" 2>/dev/null; then
+    if ! port_is_listening "$port"; then
       continue
     fi
     addr="127.0.0.1:$port"
-    result=$(grpcurl -plaintext -d "$payload" "$addr" ledger.v1.WriteService/Write 2>&1) || true
-    block_height=$(echo "$result" | jq -r '.success.blockHeight // empty' 2>/dev/null || true)
+    result=$(admin_cli write \
+      --host "$addr" \
+      --organization "$ORG_SLUG" \
+      --vault "$VAULT_SLUG" \
+      --caller "$USER_SLUG" \
+      --key "$key" \
+      --value "$value" \
+      --idempotency-key "$idem_key" 2>&1) || true
+    block_height=$(echo "$result" | jq -r '.result.Success.block_height // empty' 2>/dev/null || true)
     if [[ -n "$block_height" ]]; then
       log_step "Wrote '$key' = '$value' (block $block_height) via $addr (fallback)"
       return 0
@@ -843,14 +902,14 @@ write_entity() {
   return 1
 }
 
-# Write a numbered batch of entities via multi-operation Write RPCs.
+# Write a numbered batch of entities via single-Set-op Write RPCs.
 # Entities are keyed as {prefix}:001 .. {prefix}:{count} with values
-# "{value_prefix} item 001" etc. Operations are chunked into groups of
-# BATCH_CHUNK_SIZE to produce multiple Raft log entries (better for
-# stressing replication catch-up).
+# "{value_prefix} item 001" etc.
 #
-# Each chunk is sent to the preferred node first; on NotLeader / Unavailable,
-# the leader_endpoint hint is tried, then all listening nodes (redirect model).
+# The admin CLI's `write` subcommand only emits a single Set operation per
+# RPC, so the previous multi-op chunking is folded into a per-key sequential
+# issue. `write_entity` handles the NotLeader / leader-hint / fallback logic
+# for each call.
 # Args: node_number key_prefix count value_prefix
 write_batch() {
   local node_num=$1
@@ -858,80 +917,16 @@ write_batch() {
   local count=$3
   local value_prefix=$4
 
-  local total_written=0
-  while [[ $total_written -lt $count ]]; do
-    local chunk_size=$(( count - total_written ))
-    [[ $chunk_size -gt $BATCH_CHUNK_SIZE ]] && chunk_size=$BATCH_CHUNK_SIZE
-
-    local idem_key
-    idem_key=$(generate_idempotency_key $IDEM_COUNTER)
-    IDEM_COUNTER=$((IDEM_COUNTER + 1))
-
-    # Build operations JSON array for this chunk
-    local ops=""
-    for i in $(seq 1 "$chunk_size"); do
-      local idx key
-      idx=$(( total_written + i ))
-      key="${key_prefix}:$(printf '%03d' "$idx")"
-      local value_b64
-      value_b64=$(echo -n "${value_prefix} item $(printf '%03d' "$idx")" | base64)
-      [[ -n "$ops" ]] && ops+=","
-      ops+="{\"setEntity\":{\"key\":\"$key\",\"value\":\"$value_b64\"}}"
-    done
-
-    local payload="{
-      \"caller\": {\"slug\": \"$USER_SLUG\"},
-      \"organization\": {\"slug\": \"$ORG_SLUG\"},
-      \"vault\": {\"slug\": \"$VAULT_SLUG\"},
-      \"clientId\": {\"id\": \"lifecycle-test\"},
-      \"idempotencyKey\": \"$idem_key\",
-      \"operations\": [$ops]
-    }"
-
-    local addr result block_height chunk_ok=false
-
-    # Try the preferred node first.
-    addr=$(node_addr "$node_num")
-    result=$(grpcurl -plaintext -d "$payload" "$addr" ledger.v1.WriteService/Write 2>&1) || true
-    block_height=$(echo "$result" | jq -r '.success.blockHeight // empty' 2>/dev/null || true)
-    if [[ -n "$block_height" ]]; then
-      chunk_ok=true
-    fi
-
-    # Try leader_endpoint hint from error.
-    if [[ "$chunk_ok" != "true" ]]; then
-      local hint_addr
-      hint_addr=$(echo "$result" | sed -n 's/.*leader_endpoint=http:\/\/\([0-9.:]*\).*/\1/p' 2>/dev/null | head -1)
-      if [[ -n "$hint_addr" ]]; then
-        result=$(grpcurl -plaintext -d "$payload" "$hint_addr" ledger.v1.WriteService/Write 2>&1) || true
-        block_height=$(echo "$result" | jq -r '.success.blockHeight // empty' 2>/dev/null || true)
-        [[ -n "$block_height" ]] && chunk_ok=true
-      fi
-    fi
-
-    # Fall back to all listening ports.
-    if [[ "$chunk_ok" != "true" ]]; then
-      local port
-      for port in $(seq "$BASE_PORT" $((BASE_PORT + 9))); do
-        if ! nc -z 127.0.0.1 "$port" 2>/dev/null; then
-          continue
-        fi
-        addr="127.0.0.1:$port"
-        result=$(grpcurl -plaintext -d "$payload" "$addr" ledger.v1.WriteService/Write 2>&1) || true
-        block_height=$(echo "$result" | jq -r '.success.blockHeight // empty' 2>/dev/null || true)
-        if [[ -n "$block_height" ]]; then
-          chunk_ok=true
-          break
-        fi
-      done
-    fi
-
-    if [[ "$chunk_ok" != "true" ]]; then
-      log_error "Batch write failed for prefix '$key_prefix' (items $((total_written+1))-$((total_written+chunk_size))): $result"
+  local i
+  for ((i=1; i<=count; i++)); do
+    local idx_padded key value
+    idx_padded=$(printf '%03d' "$i")
+    key="${key_prefix}:${idx_padded}"
+    value="${value_prefix} item ${idx_padded}"
+    if ! write_entity "$node_num" "$key" "$value" >/dev/null; then
+      log_error "Batch write failed for prefix '$key_prefix' at item $i"
       return 1
     fi
-
-    total_written=$((total_written + chunk_size))
   done
 
   log_step "Wrote $count entities with prefix '$key_prefix' via node $node_num"
@@ -946,85 +941,54 @@ read_entity() {
   addr=$(node_addr "$node_num")
 
   local result
-  result=$(grpcurl -plaintext \
-    -d "{
-      \"caller\": {\"slug\": \"$USER_SLUG\"},
-      \"organization\": {\"slug\": \"$ORG_SLUG\"},
-      \"vault\": {\"slug\": \"$VAULT_SLUG\"},
-      \"key\": \"$key\",
-      \"consistency\": \"READ_CONSISTENCY_EVENTUAL\"
-    }" \
-    "$addr" \
-    ledger.v1.ReadService/Read 2>&1) || true
+  result=$(admin_cli read \
+    --host "$addr" \
+    --organization "$ORG_SLUG" \
+    --vault "$VAULT_SLUG" \
+    --caller "$USER_SLUG" \
+    --key "$key" \
+    --consistency eventual 2>&1) || true
 
-  # Value is base64-encoded bytes — decode it
-  local value_b64
-  value_b64=$(echo "$result" | jq -r '.value // empty' 2>/dev/null || true)
-  if [[ -n "$value_b64" ]]; then
-    echo "$value_b64" | base64 -d 2>/dev/null
-  fi
+  # `value` is `Option<Bytes>`, serialized as a numeric `[u8, ...]` array (or
+  # null). decode_bytes_field materializes the bytes into a UTF-8 string.
+  decode_bytes_field "$result" value
 }
 
 # List all entities from a specific node. Returns sorted "key=value" lines.
+#
+# The admin CLI's `list-entities` returns a single page (no pagination knob);
+# we request `--limit 500` so the entire fixture set fits in one response —
+# the lifecycle test never exceeds ~110 entities.
 # Args: node_number
 list_entities() {
   local node_num=$1
   local addr
   addr=$(node_addr "$node_num")
 
-  local all_entities=""
-  local page_token=""
+  local result
+  result=$(admin_cli list-entities \
+    --host "$addr" \
+    --organization "$ORG_SLUG" \
+    --vault "$VAULT_SLUG" \
+    --caller "$USER_SLUG" \
+    --limit 500 2>&1) || true
 
-  while true; do
-    local request="{
-      \"caller\": {\"slug\": \"$USER_SLUG\"},
-      \"organization\": {\"slug\": \"$ORG_SLUG\"},
-      \"vault\": {\"slug\": \"$VAULT_SLUG\"},
-      \"keyPrefix\": \"\",
-      \"limit\": 100,
-      \"consistency\": \"READ_CONSISTENCY_EVENTUAL\"
-    }"
-
-    if [[ -n "$page_token" ]]; then
-      request="{
-        \"caller\": {\"slug\": \"$USER_SLUG\"},
-        \"organization\": {\"slug\": \"$ORG_SLUG\"},
-        \"vault\": {\"slug\": \"$VAULT_SLUG\"},
-        \"keyPrefix\": \"\",
-        \"limit\": 100,
-        \"pageToken\": \"$page_token\",
-        \"consistency\": \"READ_CONSISTENCY_EVENTUAL\"
-      }"
-    fi
-
-    local result
-    result=$(grpcurl -plaintext -d "$request" "$addr" ledger.v1.ReadService/ListEntities 2>&1) || true
-
-    # Extract entities: key + base64-decoded value. Skip internal `_audit:`
-    # entries — their values are postcard-encoded protobuf with non-UTF-8
-    # bytes that break locale-aware sort, and the comparison only cares
-    # about user-visible data anyway.
-    local entities
-    entities=$(echo "$result" | jq -r '.entities[]? | select(.key | startswith("_") | not) | .key + "=" + .value' 2>/dev/null || true)
-    if [[ -n "$entities" ]]; then
-      # Decode base64 values
-      while IFS='=' read -r key value_b64; do
-        local value_decoded
-        value_decoded=$(echo "$value_b64" | base64 -d 2>/dev/null || echo "$value_b64")
-        all_entities+="${key}=${value_decoded}"$'\n'
-      done <<< "$entities"
-    fi
-
-    page_token=$(echo "$result" | jq -r '.nextPageToken // empty' 2>/dev/null || true)
-    if [[ -z "$page_token" ]]; then
-      break
-    fi
-  done
+  # Extract entities: key + Bytes-decoded value. Skip internal `_audit:`
+  # entries — their values are postcard-encoded protobuf with non-UTF-8
+  # bytes that break locale-aware sort, and the comparison only cares
+  # about user-visible data anyway.
+  #
+  # The wire `Entity` type encodes `value: Bytes` as a numeric `[u8, ...]`
+  # array, which jq's `implode` materializes as a UTF-8 string.
+  local entities
+  entities=$(echo "$result" \
+    | jq -r '.entities[]? | select(.key | startswith("_") | not) | .key + "=" + (.value | implode)' \
+    2>/dev/null || true)
 
   # `LC_ALL=C` forces byte-wise comparison so any residual non-UTF-8 in
   # decoded values doesn't make sort silently drop output under a
   # multi-byte locale.
-  echo -n "$all_entities" | LC_ALL=C sort
+  echo -n "$entities" | LC_ALL=C sort
 }
 
 # Get the tip (block height + state root) from a node.
@@ -1034,15 +998,14 @@ list_entities() {
 # Args: node_number
 get_tip() {
   local node_num=$1
-  local payload="{
-    \"organization\": {\"slug\": \"$ORG_SLUG\"},
-    \"vault\": {\"slug\": \"$VAULT_SLUG\"}
-  }"
 
   # Try the preferred node first.
   local addr result
   addr=$(node_addr "$node_num")
-  result=$(grpcurl -plaintext -d "$payload" "$addr" ledger.v1.ReadService/GetTip 2>/dev/null) || true
+  result=$(admin_cli get-tip \
+    --host "$addr" \
+    --organization "$ORG_SLUG" \
+    --vault "$VAULT_SLUG" 2>/dev/null) || true
   if echo "$result" | jq -e '.height' &>/dev/null; then
     echo "$result"
     return 0
@@ -1052,7 +1015,10 @@ get_tip() {
   local hint_addr
   hint_addr=$(echo "$result" | sed -n 's/.*leader_endpoint=http:\/\/\([0-9.:]*\).*/\1/p' 2>/dev/null | head -1)
   if [[ -n "$hint_addr" ]]; then
-    result=$(grpcurl -plaintext -d "$payload" "$hint_addr" ledger.v1.ReadService/GetTip 2>/dev/null) || true
+    result=$(admin_cli get-tip \
+      --host "$hint_addr" \
+      --organization "$ORG_SLUG" \
+      --vault "$VAULT_SLUG" 2>/dev/null) || true
     if echo "$result" | jq -e '.height' &>/dev/null; then
       echo "$result"
       return 0
@@ -1062,11 +1028,14 @@ get_tip() {
   # Fall back to all listening ports.
   local port
   for port in $(seq "$BASE_PORT" $((BASE_PORT + 9))); do
-    if ! nc -z 127.0.0.1 "$port" 2>/dev/null; then
+    if ! port_is_listening "$port"; then
       continue
     fi
     addr="127.0.0.1:$port"
-    result=$(grpcurl -plaintext -d "$payload" "$addr" ledger.v1.ReadService/GetTip 2>/dev/null) || true
+    result=$(admin_cli get-tip \
+      --host "$addr" \
+      --organization "$ORG_SLUG" \
+      --vault "$VAULT_SLUG" 2>/dev/null) || true
     if echo "$result" | jq -e '.height' &>/dev/null; then
       echo "$result"
       return 0
@@ -1191,19 +1160,17 @@ verify_data_consistency() {
 # Pre-flight
 # ---------------------------------------------------------------------------
 
-if ! command -v grpcurl &>/dev/null; then
-  log_error "grpcurl is required but not found. Install: brew install grpcurl"
-  exit 1
-fi
+for cmd in jq uuidgen openssl; do
+  if ! command -v "$cmd" &>/dev/null; then
+    log_error "$cmd is required but not found. Install: brew install $cmd"
+    exit 1
+  fi
+done
 
-if ! command -v jq &>/dev/null; then
-  log_error "jq is required but not found. Install: brew install jq"
-  exit 1
-fi
-
-# Kill any stale processes on test ports from previous runs.
+# Kill any stale processes on test ports from previous runs (the wire
+# transport binds UDP for QUIC).
 for port in $(seq "$BASE_PORT" $((BASE_PORT + 9))); do
-  stale_pid=$(lsof -ti :"$port" 2>/dev/null || true)
+  stale_pid=$(lsof -ti "udp:$port" 2>/dev/null || true)
   if [[ -n "$stale_pid" ]]; then
     log_warn "Killing stale process on port $port (PID $stale_pid)"
     # shellcheck disable=SC2086  # stale_pid may contain multiple PIDs to kill
@@ -1217,11 +1184,14 @@ done
 # ---------------------------------------------------------------------------
 
 if [[ "$SKIP_BUILD" == "false" ]]; then
-  log_info "Building inferadb-ledger ($PROFILE)..."
+  # `permissive-wire-auth` swaps in the test-stub `PermissiveVerifier` so
+  # admin-CLI invocations dialing with an empty `auth_payload` are accepted
+  # by the cluster. Production release builds must not enable this.
+  log_info "Building inferadb-ledger ($PROFILE + permissive-wire-auth)..."
   if [[ "$PROFILE" == "release" ]]; then
-    cargo +1.92 build --release -p inferadb-ledger-server
+    cargo +1.92 build --release -p inferadb-ledger-server --features permissive-wire-auth
   else
-    cargo +1.92 build -p inferadb-ledger-server
+    cargo +1.92 build -p inferadb-ledger-server --features permissive-wire-auth
   fi
 fi
 
@@ -1233,9 +1203,13 @@ log_success "Binary ready: $BINARY"
 
 mkdir -p "$DATA_ROOT"
 
-# ---------------------------------------------------------------------------
-# Create peers file for initial 3-node cluster
-# ---------------------------------------------------------------------------
+# Generate self-signed TLS material for the wire transport. Every node binds
+# QUIC + TLS, every admin-CLI invocation dials the same trust anchor.
+# generate_tls_material lives in cluster-bootstrap.sh; it sets
+# LEDGER_TLS_CERT / LEDGER_TLS_KEY / LEDGER_TLS_SERVER_NAME for the entire
+# script (start_node + admin_cli both need them).
+TLS_ROOT="$DATA_ROOT"
+generate_tls_material "$TLS_ROOT" || exit 1
 
 # ===========================================================================
 # Phase 1: Boot 3-node cluster, write data, verify replication
@@ -1253,9 +1227,13 @@ done
 
 wait_for_ports 1 2 3
 
-# Initialize the cluster via the first node
+# Initialize the cluster via the first node. TLS flags are top-level (before
+# the `init` subcommand) — clap rejects them when placed after the subcommand.
 log_step "Initializing cluster via node 1..."
-"$BINARY" init --host="$FIRST_ADDR" || {
+"$BINARY" \
+  --tls-cert "$LEDGER_TLS_CERT" \
+  --tls-server-name "$LEDGER_TLS_SERVER_NAME" \
+  init --host="$FIRST_ADDR" || {
   log_error "Cluster initialization failed"
   exit 1
 }
@@ -1281,15 +1259,16 @@ log_step "Provisioning data region us-east-va via AdminService::ProvisionRegion.
 PROVISION_OK=false
 for _attempt in $(seq 1 30); do
   for port in $(seq "$BASE_PORT" $((BASE_PORT + 9))); do
-    if ! nc -z 127.0.0.1 "$port" 2>/dev/null; then
+    if ! port_is_listening "$port"; then
       continue
     fi
     # us-east-va is a US-style region: no residency requirement, 90-day
-    # retention. R6 makes these fields explicit on the wire.
-    PROVISION_RESULT=$(grpcurl -plaintext \
-      -d '{"name": "us-east-va", "protected": false, "requires_residency": false, "retention_days": 90}' \
-      "127.0.0.1:$port" \
-      ledger.v1.AdminService/ProvisionRegion 2>&1) || true
+    # retention. The admin CLI exposes these as flag toggles + a numeric
+    # `--retention-days`.
+    PROVISION_RESULT=$(admin_cli provision-region \
+      --host "127.0.0.1:$port" \
+      --name us-east-va \
+      --retention-days 90 2>&1) || true
     if echo "$PROVISION_RESULT" | jq -e '.name' &>/dev/null; then
       PROVISION_OK=true
       break 2
@@ -1307,8 +1286,14 @@ log_success "Data region us-east-va provisioned"
 # start firing user-facing RPCs (which apply through the new region).
 sleep 3
 
-# Create organization and vault
+# Create organization and vault. After CreateOrganization commits, the
+# placement controller schedules per-org Raft voters across nodes. Each
+# voter then spawns its local group and elects a leader before
+# CreateVault can be served. Settling for 5s gives the org's Raft
+# group time to elect — without it, every node returns
+# `Not the leader for organization …` until election completes.
 create_org "$LEADER" "lifecycle-test-org"
+sleep 5
 create_vault "$LEADER"
 
 # Write initial data (Phase 1: named entities + bulk data)
@@ -1425,17 +1410,17 @@ fi
 OLD_LEADER_ID=$(get_node_id "$OLD_LEADER")
 log_info "Current leader: node $OLD_LEADER (ID: $OLD_LEADER_ID)"
 
-# Step 2: Send TransferLeadership RPC with target_node_id=0 (auto-pick best follower)
+# Step 2: Send TransferLeadership RPC with target-node-id 0 (auto-pick best follower)
 log_step "Sending TransferLeadership RPC to node $OLD_LEADER..."
 TRANSFER_ADDR=$(node_addr "$OLD_LEADER")
-TRANSFER_RESULT=$(grpcurl -plaintext \
-  -d '{"target_node_id": 0, "timeout_ms": 10000}' \
-  "$TRANSFER_ADDR" \
-  ledger.v1.AdminService/TransferLeadership 2>&1) || true
+TRANSFER_RESULT=$(admin_cli transfer-leadership \
+  --host "$TRANSFER_ADDR" \
+  --target-node-id 0 \
+  --timeout-ms 10000 2>&1) || true
 
 # Step 3: Verify the response
 TRANSFER_SUCCESS=$(echo "$TRANSFER_RESULT" | jq -r '.success // false' 2>/dev/null || echo "false")
-NEW_LEADER_ID=$(echo "$TRANSFER_RESULT" | jq -r '.newLeaderId // "0"' 2>/dev/null || echo "0")
+NEW_LEADER_ID=$(echo "$TRANSFER_RESULT" | jq -r '.new_leader_id // "0"' 2>/dev/null || echo "0")
 
 if [[ "$TRANSFER_SUCCESS" != "true" ]]; then
   log_error "TransferLeadership failed: $TRANSFER_RESULT"
@@ -1458,8 +1443,8 @@ VERIFY_NODE=1
 VERIFY_ADDR=$(node_addr "$VERIFY_NODE")
 REPORTED_LEADER=""
 for _wait in $(seq 1 30); do
-  CLUSTER_INFO=$(grpcurl -plaintext "$VERIFY_ADDR" ledger.v1.AdminService/GetClusterInfo 2>/dev/null || true)
-  REPORTED_LEADER=$(echo "$CLUSTER_INFO" | jq -r '.leaderId // "0"' 2>/dev/null || echo "0")
+  CLUSTER_INFO=$(admin_cli cluster-info --host "$VERIFY_ADDR" 2>/dev/null) || true
+  REPORTED_LEADER=$(echo "$CLUSTER_INFO" | jq -r '.leader_id // "0"' 2>/dev/null || echo "0")
   if [[ "$REPORTED_LEADER" == "$NEW_LEADER_ID" ]]; then
     break
   fi
@@ -1547,7 +1532,8 @@ log_info "Waiting for data region membership convergence..."
 sleep 5
 
 # Protect node 4 from the cleanup trap — it's the survivor under test.
-_n4_pid=$(lsof -ti "tcp:$(node_port 4)" -sTCP:LISTEN 2>/dev/null || true)
+# The wire transport binds UDP for QUIC.
+_n4_pid=$(lsof -ti "udp:$(node_port 4)" 2>/dev/null || true)
 [[ -n "$_n4_pid" ]] && PROTECTED_PIDS+=("$_n4_pid")
 
 log_info "Killing original nodes (SIGKILL — simulating crash)..."
@@ -1557,7 +1543,7 @@ log_info "Killing original nodes (SIGKILL — simulating crash)..."
 set +e
 for _kn in 1 2 3; do
   _kport=$(node_port "$_kn")
-  _kpid=$(lsof -ti "tcp:$_kport" -sTCP:LISTEN 2>/dev/null)
+  _kpid=$(lsof -ti "udp:$_kport" 2>/dev/null)
   if [[ -n "$_kpid" ]]; then
     kill -9 "$_kpid" 2>/dev/null
     wait "$_kpid" 2>/dev/null

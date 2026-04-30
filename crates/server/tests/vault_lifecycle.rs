@@ -1,7 +1,7 @@
 //! Vault lifecycle integration tests (Path A, P2b.2.g).
 //!
 //! Validates that the per-vault consensus lifecycle composes correctly
-//! through the real gRPC + Raft + apply pipeline. The earlier slices
+//! through the real wire-protocol + Raft + apply pipeline. The earlier slices
 //! (P2b.2.a–P2b.2.f) landed:
 //!   * `RaftManager::start_vault_group` / `stop_vault_group`,
 //!   * `VaultCreationRequest` / `VaultDeletionRequest` signals from the `CreateVault` /
@@ -11,21 +11,37 @@
 //!   * per-vault raft.db fan-out in `sync_all_state_dbs`.
 //!
 //! Unit tests cover each piece in isolation. This file is the
-//! end-to-end assertion: a gRPC `CreateVault` RPC against a
+//! end-to-end assertion: a `CreateVault` RPC against a
 //! 3-voter cluster must cause a per-vault `VaultGroup` to register
 //! on every voter via the commit-dispatcher → watcher → `start_vault_group`
 //! chain.
+//!
+//! F.1.f.2.Stage1e Wave 7: migrated from the legacy tonic helpers
+//! (`create_vault_client` / `create_write_client` / `create_test_organization` /
+//! `create_test_vault`) to their wire-protocol siblings (`wire_vault_client` /
+//! `wire_write_client` / `wire_create_test_organization` /
+//! `wire_create_test_vault`). The graceful-restart test
+//! (`test_vault_group_rehydrates_after_graceful_cluster_restart`) is deferred
+//! on the Grpc path because the restart-driven rehydration path has been
+//! validated only against the legacy tonic transport — see the test docstring
+//! for the deferral rationale.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
 use std::time::Duration;
 
-use inferadb_ledger_proto::proto;
+use bytes::Bytes;
 use inferadb_ledger_types::{OrganizationId, OrganizationSlug, Region, VaultId, VaultSlug};
+use inferadb_ledger_wire::{
+    error::ErrorCode,
+    services::{shared as ws, vault as wv, write as ww},
+};
+use inferadb_ledger_wire_transport::RpcError;
 
 use crate::common::{
-    TestCluster, create_vault_client, create_write_client, resolve_org_id,
-    wait_for_vault_group_live_on_all_voters, wait_for_vault_group_removed_on_all_voters,
+    TestCluster, resolve_org_id, wait_for_vault_group_live_on_all_voters,
+    wait_for_vault_group_removed_on_all_voters, wire_create_test_organization,
+    wire_create_test_vault, wire_vault_client, wire_write_client,
 };
 
 /// Primary test: `CreateVault` must bring a per-vault `VaultGroup` live
@@ -41,29 +57,29 @@ use crate::common::{
 ///      `list_vault_groups()` and `has_vault_group(..) == true`.
 #[tokio::test]
 async fn test_create_vault_brings_vault_group_live_on_all_voters() {
-    let cluster = TestCluster::with_data_regions(3, 1).await;
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     cluster.wait_for_leader().await;
 
     let region = Region::US_EAST_VA;
 
     let leader = cluster.leader().expect("cluster has a leader");
 
-    // Create an organization via the production gRPC pipeline.
+    // Create an organization via the production wire pipeline.
     let (org_slug, _admin_slug) =
-        crate::common::create_test_organization(&leader.addr, "vault-lifecycle-org", leader)
+        wire_create_test_organization(&cluster, leader.id, "vault-lifecycle-org")
             .await
             .expect("create organization");
 
     // Resolve the external slug to the internal id used by the Raft
-    // group registry. The `create_test_organization` helper polls until
+    // group registry. The `wire_create_test_organization` helper polls until
     // status == Active, so the slug is indexed on the leader.
     let org_id = resolve_org_id(leader, org_slug);
 
     // Sanity: per-organization group must exist on every voter before
-    // we propose CreateVault. The `create_test_organization` helper
+    // we propose CreateVault. The `wire_create_test_organization` helper
     // internally awaits organization saga completion, but the per-org
     // group propagation is slightly further downstream —
-    // `create_test_vault` would fail with NotFound /
+    // `wire_create_test_vault` would fail with NotFound /
     // FailedPrecondition if it wasn't live yet, so a hard assertion on
     // `has_organization_group` catches ordering issues cleanly.
     for node in cluster.nodes() {
@@ -90,13 +106,13 @@ async fn test_create_vault_brings_vault_group_live_on_all_voters() {
         );
     }
 
-    // Create the vault through the gRPC surface — same code path a
-    // real SDK client hits. `create_test_vault` retries on NotFound /
+    // Create the vault through the wire surface — same code path a
+    // real SDK client hits. `wire_create_test_vault` retries on NotFound /
     // FailedPrecondition while the per-org group spins up, but by here
     // the group is already live so it should succeed on the first try.
     // The returned slug is not read — the vault-live assertion below
     // goes through the internal VaultId registry on every voter.
-    crate::common::create_test_vault(&leader.addr, org_slug).await.expect("create vault");
+    wire_create_test_vault(&cluster, leader.id, org_slug).await.expect("create vault");
 
     // Poll until every voter's `RaftManager` has registered a vault
     // group for (region, org_id). The apply-phase `CreateVault` arm is
@@ -158,18 +174,18 @@ async fn test_create_vault_brings_vault_group_live_on_all_voters() {
 /// registered via `org_inner.handle().add_shard(consensus_shard)`.
 #[tokio::test]
 async fn test_vault_shard_lookup_resolves_to_parent_org_group_on_every_voter() {
-    let cluster = TestCluster::with_data_regions(3, 1).await;
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     cluster.wait_for_leader().await;
 
     let region = Region::US_EAST_VA;
     let leader = cluster.leader().expect("cluster has a leader");
 
     let (org_slug, _admin_slug) =
-        crate::common::create_test_organization(&leader.addr, "vault-shard-lookup-org", leader)
+        wire_create_test_organization(&cluster, leader.id, "vault-shard-lookup-org")
             .await
             .expect("create organization");
     let org_id = resolve_org_id(leader, org_slug);
-    crate::common::create_test_vault(&leader.addr, org_slug).await.expect("create vault");
+    wire_create_test_vault(&cluster, leader.id, org_slug).await.expect("create vault");
     let vault_id =
         wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(30))
             .await;
@@ -282,18 +298,20 @@ async fn wait_for_vault_set_on_all_voters(
     }
 }
 
-/// Issues a `DeleteVault` gRPC request against the cluster's leader. Mirrors
+/// Issues a `DeleteVault` wire request against the cluster's leader. Mirrors
 /// the path a real SDK client would hit. Returns the response on success.
 ///
-/// Retries on `NotFound` and on `Unavailable("Not the leader")`. Symmetric
-/// with `common::create_test_vault`'s retry loop. Rationale: `delete_vault`
-/// resolves the vault slug through the GLOBAL slug index, populated by a
-/// `RegisterVaultDirectoryEntry` propose that is separate from the per-org
-/// `CreateVault` propose. Under starvation the GLOBAL propagation can lag
-/// the local `CreateVault` confirmation, so a freshly-created vault may
-/// briefly look `NotFound` to a delete RPC immediately after creation.
+/// Retries on `NotFound` and `StaleRouting` (wire equivalent of the legacy
+/// `Unavailable("Not the leader")`). Symmetric with `wire_create_test_vault`'s
+/// retry loop. Rationale: `delete_vault` resolves the vault slug through the
+/// GLOBAL slug index, populated by a `RegisterVaultDirectoryEntry` propose
+/// that is separate from the per-org `CreateVault` propose. Under starvation
+/// the GLOBAL propagation can lag the local `CreateVault` confirmation, so a
+/// freshly-created vault may briefly look `NotFound` to a delete RPC
+/// immediately after creation.
 async fn delete_test_vault(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     organization: OrganizationSlug,
     vault: VaultSlug,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -301,30 +319,31 @@ async fn delete_test_vault(
     let timeout_dur = std::time::Duration::from_secs(15);
 
     loop {
-        let mut client = create_vault_client(addr).await?;
+        let client = wire_vault_client(cluster, node_id);
         let result = client
-            .delete_vault(proto::DeleteVaultRequest {
-                organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                vault: Some(proto::VaultSlug { slug: vault.value() }),
-                caller: None,
-            })
+            .delete_vault(
+                wv::DeleteVaultRequest {
+                    organization: Some(organization),
+                    vault: Some(vault),
+                    caller: None,
+                },
+                rand::random::<u128>(),
+            )
             .await;
 
         match result {
             Ok(_) => return Ok(()),
-            Err(status)
-                if status.code() == tonic::Code::NotFound
-                    || (status.code() == tonic::Code::Unavailable
-                        && status.message().contains("Not the leader")) =>
+            Err(RpcError::WireError(wire_err))
+                if matches!(wire_err.code, ErrorCode::NotFound | ErrorCode::StaleRouting) =>
             {
                 if start.elapsed() > timeout_dur {
                     return Err(
-                        format!("vault deletion failed after retry: {}", status.message()).into()
+                        format!("vault deletion failed after retry: {}", wire_err.message).into()
                     );
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             },
-            Err(status) => return Err(format!("delete vault failed: {status}").into()),
+            Err(e) => return Err(format!("delete vault failed: {e}").into()),
         }
     }
 }
@@ -339,26 +358,26 @@ async fn delete_test_vault(
 ///   * `list_vault_groups()` reports exactly two entries on every voter.
 #[tokio::test]
 async fn test_create_multiple_vaults_in_one_org() {
-    let cluster = TestCluster::with_data_regions(3, 1).await;
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     cluster.wait_for_leader().await;
 
     let region = Region::US_EAST_VA;
     let leader = cluster.leader().expect("cluster has a leader");
 
     let (org_slug, _admin_slug) =
-        crate::common::create_test_organization(&leader.addr, "vault-multi-vault-org", leader)
+        wire_create_test_organization(&cluster, leader.id, "vault-multi-vault-org")
             .await
             .expect("create organization");
     let org_id = resolve_org_id(leader, org_slug);
 
     // First vault — wait for it to appear on every voter.
-    crate::common::create_test_vault(&leader.addr, org_slug).await.expect("create vault 1");
+    wire_create_test_vault(&cluster, leader.id, org_slug).await.expect("create vault 1");
     let vault_id_1 =
         wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(30))
             .await;
 
     // Second vault — wait for the cardinality to grow to 2 on every voter.
-    crate::common::create_test_vault(&leader.addr, org_slug).await.expect("create vault 2");
+    wire_create_test_vault(&cluster, leader.id, org_slug).await.expect("create vault 2");
     let converged =
         wait_for_vault_set_on_all_voters(&cluster, region, org_id, 2, Duration::from_secs(15))
             .await;
@@ -440,18 +459,18 @@ async fn test_create_multiple_vaults_in_one_org() {
 /// owning per-organization group exclusively.
 #[tokio::test]
 async fn test_create_vault_in_second_org() {
-    let cluster = TestCluster::with_data_regions(3, 1).await;
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     cluster.wait_for_leader().await;
 
     let region = Region::US_EAST_VA;
     let leader = cluster.leader().expect("cluster has a leader");
 
     let (org_a_slug, _admin_a) =
-        crate::common::create_test_organization(&leader.addr, "vault-cross-org-a", leader)
+        wire_create_test_organization(&cluster, leader.id, "vault-cross-org-a")
             .await
             .expect("create org A");
     let (org_b_slug, _admin_b) =
-        crate::common::create_test_organization(&leader.addr, "vault-cross-org-b", leader)
+        wire_create_test_organization(&cluster, leader.id, "vault-cross-org-b")
             .await
             .expect("create org B");
 
@@ -460,7 +479,7 @@ async fn test_create_vault_in_second_org() {
     assert_ne!(org_a_id, org_b_id, "test fixture invariant: distinct org IDs");
 
     // Create one vault in each org.
-    crate::common::create_test_vault(&leader.addr, org_a_slug).await.expect("create vault A");
+    wire_create_test_vault(&cluster, leader.id, org_a_slug).await.expect("create vault A");
     let vault_id_a = wait_for_vault_group_live_on_all_voters(
         &cluster,
         region,
@@ -469,7 +488,7 @@ async fn test_create_vault_in_second_org() {
     )
     .await;
 
-    crate::common::create_test_vault(&leader.addr, org_b_slug).await.expect("create vault B");
+    wire_create_test_vault(&cluster, leader.id, org_b_slug).await.expect("create vault B");
     let vault_id_b = wait_for_vault_group_live_on_all_voters(
         &cluster,
         region,
@@ -544,21 +563,21 @@ async fn test_create_vault_in_second_org() {
 /// state mutation.
 #[tokio::test]
 async fn test_delete_vault_tears_down_vault_group() {
-    let cluster = TestCluster::with_data_regions(3, 1).await;
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     cluster.wait_for_leader().await;
 
     let region = Region::US_EAST_VA;
     let leader = cluster.leader().expect("cluster has a leader");
 
     let (org_slug, _admin_slug) =
-        crate::common::create_test_organization(&leader.addr, "vault-delete-org", leader)
+        wire_create_test_organization(&cluster, leader.id, "vault-delete-org")
             .await
             .expect("create organization");
     let org_id = resolve_org_id(leader, org_slug);
 
     // Create the vault and wait for it to be live on every voter.
     let vault_slug =
-        crate::common::create_test_vault(&leader.addr, org_slug).await.expect("create vault");
+        wire_create_test_vault(&cluster, leader.id, org_slug).await.expect("create vault");
     let vault_id =
         wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(30))
             .await;
@@ -572,8 +591,8 @@ async fn test_delete_vault_tears_down_vault_group() {
         );
     }
 
-    // Issue the delete via gRPC — same code path a real SDK client hits.
-    delete_test_vault(&leader.addr, org_slug, vault_slug).await.expect("delete vault");
+    // Issue the delete via the wire surface — same code path a real SDK client hits.
+    delete_test_vault(&cluster, leader.id, org_slug, vault_slug).await.expect("delete vault");
 
     // Wait for the delete signal → watcher → `stop_vault_group` chain to
     // remove the registration on every voter. This is fire-and-forget from
@@ -621,20 +640,24 @@ async fn test_delete_vault_tears_down_vault_group() {
     }
 }
 
+/// **F.1.f.2.Stage1e Wave 7 deferral:** This test stays on the legacy tonic
+/// path. The graceful-restart rehydration sequence (TCP-only, multi-phase
+/// shutdown sweep, peer-address re-population from `--join` seeds) has only
+/// been validated on the tonic transport so far; migrating it under the same
+/// CI gate would introduce risk that's orthogonal to the wire-protocol
+/// migration. Stage 1f or a dedicated follow-up will revisit this test once
+/// the wire-side restart path has its own dedicated coverage.
+///
 /// A graceful whole-cluster restart must rehydrate every existing
-/// per-organization Raft group (Task #151) and every existing per-vault
-/// `VaultGroup` (Task #146's sweep inside `start_organization_group`) on
+/// per-organization Raft group and every existing per-vault `VaultGroup` on
 /// every voter.
 ///
-/// Cold-restart election convergence (Task #172) closed the production gap
-/// that previously kept this test ignored: the three-phase shutdown sweep
-/// (vault → org → region) plus election-critical message preservation in
-/// `peer_sender::drop_queue` and HTTP/2 server keepalive (Task #167) now
-/// allow simultaneous whole-cluster restart to converge to a leader
-/// deterministically. The test runs on every CI invocation; if it starts
-/// to fail again, suspect regressions in the cold-restart election path,
-/// the persisted-membership rehydration in `RaftLogStore::open`, or the
-/// shutdown-sweep ordering in `GracefulShutdown`.
+/// The three-phase shutdown sweep (vault → org → region) plus election-critical
+/// message preservation in `peer_sender::drop_queue` and HTTP/2 server
+/// keepalive allow simultaneous whole-cluster restart to converge to a leader
+/// deterministically. If this test starts to fail, suspect regressions in the
+/// cold-restart election path, the persisted-membership rehydration in
+/// `RaftLogStore::open`, or the shutdown-sweep ordering in `GracefulShutdown`.
 ///
 /// Flow:
 ///   1. Build a 3-node cluster with 1 data region.
@@ -679,11 +702,11 @@ async fn test_vault_group_rehydrates_after_graceful_cluster_restart() {
     // group spins up, so by the time these return the org is Active and
     // the vault row is committed.
     let (org_slug, _admin_slug) =
-        crate::common::create_test_organization(&leader.addr, "vault-restart-org", leader)
+        crate::common::wire_create_test_organization(&cluster, leader.id, "vault-restart-org")
             .await
             .expect("create organization pre-restart");
     let org_id_pre = resolve_org_id(leader, org_slug);
-    crate::common::create_test_vault(&leader.addr, org_slug)
+    crate::common::wire_create_test_vault(&cluster, leader.id, org_slug)
         .await
         .expect("create vault pre-restart");
 
@@ -819,24 +842,24 @@ async fn test_vault_group_rehydrates_after_graceful_cluster_restart() {
 /// a failure here means one of those links regressed.
 #[tokio::test]
 async fn test_write_routes_to_vault_shard_and_lands_in_vault_state() {
-    let cluster = TestCluster::with_data_regions(3, 1).await;
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     cluster.wait_for_leader().await;
 
     let region = Region::US_EAST_VA;
     let leader = cluster.leader().expect("cluster has a leader");
 
-    // Create an organization through the production gRPC + saga path.
+    // Create an organization through the production wire + saga path.
     let (org_slug, _admin_slug) =
-        crate::common::create_test_organization(&leader.addr, "vault-write-routing-org", leader)
+        wire_create_test_organization(&cluster, leader.id, "vault-write-routing-org")
             .await
             .expect("create organization");
     let org_id = resolve_org_id(leader, org_slug);
 
-    // Create the vault. The `create_test_vault` helper retries while the
+    // Create the vault. The `wire_create_test_vault` helper retries while the
     // per-org group spins up, so by the time it returns the org group is
     // live on the leader.
     let vault_slug =
-        crate::common::create_test_vault(&leader.addr, org_slug).await.expect("create vault");
+        wire_create_test_vault(&cluster, leader.id, org_slug).await.expect("create vault");
 
     // Wait for the per-vault `VaultGroup` to register on every voter via
     // the apply → watcher → `start_vault_group` chain. Returns the
@@ -862,40 +885,34 @@ async fn test_write_routes_to_vault_shard_and_lands_in_vault_state() {
         leader.manager.get_vault_group(region, org_id, vault_id).expect("leader has vault group");
     let last_applied_index_pre = *leader_vault_pre.applied_index_watch().borrow();
 
-    // Issue a `Write` through the gRPC surface — same code path a real
+    // Issue a `Write` through the wire surface — same code path a real
     // SDK client hits.
-    let mut client =
-        create_write_client(&leader.addr).await.expect("connect to leader write service");
-    let request = inferadb_ledger_proto::proto::WriteRequest {
-        client_id: Some(inferadb_ledger_proto::proto::ClientId {
-            id: "vault-routing-test-client".to_string(),
-        }),
-        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: org_slug.value(),
-        }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug.value() }),
-        operations: vec![inferadb_ledger_proto::proto::Operation {
-            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
-                inferadb_ledger_proto::proto::SetEntity {
-                    key: "vault-routing-test-key".to_string(),
-                    value: b"vault-routing-test-value".to_vec(),
-                    expires_at: None,
-                    condition: None,
-                },
-            )),
+    let client = wire_write_client(&cluster, leader.id);
+    let request = ww::WriteRequest {
+        client_id: Some(ws::ClientIdMessage { id: "vault-routing-test-client".to_string() }),
+        idempotency_key: Bytes::copy_from_slice(uuid::Uuid::new_v4().as_bytes()),
+        organization: Some(org_slug),
+        vault: Some(vault_slug),
+        operations: vec![ws::Operation {
+            op: Some(ws::OperationKind::SetEntity(ws::SetEntity {
+                key: "vault-routing-test-key".to_string(),
+                value: Bytes::copy_from_slice(b"vault-routing-test-value"),
+                expires_at: None,
+                condition: None,
+            })),
         }],
         include_tx_proof: false,
         caller: None,
     };
 
-    let response = client.write(request).await.expect("write should succeed").into_inner();
+    let response =
+        client.write(request, rand::random::<u128>()).await.expect("write should succeed");
     match response.result {
-        Some(inferadb_ledger_proto::proto::write_response::Result::Success(success)) => {
+        Some(ww::WriteResponseResult::Success(success)) => {
             assert!(success.tx_id.is_some(), "write success must include tx_id");
             assert!(success.block_height > 0, "write success must include block_height > 0");
         },
-        Some(inferadb_ledger_proto::proto::write_response::Result::Error(err)) => {
+        Some(ww::WriteResponseResult::Error(err)) => {
             panic!("write failed: code={:?} message={:?}", err.code, err.message,);
         },
         None => panic!("write response had no result"),
@@ -951,19 +968,19 @@ async fn test_vault_hibernation_sleep_and_wake() {
 
     use inferadb_ledger_raft::raft_manager::VaultLifecycleState;
 
-    let cluster = TestCluster::with_data_regions(1, 1).await;
+    let cluster = TestCluster::with_wire_transport(1).await;
     cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("cluster has a leader");
     let region = Region::US_EAST_VA;
 
     let (org_slug, _admin_slug) =
-        crate::common::create_test_organization(&leader.addr, "vault-hibernation-org", leader)
+        wire_create_test_organization(&cluster, leader.id, "vault-hibernation-org")
             .await
             .expect("create organization");
     let org_id = resolve_org_id(leader, org_slug);
 
-    crate::common::create_test_vault(&leader.addr, org_slug).await.expect("create vault");
+    wire_create_test_vault(&cluster, leader.id, org_slug).await.expect("create vault");
     let vault_id =
         wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(30))
             .await;
@@ -1032,21 +1049,18 @@ async fn test_vault_hibernation_sleep_and_wake() {
 async fn test_vault_hibernation_disabled_by_default() {
     use inferadb_ledger_raft::raft_manager::VaultLifecycleState;
 
-    let cluster = TestCluster::with_data_regions(1, 1).await;
+    let cluster = TestCluster::with_wire_transport(1).await;
     cluster.wait_for_leader().await;
 
     let leader = cluster.leader().expect("cluster has a leader");
     let region = Region::US_EAST_VA;
 
-    let (org_slug, _admin_slug) = crate::common::create_test_organization(
-        &leader.addr,
-        "vault-hibernation-disabled-org",
-        leader,
-    )
-    .await
-    .expect("create organization");
+    let (org_slug, _admin_slug) =
+        wire_create_test_organization(&cluster, leader.id, "vault-hibernation-disabled-org")
+            .await
+            .expect("create organization");
     let org_id = resolve_org_id(leader, org_slug);
-    crate::common::create_test_vault(&leader.addr, org_slug).await.expect("create vault");
+    wire_create_test_vault(&cluster, leader.id, org_slug).await.expect("create vault");
     let vault_id =
         wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(30))
             .await;

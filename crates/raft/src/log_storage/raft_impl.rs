@@ -69,10 +69,9 @@ pub struct LedgerSnapshotBuilder {
     event_config: Option<EventConfig>,
     /// Per-scope snapshot encryption key provider.
     ///
-    /// Threaded through Stage 1a; resolved by Stage 2's `SnapshotPersister`
-    /// against [`SnapshotScope`] coordinates. The Stage 1b builder body
-    /// does not encrypt — Stage 2's persister is the first dereferencing
-    /// call site.
+    /// Resolved by the [`SnapshotPersister`](crate::snapshot_persister::SnapshotPersister)
+    /// against [`SnapshotScope`] coordinates. The builder body does not encrypt —
+    /// the persister is the first dereferencing call site.
     #[allow(dead_code)]
     snapshot_key_provider: Arc<dyn crate::snapshot_key_provider::SnapshotKeyProvider>,
     /// Region this snapshot belongs to.
@@ -982,6 +981,13 @@ impl RaftLogStore {
             // internal id so existing tests that match on raw id still pass.
             let broadcast_start = Instant::now();
             if let Some(sender) = &self.block_announcements {
+                use inferadb_ledger_wire::services::shared as ws;
+                // Convert chrono::DateTime<Utc> to UNIX nanoseconds (u64) using
+                // the same convention as `services::wire_shared::timestamp_proto_to_ns`:
+                // clamp negative seconds/nanos to zero, then `secs * 1e9 + nanos`.
+                let secs = u64::try_from(timestamp.timestamp().max(0)).unwrap_or(0);
+                let nanos = u64::from(timestamp.timestamp_subsec_nanos());
+                let announcement_ts = secs.saturating_mul(1_000_000_000).saturating_add(nanos);
                 for entry in &vault_entries {
                     let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
                     let organization_slug = if entry.organization_slug.value() == 0 {
@@ -994,22 +1000,17 @@ impl RaftLogStore {
                     } else {
                         entry.vault_slug.value()
                     };
-                    let announcement = inferadb_ledger_proto::proto::BlockAnnouncement {
-                        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                            slug: organization_slug,
-                        }),
-                        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault_slug }),
+                    let announcement = ws::BlockAnnouncement {
+                        organization: Some(ws::OrganizationSlug::new(organization_slug)),
+                        vault: Some(ws::VaultSlug::new(vault_slug)),
                         height: entry.vault_height,
-                        block_hash: Some(inferadb_ledger_proto::proto::Hash {
-                            value: block_hash.to_vec(),
+                        block_hash: Some(ws::Hash {
+                            value: bytes::Bytes::copy_from_slice(&block_hash),
                         }),
-                        state_root: Some(inferadb_ledger_proto::proto::Hash {
-                            value: entry.state_root.to_vec(),
+                        state_root: Some(ws::Hash {
+                            value: bytes::Bytes::copy_from_slice(&entry.state_root),
                         }),
-                        timestamp: Some(prost_types::Timestamp {
-                            seconds: timestamp.timestamp(),
-                            nanos: timestamp.timestamp_subsec_nanos() as i32,
-                        }),
+                        timestamp: announcement_ts,
                     };
                     let _ = sender.send(announcement);
                     tracing::debug!(

@@ -122,13 +122,13 @@ See the [deployment guide](docs/how-to/deployment.md) for multi-node setup, Kube
 | ------------- | ------------------------------------------------------------------------------------------------- | --------------- |
 | `--data`      | Persistent [storage](docs/architecture/durability.md) (WAL, state, snapshots)                     | _(none)_        |
 | `--dev`       | Ephemeral file-backed storage at an auto-generated tempdir; data is lost on restart               | _(off)_         |
-| `--listen`    | TCP address for gRPC API                                                                          | _(none)_        |
-| `--socket`    | Unix domain socket path for gRPC API                                                              | _(none)_        |
+| `--listen`    | TCP address for the RPC API (custom wire protocol over QUIC)                                      | _(none)_        |
+| `--socket`    | Unix domain socket path for the RPC API                                                           | _(none)_        |
 | `--join`      | Seed addresses for [cluster discovery](docs/how-to/deployment.md#adding-a-node) (comma-separated) | _(none)_        |
 | `--region`    | Geographic data residency [region](docs/how-to/deployment.md)                                     | `global`        |
 | `--advertise` | Address advertised to peers ([details](docs/how-to/deployment.md#advertise-address))              | _(auto-detect)_ |
 
-Exactly one of `--data` or `--dev` is required when launching the server; supplying neither aborts at the start of `main` with a clear error, and supplying both is rejected at parse time. Client subcommands (`init`, `vaults`, `config schema`, `restore apply`) do not require a storage flag — they either talk to a running server over gRPC or carry their own arguments. At least one of `--listen` or `--socket` must also be specified for the server-launch path. On restart, only the storage flag is required — all other flags are persisted on first boot and ignored on subsequent starts.
+Exactly one of `--data` or `--dev` is required when launching the server; supplying neither aborts at the start of `main` with a clear error, and supplying both is rejected at parse time. Client subcommands (`init`, `vaults`, `config schema`, `restore apply`) do not require a storage flag — they either talk to a running server over the wire RPC API or carry their own arguments. At least one of `--listen` or `--socket` must also be specified for the server-launch path. On restart, only the storage flag is required — all other flags are persisted on first boot and ignored on subsequent starts.
 
 See [Configuration Reference](docs/how-to/deployment.md#configuration-reference) for environment variables and all options including metrics, batching, and tuning.
 
@@ -160,7 +160,7 @@ just test
 
 Claude Code, Codex, and Cursor users: this repository ships rich agent context.
 
-- **[CLAUDE.md](CLAUDE.md)** (symlinked as `AGENTS.md`) — 14 non-negotiable golden rules covering proto codegen, storage keys, PII data residency, error handling, consensus I/O boundaries, and test hygiene.
+- **[CLAUDE.md](CLAUDE.md)** (symlinked as `AGENTS.md`) — 16 non-negotiable golden rules covering wire-protocol codegen, storage keys, PII data residency, error handling, consensus I/O boundaries, and test hygiene.
 - **Per-crate `CLAUDE.md`** — each crate's `CLAUDE.md` extends the root rules with crate-specific invariants.
 - **Seven audit agents** under `.claude/agents/` fire proactively on matching file changes.
 - **Nine task skills** under `.claude/skills/` (`/add-new-entity`, `/add-storage-key`, `/new-rpc`, etc.) encode project-specific workflows.

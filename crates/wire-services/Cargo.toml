@@ -1,0 +1,23 @@
+[package]
+name = "inferadb-ledger-wire-services"
+description = "Generated service surface for the InferaDB Ledger custom wire protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["wire", "protocol", "services", "rpc"]
+categories = ["network-programming"]
+
+[dependencies]
+inferadb-ledger-wire = { workspace = true }
+inferadb-ledger-wire-macro = { workspace = true }
+inferadb-ledger-wire-transport = { workspace = true }
+bytes.workspace = true
+futures.workspace = true
+postcard.workspace = true
+serde = { workspace = true, features = ["derive"] }
+
+[lints]
+workspace = true

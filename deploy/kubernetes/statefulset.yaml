@@ -66,23 +66,27 @@ spec:
             limits:
               cpu: "2"
               memory: "4Gi"
-          # Startup probe: allow time for Raft bootstrap
+          # Startup probe: allow time for Raft bootstrap.
+          # Uses tcpSocket (not grpc) — the wire-protocol binary serves QUIC
+          # over UDP and exposes a minimal TCP listener for K8s probes
+          # (crates/server/src/health_probe.rs). tcpSocket succeeds iff TCP
+          # handshake completes; richer signaling is not required.
           startupProbe:
-            grpc:
+            tcpSocket:
               port: 50051
             initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 24  # 2 minutes total
           # Liveness probe: detect hung processes
           livenessProbe:
-            grpc:
+            tcpSocket:
               port: 50051
             initialDelaySeconds: 0
             periodSeconds: 10
             failureThreshold: 3
           # Readiness probe: only route traffic to healthy nodes
           readinessProbe:
-            grpc:
+            tcpSocket:
               port: 50051
             initialDelaySeconds: 0
             periodSeconds: 5

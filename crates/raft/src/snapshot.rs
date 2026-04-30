@@ -5,7 +5,7 @@
 //!
 //! ## Scope
 //!
-//! Stage 1b bifurcates snapshots into two scopes:
+//! Snapshots are bifurcated into two scopes:
 //!
 //! - **Org snapshot** ([`SnapshotScope::Org`]) — captures the per-organization Raft control-plane
 //!   tables that live on the org-level `raft.db` (the per-org Raft state-machine + organization /
@@ -71,9 +71,7 @@
 //! ## Version compatibility
 //!
 //! v1 snapshots wrote a flat table list followed by a separate `entity_section`. The v1 reader is
-//! gone; on-disk v1 files are rejected with [`SnapshotError::UnsupportedVersion`]. No production
-//! deployments persist v1 snapshots — Stage 2's `SnapshotPersister` is the first persistence
-//! consumer, and it lands together with v2.
+//! gone; on-disk v1 files are rejected with [`SnapshotError::UnsupportedVersion`].
 
 use std::pin::Pin;
 

@@ -18,13 +18,9 @@ tokio = { workspace = true, features = ["fs", "io-util", "net"] }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 
-# gRPC
-tonic = { workspace = true }
-prost = { workspace = true }
-tower = { workspace = true }
-hyper-util = { workspace = true }
-
 # Serialization
+bytes = { workspace = true, features = ["serde"] }
+postcard = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
@@ -51,25 +47,34 @@ base64 = { workspace = true }
 
 # Utilities
 tracing = { workspace = true }
-opentelemetry = { workspace = true }
-tracing-opentelemetry = { workspace = true }
 futures = { workspace = true }
 chrono = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
 uuid = { workspace = true }
-prost-types = { workspace = true }
 
 # Internal crates
 inferadb-ledger-types = { workspace = true }
-inferadb-ledger-proto = { workspace = true }
+inferadb-ledger-wire = { workspace = true }
+inferadb-ledger-wire-services = { workspace = true }
+inferadb-ledger-wire-transport = { workspace = true }
+
+# TLS for wire-transport client config bridge
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = { workspace = true }
+rcgen = { workspace = true }
 
 [features]
 serde = []
+# Enables the wire-transport `insecure-skip-verify` cargo feature which
+# accepts any server certificate without verification. Tests and dev
+# workflows only — production builds (no feature flag) won't compile the
+# skip-verify path.
+insecure-skip-verify = ["inferadb-ledger-wire-transport/insecure-skip-verify"]
 
 [lints]
 workspace = true

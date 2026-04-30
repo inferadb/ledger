@@ -66,6 +66,8 @@ pub struct Summary {
 }
 
 impl Summary {
+    /// Compute operations per second over the measured wall-clock elapsed time.
+    /// Returns `0.0` when `elapsed` is zero to avoid division by zero.
     pub fn throughput(&self) -> f64 {
         if self.elapsed.is_zero() {
             0.0
@@ -129,6 +131,10 @@ impl Summary {
         }
     }
 
+    /// Print a human-readable summary to stderr.
+    ///
+    /// Output goes to stderr so it doesn't pollute stdout when the binary is
+    /// piped into another tool or used from `scripts/profile-suite.sh`.
     pub fn print(&self, preset: &str) {
         let pct = self.percentiles();
         eprintln!("==================== profile summary ====================");

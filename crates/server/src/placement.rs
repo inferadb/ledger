@@ -215,7 +215,7 @@ pub async fn reconcile_transport_channels(manager: &RaftManager) {
     // Iterate every (Region, OrganizationId) pair. Region-control-plane
     // groups live at OrganizationId(0); per-org groups live at oid != 0
     // (root rule 15). Each per-org group has its own
-    // `GrpcConsensusTransport`, so peer-channel registration must run
+    // `WireConsensusTransport`, so peer-channel registration must run
     // for both — otherwise per-org leader transfer / membership change
     // proposals can't reach late-joining voters. Per-vault groups share
     // the parent org's transport (root rule 17), so they're covered by

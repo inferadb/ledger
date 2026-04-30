@@ -21,7 +21,6 @@ path = "src/main.rs"
 [dependencies]
 # Internal
 inferadb-ledger-types.workspace = true
-inferadb-ledger-proto.workspace = true
 inferadb-ledger-state.workspace = true
 inferadb-ledger-raft.workspace = true
 inferadb-ledger-services.workspace = true
@@ -33,9 +32,6 @@ inferadb-ledger-store.workspace = true
 # Async runtime
 tokio = { workspace = true, features = ["io-util", "net", "signal"] }
 tokio-util.workspace = true
-
-# gRPC
-tonic.workspace = true
 
 # Configuration
 clap.workspace = true
@@ -51,8 +47,47 @@ parking_lot.workspace = true
 # Error handling
 snafu.workspace = true
 
+# Wire-transport TLS bridge — bootstrap loads operator-supplied PEM
+# cert+key, builds a `rustls::ServerConfig` via
+# `inferadb_ledger_wire_transport::tls::rustls_server_crypto`, and feeds it
+# into `LedgerServer::with_wire_tls_config` (F.1.d). The same crate also
+# vends the QUIC-side client config used by `WireClientTemplate` for
+# inter-node Raft.
+inferadb-ledger-wire-transport.workspace = true
+
+# Wire-protocol message types + service clients used by:
+#   - `discovery::discover_node_info` (`AdminServiceClient::get_node_info`)
+#   - `bootstrap::seed_polling_loop` (`AdminServiceClient::join_cluster`)
+#   - `bootstrap::query_peer_liveness_rpc` (`AdminServiceClient::check_peer_liveness`)
+#   - `wire_client::build_admin_client` (CLI subcommands `init`, `vaults`)
+# `wire-services` instantiates the macro-generated client structs; `wire`
+# carries the message-type definitions consumed by the generated clients.
+inferadb-ledger-wire.workspace = true
+inferadb-ledger-wire-services.workspace = true
+
+# Direct rustls dep for the operator-facing TLS plumbing (cert/key loading,
+# `ServerConfig` / `ClientConfig` construction). The wire-transport crate
+# re-exports the higher-level builders but the loader needs raw rustls
+# types (`CertificateDer`, `PrivateKeyDer`, `RootCertStore`) to bridge
+# `rustls-pemfile` output into them.
+rustls.workspace = true
+
+# PEM parsing for `--tls-cert` / `--tls-key` paths supplied by the
+# operator. `rustls-pemfile` extracts the cert chain + private key from
+# the PEM blob and hands DER bytes to `rustls`.
+rustls-pemfile.workspace = true
+
+# `Bytes` is the auth-payload type on `WireClientTemplate` — bootstrap
+# constructs an empty payload (peer mTLS authenticates the connection
+# at the QUIC layer) when installing the template on the registry.
+bytes.workspace = true
+
 # Random number generation
 rand.workspace = true
+
+# UUID generation for `admin write` idempotency keys (CLI subcommand
+# generates a fresh v4 UUID when the operator omits `--idempotency-key`).
+uuid.workspace = true
 
 # Hashing
 seahash.workspace = true
@@ -76,6 +111,13 @@ default = []
 # Enables tracing-flame span-sampling via the `--flamegraph-spans` CLI flag.
 # Consumed by `scripts/profile-server.sh spans`. Adds no cost when off.
 profiling = ["dep:tracing-flame"]
+# Forwards the `permissive-wire-auth` feature on `inferadb-ledger-services`
+# so binary builds intended for shell-script smoke tests (e.g.
+# `cluster-lifecycle-test.sh`, `crash-recovery.sh`) can dial the cluster
+# without minting a JWT — the admin CLI sends an empty `auth_payload` that
+# the production `JwtAuthVerifier` would otherwise reject. Production
+# release builds MUST NOT enable this feature.
+permissive-wire-auth = ["inferadb-ledger-services/permissive-wire-auth"]
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -86,21 +128,29 @@ inferadb-ledger-sdk.workspace = true
 futures.workspace = true
 uuid.workspace = true
 serial_test = { workspace = true }
-# Decoding ErrorDetails proto in deprecation tests.
-prost.workspace = true
 
-# Network simulation testing
-turmoil.workspace = true
-hyper.workspace = true
-hyper-util.workspace = true
-async-stream.workspace = true
-tower.workspace = true
+# Wire-transport scaffolding (Phase 0.0.E.7) — `WireTestCluster` binds a
+# `WireServer` and dials it with a `WireClient` over rcgen-generated
+# self-signed certs. The `insecure-skip-verify` feature unlocks
+# `tls::rustls_client_crypto_skip_verify` for the test-side dial path; the
+# feature is gated so production builds never compile this branch.
+# (`inferadb-ledger-wire-transport` is also a runtime dep above; the
+# dev-dep entry layers the `insecure-skip-verify` feature on top.)
+inferadb-ledger-wire-transport = { workspace = true, features = ["insecure-skip-verify"] }
+# F.1.f.2.Stage1a — wire-mode `TestCluster::with_wire_transport` runs
+# `LedgerServer::serve_wire` against a synthetic 1-node bootstrap that
+# does NOT configure a `token_service` (no JWT engine — tests stand up
+# an in-process state graph, not a token-issuing surface). Without this
+# feature flag, `serve_wire` returns a hard error on the no-token-service
+# arm. Production builds never compile this dep entry; `cargo build` for
+# the `[bin]` target sees the bare `inferadb-ledger-services` line above
+# without features.
+inferadb-ledger-services = { workspace = true, features = ["permissive-wire-auth"] }
+quinn.workspace = true
+rcgen.workspace = true
 
 [[test]]
 name = "integration"
-
-[[test]]
-name = "external"
 
 [[test]]
 name = "stress"

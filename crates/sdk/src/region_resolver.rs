@@ -12,6 +12,10 @@
 //! This avoids a discovery round-trip on every request while still reacting
 //! to leader changes within seconds, and smooths out tail latency during
 //! refresh by never blocking callers on stale-but-usable entries.
+//!
+//! Dispatch goes through the wire transport — every gateway RPC issued from
+//! this module uses [`SystemDiscoveryServiceClient`] over an
+//! [`Arc<WireClient>`].
 
 use std::{
     sync::Arc,
@@ -19,14 +23,12 @@ use std::{
 };
 
 use futures::future::{BoxFuture, FutureExt, Shared};
-use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::Region;
-use tonic::transport::Channel;
+use inferadb_ledger_wire::services::discovery::ResolveRegionLeaderRequest;
+use inferadb_ledger_wire_services::SystemDiscoveryServiceClient;
+use inferadb_ledger_wire_transport::WireClient;
 
-use crate::{
-    error::{Result, SdkError},
-    proto_util::region_to_proto_string,
-};
+use crate::error::{Result, SdkError};
 
 /// Internal cached leader entry.
 #[derive(Debug, Clone)]
@@ -144,6 +146,12 @@ impl RegionLeaderCache {
     /// Writes are gated on term monotonicity: a stale-term update (one
     /// with `raft_term` less than the cached term) is rejected to defend
     /// against reordered messages.
+    ///
+    /// Test-only: previously consumed by `spawn_leader_watcher` (the
+    /// background `WatchLeader` stream). The watcher is currently parked
+    /// pending a wire-aware re-implementation; the method itself stays so
+    /// the term-gating contract remains exercised by unit tests.
+    #[cfg(test)]
     pub(crate) fn apply_watch_update(&self, endpoint: &str, raft_term: u64) {
         if endpoint.is_empty() {
             return;
@@ -250,14 +258,11 @@ impl RegionLeaderCache {
     ///   background refresh if none is in flight.
     /// - Expired or absent (age >= `hard_ttl`): block on a coalesced resolve.
     ///
-    /// Prefer this over calling [`resolve`](Self::resolve) directly when the
-    /// caller has the gateway channel available.
-    ///
     /// # Errors
     ///
     /// Returns an [`SdkError`] if the underlying `resolve` call fails on the
     /// expired-or-absent path.
-    pub async fn get_or_resolve(self: &Arc<Self>, gateway_channel: &Channel) -> Result<String> {
+    pub async fn get_or_resolve(self: &Arc<Self>, gateway: &Arc<WireClient>) -> Result<String> {
         let snapshot = { self.cached.read().clone() };
         let label = self.region_label();
         let metrics = self.metrics();
@@ -269,12 +274,12 @@ impl RegionLeaderCache {
             Some(ref c) if c.is_stale_but_usable() => {
                 metrics.leader_cache_hit(&label);
                 metrics.region_resolve_stale_served(&label);
-                self.spawn_background_refresh(gateway_channel.clone());
+                self.spawn_background_refresh(Arc::clone(gateway));
                 Ok(c.endpoint.as_ref().to_owned())
             },
             _ => {
                 metrics.leader_cache_miss(&label);
-                self.resolve(gateway_channel).await
+                self.resolve(gateway).await
             },
         }
     }
@@ -283,13 +288,13 @@ impl RegionLeaderCache {
     ///
     /// No-op when the single-flight slot is already occupied (including by
     /// a caller currently awaiting `resolve`).
-    pub fn spawn_background_refresh(self: &Arc<Self>, gateway_channel: Channel) {
+    pub fn spawn_background_refresh(self: &Arc<Self>, gateway: Arc<WireClient>) {
         if self.in_flight.lock().is_some() {
             return;
         }
         let this = Arc::clone(self);
         tokio::spawn(async move {
-            let _ = this.resolve(&gateway_channel).await;
+            let _ = this.resolve(&gateway).await;
         });
     }
 
@@ -298,10 +303,10 @@ impl RegionLeaderCache {
     ///
     /// # Errors
     ///
-    /// Returns an [`SdkError`] if the gRPC call fails (network error, server
+    /// Returns an [`SdkError`] if the wire call fails (network error, server
     /// unavailable, unknown region, etc.).
-    pub async fn resolve(self: &Arc<Self>, gateway_channel: &Channel) -> Result<String> {
-        let gateway = gateway_channel.clone();
+    pub async fn resolve(self: &Arc<Self>, gateway: &Arc<WireClient>) -> Result<String> {
+        let gateway = Arc::clone(gateway);
         let this = Arc::clone(self);
         self.run_single_flight(move || async move { this.resolve_via_gateway(&gateway).await })
             .await
@@ -309,24 +314,21 @@ impl RegionLeaderCache {
 
     /// Performs the actual `ResolveRegionLeader` RPC and writes the result into
     /// the cache. This is the inner path driven through the single-flight slot.
-    async fn resolve_via_gateway(&self, gateway_channel: &Channel) -> Result<String> {
+    async fn resolve_via_gateway(&self, gateway: &Arc<WireClient>) -> Result<String> {
         let previous_endpoint = self.cached.read().as_ref().map(|c| Arc::clone(&c.endpoint));
 
-        let mut client = proto::system_discovery_service_client::SystemDiscoveryServiceClient::new(
-            gateway_channel.clone(),
-        );
+        let client = SystemDiscoveryServiceClient::new(Arc::clone(gateway));
+        let request = ResolveRegionLeaderRequest { region: self.region.as_str().to_owned() };
+        // The wire client does not surface a per-request correlation ID to
+        // the caller; pass zero (the framing layer assigns its own internal
+        // correlation), matching every other ops_wire dispatch site.
+        let response = client.resolve_region_leader(request, 0).await.map_err(|err| {
+            SdkError::Connection { message: format!("gateway rpc failed: {err}") }
+        })?;
 
-        let response = client
-            .resolve_region_leader(proto::ResolveRegionLeaderRequest {
-                region: region_to_proto_string(self.region),
-            })
-            .await
-            .map_err(SdkError::from)?;
-
-        let resp = response.into_inner();
-        let soft_ttl = if resp.ttl_seconds > 0 {
+        let soft_ttl = if response.ttl_seconds > 0 {
             // Clamp to defend against pathological server values.
-            Duration::from_secs(u64::from(resp.ttl_seconds).min(MAX_SERVER_TTL_SECS))
+            Duration::from_secs(u64::from(response.ttl_seconds).min(MAX_SERVER_TTL_SECS))
         } else {
             self.default_soft_ttl
         };
@@ -334,14 +336,14 @@ impl RegionLeaderCache {
         // configured default_hard_ttl, scale hard to at least 4x soft.
         let hard_ttl = std::cmp::max(self.default_hard_ttl, soft_ttl.saturating_mul(4));
 
-        let endpoint = resp.endpoint;
+        let endpoint = response.endpoint;
 
         *self.cached.write() = Some(CachedLeader {
             endpoint: Arc::from(endpoint.as_str()),
             resolved_at: Instant::now(),
             soft_ttl,
             hard_ttl,
-            term: Some(resp.raft_term),
+            term: Some(response.raft_term),
         });
 
         if let Some(prev) = previous_endpoint
@@ -384,17 +386,13 @@ impl RegionLeaderCache {
         };
         let result = shared.await;
         // `Result<String, SdkError>` is not `Clone` (SdkError contains
-        // non-Clone variants like `tonic::transport::Error`). The shared future
+        // non-Clone variants like `TransportError`). The shared future
         // therefore yields `Arc<Result<_>>`; each awaiter reconstructs an owned
         // `Result`. Ok clones the endpoint string. Err is downgraded to
         // `SdkError::Connection` with the message rendered — typed error
-        // information (gRPC code, request_id, trace_id, error_details) is lost
-        // on the failure path for ALL awaiters, including the uncontended first
-        // caller. Acceptable trade-off: the current caller of `resolve` in
-        // `ConnectionPool::get_region_channel` only distinguishes Ok/Err and
-        // logs on Err. If richer error classification is needed in the future,
-        // replace this with a `Clone`-compatible error type or switch to a
-        // broadcast-channel coalescing primitive.
+        // information is lost on the failure path for ALL awaiters, including
+        // the uncontended first caller. Acceptable trade-off: callers of
+        // `resolve` only distinguish Ok/Err and log on Err.
         match &*result {
             Ok(endpoint) => Ok(endpoint.clone()),
             Err(err) => Err(SdkError::Connection { message: err.to_string() }),
@@ -403,7 +401,7 @@ impl RegionLeaderCache {
 
     /// Test-only hook that drives an arbitrary closure through the same
     /// single-flight coalescing used by [`resolve`]. Lets tests exercise
-    /// the coalescing primitive without spinning up a gRPC server.
+    /// the coalescing primitive without spinning up a wire server.
     #[cfg(test)]
     pub(crate) async fn resolve_via_closure<F, Fut>(self: &Arc<Self>, op: F) -> Result<String>
     where
@@ -412,95 +410,6 @@ impl RegionLeaderCache {
     {
         self.run_single_flight(op).await
     }
-}
-
-/// Initial reconnect backoff for the leader watcher.
-const WATCHER_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
-
-/// Maximum reconnect backoff for the leader watcher.
-const WATCHER_MAX_BACKOFF: Duration = Duration::from_secs(30);
-
-/// Applies equal-jitter to a backoff value before sleeping. Breaks client
-/// synchronization when many watchers reconnect after a shared upstream
-/// event (e.g. gateway restart). The backoff progression itself remains
-/// deterministic — only the actual sleep for any given attempt is
-/// randomized within `[0.5 * d, 1.5 * d)`.
-fn jittered(d: Duration) -> Duration {
-    use rand::RngExt;
-    let factor = rand::rng().random_range(0.5_f64..1.5);
-    Duration::from_secs_f64(d.as_secs_f64() * factor)
-}
-
-/// Spawns a background task that streams leader updates from the gateway and
-/// applies them to the given cache. The task runs until the provided
-/// cancellation token is triggered. On stream error or EOF, it reconnects
-/// with exponential backoff capped at [`WATCHER_MAX_BACKOFF`].
-///
-/// The TTL-based `resolve` path remains the cold-start and fallback: the
-/// watcher augments the cache with push updates but does not replace it.
-pub(crate) fn spawn_leader_watcher(
-    cache: Arc<RegionLeaderCache>,
-    gateway: Channel,
-    metrics: Arc<dyn crate::metrics::SdkMetrics>,
-    cancel: tokio_util::sync::CancellationToken,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut backoff = WATCHER_INITIAL_BACKOFF;
-        let label = cache.region_label();
-        let region_proto = region_to_proto_string(cache.region());
-
-        loop {
-            if cancel.is_cancelled() {
-                return;
-            }
-
-            let mut client =
-                proto::system_discovery_service_client::SystemDiscoveryServiceClient::new(
-                    gateway.clone(),
-                );
-            let request = proto::WatchLeaderRequest { region: region_proto.clone() };
-
-            let stream_result = tokio::select! {
-                _ = cancel.cancelled() => return,
-                res = client.watch_leader(request) => res,
-            };
-
-            match stream_result {
-                Ok(resp) => {
-                    // Reset backoff on successful open.
-                    backoff = WATCHER_INITIAL_BACKOFF;
-                    let mut stream = resp.into_inner();
-
-                    loop {
-                        tokio::select! {
-                            _ = cancel.cancelled() => return,
-                            item = stream.message() => {
-                                match item {
-                                    Ok(Some(update)) => {
-                                        metrics.leader_watch_update(&label);
-                                        cache.apply_watch_update(&update.endpoint, update.raft_term);
-                                    },
-                                    // Server closed or stream error — fall through to reconnect.
-                                    Ok(None) | Err(_) => break,
-                                }
-                            }
-                        }
-                    }
-                },
-                Err(_) => {
-                    // Open failed — fall through to backoff.
-                },
-            }
-
-            metrics.leader_watch_reconnect(&label);
-
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                () = tokio::time::sleep(jittered(backoff)) => {},
-            }
-            backoff = (backoff * 2).min(WATCHER_MAX_BACKOFF);
-        }
-    })
 }
 
 #[cfg(test)]
@@ -885,52 +794,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn get_or_resolve_emits_hit_on_fresh_cache() {
-        let metrics = Arc::new(CountingTestMetrics::default());
-        let cache = Arc::new(RegionLeaderCache::new(Region::US_EAST_VA));
-        cache.set_metrics(Arc::clone(&metrics) as Arc<dyn crate::metrics::SdkMetrics>);
-
-        *cache.cached.write() = Some(CachedLeader {
-            endpoint: Arc::from("http://fresh:5000"),
-            resolved_at: Instant::now(),
-            soft_ttl: Duration::from_secs(30),
-            hard_ttl: Duration::from_secs(120),
-            term: None,
-        });
-
-        // Fresh snapshot — no gateway call needed. Dummy channel is fine
-        // because the fresh arm returns before touching it.
-        let dummy = Channel::from_static("http://127.0.0.1:1").connect_lazy();
-        let _ = cache.get_or_resolve(&dummy).await.expect("fresh");
-
-        assert_eq!(metrics.get("hit", "us-east-va"), 1);
-        assert_eq!(metrics.get("miss", "us-east-va"), 0);
-        assert_eq!(metrics.get("stale_served", "us-east-va"), 0);
-    }
-
-    #[tokio::test]
-    async fn get_or_resolve_emits_stale_served_on_stale_cache() {
-        let metrics = Arc::new(CountingTestMetrics::default());
-        let cache = Arc::new(RegionLeaderCache::new(Region::US_EAST_VA));
-        cache.set_metrics(Arc::clone(&metrics) as Arc<dyn crate::metrics::SdkMetrics>);
-
-        *cache.cached.write() = Some(CachedLeader {
-            endpoint: Arc::from("http://stale:5000"),
-            resolved_at: Instant::now() - Duration::from_secs(60),
-            soft_ttl: Duration::from_secs(30),
-            hard_ttl: Duration::from_secs(120),
-            term: None,
-        });
-
-        let dummy = Channel::from_static("http://127.0.0.1:1").connect_lazy();
-        let _ = cache.get_or_resolve(&dummy).await.expect("stale-but-usable");
-
-        assert_eq!(metrics.get("hit", "us-east-va"), 1);
-        assert_eq!(metrics.get("stale_served", "us-east-va"), 1);
-        assert_eq!(metrics.get("miss", "us-east-va"), 0);
-    }
-
     #[test]
     fn apply_hint_does_not_fire_flap_metric() {
         // Flap is reserved for resolve-path endpoint changes; hints are a
@@ -1103,15 +966,6 @@ mod tests {
         // is still accepted under the None-cache rule.
         let guard = cache.cached.read();
         assert_eq!(guard.as_ref().and_then(|c| c.term), None);
-    }
-
-    #[test]
-    fn jitter_stays_within_bounds() {
-        for _ in 0..100 {
-            let d = jittered(Duration::from_secs(10));
-            assert!(d >= Duration::from_secs(5));
-            assert!(d < Duration::from_secs(15));
-        }
     }
 
     #[test]

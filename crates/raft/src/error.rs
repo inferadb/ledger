@@ -137,23 +137,10 @@ pub enum OrphanCleanupError {
 
 /// Errors from gRPC service operations.
 ///
-/// These errors are converted to `tonic::Status` at the service boundary.
-///
-/// ## gRPC Status Code Mapping
-///
-/// | Variant             | gRPC Code             | Retryable | Notes                                    |
-/// |---------------------|-----------------------|-----------|------------------------------------------|
-/// | `Raft` (leadership) | `UNAVAILABLE`         | Yes       | "not leader", "forward to leader"        |
-/// | `Raft` (other)      | `INTERNAL`            | No        | Genuine internal Raft failures            |
-/// | `Storage`           | `INTERNAL`            | No        | Storage engine failures                   |
-/// | `BlockArchive`      | `INTERNAL`            | No        | Block archive failures                    |
-/// | `Snapshot`          | `FAILED_PRECONDITION` | No        | Snapshot in progress or unavailable       |
-/// | `InvalidArgument`   | `INVALID_ARGUMENT`    | No        | Malformed request or validation failure   |
-/// | `ResourceNotFound`  | `NOT_FOUND`           | No        | Organization/vault/entity not found          |
-/// | `PreconditionFailed`| `FAILED_PRECONDITION` | No        | State precondition violated               |
-/// | `RateLimited`       | `RESOURCE_EXHAUSTED`  | Yes       | Includes `retry-after-ms` metadata        |
-/// | `Timeout`           | `DEADLINE_EXCEEDED`   | Yes       | Raft proposal or operation timeout        |
-/// | `Unavailable`       | `UNAVAILABLE`         | Yes       | Node not ready, shutting down, no leader  |
+/// Service handlers consume these via the wire-shaped classifier in
+/// `crates/services/src/services/error_classify.rs::classify_raft_error_wire`;
+/// the `tonic::Status` conversion that previously lived here was deleted in
+/// stage F.1.f.2.5c when the wire path became canonical.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum ServiceError {
@@ -198,47 +185,6 @@ pub enum ServiceError {
     Unavailable { message: String },
 }
 
-impl From<ServiceError> for tonic::Status {
-    fn from(err: ServiceError) -> Self {
-        match err {
-            ServiceError::Raft { message, .. } => {
-                if is_leadership_error(&message) {
-                    tonic::Status::unavailable(message)
-                } else {
-                    tonic::Status::internal(message)
-                }
-            },
-            ServiceError::Storage { source } => {
-                tonic::Status::internal(format!("Storage error: {}", source))
-            },
-            ServiceError::BlockArchive { source } => {
-                tonic::Status::internal(format!("Block archive error: {}", source))
-            },
-            ServiceError::Snapshot { message } => {
-                tonic::Status::failed_precondition(format!("Snapshot error: {}", message))
-            },
-            ServiceError::InvalidArgument { message } => tonic::Status::invalid_argument(message),
-            ServiceError::ResourceNotFound { resource_type, identifier } => {
-                tonic::Status::not_found(format!("{} not found: {}", resource_type, identifier))
-            },
-            ServiceError::PreconditionFailed { message } => {
-                tonic::Status::failed_precondition(message)
-            },
-            ServiceError::RateLimited { message, retry_after_ms } => {
-                let mut status = tonic::Status::resource_exhausted(message);
-                if let Ok(val) =
-                    tonic::metadata::MetadataValue::try_from(retry_after_ms.to_string())
-                {
-                    status.metadata_mut().insert("retry-after-ms", val);
-                }
-                status
-            },
-            ServiceError::Timeout { message } => tonic::Status::deadline_exceeded(message),
-            ServiceError::Unavailable { message } => tonic::Status::unavailable(message),
-        }
-    }
-}
-
 // ============================================================================
 // ServiceError Helper Methods
 // ============================================================================
@@ -253,7 +199,11 @@ impl From<ServiceError> for tonic::Status {
 /// Recognized patterns (from openraft 0.9 error messages):
 /// - "not leader" / "NotAMembershipLog" / "forward to leader"
 /// - "leader" combined with "unknown" / "lost" / "changing"
-fn is_leadership_error(message: &str) -> bool {
+///
+/// Public so the wire-shaped classifier in
+/// `crates/services/src/services/error_classify.rs::classify_raft_error_wire`
+/// can share the same predicate.
+pub fn is_leadership_error(message: &str) -> bool {
     let lower = message.to_lowercase();
     lower.contains("not leader")
         || lower.contains("forward to leader")
@@ -263,18 +213,6 @@ fn is_leadership_error(message: &str) -> bool {
         || (lower.contains("leader") && lower.contains("lost"))
         || (lower.contains("leader") && lower.contains("changing"))
         || lower.contains("no leader")
-}
-
-/// Classifies a Raft error message into the appropriate `tonic::Status` code.
-///
-/// Leadership-related errors → `UNAVAILABLE` (retryable)
-/// All other Raft errors → `INTERNAL` (not retryable)
-pub fn classify_raft_error(message: &str) -> tonic::Status {
-    if is_leadership_error(message) {
-        tonic::Status::unavailable(format!("Raft error: {}", message))
-    } else {
-        tonic::Status::internal(format!("Raft error: {}", message))
-    }
 }
 
 impl ServiceError {
@@ -342,201 +280,6 @@ mod tests {
             identifier: "user-123".to_string(),
         };
         assert_eq!(err.to_string(), "User not found: user-123");
-    }
-
-    // ========================================================================
-    // ServiceError → tonic::Status mapping tests
-    // ========================================================================
-
-    #[test]
-    fn test_raft_leadership_error_maps_to_unavailable() {
-        let err = ServiceError::Raft {
-            message: "not leader".to_string(),
-            backtrace: Backtrace::generate(),
-        };
-        let status: tonic::Status = err.into();
-        assert_eq!(status.code(), tonic::Code::Unavailable);
-        assert!(status.message().contains("not leader"));
-    }
-
-    #[test]
-    fn test_raft_forward_to_leader_maps_to_unavailable() {
-        let err = ServiceError::Raft {
-            message: "Forward to leader node 3".to_string(),
-            backtrace: Backtrace::generate(),
-        };
-        let status: tonic::Status = err.into();
-        assert_eq!(status.code(), tonic::Code::Unavailable);
-    }
-
-    #[test]
-    fn test_raft_no_leader_maps_to_unavailable() {
-        let err = ServiceError::Raft {
-            message: "No leader available".to_string(),
-            backtrace: Backtrace::generate(),
-        };
-        let status: tonic::Status = err.into();
-        assert_eq!(status.code(), tonic::Code::Unavailable);
-    }
-
-    #[test]
-    fn test_raft_leader_unknown_maps_to_unavailable() {
-        let err = ServiceError::Raft {
-            message: "Leader is unknown during election".to_string(),
-            backtrace: Backtrace::generate(),
-        };
-        let status: tonic::Status = err.into();
-        assert_eq!(status.code(), tonic::Code::Unavailable);
-    }
-
-    #[test]
-    fn test_raft_leader_lost_maps_to_unavailable() {
-        let err = ServiceError::Raft {
-            message: "Leader lost: network partition".to_string(),
-            backtrace: Backtrace::generate(),
-        };
-        let status: tonic::Status = err.into();
-        assert_eq!(status.code(), tonic::Code::Unavailable);
-    }
-
-    #[test]
-    fn test_raft_leader_changing_maps_to_unavailable() {
-        let err = ServiceError::Raft {
-            message: "Leader changing, retry later".to_string(),
-            backtrace: Backtrace::generate(),
-        };
-        let status: tonic::Status = err.into();
-        assert_eq!(status.code(), tonic::Code::Unavailable);
-    }
-
-    #[test]
-    fn test_raft_not_a_leader_maps_to_unavailable() {
-        let err = ServiceError::Raft {
-            message: "Not a leader, current leader is node 2".to_string(),
-            backtrace: Backtrace::generate(),
-        };
-        let status: tonic::Status = err.into();
-        assert_eq!(status.code(), tonic::Code::Unavailable);
-    }
-
-    #[test]
-    fn test_raft_generic_error_maps_to_internal() {
-        let err = ServiceError::Raft {
-            message: "log compaction failed".to_string(),
-            backtrace: Backtrace::generate(),
-        };
-        let status: tonic::Status = err.into();
-        assert_eq!(status.code(), tonic::Code::Internal);
-    }
-
-    #[test]
-    fn test_raft_quorum_error_maps_to_internal() {
-        let err = ServiceError::Raft {
-            message: "quorum lost: insufficient replicas".to_string(),
-            backtrace: Backtrace::generate(),
-        };
-        let status: tonic::Status = err.into();
-        assert_eq!(status.code(), tonic::Code::Internal);
-    }
-
-    #[test]
-    fn test_snapshot_helper_maps_to_failed_precondition() {
-        let status: tonic::Status = ServiceError::snapshot("storage test").into();
-        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-    }
-
-    #[test]
-    fn test_snapshot_maps_to_failed_precondition() {
-        let err = ServiceError::Snapshot { message: "snapshot in progress".to_string() };
-        let status: tonic::Status = err.into();
-        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-        assert!(status.message().contains("snapshot in progress"));
-    }
-
-    #[test]
-    fn test_invalid_argument_maps_correctly() {
-        let err = ServiceError::InvalidArgument { message: "missing field".to_string() };
-        let status: tonic::Status = err.into();
-        assert_eq!(status.code(), tonic::Code::InvalidArgument);
-        assert!(status.message().contains("missing field"));
-    }
-
-    #[test]
-    fn test_resource_not_found_maps_correctly() {
-        let err = ServiceError::ResourceNotFound {
-            resource_type: "Organization".to_string(),
-            identifier: "123".to_string(),
-        };
-        let status: tonic::Status = err.into();
-        assert_eq!(status.code(), tonic::Code::NotFound);
-        assert!(status.message().contains("Organization"));
-        assert!(status.message().contains("123"));
-    }
-
-    #[test]
-    fn test_precondition_failed_maps_correctly() {
-        let err = ServiceError::PreconditionFailed { message: "vault locked".to_string() };
-        let status: tonic::Status = err.into();
-        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-        assert!(status.message().contains("vault locked"));
-    }
-
-    #[test]
-    fn test_rate_limited_maps_to_resource_exhausted() {
-        let err = ServiceError::RateLimited {
-            message: "organization rate limit exceeded".to_string(),
-            retry_after_ms: 500,
-        };
-        let status: tonic::Status = err.into();
-        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
-        assert!(status.message().contains("organization rate limit exceeded"));
-    }
-
-    #[test]
-    fn test_rate_limited_includes_retry_after_metadata() {
-        let err =
-            ServiceError::RateLimited { message: "rate limited".to_string(), retry_after_ms: 1500 };
-        let status: tonic::Status = err.into();
-        let retry_after = status.metadata().get("retry-after-ms").unwrap().to_str().unwrap();
-        assert_eq!(retry_after, "1500");
-    }
-
-    #[test]
-    fn test_timeout_maps_to_deadline_exceeded() {
-        let err = ServiceError::Timeout { message: "Raft proposal timed out".to_string() };
-        let status: tonic::Status = err.into();
-        assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
-        assert!(status.message().contains("Raft proposal timed out"));
-    }
-
-    #[test]
-    fn test_unavailable_maps_correctly() {
-        let err = ServiceError::Unavailable { message: "node shutting down".to_string() };
-        let status: tonic::Status = err.into();
-        assert_eq!(status.code(), tonic::Code::Unavailable);
-        assert!(status.message().contains("node shutting down"));
-    }
-
-    // ========================================================================
-    // classify_raft_error tests
-    // ========================================================================
-
-    #[test]
-    fn test_classify_raft_error_leadership() {
-        let status = classify_raft_error("Not leader, forward to node 2");
-        assert_eq!(status.code(), tonic::Code::Unavailable);
-    }
-
-    #[test]
-    fn test_classify_raft_error_generic() {
-        let status = classify_raft_error("internal state machine error");
-        assert_eq!(status.code(), tonic::Code::Internal);
-    }
-
-    #[test]
-    fn test_classify_raft_error_case_insensitive() {
-        let status = classify_raft_error("NOT LEADER");
-        assert_eq!(status.code(), tonic::Code::Unavailable);
     }
 
     // ========================================================================

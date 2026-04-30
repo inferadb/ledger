@@ -19,8 +19,8 @@
 use std::{sync::Arc, time::Duration};
 
 use dashmap::DashMap;
-use inferadb_ledger_proto::proto::WriteSuccess;
 use inferadb_ledger_types::types::{OrganizationId, VaultId};
+use inferadb_ledger_wire::services::write::WriteSuccess;
 use moka::sync::Cache;
 use tokio::sync::Notify;
 
@@ -297,7 +297,8 @@ impl Default for IdempotencyCache {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
-    use inferadb_ledger_proto::proto::TxId;
+    use bytes::Bytes;
+    use inferadb_ledger_wire::services::shared::TxIdMessage;
 
     use super::*;
 
@@ -311,7 +312,7 @@ mod tests {
 
     fn make_result(block_height: u64, assigned_sequence: u64) -> WriteSuccess {
         WriteSuccess {
-            tx_id: Some(TxId { id: vec![0u8; 16] }),
+            tx_id: Some(TxIdMessage { id: Bytes::from_static(&[0u8; 16]) }),
             block_height,
             assigned_sequence,
             block_header: None,

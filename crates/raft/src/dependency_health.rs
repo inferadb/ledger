@@ -2,7 +2,11 @@
 //!
 //! Validates external dependencies beyond internal Raft state:
 //! - **Disk writability**: touch + delete a temp file in the data directory
-//! - **Peer reachability**: gRPC connectivity check to cluster peers
+//! - **Peer reachability**: in-process check against the shared `peer_liveness` map populated by
+//!   the Raft request path on every successful inbound consensus envelope. Transport-agnostic —
+//!   works identically for both the legacy gRPC `RaftService` and the wire-protocol
+//!   `WireRaftServerHandler`. A peer is considered reachable iff its last-seen timestamp falls
+//!   within [`PEER_LIVENESS_THRESHOLD`].
 //! - **Raft log lag**: ensures the node isn't too far behind the leader
 //! - **RMK (Region Master Key) provisioning**: reports loaded RMK versions per region
 //!
@@ -20,7 +24,26 @@ use inferadb_ledger_store::crypto::{RegionKeyManager, rmk_versions_for_health};
 use inferadb_ledger_types::{config::HealthCheckConfig, types::Region};
 use parking_lot::RwLock;
 
-use crate::{consensus_handle::ConsensusHandle, peer_address_map::PeerAddressMap};
+use crate::consensus_handle::ConsensusHandle;
+
+/// Shared peer-liveness map populated by the Raft request path on every
+/// successful inbound consensus envelope (`crates/services/src/services/raft.rs`
+/// for the gRPC path; `crates/raft/src/wire_consensus_transport/server_handler.rs`
+/// for the wire path). Maps peer node id → instant of the most recent
+/// observed message from that peer.
+///
+/// Owned by `bootstrap_node` (`crates/server/src/bootstrap.rs`) and shared
+/// with the admin service's `CheckPeerLiveness` RPC, the Raft service that
+/// records arrivals, and the dependency-health checker (this module).
+pub type PeerLivenessMap = Arc<RwLock<HashMap<u64, Instant>>>;
+
+/// Window for considering a peer reachable based on its `peer_liveness`
+/// entry. The Raft heartbeat cadence is ~100ms, so a peer that has been
+/// silent for more than [`PEER_LIVENESS_THRESHOLD`] has missed many
+/// heartbeats and is treated as unreachable. Sized generously above the
+/// heartbeat interval so transient hiccups (one missed heartbeat, brief
+/// reconnect) don't flap the readiness probe.
+pub const PEER_LIVENESS_THRESHOLD: Duration = Duration::from_secs(30);
 
 /// Result of a single dependency health check.
 #[derive(Debug, Clone)]
@@ -77,8 +100,10 @@ pub struct DependencyHealthChecker {
     /// `required_regions` keep `Region::GLOBAL` and the node's own region
     /// in the required set regardless.
     known_regions: Vec<(Region, bool)>,
-    /// Peer address map for TCP reachability checks.
-    peer_addresses: Option<PeerAddressMap>,
+    /// Shared peer-liveness map for in-process reachability checks. When
+    /// `None`, peer reachability falls through to "unknown — treat as
+    /// healthy" (single-node bootstrap path, before any peer has connected).
+    peer_liveness: Option<PeerLivenessMap>,
 }
 
 impl DependencyHealthChecker {
@@ -93,7 +118,7 @@ impl DependencyHealthChecker {
             node_region: None,
             node_requires_residency: inferadb_ledger_state::system::default_requires_residency(),
             known_regions: Vec::new(),
-            peer_addresses: None,
+            peer_liveness: None,
         }
     }
 
@@ -110,9 +135,13 @@ impl DependencyHealthChecker {
         self
     }
 
-    /// Attaches the peer address map for TCP reachability checks.
-    pub fn with_peer_addresses(mut self, peer_addresses: PeerAddressMap) -> Self {
-        self.peer_addresses = Some(peer_addresses);
+    /// Attaches the shared peer-liveness map for in-process reachability
+    /// checks. Transport-agnostic — the Raft request path on both the
+    /// legacy gRPC `RaftService` and the wire-protocol
+    /// `WireRaftServerHandler` updates this map, so the readiness probe
+    /// observes the same signal under either transport.
+    pub fn with_peer_liveness(mut self, peer_liveness: PeerLivenessMap) -> Self {
+        self.peer_liveness = Some(peer_liveness);
         self
     }
 
@@ -146,14 +175,11 @@ impl DependencyHealthChecker {
 
         let disk_result = check_disk(&self.data_dir);
         let raft_lag_result = check_raft_lag(&self.handle, self.config.max_raft_lag);
-        let default_map = PeerAddressMap::new();
-        let peer_addresses = self.peer_addresses.as_ref().unwrap_or(&default_map);
-        let peer_result = check_peer_reachability_handle(
+        let peer_result = check_peer_reachability_via_liveness(
             &self.handle,
-            peer_addresses,
-            Duration::from_secs(self.config.dependency_check_timeout_secs),
-        )
-        .await;
+            self.peer_liveness.as_ref(),
+            PEER_LIVENESS_THRESHOLD,
+        );
 
         results.insert("disk_writable".to_string(), disk_result);
         results.insert("raft_log_lag".to_string(), raft_lag_result);
@@ -253,15 +279,25 @@ pub(crate) fn check_raft_lag(handle: &ConsensusHandle, max_lag: u64) -> Dependen
     }
 }
 
-/// Checks TCP reachability for cluster peers.
+/// Checks peer reachability against the shared in-process liveness map.
 ///
-/// Resolves each voter's address from `peer_addresses` and attempts a TCP
-/// connection within `timeout`. Reports healthy when a majority of peers
-/// are reachable.
-pub(crate) async fn check_peer_reachability_handle(
+/// A peer is reachable iff the Raft request path has observed a successful
+/// inbound consensus envelope from it within `threshold`. Transport-agnostic:
+/// both the gRPC `RaftService::replicate` (`crates/services/src/services/raft.rs`)
+/// and the wire-protocol `WireRaftServerHandler::handle_replicate_stream`
+/// (`crates/raft/src/wire_consensus_transport/server_handler.rs`) write into
+/// the same map. The legacy out-of-band TCP probe was unsuited to the wire
+/// transport (QUIC/UDP) and has been removed; reading the same per-peer
+/// liveness state both transports already maintain is the cleaner signal.
+///
+/// Reports healthy when a majority of voters (including self) are reachable
+/// or when the cluster is single-node. When `peer_liveness` is `None` the
+/// probe degrades to "unknown — treat as healthy"; this preserves the
+/// bootstrap path where the liveness map hasn't yet been wired through.
+pub(crate) fn check_peer_reachability_via_liveness(
     handle: &ConsensusHandle,
-    peer_addresses: &PeerAddressMap,
-    timeout: Duration,
+    peer_liveness: Option<&PeerLivenessMap>,
+    threshold: Duration,
 ) -> DependencyCheckResult {
     let state = handle.shard_state();
     let my_id = handle.node_id();
@@ -269,6 +305,34 @@ pub(crate) async fn check_peer_reachability_handle(
     let voter_ids: Vec<u64> =
         state.voters.iter().filter(|&&id| id.0 != my_id).map(|id| id.0).collect();
 
+    let snapshot: HashMap<u64, Instant> = match peer_liveness {
+        Some(map) => map.read().clone(),
+        None => {
+            // Probe degrades to "unknown — treat as healthy" so a node
+            // missing the liveness map (single-node bootstrap before any
+            // peer has connected) doesn't fail readiness.
+            return evaluate_peer_reachability(&voter_ids, &HashMap::new(), threshold, true);
+        },
+    };
+
+    evaluate_peer_reachability(&voter_ids, &snapshot, threshold, false)
+}
+
+/// Pure-logic evaluator for peer reachability. Split out from
+/// [`check_peer_reachability_via_liveness`] so unit tests can exercise the
+/// quorum arithmetic without standing up a [`ConsensusHandle`] / engine /
+/// transport stack.
+///
+/// `liveness_unwired = true` short-circuits to "healthy" with a probe-skipped
+/// message; production callers pass `false` whenever the liveness map is
+/// available, even if it's empty (an empty map is a real signal — no peer
+/// has spoken to us recently).
+fn evaluate_peer_reachability(
+    voter_ids: &[u64],
+    snapshot: &HashMap<u64, Instant>,
+    threshold: Duration,
+    liveness_unwired: bool,
+) -> DependencyCheckResult {
     if voter_ids.is_empty() {
         return DependencyCheckResult {
             healthy: true,
@@ -276,32 +340,39 @@ pub(crate) async fn check_peer_reachability_handle(
         };
     }
 
+    if liveness_unwired {
+        return DependencyCheckResult {
+            healthy: true,
+            detail: "peer liveness map not wired; reachability probe skipped".to_string(),
+        };
+    }
+
+    let now = Instant::now();
     let mut reachable = 0u32;
     let mut unreachable = 0u32;
 
-    for &peer_id in &voter_ids {
-        let addr = match peer_addresses.get(peer_id) {
-            Some(a) => a,
-            None => {
-                unreachable += 1;
-                continue;
-            },
-        };
-
-        match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr)).await {
-            Ok(Ok(_)) => reachable += 1,
-            _ => unreachable += 1,
+    for &peer_id in voter_ids {
+        let seen_recently = snapshot
+            .get(&peer_id)
+            .map(|seen_at| now.saturating_duration_since(*seen_at) <= threshold)
+            .unwrap_or(false);
+        if seen_recently {
+            reachable += 1;
+        } else {
+            unreachable += 1;
         }
     }
 
     let other_voters = voter_ids.len() as u32;
     let total_voters = other_voters + 1; // include self
     let healthy = (reachable + 1) > total_voters / 2; // +1 for self
+    let threshold_secs = threshold.as_secs();
 
     DependencyCheckResult {
         healthy,
         detail: format!(
-            "{reachable}/{other_voters} peers reachable ({unreachable} unreachable, self counts toward {total_voters}-node quorum)"
+            "{reachable}/{other_voters} peers reachable within {threshold_secs}s \
+             ({unreachable} unreachable, self counts toward {total_voters}-node quorum)"
         ),
     }
 }
@@ -607,5 +678,129 @@ mod tests {
         assert!(result.healthy);
         // Probe file should be cleaned up
         assert!(!probe_path.exists());
+    }
+
+    // ─── Peer Reachability via Liveness Tests ────────────────────
+
+    #[test]
+    fn liveness_probe_single_node_cluster_is_healthy() {
+        let result = evaluate_peer_reachability(
+            &[],
+            &HashMap::new(),
+            PEER_LIVENESS_THRESHOLD,
+            // liveness_unwired =
+            false,
+        );
+        assert!(result.healthy);
+        assert!(result.detail.contains("single-node"));
+    }
+
+    #[test]
+    fn liveness_probe_skipped_when_map_unwired() {
+        // Even with peers in voter set, an unwired map degrades to healthy.
+        let result = evaluate_peer_reachability(
+            &[2, 3],
+            &HashMap::new(),
+            PEER_LIVENESS_THRESHOLD,
+            // liveness_unwired =
+            true,
+        );
+        assert!(result.healthy);
+        assert!(result.detail.contains("not wired"));
+    }
+
+    #[test]
+    fn liveness_probe_quorum_majority_reachable() {
+        // 3-node cluster (self + 2 peers); both peers seen recently → healthy.
+        let mut snap = HashMap::new();
+        snap.insert(2, Instant::now());
+        snap.insert(3, Instant::now());
+        let result = evaluate_peer_reachability(&[2, 3], &snap, PEER_LIVENESS_THRESHOLD, false);
+        assert!(result.healthy);
+        assert!(result.detail.contains("2/2 peers reachable"));
+    }
+
+    #[test]
+    fn liveness_probe_quorum_one_of_two_reachable_still_healthy() {
+        // 3-node cluster (self + 2 peers); 1 peer seen, self counts → 2/3 quorum.
+        let mut snap = HashMap::new();
+        snap.insert(2, Instant::now());
+        let result = evaluate_peer_reachability(&[2, 3], &snap, PEER_LIVENESS_THRESHOLD, false);
+        assert!(result.healthy, "self + 1 peer = majority of 3-node cluster");
+        assert!(result.detail.contains("1/2 peers reachable"));
+    }
+
+    #[test]
+    fn liveness_probe_quorum_no_peers_reachable_unhealthy() {
+        // 3-node cluster (self + 2 peers); 0 peers seen → 1/3 < majority.
+        let result =
+            evaluate_peer_reachability(&[2, 3], &HashMap::new(), PEER_LIVENESS_THRESHOLD, false);
+        assert!(!result.healthy);
+        assert!(result.detail.contains("0/2 peers reachable"));
+    }
+
+    #[test]
+    fn liveness_probe_5_node_cluster_two_reachable_healthy() {
+        // 5-node cluster (self + 4 peers); 2 peers seen, self counts → 3/5 quorum.
+        let mut snap = HashMap::new();
+        snap.insert(2, Instant::now());
+        snap.insert(3, Instant::now());
+        let result =
+            evaluate_peer_reachability(&[2, 3, 4, 5], &snap, PEER_LIVENESS_THRESHOLD, false);
+        assert!(result.healthy, "self + 2 peers = majority of 5-node cluster");
+        assert!(result.detail.contains("2/4 peers reachable"));
+    }
+
+    #[test]
+    fn liveness_probe_5_node_cluster_one_reachable_unhealthy() {
+        // 5-node cluster (self + 4 peers); 1 peer seen, self counts → 2/5 < majority.
+        let mut snap = HashMap::new();
+        snap.insert(2, Instant::now());
+        let result =
+            evaluate_peer_reachability(&[2, 3, 4, 5], &snap, PEER_LIVENESS_THRESHOLD, false);
+        assert!(!result.healthy);
+        assert!(result.detail.contains("1/4 peers reachable"));
+    }
+
+    #[test]
+    fn liveness_probe_stale_entries_treated_as_unreachable() {
+        // 3-node cluster; both peers have entries but both are stale.
+        let stale_threshold = Duration::from_millis(1);
+        let mut snap = HashMap::new();
+        snap.insert(2, Instant::now() - Duration::from_secs(60));
+        snap.insert(3, Instant::now() - Duration::from_secs(60));
+        let result = evaluate_peer_reachability(&[2, 3], &snap, stale_threshold, false);
+        assert!(!result.healthy);
+        assert!(result.detail.contains("0/2 peers reachable"));
+    }
+
+    #[test]
+    fn liveness_probe_threshold_is_inclusive_lower_bound() {
+        // A peer seen exactly `threshold` ago is still considered reachable.
+        // (Saturation arithmetic + `<=` comparison make this the boundary.)
+        let threshold = Duration::from_secs(30);
+        let mut snap = HashMap::new();
+        // Subtract 25s — comfortably within 30s threshold.
+        snap.insert(2, Instant::now() - Duration::from_secs(25));
+        let result = evaluate_peer_reachability(&[2], &snap, threshold, false);
+        assert!(result.healthy);
+        assert!(result.detail.contains("1/1 peers reachable"));
+    }
+
+    #[test]
+    fn liveness_probe_unknown_peer_unreachable() {
+        // Voter set lists peer 99 but the liveness map has no entry for it.
+        let mut snap = HashMap::new();
+        snap.insert(2, Instant::now()); // unrelated entry
+        let result = evaluate_peer_reachability(&[99], &snap, PEER_LIVENESS_THRESHOLD, false);
+        assert!(!result.healthy);
+        assert!(result.detail.contains("0/1 peers reachable"));
+    }
+
+    #[test]
+    fn liveness_probe_threshold_constant_is_thirty_seconds() {
+        // Sanity-check the documented threshold so a future tweak to the
+        // constant doesn't silently shrink the missed-heartbeat window.
+        assert_eq!(PEER_LIVENESS_THRESHOLD, Duration::from_secs(30));
     }
 }

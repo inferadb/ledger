@@ -2,15 +2,27 @@
 //!
 //! Exercises the WatchBlocks streaming API under sustained block production
 //! exceeding broadcast channel capacity, with mid-stream reconnection.
+//!
+//! F.1.f.2.Stage1e Wave 6: migrated from legacy tonic `create_read_client` /
+//! `create_write_client` to wire-protocol siblings (`wire_read_client` /
+//! `wire_write_client`). The wire-services `ReadServiceClient::watch_blocks`
+//! returns a `TypedResponseStream<BlockAnnouncement>` which implements
+//! `futures::Stream<Item = Result<BlockAnnouncement, RpcError>>` directly —
+//! no tonic `.into_inner()` unwrap needed.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures::StreamExt;
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use inferadb_ledger_wire::services::{read as wr, shared as ws, write as ww};
 
-use crate::common::{TestCluster, create_read_client, create_write_client};
+use crate::common::{
+    TestCluster, wire_create_test_organization, wire_create_test_vault, wire_read_client,
+    wire_write_client,
+};
 
 // ============================================================================
 // Test Helpers
@@ -18,63 +30,57 @@ use crate::common::{TestCluster, create_read_client, create_write_client};
 
 /// Creates an organization and returns its slug.
 async fn create_organization(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     name: &str,
-    node: &crate::common::TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
-    let (slug, _admin) = crate::common::create_test_organization(addr, name, node).await?;
+    let (slug, _admin) = wire_create_test_organization(cluster, node_id, name).await?;
     Ok(slug)
 }
 
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
-    crate::common::create_test_vault(addr, organization).await
+    wire_create_test_vault(cluster, node_id, organization).await
 }
 
 /// Writes a key-value pair to a vault and return the block height.
 async fn write_entity(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     organization: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
     value: &[u8],
     client_id: &str,
 ) -> Result<u64, Box<dyn std::error::Error>> {
-    let mut client = create_write_client(addr).await?;
+    let client = wire_write_client(cluster, node_id);
 
-    let request = inferadb_ledger_proto::proto::WriteRequest {
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: organization.value(),
-        }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
-        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.to_string() }),
-        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        operations: vec![inferadb_ledger_proto::proto::Operation {
-            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
-                inferadb_ledger_proto::proto::SetEntity {
-                    key: key.to_string(),
-                    value: value.to_vec(),
-                    condition: None,
-                    expires_at: None,
-                },
-            )),
+    let request = ww::WriteRequest {
+        organization: Some(organization),
+        vault: Some(vault),
+        client_id: Some(ws::ClientIdMessage { id: client_id.to_string() }),
+        idempotency_key: Bytes::copy_from_slice(uuid::Uuid::new_v4().as_bytes()),
+        operations: vec![ws::Operation {
+            op: Some(ws::OperationKind::SetEntity(ws::SetEntity {
+                key: key.to_string(),
+                value: Bytes::copy_from_slice(value),
+                expires_at: None,
+                condition: None,
+            })),
         }],
         include_tx_proof: false,
         caller: None,
     };
 
-    let response = client.write(request).await?.into_inner();
+    let response = client.write(request, rand::random::<u128>()).await?;
 
     match response.result {
-        Some(inferadb_ledger_proto::proto::write_response::Result::Success(s)) => {
-            Ok(s.block_height)
-        },
-        Some(inferadb_ledger_proto::proto::write_response::Result::Error(e)) => {
-            Err(format!("Write failed: {:?}", e).into())
-        },
+        Some(ww::WriteResponseResult::Success(s)) => Ok(s.block_height),
+        Some(ww::WriteResponseResult::Error(e)) => Err(format!("Write failed: {:?}", e).into()),
         None => Err("No result in response".into()),
     }
 }
@@ -98,32 +104,28 @@ async fn write_entity(
 /// 3. Mid-stream reconnection from an arbitrary height works correctly
 #[tokio::test]
 async fn test_watch_blocks_high_volume_reconnect() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
     let organization =
-        create_organization(&leader.addr, "highvol-ns", leader).await.expect("create organization");
-    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
+        create_organization(&cluster, leader.id, "highvol-ns").await.expect("create organization");
+    let vault = create_vault(&cluster, leader.id, organization).await.expect("create vault");
 
     // Subscribe from block 1
-    let mut read_client = create_read_client(&leader.addr).await.expect("create read client");
-    let request = inferadb_ledger_proto::proto::WatchBlocksRequest {
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: organization.value(),
-        }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
+    let read_client = wire_read_client(&cluster, leader.id);
+    let request = wr::WatchBlocksRequest {
+        organization: Some(organization),
+        vault: Some(vault),
         start_height: 1,
         caller: None,
     };
 
-    let mut stream =
-        read_client.watch_blocks(request).await.expect("watch_blocks should succeed").into_inner();
+    let mut stream = read_client
+        .watch_blocks(request, rand::random::<u128>())
+        .await
+        .expect("watch_blocks should succeed");
 
     // Write 500 blocks — validates streaming and reconnection without approaching
     // the B+ tree page overflow threshold. Reuse a single client_id to avoid
@@ -132,7 +134,8 @@ async fn test_watch_blocks_high_volume_reconnect() {
     let client_id = "highvol-writer";
     for i in 1..=total_writes {
         write_entity(
-            &leader.addr,
+            &cluster,
+            leader.id,
             organization,
             vault,
             &format!("hv-key-{}", i),
@@ -177,21 +180,18 @@ async fn test_watch_blocks_high_volume_reconnect() {
     // Drop the first stream and reconnect from an arbitrary mid-point
     drop(stream);
     let reconnect_height = total_writes / 2;
-    let mut read_client2 = create_read_client(&leader.addr).await.expect("create read client");
-    let reconnect_request = inferadb_ledger_proto::proto::WatchBlocksRequest {
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: organization.value(),
-        }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
+    let read_client2 = wire_read_client(&cluster, leader.id);
+    let reconnect_request = wr::WatchBlocksRequest {
+        organization: Some(organization),
+        vault: Some(vault),
         start_height: reconnect_height,
         caller: None,
     };
 
     let mut reconnect_stream = read_client2
-        .watch_blocks(reconnect_request)
+        .watch_blocks(reconnect_request, rand::random::<u128>())
         .await
-        .expect("reconnection should succeed")
-        .into_inner();
+        .expect("reconnection should succeed");
 
     // Verify we receive the historical blocks from reconnect_height onwards
     let mut reconnect_count = 0u64;

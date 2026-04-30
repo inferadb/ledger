@@ -1,6 +1,5 @@
 //! Cryptographically verified read operations.
 
-use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{OrganizationSlug, UserSlug, VaultSlug};
 
 use crate::{
@@ -16,26 +15,17 @@ impl LedgerClient {
 
     /// Reads a value with cryptographic proof for client-side verification.
     ///
-    /// Returns the value along with a Merkle proof that can be used to verify
-    /// the value is authentic without trusting the server. The proof links
-    /// the entity value to the state root in the block header.
-    ///
-    /// # Arguments
-    ///
-    /// * `caller` - Identity of the user performing this operation (external slug).
-    /// * `organization` - Organization slug (external identifier).
-    /// * `vault` - Optional vault slug (omit for organization-level entities).
-    /// * `key` - Entity key to read.
-    /// * `opts` - Verification options (height, chain proof).
-    ///
-    /// # Returns
-    ///
-    /// `VerifiedValue` containing the value and proofs, or `None` if key not found.
+    /// Returns `Some(`[`VerifiedValue`](crate::VerifiedValue)`)` containing
+    /// the value and a Merkle proof linking the entity to the state root in
+    /// the block header, or `None` if the key was not found. The proof can be
+    /// verified client-side without trusting the server. Omit `vault` for
+    /// organization-level entities. Pass [`VerifyOpts`](crate::VerifyOpts) to
+    /// request a specific block height or include a chain proof.
     ///
     /// # Errors
     ///
-    /// Returns `SdkError::Shutdown` if the client has been shut down.
-    /// Returns `SdkError::Rpc` if the read fails after retry attempts.
+    /// Returns [`crate::SdkError::Shutdown`] if the client has been shut down,
+    /// or [`crate::SdkError::Rpc`] if the read fails after retry attempts.
     ///
     /// # Example
     ///
@@ -66,28 +56,20 @@ impl LedgerClient {
         self.call_with_retry("verified_read", || {
             let pool = pool.clone();
             let key = key.clone();
+            let opts = opts.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_read_client);
-
-                let request = proto::VerifiedReadRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    vault: vault.map(|v| proto::VaultSlug { slug: v.value() }),
-                    key: key.clone(),
-                    at_height: opts.at_height,
-                    include_chain_proof: opts.include_chain_proof,
-                    trusted_height: opts.trusted_height,
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                let response =
-                    client.verified_read(tonic::Request::new(request)).await?.into_inner();
-
-                // If no value and no block header, key was not found
-                if response.value.is_none() && response.block_header.is_none() {
-                    return Ok(None);
-                }
-
-                Ok(VerifiedValue::from_proto(response))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::verified_read::verified_read(
+                    wire_client,
+                    request_id,
+                    caller,
+                    organization,
+                    vault,
+                    key,
+                    opts,
+                )
+                .await
             }
         })
         .await

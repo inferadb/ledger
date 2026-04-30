@@ -1,6 +1,5 @@
 //! Query and write operation types: entities, relationships, operations, pagination.
 
-use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::VaultSlug;
 
 use crate::types::{
@@ -48,16 +47,6 @@ pub struct Entity {
 }
 
 impl Entity {
-    /// Converts from protobuf message.
-    pub(crate) fn from_proto(proto: proto::Entity) -> Self {
-        Self {
-            key: proto.key,
-            value: proto.value,
-            expires_at: proto.expires_at.filter(|&ts| ts > 0),
-            version: proto.version,
-        }
-    }
-
     /// Checks if this entity has expired relative to a given timestamp.
     pub fn is_expired_at(&self, now_secs: u64) -> bool {
         self.expires_at.is_some_and(|exp| exp <= now_secs)
@@ -87,11 +76,6 @@ impl Relationship {
         subject: impl Into<String>,
     ) -> Self {
         Self { resource: resource.into(), relation: relation.into(), subject: subject.into() }
-    }
-
-    /// Converts from protobuf message.
-    pub(crate) fn from_proto(proto: proto::Relationship) -> Self {
-        Self { resource: proto.resource, relation: proto.relation, subject: proto.subject }
     }
 }
 
@@ -361,21 +345,6 @@ pub struct VerifiedValue {
 }
 
 impl VerifiedValue {
-    /// Creates from protobuf response.
-    pub(crate) fn from_proto(proto: proto::VerifiedReadResponse) -> Option<Self> {
-        // Block header is required for verification
-        let block_header = proto.block_header.map(BlockHeader::from_proto)?;
-        let merkle_proof = proto.merkle_proof.map(MerkleProof::from_proto)?;
-
-        Some(Self {
-            value: proto.value,
-            block_height: proto.block_height,
-            block_header,
-            merkle_proof,
-            chain_proof: proto.chain_proof.map(ChainProof::from_proto),
-        })
-    }
-
     /// Verifies the value is authentic.
     ///
     /// Checks that the Merkle proof correctly links the value to the state root
@@ -578,38 +547,6 @@ impl Operation {
             },
         }
     }
-
-    /// Converts to protobuf operation.
-    pub(crate) fn to_proto(&self) -> proto::Operation {
-        let op = match self {
-            Operation::SetEntity { key, value, expires_at, condition } => {
-                proto::operation::Op::SetEntity(proto::SetEntity {
-                    key: key.clone(),
-                    value: value.clone(),
-                    expires_at: *expires_at,
-                    condition: condition.as_ref().map(SetCondition::to_proto),
-                })
-            },
-            Operation::DeleteEntity { key } => {
-                proto::operation::Op::DeleteEntity(proto::DeleteEntity { key: key.clone() })
-            },
-            Operation::CreateRelationship { resource, relation, subject } => {
-                proto::operation::Op::CreateRelationship(proto::CreateRelationship {
-                    resource: resource.clone(),
-                    relation: relation.clone(),
-                    subject: subject.clone(),
-                })
-            },
-            Operation::DeleteRelationship { resource, relation, subject } => {
-                proto::operation::Op::DeleteRelationship(proto::DeleteRelationship {
-                    resource: resource.clone(),
-                    relation: relation.clone(),
-                    subject: subject.clone(),
-                })
-            },
-        };
-        proto::Operation { op: Some(op) }
-    }
 }
 
 impl SetCondition {
@@ -637,16 +574,5 @@ impl SetCondition {
             None => SetCondition::NotExists,
             Some(value) => SetCondition::ValueEquals(value.into()),
         }
-    }
-
-    /// Converts to protobuf set condition.
-    pub(crate) fn to_proto(&self) -> proto::SetCondition {
-        let condition = match self {
-            SetCondition::NotExists => proto::set_condition::Condition::NotExists(true),
-            SetCondition::MustExist => proto::set_condition::Condition::MustExists(true),
-            SetCondition::Version(v) => proto::set_condition::Condition::Version(*v),
-            SetCondition::ValueEquals(v) => proto::set_condition::Condition::ValueEquals(v.clone()),
-        };
-        proto::SetCondition { condition: Some(condition) }
     }
 }

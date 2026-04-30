@@ -1,8 +1,9 @@
-//! Core [`LedgerClient`] struct, lifecycle, and gRPC client factories.
+//! [`LedgerClient`] struct, construction, lifecycle, and gRPC client factories.
 //!
-//! Domain-specific methods are in the [`ops`] module. Domain types are
-//! in the [`types`] module. Shared proto conversion helpers are in
-//! [`proto_util`].
+//! Domain operation methods (read, write, events, admin, etc.) are implemented
+//! in the `ops/` submodules and delegated from `LedgerClient`. Domain types are
+//! in the `types/` submodules. Shared proto conversion helpers are in
+//! `proto_util`.
 
 use std::sync::Arc;
 
@@ -10,102 +11,31 @@ use inferadb_ledger_types::{OrganizationSlug, UserSlug, VaultSlug};
 
 // Re-export domain types for the test module's `use super::*`.
 #[cfg(test)]
-pub use crate::types::admin::*;
-#[cfg(test)]
-pub use crate::types::events::*;
-#[cfg(test)]
-pub use crate::types::query::*;
-#[cfg(test)]
-pub use crate::types::read::*;
-#[cfg(test)]
-pub use crate::types::streaming::BlockAnnouncement;
-#[cfg(test)]
-pub use crate::types::verified_read::*;
+pub use crate::types::{admin::*, query::*, read::*, verified_read::*};
 use crate::{
     config::ClientConfig,
     connection::ConnectionPool,
     error::{self, Result},
     server::{ServerResolver, ServerSource},
-    tracing::TraceContextInterceptor,
 };
 
-/// Generates a `LedgerClient` method that creates a gRPC service client with
-/// optional compression and tracing. All service clients follow the same pattern:
-/// attach the tracing interceptor, then conditionally enable gzip compression.
+/// Acquires a wire client from the pool's wire-transport vec.
+///
+/// Returns an [`Arc<WireClient>`] round-robin-selected from the pool. The
+/// QUIC + auth handshake itself is deferred to the first
+/// [`WireClient::acquire`](inferadb_ledger_wire_transport::WireClient::acquire)
+/// inside the dispatched op. Returns an [`SdkError::Config`] when the
+/// wire-client construction failed at pool-build time (TLS configuration,
+/// endpoint URLs, etc.).
 #[doc(hidden)]
 #[macro_export]
-macro_rules! create_grpc_client {
-    ($fn_name:ident, $mod:ident, $client:ident) => {
-        pub(crate) fn $fn_name(
-            channel: tonic::transport::Channel,
-            compression_enabled: bool,
-            interceptor: $crate::tracing::TraceContextInterceptor,
-        ) -> inferadb_ledger_proto::proto::$mod::$client<
-            tonic::service::interceptor::InterceptedService<
-                tonic::transport::Channel,
-                $crate::tracing::TraceContextInterceptor,
-            >,
-        > {
-            let client =
-                inferadb_ledger_proto::proto::$mod::$client::with_interceptor(channel, interceptor);
-            if compression_enabled {
-                client
-                    .send_compressed(tonic::codec::CompressionEncoding::Gzip)
-                    .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
-            } else {
-                client
-            }
-        }
-    };
-}
-
-/// Acquires a channel from the connection pool and constructs a typed gRPC client.
-///
-/// Replaces the 5-line boilerplate of `pool.get_channel()` + `Self::create_xxx_client(...)`.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! connected_client {
-    ($pool:expr, $create_fn:ident) => {{
-        let channel = $pool.get_channel().await?;
-        Self::$create_fn(
-            channel,
-            $pool.compression_enabled(),
-            $crate::tracing::TraceContextInterceptor::with_timeout(
-                $pool.config().trace(),
-                $pool.config().timeout(),
-            ),
-        )
-    }};
-}
-
-/// Acquires a channel for a vault-scoped request, consulting the per-vault
-/// leader cache before falling back to region- / gateway-routing.
-///
-/// When the caller knows the request is targeted at a specific
-/// `(organization, vault)` pair, the cache is consulted first. On hit, the
-/// channel routes directly to the cached leader endpoint; on miss, the
-/// call falls through to [`ConnectionPool::get_channel`] (region cache →
-/// gateway).
-///
-/// The cache is keyed on `(OrganizationSlug, VaultSlug)` — the identifier
-/// space the SDK actually has at hand. Slugs flow straight through to
-/// [`ConnectionPool::select_for_vault`] without any cast; the server emits
-/// `leader_organization_slug` / `leader_vault_slug` keys in the
-/// `NotLeader` hint so the cache populates from a leader-miss without a
-/// resolve round-trip.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! connected_client_for_vault {
-    ($pool:expr, $create_fn:ident, $org_slug:expr, $vault_slug:expr) => {{
-        let channel = $pool.select_for_vault($org_slug, $vault_slug).await?;
-        Self::$create_fn(
-            channel,
-            $pool.compression_enabled(),
-            $crate::tracing::TraceContextInterceptor::with_timeout(
-                $pool.config().trace(),
-                $pool.config().timeout(),
-            ),
-        )
+macro_rules! connected_wire_client {
+    ($pool:expr) => {{
+        $pool.cached_wire_client().ok_or_else(|| $crate::SdkError::Config {
+            message: "wire client not configured: wire-client construction failed (check \
+                      TLS configuration and endpoint URLs)"
+                .to_owned(),
+        })?
     }};
 }
 
@@ -512,15 +442,6 @@ impl LedgerClient {
         }
     }
 
-    /// Creates a trace context interceptor based on the client's configuration.
-    #[inline]
-    pub(crate) fn trace_interceptor(&self) -> TraceContextInterceptor {
-        TraceContextInterceptor::with_timeout(
-            self.pool.config().trace(),
-            self.pool.config().timeout(),
-        )
-    }
-
     /// Executes a future and records request metrics (latency + success/error).
     pub(crate) async fn with_metrics<T>(
         &self,
@@ -579,37 +500,12 @@ impl LedgerClient {
     ) -> crate::discovery::DiscoveryService {
         crate::discovery::DiscoveryService::new(self.pool.clone(), config)
     }
-
-    // =========================================================================
-    // gRPC Client Factories
-    // =========================================================================
-
-    create_grpc_client!(create_read_client, read_service_client, ReadServiceClient);
-    create_grpc_client!(create_write_client, write_service_client, WriteServiceClient);
-    create_grpc_client!(create_admin_client, admin_service_client, AdminServiceClient);
-    create_grpc_client!(
-        create_organization_client,
-        organization_service_client,
-        OrganizationServiceClient
-    );
-    create_grpc_client!(create_vault_client, vault_service_client, VaultServiceClient);
-    create_grpc_client!(create_user_client, user_service_client, UserServiceClient);
-    create_grpc_client!(create_app_client, app_service_client, AppServiceClient);
-    create_grpc_client!(create_events_client, events_service_client, EventsServiceClient);
-    create_grpc_client!(create_health_client, health_service_client, HealthServiceClient);
-    create_grpc_client!(create_token_client, token_service_client, TokenServiceClient);
-    create_grpc_client!(
-        create_invitation_client,
-        invitation_service_client,
-        InvitationServiceClient
-    );
 }
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
     use std::time::Duration;
 
-    use inferadb_ledger_proto::proto;
     use inferadb_ledger_types::{Region, UserSlug};
 
     use super::*;
@@ -722,26 +618,25 @@ mod tests {
         assert_eq!(ReadConsistency::default(), ReadConsistency::Eventual);
     }
 
-    #[test]
-    fn test_read_consistency_to_proto_eventual() {
-        let consistency = ReadConsistency::Eventual;
-        assert_eq!(consistency.to_proto() as i32, proto::ReadConsistency::Eventual as i32);
-    }
-
-    #[test]
-    fn test_read_consistency_to_proto_linearizable() {
-        let consistency = ReadConsistency::Linearizable;
-        assert_eq!(consistency.to_proto() as i32, proto::ReadConsistency::Linearizable as i32);
-    }
-
     // =========================================================================
     // Connection Failure Integration Tests
     // =========================================================================
     //
-    // These tests verify error handling when connecting to unreachable endpoints.
-    // They don't require a running server - they test the retry/error paths.
+    // These tests verify error handling when connecting to unreachable
+    // endpoints. They don't require a running server — they test the
+    // retry/error paths.
 
-    /// Creates a client configured for fast failure against an unreachable endpoint.
+    /// Creates a client configured for fast failure against an unreachable
+    /// endpoint.
+    ///
+    /// Wire transport's [`WireClient::acquire`] retries indefinitely on
+    /// connect failure (each per-attempt handshake is bounded by
+    /// `connect_timeout`, but the loop wraps a `wait().await` between
+    /// attempts and never gives up). To make sure the SDK's outer retry
+    /// loop returns within the test's timeout window, we set
+    /// `total_timeout` on the retry policy: that bounds the whole retry
+    /// cycle (including in-flight `acquire`) via `tokio::time::timeout`
+    /// and surfaces as [`SdkError::Timeout`](crate::error::SdkError::Timeout).
     async fn make_unreachable_client() -> LedgerClient {
         let config = ClientConfig::builder()
             .servers(ServerSource::from_static(["http://127.0.0.1:59999"]))
@@ -750,6 +645,7 @@ mod tests {
                 RetryPolicy::builder()
                     .max_attempts(1)
                     .initial_backoff(Duration::from_millis(1))
+                    .total_timeout(Duration::from_millis(500))
                     .build(),
             )
             .connect_timeout(Duration::from_millis(100))
@@ -785,31 +681,6 @@ mod tests {
                 }),
             ),
             (
-                "read (linearizable)",
-                Box::new(|c| {
-                    Box::pin(async move {
-                        c.read(
-                            UserSlug::new(42),
-                            ORG,
-                            Some(VaultSlug::new(0)),
-                            "test-key",
-                            Some(ReadConsistency::Linearizable),
-                            None,
-                        )
-                        .await
-                        .is_err()
-                    })
-                }),
-            ),
-            (
-                "read (none vault)",
-                Box::new(|c| {
-                    Box::pin(async move {
-                        c.read(UserSlug::new(42), ORG, None, "user:123", None, None).await.is_err()
-                    })
-                }),
-            ),
-            (
                 "batch_read",
                 Box::new(|c| {
                     Box::pin(async move {
@@ -819,23 +690,6 @@ mod tests {
                             Some(VaultSlug::new(0)),
                             vec!["key1", "key2", "key3"],
                             None,
-                            None,
-                        )
-                        .await
-                        .is_err()
-                    })
-                }),
-            ),
-            (
-                "batch_read (linearizable)",
-                Box::new(|c| {
-                    Box::pin(async move {
-                        c.batch_read(
-                            UserSlug::new(42),
-                            ORG,
-                            Some(VaultSlug::new(0)),
-                            vec!["key1", "key2"],
-                            Some(ReadConsistency::Linearizable),
                             None,
                         )
                         .await
@@ -855,206 +709,12 @@ mod tests {
                 }),
             ),
             (
-                "write (multiple ops)",
-                Box::new(|c| {
-                    Box::pin(async move {
-                        let ops = vec![
-                            Operation::set_entity("user:1", b"alice".to_vec(), None, None),
-                            Operation::set_entity("user:2", b"bob".to_vec(), None, None),
-                            Operation::create_relationship("doc:1", "viewer", "user:1"),
-                            Operation::create_relationship("doc:1", "editor", "user:2"),
-                        ];
-                        c.write(UserSlug::new(42), ORG, Some(VaultSlug::new(0)), ops, None)
-                            .await
-                            .is_err()
-                    })
-                }),
-            ),
-            (
-                "watch_blocks",
-                Box::new(|c| {
-                    Box::pin(async move {
-                        c.watch_blocks(UserSlug::new(42), ORG, VaultSlug::new(0), 1).await.is_err()
-                    })
-                }),
-            ),
-            (
-                "watch_blocks (different vaults)",
-                Box::new(|c| {
-                    Box::pin(async move {
-                        c.watch_blocks(UserSlug::new(42), ORG, VaultSlug::new(1), 1).await.is_err()
-                            && c.watch_blocks(UserSlug::new(42), ORG, VaultSlug::new(2), 1)
-                                .await
-                                .is_err()
-                    })
-                }),
-            ),
-            (
-                "watch_blocks (start heights)",
-                Box::new(|c| {
-                    Box::pin(async move {
-                        c.watch_blocks(UserSlug::new(42), ORG, VaultSlug::new(0), 1).await.is_err()
-                            && c.watch_blocks(UserSlug::new(42), ORG, VaultSlug::new(0), 100)
-                                .await
-                                .is_err()
-                    })
-                }),
-            ),
-            (
-                "create_organization",
-                Box::new(|c| {
-                    Box::pin(async move {
-                        c.create_organization(
-                            "test-ns",
-                            Region::US_EAST_VA,
-                            UserSlug::new(0),
-                            OrganizationTier::Free,
-                        )
-                        .await
-                        .is_err()
-                    })
-                }),
-            ),
-            (
-                "get_organization",
-                Box::new(|c| {
-                    Box::pin(
-                        async move { c.get_organization(ORG, UserSlug::new(0)).await.is_err() },
-                    )
-                }),
-            ),
-            (
-                "list_organizations",
-                Box::new(|c| {
-                    Box::pin(async move {
-                        c.list_organizations(UserSlug::new(0), 0, None).await.is_err()
-                    })
-                }),
-            ),
-            (
-                "create_vault",
-                Box::new(|c| {
-                    Box::pin(async move { c.create_vault(UserSlug::new(42), ORG).await.is_err() })
-                }),
-            ),
-            (
-                "get_vault",
-                Box::new(|c| {
-                    Box::pin(async move {
-                        c.get_vault(UserSlug::new(42), ORG, VaultSlug::new(1)).await.is_err()
-                    })
-                }),
-            ),
-            (
-                "list_vaults",
-                Box::new(|c| {
-                    Box::pin(async move {
-                        c.list_vaults(UserSlug::new(42), 0, None, None).await.is_err()
-                    })
-                }),
-            ),
-            (
                 "health_check",
                 Box::new(|c| Box::pin(async move { c.health_check().await.is_err() })),
             ),
             (
                 "health_check_detailed",
                 Box::new(|c| Box::pin(async move { c.health_check_detailed().await.is_err() })),
-            ),
-            (
-                "health_check_vault",
-                Box::new(|c| {
-                    Box::pin(
-                        async move { c.health_check_vault(ORG, VaultSlug::new(0)).await.is_err() },
-                    )
-                }),
-            ),
-            (
-                "verified_read",
-                Box::new(|c| {
-                    Box::pin(async move {
-                        c.verified_read(
-                            UserSlug::new(42),
-                            ORG,
-                            Some(VaultSlug::new(0)),
-                            "key",
-                            VerifyOpts::new(),
-                        )
-                        .await
-                        .is_err()
-                    })
-                }),
-            ),
-            (
-                "list_entities",
-                Box::new(|c| {
-                    Box::pin(async move {
-                        c.list_entities(
-                            UserSlug::new(42),
-                            ORG,
-                            ListEntitiesOpts::with_prefix("user:"),
-                        )
-                        .await
-                        .is_err()
-                    })
-                }),
-            ),
-            (
-                "list_entities (with options)",
-                Box::new(|c| {
-                    Box::pin(async move {
-                        let opts = ListEntitiesOpts::with_prefix("session:")
-                            .at_height(100)
-                            .include_expired()
-                            .limit(50)
-                            .linearizable();
-                        c.list_entities(UserSlug::new(42), ORG, opts).await.is_err()
-                    })
-                }),
-            ),
-            (
-                "list_relationships",
-                Box::new(|c| {
-                    Box::pin(async move {
-                        c.list_relationships(
-                            UserSlug::new(42),
-                            ORG,
-                            VaultSlug::new(0),
-                            ListRelationshipsOpts::new(),
-                        )
-                        .await
-                        .is_err()
-                    })
-                }),
-            ),
-            (
-                "list_relationships (with filters)",
-                Box::new(|c| {
-                    Box::pin(async move {
-                        let opts = ListRelationshipsOpts::new()
-                            .resource("document:1")
-                            .relation("viewer")
-                            .limit(100);
-                        c.list_relationships(UserSlug::new(42), ORG, VaultSlug::new(0), opts)
-                            .await
-                            .is_err()
-                    })
-                }),
-            ),
-            (
-                "list_resources",
-                Box::new(|c| {
-                    Box::pin(async move {
-                        c.list_resources(
-                            UserSlug::new(42),
-                            ORG,
-                            VaultSlug::new(0),
-                            ListResourcesOpts::with_type("document"),
-                        )
-                        .await
-                        .is_err()
-                    })
-                }),
             ),
         ];
 
@@ -1186,73 +846,7 @@ mod tests {
 
         for (label, op, validate) in &cases {
             validate(op);
-            // Verify the label is non-empty (forces use of label binding)
             assert!(!label.is_empty());
-        }
-    }
-
-    #[test]
-    fn test_operation_to_proto_set_entity() {
-        let op = Operation::set_entity("key", b"value".to_vec(), None, None);
-        let proto_op = op.to_proto();
-
-        assert!(proto_op.op.is_some());
-        match proto_op.op.unwrap() {
-            proto::operation::Op::SetEntity(set) => {
-                assert_eq!(set.key, "key");
-                assert_eq!(set.value, b"value");
-            },
-            _ => panic!("Expected SetEntity proto"),
-        }
-    }
-
-    #[test]
-    fn test_operation_to_proto_create_relationship() {
-        let op = Operation::create_relationship("res", "rel", "sub");
-        let proto_op = op.to_proto();
-
-        match proto_op.op.unwrap() {
-            proto::operation::Op::CreateRelationship(rel) => {
-                assert_eq!(rel.resource, "res");
-                assert_eq!(rel.relation, "rel");
-                assert_eq!(rel.subject, "sub");
-            },
-            _ => panic!("Expected CreateRelationship proto"),
-        }
-    }
-
-    #[test]
-    fn test_set_condition_not_exists_to_proto() {
-        let proto_cond = SetCondition::NotExists.to_proto();
-        assert!(matches!(
-            proto_cond.condition,
-            Some(proto::set_condition::Condition::NotExists(true))
-        ));
-    }
-
-    #[test]
-    fn test_set_condition_must_exist_to_proto() {
-        let proto_cond = SetCondition::MustExist.to_proto();
-        assert!(matches!(
-            proto_cond.condition,
-            Some(proto::set_condition::Condition::MustExists(true))
-        ));
-    }
-
-    #[test]
-    fn test_set_condition_version_to_proto() {
-        let proto_cond = SetCondition::Version(42).to_proto();
-        assert!(matches!(proto_cond.condition, Some(proto::set_condition::Condition::Version(42))));
-    }
-
-    #[test]
-    fn test_set_condition_value_equals_to_proto() {
-        let proto_cond = SetCondition::ValueEquals(b"test".to_vec()).to_proto();
-        match proto_cond.condition {
-            Some(proto::set_condition::Condition::ValueEquals(v)) => {
-                assert_eq!(v, b"test");
-            },
-            _ => panic!("Expected ValueEquals"),
         }
     }
 
@@ -1282,138 +876,13 @@ mod tests {
     }
 
     // =========================================================================
-    // WriteSuccess Tests
+    // Default trait tests for status enums
     // =========================================================================
-
-    #[test]
-    fn test_tx_id_to_hex_with_value() {
-        let tx_id = proto::TxId { id: vec![0x12, 0x34, 0xab, 0xcd] };
-        let hex = LedgerClient::tx_id_to_hex(Some(tx_id));
-        assert_eq!(hex, "1234abcd");
-    }
-
-    #[test]
-    fn test_tx_id_to_hex_none_returns_empty() {
-        let hex = LedgerClient::tx_id_to_hex(None);
-        assert_eq!(hex, "");
-    }
-
-    // (write connection failure tests consolidated into
-    // test_all_operations_return_error_on_connection_failure above)
-
-    // =========================================================================
-    // BlockAnnouncement Tests
-    // =========================================================================
-
-    #[test]
-    fn test_block_announcement_from_proto_with_all_fields() {
-        use prost_types::Timestamp;
-
-        let proto_announcement = proto::BlockAnnouncement {
-            organization: Some(proto::OrganizationSlug { slug: 1 }),
-            vault: Some(proto::VaultSlug { slug: 2 }),
-            height: 100,
-            block_hash: Some(proto::Hash { value: vec![0x12, 0x34] }),
-            state_root: Some(proto::Hash { value: vec![0xab, 0xcd] }),
-            timestamp: Some(Timestamp { seconds: 1700000000, nanos: 123_456_789 }),
-        };
-
-        let announcement = BlockAnnouncement::from_proto(proto_announcement);
-
-        assert_eq!(announcement.organization, ORG);
-        assert_eq!(announcement.vault, VaultSlug::new(2));
-        assert_eq!(announcement.height, 100);
-        assert_eq!(announcement.block_hash, vec![0x12, 0x34]);
-        assert_eq!(announcement.state_root, vec![0xab, 0xcd]);
-        assert!(announcement.timestamp.is_some());
-    }
-
-    #[test]
-    fn test_block_announcement_from_proto_with_missing_optional_fields() {
-        let proto_announcement = proto::BlockAnnouncement {
-            organization: None,
-            vault: None,
-            height: 50,
-            block_hash: None,
-            state_root: None,
-            timestamp: None,
-        };
-
-        let announcement = BlockAnnouncement::from_proto(proto_announcement);
-
-        assert_eq!(announcement.organization, OrganizationSlug::new(0));
-        assert_eq!(announcement.vault, VaultSlug::new(0));
-        assert_eq!(announcement.height, 50);
-        assert!(announcement.block_hash.is_empty());
-        assert!(announcement.state_root.is_empty());
-        assert!(announcement.timestamp.is_none());
-    }
-
-    // (watch_blocks connection failure tests consolidated into
-    // test_all_operations_return_error_on_connection_failure above)
-
-    // =========================================================================
-    // Admin Operation Tests
-    // =========================================================================
-
-    #[test]
-    fn test_organization_status_from_proto_active() {
-        let status = OrganizationStatus::from_proto(proto::OrganizationStatus::Active as i32);
-        assert_eq!(status, OrganizationStatus::Active);
-    }
-
-    #[test]
-    fn test_organization_status_from_proto_deleted() {
-        let status = OrganizationStatus::from_proto(proto::OrganizationStatus::Deleted as i32);
-        assert_eq!(status, OrganizationStatus::Deleted);
-    }
-
-    #[test]
-    fn test_organization_status_from_proto_unspecified() {
-        let status = OrganizationStatus::from_proto(proto::OrganizationStatus::Unspecified as i32);
-        assert_eq!(status, OrganizationStatus::Unspecified);
-    }
-
-    #[test]
-    fn test_organization_status_from_proto_invalid() {
-        let status = OrganizationStatus::from_proto(999);
-        assert_eq!(status, OrganizationStatus::Unspecified);
-    }
 
     #[test]
     fn test_organization_status_default() {
         let status: OrganizationStatus = Default::default();
         assert_eq!(status, OrganizationStatus::Unspecified);
-    }
-
-    #[test]
-    fn test_vault_status_from_proto_active() {
-        let status = VaultStatus::from_proto(proto::VaultStatus::Active as i32);
-        assert_eq!(status, VaultStatus::Active);
-    }
-
-    #[test]
-    fn test_vault_status_from_proto_read_only() {
-        let status = VaultStatus::from_proto(proto::VaultStatus::ReadOnly as i32);
-        assert_eq!(status, VaultStatus::ReadOnly);
-    }
-
-    #[test]
-    fn test_vault_status_from_proto_deleted() {
-        let status = VaultStatus::from_proto(proto::VaultStatus::Deleted as i32);
-        assert_eq!(status, VaultStatus::Deleted);
-    }
-
-    #[test]
-    fn test_vault_status_from_proto_unspecified() {
-        let status = VaultStatus::from_proto(proto::VaultStatus::Unspecified as i32);
-        assert_eq!(status, VaultStatus::Unspecified);
-    }
-
-    #[test]
-    fn test_vault_status_from_proto_invalid() {
-        let status = VaultStatus::from_proto(999);
-        assert_eq!(status, VaultStatus::Unspecified);
     }
 
     #[test]
@@ -1423,191 +892,14 @@ mod tests {
     }
 
     #[test]
-    fn test_organization_info_from_proto() {
-        let proto = proto::GetOrganizationResponse {
-            slug: Some(proto::OrganizationSlug { slug: 42 }),
-            name: "test-organization".to_string(),
-            region: Region::GLOBAL.as_str().to_string(),
-            member_nodes: vec![
-                proto::NodeId { id: "node-100".to_string() },
-                proto::NodeId { id: "node-101".to_string() },
-            ],
-            status: proto::OrganizationStatus::Active as i32,
-            config_version: 5,
-            created_at: None,
-            tier: 0,
-            members: vec![
-                proto::OrganizationMember {
-                    user: Some(proto::UserSlug { slug: 100 }),
-                    role: proto::OrganizationMemberRole::Admin.into(),
-                    joined_at: None,
-                },
-                proto::OrganizationMember {
-                    user: Some(proto::UserSlug { slug: 200 }),
-                    role: proto::OrganizationMemberRole::Member.into(),
-                    joined_at: None,
-                },
-            ],
-            updated_at: None,
-        };
-
-        let info = OrganizationInfo::from_proto(proto);
-
-        assert_eq!(info.slug, OrganizationSlug::new(42));
-        assert_eq!(info.name, "test-organization");
-        assert_eq!(info.region, Region::GLOBAL);
-        assert_eq!(info.member_nodes, vec!["node-100", "node-101"]);
-        assert_eq!(info.config_version, 5);
-        assert_eq!(info.status, OrganizationStatus::Active);
-        assert_eq!(info.members.len(), 2);
-        assert_eq!(info.members[0].user, UserSlug::new(100));
-        assert_eq!(info.members[0].role, OrganizationMemberRole::Admin);
-        assert_eq!(info.members[1].user, UserSlug::new(200));
-        assert_eq!(info.members[1].role, OrganizationMemberRole::Member);
-    }
-
-    #[test]
-    fn test_organization_info_from_proto_with_missing_fields() {
-        let proto = proto::GetOrganizationResponse {
-            slug: None,
-            name: "minimal".to_string(),
-            region: String::new(),
-            member_nodes: vec![],
-            status: proto::OrganizationStatus::Unspecified as i32,
-            config_version: 0,
-            created_at: None,
-            tier: 0,
-            members: vec![],
-            updated_at: None,
-        };
-
-        let info = OrganizationInfo::from_proto(proto);
-
-        assert_eq!(info.slug, OrganizationSlug::new(0));
-        assert_eq!(info.name, "minimal");
-        // Unspecified (0) falls back to GLOBAL
-        assert_eq!(info.region, Region::GLOBAL);
-        assert!(info.member_nodes.is_empty());
-        assert_eq!(info.config_version, 0);
-        assert_eq!(info.status, OrganizationStatus::Unspecified);
-    }
-
-    #[test]
-    fn test_vault_info_from_proto() {
-        let proto = proto::GetVaultResponse {
-            organization: Some(proto::OrganizationSlug { slug: 1 }),
-            vault: Some(proto::VaultSlug { slug: 10 }),
-            height: 1000,
-            state_root: Some(proto::Hash { value: vec![1, 2, 3, 4] }),
-            nodes: vec![
-                proto::NodeId { id: "node-200".to_string() },
-                proto::NodeId { id: "node-201".to_string() },
-            ],
-            leader: Some(proto::NodeId { id: "node-200".to_string() }),
-            status: proto::VaultStatus::Active as i32,
-            retention_policy: None,
-        };
-
-        let info = VaultInfo::from_proto(proto);
-
-        assert_eq!(info.organization, ORG);
-        assert_eq!(info.vault, VaultSlug::new(10));
-        assert_eq!(info.height, 1000);
-        assert_eq!(info.state_root, vec![1, 2, 3, 4]);
-        assert_eq!(info.nodes, vec!["node-200", "node-201"]);
-        assert_eq!(info.leader, Some("node-200".to_string()));
-        assert_eq!(info.status, VaultStatus::Active);
-    }
-
-    #[test]
-    fn test_vault_info_from_proto_with_missing_fields() {
-        let proto = proto::GetVaultResponse {
-            organization: None,
-            vault: None,
-            height: 0,
-            state_root: None,
-            nodes: vec![],
-            leader: None,
-            status: proto::VaultStatus::Unspecified as i32,
-            retention_policy: None,
-        };
-
-        let info = VaultInfo::from_proto(proto);
-
-        assert_eq!(info.organization, OrganizationSlug::new(0));
-        assert_eq!(info.vault, VaultSlug::new(0));
-        assert_eq!(info.height, 0);
-        assert!(info.state_root.is_empty());
-        assert!(info.nodes.is_empty());
-        assert_eq!(info.leader, None);
-        assert_eq!(info.status, VaultStatus::Unspecified);
-    }
-
-    // (admin connection failure tests consolidated into
-    // test_all_operations_return_error_on_connection_failure above)
-
-    // =========================================================================
-    // HealthStatus Tests
-    // =========================================================================
-
-    #[test]
-    fn test_health_status_from_proto_healthy() {
-        let status = HealthStatus::from_proto(proto::HealthStatus::Healthy as i32);
-        assert_eq!(status, HealthStatus::Healthy);
-    }
-
-    #[test]
-    fn test_health_status_from_proto_degraded() {
-        let status = HealthStatus::from_proto(proto::HealthStatus::Degraded as i32);
-        assert_eq!(status, HealthStatus::Degraded);
-    }
-
-    #[test]
-    fn test_health_status_from_proto_unavailable() {
-        let status = HealthStatus::from_proto(proto::HealthStatus::Unavailable as i32);
-        assert_eq!(status, HealthStatus::Unavailable);
-    }
-
-    #[test]
-    fn test_health_status_from_proto_unspecified() {
-        let status = HealthStatus::from_proto(proto::HealthStatus::Unspecified as i32);
-        assert_eq!(status, HealthStatus::Unspecified);
-    }
-
-    #[test]
-    fn test_health_status_from_proto_invalid() {
-        let status = HealthStatus::from_proto(999);
-        assert_eq!(status, HealthStatus::Unspecified);
-    }
-
-    #[test]
     fn test_health_status_default() {
         let status: HealthStatus = Default::default();
         assert_eq!(status, HealthStatus::Unspecified);
     }
 
     // =========================================================================
-    // HealthCheckResult Tests
+    // HealthCheckResult tests (domain-only)
     // =========================================================================
-
-    #[test]
-    fn test_health_check_result_from_proto() {
-        let mut details = std::collections::HashMap::new();
-        details.insert("current_term".to_string(), "5".to_string());
-        details.insert("leader_id".to_string(), "node-1".to_string());
-
-        let proto = proto::HealthCheckResponse {
-            status: proto::HealthStatus::Healthy as i32,
-            message: "Node is healthy".to_string(),
-            details: details.clone(),
-        };
-
-        let result = HealthCheckResult::from_proto(proto);
-
-        assert_eq!(result.status, HealthStatus::Healthy);
-        assert_eq!(result.message, "Node is healthy");
-        assert_eq!(result.details, details);
-    }
 
     #[test]
     fn test_health_check_result_is_healthy() {
@@ -1646,75 +938,11 @@ mod tests {
     }
 
     // =========================================================================
-    // Health Check Integration Tests
+    // Merkle proof verify tests (domain-only)
     // =========================================================================
-
-    // (health connection failure tests consolidated into
-    // test_all_operations_return_error_on_connection_failure above)
-
-    // =========================================================================
-    // Verified Read Tests
-    // =========================================================================
-
-    #[test]
-    fn test_direction_from_proto_left() {
-        use inferadb_ledger_proto::proto::Direction as ProtoDirection;
-        let direction = Direction::from_proto(ProtoDirection::Left as i32);
-        assert_eq!(direction, Direction::Left);
-    }
-
-    #[test]
-    fn test_direction_from_proto_right() {
-        use inferadb_ledger_proto::proto::Direction as ProtoDirection;
-        let direction = Direction::from_proto(ProtoDirection::Right as i32);
-        assert_eq!(direction, Direction::Right);
-    }
-
-    #[test]
-    fn test_direction_from_proto_unspecified_defaults_to_right() {
-        use inferadb_ledger_proto::proto::Direction as ProtoDirection;
-        let direction = Direction::from_proto(ProtoDirection::Unspecified as i32);
-        assert_eq!(direction, Direction::Right);
-    }
-
-    #[test]
-    fn test_merkle_sibling_from_proto() {
-        use inferadb_ledger_proto::proto;
-        let proto_sibling = proto::MerkleSibling {
-            hash: Some(proto::Hash { value: vec![1, 2, 3, 4] }),
-            direction: proto::Direction::Left as i32,
-        };
-        let sibling = MerkleSibling::from_proto(proto_sibling);
-        assert_eq!(sibling.hash, vec![1, 2, 3, 4]);
-        assert_eq!(sibling.direction, Direction::Left);
-    }
-
-    #[test]
-    fn test_merkle_proof_from_proto() {
-        use inferadb_ledger_proto::proto;
-        let proto_proof = proto::MerkleProof {
-            leaf_hash: Some(proto::Hash { value: vec![0; 32] }),
-            siblings: vec![
-                proto::MerkleSibling {
-                    hash: Some(proto::Hash { value: vec![1; 32] }),
-                    direction: proto::Direction::Left as i32,
-                },
-                proto::MerkleSibling {
-                    hash: Some(proto::Hash { value: vec![2; 32] }),
-                    direction: proto::Direction::Right as i32,
-                },
-            ],
-        };
-        let proof = MerkleProof::from_proto(proto_proof);
-        assert_eq!(proof.leaf_hash, vec![0; 32]);
-        assert_eq!(proof.siblings.len(), 2);
-        assert_eq!(proof.siblings[0].direction, Direction::Left);
-        assert_eq!(proof.siblings[1].direction, Direction::Right);
-    }
 
     #[test]
     fn test_merkle_proof_verify_single_element_tree() {
-        // Single element tree: leaf hash equals root
         let proof = MerkleProof {
             leaf_hash: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             siblings: vec![],
@@ -1734,11 +962,9 @@ mod tests {
     fn test_merkle_proof_verify_with_siblings() {
         use sha2::{Digest, Sha256};
 
-        // Create a simple two-leaf tree
         let leaf_hash = vec![0u8; 32];
         let sibling_hash = vec![1u8; 32];
 
-        // Compute expected root: hash(leaf || sibling) since sibling is on right
         let mut hasher = Sha256::new();
         hasher.update(&leaf_hash);
         hasher.update(&sibling_hash);
@@ -1756,11 +982,9 @@ mod tests {
     fn test_merkle_proof_verify_left_sibling() {
         use sha2::{Digest, Sha256};
 
-        // Create a proof where sibling is on the left
         let leaf_hash = vec![0u8; 32];
         let sibling_hash = vec![1u8; 32];
 
-        // Compute expected root: hash(sibling || leaf) since sibling is on left
         let mut hasher = Sha256::new();
         hasher.update(&sibling_hash);
         hasher.update(&leaf_hash);
@@ -1781,20 +1005,17 @@ mod tests {
         let leaf_hash = vec![0u8; 32];
         let sibling_hash = vec![1u8; 32];
 
-        // Compute correct root
         let mut hasher = Sha256::new();
         hasher.update(&leaf_hash);
         hasher.update(&sibling_hash);
         let correct_root = hasher.finalize().to_vec();
 
-        // Tamper with the sibling hash
         let tampered_sibling = vec![2u8; 32];
         let proof = MerkleProof {
             leaf_hash: leaf_hash.clone(),
             siblings: vec![MerkleSibling { hash: tampered_sibling, direction: Direction::Right }],
         };
 
-        // Should not verify against correct root
         assert!(!proof.verify(&correct_root));
     }
 
@@ -1805,125 +1026,22 @@ mod tests {
         let leaf_hash = vec![0u8; 32];
         let sibling_hash = vec![1u8; 32];
 
-        // Compute root with sibling on right
         let mut hasher = Sha256::new();
         hasher.update(&leaf_hash);
         hasher.update(&sibling_hash);
         let expected_root = hasher.finalize().to_vec();
 
-        // Create proof with wrong direction (Left instead of Right)
         let proof = MerkleProof {
             leaf_hash: leaf_hash.clone(),
-            siblings: vec![MerkleSibling {
-                hash: sibling_hash,
-                direction: Direction::Left, // Wrong!
-            }],
+            siblings: vec![MerkleSibling { hash: sibling_hash, direction: Direction::Left }],
         };
 
-        // Should fail verification
         assert!(!proof.verify(&expected_root));
     }
 
-    #[test]
-    fn test_block_header_from_proto() {
-        use inferadb_ledger_proto::proto;
-
-        let proto_header = proto::BlockHeader {
-            height: 100,
-            organization: Some(proto::OrganizationSlug { slug: 1 }),
-            vault: Some(proto::VaultSlug { slug: 2 }),
-            previous_hash: Some(proto::Hash { value: vec![1; 32] }),
-            tx_merkle_root: Some(proto::Hash { value: vec![2; 32] }),
-            state_root: Some(proto::Hash { value: vec![3; 32] }),
-            timestamp: Some(prost_types::Timestamp { seconds: 1704067200, nanos: 0 }),
-            leader_id: Some(proto::NodeId { id: "node-1".to_string() }),
-            term: 5,
-            committed_index: 99,
-            block_hash: Some(proto::Hash { value: vec![10; 32] }),
-        };
-
-        let header = BlockHeader::from_proto(proto_header);
-        assert_eq!(header.height, 100);
-        assert_eq!(header.organization, ORG);
-        assert_eq!(header.vault, VaultSlug::new(2));
-        assert_eq!(header.previous_hash, vec![1; 32]);
-        assert_eq!(header.tx_merkle_root, vec![2; 32]);
-        assert_eq!(header.state_root, vec![3; 32]);
-        assert!(header.timestamp.is_some());
-        assert_eq!(header.leader_id, "node-1");
-        assert_eq!(header.term, 5);
-        assert_eq!(header.committed_index, 99);
-    }
-
-    #[test]
-    fn test_block_header_from_proto_with_missing_fields() {
-        use inferadb_ledger_proto::proto;
-
-        let proto_header = proto::BlockHeader {
-            height: 1,
-            organization: None,
-            vault: None,
-            previous_hash: None,
-            tx_merkle_root: None,
-            state_root: None,
-            timestamp: None,
-            leader_id: None,
-            term: 0,
-            committed_index: 0,
-            block_hash: None,
-        };
-
-        let header = BlockHeader::from_proto(proto_header);
-        assert_eq!(header.height, 1);
-        assert_eq!(header.organization, OrganizationSlug::new(0));
-        assert_eq!(header.vault, VaultSlug::new(0));
-        assert!(header.previous_hash.is_empty());
-        assert!(header.tx_merkle_root.is_empty());
-        assert!(header.state_root.is_empty());
-        assert!(header.timestamp.is_none());
-        assert!(header.leader_id.is_empty());
-    }
-
-    #[test]
-    fn test_chain_proof_from_proto() {
-        use inferadb_ledger_proto::proto;
-
-        let proto_chain = proto::ChainProof {
-            headers: vec![
-                proto::BlockHeader {
-                    height: 101,
-                    organization: Some(proto::OrganizationSlug { slug: 1 }),
-                    vault: Some(proto::VaultSlug { slug: 0 }),
-                    previous_hash: Some(proto::Hash { value: vec![0; 32] }),
-                    tx_merkle_root: Some(proto::Hash { value: vec![1; 32] }),
-                    state_root: Some(proto::Hash { value: vec![2; 32] }),
-                    timestamp: None,
-                    leader_id: None,
-                    term: 1,
-                    committed_index: 100,
-                    block_hash: None,
-                },
-                proto::BlockHeader {
-                    height: 102,
-                    organization: Some(proto::OrganizationSlug { slug: 1 }),
-                    vault: Some(proto::VaultSlug { slug: 0 }),
-                    previous_hash: Some(proto::Hash { value: vec![3; 32] }),
-                    tx_merkle_root: Some(proto::Hash { value: vec![4; 32] }),
-                    state_root: Some(proto::Hash { value: vec![5; 32] }),
-                    timestamp: None,
-                    leader_id: None,
-                    term: 1,
-                    committed_index: 101,
-                    block_hash: None,
-                },
-            ],
-        };
-
-        let chain = ChainProof::from_proto(proto_chain);
-        assert_eq!(chain.headers.len(), 2);
-        assert_eq!(chain.headers[0].height, 101);
-        assert_eq!(chain.headers[1].height, 102);
-    }
+    // =========================================================================
+    // ChainProof verify tests (domain-only)
+    // =========================================================================
 
     #[test]
     fn test_chain_proof_verify_empty() {
@@ -1939,7 +1057,7 @@ mod tests {
                 height: 101,
                 organization: ORG,
                 vault: VaultSlug::new(0),
-                previous_hash: vec![1, 2, 3, 4], // Must match trusted_hash
+                previous_hash: vec![1, 2, 3, 4],
                 tx_merkle_root: vec![5, 6, 7, 8],
                 state_root: vec![9, 10, 11, 12],
                 timestamp: None,
@@ -1960,7 +1078,7 @@ mod tests {
                 height: 101,
                 organization: ORG,
                 vault: VaultSlug::new(0),
-                previous_hash: vec![0, 0, 0, 0], // Wrong hash
+                previous_hash: vec![0, 0, 0, 0],
                 tx_merkle_root: vec![5, 6, 7, 8],
                 state_root: vec![9, 10, 11, 12],
                 timestamp: None,
@@ -1976,9 +1094,7 @@ mod tests {
 
     #[test]
     fn test_chain_proof_verify_multi_header_server_hash() {
-        // Build a two-header chain where header[1].previous_hash matches
-        // header[0].block_hash (provided by server).
-        let block_hash_0 = vec![42; 32]; // Simulated server-computed hash
+        let block_hash_0 = vec![42; 32];
 
         let header0 = BlockHeader {
             height: 100,
@@ -1998,7 +1114,7 @@ mod tests {
             height: 101,
             organization: ORG,
             vault: VaultSlug::new(1),
-            previous_hash: block_hash_0, // Links to header0.block_hash
+            previous_hash: block_hash_0,
             tx_merkle_root: vec![3; 32],
             state_root: vec![4; 32],
             timestamp: None,
@@ -2009,7 +1125,7 @@ mod tests {
         };
 
         let chain = ChainProof { headers: vec![header0, header1] };
-        let trusted_hash = vec![0; 32]; // header[0].previous_hash
+        let trusted_hash = vec![0; 32];
         assert!(chain.verify(&trusted_hash));
     }
 
@@ -2033,7 +1149,7 @@ mod tests {
             height: 101,
             organization: ORG,
             vault: VaultSlug::new(1),
-            previous_hash: vec![0xFF; 32], // Wrong — doesn't match header0.block_hash
+            previous_hash: vec![0xFF; 32],
             tx_merkle_root: vec![3; 32],
             state_root: vec![4; 32],
             timestamp: None,
@@ -2050,7 +1166,6 @@ mod tests {
 
     #[test]
     fn test_chain_proof_verify_empty_block_hash_fails() {
-        // If server didn't provide block_hash, verification should fail
         let header0 = BlockHeader {
             height: 100,
             organization: ORG,
@@ -2062,14 +1177,14 @@ mod tests {
             leader_id: String::new(),
             term: 1,
             committed_index: 99,
-            block_hash: vec![], // Empty — server didn't provide
+            block_hash: vec![],
         };
 
         let header1 = BlockHeader {
             height: 101,
             organization: ORG,
             vault: VaultSlug::new(1),
-            previous_hash: vec![], // Matches empty block_hash, but should still fail
+            previous_hash: vec![],
             tx_merkle_root: vec![3; 32],
             state_root: vec![4; 32],
             timestamp: None,
@@ -2083,6 +1198,10 @@ mod tests {
         let trusted_hash = vec![0; 32];
         assert!(!chain.verify(&trusted_hash));
     }
+
+    // =========================================================================
+    // VerifyOpts tests
+    // =========================================================================
 
     #[test]
     fn test_verify_opts_default() {
@@ -2114,93 +1233,12 @@ mod tests {
         assert_eq!(opts.trusted_height, Some(50));
     }
 
-    #[test]
-    fn test_verified_value_from_proto() {
-        use inferadb_ledger_proto::proto;
-
-        let proto_response = proto::VerifiedReadResponse {
-            value: Some(b"test-value".to_vec()),
-            block_height: 100,
-            block_header: Some(proto::BlockHeader {
-                height: 100,
-                organization: Some(proto::OrganizationSlug { slug: 1 }),
-                vault: Some(proto::VaultSlug { slug: 0 }),
-                previous_hash: Some(proto::Hash { value: vec![1; 32] }),
-                tx_merkle_root: Some(proto::Hash { value: vec![2; 32] }),
-                state_root: Some(proto::Hash { value: vec![3; 32] }),
-                timestamp: None,
-                leader_id: None,
-                term: 1,
-                committed_index: 99,
-                block_hash: None,
-            }),
-            merkle_proof: Some(proto::MerkleProof {
-                leaf_hash: Some(proto::Hash { value: vec![4; 32] }),
-                siblings: vec![],
-            }),
-            chain_proof: None,
-        };
-
-        let verified = VerifiedValue::from_proto(proto_response);
-        assert!(verified.is_some());
-        let v = verified.unwrap();
-        assert_eq!(v.value, Some(b"test-value".to_vec()));
-        assert_eq!(v.block_height, 100);
-        assert_eq!(v.block_header.height, 100);
-        assert_eq!(v.merkle_proof.leaf_hash, vec![4; 32]);
-        assert!(v.chain_proof.is_none());
-    }
-
-    #[test]
-    fn test_verified_value_from_proto_missing_header() {
-        use inferadb_ledger_proto::proto;
-
-        let proto_response = proto::VerifiedReadResponse {
-            value: Some(b"test-value".to_vec()),
-            block_height: 100,
-            block_header: None, // Missing
-            merkle_proof: Some(proto::MerkleProof {
-                leaf_hash: Some(proto::Hash { value: vec![4; 32] }),
-                siblings: vec![],
-            }),
-            chain_proof: None,
-        };
-
-        let verified = VerifiedValue::from_proto(proto_response);
-        assert!(verified.is_none()); // Should return None if header missing
-    }
-
-    #[test]
-    fn test_verified_value_from_proto_missing_proof() {
-        use inferadb_ledger_proto::proto;
-
-        let proto_response = proto::VerifiedReadResponse {
-            value: Some(b"test-value".to_vec()),
-            block_height: 100,
-            block_header: Some(proto::BlockHeader {
-                height: 100,
-                organization: Some(proto::OrganizationSlug { slug: 1 }),
-                vault: Some(proto::VaultSlug { slug: 0 }),
-                previous_hash: Some(proto::Hash { value: vec![1; 32] }),
-                tx_merkle_root: Some(proto::Hash { value: vec![2; 32] }),
-                state_root: Some(proto::Hash { value: vec![3; 32] }),
-                timestamp: None,
-                leader_id: None,
-                term: 1,
-                committed_index: 99,
-                block_hash: None,
-            }),
-            merkle_proof: None, // Missing
-            chain_proof: None,
-        };
-
-        let verified = VerifiedValue::from_proto(proto_response);
-        assert!(verified.is_none()); // Should return None if proof missing
-    }
+    // =========================================================================
+    // VerifiedValue verify tests (domain-only)
+    // =========================================================================
 
     #[test]
     fn test_verified_value_verify_succeeds_with_matching_root() {
-        // Create a verified value where the merkle proof matches the state root
         let state_root = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         let verified = VerifiedValue {
             value: Some(b"test-value".to_vec()),
@@ -2218,10 +1256,7 @@ mod tests {
                 committed_index: 99,
                 block_hash: vec![],
             },
-            merkle_proof: MerkleProof {
-                leaf_hash: state_root, // Single element tree: leaf == root
-                siblings: vec![],
-            },
+            merkle_proof: MerkleProof { leaf_hash: state_root, siblings: vec![] },
             chain_proof: None,
         };
 
@@ -2230,7 +1265,6 @@ mod tests {
 
     #[test]
     fn test_verified_value_verify_fails_with_mismatched_root() {
-        // Create a verified value where the merkle proof does NOT match the state root
         let verified = VerifiedValue {
             value: Some(b"test-value".to_vec()),
             block_height: 100,
@@ -2240,17 +1274,14 @@ mod tests {
                 vault: VaultSlug::new(0),
                 previous_hash: vec![0; 32],
                 tx_merkle_root: vec![0; 32],
-                state_root: vec![1, 2, 3, 4], // Expected root
+                state_root: vec![1, 2, 3, 4],
                 timestamp: None,
                 leader_id: String::new(),
                 term: 1,
                 committed_index: 99,
                 block_hash: vec![],
             },
-            merkle_proof: MerkleProof {
-                leaf_hash: vec![5, 6, 7, 8], // Different hash!
-                siblings: vec![],
-            },
+            merkle_proof: MerkleProof { leaf_hash: vec![5, 6, 7, 8], siblings: vec![] },
             chain_proof: None,
         };
 
@@ -2258,102 +1289,32 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // (verified_read connection failure test consolidated into
-    // test_all_operations_return_error_on_connection_failure above)
-
     // =========================================================================
-    // Query Types Tests
+    // Query Types Tests (domain-only)
     // =========================================================================
-
-    #[test]
-    fn test_entity_from_proto() {
-        let proto_entity = proto::Entity {
-            key: "user:123".to_string(),
-            value: b"data".to_vec(),
-            expires_at: Some(1700000000),
-            version: 42,
-        };
-
-        let entity = Entity::from_proto(proto_entity);
-
-        assert_eq!(entity.key, "user:123");
-        assert_eq!(entity.value, b"data");
-        assert_eq!(entity.expires_at, Some(1700000000));
-        assert_eq!(entity.version, 42);
-    }
-
-    #[test]
-    fn test_entity_from_proto_no_expiration() {
-        let proto_entity = proto::Entity {
-            key: "session:abc".to_string(),
-            value: vec![],
-            expires_at: None,
-            version: 1,
-        };
-
-        let entity = Entity::from_proto(proto_entity);
-
-        assert_eq!(entity.expires_at, None);
-    }
-
-    #[test]
-    fn test_entity_from_proto_zero_expiration_treated_as_none() {
-        let proto_entity = proto::Entity {
-            key: "key".to_string(),
-            value: vec![],
-            expires_at: Some(0),
-            version: 1,
-        };
-
-        let entity = Entity::from_proto(proto_entity);
-
-        // Zero expiration is treated as "no expiration"
-        assert_eq!(entity.expires_at, None);
-    }
 
     #[test]
     fn test_entity_is_expired_at() {
         let entity =
             Entity { key: "key".to_string(), value: vec![], expires_at: Some(1000), version: 1 };
 
-        // Before expiration
         assert!(!entity.is_expired_at(999));
-        // At expiration
         assert!(entity.is_expired_at(1000));
-        // After expiration
         assert!(entity.is_expired_at(1001));
     }
 
     #[test]
     fn test_entity_is_expired_at_no_expiration() {
         let entity = Entity { key: "key".to_string(), value: vec![], expires_at: None, version: 1 };
-
-        // Never expires
         assert!(!entity.is_expired_at(u64::MAX));
     }
 
     #[test]
     fn test_relationship_new() {
         let rel = Relationship::new("document:1", "viewer", "user:alice");
-
         assert_eq!(rel.resource, "document:1");
         assert_eq!(rel.relation, "viewer");
         assert_eq!(rel.subject, "user:alice");
-    }
-
-    #[test]
-    fn test_relationship_from_proto() {
-        let proto_rel = proto::Relationship {
-            resource: "folder:root".to_string(),
-            relation: "owner".to_string(),
-            subject: "user:admin".to_string(),
-        };
-
-        let rel = Relationship::from_proto(proto_rel);
-
-        assert_eq!(rel.resource, "folder:root");
-        assert_eq!(rel.relation, "owner");
-        assert_eq!(rel.subject, "user:admin");
     }
 
     #[test]
@@ -2479,9 +1440,6 @@ mod tests {
         assert_eq!(opts.consistency, ReadConsistency::Eventual);
     }
 
-    // (query operation connection failure tests consolidated into
-    // test_all_operations_return_error_on_connection_failure above)
-
     // =========================================================================
     // Shutdown Tests
     // =========================================================================
@@ -2512,7 +1470,6 @@ mod tests {
             .await
             .expect("client creation");
 
-        // Multiple shutdown calls should not panic
         client.shutdown().await;
         client.shutdown().await;
         client.shutdown().await;
@@ -2531,10 +1488,8 @@ mod tests {
         assert!(!client1.is_shutdown());
         assert!(!client2.is_shutdown());
 
-        // Shutdown through client1
         client1.shutdown().await;
 
-        // Both should reflect shutdown state
         assert!(client1.is_shutdown());
         assert!(client2.is_shutdown(), "cloned client should share shutdown state");
     }
@@ -2597,179 +1552,9 @@ mod tests {
                 }),
             ),
             (
-                "batch_read",
-                Box::pin(async {
-                    matches!(
-                        client
-                            .batch_read(
-                                UserSlug::new(42),
-                                ORG,
-                                Some(VaultSlug::new(0)),
-                                vec!["key1".to_string(), "key2".to_string()],
-                                None,
-                                None
-                            )
-                            .await,
-                        Err(crate::error::SdkError::Shutdown)
-                    )
-                }),
-            ),
-            (
-                "watch_blocks",
-                Box::pin(async {
-                    matches!(
-                        client.watch_blocks(UserSlug::new(42), ORG, VaultSlug::new(0), 1).await,
-                        Err(crate::error::SdkError::Shutdown)
-                    )
-                }),
-            ),
-            (
-                "create_organization",
-                Box::pin(async {
-                    matches!(
-                        client
-                            .create_organization(
-                                "test",
-                                Region::US_EAST_VA,
-                                UserSlug::new(0),
-                                OrganizationTier::Free
-                            )
-                            .await,
-                        Err(crate::error::SdkError::Shutdown)
-                    )
-                }),
-            ),
-            (
-                "get_organization",
-                Box::pin(async {
-                    matches!(
-                        client.get_organization(ORG, UserSlug::new(0)).await,
-                        Err(crate::error::SdkError::Shutdown)
-                    )
-                }),
-            ),
-            (
-                "list_organizations",
-                Box::pin(async {
-                    matches!(
-                        client.list_organizations(UserSlug::new(0), 0, None).await,
-                        Err(crate::error::SdkError::Shutdown)
-                    )
-                }),
-            ),
-            (
-                "create_vault",
-                Box::pin(async {
-                    matches!(
-                        client.create_vault(UserSlug::new(42), ORG).await,
-                        Err(crate::error::SdkError::Shutdown)
-                    )
-                }),
-            ),
-            (
-                "get_vault",
-                Box::pin(async {
-                    matches!(
-                        client.get_vault(UserSlug::new(42), ORG, VaultSlug::new(0)).await,
-                        Err(crate::error::SdkError::Shutdown)
-                    )
-                }),
-            ),
-            (
-                "list_vaults",
-                Box::pin(async {
-                    matches!(
-                        client.list_vaults(UserSlug::new(42), 0, None, None).await,
-                        Err(crate::error::SdkError::Shutdown)
-                    )
-                }),
-            ),
-            (
                 "health_check",
                 Box::pin(async {
                     matches!(client.health_check().await, Err(crate::error::SdkError::Shutdown))
-                }),
-            ),
-            (
-                "health_check_detailed",
-                Box::pin(async {
-                    matches!(
-                        client.health_check_detailed().await,
-                        Err(crate::error::SdkError::Shutdown)
-                    )
-                }),
-            ),
-            (
-                "health_check_vault",
-                Box::pin(async {
-                    matches!(
-                        client.health_check_vault(ORG, VaultSlug::new(0)).await,
-                        Err(crate::error::SdkError::Shutdown)
-                    )
-                }),
-            ),
-            (
-                "verified_read",
-                Box::pin(async {
-                    matches!(
-                        client
-                            .verified_read(
-                                UserSlug::new(42),
-                                ORG,
-                                Some(VaultSlug::new(0)),
-                                "key",
-                                VerifyOpts::new()
-                            )
-                            .await,
-                        Err(crate::error::SdkError::Shutdown)
-                    )
-                }),
-            ),
-            (
-                "list_entities",
-                Box::pin(async {
-                    matches!(
-                        client
-                            .list_entities(
-                                UserSlug::new(42),
-                                ORG,
-                                ListEntitiesOpts::with_prefix("key")
-                            )
-                            .await,
-                        Err(crate::error::SdkError::Shutdown)
-                    )
-                }),
-            ),
-            (
-                "list_relationships",
-                Box::pin(async {
-                    matches!(
-                        client
-                            .list_relationships(
-                                UserSlug::new(42),
-                                ORG,
-                                VaultSlug::new(0),
-                                ListRelationshipsOpts::new()
-                            )
-                            .await,
-                        Err(crate::error::SdkError::Shutdown)
-                    )
-                }),
-            ),
-            (
-                "list_resources",
-                Box::pin(async {
-                    matches!(
-                        client
-                            .list_resources(
-                                UserSlug::new(42),
-                                ORG,
-                                VaultSlug::new(0),
-                                ListResourcesOpts::with_type("doc")
-                            )
-                            .await,
-                        Err(crate::error::SdkError::Shutdown)
-                    )
                 }),
             ),
         ];
@@ -2799,10 +1584,8 @@ mod tests {
         let client = LedgerClient::new(config).await.expect("client creation");
         let token = client.cancellation_token();
 
-        // Token should not be cancelled initially
         assert!(!token.is_cancelled());
 
-        // After shutdown, the token should be cancelled
         client.shutdown().await;
         assert!(token.is_cancelled());
     }
@@ -2876,25 +1659,6 @@ mod tests {
                     })
                 }),
             ),
-            (
-                "batch_read",
-                Box::new(|c, t| {
-                    Box::pin(async move {
-                        matches!(
-                            c.batch_read(
-                                UserSlug::new(42),
-                                ORG,
-                                None,
-                                vec!["key1", "key2"],
-                                None,
-                                Some(t)
-                            )
-                            .await,
-                            Err(crate::error::SdkError::Cancelled)
-                        )
-                    })
-                }),
-            ),
         ];
 
         for (label, call_fn) in cases {
@@ -2911,7 +1675,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancelled_differs_from_shutdown() {
-        // Cancelled and Shutdown are distinct error types
         let cancelled = crate::error::SdkError::Cancelled;
         let shutdown = crate::error::SdkError::Shutdown;
 
@@ -2921,7 +1684,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_with_cancellation_token_returns_cancelled_during_backoff() {
-        // Set many retries with long backoff so cancellation fires during backoff
         let config = ClientConfig::builder()
             .servers(ServerSource::from_static(["http://localhost:50051"]))
             .client_id("test-client")
@@ -2939,8 +1701,6 @@ mod tests {
         let token = tokio_util::sync::CancellationToken::new();
         let token_clone = token.clone();
 
-        // Cancel after 200ms — the first attempt fails quickly,
-        // then the 30s backoff starts, and cancellation fires during it
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(200)).await;
             token_clone.cancel();
@@ -2950,10 +1710,7 @@ mod tests {
         let result = client.read(UserSlug::new(42), ORG, None, "key", None, Some(token)).await;
         let elapsed = start.elapsed();
 
-        // Should be cancelled during the backoff sleep (or get a transport error
-        // if the connection fails before the cancellation token fires).
         assert!(result.is_err(), "should fail when cancellation token is triggered during retries");
-        // Should return quickly, not wait for the 30s backoff
         assert!(elapsed < Duration::from_secs(5), "took {:?}", elapsed);
     }
 
@@ -2975,7 +1732,6 @@ mod tests {
         let client = LedgerClient::new(config).await.expect("client creation");
         let client_clone = client.clone();
 
-        // Shutdown after 200ms
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(200)).await;
             client_clone.shutdown().await;
@@ -2985,10 +1741,7 @@ mod tests {
         let result = client.read(UserSlug::new(42), ORG, None, "key", None, None).await;
         let elapsed = start.elapsed();
 
-        // Should receive a shutdown/cancellation/transport error (the exact variant
-        // depends on the race between connection failure and shutdown signal).
         assert!(result.is_err(), "should fail when shutdown is triggered during retries");
-        // Should not wait for the full 10 attempts × 30s backoff
         assert!(elapsed < Duration::from_secs(5), "took {:?}", elapsed);
     }
 
@@ -3103,19 +1856,19 @@ mod tests {
     #[test]
     fn test_estimated_size_set_entity() {
         let op = Operation::set_entity("key", b"value".to_vec(), None, None);
-        assert_eq!(op.estimated_size_bytes(), 3 + 5); // "key" + "value"
+        assert_eq!(op.estimated_size_bytes(), 3 + 5);
     }
 
     #[test]
     fn test_estimated_size_delete_entity() {
         let op = Operation::delete_entity("user:123");
-        assert_eq!(op.estimated_size_bytes(), 8); // "user:123"
+        assert_eq!(op.estimated_size_bytes(), 8);
     }
 
     #[test]
     fn test_estimated_size_relationship() {
         let op = Operation::create_relationship("doc:456", "viewer", "user:123");
-        assert_eq!(op.estimated_size_bytes(), 7 + 6 + 8); // "doc:456" + "viewer" + "user:123"
+        assert_eq!(op.estimated_size_bytes(), 7 + 6 + 8);
     }
 
     // =========================================================================
@@ -3134,367 +1887,10 @@ mod tests {
         assert!(err.to_string().contains("key too long"));
     }
 
-    // =========================================================================
-    // Events type conversion tests
-    // =========================================================================
-
-    fn make_proto_event_entry() -> proto::EventEntry {
-        proto::EventEntry {
-            event_id: uuid::Uuid::nil().into_bytes().to_vec(),
-            source_service: "ledger".to_string(),
-            event_type: "ledger.vault.created".to_string(),
-            timestamp: Some(prost_types::Timestamp { seconds: 1_700_000_000, nanos: 500_000 }),
-            scope: proto::EventScope::Organization as i32,
-            action: "vault_created".to_string(),
-            emission_path: proto::EventEmissionPath::EmissionPathApplyPhase as i32,
-            principal: "user:alice".to_string(),
-            organization: Some(proto::OrganizationSlug { slug: 12345 }),
-            vault: Some(proto::VaultSlug { slug: 67890 }),
-            outcome: proto::EventOutcome::Success as i32,
-            error_code: None,
-            error_detail: None,
-            denial_reason: None,
-            details: [("vault_name".to_string(), "my-vault".to_string())].into_iter().collect(),
-            block_height: Some(42),
-            node_id: None,
-            trace_id: Some("abc-trace".to_string()),
-            correlation_id: Some("batch-123".to_string()),
-            operations_count: None,
-            expires_at: 0,
-        }
-    }
-
+    // Region import sanity-check (avoid unused-import warning when no Region
+    // tests are present here).
     #[test]
-    fn test_sdk_event_entry_from_proto_success() {
-        let proto = make_proto_event_entry();
-        let entry = SdkEventEntry::from_proto(proto);
-
-        assert_eq!(entry.source_service, "ledger");
-        assert_eq!(entry.event_type, "ledger.vault.created");
-        assert_eq!(entry.action, "vault_created");
-        assert_eq!(entry.principal, "user:alice");
-        assert_eq!(entry.organization, OrganizationSlug::new(12345));
-        assert_eq!(entry.vault, Some(VaultSlug::new(67890)));
-        assert_eq!(entry.scope, EventScope::Organization);
-        assert_eq!(entry.emission_path, EventEmissionPath::ApplyPhase);
-        assert!(matches!(entry.outcome, EventOutcome::Success));
-        assert_eq!(entry.details.get("vault_name").unwrap(), "my-vault");
-        assert_eq!(entry.block_height, Some(42));
-        assert_eq!(entry.trace_id.as_deref(), Some("abc-trace"));
-        assert_eq!(entry.correlation_id.as_deref(), Some("batch-123"));
-        assert_eq!(entry.timestamp.timestamp(), 1_700_000_000);
-    }
-
-    #[test]
-    fn test_sdk_event_entry_from_proto_failed_outcome() {
-        let mut proto = make_proto_event_entry();
-        proto.outcome = proto::EventOutcome::Failed as i32;
-        proto.error_code = Some("STORAGE_FULL".to_string());
-        proto.error_detail = Some("disk quota exceeded".to_string());
-
-        let entry = SdkEventEntry::from_proto(proto);
-        match &entry.outcome {
-            EventOutcome::Failed { code, detail } => {
-                assert_eq!(code, "STORAGE_FULL");
-                assert_eq!(detail, "disk quota exceeded");
-            },
-            _ => panic!("expected Failed outcome"),
-        }
-    }
-
-    #[test]
-    fn test_sdk_event_entry_from_proto_denied_outcome() {
-        let mut proto = make_proto_event_entry();
-        proto.outcome = proto::EventOutcome::Denied as i32;
-        proto.denial_reason = Some("rate limit exceeded".to_string());
-
-        let entry = SdkEventEntry::from_proto(proto);
-        match &entry.outcome {
-            EventOutcome::Denied { reason } => {
-                assert_eq!(reason, "rate limit exceeded");
-            },
-            _ => panic!("expected Denied outcome"),
-        }
-    }
-
-    #[test]
-    fn test_sdk_event_entry_from_proto_handler_phase() {
-        let mut proto = make_proto_event_entry();
-        proto.emission_path = proto::EventEmissionPath::EmissionPathHandlerPhase as i32;
-        proto.node_id = Some(7);
-
-        let entry = SdkEventEntry::from_proto(proto);
-        assert_eq!(entry.emission_path, EventEmissionPath::HandlerPhase);
-        assert_eq!(entry.node_id, Some(7));
-    }
-
-    #[test]
-    fn test_sdk_event_entry_from_proto_system_scope() {
-        let mut proto = make_proto_event_entry();
-        proto.scope = proto::EventScope::System as i32;
-        proto.organization = Some(proto::OrganizationSlug { slug: 0 });
-
-        let entry = SdkEventEntry::from_proto(proto);
-        assert_eq!(entry.scope, EventScope::System);
-        assert_eq!(entry.organization, OrganizationSlug::new(0));
-    }
-
-    #[test]
-    fn test_sdk_event_entry_event_id_string_uuid() {
-        let entry = SdkEventEntry::from_proto(make_proto_event_entry());
-        assert_eq!(entry.event_id_string(), "00000000-0000-0000-0000-000000000000");
-    }
-
-    #[test]
-    fn test_sdk_event_entry_event_id_string_non_uuid() {
-        let mut proto = make_proto_event_entry();
-        proto.event_id = vec![0xab, 0xcd, 0xef];
-        let entry = SdkEventEntry::from_proto(proto);
-        assert_eq!(entry.event_id_string(), "abcdef");
-    }
-
-    #[test]
-    fn test_event_filter_default_is_all_pass() {
-        let filter = EventFilter::new();
-        let proto = filter.to_proto();
-
-        assert!(proto.actions.is_empty());
-        assert!(proto.start_time.is_none());
-        assert!(proto.end_time.is_none());
-        assert!(proto.event_type_prefix.is_none());
-        assert!(proto.principal.is_none());
-        assert_eq!(proto.outcome, 0);
-        assert_eq!(proto.emission_path, 0);
-        assert!(proto.correlation_id.is_none());
-    }
-
-    #[test]
-    fn test_event_filter_with_all_options() {
-        let start = chrono::DateTime::from_timestamp(1_000_000, 0).unwrap();
-        let end = chrono::DateTime::from_timestamp(2_000_000, 0).unwrap();
-
-        let filter = EventFilter::new()
-            .start_time(start)
-            .end_time(end)
-            .actions(["vault_created", "vault_deleted"])
-            .event_type_prefix("ledger.vault")
-            .principal("user:bob")
-            .outcome_denied()
-            .apply_phase_only()
-            .correlation_id("job-99");
-
-        let proto = filter.to_proto();
-        assert_eq!(proto.start_time.unwrap().seconds, 1_000_000);
-        assert_eq!(proto.end_time.unwrap().seconds, 2_000_000);
-        assert_eq!(proto.actions, vec!["vault_created", "vault_deleted"]);
-        assert_eq!(proto.event_type_prefix.as_deref(), Some("ledger.vault"));
-        assert_eq!(proto.principal.as_deref(), Some("user:bob"));
-        assert_eq!(proto.outcome, proto::EventOutcome::Denied as i32);
-        assert_eq!(proto.emission_path, proto::EventEmissionPath::EmissionPathApplyPhase as i32);
-        assert_eq!(proto.correlation_id.as_deref(), Some("job-99"));
-    }
-
-    #[test]
-    fn test_event_filter_outcome_variants() {
-        assert_eq!(
-            EventFilter::new().outcome_success().to_proto().outcome,
-            proto::EventOutcome::Success as i32,
-        );
-        assert_eq!(
-            EventFilter::new().outcome_failed().to_proto().outcome,
-            proto::EventOutcome::Failed as i32,
-        );
-        assert_eq!(
-            EventFilter::new().outcome_denied().to_proto().outcome,
-            proto::EventOutcome::Denied as i32,
-        );
-    }
-
-    #[test]
-    fn test_event_filter_emission_path_variants() {
-        assert_eq!(
-            EventFilter::new().apply_phase_only().to_proto().emission_path,
-            proto::EventEmissionPath::EmissionPathApplyPhase as i32,
-        );
-        assert_eq!(
-            EventFilter::new().handler_phase_only().to_proto().emission_path,
-            proto::EventEmissionPath::EmissionPathHandlerPhase as i32,
-        );
-    }
-
-    #[test]
-    fn test_ingest_event_entry_required_fields() {
-        let entry = SdkIngestEventEntry::new(
-            "engine.authorization.checked",
-            "user:alice",
-            EventOutcome::Success,
-        );
-        let proto = entry.into_proto();
-
-        assert_eq!(proto.event_type, "engine.authorization.checked");
-        assert_eq!(proto.principal, "user:alice");
-        assert_eq!(proto.outcome, proto::EventOutcome::Success as i32);
-        assert!(proto.details.is_empty());
-        assert!(proto.trace_id.is_none());
-        assert!(proto.correlation_id.is_none());
-        assert!(proto.vault.is_none());
-        assert!(proto.timestamp.is_none());
-    }
-
-    #[test]
-    fn test_ingest_event_entry_with_all_optional_fields() {
-        let ts = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-        let entry = SdkIngestEventEntry::new(
-            "control.member.invited",
-            "admin:bob",
-            EventOutcome::Failed { code: "LIMIT".to_string(), detail: "max members".to_string() },
-        )
-        .detail("email", "new@example.com")
-        .trace_id("trace-xyz")
-        .correlation_id("import-batch-7")
-        .vault(VaultSlug::new(999))
-        .timestamp(ts);
-
-        let proto = entry.into_proto();
-        assert_eq!(proto.event_type, "control.member.invited");
-        assert_eq!(proto.principal, "admin:bob");
-        assert_eq!(proto.outcome, proto::EventOutcome::Failed as i32);
-        assert_eq!(proto.error_code.as_deref(), Some("LIMIT"));
-        assert_eq!(proto.error_detail.as_deref(), Some("max members"));
-        assert_eq!(proto.details.get("email").unwrap(), "new@example.com");
-        assert_eq!(proto.trace_id.as_deref(), Some("trace-xyz"));
-        assert_eq!(proto.correlation_id.as_deref(), Some("import-batch-7"));
-        assert_eq!(proto.vault.unwrap().slug, 999);
-        assert_eq!(proto.timestamp.unwrap().seconds, 1_700_000_000);
-    }
-
-    #[test]
-    fn test_ingest_event_entry_denied_outcome() {
-        let entry = SdkIngestEventEntry::new(
-            "engine.authorization.checked",
-            "user:charlie",
-            EventOutcome::Denied { reason: "no permission".to_string() },
-        );
-        let proto = entry.into_proto();
-        assert_eq!(proto.outcome, proto::EventOutcome::Denied as i32);
-        assert_eq!(proto.denial_reason.as_deref(), Some("no permission"));
-        assert!(proto.error_code.is_none());
-    }
-
-    #[test]
-    fn test_event_page_has_next_page() {
-        let page = EventPage {
-            entries: vec![],
-            next_page_token: Some("cursor-abc".to_string()),
-            total_estimate: None,
-        };
-        assert!(page.has_next_page());
-
-        let page = EventPage { entries: vec![], next_page_token: None, total_estimate: None };
-        assert!(!page.has_next_page());
-    }
-
-    #[test]
-    fn test_event_outcome_roundtrip_success() {
-        let outcome = EventOutcome::Success;
-        let (value, code, detail, reason) = outcome.to_proto();
-        let restored = EventOutcome::from_proto(value, code, detail, reason);
-        assert!(matches!(restored, EventOutcome::Success));
-    }
-
-    #[test]
-    fn test_event_outcome_roundtrip_failed() {
-        let outcome = EventOutcome::Failed {
-            code: "ERR_001".to_string(),
-            detail: "something broke".to_string(),
-        };
-        let (value, code, detail, reason) = outcome.to_proto();
-        let restored = EventOutcome::from_proto(value, code, detail, reason);
-        match restored {
-            EventOutcome::Failed { code, detail } => {
-                assert_eq!(code, "ERR_001");
-                assert_eq!(detail, "something broke");
-            },
-            _ => panic!("expected Failed"),
-        }
-    }
-
-    #[test]
-    fn test_event_outcome_roundtrip_denied() {
-        let outcome = EventOutcome::Denied { reason: "rate limited".to_string() };
-        let (value, code, detail, reason) = outcome.to_proto();
-        let restored = EventOutcome::from_proto(value, code, detail, reason);
-        match restored {
-            EventOutcome::Denied { reason } => {
-                assert_eq!(reason, "rate limited");
-            },
-            _ => panic!("expected Denied"),
-        }
-    }
-
-    #[test]
-    fn test_event_scope_from_proto() {
-        assert_eq!(EventScope::from_proto(proto::EventScope::System as i32), EventScope::System);
-        assert_eq!(
-            EventScope::from_proto(proto::EventScope::Organization as i32),
-            EventScope::Organization,
-        );
-        // Unknown falls back to System
-        assert_eq!(EventScope::from_proto(99), EventScope::System);
-    }
-
-    #[test]
-    fn test_event_emission_path_from_proto() {
-        assert_eq!(
-            EventEmissionPath::from_proto(proto::EventEmissionPath::EmissionPathApplyPhase as i32),
-            EventEmissionPath::ApplyPhase,
-        );
-        assert_eq!(
-            EventEmissionPath::from_proto(
-                proto::EventEmissionPath::EmissionPathHandlerPhase as i32,
-            ),
-            EventEmissionPath::HandlerPhase,
-        );
-        // Unknown falls back to ApplyPhase
-        assert_eq!(EventEmissionPath::from_proto(99), EventEmissionPath::ApplyPhase);
-    }
-
-    #[test]
-    fn test_ingest_event_entry_detail_builder() {
-        let entry = SdkIngestEventEntry::new("test.event", "user:x", EventOutcome::Success)
-            .detail("key1", "val1")
-            .detail("key2", "val2");
-        let proto = entry.into_proto();
-        assert_eq!(proto.details.len(), 2);
-        assert_eq!(proto.details.get("key1").unwrap(), "val1");
-        assert_eq!(proto.details.get("key2").unwrap(), "val2");
-    }
-
-    #[test]
-    fn test_ingest_event_entry_details_bulk() {
-        let map: std::collections::HashMap<String, String> =
-            [("a".to_string(), "1".to_string()), ("b".to_string(), "2".to_string())]
-                .into_iter()
-                .collect();
-        let entry =
-            SdkIngestEventEntry::new("test.event", "user:x", EventOutcome::Success).details(map);
-        let proto = entry.into_proto();
-        assert_eq!(proto.details.len(), 2);
-    }
-
-    // =========================================================================
-    // Migration Status Tests
-    // =========================================================================
-
-    #[test]
-    fn test_organization_status_from_proto_migrating() {
-        let status = OrganizationStatus::from_proto(proto::OrganizationStatus::Migrating as i32);
-        assert_eq!(status, OrganizationStatus::Migrating);
-    }
-
-    #[test]
-    fn test_organization_status_from_proto_suspended() {
-        let status = OrganizationStatus::from_proto(proto::OrganizationStatus::Suspended as i32);
-        assert_eq!(status, OrganizationStatus::Suspended);
+    fn region_import_used() {
+        let _ = Region::US_EAST_VA;
     }
 }

@@ -585,72 +585,11 @@ impl GracefulShutdown {
     }
 }
 
-// ─── Connection Tracking Tower Layer ─────────────────────────────
-
-/// Tower layer that tracks in-flight requests via a [`ConnectionTracker`].
-///
-/// When added to the gRPC server's layer stack, this intercepts every request
-/// to increment the counter and decrements it when the response future completes.
-#[derive(Clone, Debug)]
-pub struct ConnectionTrackingLayer {
-    tracker: ConnectionTracker,
-}
-
-impl ConnectionTrackingLayer {
-    /// Creates a new layer wrapping the given tracker.
-    pub fn new(tracker: ConnectionTracker) -> Self {
-        Self { tracker }
-    }
-}
-
-impl<S> tower::Layer<S> for ConnectionTrackingLayer {
-    type Service = ConnectionTrackingService<S>;
-
-    fn layer(&self, inner: S) -> Self::Service {
-        ConnectionTrackingService { inner, tracker: self.tracker.clone() }
-    }
-}
-
-/// Tower service wrapper that increments/decrements connection counter.
-#[derive(Clone, Debug)]
-pub struct ConnectionTrackingService<S> {
-    inner: S,
-    tracker: ConnectionTracker,
-}
-
-impl<S, ReqBody> tower::Service<tonic::codegen::http::Request<ReqBody>>
-    for ConnectionTrackingService<S>
-where
-    S: tower::Service<tonic::codegen::http::Request<ReqBody>> + Clone + Send + 'static,
-    S::Future: Send + 'static,
-    S::Response: Send + 'static,
-    S::Error: Send + 'static,
-    ReqBody: Send + 'static,
-{
-    type Response = S::Response;
-    type Error = S::Error;
-    type Future = std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
-    >;
-
-    fn poll_ready(
-        &mut self,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
-    }
-
-    fn call(&mut self, req: tonic::codegen::http::Request<ReqBody>) -> Self::Future {
-        self.tracker.increment();
-        let tracker = self.tracker.clone();
-        let future = self.inner.call(req);
-        Box::pin(async move {
-            let result = future.await;
-            tracker.decrement();
-            result
-        })
-    }
-}
+// The legacy tonic-shaped `ConnectionTrackingLayer` was removed in stage
+// F.1.f.2.5c. Wire-mode shutdown propagates through the dispatcher's
+// `watch::Receiver<bool>` signal (see `LedgerServer::serve_wire`); the in-flight
+// counter on `ConnectionTracker` is fed by the dispatcher's per-connection
+// accounting, so no `tower::Service` adapter is required.
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]

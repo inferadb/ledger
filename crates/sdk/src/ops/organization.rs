@@ -1,16 +1,13 @@
 //! Organization CRUD, team management, migration, and erasure operations.
 
-use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{OrganizationSlug, Region, TeamSlug, UserSlug};
 
 use crate::{
     LedgerClient,
     error::Result,
-    proto_util::{missing_response_field, proto_timestamp_to_system_time, region_from_proto_str},
     types::admin::{
         MigrationInfo, OrganizationDeleteInfo, OrganizationInfo, OrganizationMemberInfo,
-        OrganizationMemberRole, OrganizationStatus, OrganizationTier, TeamInfo, TeamMemberRole,
-        UserMigrationInfo,
+        OrganizationMemberRole, OrganizationTier, TeamInfo, TeamMemberRole, UserMigrationInfo,
     },
 };
 
@@ -21,39 +18,11 @@ impl LedgerClient {
 
     /// Creates a new organization with the specified data residency region.
     ///
-    /// Every organization must declare a region at creation time. The region
+    /// `name` is a human-readable identifier (e.g., `"acme_corp"`). `region`
     /// determines where the organization's data is stored and which data
-    /// protection regulations apply.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - Human-readable name for the organization (e.g., "acme_corp").
-    /// * `region` - Data residency region. Must not be `Region::Global` (the control plane) or
-    ///   `Region::Unspecified`.
-    ///
-    /// # Returns
-    ///
-    /// Returns [`OrganizationInfo`] containing the generated slug and metadata.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Connection fails after retry attempts
-    /// - The organization name is invalid
-    /// - The region is `Global` or `Unspecified`
-    /// - A protected region has insufficient in-region nodes (< 3)
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationTier, Region, UserSlug};
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
-    /// let org = client.create_organization("my-org", Region::US_EAST_VA, UserSlug::new(1), OrganizationTier::Free).await?;
-    /// println!("Created organization with slug: {}", org.slug);
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// protection regulations apply; it must not be `Region::Global` or
+    /// `Region::Unspecified`. Returns [`OrganizationInfo`] containing the
+    /// generated slug and metadata.
     pub async fn create_organization(
         &self,
         name: impl Into<String>,
@@ -62,7 +31,6 @@ impl LedgerClient {
         tier: OrganizationTier,
     ) -> Result<OrganizationInfo> {
         let name = name.into();
-        let region_slug = region.as_str().to_string();
         // Generate the organization slug once, outside the retry loop.
         // Every retry for this logical call reuses it so the saga's
         // idempotency-by-slug path returns the same OrganizationId
@@ -78,64 +46,25 @@ impl LedgerClient {
         self.call_with_retry("create_organization", || {
             let pool = pool.clone();
             let name = name.clone();
-            let region_slug = region_slug.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_organization_client);
-
-                let request = proto::CreateOrganizationRequest {
-                    name: name.clone(),
-                    region: region_slug,
-                    tier: Some(tier.to_proto()),
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                    slug: Some(proto::OrganizationSlug { slug: org_slug.value() }),
-                };
-
-                let response =
-                    client.create_organization(tonic::Request::new(request)).await?.into_inner();
-
-                Ok(OrganizationInfo::from_fields(
-                    response.slug,
-                    response.name,
-                    response.region,
-                    response.member_nodes,
-                    response.config_version,
-                    response.status,
-                    response.tier,
-                    &response.members,
-                ))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::organization::create_organization(
+                    wire_client,
+                    request_id,
+                    name,
+                    region,
+                    caller,
+                    tier,
+                    org_slug,
+                )
+                .await
             }
         })
         .await
     }
 
     /// Returns information about an organization by slug.
-    ///
-    /// # Arguments
-    ///
-    /// * `slug` - Organization slug (external identifier).
-    ///
-    /// # Returns
-    ///
-    /// Returns [`OrganizationInfo`] containing organization metadata.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Connection fails after retry attempts
-    /// - The organization does not exist
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, UserSlug, VaultSlug};
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
-    /// # let slug = OrganizationSlug::new(1);
-    /// let info = client.get_organization(slug, UserSlug::new(42)).await?;
-    /// println!("Organization: {} (status: {:?})", info.name, info.status);
-    /// # Ok(())
-    /// # }
-    /// ```
     pub async fn get_organization(
         &self,
         slug: OrganizationSlug,
@@ -145,57 +74,16 @@ impl LedgerClient {
         self.call_with_retry("get_organization", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_organization_client);
-
-                let request = proto::GetOrganizationRequest {
-                    slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                };
-
-                let response =
-                    client.get_organization(tonic::Request::new(request)).await?.into_inner();
-
-                Ok(OrganizationInfo::from_proto(response))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::organization::get_organization(wire_client, request_id, slug, user)
+                    .await
             }
         })
         .await
     }
 
     /// Updates an organization's mutable fields.
-    ///
-    /// Currently supports renaming an organization. The initiator must be
-    /// an organization administrator.
-    ///
-    /// # Arguments
-    ///
-    /// * `slug` - Organization slug (external identifier).
-    /// * `user` - User slug of the admin performing the update.
-    /// * `name` - New name for the organization, or `None` to keep the current name.
-    ///
-    /// # Returns
-    ///
-    /// Returns the updated [`OrganizationInfo`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Connection fails after retry attempts
-    /// - The organization does not exist
-    /// - The initiator is not an organization admin
-    /// - The new name is invalid
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, UserSlug};
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
-    /// # let slug = OrganizationSlug::new(1);
-    /// let updated = client.update_organization(slug, UserSlug::new(42), Some("new-name".into())).await?;
-    /// println!("Updated organization: {}", updated.name);
-    /// # Ok(())
-    /// # }
-    /// ```
     pub async fn update_organization(
         &self,
         slug: OrganizationSlug,
@@ -207,58 +95,22 @@ impl LedgerClient {
             let pool = pool.clone();
             let name = name.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_organization_client);
-
-                let request = proto::UpdateOrganizationRequest {
-                    slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                    name: name.clone(),
-                };
-
-                let response =
-                    client.update_organization(tonic::Request::new(request)).await?.into_inner();
-
-                Ok(OrganizationInfo::from_update_proto(response))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::organization::update_organization(
+                    wire_client,
+                    request_id,
+                    slug,
+                    user,
+                    name,
+                )
+                .await
             }
         })
         .await
     }
 
     /// Soft-deletes an organization by slug.
-    ///
-    /// Marks the organization for deletion. Fails if the organization
-    /// still contains active vaults. The organization enters `Deleted` status
-    /// and data is retained for `retention_days` before being purged.
-    ///
-    /// # Arguments
-    ///
-    /// * `slug` - Organization slug (external identifier).
-    /// * `user` - User slug of the admin initiating the delete.
-    ///
-    /// # Returns
-    ///
-    /// Returns [`OrganizationDeleteInfo`] with the deletion timestamp and retention period.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Connection fails after retry attempts
-    /// - The organization does not exist
-    /// - The organization still has active vaults
-    /// - The initiator is not an organization admin
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use inferadb_ledger_sdk::{LedgerClient, OrganizationSlug, UserSlug, VaultSlug};
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
-    /// # let slug = OrganizationSlug::new(1);
-    /// let delete_info = client.delete_organization(slug, UserSlug::new(42)).await?;
-    /// println!("Deleted, retention: {} days", delete_info.retention_days);
-    /// # Ok(())
-    /// # }
-    /// ```
     pub async fn delete_organization(
         &self,
         slug: OrganizationSlug,
@@ -268,59 +120,21 @@ impl LedgerClient {
         self.call_with_retry("delete_organization", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_organization_client);
-
-                let request = proto::DeleteOrganizationRequest {
-                    slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                };
-
-                let response =
-                    client.delete_organization(tonic::Request::new(request)).await?.into_inner();
-
-                let deleted_at =
-                    response.deleted_at.as_ref().and_then(proto_timestamp_to_system_time);
-
-                Ok(OrganizationDeleteInfo { deleted_at, retention_days: response.retention_days })
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::organization::delete_organization(
+                    wire_client,
+                    request_id,
+                    slug,
+                    user,
+                )
+                .await
             }
         })
         .await
     }
 
     /// Lists organizations visible to the caller.
-    ///
-    /// Returns a paginated list of organizations. Pass the returned
-    /// `next_page_token` into subsequent calls to retrieve further pages.
-    ///
-    /// # Arguments
-    ///
-    /// * `caller` - User slug of the caller (for authorization filtering).
-    /// * `page_size` - Maximum items per page (0 = server default).
-    /// * `page_token` - Opaque cursor from a previous response, or `None` for the first page.
-    ///
-    /// # Returns
-    ///
-    /// A tuple of `(organizations, next_page_token)`. When `next_page_token`
-    /// is `None`, there are no more pages.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if connection fails after retry attempts.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use inferadb_ledger_sdk::LedgerClient;
-    /// # use inferadb_ledger_types::UserSlug;
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let client = LedgerClient::connect("http://localhost:50051", "my-service").await?;
-    /// let (organizations, _next) = client.list_organizations(UserSlug::new(1), 100, None).await?;
-    /// for org in organizations {
-    ///     println!("Organization: {} (slug: {})", org.name, org.slug);
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
     pub async fn list_organizations(
         &self,
         caller: UserSlug,
@@ -332,46 +146,22 @@ impl LedgerClient {
             let pool = pool.clone();
             let page_token = page_token.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_organization_client);
-
-                let request = proto::ListOrganizationsRequest {
-                    page_token: page_token.clone(),
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::organization::list_organizations(
+                    wire_client,
+                    request_id,
+                    caller,
                     page_size,
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                let response =
-                    client.list_organizations(tonic::Request::new(request)).await?.into_inner();
-
-                let organizations =
-                    response.organizations.into_iter().map(OrganizationInfo::from_proto).collect();
-
-                Ok((organizations, response.next_page_token))
+                    page_token,
+                )
+                .await
             }
         })
         .await
     }
 
     /// Lists members of an organization.
-    ///
-    /// # Arguments
-    ///
-    /// * `slug` - Organization slug (external identifier).
-    /// * `caller` - User slug of the caller (must be a member).
-    /// * `page_size` - Maximum items per page (0 = server default).
-    /// * `page_token` - Opaque cursor from a previous response, or `None` for the first page.
-    ///
-    /// # Returns
-    ///
-    /// A tuple of `(members, next_page_token)`. When `next_page_token`
-    /// is `None`, there are no more pages.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Connection fails after retry attempts
-    /// - The organization does not exist
-    /// - The caller is not a member
     pub async fn list_organization_members(
         &self,
         slug: OrganizationSlug,
@@ -384,46 +174,23 @@ impl LedgerClient {
             let pool = pool.clone();
             let page_token = page_token.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_organization_client);
-
-                let request = proto::ListOrganizationMembersRequest {
-                    slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                    page_token: page_token.clone(),
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::organization::list_organization_members(
+                    wire_client,
+                    request_id,
+                    slug,
+                    caller,
                     page_size,
-                };
-
-                let response = client
-                    .list_organization_members(tonic::Request::new(request))
-                    .await?
-                    .into_inner();
-
-                let members =
-                    response.members.iter().map(OrganizationMemberInfo::from_proto).collect();
-
-                Ok((members, response.next_page_token))
+                    page_token,
+                )
+                .await
             }
         })
         .await
     }
 
     /// Removes a member from an organization.
-    ///
-    /// Self-removal: any member can leave unless they are the last admin.
-    /// Removing others: initiator must be an admin.
-    ///
-    /// # Arguments
-    ///
-    /// * `slug` - Organization slug (external identifier).
-    /// * `user` - User slug of the person performing the removal.
-    /// * `target` - User slug of the member to remove.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The target is not a member
-    /// - The initiator lacks permission
-    /// - Removing the last admin
     pub async fn remove_organization_member(
         &self,
         slug: OrganizationSlug,
@@ -434,43 +201,22 @@ impl LedgerClient {
         self.call_with_retry("remove_organization_member", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_organization_client);
-
-                let request = proto::RemoveOrganizationMemberRequest {
-                    slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                    target: Some(proto::UserSlug { slug: target.value() }),
-                };
-
-                client.remove_organization_member(tonic::Request::new(request)).await?;
-
-                Ok(())
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::organization::remove_organization_member(
+                    wire_client,
+                    request_id,
+                    slug,
+                    user,
+                    target,
+                )
+                .await
             }
         })
         .await
     }
 
     /// Updates a member's role within an organization.
-    ///
-    /// Initiator must be an admin. Cannot demote the last admin.
-    ///
-    /// # Arguments
-    ///
-    /// * `slug` - Organization slug (external identifier).
-    /// * `user` - User slug of the admin performing the change.
-    /// * `target` - User slug of the member to update.
-    /// * `role` - New role for the member.
-    ///
-    /// # Returns
-    ///
-    /// Returns the updated [`OrganizationMemberInfo`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The initiator is not an admin
-    /// - The target is not a member
-    /// - Demoting the last admin
     pub async fn update_organization_member_role(
         &self,
         slug: OrganizationSlug,
@@ -482,26 +228,17 @@ impl LedgerClient {
         self.call_with_retry("update_organization_member_role", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_organization_client);
-
-                let request = proto::UpdateOrganizationMemberRoleRequest {
-                    slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                    target: Some(proto::UserSlug { slug: target.value() }),
-                    role: role.to_proto(),
-                };
-
-                let response = client
-                    .update_organization_member_role(tonic::Request::new(request))
-                    .await?
-                    .into_inner();
-
-                let member =
-                    response.member.as_ref().map(OrganizationMemberInfo::from_proto).ok_or_else(
-                        || missing_response_field("member", "UpdateOrganizationMemberRoleResponse"),
-                    )?;
-
-                Ok(member)
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::organization::update_organization_member_role(
+                    wire_client,
+                    request_id,
+                    slug,
+                    user,
+                    target,
+                    role,
+                )
+                .await
             }
         })
         .await
@@ -512,18 +249,6 @@ impl LedgerClient {
     // =========================================================================
 
     /// Lists teams in an organization.
-    ///
-    /// # Arguments
-    ///
-    /// * `organization` - Organization slug (external identifier).
-    /// * `caller` - User slug of the caller (for authorization filtering).
-    /// * `page_size` - Maximum items per page (0 = server default).
-    /// * `page_token` - Opaque cursor from a previous response, or `None` for the first page.
-    ///
-    /// # Returns
-    ///
-    /// A tuple of `(teams, next_page_token)`. When `next_page_token`
-    /// is `None`, there are no more pages.
     pub async fn list_organization_teams(
         &self,
         organization: OrganizationSlug,
@@ -536,32 +261,23 @@ impl LedgerClient {
             let pool = pool.clone();
             let page_token = page_token.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_organization_client);
-
-                let request = proto::ListOrganizationTeamsRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                    page_token: page_token.clone(),
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::organization::list_organization_teams(
+                    wire_client,
+                    request_id,
+                    organization,
+                    caller,
                     page_size,
-                };
-
-                let response = client
-                    .list_organization_teams(tonic::Request::new(request))
-                    .await?
-                    .into_inner();
-
-                let teams = response.teams.iter().map(TeamInfo::from_proto).collect();
-
-                Ok((teams, response.next_page_token))
+                    page_token,
+                )
+                .await
             }
         })
         .await
     }
 
     /// Creates a new team within an organization.
-    ///
-    /// The team name must be unique within the organization.
-    /// A Snowflake team slug is generated server-side.
     pub async fn create_organization_team(
         &self,
         organization: OrganizationSlug,
@@ -581,37 +297,25 @@ impl LedgerClient {
 
         self.call_with_retry("create_organization_team", || {
             let pool = pool.clone();
-
             let name = name.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_organization_client);
-
-                let request = proto::CreateOrganizationTeamRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    name: name.clone(),
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                    slug: Some(proto::TeamSlug { slug: team_slug.value() }),
-                };
-
-                let response = client
-                    .create_organization_team(tonic::Request::new(request))
-                    .await?
-                    .into_inner();
-
-                response
-                    .team
-                    .as_ref()
-                    .map(TeamInfo::from_proto)
-                    .ok_or_else(|| missing_response_field("team", "CreateTeamResponse"))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::organization::create_organization_team(
+                    wire_client,
+                    request_id,
+                    organization,
+                    name,
+                    caller,
+                    team_slug,
+                )
+                .await
             }
         })
         .await
     }
 
     /// Deletes a team from an organization.
-    ///
-    /// Caller must be an organization administrator or team manager.
-    /// Optionally moves all members to another team before deletion.
     pub async fn delete_organization_team(
         &self,
         team: TeamSlug,
@@ -622,25 +326,22 @@ impl LedgerClient {
         self.call_with_retry("delete_organization_team", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_organization_client);
-
-                let request = proto::DeleteOrganizationTeamRequest {
-                    slug: Some(proto::TeamSlug { slug: team.value() }),
-                    move_members_to: move_members_to.map(|s| proto::TeamSlug { slug: s.value() }),
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                client.delete_organization_team(tonic::Request::new(request)).await?;
-
-                Ok(())
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::organization::delete_organization_team(
+                    wire_client,
+                    request_id,
+                    team,
+                    caller,
+                    move_members_to,
+                )
+                .await
             }
         })
         .await
     }
 
     /// Updates a team's metadata (currently: name only).
-    ///
-    /// Caller must be an organization administrator or team manager.
     pub async fn update_organization_team(
         &self,
         team: TeamSlug,
@@ -652,36 +353,24 @@ impl LedgerClient {
 
         self.call_with_retry("update_organization_team", || {
             let pool = pool.clone();
-
             let name = name.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_organization_client);
-
-                let request = proto::UpdateOrganizationTeamRequest {
-                    slug: Some(proto::TeamSlug { slug: team.value() }),
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                    name: name.clone(),
-                };
-
-                let response = client
-                    .update_organization_team(tonic::Request::new(request))
-                    .await?
-                    .into_inner();
-
-                response
-                    .team
-                    .as_ref()
-                    .map(TeamInfo::from_proto)
-                    .ok_or_else(|| missing_response_field("team", "UpdateTeamResponse"))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::organization::update_organization_team(
+                    wire_client,
+                    request_id,
+                    team,
+                    caller,
+                    name,
+                )
+                .await
             }
         })
         .await
     }
 
     /// Retrieves a single team by slug.
-    ///
-    /// Admins can see any team; non-admin callers can only see teams they
-    /// belong to.
     pub async fn get_organization_team(
         &self,
         team: TeamSlug,
@@ -691,29 +380,21 @@ impl LedgerClient {
         self.call_with_retry("get_organization_team", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_organization_client);
-
-                let request = proto::GetOrganizationTeamRequest {
-                    slug: Some(proto::TeamSlug { slug: team.value() }),
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                let response =
-                    client.get_organization_team(tonic::Request::new(request)).await?.into_inner();
-
-                response
-                    .team
-                    .as_ref()
-                    .map(TeamInfo::from_proto)
-                    .ok_or_else(|| missing_response_field("team", "GetOrganizationTeamResponse"))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::organization::get_organization_team(
+                    wire_client,
+                    request_id,
+                    team,
+                    caller,
+                )
+                .await
             }
         })
         .await
     }
 
     /// Adds a member to a team.
-    ///
-    /// Returns the updated team info.
     pub async fn add_team_member(
         &self,
         team: TeamSlug,
@@ -725,23 +406,17 @@ impl LedgerClient {
         self.call_with_retry("add_team_member", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_organization_client);
-
-                let request = proto::AddTeamMemberRequest {
-                    team: Some(proto::TeamSlug { slug: team.value() }),
-                    user: Some(proto::UserSlug { slug: user.value() }),
-                    role: role.to_proto().into(),
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                let response =
-                    client.add_team_member(tonic::Request::new(request)).await?.into_inner();
-
-                response
-                    .team
-                    .as_ref()
-                    .map(TeamInfo::from_proto)
-                    .ok_or_else(|| missing_response_field("team", "AddTeamMemberResponse"))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::organization::add_team_member(
+                    wire_client,
+                    request_id,
+                    team,
+                    user,
+                    role,
+                    caller,
+                )
+                .await
             }
         })
         .await
@@ -758,29 +433,22 @@ impl LedgerClient {
         self.call_with_retry("remove_team_member", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_organization_client);
-
-                let request = proto::RemoveTeamMemberRequest {
-                    team: Some(proto::TeamSlug { slug: team.value() }),
-                    user: Some(proto::UserSlug { slug: user.value() }),
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                client.remove_team_member(tonic::Request::new(request)).await?;
-                Ok(())
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::organization::remove_team_member(
+                    wire_client,
+                    request_id,
+                    team,
+                    user,
+                    caller,
+                )
+                .await
             }
         })
         .await
     }
 
     /// Updates a team member's role.
-    ///
-    /// # Arguments
-    ///
-    /// * `team` - Team slug (external identifier).
-    /// * `user` - User slug of the member whose role to update.
-    /// * `role` - New role to assign.
-    /// * `caller` - User slug of the caller (must be org admin or team manager).
     pub async fn update_team_member_role(
         &self,
         team: TeamSlug,
@@ -792,52 +460,23 @@ impl LedgerClient {
         self.call_with_retry("update_team_member_role", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_organization_client);
-
-                let request = proto::UpdateTeamMemberRoleRequest {
-                    team: Some(proto::TeamSlug { slug: team.value() }),
-                    user: Some(proto::UserSlug { slug: user.value() }),
-                    role: role.to_proto().into(),
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                let response = client
-                    .update_team_member_role(tonic::Request::new(request))
-                    .await?
-                    .into_inner();
-
-                response
-                    .team
-                    .as_ref()
-                    .map(TeamInfo::from_proto)
-                    .ok_or_else(|| missing_response_field("team", "UpdateTeamMemberRoleResponse"))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::organization::update_team_member_role(
+                    wire_client,
+                    request_id,
+                    team,
+                    user,
+                    role,
+                    caller,
+                )
+                .await
             }
         })
         .await
     }
 
     /// Initiates migration of an organization to a different region.
-    ///
-    /// Transitions the organization to `Migrating` status and creates a background
-    /// saga to drive the migration through. Writes are blocked during migration.
-    ///
-    /// # Arguments
-    ///
-    /// * `slug` - Organization slug (external identifier).
-    /// * `target_region` - Target region for the migration.
-    /// * `acknowledge_residency_downgrade` - Required for protected -> non-protected.
-    ///
-    /// # Returns
-    ///
-    /// Returns [`MigrationInfo`] with source/target regions and current status.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Organization does not exist
-    /// - Organization is not in `Active` status
-    /// - Target region is the same as current region
-    /// - Protected -> non-protected without acknowledgment
     pub async fn migrate_organization(
         &self,
         slug: OrganizationSlug,
@@ -845,138 +484,67 @@ impl LedgerClient {
         acknowledge_residency_downgrade: bool,
         user: UserSlug,
     ) -> Result<MigrationInfo> {
-        let target_slug = target_region.as_str().to_string();
         let pool = self.pool.clone();
         self.call_with_retry("migrate_organization", || {
             let pool = pool.clone();
-            let target_slug = target_slug.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_organization_client);
-
-                let request = proto::MigrateOrganizationRequest {
-                    slug: Some(proto::OrganizationSlug { slug: slug.value() }),
-                    target_region: target_slug,
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::organization::migrate_organization(
+                    wire_client,
+                    request_id,
+                    slug,
+                    target_region,
                     acknowledge_residency_downgrade,
-                    caller: Some(proto::UserSlug { slug: user.value() }),
-                };
-
-                let response =
-                    client.migrate_organization(tonic::Request::new(request)).await?.into_inner();
-
-                Ok(MigrationInfo {
-                    slug: OrganizationSlug::new(response.slug.map_or(0, |s| s.slug)),
-                    source_region: region_from_proto_str(&response.source_region)
-                        .unwrap_or(Region::GLOBAL),
-                    target_region: region_from_proto_str(&response.target_region)
-                        .unwrap_or(target_region),
-                    status: OrganizationStatus::from_proto(response.status),
-                })
+                    user,
+                )
+                .await
             }
         })
         .await
     }
 
     /// Initiates a user region migration.
-    ///
-    /// Moves the user's data residency to the target region. Authenticated API
-    /// calls for this user are temporarily blocked while the migration is in
-    /// progress.
-    ///
-    /// # Arguments
-    ///
-    /// * `user_slug` - User slug (external identifier).
-    /// * `target_region` - Target region for the migration.
-    ///
-    /// # Returns
-    ///
-    /// Returns [`UserMigrationInfo`] with source/target regions and current directory status.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - User does not exist
-    /// - Target region is the same as current region
-    /// - Connection fails after retry attempts
     pub async fn migrate_user_region(
         &self,
         caller: UserSlug,
         user: UserSlug,
         target_region: Region,
     ) -> Result<UserMigrationInfo> {
-        let target_slug = target_region.as_str().to_string();
         let pool = self.pool.clone();
         self.call_with_retry("migrate_user_region", || {
             let pool = pool.clone();
-            let target_slug = target_slug.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_user_client);
-
-                let request = proto::MigrateUserRegionRequest {
-                    slug: Some(proto::UserSlug { slug: user.value() }),
-                    target_region: target_slug,
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                let response =
-                    client.migrate_user_region(tonic::Request::new(request)).await?.into_inner();
-
-                Ok(UserMigrationInfo {
-                    slug: UserSlug::new(response.slug.map_or(0, |s| s.slug)),
-                    source_region: region_from_proto_str(&response.source_region)
-                        .unwrap_or(Region::GLOBAL),
-                    target_region: region_from_proto_str(&response.target_region)
-                        .unwrap_or(target_region),
-                    directory_status: response.directory_status,
-                })
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::user::migrate_user_region(
+                    wire_client,
+                    request_id,
+                    caller,
+                    user,
+                    target_region,
+                )
+                .await
             }
         })
         .await
     }
 
     /// Erases a user's PII through crypto-shredding.
-    ///
-    /// Permanently destroys the user's blinding key material, rendering all
-    /// associated email hashes unrecoverable. This operation is irreversible.
-    ///
-    /// # Arguments
-    ///
-    /// * `user` - User slug (Snowflake ID) to erase.
-    /// * `erased_by` - Identity of the actor requesting erasure (audit trail).
-    /// * `region` - Region where the user's PII resides.
-    ///
-    /// # Returns
-    ///
-    /// Returns the user slug that was erased.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - User does not exist
-    /// - Confirmation token is invalid, expired, or missing
-    /// - Connection fails after retry attempts
     pub async fn erase_user(
         &self,
         user: UserSlug,
         caller: UserSlug,
         region: Region,
     ) -> Result<UserSlug> {
-        let region_slug = region.as_str().to_string();
         let pool = self.pool.clone();
         self.call_with_retry("erase_user", || {
             let pool = pool.clone();
-            let region_slug = region_slug.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_user_client);
-
-                let request = proto::EraseUserRequest {
-                    user: Some(proto::UserSlug { slug: user.value() }),
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                    region: region_slug,
-                };
-
-                let response = client.erase_user(tonic::Request::new(request)).await?.into_inner();
-
-                Ok(UserSlug::new(response.user.map_or(0, |u| u.slug)))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::user::erase_user(wire_client, request_id, user, caller, region)
+                    .await
             }
         })
         .await

@@ -1,0 +1,708 @@
+//! Wire-protocol implementation for `VaultService` (Phase F.1.f.1.4).
+//!
+//! Provides the [`inferadb_ledger_wire_services::VaultService`] impl on
+//! [`super::vault::VaultService`]. The wire impl operates on wire types
+//! directly — no proto round-trip, no UFCS-delegation through the tonic
+//! impl. The two paths share only the underlying `SlugResolver`,
+//! `AppliedState`, and `ProposalService` primitives.
+//!
+//! Non-trivial wire mappings preserved here:
+//!
+//! - `BlockHeader` (carried inside the inlined `CreateVaultResponse.genesis`) and `Hash` (carried
+//!   inside `GetVaultResponse.state_root`) are bridged by the shared helpers in
+//!   [`super::wire_shared`] — same primitives the `WriteService` shim uses.
+//! - `BlockRetentionPolicy.mode` is `Option<i32>` (proto enum) and `Option<BlockRetentionMode>` on
+//!   the wire — bridged by numeric-tag mapping with unknown tags collapsing to `Unspecified`.
+//! - `VaultStatus` round-trips by numeric tag, identical to other repr-i32 wire enums.
+
+use bytes::Bytes;
+use inferadb_ledger_raft::{
+    metrics,
+    types::{
+        BlockRetentionMode as DomainBlockRetentionMode,
+        BlockRetentionPolicy as DomainRetentionPolicy, LedgerResponse, OrganizationRequest,
+        SystemRequest,
+    },
+};
+use inferadb_ledger_types::{
+    OrganizationSlug as DomainOrganizationSlug, VaultEntry, VaultSlug as DomainVaultSlug,
+    ZERO_HASH,
+    events::{EventAction, EventOutcome as EventOutcomeType},
+};
+use inferadb_ledger_wire::{
+    ErrorCode, RequestContext, WireError,
+    services::{shared as ws, vault as w},
+};
+
+use super::{helpers, slug_resolver::SlugResolver, vault::VaultService};
+
+// ---------------------------------------------------------------------------
+// Enum conversions (numeric-tag mappings).
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Wire-trait implementation for `VaultService`.
+//
+// Mirrors the tonic [`super::vault::VaultService`] handler bodies line-by-line
+// on wire types — no UFCS delegation through the tonic impl. Both impls share
+// the same `pub(super) ctx: ServiceContext` field on [`VaultService`] and call
+// into the same F.1.f.0 wire-native APIs (`SlugResolver::*`,
+// `helpers::*`, `ServiceContext::propose_*`).
+//
+// `BlockRetentionPolicy` translation: wire `w::BlockRetentionPolicy` carries
+// `Option<BlockRetentionMode>` + `Option<u64>`; the domain
+// `inferadb_ledger_raft::types::BlockRetentionPolicy` requires both fields.
+// The wire path validates inline and rejects unspecified mode / missing
+// retention_blocks with `ErrorCode::InvalidArgument`.
+// ---------------------------------------------------------------------------
+
+/// Translate a wire `BlockRetentionPolicy` into the domain type.
+///
+/// Wire mirrors proto's optional-presence shape; the domain type requires
+/// both fields. Rejects `mode = None`, `mode = Unspecified`, and
+/// `retention_blocks = None` with `ErrorCode::InvalidArgument`, matching
+/// the tonic path's `TryFrom<&proto::BlockRetentionPolicy>` discipline.
+fn wire_to_domain_retention_policy(
+    p_in: &ws::BlockRetentionPolicy,
+) -> Result<DomainRetentionPolicy, WireError> {
+    let retention_blocks = p_in.retention_blocks.ok_or_else(|| {
+        WireError::new(ErrorCode::InvalidArgument, "BlockRetentionPolicy missing retention_blocks")
+    })?;
+    let mode = match p_in.mode {
+        None => {
+            return Err(WireError::new(
+                ErrorCode::InvalidArgument,
+                "BlockRetentionPolicy missing mode",
+            ));
+        },
+        Some(ws::BlockRetentionMode::Unspecified) => {
+            return Err(WireError::new(
+                ErrorCode::InvalidArgument,
+                "BlockRetentionPolicy mode must be specified",
+            ));
+        },
+        Some(ws::BlockRetentionMode::Full) => DomainBlockRetentionMode::Full,
+        Some(ws::BlockRetentionMode::Compacted) => DomainBlockRetentionMode::Compacted,
+    };
+    Ok(DomainRetentionPolicy { mode, retention_blocks })
+}
+
+impl inferadb_ledger_wire_services::VaultService for VaultService {
+    /// Mirrors the tonic [`vault`](super::vault::VaultService) `create_vault`
+    /// handler: resolves the org slug, validates the client-supplied vault
+    /// slug + retention policy, dual-proposes (per-org `CreateVault` then
+    /// GLOBAL `RegisterVaultDirectoryEntry`), waits for the local vault
+    /// group to be live, and returns the vault slug + genesis block header.
+    async fn create_vault(
+        &self,
+        request: w::CreateVaultRequest,
+        _ctx: RequestContext,
+    ) -> Result<w::CreateVaultResponse, WireError> {
+        helpers::check_not_draining(self.ctx.health_state.as_ref())?;
+
+        let mut log_ctx = self.ctx.make_request_context_from("VaultService", "create_vault", &_ctx);
+        let req = request;
+
+        // Mirror `extract_caller_from_proto_slug`: stash the caller's slug on
+        // the canonical-log-line context. Wire `UserSlug` carries the same
+        // `u64` Snowflake value the proto path forwarded.
+        if let Some(ref c) = req.caller {
+            log_ctx.set_caller(c.value());
+        }
+
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
+        let organization_slug_val = req.organization.as_ref().map_or(0, |n| n.value());
+        let organization_id = slug_resolver
+            .extract_and_resolve(req.organization.map(|s| DomainOrganizationSlug::new(s.value())))
+            .inspect_err(|err| {
+                log_ctx.set_error("InvalidArgument", &err.message);
+            })?;
+
+        log_ctx.set_organization(organization_slug_val);
+
+        // Translate wire retention policy to the domain type. Rejects
+        // messages that omit either explicit-presence field — same
+        // discipline as the tonic path's `TryFrom<&proto::BlockRetentionPolicy>`.
+        let retention_policy = req
+            .retention_policy
+            .as_ref()
+            .map(wire_to_domain_retention_policy)
+            .transpose()
+            .inspect_err(|err: &WireError| {
+                log_ctx.set_error("InvalidArgument", &err.message);
+            })?;
+        if let Some(policy) = retention_policy.as_ref() {
+            match policy.mode {
+                DomainBlockRetentionMode::Full => log_ctx.set_retention_mode("full"),
+                DomainBlockRetentionMode::Compacted => log_ctx.set_retention_mode("compacted"),
+            }
+        }
+
+        // Client-supplied Snowflake slug — required. Retries across lost
+        // responses MUST reuse the same slug so the per-org CreateVault
+        // idempotency path returns the existing `VaultId` instead of
+        // creating an orphan body. See
+        // `per_org_create_vault_is_idempotent_by_slug`.
+        let vault_slug_wire = req.slug.ok_or_else(|| {
+            WireError::new(ErrorCode::InvalidArgument, "CreateVaultRequest.slug is required")
+        })?;
+        if vault_slug_wire.value() == 0 {
+            return Err(WireError::new(
+                ErrorCode::InvalidArgument,
+                "CreateVaultRequest.slug must be a non-zero Snowflake",
+            ));
+        }
+        let vault_slug = DomainVaultSlug::new(vault_slug_wire.value());
+
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(organization_id)
+            .ok_or_else(|| WireError::new(ErrorCode::NotFound, "Organization not found"))?;
+
+        // γ Phase 3b dual-propose:
+        //   (a) CreateVault → per-org group: allocates `VaultId` from the
+        //       per-org counter, writes the vault body (VaultMeta,
+        //       vault_heights, vault_health) to per-org `AppliedState`.
+        //   (b) RegisterVaultDirectoryEntry → GLOBAL: inserts the slug-index
+        //       entry so `SlugResolver::resolve_vault(slug)` returns the
+        //       `(organization, vault_id)` pair cluster-wide.
+        //
+        // Failure mode: step (b) can fail after step (a) succeeds. That
+        // leaves a vault body in per-org state with no GLOBAL slug-index
+        // entry. The error surfaces to the client, who can retry — step
+        // (b) is idempotent (inserting the same tuple is a no-op), so the
+        // next attempt (or an orphan-cleanup sweep) resolves it.
+        let response = self
+            .ctx
+            .propose_to_organization_request(
+                org_meta.region,
+                organization_id,
+                OrganizationRequest::CreateVault {
+                    organization: organization_id,
+                    slug: vault_slug,
+                    name: None,
+                    retention_policy,
+                },
+                &_ctx,
+                &mut log_ctx,
+            )
+            .await?;
+
+        match response {
+            LedgerResponse::VaultCreated { vault: vault_id, slug } => {
+                // The per-org `CreateVault` apply arm signals the vault-
+                // lifecycle watcher (`start_organization_group`) via an
+                // mpsc channel; the watcher then calls
+                // `RaftManager::start_vault_group` to register the per-
+                // vault Raft shard locally. That dispatch is asynchronous
+                // — the apply returns before the watcher runs — so a
+                // client write issued immediately after `CreateVault`
+                // returns can race the registration and hit "Vault is not
+                // active on this node" on the same leader that just
+                // committed the entry. Wait for the local registration
+                // before responding so the leader's view of the vault is
+                // ready by the time the client sees success. Followers
+                // converge through their own watcher tasks; cross-voter
+                // convergence is not required for this RPC's contract.
+                if let Some(ref manager) = self.ctx.manager {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    loop {
+                        if manager
+                            .get_vault_group(org_meta.region, organization_id, vault_id)
+                            .is_ok()
+                        {
+                            break;
+                        }
+                        if std::time::Instant::now() >= deadline {
+                            log_ctx.set_error(
+                                "Internal",
+                                "Vault group registration timed out on local node",
+                            );
+                            return Err(WireError::new(
+                                ErrorCode::Internal,
+                                "Vault group registration timed out on local node",
+                            ));
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                    }
+                }
+
+                // Step (b): register the slug-index entry on GLOBAL so the
+                // vault can be resolved by external slug. Must complete
+                // before returning success — if it fails, the client sees
+                // the error and can retry (idempotent on re-apply).
+                self.ctx
+                    .propose_system_request(
+                        SystemRequest::RegisterVaultDirectoryEntry {
+                            organization: organization_id,
+                            vault: vault_id,
+                            slug,
+                        },
+                        &_ctx,
+                        &mut log_ctx,
+                    )
+                    .await?;
+
+                log_ctx.set_vault(slug.value());
+                log_ctx.set_success();
+                metrics::record_organization_operation(organization_id, "create_vault");
+                metrics::record_organization_latency(
+                    organization_id,
+                    "create_vault",
+                    log_ctx.elapsed_secs(),
+                );
+
+                log_ctx.record_event(EventAction::VaultCreated, EventOutcomeType::Success, &[]);
+
+                // Get Raft metrics for leader_id and term.
+                let (leader_id, current_term) = if let Some(raft_metrics) = self.ctx.raft_metrics()
+                {
+                    let leader = raft_metrics.current_leader.unwrap_or(raft_metrics.id);
+                    log_ctx.set_raft_term(raft_metrics.current_term);
+                    (leader, raft_metrics.current_term)
+                } else {
+                    // Fallback when metrics are unavailable (e.g., test mocks).
+                    (0, 0)
+                };
+
+                // Compute empty state root for genesis block.
+                let state_root = self.ctx.state.compute_state_root(vault_id).map_err(|e| {
+                    tracing::error!(
+                        vault_id = vault_id.value(),
+                        error = ?e,
+                        "Failed to compute state root for genesis block"
+                    );
+                    WireError::new(
+                        ErrorCode::Internal,
+                        "Failed to compute state root for genesis block",
+                    )
+                })?;
+
+                // Build genesis block header (height 0).
+                let genesis_entry = VaultEntry {
+                    organization: organization_id,
+                    vault: vault_id,
+                    vault_height: 0,
+                    previous_vault_hash: ZERO_HASH,
+                    transactions: vec![],
+                    tx_merkle_root: ZERO_HASH,
+                    state_root,
+
+                    organization_slug: DomainOrganizationSlug::new(0),
+                    vault_slug: DomainVaultSlug::new(0),
+                };
+                let genesis_hash = inferadb_ledger_types::vault_entry_hash(&genesis_entry);
+                let organization = slug_resolver.resolve_slug(organization_id)?;
+
+                // Compose timestamp as UNIX nanoseconds — wire BlockHeader
+                // carries `u64` ns rather than the proto `Timestamp { seconds, nanos }`.
+                let timestamp_ns = u64::try_from(chrono::Utc::now().timestamp().max(0))
+                    .unwrap_or(0)
+                    .saturating_mul(1_000_000_000);
+
+                let genesis = ws::BlockHeader {
+                    height: 0,
+                    organization: Some(ws::OrganizationSlug::new(organization.value())),
+                    vault: Some(ws::VaultSlug::new(slug.value())),
+                    previous_hash: Some(ws::Hash { value: Bytes::copy_from_slice(&ZERO_HASH) }),
+                    tx_merkle_root: Some(ws::Hash {
+                        value: Bytes::copy_from_slice(&ZERO_HASH), // Empty transaction list.
+                    }),
+                    state_root: Some(ws::Hash { value: Bytes::copy_from_slice(&state_root) }),
+                    timestamp: timestamp_ns,
+                    leader_id: Some(ws::NodeId::new(leader_id.to_string())),
+                    term: current_term,
+                    committed_index: 0, // Not available via propose helper.
+                    block_hash: Some(ws::Hash { value: Bytes::copy_from_slice(&genesis_hash) }),
+                };
+
+                Ok(w::CreateVaultResponse {
+                    vault: Some(ws::VaultSlug::new(slug.value())),
+                    genesis: Some(genesis),
+                })
+            },
+            LedgerResponse::Error { code, message } => {
+                log_ctx.set_error(code.grpc_code_name(), &message);
+                Err(helpers::error_code_to_wire_error(code, message))
+            },
+            _ => {
+                log_ctx.set_error("UnexpectedResponse", "Unexpected response type");
+                Err(WireError::new(ErrorCode::Internal, "Unexpected response type"))
+            },
+        }
+    }
+
+    /// Mirrors the tonic [`vault`](super::vault::VaultService) `delete_vault`
+    /// handler: resolves the org and vault slugs, dual-proposes (per-org
+    /// `DeleteVault` then GLOBAL `UnregisterVaultDirectoryEntry`), and
+    /// returns the deletion timestamp.
+    async fn delete_vault(
+        &self,
+        request: w::DeleteVaultRequest,
+        _ctx: RequestContext,
+    ) -> Result<w::DeleteVaultResponse, WireError> {
+        helpers::check_not_draining(self.ctx.health_state.as_ref())?;
+
+        let mut log_ctx = self.ctx.make_request_context_from("VaultService", "delete_vault", &_ctx);
+        let req = request;
+
+        if let Some(ref c) = req.caller {
+            log_ctx.set_caller(c.value());
+        }
+
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
+        let organization_slug_val = req.organization.as_ref().map_or(0, |n| n.value());
+        let organization_id = slug_resolver
+            .extract_and_resolve(req.organization.map(|s| DomainOrganizationSlug::new(s.value())))
+            .inspect_err(|err| {
+                log_ctx.set_error("InvalidArgument", &err.message);
+            })?;
+
+        let vault_id = slug_resolver
+            .extract_and_resolve_vault(req.vault.map(|s| DomainVaultSlug::new(s.value())))
+            .inspect_err(|err| {
+                log_ctx.set_error("InvalidArgument", &err.message);
+            })?;
+
+        let vault_val = req.vault.as_ref().map_or(0, |v| v.value());
+        log_ctx.set_target(organization_slug_val, vault_val);
+
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(organization_id)
+            .ok_or_else(|| WireError::new(ErrorCode::NotFound, "Organization not found"))?;
+
+        // γ Phase 3b dual-propose:
+        //   (a) DeleteVault → per-org group: soft-deletes the vault body
+        //       (sets `VaultMeta.deleted = true` in per-org state).
+        //   (b) UnregisterVaultDirectoryEntry → GLOBAL: removes the
+        //       slug-index entry so subsequent `SlugResolver::resolve_vault`
+        //       calls return `NotFound`.
+        //
+        // Failure mode: step (b) can fail after step (a) succeeds. That
+        // leaves a deleted body in per-org state with an orphan slug-index
+        // entry on GLOBAL. Step (b) is idempotent (removing a missing
+        // entry is a no-op), so a retry — or an orphan-cleanup sweep —
+        // resolves it.
+        let response = self
+            .ctx
+            .propose_to_organization_request(
+                org_meta.region,
+                organization_id,
+                OrganizationRequest::DeleteVault { organization: organization_id, vault: vault_id },
+                &_ctx,
+                &mut log_ctx,
+            )
+            .await?;
+
+        match response {
+            LedgerResponse::VaultDeleted { success } => {
+                if success {
+                    self.ctx
+                        .propose_system_request(
+                            SystemRequest::UnregisterVaultDirectoryEntry {
+                                organization: organization_id,
+                                vault: vault_id,
+                            },
+                            &_ctx,
+                            &mut log_ctx,
+                        )
+                        .await?;
+
+                    log_ctx.set_success();
+                    metrics::record_organization_operation(organization_id, "delete_vault");
+                    metrics::record_organization_latency(
+                        organization_id,
+                        "delete_vault",
+                        log_ctx.elapsed_secs(),
+                    );
+
+                    log_ctx.record_event(EventAction::VaultDeleted, EventOutcomeType::Success, &[]);
+
+                    // Compose the deletion timestamp as UNIX nanoseconds —
+                    // wire `DeleteVaultResponse.deleted_at` is a non-optional
+                    // `u64` ns rather than the proto `Option<Timestamp>`.
+                    let deleted_at = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+                        .unwrap_or(0);
+
+                    Ok(w::DeleteVaultResponse { deleted_at })
+                } else {
+                    log_ctx.set_error("DeleteFailed", "Failed to delete vault");
+                    Err(WireError::new(ErrorCode::Internal, "Failed to delete vault"))
+                }
+            },
+            LedgerResponse::Error { code, message } => {
+                log_ctx.set_error(code.grpc_code_name(), &message);
+                Err(helpers::error_code_to_wire_error(code, message))
+            },
+            _ => {
+                log_ctx.set_error("UnexpectedResponse", "Unexpected response type");
+                Err(WireError::new(ErrorCode::Internal, "Unexpected response type"))
+            },
+        }
+    }
+
+    /// Mirrors the tonic [`vault`](super::vault::VaultService) `get_vault`
+    /// handler: resolves the org and vault slugs, reads the vault body
+    /// from the owning per-org `AppliedState` (or GLOBAL fallback), and
+    /// returns the metadata.
+    async fn get_vault(
+        &self,
+        request: w::GetVaultRequest,
+        _ctx: RequestContext,
+    ) -> Result<w::GetVaultResponse, WireError> {
+        let mut log_ctx = self.ctx.make_request_context_from("VaultService", "get_vault", &_ctx);
+        let req = request;
+
+        if let Some(ref c) = req.caller {
+            log_ctx.set_caller(c.value());
+        }
+
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
+        let organization_slug_val = req.organization.as_ref().map_or(0, |n| n.value());
+        let organization_id = slug_resolver
+            .extract_and_resolve(req.organization.map(|s| DomainOrganizationSlug::new(s.value())))
+            .inspect_err(|err| {
+                log_ctx.set_error("InvalidArgument", &err.message);
+            })?;
+
+        let vault_id = slug_resolver
+            .extract_and_resolve_vault(req.vault.map(|s| DomainVaultSlug::new(s.value())))
+            .inspect_err(|err| {
+                log_ctx.set_error("InvalidArgument", &err.message);
+            })?;
+
+        let vault_val = req.vault.as_ref().map_or(0, |v| v.value());
+        log_ctx.set_target(organization_slug_val, vault_val);
+
+        // Get vault metadata and height.
+        //
+        // Post-γ, vault record bodies live in the per-organization
+        // group's `AppliedState`. Route through the manager to read
+        // from the owning org's state; fall back to GLOBAL for
+        // single-Raft test setups without a manager.
+        let per_org_state = self
+            .ctx
+            .manager
+            .as_ref()
+            .and_then(|m| m.route_organization(organization_id))
+            .map(|g| g.applied_state().clone());
+        let read_state = per_org_state.as_ref().unwrap_or(&self.ctx.applied_state);
+        let vault_meta = read_state.get_vault(organization_id, vault_id);
+        let height = read_state.vault_height(organization_id, vault_id);
+
+        match vault_meta {
+            Some(vault) => {
+                log_ctx.set_block_height(height);
+                log_ctx.set_success();
+                let organization = slug_resolver.resolve_slug(organization_id)?;
+                Ok(w::GetVaultResponse {
+                    organization: Some(ws::OrganizationSlug::new(organization.value())),
+                    vault: Some(ws::VaultSlug::new(vault.slug.value())),
+                    height,
+                    state_root: None,
+                    nodes: vec![],
+                    leader: None,
+                    status: ws::VaultStatus::Active,
+                    retention_policy: None,
+                })
+            },
+            None => {
+                log_ctx.set_error("NotFound", "Vault not found");
+                Err(WireError::new(ErrorCode::NotFound, "Vault not found"))
+            },
+        }
+    }
+
+    /// Mirrors the tonic [`vault`](super::vault::VaultService) `list_vaults`
+    /// handler: aggregates vaults across per-org groups via the raft
+    /// manager (or GLOBAL fallback), applies optional org filter and
+    /// cursor-based pagination, and returns the page.
+    async fn list_vaults(
+        &self,
+        request: w::ListVaultsRequest,
+        _ctx: RequestContext,
+    ) -> Result<w::ListVaultsResponse, WireError> {
+        let mut log_ctx = self.ctx.make_request_context_from("VaultService", "list_vaults", &_ctx);
+        let req = request;
+
+        if let Some(ref c) = req.caller {
+            log_ctx.set_caller(c.value());
+        }
+
+        let page_size = super::pagination::normalize_page_size(req.page_size);
+        // `decode_page_token` consumes `&Option<Vec<u8>>` — bridge from the
+        // wire's `Option<Bytes>` by lazy clone-to-vec (only on `Some`).
+        let page_token_vec = req.page_token.as_ref().map(|b| b.to_vec());
+        let start_after = super::pagination::decode_page_token(&page_token_vec);
+
+        // Build (vault_slug, response) pairs for pagination.
+        //
+        // Post-γ, vault heights + record bodies live in each
+        // per-organization group's `AppliedState`. Aggregate across per-
+        // org groups via the raft manager; for each (org, vault) pair
+        // read `VaultMeta` from that group's applied state. Fall back
+        // to GLOBAL for single-Raft test setups where no manager is
+        // configured.
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
+        let org_filter = req.organization.as_ref().map(|o| o.value());
+        let mut vault_keys = Vec::new();
+        if let Some(ref manager) = self.ctx.manager {
+            manager.for_each_vault_across_groups(|org, vault, _| vault_keys.push((org, vault)));
+        } else {
+            self.ctx
+                .applied_state
+                .for_each_vault_height(|org, vault, _| vault_keys.push((org, vault)));
+        }
+
+        let vaults_with_slugs: Vec<(u64, w::GetVaultResponse)> = vault_keys
+            .iter()
+            .filter_map(|(org_id, vault_id)| {
+                let per_org_state = self
+                    .ctx
+                    .manager
+                    .as_ref()
+                    .and_then(|m| m.route_organization(*org_id))
+                    .map(|g| g.applied_state().clone());
+                let state = per_org_state.as_ref().unwrap_or(&self.ctx.applied_state);
+                state.get_vault(*org_id, *vault_id).map(|v| {
+                    let height = state.vault_height(v.organization, v.vault);
+                    let organization = slug_resolver.resolve_slug(v.organization)?;
+                    // Skip if org filter is set and doesn't match.
+                    if let Some(filter_slug) = org_filter
+                        && organization.value() != filter_slug
+                    {
+                        return Ok(None);
+                    }
+                    Ok(Some((
+                        v.slug.value(),
+                        w::GetVaultResponse {
+                            organization: Some(ws::OrganizationSlug::new(organization.value())),
+                            vault: Some(ws::VaultSlug::new(v.slug.value())),
+                            height,
+                            state_root: None,
+                            nodes: vec![],
+                            leader: None,
+                            status: ws::VaultStatus::Active,
+                            retention_policy: None,
+                        },
+                    )))
+                })
+            })
+            .collect::<Result<Vec<_>, WireError>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+
+        let (vaults, next_page_token_vec) =
+            super::pagination::paginate_by_slug(vaults_with_slugs, start_after, page_size);
+
+        log_ctx.set_keys_count(vaults.len());
+        log_ctx.set_success();
+
+        Ok(w::ListVaultsResponse { vaults, next_page_token: next_page_token_vec.map(Bytes::from) })
+    }
+
+    /// Mirrors the tonic [`vault`](super::vault::VaultService) `update_vault`
+    /// handler: resolves the org and vault slugs, validates the retention
+    /// policy, and proposes `UpdateVault` to the per-organization group.
+    async fn update_vault(
+        &self,
+        request: w::UpdateVaultRequest,
+        _ctx: RequestContext,
+    ) -> Result<w::UpdateVaultResponse, WireError> {
+        helpers::check_not_draining(self.ctx.health_state.as_ref())?;
+
+        let mut log_ctx = self.ctx.make_request_context_from("VaultService", "update_vault", &_ctx);
+        let req = request;
+
+        if let Some(ref c) = req.caller {
+            log_ctx.set_caller(c.value());
+        }
+
+        let slug_resolver = SlugResolver::new(self.ctx.applied_state.clone());
+        let organization_slug_val = req.organization.as_ref().map_or(0, |n| n.value());
+        let organization_id = slug_resolver
+            .extract_and_resolve(req.organization.map(|s| DomainOrganizationSlug::new(s.value())))
+            .inspect_err(|err| {
+                log_ctx.set_error("InvalidArgument", &err.message);
+            })?;
+        let vault_id = slug_resolver
+            .extract_and_resolve_vault(req.vault.map(|s| DomainVaultSlug::new(s.value())))
+            .inspect_err(|err| {
+                log_ctx.set_error("InvalidArgument", &err.message);
+            })?;
+
+        let vault_val = req.vault.as_ref().map_or(0, |v| v.value());
+        log_ctx.set_target(organization_slug_val, vault_val);
+
+        // Translate wire retention policy to the domain type.
+        let retention_policy = req
+            .retention_policy
+            .as_ref()
+            .map(wire_to_domain_retention_policy)
+            .transpose()
+            .inspect_err(|err: &WireError| {
+                log_ctx.set_error("InvalidArgument", &err.message);
+            })?;
+
+        let org_meta = self
+            .ctx
+            .applied_state
+            .get_organization(organization_id)
+            .ok_or_else(|| WireError::new(ErrorCode::NotFound, "Organization not found"))?;
+
+        // γ Phase 3b: UpdateVault touches only the per-org vault body
+        // (retention policy lives on `VaultMeta`). No GLOBAL slug-index
+        // change — this is a single-propose path.
+        let response = self
+            .ctx
+            .propose_to_organization_request(
+                org_meta.region,
+                organization_id,
+                OrganizationRequest::UpdateVault {
+                    organization: organization_id,
+                    vault: vault_id,
+                    retention_policy,
+                },
+                &_ctx,
+                &mut log_ctx,
+            )
+            .await?;
+
+        match response {
+            LedgerResponse::VaultUpdated { success } => {
+                if success {
+                    log_ctx.set_success();
+                    metrics::record_organization_operation(organization_id, "update_vault");
+                    metrics::record_organization_latency(
+                        organization_id,
+                        "update_vault",
+                        log_ctx.elapsed_secs(),
+                    );
+                    Ok(w::UpdateVaultResponse {})
+                } else {
+                    log_ctx.set_error("UpdateFailed", "Failed to update vault");
+                    Err(WireError::new(ErrorCode::Internal, "Failed to update vault"))
+                }
+            },
+            LedgerResponse::Error { code, message } => {
+                log_ctx.set_error(code.grpc_code_name(), &message);
+                Err(helpers::error_code_to_wire_error(code, message))
+            },
+            _ => {
+                log_ctx.set_error("UnexpectedResponse", "Unexpected response type");
+                Err(WireError::new(ErrorCode::Internal, "Unexpected response type"))
+            },
+        }
+    }
+}
+
+// End-to-end shim test (VaultService instantiation against a live
+// `ProposalService` / `RegionResolver` / `RaftManager`) is deferred to
+// E.7 (TestCluster migration). Tonic-status → WireError mapping is covered
+// by `wire_helpers::tests`.

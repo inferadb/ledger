@@ -109,26 +109,22 @@ pub enum StateError {
 /// Result type for state operations.
 pub type Result<T> = std::result::Result<T, StateError>;
 
-/// Convenience constructor for tests and transitional callers that still
-/// want a singleton-backed [`StateLayer`].
+/// Convenience constructor for tests that want a singleton-backed [`StateLayer`].
 ///
-/// Slice 2b of per-vault consensus flipped [`StateLayer::new`] to take a
-/// [`VaultDbFactory`] closure. This helper wraps a single shared
-/// [`Arc<Database<B>>`] into a factory that resolves every vault to the
-/// same DB — preserving legacy test semantics without repeating the
-/// closure at every call site.
+/// Wraps a single shared [`Arc<Database<B>>`] into a [`VaultDbFactory`] closure
+/// that resolves every vault to the same database, preserving legacy test semantics
+/// without repeating the closure at every call site.
 ///
-/// Production code uses a per-vault factory
+/// Production code supplies a per-vault factory
 /// (`{org_dir}/state/vault-{id}/state.db`) assembled in
 /// `RaftManager::open_region_storage` and must not call this helper.
 ///
 /// # Errors
 ///
-/// Returns [`StateError::Store`] if `StateLayer::new`'s eager
-/// materialisation of the `SYSTEM_VAULT_ID` database fails. The shared
-/// factory cannot fail by construction (it simply clones an already-
-/// open `Arc`), but the signature stays fallible to match
-/// [`StateLayer::new`].
+/// Returns [`StateError::Store`] if [`StateLayer::new`]'s eager materialisation
+/// of the `SYSTEM_VAULT_ID` database fails. The shared factory cannot fail by
+/// construction (it simply clones an already-open `Arc`), but the signature stays
+/// fallible to match [`StateLayer::new`].
 pub fn new_state_layer_shared<B>(
     db: Arc<Database<B>>,
     meta_db: Arc<Database<B>>,
@@ -143,16 +139,11 @@ where
 /// Factory closure that opens (or creates) the [`Database`] backing a
 /// specific vault's state.
 ///
-/// Introduced by Slice 2b of per-vault consensus. P2b.0 drops each
-/// vault's state.db one level deeper so future slices can add
-/// per-vault `raft.db` / `blocks.db` / `events.db` alongside. The
-/// production factory captures the per-organization path components
-/// and composes
-/// `{data_dir}/{region}/{organization_id}/state/vault-{vault_id}/state.db`.
-/// Test factories capture an in-memory backend and open a fresh
-/// [`Database::open_in_memory`] per vault. The factory is invoked exactly
-/// once per vault — the per-vault HashMap caches the resulting [`Arc`] for
-/// the lifetime of the [`StateLayer`].
+/// The production factory captures the per-organization path components and
+/// composes `{data_dir}/{region}/{organization_id}/state/vault-{vault_id}/state.db`.
+/// Test factories open a fresh [`Database::open_in_memory`] per vault.
+/// The factory is invoked exactly once per vault — the per-vault `HashMap`
+/// caches the resulting [`Arc`] for the lifetime of the [`StateLayer`].
 pub type VaultDbFactory<B> =
     Arc<dyn Fn(VaultId) -> Result<Arc<Database<B>>> + Send + Sync + 'static>;
 
@@ -163,11 +154,11 @@ pub type VaultDbFactory<B> =
 /// tracked with its own [`VaultCommitment`] — only buckets modified since
 /// the last commit are rehashed.
 ///
-/// # Per-vault databases (Slice 2b of per-vault consensus)
+/// # Per-vault databases
 ///
-/// As of Slice 2b, each vault owns its own [`Database`]; [`StateLayer`]
-/// caches open handles in the `dbs` map and lazily materialises new vaults
-/// via the [`VaultDbFactory`] supplied to [`StateLayer::new`]. Callers
+/// Each vault owns its own [`Database`]. [`StateLayer`] caches open handles
+/// in the `dbs` map and lazily materialises new vaults via the
+/// [`VaultDbFactory`] supplied to [`StateLayer::new`]. Callers
 /// acquire the per-vault handle through [`StateLayer::db_for`], which
 /// returns an owned [`Arc`] — they then open read/write transactions
 /// against the local `Arc`. Transactions borrow from the `Arc`, not from
@@ -188,24 +179,23 @@ pub struct StateLayer<B: StorageBackend> {
     /// Lazily-materialised per-vault state databases.
     ///
     /// Keyed by [`VaultId`]; each value is an [`Arc`] clone of the
-    /// `Database` returned by [`VaultDbFactory`]. The Arc is never removed
+    /// `Database` returned by [`VaultDbFactory`]. The `Arc` is never removed
     /// from the map — vault databases live for the lifetime of the
-    /// [`StateLayer`] (hibernation will evict in Phase 4, out of scope for
-    /// Slice 2b). Open via [`Self::db_for`] (double-checked locking);
+    /// [`StateLayer`]. Open via [`Self::db_for`] (double-checked locking);
     /// enumerate via [`Self::live_vault_dbs`].
     dbs: RwLock<HashMap<VaultId, Arc<Database<B>>>>,
     /// Factory that opens a vault's [`Database`] on first reference.
+    ///
     /// Invoked exactly once per [`VaultId`]; the resulting [`Arc`] is
     /// cached in `dbs` for the lifetime of the state layer.
     db_factory: VaultDbFactory<B>,
     /// Per-organization coordination database handle (`_meta.db`).
     ///
-    /// Owns the `_meta:last_applied` crash-recovery sentinel as of the
-    /// per-vault consensus Slice 1 cleave. Must always be synced **after**
-    /// every per-vault state database (and `raft.db` / `blocks.db` /
-    /// `events.db`) so the sentinel on disk never advances past entity
-    /// data that has not yet reached the page cache's dual-slot on-disk
-    /// pointer.
+    /// Owns the `_meta:last_applied` crash-recovery sentinel. Must always be
+    /// synced **after** every per-vault state database (and `raft.db` /
+    /// `blocks.db` / `events.db`) so the sentinel on disk never advances past
+    /// entity data that has not yet reached the page cache's dual-slot
+    /// on-disk pointer.
     meta_db: Arc<Database<B>>,
     /// Per-vault commitment tracking.
     vault_commitments: RwLock<HashMap<VaultId, VaultCommitment>>,
@@ -220,19 +210,16 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Creates a new state layer backed by a per-vault database factory and
     /// the per-organization meta database.
     ///
-    /// Slice 2b of per-vault consensus flips `StateLayer` from a singleton
-    /// `Arc<Database<B>>` to a lazy per-vault [`HashMap`]. The `db_factory`
-    /// closure is invoked the first time [`Self::db_for`] is asked for a
-    /// given [`VaultId`]; the resulting [`Arc`] is cached for the lifetime
-    /// of the layer.
+    /// The `db_factory` closure is invoked the first time [`Self::db_for`] is
+    /// asked for a given [`VaultId`]; the resulting [`Arc`] is cached for the
+    /// lifetime of the layer.
     ///
-    /// `meta_db` is the per-organization `_meta.db` coordinator introduced
-    /// by Slice 1 of per-vault consensus. It owns the `_meta:last_applied`
-    /// sentinel; entity data lives in the per-vault databases. The apply
-    /// path commits entity data to the vault's DB first, then records the
-    /// sentinel in `meta_db` in a second transaction so any crash between
-    /// the two commits merely re-drives idempotent replay instead of
-    /// advancing the sentinel past work that never reached the state DB.
+    /// `meta_db` is the per-organization `_meta.db` coordinator. It owns the
+    /// `_meta:last_applied` sentinel; entity data lives in the per-vault
+    /// databases. The apply path commits entity data to the vault's DB first,
+    /// then records the sentinel in `meta_db` in a second transaction so any
+    /// crash between the two commits merely re-drives idempotent replay instead
+    /// of advancing the sentinel past work that never reached the state DB.
     ///
     /// The constructor eagerly materialises the
     /// [`crate::system::SYSTEM_VAULT_ID`] database via the factory.
@@ -411,13 +398,11 @@ impl<B: StorageBackend> StateLayer<B> {
         Ok(RwLockReadGuard::map(map, |m| &m[&vault]))
     }
 
-    /// Returns the [`Database`] handle that owns the given vault's entity
-    /// data.
+    /// Returns the [`Database`] handle that owns the given vault's entity data.
     ///
-    /// Slice 2b of per-vault consensus: the first call for a given
-    /// [`VaultId`] invokes the factory closure supplied to
-    /// [`Self::new`] and caches the resulting [`Arc`]. Subsequent calls
-    /// return a clone of the cached handle. Lookup uses double-checked
+    /// The first call for a given [`VaultId`] invokes the factory closure
+    /// supplied to [`Self::new`] and caches the resulting [`Arc`]. Subsequent
+    /// calls return a clone of the cached handle. Lookup uses double-checked
     /// locking — the common path takes a read lock only.
     ///
     /// The returned value is an **owned** [`Arc`] (not a reference into
@@ -462,9 +447,9 @@ impl<B: StorageBackend> StateLayer<B> {
     /// Phase A (vault state DBs + raft.db + blocks.db + events.db
     /// concurrent) across every live vault before Phase B syncs meta.db.
     ///
-    /// Slice 2b returns a snapshot vector rather than an iterator
-    /// borrowing from the lock, so callers can drop the read lock before
-    /// awaiting per-DB sync futures.
+    /// Returns a snapshot vector rather than an iterator borrowing from the
+    /// lock, so callers can drop the read lock before awaiting per-DB sync
+    /// futures.
     pub fn live_vault_dbs(&self) -> Vec<(VaultId, Arc<Database<B>>)> {
         self.dbs.read().iter().map(|(v, db)| (*v, Arc::clone(db))).collect()
     }
@@ -512,12 +497,11 @@ impl<B: StorageBackend> StateLayer<B> {
         Ok(())
     }
 
-    // Slice 2b note: the pre-Slice-2b `begin_write(vault)` / `begin_read(vault)`
-    // convenience wrappers are deleted. With a per-vault HashMap, the Arc
-    // cannot be clone-on-demand inside `StateLayer` and still return a
-    // transaction that outlives the clone — transactions borrow from
-    // `&Database`, so the Arc must live in the caller's scope. Call sites
-    // now take the two-liner:
+    // `begin_write(vault)` / `begin_read(vault)` convenience wrappers are not
+    // provided. With a per-vault HashMap the Arc cannot be clone-on-demand
+    // inside `StateLayer` and still return a transaction that outlives the
+    // clone — transactions borrow from `&Database`, so the Arc must live in
+    // the caller's scope. Call sites take the two-liner:
     //
     // ```text
     // let db = state.db_for(vault)?;          // owned Arc
@@ -527,17 +511,16 @@ impl<B: StorageBackend> StateLayer<B> {
     // // `db` drops strictly after `txn`.
     // ```
     //
-    // This keeps the lifetime chain explicit, avoids self-referential
-    // gymnastics, and is trivially safe — the caller's local Arc outlives
-    // the txn by construction.
+    // This keeps the lifetime chain explicit and avoids self-referential
+    // gymnastics — the caller's local Arc outlives the txn by construction.
 
     /// Sentinel key for crash-recovery atomicity (organization-scoped Raft
     /// group — the parent org's `OrganizationGroup`).
     ///
-    /// Stored in the meta.db coordinator database (post–Slice 1) with a raw
-    /// byte key. A byte-identical sentinel previously lived in state.db under
-    /// the Entities table; legacy detection refuses to boot when that
-    /// artefact is still present (see `detect_legacy_sentinel`).
+    /// Stored in the meta.db coordinator database with a raw byte key.
+    /// A byte-identical sentinel previously lived in state.db under the
+    /// Entities table; legacy detection refuses to boot when that artefact
+    /// is still present (see `detect_legacy_sentinel`).
     pub const LAST_APPLIED_KEY: &'static [u8] = b"_meta:last_applied";
 
     /// Builds the sentinel key for a per-vault Raft group.
@@ -585,12 +568,11 @@ impl<B: StorageBackend> StateLayer<B> {
     /// indices — sharing a single key allowed one group's apply pipeline
     /// to skip-replay against another group's last-applied log id.
     ///
-    /// Under Slice 1 of per-vault consensus the sentinel is no longer
-    /// bundled into the entity-data write transaction. The apply path
-    /// commits entity data to state.db first, then calls this method to
-    /// record the sentinel in meta.db in a separate transaction. A crash
-    /// between the two commits leaves the sentinel un-advanced; WAL replay
-    /// re-drives the idempotent apply path on restart.
+    /// The sentinel is not bundled into the entity-data write transaction.
+    /// The apply path commits entity data to state.db first, then calls this
+    /// method to record the sentinel in meta.db in a separate transaction.
+    /// A crash between the two commits leaves the sentinel un-advanced; WAL
+    /// replay re-drives the idempotent apply path on restart.
     ///
     /// The commit uses `commit_in_memory`, matching the apply path's
     /// durability model — the `StateCheckpointer` fans out a strict-ordered
@@ -630,19 +612,17 @@ impl<B: StorageBackend> StateLayer<B> {
         txn.get::<inferadb_ledger_store::tables::Entities>(&key).context(StoreSnafu)
     }
 
-    /// Reads the legacy `_meta:last_applied` sentinel from the state
-    /// database, returning `Some(bytes)` if a pre–Slice 1 layout is
-    /// detected. Slice 1 moves the sentinel to meta.db; any hit here on
-    /// startup means the data directory was written by an older build.
+    /// Reads the legacy `_meta:last_applied` sentinel from the state database.
     ///
-    /// Slice 2b: under the per-vault state DB layout the pre-Slice-1
-    /// layout is anyway refused at `RegionStorageManager::open_organization`
-    /// — a legacy flat `state.db` file (not directory) on disk fails the
-    /// legacy detector before this layer is ever constructed. This helper
-    /// is retained for `RaftLogStore`'s recovery-assertion path; it now
-    /// probes the system vault's DB (materialised eagerly by
-    /// [`Self::new`]). Any hit is treated as a "should have been caught
-    /// earlier" signal by the caller.
+    /// Returns `Some(bytes)` if the sentinel was found in state.db under the
+    /// Entities table, which indicates the data directory was written by an
+    /// older build that kept the sentinel in state.db rather than meta.db.
+    /// The current layout refuses to boot when a legacy flat `state.db` file
+    /// is detected at `RegionStorageManager::open_organization`; this helper
+    /// is retained for `RaftLogStore`'s recovery-assertion path and probes
+    /// the system vault's DB (materialised eagerly by [`Self::new`]).
+    /// Any hit is treated as a "should have been caught earlier" signal by
+    /// the caller.
     ///
     /// # Errors
     ///
@@ -1255,9 +1235,8 @@ impl<B: StorageBackend> StateLayer<B> {
 
         // Resolve the vault's per-vault DB once before the rayon fan-out —
         // each worker opens its own MVCC read transaction against this
-        // shared `Arc`. Under Slice 2b, `db_for` returns a cheap clone of
-        // the HashMap's `Arc`; there is no lock held across the rayon
-        // join.
+        // shared `Arc`. `db_for` returns a cheap clone of the HashMap's
+        // `Arc`; no lock is held across the rayon join.
         let db = self.db_for(vault)?;
 
         // Use the bounded apply-path pool (see `apply_pool`) rather than
@@ -1312,7 +1291,7 @@ impl<B: StorageBackend> StateLayer<B> {
     ///
     /// Used by the apply pipeline to label per-vault Prometheus
     /// observations as cache hits vs misses without changing the
-    /// `compute_state_root` API surface (Phase 7 / O3).
+    /// `compute_state_root` API surface.
     pub fn state_root_is_cached(&self, vault: VaultId) -> bool {
         self.vault_commitments.read().get(&vault).is_some_and(|commitment| !commitment.is_dirty())
     }
@@ -1657,9 +1636,8 @@ mod tests {
 
     fn create_test_state() -> StateLayer<InMemoryBackend> {
         let meta_engine = InMemoryStorageEngine::open().expect("open meta engine");
-        // Slice 2b: each vault gets its own `Database`. The test factory
-        // opens a fresh in-memory database per vault — tests exercise
-        // the per-vault branch, not the Slice 2a singleton shim.
+        // Each vault gets its own `Database`. The test factory opens a fresh
+        // in-memory database per vault, matching the production per-vault layout.
         StateLayer::new(
             |_vault| {
                 inferadb_ledger_store::Database::<InMemoryBackend>::open_in_memory()
@@ -2472,8 +2450,8 @@ mod tests {
             state.apply_operations(vault, &ops, 200 + i as u64).unwrap();
         }
 
-        // Run compaction on the vault that received the writes — Slice 2c
-        // signature requires the caller to address a specific vault.
+        // Run compaction on the vault that received the writes — the caller
+        // must address a specific vault.
         let stats = state.compact_tables(vault, 0.4).unwrap();
 
         // Verify remaining data is intact
@@ -2510,9 +2488,8 @@ mod tests {
         let state = create_test_state();
         let log_id_bytes = b"test_log_id_v1";
 
-        // Persist sentinel through the meta-db helper (Slice 1 cleave: the
-        // sentinel lives in its own database, committed in a separate txn
-        // after the state.db apply).
+        // Persist sentinel through the meta-db helper: the sentinel lives in
+        // its own database, committed in a separate txn after state.db apply.
         state.persist_last_applied_meta(None, log_id_bytes).unwrap();
 
         // Read it back
@@ -2531,9 +2508,9 @@ mod tests {
         assert_eq!(result.as_deref(), Some(b"log_id_2".as_slice()));
     }
 
-    /// Post–Slice 1, entity writes and the sentinel commit in two separate
-    /// transactions across two separate databases. Success of both leaves
-    /// both readable — this test pins that behaviour.
+    /// Entity writes and the sentinel commit in two separate transactions
+    /// across two separate databases. Success of both leaves both readable
+    /// — this test pins that behaviour.
     #[test]
     fn test_entity_and_sentinel_visible_after_two_step_apply() {
         let state = create_test_state();
@@ -2646,19 +2623,17 @@ mod tests {
         assert_eq!(entity.unwrap().value, b"entity_value");
     }
 
-    /// Legacy detector: a pre–Slice 1 data_dir carries the sentinel under
-    /// the Entities table in state.db. Writing that artefact directly
-    /// lets us confirm `read_legacy_last_applied_from_state_db` picks it
-    /// up.
+    /// Legacy detector: a pre-migration data directory carries the sentinel
+    /// under the Entities table in state.db. Writing that artefact directly
+    /// confirms `read_legacy_last_applied_from_state_db` picks it up.
     #[test]
     fn test_legacy_sentinel_detection_reads_state_db() {
         let state = create_test_state();
 
-        // Simulate a pre–Slice 1 artefact: sentinel bytes written under
-        // the legacy key into the system vault's state.db Entities table.
-        // Under Slice 2c the legacy probe is scoped explicitly to the
-        // system vault DB (no `any_db` shim — every consumer addresses a
-        // specific vault id).
+        // Simulate a legacy artefact: sentinel bytes written under the
+        // legacy key into the system vault's state.db Entities table.
+        // The legacy probe is scoped to the system vault DB; every consumer
+        // addresses a specific vault id.
         let db = state.db_for(SYSTEM_VAULT_ID).unwrap();
         let mut txn = db.write().unwrap();
         txn.insert_raw(
@@ -3364,7 +3339,7 @@ mod tests {
         use inferadb_ledger_store::{Database, FileBackend};
         use tempfile::tempdir;
 
-        // P2b.0: the factory shape mirrors production —
+        // The factory shape mirrors production:
         // `state/vault-{vault_id}/state.db` under a per-case directory.
         // The factory creates the per-vault directory lazily before
         // opening state.db, matching the production factory in

@@ -2,22 +2,22 @@
 
 ## Project Overview
 
-InferaDB Ledger is a blockchain database for cryptographically verifiable authorization. Every write produces a Merkle-chained block; every authorization check is provable. The system is always multi-Raft in production and handles PII under strict data-residency rules (EU-region data must stay in EU-region storage). Treat every change to storage keys, gRPC surfaces, error handling, or consensus primitives with that level of seriousness — a silent data-residency violation is a compliance incident, and a silent consensus bug is data loss.
+InferaDB Ledger is a blockchain database for cryptographically verifiable authorization. Every write produces a Merkle-chained block; every authorization check is provable. The system is always multi-Raft in production and handles PII under strict data-residency rules (EU-region data must stay in EU-region storage). Treat every change to storage keys, RPC surfaces, error handling, or consensus primitives with that level of seriousness — a silent data-residency violation is a compliance incident, and a silent consensus bug is data loss.
 
 Writes are WAL-durable on response. The four regional DBs — state.db, raft.db, blocks.db, events.db — all materialize lazily via `StateCheckpointer` (per-region, `crates/raft/src/state_checkpointer.rs`) and are force-synced on shutdown, snapshot, and backup boundaries. Handler-phase audit events (no WAL backstop) are batched separately: `EventHandle::record_handler_event` enqueues into a bounded `FlushQueue`; the `EventFlusher` drains into the events.db page cache via `commit_in_memory`, so durability lands on the next StateCheckpointer tick (~500ms default) — same class as apply-phase events, except the emission itself is not WAL-backed. `GracefulShutdown` Phase 5b drains the queue, Phase 5c fsyncs all four DBs; clean shutdown preserves zero-loss. Strict-durable exceptions: `RaftLogStore::save_vote` (election safety), `EventWriter::write_entry` (only reached on the `EventWriterBatchConfig::enabled=false` escape hatch and in tests — the flusher now commits in-memory directly), `StateLayer::apply_operations` (admin / recovery callers — IN-APPLY-PIPELINE arms use `apply_operations_lazy`), backup producers, and the two background-compaction paths (`BlockArchive::compact_before`, `EventsGc::tick_inner`). On crash, state is re-derived by replaying `(applied_durable, last_committed]` from the WAL; handler-phase events flushed but not yet checkpointed at the moment of the crash are lost (not WAL-backed). See [`docs/architecture/durability.md`](docs/architecture/durability.md).
 
 ## Tech Stack
 
-| Layer                  | Technology                                   | Version / Notes                                                               |
-| ---------------------- | -------------------------------------------- | ----------------------------------------------------------------------------- |
-| Language               | Rust                                         | 1.92 (2024 edition); pinned `+1.92` for build/clippy/test, `+nightly` for fmt |
-| Consensus              | Custom in-house multi-shard Raft             | No openraft. Lives in `crates/consensus/`.                                    |
-| Storage                | B+ tree, per-vault AES-256-GCM segmented WAL | `crates/store/` + `crates/consensus/src/wal/`                                 |
-| RPC                    | gRPC / Protocol Buffers                      | tonic 0.14                                                                    |
-| Errors (server crates) | `snafu`                                      | `types`, `store`, `proto`, `state`, `consensus`, `raft`, `services`, `server` |
-| Errors (SDK)           | `thiserror`                                  | SDK only — consumer-facing types                                              |
-| Builders               | `bon`                                        | Both `#[derive(bon::Builder)]` and `#[bon::bon] impl`                         |
-| Task runner            | `just`                                       | `just --list` is the source of truth                                          |
+| Layer                  | Technology                                   | Version / Notes                                                                                          |
+| ---------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| Language               | Rust                                         | 1.92 (2024 edition); pinned `+1.92` for build/clippy/test, `+nightly` for fmt                            |
+| Consensus              | Custom in-house multi-shard Raft             | No openraft. Lives in `crates/consensus/`.                                                               |
+| Storage                | B+ tree, per-vault AES-256-GCM segmented WAL | `crates/store/` + `crates/consensus/src/wal/`                                                            |
+| RPC                    | Custom QUIC wire protocol                    | `crates/wire/` (types, codec, frame), `crates/wire-macro/` (`define_protocol!`), `crates/wire-services/` (single macro invocation enumerating all 14 services), `crates/wire-transport/` (`WireServer`, `WireClient`, dispatcher). Postcard serialization, rustls/QUIC at the link layer. |
+| Errors (server crates) | `snafu`                                      | `types`, `store`, `state`, `consensus`, `raft`, `services`, `server`, `wire`, `wire-services`, `wire-transport` |
+| Errors (SDK)           | `thiserror`                                  | SDK only — consumer-facing types                                                                         |
+| Builders               | `bon`                                        | Both `#[derive(bon::Builder)]` and `#[bon::bon] impl`                                                    |
+| Task runner            | `just`                                       | `just --list` is the source of truth                                                                     |
 
 ## Repo Structure
 
@@ -26,15 +26,18 @@ ledger/
 ├── CLAUDE.md              # You are here. Golden rules, conventions, escalation.
 ├── AGENTS.md              # Symlink → CLAUDE.md (for tools that look for AGENTS.md).
 ├── Justfile               # Every command. Run `just --list` for the catalog.
-├── proto/ledger/v1/       # Protobuf source. Hand-edit here; regenerate with `just proto`.
 ├── crates/
 │   ├── types/             # Newtype IDs, errors, config, Merkle, hash, snowflake.
 │   ├── store/             # B+ tree, pages, backends, crypto keys.
-│   ├── proto/             # Protobuf codegen + From/TryFrom conversions.
+│   ├── fs/                # Low-level fs primitives (barrier fsync, page-cache eviction). The single allow-listed `unsafe` crate.
 │   ├── state/             # StorageEngine, StateLayer, SystemKeys, residency patterns.
 │   ├── consensus/         # Custom in-house Raft: Engine, Reactor, Shard, WAL, simulation.
 │   ├── raft/              # Saga orchestrator, background jobs, apply pipeline, rate limiter.
-│   ├── services/          # 14 gRPC services, SlugResolver, JwtEngine, server assembly.
+│   ├── wire/              # Wire-protocol message types, codec, frame, opcode, version, context.
+│   ├── wire-macro/        # `define_protocol!` proc macro — emits server traits, client structs, dispatch fns, OpCode enum.
+│   ├── wire-services/     # Single `define_protocol!` invocation enumerating all 14 services + their opcode allocations.
+│   ├── wire-transport/    # QUIC `WireServer`, `WireClient`, dispatcher, frame I/O, snapshot stream.
+│   ├── services/          # 14 RPC service implementations (wire-trait impls), SlugResolver, JwtEngine, server assembly.
 │   ├── server/            # Binary entrypoint + single-binary integration tests.
 │   ├── sdk/               # Consumer Rust client (the one crate using thiserror).
 │   ├── test-utils/        # Shared test scaffolding, CrashInjector, proptest strategies.
@@ -49,19 +52,19 @@ Each crate has its own `CLAUDE.md` (symlinked to `AGENTS.md`) with crate-specifi
 
 **Non-negotiable. Every agent, contributor, and reviewer follows these. If a rule looks wrong, raise it explicitly — never silently violate.**
 
-1. **Never hand-edit `crates/proto/src/generated/` or `Cargo.lock`.** Both are generated. Edit `proto/ledger/v1/*.proto` and run `just proto`; edit `Cargo.toml` and run `cargo +1.92 build --workspace`. The `.claude/settings.json` `PreToolUse` hook blocks edits to these paths.
+1. **Wire-protocol types and dispatch are macro-generated; never hand-edit `Cargo.lock`.** RPC request/response types live in `crates/wire/src/services/*.rs` (one file per service); the canonical service catalog is the single `define_protocol!` invocation in `crates/wire-services/src/lib.rs`, which expands into server traits, client structs, dispatch fns, and the `OpCode` enum. Add or rename an RPC by editing the wire types + the `define_protocol!` invocation, never by hand-editing macro-emitted code. `Cargo.lock` is regenerated by cargo — edit `Cargo.toml` and run `cargo +1.92 build --workspace`. The `.claude/settings.json` `PreToolUse` hook blocks edits to `Cargo.lock`.
 
 2. **Never run `git commit` from an agent.** The `PreToolUse` hook blocks `git commit`. The human operator commits when work is ready.
 
 3. **Every `*_PREFIX` / `*_KEY` constant on `SystemKeys` in `crates/state/src/system/keys.rs` has a matching `KEY_REGISTRY` entry.** A missing entry silently disables `SystemKeys::validate_key_tier()` for that key — the exact data-residency bug the registry exists to catch. Audited proactively by the `data-residency-auditor` agent.
 
-4. **Storage keys take internal `{Entity}Id(i64)` newtypes only — never `{Entity}Slug(u64)`.** Slug ↔ ID translation lives at the gRPC boundary in `crates/services/src/services/slug_resolver.rs`. A `*Slug` argument on any key builder in `crates/state/src/system/keys.rs` is a bug.
+4. **Storage keys take internal `{Entity}Id(i64)` newtypes only — never `{Entity}Slug(u64)`.** Slug ↔ ID translation lives at the wire-protocol boundary in `crates/services/src/services/slug_resolver.rs`. A `*Slug` argument on any key builder in `crates/state/src/system/keys.rs` is a bug.
 
 5. **Never write PII to a `KeyTier::Global` key.** PII → REGIONAL, always. Use Pattern 1 (REGIONAL-only bare key), Pattern 2 (GLOBAL skeleton + REGIONAL `{entity}_profile:` overlay), or Pattern 3 (GLOBAL-only, no PII). Full pattern detail in `crates/state/CLAUDE.md`. Audited by `data-residency-auditor`.
 
 6. **Every storage write calls `SystemKeys::validate_key_tier(&key, expected_tier)` in the same transaction, immediately before the put/insert.** Construct keys via `SystemKeys::*` builders only — never `format!("_idx:foo:{id}")` at the call site. Inline construction bypasses both the registry and the tier check.
 
-7. **Server crates use `snafu` only. The SDK uses `thiserror`.** `anyhow` is banned everywhere. Every variant with a `source` field includes `#[snafu(implicit)] location: snafu::Location`. Propagate via `.context(XxxSnafu)?` — never manually construct an error variant. Audited by `snafu-error-reviewer`.
+7. **Server crates use `snafu` only. The SDK uses `thiserror`.** `anyhow` is banned everywhere. Every variant with a `source` field includes `#[snafu(implicit)] location: snafu::Location`. Propagate via `.context(XxxSnafu)?` — never manually construct an error variant. The wire crate's `WireError` (in `crates/wire/src/error.rs`) is the canonical RPC-boundary error type returned to clients. Audited by `snafu-error-reviewer`.
 
 8. **No `unsafe`, `panic!`, `todo!()`, `unimplemented!()`, or `TODO`/`FIXME`/`HACK`/`XXX` comments in production code.** No placeholder stubs, no backwards-compat shims, no feature-flag dead paths. `.unwrap()` / `.expect()` outside `#[cfg(test)]` requires a `SAFETY:` comment stating why the call cannot fail. Audited by `unsafe-panic-auditor`. **Single narrowly-scoped exception: `crates/fs/`** wraps `fcntl(F_BARRIERFSYNC)` on Apple platforms and `posix_fadvise(POSIX_FADV_DONTNEED)` on Linux (no audited safe-syscall crate exposes either). Every `unsafe` block there must carry a `SAFETY:` comment and map to a single syscall. Any other crate tripping `unsafe_code` is still a hard failure.
 
@@ -69,9 +72,9 @@ Each crate has its own `CLAUDE.md` (symlinked to `AGENTS.md`) with crate-specifi
 
 10. **`Shard` in `crates/consensus/src/shard.rs` returns `Action` values and performs no I/O.** Any blocking call, disk read, or network send inside `Shard` is a correctness bug. All I/O executes in `Reactor` (`crates/consensus/src/reactor.rs`). WAL writes are batched with a single `fsync` per batch — never per proposal.
 
-11. **External gRPC messages use `{Entity}Slug { slug: u64 }`, never internal `{Entity}Id(i64)`.** Server-side request forwarding is allowed **only** for saga orchestration — the `RegionalProposal` RPC. All other cross-region / cross-leader traffic uses redirect-only routing: return `NotLeader` + `LeaderHint` inside `ErrorDetails` and let the SDK's `RegionLeaderCache` reconnect.
+11. **External wire messages carry typed `{Entity}Slug(u64)` newtypes, never internal `{Entity}Id(i64)`.** Wire-message structs in `crates/wire/src/services/*.rs` use the typed slug newtypes from `crates/types/src/types/ids.rs` directly — there is no proto-style wrapper message. Server-side request forwarding is allowed **only** for saga orchestration — the `SubmitRegionalProposal` RPC. All other cross-region / cross-leader traffic uses redirect-only routing: return `NotLeader` + `LeaderHint` inside `WireError.context` and let the SDK's `RegionLeaderCache` / `VaultLeaderCache` reconnect.
 
-12. **All gRPC error responses go through `status_with_correlation()` in `crates/services/src/services/metadata.rs`.** Never construct `tonic::Status` manually — the helper auto-attaches `ErrorDetails` built by `build_error_details()` in the same directory. Errors without `ErrorDetails` lose retryability, error-code, and suggested-action metadata on the SDK side.
+12. **All RPC error responses go through `wire_error_with_correlation()` in `crates/services/src/services/wire_helpers.rs`.** Never construct a `WireError` directly inside a handler and return it — the helper stamps `request_id` / `trace_id` into `WireError.context` so the dispatcher can surface them in response-frame headers. Use `build_wire_error()` (also in `wire_helpers`) to construct rich errors from a handler with structured context (rate-limit reason, validation field, leader-hint coordinates, etc.). Errors that bypass `wire_error_with_correlation` lose correlation IDs on the SDK side.
 
 13. **Server integration tests are a single binary.** `crates/server/Cargo.toml` sets `autotests = false` and declares exactly one `[[test]] name = "integration"`. Every test file is a submodule of `crates/server/tests/integration.rs` using `use crate::common::` — never `mod common;`. Audited by `test-isolation-auditor`.
 
@@ -88,7 +91,7 @@ Each crate has its own `CLAUDE.md` (symlinked to `AGENTS.md`) with crate-specifi
 ### Toolchain
 
 - `cargo +1.92` for build, clippy, test. `cargo +nightly` for fmt. Never fall back to unpinned `cargo`.
-- Everyday commands: `just check-quick` (fast iteration), `just ci` (pre-merge gate), `just proto` (after `.proto` edits), `just ready` (proto + ci). Full catalog: `just --list`.
+- Everyday commands: `just check-quick` (fast iteration), `just ci` (pre-merge gate), `just ready` (the same — there is no separate proto regen step under the wire protocol). Full catalog: `just --list`.
 
 ### Identifiers
 
@@ -154,10 +157,10 @@ Pause and flag the human operator when any of these is true:
 
 - The task would **break a golden rule** or appears to require an exception.
 - The task requires **reintroducing `openraft`** or any external Raft implementation (golden rule 9).
-- The task edits a **generated file** (`crates/proto/src/generated/`, `Cargo.lock`) — the hook will block, but the plan itself is wrong.
+- The task edits a **generated file** (`Cargo.lock`, or any code emitted by the `define_protocol!` macro inside `crates/wire-services/`) — the hook blocks `Cargo.lock` directly, but emitting hand-edits into macro output is silently overwritten on the next build.
 - The task adds a **new storage-key prefix family** without a data-residency plan. Invoke the `/add-storage-key` skill first; surface to a human if the residency pattern is unclear.
-- The task adds or renames a **gRPC service or RPC** without a matching update to `proto/ledger/v1/*.proto` + `crates/proto/src/convert/**`.
-- An audit agent (`unsafe-panic-auditor`, `snafu-error-reviewer`, `data-residency-auditor`, `proto-reviewer`, `test-isolation-auditor`, `consensus-reviewer`) raises a finding you believe is wrong — surface the contradiction rather than override.
+- The task adds or renames an **RPC method or service** without a matching update to `crates/wire/src/services/*.rs` (request/response types) + the `define_protocol!` invocation in `crates/wire-services/src/lib.rs`.
+- An audit agent (`unsafe-panic-auditor`, `snafu-error-reviewer`, `data-residency-auditor`, `wire-reviewer`, `test-isolation-auditor`, `consensus-reviewer`) raises a finding you believe is wrong — surface the contradiction rather than override.
 - A golden rule appears **outdated** or contradicts another rule.
 - A proposed change would **break an existing API, schema, wire contract, storage layout, or public signature** but produces materially better code (clearer, more correct, more efficient, simpler). Pause and confirm with the human operator — breaking changes are welcome when the tradeoff is worthwhile; silent breakage never is. Describe the break, the replacement, and the migration plan before proceeding.
 
@@ -187,17 +190,16 @@ When a new rule is added here, also update the relevant **agent definition** (if
 - `unsafe-panic-auditor` — banned constructs, stubs, shims, feature flags
 - `snafu-error-reviewer` — snafu discipline, `ErrorCode` integration
 - `data-residency-auditor` — PII and tier correctness, `KEY_REGISTRY` completeness
-- `proto-reviewer` — proto + conversion + service wiring, `SlugResolver`, `ErrorDetails`
+- `wire-reviewer` — wire-protocol message types, `define_protocol!` invocation, service wiring, `SlugResolver`, `WireError` attachment, opcode-range bounds
 - `test-isolation-auditor` — server integration test hygiene
 - `consensus-reviewer` — custom Raft / WAL / shard / saga invariants
-- `documentation-reviewer` — user-facing docs (`README.md`, `CONTRIBUTING.md`, `DESIGN.md`, `WHITEPAPER.md`, `Justfile`, `docs/**`) plus user-facing source surface (`crates/types/src/config/**`, `crates/types/src/error_code.rs`, `crates/sdk/src/{lib,client}.rs`, `crates/services/src/services/**`, `crates/server/src/{main,config}.rs`, `proto/ledger/v1/**`) for factual accuracy against code + developer-experience principles (audience, problem framing, Hello World, single source of truth, progressive disclosure). Dispatches parallel subagents.
+- `documentation-reviewer` — user-facing docs (`README.md`, `CONTRIBUTING.md`, `DESIGN.md`, `WHITEPAPER.md`, `Justfile`, `docs/**`) plus user-facing source surface (`crates/types/src/config/**`, `crates/types/src/error_code.rs`, `crates/sdk/src/{lib,client}.rs`, `crates/services/src/services/**`, `crates/server/src/{main,config}.rs`, `crates/wire/src/services/**`, `crates/wire-services/src/lib.rs`) for factual accuracy against code + developer-experience principles (audience, problem framing, Hello World, single source of truth, progressive disclosure). Dispatches parallel subagents.
 
 **Skills** (invoke via `/skill-name` or auto-triggered):
 
 - `/add-new-entity` — dual-ID entity rollout
 - `/add-storage-key` — new key constant with registry + tier validation
-- `/add-proto-conversion` — From/TryFrom conversion discipline
-- `/new-rpc` — full gRPC method addition
+- `/new-rpc` — full RPC method addition (wire types + `define_protocol!` invocation + service trait impl)
 - `/use-bon-builder` — bon patterns and gotchas
 - `/define-error-type` — snafu variant shapes and `ErrorCode` wiring
 - `/just-ci-gate` — authoritative pre-PR gate
@@ -206,11 +208,10 @@ When a new rule is added here, also update the relevant **agent definition** (if
 
 **Hooks** (`.claude/settings.json`):
 
-- `PreToolUse` — blocks `git commit`, edits to `crates/proto/src/generated/`, edits to `Cargo.lock`.
+- `PreToolUse` — blocks `git commit`, edits to `Cargo.lock`.
 - `PostToolUse` on `.rs` edits — `cargo +nightly fmt` + `cargo +1.92 check -p <crate>` (first 15 errors surfaced).
-- `PostToolUse` on `.proto` edits — reminder to run `just proto`.
 - `PostToolUse` on `.rs` / `.md` edits — writing-check: flags fenced `ignore` blocks, untagged code-fence openers, and non-kebab-case markdown filenames.
 - `PostToolUse` on `crates/state/src/system/keys.rs` edits — auto-spawns `data-residency-auditor` as a subagent; findings surface in the transcript.
 - `PostToolUse` on `crates/server/tests/**` edits — auto-spawns `test-isolation-auditor` as a subagent.
-- `PostToolUse` on documentation-sensitive paths (`proto/ledger/v1/**/*.proto`, `Justfile`, root `Cargo.toml`, `crates/services/src/services/**`, `crates/server/src/{main,config}.rs`, `crates/types/src/config/**`, `crates/types/src/error_code.rs`, `crates/sdk/src/{lib,client}.rs`, root docs, `docs/**/*.md`) — auto-spawns `documentation-reviewer`, which fans out into parallel `Explore` subagents across doc partitions.
+- `PostToolUse` on documentation-sensitive paths (`Justfile`, root `Cargo.toml`, `crates/services/src/services/**`, `crates/server/src/{main,config}.rs`, `crates/types/src/config/**`, `crates/types/src/error_code.rs`, `crates/sdk/src/{lib,client}.rs`, root docs, `docs/**/*.md`) — auto-spawns `documentation-reviewer`, which fans out into parallel `Explore` subagents across doc partitions.
 - `SessionStart` — reminder to call `mcp__plugin_serena_serena__activate_project` for this workspace.

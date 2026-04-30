@@ -5,15 +5,26 @@
 //! - Orphan cleanup only runs on leader
 //! - Deleted users' memberships are identified as orphans
 //! - Orphaned memberships are cleaned up
+//!
+//! F.1.f.2.Stage1e Wave 4: migrated from the legacy tonic helpers
+//! (`create_read_client` / `create_write_client` /
+//! `create_test_organization` / `create_test_vault`) to their
+//! wire-protocol siblings (`wire_read_client` / `wire_write_client` /
+//! `wire_create_test_organization` / `wire_create_test_vault`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
 use std::time::Duration;
 
+use bytes::Bytes;
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use inferadb_ledger_wire::services::{read as wr, shared as ws, write as ww};
 use serial_test::serial;
 
-use crate::common::{TestCluster, create_read_client, create_write_client};
+use crate::common::{
+    TestCluster, wire_create_test_organization, wire_create_test_vault, wire_read_client,
+    wire_write_client,
+};
 
 // ============================================================================
 // Test Helpers
@@ -21,86 +32,81 @@ use crate::common::{TestCluster, create_read_client, create_write_client};
 
 /// Creates an organization and returns its slug.
 async fn create_organization(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     name: &str,
-    node: &crate::common::TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
-    let (slug, _admin) = crate::common::create_test_organization(addr, name, node).await?;
+    let (slug, _admin) = wire_create_test_organization(cluster, node_id, name).await?;
     Ok(slug)
 }
 
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
-    crate::common::create_test_vault(addr, organization).await
+    wire_create_test_vault(cluster, node_id, organization).await
 }
 
 /// Writes an entity to a specific organization.
 async fn write_entity(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     organization: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
     value: &serde_json::Value,
     client_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = create_write_client(addr).await?;
+    let client = wire_write_client(cluster, node_id);
 
-    let request = inferadb_ledger_proto::proto::WriteRequest {
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: organization.value(),
-        }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
-        client_id: Some(inferadb_ledger_proto::proto::ClientId { id: client_id.to_string() }),
-        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        operations: vec![inferadb_ledger_proto::proto::Operation {
-            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
-                inferadb_ledger_proto::proto::SetEntity {
-                    key: key.to_string(),
-                    value: serde_json::to_vec(value).unwrap(),
-                    condition: None,
-                    expires_at: None,
-                },
-            )),
+    let request = ww::WriteRequest {
+        organization: Some(organization),
+        vault: Some(vault),
+        client_id: Some(ws::ClientIdMessage { id: client_id.to_string() }),
+        idempotency_key: Bytes::copy_from_slice(uuid::Uuid::new_v4().as_bytes()),
+        operations: vec![ws::Operation {
+            op: Some(ws::OperationKind::SetEntity(ws::SetEntity {
+                key: key.to_string(),
+                value: Bytes::from(serde_json::to_vec(value).unwrap()),
+                condition: None,
+                expires_at: None,
+            })),
         }],
         include_tx_proof: false,
         caller: None,
     };
 
-    let response = client.write(request).await?.into_inner();
+    let response = client.write(request, rand::random::<u128>()).await?;
 
     match response.result {
-        Some(inferadb_ledger_proto::proto::write_response::Result::Success(_)) => Ok(()),
-        Some(inferadb_ledger_proto::proto::write_response::Result::Error(e)) => {
-            Err(format!("Write error: {:?}", e).into())
-        },
+        Some(ww::WriteResponseResult::Success(_)) => Ok(()),
+        Some(ww::WriteResponseResult::Error(e)) => Err(format!("Write error: {:?}", e).into()),
         None => Err("No result in write response".into()),
     }
 }
 
 /// Reads an entity from an organization.
 async fn read_entity(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     organization: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
 ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
-    let mut client = create_read_client(addr).await?;
+    let client = wire_read_client(cluster, node_id);
 
-    let request = inferadb_ledger_proto::proto::ReadRequest {
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: organization.value(),
-        }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
+    let request = wr::ReadRequest {
+        organization: Some(organization),
+        vault: Some(vault),
         key: key.to_string(),
-        consistency: 0, // EVENTUAL
+        consistency: ws::ReadConsistency::Eventual,
         caller: None,
     };
 
-    let response = client.read(request).await?.into_inner();
-    Ok(response.value)
+    let response = client.read(request, rand::random::<u128>()).await?;
+    Ok(response.value.map(|b| b.to_vec()))
 }
 
 // ============================================================================
@@ -110,11 +116,7 @@ async fn read_entity(
 /// Tests that orphan cleanup job starts and runs without errors.
 #[tokio::test]
 async fn test_orphan_cleanup_job_starts() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -133,11 +135,7 @@ async fn test_orphan_cleanup_job_starts() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_orphan_cleanup_leader_only() {
-    let cluster = TestCluster::new(3).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     let leader_id = cluster.wait_for_leader().await;
 
     // Verify we have followers
@@ -157,19 +155,15 @@ async fn test_orphan_cleanup_leader_only() {
 /// Users with `deleted_at` or status DELETED/DELETING are considered deleted.
 #[tokio::test]
 async fn test_deleted_user_detection() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault for test data
-    let ns_id = create_organization(&leader.addr, "deleted-user-ns", leader)
+    let ns_id = create_organization(&cluster, leader.id, "deleted-user-ns")
         .await
         .expect("create organization");
-    let vault_id = create_vault(&leader.addr, ns_id).await.expect("create vault");
+    let vault_id = create_vault(&cluster, leader.id, ns_id).await.expect("create vault");
 
     // Create a user with deleted_at timestamp
     let deleted_user_id = 1001i64;
@@ -182,7 +176,8 @@ async fn test_deleted_user_detection() {
     });
 
     write_entity(
-        &leader.addr,
+        &cluster,
+        leader.id,
         ns_id,
         vault_id,
         &deleted_user_key,
@@ -203,7 +198,8 @@ async fn test_deleted_user_detection() {
     });
 
     write_entity(
-        &leader.addr,
+        &cluster,
+        leader.id,
         ns_id,
         vault_id,
         &deleted_status_user_key,
@@ -224,7 +220,8 @@ async fn test_deleted_user_detection() {
     });
 
     write_entity(
-        &leader.addr,
+        &cluster,
+        leader.id,
         ns_id,
         vault_id,
         &active_user_key,
@@ -235,7 +232,7 @@ async fn test_deleted_user_detection() {
     .expect("create active user");
 
     // Verify all users were written
-    let deleted_bytes = read_entity(&leader.addr, ns_id, vault_id, &deleted_user_key)
+    let deleted_bytes = read_entity(&cluster, leader.id, ns_id, vault_id, &deleted_user_key)
         .await
         .expect("read deleted user")
         .expect("deleted user should exist");
@@ -243,7 +240,7 @@ async fn test_deleted_user_detection() {
     let deleted_user: serde_json::Value = serde_json::from_slice(&deleted_bytes).unwrap();
     assert!(deleted_user.get("deleted_at").is_some(), "User should have deleted_at");
 
-    let status_bytes = read_entity(&leader.addr, ns_id, vault_id, &deleted_status_user_key)
+    let status_bytes = read_entity(&cluster, leader.id, ns_id, vault_id, &deleted_status_user_key)
         .await
         .expect("read status-deleted user")
         .expect("status-deleted user should exist");
@@ -251,7 +248,7 @@ async fn test_deleted_user_detection() {
     let status_user: serde_json::Value = serde_json::from_slice(&status_bytes).unwrap();
     assert_eq!(status_user.get("status").and_then(|s| s.as_str()), Some("DELETED"));
 
-    let active_bytes = read_entity(&leader.addr, ns_id, vault_id, &active_user_key)
+    let active_bytes = read_entity(&cluster, leader.id, ns_id, vault_id, &active_user_key)
         .await
         .expect("read active user")
         .expect("active user should exist");
@@ -264,19 +261,15 @@ async fn test_deleted_user_detection() {
 /// Tests membership data format for orphan detection.
 #[tokio::test]
 async fn test_membership_data_format() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
     // Create an organization and vault
-    let ns_id = create_organization(&leader.addr, "membership-test-ns", leader)
+    let ns_id = create_organization(&cluster, leader.id, "membership-test-ns")
         .await
         .expect("create organization");
-    let vault_id = create_vault(&leader.addr, ns_id).await.expect("create vault");
+    let vault_id = create_vault(&cluster, leader.id, ns_id).await.expect("create vault");
 
     // Create a membership record
     let user_id = 2001i64;
@@ -287,12 +280,20 @@ async fn test_membership_data_format() {
         "created_at": "2024-01-01T00:00:00Z",
     });
 
-    write_entity(&leader.addr, ns_id, vault_id, &member_key, &member_value, "membership-test")
-        .await
-        .expect("create membership");
+    write_entity(
+        &cluster,
+        leader.id,
+        ns_id,
+        vault_id,
+        &member_key,
+        &member_value,
+        "membership-test",
+    )
+    .await
+    .expect("create membership");
 
     // Verify membership was written
-    let member_bytes = read_entity(&leader.addr, ns_id, vault_id, &member_key)
+    let member_bytes = read_entity(&cluster, leader.id, ns_id, vault_id, &member_key)
         .await
         .expect("read membership")
         .expect("membership should exist");
@@ -307,19 +308,15 @@ async fn test_membership_data_format() {
 /// Records that belong to active users should survive cleanup cycles.
 #[tokio::test]
 async fn test_orphan_cleanup_skips_active_records() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
     // Create organization and vault
-    let ns_id = create_organization(&leader.addr, "skip-active-ns", leader)
+    let ns_id = create_organization(&cluster, leader.id, "skip-active-ns")
         .await
         .expect("create organization");
-    let vault_id = create_vault(&leader.addr, ns_id).await.expect("create vault");
+    let vault_id = create_vault(&cluster, leader.id, ns_id).await.expect("create vault");
 
     // Write a "member" record that should not be cleaned up
     let member_key = "member:9999";
@@ -329,15 +326,23 @@ async fn test_orphan_cleanup_skips_active_records() {
         "note": "This active member should not be cleaned",
     });
 
-    write_entity(&leader.addr, ns_id, vault_id, member_key, &member_value, "skip-active-test")
-        .await
-        .expect("create member");
+    write_entity(
+        &cluster,
+        leader.id,
+        ns_id,
+        vault_id,
+        member_key,
+        &member_value,
+        "skip-active-test",
+    )
+    .await
+    .expect("create member");
 
     // Give cleanup time to run
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // The member should still exist (not orphaned)
-    let member_bytes = read_entity(&leader.addr, ns_id, vault_id, member_key)
+    let member_bytes = read_entity(&cluster, leader.id, ns_id, vault_id, member_key)
         .await
         .expect("read member")
         .expect("active member should still exist");
@@ -349,17 +354,13 @@ async fn test_orphan_cleanup_skips_active_records() {
 /// Tests orphan cleanup handles empty organizations gracefully.
 #[tokio::test]
 async fn test_orphan_cleanup_handles_empty_organization() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
     // Create an organization with no memberships
     let _ns_id =
-        create_organization(&leader.addr, "empty-ns", leader).await.expect("create organization");
+        create_organization(&cluster, leader.id, "empty-ns").await.expect("create organization");
 
     // Give cleanup time to run
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -372,18 +373,14 @@ async fn test_orphan_cleanup_handles_empty_organization() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_orphan_cleanup_with_concurrent_jobs() {
-    let cluster = TestCluster::new(3).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("has leader");
 
     // Create some state to exercise all background jobs.
     // Use the saga-aware helper that waits for Active status to avoid
     // "Organization with slug not found" races on multi-node clusters.
-    let organization = create_organization(&leader.addr, "concurrent-jobs-test", leader)
+    let organization = create_organization(&cluster, leader.id, "concurrent-jobs-test")
         .await
         .expect("create organization");
 
@@ -394,7 +391,7 @@ async fn test_orphan_cleanup_with_concurrent_jobs() {
     );
 
     // Create vault
-    let _vault = create_vault(&leader.addr, organization).await.expect("create vault");
+    let _vault = create_vault(&cluster, leader.id, organization).await.expect("create vault");
 
     // Wait for vault creation to propagate, then let background jobs run
     // at least one cycle (OrphanCleanup, TtlGC, SagaOrchestrator, AutoRecovery, LearnerRefresh).

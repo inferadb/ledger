@@ -2631,7 +2631,7 @@ pub fn record_onboarding_request(stage: &str, status: &str) {
 // =============================================================================
 
 /// Records a peer consensus-message send completion. Called by the per-peer
-/// drain task in `consensus_transport::peer_sender`.
+/// drain task in `wire_consensus_transport::peer_sender`.
 #[inline]
 pub fn record_peer_send_latency(peer: u64, latency_secs: f64) {
     let peer_str = peer.to_string();

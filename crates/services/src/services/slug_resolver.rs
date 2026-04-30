@@ -8,27 +8,51 @@
 //! Resolution reads from the Raft-replicated [`AppliedStateAccessor`] slug index,
 //! ensuring consistency across all nodes.
 //!
+//! All methods return [`WireError`] on failure — the wire-protocol-native error
+//! shape. Callers on the tonic path bridge via
+//! [`super::wire_helpers::wire_error_to_tonic_status`]; callers on the wire
+//! path propagate directly.
+//!
 //! ## Usage
 //!
 //! ```no_run
 //! # use inferadb_ledger_raft::log_storage::AppliedStateAccessor;
-//! # fn example(applied_state: &AppliedStateAccessor) -> Result<(), tonic::Status> {
+//! # use inferadb_ledger_wire::WireError;
+//! # fn example(applied_state: &AppliedStateAccessor) -> Result<(), WireError> {
 //! use inferadb_ledger_services::services::slug_resolver::SlugResolver;
 //!
 //! let resolver = SlugResolver::new(applied_state.clone());
-//! // resolver.extract_and_resolve(&request.organization)?;
-//! // resolver.extract_and_resolve_vault(&request.vault)?;
+//! // resolver.extract_and_resolve(request.organization)?;
+//! // resolver.extract_and_resolve_vault(request.vault)?;
 //! # Ok(())
 //! # }
 //! ```
 
-use inferadb_ledger_proto::proto;
+use std::collections::BTreeMap;
+
 use inferadb_ledger_raft::log_storage::AppliedStateAccessor;
 use inferadb_ledger_types::{
     AppId, AppSlug, OrganizationId, OrganizationSlug, TeamId, TeamSlug, UserId, UserSlug, VaultId,
     VaultSlug,
 };
-use tonic::Status;
+use inferadb_ledger_wire::{ErrorCode, WireError};
+
+use super::wire_helpers::build_wire_error;
+
+/// Build an `INVALID_ARGUMENT` `WireError` for slug-validation failures.
+///
+/// Used by every `extract_*_slug` helper. The empty `error_code`,
+/// non-retryable, no `retry_after_ms`, empty `context`, and empty
+/// `suggested_action` shape matches what `Status::invalid_argument(msg)`
+/// would have produced via the legacy tonic path.
+fn invalid_argument(message: impl Into<String>) -> WireError {
+    build_wire_error(ErrorCode::InvalidArgument, message, "", false, 0, BTreeMap::new(), "")
+}
+
+/// Build a `NOT_FOUND` `WireError` for slug-resolution failures.
+fn not_found(message: impl Into<String>) -> WireError {
+    build_wire_error(ErrorCode::NotFound, message, "", false, 0, BTreeMap::new(), "")
+}
 
 /// Resolves external slugs to internal IDs at gRPC service boundaries.
 ///
@@ -47,67 +71,61 @@ impl SlugResolver {
         Self { state }
     }
 
-    /// Extracts and validates an organization slug from a proto message.
+    /// Extracts and validates an organization slug.
     ///
-    /// Returns `INVALID_ARGUMENT` if the slug field is missing or zero.
-    pub fn extract_slug(
-        proto_slug: &Option<proto::OrganizationSlug>,
-    ) -> Result<OrganizationSlug, Status> {
-        let slug =
-            proto_slug.as_ref().ok_or_else(|| Status::invalid_argument("Missing organization"))?;
-        if slug.slug == 0 {
-            return Err(Status::invalid_argument("organization must be non-zero"));
+    /// Returns `INVALID_ARGUMENT` if the slug is missing or zero.
+    pub fn extract_slug(slug: Option<OrganizationSlug>) -> Result<OrganizationSlug, WireError> {
+        let slug = slug.ok_or_else(|| invalid_argument("Missing organization"))?;
+        if slug.value() == 0 {
+            return Err(invalid_argument("organization must be non-zero"));
         }
-        Ok(OrganizationSlug::new(slug.slug))
+        Ok(slug)
     }
 
     /// Resolves an organization slug to its internal ID.
     ///
     /// Returns `NOT_FOUND` if the slug is not registered.
-    pub fn resolve(&self, slug: OrganizationSlug) -> Result<OrganizationId, Status> {
-        self.state.resolve_slug_to_id(slug).ok_or_else(|| {
-            Status::not_found(format!("Organization with slug {} not found", slug.value()))
-        })
+    pub fn resolve(&self, slug: OrganizationSlug) -> Result<OrganizationId, WireError> {
+        self.state
+            .resolve_slug_to_id(slug)
+            .ok_or_else(|| not_found(format!("Organization with slug {} not found", slug.value())))
     }
 
     /// Reverse lookup: internal ID to external slug.
     ///
     /// Returns `NOT_FOUND` if the ID has no associated slug.
-    pub fn resolve_slug(&self, id: OrganizationId) -> Result<OrganizationSlug, Status> {
+    pub fn resolve_slug(&self, id: OrganizationId) -> Result<OrganizationSlug, WireError> {
         self.state
             .resolve_id_to_slug(id)
-            .ok_or_else(|| Status::not_found(format!("Organization {} not found", id)))
+            .ok_or_else(|| not_found(format!("Organization {} not found", id)))
     }
 
-    /// Extracts a slug from a proto message and resolves it to an internal ID.
+    /// Extracts a slug and resolves it to an internal ID.
     ///
     /// Combines [`extract_slug`](Self::extract_slug) and [`resolve`](Self::resolve)
     /// for the common case where a request carries a required organization slug.
     pub fn extract_and_resolve(
         &self,
-        proto_slug: &Option<proto::OrganizationSlug>,
-    ) -> Result<OrganizationId, Status> {
-        let slug = Self::extract_slug(proto_slug)?;
+        slug: Option<OrganizationSlug>,
+    ) -> Result<OrganizationId, WireError> {
+        let slug = Self::extract_slug(slug)?;
         self.resolve(slug)
     }
 
     /// Extracts an optional slug and resolves it if present.
     ///
-    /// Returns `Ok(None)` when the proto field is absent. Returns an error
+    /// Returns `Ok(None)` when the slug is absent. Returns an error
     /// only if the slug is present but zero or not found in the index.
     pub fn extract_and_resolve_optional(
         &self,
-        proto_slug: &Option<proto::OrganizationSlug>,
-    ) -> Result<Option<OrganizationId>, Status> {
-        match proto_slug {
+        slug: Option<OrganizationSlug>,
+    ) -> Result<Option<OrganizationId>, WireError> {
+        match slug {
             None => Ok(None),
-            Some(slug) if slug.slug == 0 => {
-                Err(Status::invalid_argument("organization must be non-zero"))
+            Some(slug) if slug.value() == 0 => {
+                Err(invalid_argument("organization must be non-zero"))
             },
-            Some(slug) => {
-                let domain_slug = OrganizationSlug::new(slug.slug);
-                self.resolve(domain_slug).map(Some)
-            },
+            Some(slug) => self.resolve(slug).map(Some),
         }
     }
 
@@ -121,33 +139,32 @@ impl SlugResolver {
     /// without an index lookup. This is needed because the system organization
     /// is hardcoded and never created via `CreateOrganization`.
     ///
-    /// Returns `INVALID_ARGUMENT` if the slug field is missing.
+    /// Returns `INVALID_ARGUMENT` if the slug is missing.
     pub fn extract_and_resolve_for_events(
         &self,
-        proto_slug: &Option<proto::OrganizationSlug>,
-    ) -> Result<OrganizationId, Status> {
-        let slug =
-            proto_slug.as_ref().ok_or_else(|| Status::invalid_argument("Missing organization"))?;
+        slug: Option<OrganizationSlug>,
+    ) -> Result<OrganizationId, WireError> {
+        let slug = slug.ok_or_else(|| invalid_argument("Missing organization"))?;
 
         // System organization: slug=0 maps to OrganizationId(0) directly
-        if slug.slug == 0 {
+        if slug.value() == 0 {
             return Ok(OrganizationId::new(0));
         }
 
-        self.resolve(OrganizationSlug::new(slug.slug))
+        self.resolve(slug)
     }
 
     // --- Vault slug resolution ---
 
-    /// Extracts and validates a vault slug from a proto message.
+    /// Extracts and validates a vault slug.
     ///
-    /// Returns `INVALID_ARGUMENT` if the slug field is missing or zero.
-    pub fn extract_vault_slug(proto_slug: &Option<proto::VaultSlug>) -> Result<VaultSlug, Status> {
-        let slug = proto_slug.as_ref().ok_or_else(|| Status::invalid_argument("Missing vault"))?;
-        if slug.slug == 0 {
-            return Err(Status::invalid_argument("vault must be non-zero"));
+    /// Returns `INVALID_ARGUMENT` if the slug is missing or zero.
+    pub fn extract_vault_slug(slug: Option<VaultSlug>) -> Result<VaultSlug, WireError> {
+        let slug = slug.ok_or_else(|| invalid_argument("Missing vault"))?;
+        if slug.value() == 0 {
+            return Err(invalid_argument("vault must be non-zero"));
         }
-        Ok(VaultSlug::new(slug.slug))
+        Ok(slug)
     }
 
     /// Resolves a vault slug to its internal ID.
@@ -158,10 +175,10 @@ impl SlugResolver {
     /// the vault id should use
     /// [`resolve_vault_pair`](Self::resolve_vault_pair).
     /// Returns `NOT_FOUND` if the slug is not registered.
-    pub fn resolve_vault(&self, slug: VaultSlug) -> Result<VaultId, Status> {
+    pub fn resolve_vault(&self, slug: VaultSlug) -> Result<VaultId, WireError> {
         self.state
             .resolve_vault_slug_to_id(slug)
-            .ok_or_else(|| Status::not_found(format!("Vault with slug {} not found", slug.value())))
+            .ok_or_else(|| not_found(format!("Vault with slug {} not found", slug.value())))
     }
 
     /// Resolves a vault slug to its owning `(OrganizationId, VaultId)` pair.
@@ -170,10 +187,13 @@ impl SlugResolver {
     /// caller does not already have the organization in scope — e.g.
     /// the `HealthService` probe path that accepts a vault slug
     /// without a required organization slug in the request.
-    pub fn resolve_vault_pair(&self, slug: VaultSlug) -> Result<(OrganizationId, VaultId), Status> {
+    pub fn resolve_vault_pair(
+        &self,
+        slug: VaultSlug,
+    ) -> Result<(OrganizationId, VaultId), WireError> {
         self.state
             .resolve_vault_slug_to_pair(slug)
-            .ok_or_else(|| Status::not_found(format!("Vault with slug {} not found", slug.value())))
+            .ok_or_else(|| not_found(format!("Vault with slug {} not found", slug.value())))
     }
 
     /// Reverse lookup: `(OrganizationId, VaultId)` to external slug.
@@ -185,42 +205,35 @@ impl SlugResolver {
         &self,
         organization: OrganizationId,
         id: VaultId,
-    ) -> Result<VaultSlug, Status> {
+    ) -> Result<VaultSlug, WireError> {
         self.state
             .resolve_vault_id_to_slug(organization, id)
-            .ok_or_else(|| Status::not_found(format!("Vault {}:{} not found", organization, id)))
+            .ok_or_else(|| not_found(format!("Vault {}:{} not found", organization, id)))
     }
 
-    /// Extracts a vault slug from a proto message and resolves it to an
-    /// internal `VaultId`.
+    /// Extracts a vault slug and resolves it to an internal `VaultId`.
     ///
     /// Combines [`extract_vault_slug`](Self::extract_vault_slug) and
     /// [`resolve_vault`](Self::resolve_vault) for the common case where a
     /// request carries a required vault slug and the caller has already
     /// resolved the organization independently.
-    pub fn extract_and_resolve_vault(
-        &self,
-        proto_slug: &Option<proto::VaultSlug>,
-    ) -> Result<VaultId, Status> {
-        let slug = Self::extract_vault_slug(proto_slug)?;
+    pub fn extract_and_resolve_vault(&self, slug: Option<VaultSlug>) -> Result<VaultId, WireError> {
+        let slug = Self::extract_vault_slug(slug)?;
         self.resolve_vault(slug)
     }
 
     /// Extracts an optional vault slug and resolves it if present.
     ///
-    /// Returns `Ok(None)` when the proto field is absent. Returns an error
+    /// Returns `Ok(None)` when the slug is absent. Returns an error
     /// only if the slug is present but zero or not found in the index.
     pub fn extract_and_resolve_vault_optional(
         &self,
-        proto_slug: &Option<proto::VaultSlug>,
-    ) -> Result<Option<VaultId>, Status> {
-        match proto_slug {
+        slug: Option<VaultSlug>,
+    ) -> Result<Option<VaultId>, WireError> {
+        match slug {
             None => Ok(None),
-            Some(slug) if slug.slug == 0 => Err(Status::invalid_argument("vault must be non-zero")),
-            Some(slug) => {
-                let domain_slug = VaultSlug::new(slug.slug);
-                self.resolve_vault(domain_slug).map(Some)
-            },
+            Some(slug) if slug.value() == 0 => Err(invalid_argument("vault must be non-zero")),
+            Some(slug) => self.resolve_vault(slug).map(Some),
         }
     }
 
@@ -228,63 +241,57 @@ impl SlugResolver {
     // User slug resolution
     // =========================================================================
 
-    /// Extracts and validates a user slug from a proto message.
+    /// Extracts and validates a user slug.
     ///
-    /// Returns `INVALID_ARGUMENT` if the slug field is missing or zero.
-    pub fn extract_user_slug(proto_slug: &Option<proto::UserSlug>) -> Result<UserSlug, Status> {
-        let slug = proto_slug.as_ref().ok_or_else(|| Status::invalid_argument("Missing user"))?;
-        if slug.slug == 0 {
-            return Err(Status::invalid_argument("user must be non-zero"));
+    /// Returns `INVALID_ARGUMENT` if the slug is missing or zero.
+    pub fn extract_user_slug(slug: Option<UserSlug>) -> Result<UserSlug, WireError> {
+        let slug = slug.ok_or_else(|| invalid_argument("Missing user"))?;
+        if slug.value() == 0 {
+            return Err(invalid_argument("user must be non-zero"));
         }
-        Ok(UserSlug::new(slug.slug))
+        Ok(slug)
     }
 
     /// Resolves a user slug to its internal ID.
     ///
     /// Returns `NOT_FOUND` if the slug is not registered.
-    pub fn resolve_user(&self, slug: UserSlug) -> Result<UserId, Status> {
+    pub fn resolve_user(&self, slug: UserSlug) -> Result<UserId, WireError> {
         self.state
             .resolve_user_slug_to_id(slug)
-            .ok_or_else(|| Status::not_found(format!("User with slug {} not found", slug.value())))
+            .ok_or_else(|| not_found(format!("User with slug {} not found", slug.value())))
     }
 
     /// Reverse lookup: internal user ID to external slug.
     ///
     /// Returns `NOT_FOUND` if the ID has no associated slug.
-    pub fn resolve_user_slug(&self, id: UserId) -> Result<UserSlug, Status> {
+    pub fn resolve_user_slug(&self, id: UserId) -> Result<UserSlug, WireError> {
         self.state
             .resolve_user_id_to_slug(id)
-            .ok_or_else(|| Status::not_found(format!("User {} not found", id)))
+            .ok_or_else(|| not_found(format!("User {} not found", id)))
     }
 
-    /// Extracts a user slug from a proto message and resolves it to an internal ID.
+    /// Extracts a user slug and resolves it to an internal ID.
     ///
     /// Combines [`extract_user_slug`](Self::extract_user_slug) and
     /// [`resolve_user`](Self::resolve_user) for the common case where a
     /// request carries a required user slug.
-    pub fn extract_and_resolve_user(
-        &self,
-        proto_slug: &Option<proto::UserSlug>,
-    ) -> Result<UserId, Status> {
-        let slug = Self::extract_user_slug(proto_slug)?;
+    pub fn extract_and_resolve_user(&self, slug: Option<UserSlug>) -> Result<UserId, WireError> {
+        let slug = Self::extract_user_slug(slug)?;
         self.resolve_user(slug)
     }
 
     /// Extracts an optional user slug and resolves it if present.
     ///
-    /// Returns `Ok(None)` when the proto field is absent. Returns an error
+    /// Returns `Ok(None)` when the slug is absent. Returns an error
     /// only if the slug is present but zero or not found in the index.
     pub fn extract_and_resolve_user_optional(
         &self,
-        proto_slug: &Option<proto::UserSlug>,
-    ) -> Result<Option<UserId>, Status> {
-        match proto_slug {
+        slug: Option<UserSlug>,
+    ) -> Result<Option<UserId>, WireError> {
+        match slug {
             None => Ok(None),
-            Some(slug) if slug.slug == 0 => Err(Status::invalid_argument("user must be non-zero")),
-            Some(slug) => {
-                let domain_slug = UserSlug::new(slug.slug);
-                self.resolve_user(domain_slug).map(Some)
-            },
+            Some(slug) if slug.value() == 0 => Err(invalid_argument("user must be non-zero")),
+            Some(slug) => self.resolve_user(slug).map(Some),
         }
     }
 
@@ -292,47 +299,44 @@ impl SlugResolver {
     // Team slug resolution
     // =========================================================================
 
-    /// Extracts and validates a team slug from a proto message.
+    /// Extracts and validates a team slug.
     ///
-    /// Returns `INVALID_ARGUMENT` if the slug field is missing or zero.
-    pub fn extract_team_slug(proto_slug: &Option<proto::TeamSlug>) -> Result<TeamSlug, Status> {
-        let slug = proto_slug.as_ref().ok_or_else(|| Status::invalid_argument("Missing team"))?;
-        if slug.slug == 0 {
-            return Err(Status::invalid_argument("team must be non-zero"));
+    /// Returns `INVALID_ARGUMENT` if the slug is missing or zero.
+    pub fn extract_team_slug(slug: Option<TeamSlug>) -> Result<TeamSlug, WireError> {
+        let slug = slug.ok_or_else(|| invalid_argument("Missing team"))?;
+        if slug.value() == 0 {
+            return Err(invalid_argument("team must be non-zero"));
         }
-        Ok(TeamSlug::new(slug.slug))
+        Ok(slug)
     }
 
     /// Resolves a team slug to its internal (organization ID, team ID) pair.
     ///
     /// Returns `NOT_FOUND` if the slug is not registered.
-    pub fn resolve_team(&self, slug: TeamSlug) -> Result<(OrganizationId, TeamId), Status> {
+    pub fn resolve_team(&self, slug: TeamSlug) -> Result<(OrganizationId, TeamId), WireError> {
         self.state
             .resolve_team_slug(slug)
-            .ok_or_else(|| Status::not_found(format!("Team with slug {} not found", slug.value())))
+            .ok_or_else(|| not_found(format!("Team with slug {} not found", slug.value())))
     }
 
-    /// Extracts a team slug from a proto message and resolves it to internal IDs.
+    /// Extracts a team slug and resolves it to internal IDs.
     pub fn extract_and_resolve_team(
         &self,
-        proto_slug: &Option<proto::TeamSlug>,
-    ) -> Result<(OrganizationId, TeamId), Status> {
-        let slug = Self::extract_team_slug(proto_slug)?;
+        slug: Option<TeamSlug>,
+    ) -> Result<(OrganizationId, TeamId), WireError> {
+        let slug = Self::extract_team_slug(slug)?;
         self.resolve_team(slug)
     }
 
     /// Extracts an optional team slug and resolves it if present.
     pub fn extract_and_resolve_team_optional(
         &self,
-        proto_slug: &Option<proto::TeamSlug>,
-    ) -> Result<Option<(OrganizationId, TeamId)>, Status> {
-        match proto_slug {
+        slug: Option<TeamSlug>,
+    ) -> Result<Option<(OrganizationId, TeamId)>, WireError> {
+        match slug {
             None => Ok(None),
-            Some(slug) if slug.slug == 0 => Err(Status::invalid_argument("team must be non-zero")),
-            Some(slug) => {
-                let domain_slug = TeamSlug::new(slug.slug);
-                self.resolve_team(domain_slug).map(Some)
-            },
+            Some(slug) if slug.value() == 0 => Err(invalid_argument("team must be non-zero")),
+            Some(slug) => self.resolve_team(slug).map(Some),
         }
     }
 
@@ -340,59 +344,56 @@ impl SlugResolver {
     // App slug resolution
     // =========================================================================
 
-    /// Extracts and validates an app slug from a proto message.
+    /// Extracts and validates an app slug.
     ///
-    /// Returns `INVALID_ARGUMENT` if the slug field is missing or zero.
-    pub fn extract_app_slug(proto_slug: &Option<proto::AppSlug>) -> Result<AppSlug, Status> {
-        let slug = proto_slug.as_ref().ok_or_else(|| Status::invalid_argument("Missing app"))?;
-        if slug.slug == 0 {
-            return Err(Status::invalid_argument("app must be non-zero"));
+    /// Returns `INVALID_ARGUMENT` if the slug is missing or zero.
+    pub fn extract_app_slug(slug: Option<AppSlug>) -> Result<AppSlug, WireError> {
+        let slug = slug.ok_or_else(|| invalid_argument("Missing app"))?;
+        if slug.value() == 0 {
+            return Err(invalid_argument("app must be non-zero"));
         }
-        Ok(AppSlug::new(slug.slug))
+        Ok(slug)
     }
 
     /// Resolves an app slug to its internal (organization ID, app ID) pair.
     ///
     /// Returns `NOT_FOUND` if the slug is not registered.
-    pub fn resolve_app(&self, slug: AppSlug) -> Result<(OrganizationId, AppId), Status> {
+    pub fn resolve_app(&self, slug: AppSlug) -> Result<(OrganizationId, AppId), WireError> {
         self.state
             .resolve_app_slug(slug)
-            .ok_or_else(|| Status::not_found(format!("App with slug {} not found", slug.value())))
+            .ok_or_else(|| not_found(format!("App with slug {} not found", slug.value())))
     }
 
     /// Reverse lookup: internal app ID to external slug.
     ///
     /// Returns `NOT_FOUND` if the ID has no associated slug.
-    pub fn resolve_app_slug(&self, id: AppId) -> Result<AppSlug, Status> {
+    pub fn resolve_app_slug(&self, id: AppId) -> Result<AppSlug, WireError> {
         self.state
             .resolve_app_id_to_slug(id)
-            .ok_or_else(|| Status::not_found(format!("App {} not found", id)))
+            .ok_or_else(|| not_found(format!("App {} not found", id)))
     }
 
-    /// Extracts an app slug from a proto message and resolves it to internal IDs.
+    /// Extracts an app slug and resolves it to internal IDs.
     pub fn extract_and_resolve_app(
         &self,
-        proto_slug: &Option<proto::AppSlug>,
-    ) -> Result<(OrganizationId, AppId), Status> {
-        let slug = Self::extract_app_slug(proto_slug)?;
+        slug: Option<AppSlug>,
+    ) -> Result<(OrganizationId, AppId), WireError> {
+        let slug = Self::extract_app_slug(slug)?;
         self.resolve_app(slug)
     }
 
     /// Extracts an optional app slug and resolves it if present.
     ///
-    /// Returns `Ok(None)` when the proto field is absent. Returns an error
+    /// Returns `Ok(None)` when the slug is absent. Returns an error
     /// only if the slug is present but zero or not found in the index.
     pub fn extract_and_resolve_app_optional(
         &self,
-        proto_slug: &Option<proto::AppSlug>,
-    ) -> Result<Option<(OrganizationId, AppId)>, Status> {
-        match proto_slug {
+        slug: Option<AppSlug>,
+    ) -> Result<Option<(OrganizationId, AppId)>, WireError> {
+        match slug {
             None => Ok(None),
-            Some(slug) if slug.slug == 0 => Err(Status::invalid_argument("app must be non-zero")),
-            Some(slug) => {
-                let domain_slug = AppSlug::new(slug.slug);
-                self.resolve_app(domain_slug).map(Some)
-            },
+            Some(slug) if slug.value() == 0 => Err(invalid_argument("app must be non-zero")),
+            Some(slug) => self.resolve_app(slug).map(Some),
         }
     }
 }
@@ -439,28 +440,26 @@ mod tests {
 
     #[test]
     fn extract_slug_valid() {
-        let proto = Some(proto::OrganizationSlug { slug: 42 });
-        let result = SlugResolver::extract_slug(&proto).unwrap();
+        let result = SlugResolver::extract_slug(Some(OrganizationSlug::new(42))).unwrap();
         assert_eq!(result.value(), 42);
     }
 
     #[test]
     fn extract_slug_missing_returns_invalid_argument() {
-        let result = SlugResolver::extract_slug(&None);
+        let result = SlugResolver::extract_slug(None);
         assert!(result.is_err());
-        let status = result.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::InvalidArgument);
-        assert!(status.message().contains("Missing"));
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+        assert!(err.message.contains("Missing"));
     }
 
     #[test]
     fn extract_slug_zero_returns_invalid_argument() {
-        let proto = Some(proto::OrganizationSlug { slug: 0 });
-        let result = SlugResolver::extract_slug(&proto);
+        let result = SlugResolver::extract_slug(Some(OrganizationSlug::new(0)));
         assert!(result.is_err());
-        let status = result.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::InvalidArgument);
-        assert!(status.message().contains("non-zero"));
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+        assert!(err.message.contains("non-zero"));
     }
 
     #[test]
@@ -477,9 +476,9 @@ mod tests {
         let slug = OrganizationSlug::new(999);
         let result = resolver.resolve(slug);
         assert!(result.is_err());
-        let status = result.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::NotFound);
-        assert!(status.message().contains("999"));
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound);
+        assert!(err.message.contains("999"));
     }
 
     #[test]
@@ -494,70 +493,65 @@ mod tests {
         let resolver = make_resolver(&[(100, 1)]);
         let result = resolver.resolve_slug(OrganizationId::new(42));
         assert!(result.is_err());
-        let status = result.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::NotFound);
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound);
     }
 
     #[test]
     fn extract_and_resolve_valid() {
         let resolver = make_resolver(&[(42, 7)]);
-        let proto = Some(proto::OrganizationSlug { slug: 42 });
-        let org_id = resolver.extract_and_resolve(&proto).unwrap();
+        let org_id = resolver.extract_and_resolve(Some(OrganizationSlug::new(42))).unwrap();
         assert_eq!(org_id, OrganizationId::new(7));
     }
 
     #[test]
     fn extract_and_resolve_missing_slug() {
         let resolver = make_resolver(&[]);
-        let result = resolver.extract_and_resolve(&None);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+        let result = resolver.extract_and_resolve(None);
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidArgument);
     }
 
     #[test]
     fn extract_and_resolve_zero_slug() {
         let resolver = make_resolver(&[]);
-        let proto = Some(proto::OrganizationSlug { slug: 0 });
-        let result = resolver.extract_and_resolve(&proto);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+        let result = resolver.extract_and_resolve(Some(OrganizationSlug::new(0)));
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidArgument);
     }
 
     #[test]
     fn extract_and_resolve_unknown_slug() {
         let resolver = make_resolver(&[(100, 1)]);
-        let proto = Some(proto::OrganizationSlug { slug: 999 });
-        let result = resolver.extract_and_resolve(&proto);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+        let result = resolver.extract_and_resolve(Some(OrganizationSlug::new(999)));
+        assert_eq!(result.unwrap_err().code, ErrorCode::NotFound);
     }
 
     #[test]
     fn extract_and_resolve_optional_none() {
         let resolver = make_resolver(&[]);
-        let result = resolver.extract_and_resolve_optional(&None).unwrap();
+        let result = resolver.extract_and_resolve_optional(None).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn extract_and_resolve_optional_valid() {
         let resolver = make_resolver(&[(42, 7)]);
-        let proto = Some(proto::OrganizationSlug { slug: 42 });
-        let result = resolver.extract_and_resolve_optional(&proto).unwrap();
+        let result =
+            resolver.extract_and_resolve_optional(Some(OrganizationSlug::new(42))).unwrap();
         assert_eq!(result, Some(OrganizationId::new(7)));
     }
 
     #[test]
     fn extract_and_resolve_optional_zero() {
         let resolver = make_resolver(&[]);
-        let proto = Some(proto::OrganizationSlug { slug: 0 });
-        let result = resolver.extract_and_resolve_optional(&proto);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+        let result = resolver.extract_and_resolve_optional(Some(OrganizationSlug::new(0)));
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidArgument);
     }
 
     #[test]
     fn extract_and_resolve_optional_unknown() {
         let resolver = make_resolver(&[(100, 1)]);
-        let proto = Some(proto::OrganizationSlug { slug: 999 });
-        let result = resolver.extract_and_resolve_optional(&proto);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+        let result = resolver.extract_and_resolve_optional(Some(OrganizationSlug::new(999)));
+        assert_eq!(result.unwrap_err().code, ErrorCode::NotFound);
     }
 
     #[test]
@@ -591,60 +585,57 @@ mod tests {
     #[test]
     fn extract_and_resolve_for_events_system_slug() {
         let resolver = make_resolver(&[]);
-        let proto = Some(proto::OrganizationSlug { slug: 0 });
-        let org_id = resolver.extract_and_resolve_for_events(&proto).unwrap();
+        let org_id =
+            resolver.extract_and_resolve_for_events(Some(OrganizationSlug::new(0))).unwrap();
         assert_eq!(org_id, OrganizationId::new(0));
     }
 
     #[test]
     fn extract_and_resolve_for_events_regular_slug() {
         let resolver = make_resolver(&[(42, 7)]);
-        let proto = Some(proto::OrganizationSlug { slug: 42 });
-        let org_id = resolver.extract_and_resolve_for_events(&proto).unwrap();
+        let org_id =
+            resolver.extract_and_resolve_for_events(Some(OrganizationSlug::new(42))).unwrap();
         assert_eq!(org_id, OrganizationId::new(7));
     }
 
     #[test]
     fn extract_and_resolve_for_events_missing_slug() {
         let resolver = make_resolver(&[]);
-        let result = resolver.extract_and_resolve_for_events(&None);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+        let result = resolver.extract_and_resolve_for_events(None);
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidArgument);
     }
 
     #[test]
     fn extract_and_resolve_for_events_unknown_slug() {
         let resolver = make_resolver(&[(100, 1)]);
-        let proto = Some(proto::OrganizationSlug { slug: 999 });
-        let result = resolver.extract_and_resolve_for_events(&proto);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+        let result = resolver.extract_and_resolve_for_events(Some(OrganizationSlug::new(999)));
+        assert_eq!(result.unwrap_err().code, ErrorCode::NotFound);
     }
 
     // --- Vault slug tests ---
 
     #[test]
     fn extract_vault_slug_valid() {
-        let proto = Some(proto::VaultSlug { slug: 42 });
-        let result = SlugResolver::extract_vault_slug(&proto).unwrap();
+        let result = SlugResolver::extract_vault_slug(Some(VaultSlug::new(42))).unwrap();
         assert_eq!(result.value(), 42);
     }
 
     #[test]
     fn extract_vault_slug_missing_returns_invalid_argument() {
-        let result = SlugResolver::extract_vault_slug(&None);
+        let result = SlugResolver::extract_vault_slug(None);
         assert!(result.is_err());
-        let status = result.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::InvalidArgument);
-        assert!(status.message().contains("Missing"));
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+        assert!(err.message.contains("Missing"));
     }
 
     #[test]
     fn extract_vault_slug_zero_returns_invalid_argument() {
-        let proto = Some(proto::VaultSlug { slug: 0 });
-        let result = SlugResolver::extract_vault_slug(&proto);
+        let result = SlugResolver::extract_vault_slug(Some(VaultSlug::new(0)));
         assert!(result.is_err());
-        let status = result.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::InvalidArgument);
-        assert!(status.message().contains("non-zero"));
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+        assert!(err.message.contains("non-zero"));
     }
 
     #[test]
@@ -661,9 +652,9 @@ mod tests {
         let slug = VaultSlug::new(999);
         let result = resolver.resolve_vault(slug);
         assert!(result.is_err());
-        let status = result.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::NotFound);
-        assert!(status.message().contains("999"));
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound);
+        assert!(err.message.contains("999"));
     }
 
     #[test]
@@ -678,70 +669,64 @@ mod tests {
         let resolver = make_resolver_with_vaults(&[], &[(100, 1)]);
         let result = resolver.resolve_vault_slug(OrganizationId::new(0), VaultId::new(42));
         assert!(result.is_err());
-        let status = result.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::NotFound);
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound);
     }
 
     #[test]
     fn extract_and_resolve_vault_valid() {
         let resolver = make_resolver_with_vaults(&[], &[(42, 7)]);
-        let proto = Some(proto::VaultSlug { slug: 42 });
-        let vault_id = resolver.extract_and_resolve_vault(&proto).unwrap();
+        let vault_id = resolver.extract_and_resolve_vault(Some(VaultSlug::new(42))).unwrap();
         assert_eq!(vault_id, VaultId::new(7));
     }
 
     #[test]
     fn extract_and_resolve_vault_missing_slug() {
         let resolver = make_resolver_with_vaults(&[], &[]);
-        let result = resolver.extract_and_resolve_vault(&None);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+        let result = resolver.extract_and_resolve_vault(None);
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidArgument);
     }
 
     #[test]
     fn extract_and_resolve_vault_zero_slug() {
         let resolver = make_resolver_with_vaults(&[], &[]);
-        let proto = Some(proto::VaultSlug { slug: 0 });
-        let result = resolver.extract_and_resolve_vault(&proto);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+        let result = resolver.extract_and_resolve_vault(Some(VaultSlug::new(0)));
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidArgument);
     }
 
     #[test]
     fn extract_and_resolve_vault_unknown_slug() {
         let resolver = make_resolver_with_vaults(&[], &[(100, 1)]);
-        let proto = Some(proto::VaultSlug { slug: 999 });
-        let result = resolver.extract_and_resolve_vault(&proto);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+        let result = resolver.extract_and_resolve_vault(Some(VaultSlug::new(999)));
+        assert_eq!(result.unwrap_err().code, ErrorCode::NotFound);
     }
 
     #[test]
     fn extract_and_resolve_vault_optional_none() {
         let resolver = make_resolver_with_vaults(&[], &[]);
-        let result = resolver.extract_and_resolve_vault_optional(&None).unwrap();
+        let result = resolver.extract_and_resolve_vault_optional(None).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn extract_and_resolve_vault_optional_valid() {
         let resolver = make_resolver_with_vaults(&[], &[(42, 7)]);
-        let proto = Some(proto::VaultSlug { slug: 42 });
-        let result = resolver.extract_and_resolve_vault_optional(&proto).unwrap();
+        let result = resolver.extract_and_resolve_vault_optional(Some(VaultSlug::new(42))).unwrap();
         assert_eq!(result, Some(VaultId::new(7)));
     }
 
     #[test]
     fn extract_and_resolve_vault_optional_zero() {
         let resolver = make_resolver_with_vaults(&[], &[]);
-        let proto = Some(proto::VaultSlug { slug: 0 });
-        let result = resolver.extract_and_resolve_vault_optional(&proto);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+        let result = resolver.extract_and_resolve_vault_optional(Some(VaultSlug::new(0)));
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidArgument);
     }
 
     #[test]
     fn extract_and_resolve_vault_optional_unknown() {
         let resolver = make_resolver_with_vaults(&[], &[(100, 1)]);
-        let proto = Some(proto::VaultSlug { slug: 999 });
-        let result = resolver.extract_and_resolve_vault_optional(&proto);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+        let result = resolver.extract_and_resolve_vault_optional(Some(VaultSlug::new(999)));
+        assert_eq!(result.unwrap_err().code, ErrorCode::NotFound);
     }
 
     #[test]
@@ -792,28 +777,26 @@ mod tests {
 
     #[test]
     fn extract_user_slug_valid() {
-        let proto = Some(proto::UserSlug { slug: 42 });
-        let result = SlugResolver::extract_user_slug(&proto).unwrap();
+        let result = SlugResolver::extract_user_slug(Some(UserSlug::new(42))).unwrap();
         assert_eq!(result.value(), 42);
     }
 
     #[test]
     fn extract_user_slug_missing_returns_invalid_argument() {
-        let result = SlugResolver::extract_user_slug(&None);
+        let result = SlugResolver::extract_user_slug(None);
         assert!(result.is_err());
-        let status = result.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::InvalidArgument);
-        assert!(status.message().contains("Missing"));
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+        assert!(err.message.contains("Missing"));
     }
 
     #[test]
     fn extract_user_slug_zero_returns_invalid_argument() {
-        let proto = Some(proto::UserSlug { slug: 0 });
-        let result = SlugResolver::extract_user_slug(&proto);
+        let result = SlugResolver::extract_user_slug(Some(UserSlug::new(0)));
         assert!(result.is_err());
-        let status = result.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::InvalidArgument);
-        assert!(status.message().contains("non-zero"));
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+        assert!(err.message.contains("non-zero"));
     }
 
     #[test]
@@ -830,9 +813,9 @@ mod tests {
         let slug = UserSlug::new(999);
         let result = resolver.resolve_user(slug);
         assert!(result.is_err());
-        let status = result.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::NotFound);
-        assert!(status.message().contains("999"));
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound);
+        assert!(err.message.contains("999"));
     }
 
     #[test]
@@ -847,70 +830,64 @@ mod tests {
         let resolver = make_resolver_with_users(&[(100, 1)]);
         let result = resolver.resolve_user_slug(UserId::new(42));
         assert!(result.is_err());
-        let status = result.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::NotFound);
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound);
     }
 
     #[test]
     fn extract_and_resolve_user_valid() {
         let resolver = make_resolver_with_users(&[(42, 7)]);
-        let proto = Some(proto::UserSlug { slug: 42 });
-        let user_id = resolver.extract_and_resolve_user(&proto).unwrap();
+        let user_id = resolver.extract_and_resolve_user(Some(UserSlug::new(42))).unwrap();
         assert_eq!(user_id, UserId::new(7));
     }
 
     #[test]
     fn extract_and_resolve_user_missing_slug() {
         let resolver = make_resolver_with_users(&[]);
-        let result = resolver.extract_and_resolve_user(&None);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+        let result = resolver.extract_and_resolve_user(None);
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidArgument);
     }
 
     #[test]
     fn extract_and_resolve_user_zero_slug() {
         let resolver = make_resolver_with_users(&[]);
-        let proto = Some(proto::UserSlug { slug: 0 });
-        let result = resolver.extract_and_resolve_user(&proto);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+        let result = resolver.extract_and_resolve_user(Some(UserSlug::new(0)));
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidArgument);
     }
 
     #[test]
     fn extract_and_resolve_user_unknown_slug() {
         let resolver = make_resolver_with_users(&[(100, 1)]);
-        let proto = Some(proto::UserSlug { slug: 999 });
-        let result = resolver.extract_and_resolve_user(&proto);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+        let result = resolver.extract_and_resolve_user(Some(UserSlug::new(999)));
+        assert_eq!(result.unwrap_err().code, ErrorCode::NotFound);
     }
 
     #[test]
     fn extract_and_resolve_user_optional_none() {
         let resolver = make_resolver_with_users(&[]);
-        let result = resolver.extract_and_resolve_user_optional(&None).unwrap();
+        let result = resolver.extract_and_resolve_user_optional(None).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn extract_and_resolve_user_optional_valid() {
         let resolver = make_resolver_with_users(&[(42, 7)]);
-        let proto = Some(proto::UserSlug { slug: 42 });
-        let result = resolver.extract_and_resolve_user_optional(&proto).unwrap();
+        let result = resolver.extract_and_resolve_user_optional(Some(UserSlug::new(42))).unwrap();
         assert_eq!(result, Some(UserId::new(7)));
     }
 
     #[test]
     fn extract_and_resolve_user_optional_zero() {
         let resolver = make_resolver_with_users(&[]);
-        let proto = Some(proto::UserSlug { slug: 0 });
-        let result = resolver.extract_and_resolve_user_optional(&proto);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+        let result = resolver.extract_and_resolve_user_optional(Some(UserSlug::new(0)));
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidArgument);
     }
 
     #[test]
     fn extract_and_resolve_user_optional_unknown() {
         let resolver = make_resolver_with_users(&[(100, 1)]);
-        let proto = Some(proto::UserSlug { slug: 999 });
-        let result = resolver.extract_and_resolve_user_optional(&proto);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+        let result = resolver.extract_and_resolve_user_optional(Some(UserSlug::new(999)));
+        assert_eq!(result.unwrap_err().code, ErrorCode::NotFound);
     }
 
     #[test]
@@ -953,28 +930,26 @@ mod tests {
 
     #[test]
     fn extract_app_slug_valid() {
-        let proto = Some(proto::AppSlug { slug: 42 });
-        let result = SlugResolver::extract_app_slug(&proto).unwrap();
+        let result = SlugResolver::extract_app_slug(Some(AppSlug::new(42))).unwrap();
         assert_eq!(result.value(), 42);
     }
 
     #[test]
     fn extract_app_slug_missing_returns_invalid_argument() {
-        let result = SlugResolver::extract_app_slug(&None);
+        let result = SlugResolver::extract_app_slug(None);
         assert!(result.is_err());
-        let status = result.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::InvalidArgument);
-        assert!(status.message().contains("Missing"));
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+        assert!(err.message.contains("Missing"));
     }
 
     #[test]
     fn extract_app_slug_zero_returns_invalid_argument() {
-        let proto = Some(proto::AppSlug { slug: 0 });
-        let result = SlugResolver::extract_app_slug(&proto);
+        let result = SlugResolver::extract_app_slug(Some(AppSlug::new(0)));
         assert!(result.is_err());
-        let status = result.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::InvalidArgument);
-        assert!(status.message().contains("non-zero"));
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+        assert!(err.message.contains("non-zero"));
     }
 
     #[test]
@@ -990,9 +965,9 @@ mod tests {
         let resolver = make_resolver_with_apps(&[(100, 1, 10)]);
         let result = resolver.resolve_app(AppSlug::new(999));
         assert!(result.is_err());
-        let status = result.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::NotFound);
-        assert!(status.message().contains("999"));
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound);
+        assert!(err.message.contains("999"));
     }
 
     #[test]
@@ -1006,14 +981,13 @@ mod tests {
     fn resolve_app_slug_reverse_unknown_returns_not_found() {
         let resolver = make_resolver_with_apps(&[(100, 1, 10)]);
         let result = resolver.resolve_app_slug(AppId::new(999));
-        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+        assert_eq!(result.unwrap_err().code, ErrorCode::NotFound);
     }
 
     #[test]
     fn extract_and_resolve_app_valid() {
         let resolver = make_resolver_with_apps(&[(42, 1, 10)]);
-        let proto = Some(proto::AppSlug { slug: 42 });
-        let (org_id, app_id) = resolver.extract_and_resolve_app(&proto).unwrap();
+        let (org_id, app_id) = resolver.extract_and_resolve_app(Some(AppSlug::new(42))).unwrap();
         assert_eq!(org_id, OrganizationId::new(1));
         assert_eq!(app_id, AppId::new(10));
     }
@@ -1021,54 +995,49 @@ mod tests {
     #[test]
     fn extract_and_resolve_app_missing_slug() {
         let resolver = make_resolver_with_apps(&[]);
-        let result = resolver.extract_and_resolve_app(&None);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+        let result = resolver.extract_and_resolve_app(None);
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidArgument);
     }
 
     #[test]
     fn extract_and_resolve_app_zero_slug() {
         let resolver = make_resolver_with_apps(&[]);
-        let proto = Some(proto::AppSlug { slug: 0 });
-        let result = resolver.extract_and_resolve_app(&proto);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+        let result = resolver.extract_and_resolve_app(Some(AppSlug::new(0)));
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidArgument);
     }
 
     #[test]
     fn extract_and_resolve_app_unknown_slug() {
         let resolver = make_resolver_with_apps(&[(42, 1, 10)]);
-        let proto = Some(proto::AppSlug { slug: 999 });
-        let result = resolver.extract_and_resolve_app(&proto);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+        let result = resolver.extract_and_resolve_app(Some(AppSlug::new(999)));
+        assert_eq!(result.unwrap_err().code, ErrorCode::NotFound);
     }
 
     #[test]
     fn extract_and_resolve_app_optional_none() {
         let resolver = make_resolver_with_apps(&[]);
-        let result = resolver.extract_and_resolve_app_optional(&None).unwrap();
+        let result = resolver.extract_and_resolve_app_optional(None).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn extract_and_resolve_app_optional_valid() {
         let resolver = make_resolver_with_apps(&[(42, 1, 10)]);
-        let proto = Some(proto::AppSlug { slug: 42 });
-        let result = resolver.extract_and_resolve_app_optional(&proto).unwrap();
+        let result = resolver.extract_and_resolve_app_optional(Some(AppSlug::new(42))).unwrap();
         assert_eq!(result, Some((OrganizationId::new(1), AppId::new(10))));
     }
 
     #[test]
     fn extract_and_resolve_app_optional_zero() {
         let resolver = make_resolver_with_apps(&[]);
-        let proto = Some(proto::AppSlug { slug: 0 });
-        let result = resolver.extract_and_resolve_app_optional(&proto);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+        let result = resolver.extract_and_resolve_app_optional(Some(AppSlug::new(0)));
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidArgument);
     }
 
     #[test]
     fn extract_and_resolve_app_optional_unknown() {
         let resolver = make_resolver_with_apps(&[(100, 1, 10)]);
-        let proto = Some(proto::AppSlug { slug: 999 });
-        let result = resolver.extract_and_resolve_app_optional(&proto);
-        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+        let result = resolver.extract_and_resolve_app_optional(Some(AppSlug::new(999)));
+        assert_eq!(result.unwrap_err().code, ErrorCode::NotFound);
     }
 }

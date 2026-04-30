@@ -1,14 +1,13 @@
 //! SDK types for the Token service.
 //!
-//! Provides ergonomic wrappers around the proto-generated token types,
-//! converting timestamps and enums to idiomatic Rust types.
+//! Provides ergonomic wrappers around the wire-protocol token types,
+//! converting timestamps and enums to idiomatic Rust types. Wire-side
+//! conversions live in `crate::ops_wire::token`; the structs here are
+//! the consumer-facing surface returned by those dispatch functions.
 
 use std::time::SystemTime;
 
-use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{AppSlug, UserSlug, VaultSlug};
-
-use crate::proto_util::proto_timestamp_to_system_time;
 
 /// An access + refresh token pair returned by session/vault token creation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,24 +21,6 @@ pub struct TokenPair {
     pub access_expires_at: Option<SystemTime>,
     /// When the refresh token expires.
     pub refresh_expires_at: Option<SystemTime>,
-}
-
-impl TokenPair {
-    /// Converts from protobuf `TokenPair`.
-    pub(crate) fn from_proto(p: proto::TokenPair) -> Self {
-        Self {
-            access_token: p.access_token,
-            refresh_token: p.refresh_token,
-            access_expires_at: p
-                .access_expires_at
-                .as_ref()
-                .and_then(proto_timestamp_to_system_time),
-            refresh_expires_at: p
-                .refresh_expires_at
-                .as_ref()
-                .and_then(proto_timestamp_to_system_time),
-        }
-    }
 }
 
 /// Parsed claims from a validated access token.
@@ -67,26 +48,6 @@ pub enum ValidatedToken {
     },
 }
 
-impl ValidatedToken {
-    /// Converts from protobuf `ValidateTokenResponse`.
-    pub(crate) fn from_proto(r: proto::ValidateTokenResponse) -> Option<Self> {
-        match r.claims {
-            Some(proto::validate_token_response::Claims::UserSession(c)) => {
-                Some(Self::UserSession { user: UserSlug::new(c.user_slug), role: c.role })
-            },
-            Some(proto::validate_token_response::Claims::VaultAccess(c)) => {
-                Some(Self::VaultAccess {
-                    organization: c.org_slug,
-                    app: AppSlug::new(c.app_slug),
-                    vault: VaultSlug::new(c.vault_slug),
-                    scopes: c.scopes,
-                })
-            },
-            None => None,
-        }
-    }
-}
-
 /// Public key metadata for token verification (JWKS-style).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -103,18 +64,4 @@ pub struct PublicKeyInfo {
     pub valid_until: Option<SystemTime>,
     /// When this key was created.
     pub created_at: Option<SystemTime>,
-}
-
-impl PublicKeyInfo {
-    /// Converts from protobuf `PublicKeyInfo`.
-    pub(crate) fn from_proto(p: proto::PublicKeyInfo) -> Self {
-        Self {
-            kid: p.kid,
-            public_key: p.public_key,
-            status: p.status,
-            valid_from: p.valid_from.as_ref().and_then(proto_timestamp_to_system_time),
-            valid_until: p.valid_until.as_ref().and_then(proto_timestamp_to_system_time),
-            created_at: p.created_at.as_ref().and_then(proto_timestamp_to_system_time),
-        }
-    }
 }

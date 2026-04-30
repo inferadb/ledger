@@ -13,6 +13,9 @@
 //! Heavy scale tests (5000 client IDs, 100 orgs × 10 vaults, 1000 bulk writes,
 //! snapshot determinism) have been moved to the `stress` binary
 //! (`stress_integration.rs`) to keep integration tests under 4 minutes.
+//!
+//! F.1.f.2.Stage1e Wave 6: migrated from legacy tonic helpers to wire-protocol
+//! siblings.
 
 #![allow(
     clippy::unwrap_used,
@@ -24,11 +27,15 @@
 
 use std::time::Duration;
 
-use inferadb_ledger_proto::proto;
+use bytes::Bytes;
 use inferadb_ledger_types::{OrganizationSlug, Region, VaultSlug};
+use inferadb_ledger_wire::services::{read as wr, shared as ws, vault as wv, write as ww};
 use serial_test::serial;
 
-use crate::common::{TestCluster, create_read_client, create_vault_client, create_write_client};
+use crate::common::{
+    TestCluster, wire_create_test_organization, wire_create_test_vault, wire_read_client,
+    wire_vault_client, wire_write_client,
+};
 
 // =============================================================================
 // Helpers
@@ -36,113 +43,128 @@ use crate::common::{TestCluster, create_read_client, create_vault_client, create
 
 /// Creates an organization and returns its slug.
 async fn create_organization(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     name: &str,
-    node: &crate::common::TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
-    let (slug, _admin) = crate::common::create_test_organization(addr, name, node).await?;
+    let (slug, _admin) = wire_create_test_organization(cluster, node_id, name).await?;
     Ok(slug)
 }
 
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
-    crate::common::create_test_vault(addr, organization).await
+    wire_create_test_vault(cluster, node_id, organization).await
 }
 
 /// Writes an entity and returns the assigned sequence number.
 async fn write_entity(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     organization: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
     value: &[u8],
     client_id: &str,
 ) -> Result<u64, Box<dyn std::error::Error>> {
-    let mut client = create_write_client(addr).await?;
+    let client = wire_write_client(cluster, node_id);
     let response = client
-        .write(proto::WriteRequest {
-            client_id: Some(proto::ClientId { id: client_id.to_string() }),
-            idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-            organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-            vault: Some(proto::VaultSlug { slug: vault.value() }),
-            operations: vec![proto::Operation {
-                op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
-                    key: key.to_string(),
-                    value: value.to_vec(),
-                    expires_at: None,
-                    condition: None,
-                })),
-            }],
-            include_tx_proof: false,
-            caller: None,
-        })
+        .write(
+            ww::WriteRequest {
+                client_id: Some(ws::ClientIdMessage { id: client_id.to_string() }),
+                idempotency_key: Bytes::copy_from_slice(uuid::Uuid::new_v4().as_bytes()),
+                organization: Some(organization),
+                vault: Some(vault),
+                operations: vec![ws::Operation {
+                    op: Some(ws::OperationKind::SetEntity(ws::SetEntity {
+                        key: key.to_string(),
+                        value: Bytes::copy_from_slice(value),
+                        expires_at: None,
+                        condition: None,
+                    })),
+                }],
+                include_tx_proof: false,
+                caller: None,
+            },
+            rand::random::<u128>(),
+        )
         .await?;
-    match response.into_inner().result {
-        Some(proto::write_response::Result::Success(s)) => Ok(s.assigned_sequence),
-        Some(proto::write_response::Result::Error(e)) => {
-            Err(format!("write error: {:?}", e).into())
-        },
+    match response.result {
+        Some(ww::WriteResponseResult::Success(s)) => Ok(s.assigned_sequence),
+        Some(ww::WriteResponseResult::Error(e)) => Err(format!("write error: {:?}", e).into()),
         None => Err("no result in write response".into()),
     }
 }
 
 /// Reads an entity and returns its value (if it exists).
 async fn read_entity(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     organization: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
 ) -> Option<Vec<u8>> {
-    let mut client = create_read_client(addr).await.ok()?;
+    let client = wire_read_client(cluster, node_id);
     let response = client
-        .read(proto::ReadRequest {
-            organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-            vault: Some(proto::VaultSlug { slug: vault.value() }),
-            key: key.to_string(),
-            consistency: 0,
-            caller: None,
-        })
+        .read(
+            wr::ReadRequest {
+                organization: Some(organization),
+                vault: Some(vault),
+                key: key.to_string(),
+                consistency: ws::ReadConsistency::Unspecified,
+                caller: None,
+            },
+            rand::random::<u128>(),
+        )
         .await
         .ok()?;
-    response.into_inner().value
+    response.value.map(|b| b.to_vec())
 }
 
 /// Deletes a vault.
 async fn delete_vault(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     organization: OrganizationSlug,
     vault: VaultSlug,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = create_vault_client(addr).await?;
+    let client = wire_vault_client(cluster, node_id);
     client
-        .delete_vault(proto::DeleteVaultRequest {
-            organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-            vault: Some(proto::VaultSlug { slug: vault.value() }),
-            caller: None,
-        })
+        .delete_vault(
+            wv::DeleteVaultRequest {
+                organization: Some(organization),
+                vault: Some(vault),
+                caller: None,
+            },
+            rand::random::<u128>(),
+        )
         .await?;
     Ok(())
 }
 
 /// Gets the client state (last committed sequence).
 async fn get_client_state(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     organization: OrganizationSlug,
     vault: VaultSlug,
     client_id: &str,
 ) -> Result<u64, Box<dyn std::error::Error>> {
-    let mut client = create_read_client(addr).await?;
+    let client = wire_read_client(cluster, node_id);
     let response = client
-        .get_client_state(proto::GetClientStateRequest {
-            organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-            vault: Some(proto::VaultSlug { slug: vault.value() }),
-            client_id: Some(proto::ClientId { id: client_id.to_string() }),
-        })
+        .get_client_state(
+            wr::GetClientStateRequest {
+                organization: Some(organization),
+                vault: Some(vault),
+                client_id: Some(ws::ClientIdMessage { id: client_id.to_string() }),
+            },
+            rand::random::<u128>(),
+        )
         .await?;
-    Ok(response.into_inner().last_committed_sequence)
+    Ok(response.last_committed_sequence)
 }
 
 // =============================================================================
@@ -154,11 +176,7 @@ async fn get_client_state(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_empty_state_snapshot_round_trip() {
-    let cluster = TestCluster::new(3).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     let _leader_id = cluster.wait_for_leader().await;
 
     // Wait for the cluster to stabilize — even with no user data, the
@@ -187,39 +205,49 @@ async fn test_empty_state_snapshot_round_trip() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_snapshot_with_deleted_entities() {
-    let cluster = TestCluster::new(3).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
     // Create 3 orgs, each with 2 vaults.
-    let org1 = create_organization(&leader.addr, "del-org-1", leader).await.expect("create org 1");
-    let org2 = create_organization(&leader.addr, "del-org-2", leader).await.expect("create org 2");
-    let org3 = create_organization(&leader.addr, "del-org-3", leader).await.expect("create org 3");
+    let org1 = create_organization(&cluster, leader.id, "del-org-1").await.expect("create org 1");
+    let org2 = create_organization(&cluster, leader.id, "del-org-2").await.expect("create org 2");
+    let org3 = create_organization(&cluster, leader.id, "del-org-3").await.expect("create org 3");
 
-    let v1a = create_vault(&leader.addr, org1).await.expect("vault 1a");
-    let v1b = create_vault(&leader.addr, org1).await.expect("vault 1b");
-    let v2a = create_vault(&leader.addr, org2).await.expect("vault 2a");
-    let _v2b = create_vault(&leader.addr, org2).await.expect("vault 2b");
-    let _v3a = create_vault(&leader.addr, org3).await.expect("vault 3a");
-    let _v3b = create_vault(&leader.addr, org3).await.expect("vault 3b");
+    let v1a = create_vault(&cluster, leader.id, org1).await.expect("vault 1a");
+    let v1b = create_vault(&cluster, leader.id, org1).await.expect("vault 1b");
+    let v2a = create_vault(&cluster, leader.id, org2).await.expect("vault 2a");
+    let _v2b = create_vault(&cluster, leader.id, org2).await.expect("vault 2b");
+    let _v3a = create_vault(&cluster, leader.id, org3).await.expect("vault 3a");
+    let _v3b = create_vault(&cluster, leader.id, org3).await.expect("vault 3b");
 
     // Write some data to org1's vaults.
-    write_entity(&leader.addr, org1, v1a, "k1", b"v1", "del-client").await.expect("write to v1a");
-    write_entity(&leader.addr, org1, v1b, "k2", b"v2", "del-client").await.expect("write to v1b");
-    write_entity(&leader.addr, org2, v2a, "k3", b"v3", "del-client").await.expect("write to v2a");
+    write_entity(&cluster, leader.id, org1, v1a, "k1", b"v1", "del-client")
+        .await
+        .expect("write to v1a");
+    write_entity(&cluster, leader.id, org1, v1b, "k2", b"v2", "del-client")
+        .await
+        .expect("write to v1b");
+    write_entity(&cluster, leader.id, org2, v2a, "k3", b"v3", "del-client")
+        .await
+        .expect("write to v2a");
 
     // Delete vault 1b, then delete org 2 (which requires deleting its vaults first).
-    delete_vault(&leader.addr, org1, v1b).await.expect("delete vault 1b");
+    delete_vault(&cluster, leader.id, org1, v1b).await.expect("delete vault 1b");
 
     // Write another entity to org3 to advance sequences after deletion.
-    let org3_vault = create_vault(&leader.addr, org3).await.expect("extra vault for org3");
-    write_entity(&leader.addr, org3, org3_vault, "post-delete", b"still-works", "del-client")
-        .await
-        .expect("write after delete");
+    let org3_vault = create_vault(&cluster, leader.id, org3).await.expect("extra vault for org3");
+    write_entity(
+        &cluster,
+        leader.id,
+        org3,
+        org3_vault,
+        "post-delete",
+        b"still-works",
+        "del-client",
+    )
+    .await
+    .expect("write after delete");
 
     // Wait for replication (global + data region).
     let synced = cluster.wait_for_sync(Duration::from_secs(15)).await;
@@ -230,14 +258,14 @@ async fn test_snapshot_with_deleted_entities() {
     // 2. org3's post-delete write is present.
     let follower = cluster.followers().into_iter().next().expect("follower");
 
-    let v1a_data = read_entity(&follower.addr, org1, v1a, "k1").await;
+    let v1a_data = read_entity(&cluster, follower.id, org1, v1a, "k1").await;
     assert_eq!(v1a_data, Some(b"v1".to_vec()), "org1/v1a should still have data");
 
-    let post_del = read_entity(&follower.addr, org3, org3_vault, "post-delete").await;
+    let post_del = read_entity(&cluster, follower.id, org3, org3_vault, "post-delete").await;
     assert_eq!(post_del, Some(b"still-works".to_vec()), "post-delete write should be replicated");
 
     // Verify sequence counters aren't corrupted by checking we can still write.
-    write_entity(&leader.addr, org1, v1a, "after-del-2", b"ok", "del-client")
+    write_entity(&cluster, leader.id, org1, v1a, "after-del-2", b"ok", "del-client")
         .await
         .expect("write after all deletions should succeed");
 }
@@ -251,21 +279,18 @@ async fn test_snapshot_with_deleted_entities() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_leader_failover_mid_batch_no_data_loss() {
-    let cluster = TestCluster::new(3).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     let leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
     // ORG-ISOLATION: alpha receives the writes, beta must stay empty.
     let org_alpha =
-        create_organization(&leader.addr, "failover-ns-a", leader).await.expect("create org alpha");
-    let vault_alpha = create_vault(&leader.addr, org_alpha).await.expect("create vault alpha");
+        create_organization(&cluster, leader.id, "failover-ns-a").await.expect("create org alpha");
+    let vault_alpha =
+        create_vault(&cluster, leader.id, org_alpha).await.expect("create vault alpha");
     let org_beta =
-        create_organization(&leader.addr, "failover-ns-b", leader).await.expect("create org beta");
-    let vault_beta = create_vault(&leader.addr, org_beta).await.expect("create vault beta");
+        create_organization(&cluster, leader.id, "failover-ns-b").await.expect("create org beta");
+    let vault_beta = create_vault(&cluster, leader.id, org_beta).await.expect("create vault beta");
 
     // Write 50 entities sequentially (alpha only). A5 migrated this from
     // `BatchWrite` to per-op `Write` after Phase 6 of the per-vault
@@ -275,7 +300,8 @@ async fn test_leader_failover_mid_batch_no_data_loss() {
     // entry must survive failover and be readable from a follower.
     for i in 0..50 {
         write_entity(
-            &leader.addr,
+            &cluster,
+            leader.id,
             org_alpha,
             vault_alpha,
             &format!("fail-key-{}", i),
@@ -300,7 +326,7 @@ async fn test_leader_failover_mid_batch_no_data_loss() {
     for i in [0, 25, 49] {
         let key = format!("fail-key-{}", i);
         let expected = format!("fail-value-{}", i).into_bytes();
-        let value = read_entity(&follower.addr, org_alpha, vault_alpha, &key).await;
+        let value = read_entity(&cluster, follower.id, org_alpha, vault_alpha, &key).await;
         assert_eq!(value, Some(expected), "follower should have {} after failover", key);
     }
 
@@ -308,7 +334,7 @@ async fn test_leader_failover_mid_batch_no_data_loss() {
     for node in cluster.nodes() {
         for i in [0u64, 25, 49] {
             let key = format!("fail-key-{}", i);
-            let value = read_entity(&node.addr, org_beta, vault_beta, &key).await;
+            let value = read_entity(&cluster, node.id, org_beta, vault_beta, &key).await;
             assert_eq!(value, None, "node {} beta must not see alpha {}", node.id, key);
         }
     }
@@ -325,30 +351,26 @@ async fn test_leader_failover_mid_batch_no_data_loss() {
 /// This test verifies the moka cache dedup path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_idempotency_dedup_same_key_returns_cached() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
     let organization =
-        create_organization(&leader.addr, "dedup-ns", leader).await.expect("create organization");
-    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
+        create_organization(&cluster, leader.id, "dedup-ns").await.expect("create organization");
+    let vault = create_vault(&cluster, leader.id, organization).await.expect("create vault");
 
     // Write with a specific idempotency key.
-    let shared_key = uuid::Uuid::new_v4().as_bytes().to_vec();
-    let mut write_client = create_write_client(&leader.addr).await.expect("connect");
-    let request = proto::WriteRequest {
-        client_id: Some(proto::ClientId { id: "dedup-client".to_string() }),
+    let shared_key = Bytes::copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    let write_client = wire_write_client(&cluster, leader.id);
+    let request = ww::WriteRequest {
+        client_id: Some(ws::ClientIdMessage { id: "dedup-client".to_string() }),
         idempotency_key: shared_key.clone(),
-        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-        vault: Some(proto::VaultSlug { slug: vault.value() }),
-        operations: vec![proto::Operation {
-            op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
+        organization: Some(organization),
+        vault: Some(vault),
+        operations: vec![ws::Operation {
+            op: Some(ws::OperationKind::SetEntity(ws::SetEntity {
                 key: "dedup-key".to_string(),
-                value: b"dedup-value".to_vec(),
+                value: Bytes::from_static(b"dedup-value"),
                 expires_at: None,
                 condition: None,
             })),
@@ -356,24 +378,24 @@ async fn test_idempotency_dedup_same_key_returns_cached() {
         include_tx_proof: false,
         caller: None,
     };
-    let response = write_client.write(request).await.expect("first write");
-    let first_seq = match response.into_inner().result {
-        Some(proto::write_response::Result::Success(s)) => s.assigned_sequence,
+    let response = write_client.write(request, rand::random::<u128>()).await.expect("first write");
+    let first_seq = match response.result {
+        Some(ww::WriteResponseResult::Success(s)) => s.assigned_sequence,
         other => panic!("first write should succeed, got: {:?}", other),
     };
 
     // Retry with the same idempotency key and same payload.
     // On a single-node cluster the write response above guarantees the entry
     // is applied, so the moka cache (or replicated state) will catch the dup.
-    let retry = proto::WriteRequest {
-        client_id: Some(proto::ClientId { id: "dedup-client".to_string() }),
+    let retry = ww::WriteRequest {
+        client_id: Some(ws::ClientIdMessage { id: "dedup-client".to_string() }),
         idempotency_key: shared_key,
-        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-        vault: Some(proto::VaultSlug { slug: vault.value() }),
-        operations: vec![proto::Operation {
-            op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
+        organization: Some(organization),
+        vault: Some(vault),
+        operations: vec![ws::Operation {
+            op: Some(ws::OperationKind::SetEntity(ws::SetEntity {
                 key: "dedup-key".to_string(),
-                value: b"dedup-value".to_vec(),
+                value: Bytes::from_static(b"dedup-value"),
                 expires_at: None,
                 condition: None,
             })),
@@ -381,20 +403,20 @@ async fn test_idempotency_dedup_same_key_returns_cached() {
         include_tx_proof: false,
         caller: None,
     };
-    let retry_resp = write_client.write(retry).await.expect("retry write");
-    match retry_resp.into_inner().result {
-        Some(proto::write_response::Result::Success(s)) => {
+    let retry_resp = write_client.write(retry, rand::random::<u128>()).await.expect("retry write");
+    match retry_resp.result {
+        Some(ww::WriteResponseResult::Success(s)) => {
             // Moka cache returns the cached success with the original sequence.
             assert_eq!(
                 s.assigned_sequence, first_seq,
                 "retry should return same sequence as original"
             );
         },
-        Some(proto::write_response::Result::Error(e)) => {
+        Some(ww::WriteResponseResult::Error(e)) => {
             // AlreadyCommitted is also valid (replicated state path).
             assert_eq!(
-                e.code(),
-                proto::WriteErrorCode::AlreadyCommitted,
+                e.code,
+                ww::WriteErrorCode::AlreadyCommitted,
                 "should get AlreadyCommitted, got: {:?}",
                 e
             );
@@ -403,7 +425,7 @@ async fn test_idempotency_dedup_same_key_returns_cached() {
     }
 
     // Verify the entity was only written once (same value, not duplicated).
-    let value = read_entity(&leader.addr, organization, vault, "dedup-key").await;
+    let value = read_entity(&cluster, leader.id, organization, vault, "dedup-key").await;
     assert_eq!(value, Some(b"dedup-value".to_vec()));
 }
 
@@ -418,11 +440,7 @@ async fn test_idempotency_dedup_same_key_returns_cached() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_sequence_counters_persisted_and_restored() {
-    let cluster = TestCluster::new(3).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
@@ -432,13 +450,13 @@ async fn test_sequence_counters_persisted_and_restored() {
     let mut organizations = Vec::new();
     let mut vaults = Vec::new();
     for i in 0..3 {
-        let org = create_organization(&leader.addr, &format!("seq-org-{}", i), leader)
+        let org = create_organization(&cluster, leader.id, &format!("seq-org-{}", i))
             .await
             .expect("create org");
         organizations.push(org);
 
         for _v in 0..2 {
-            let vault = create_vault(&leader.addr, org).await.expect("create vault");
+            let vault = create_vault(&cluster, leader.id, org).await.expect("create vault");
             vaults.push(vault);
         }
     }
@@ -447,7 +465,8 @@ async fn test_sequence_counters_persisted_and_restored() {
     for (idx, &vault) in vaults.iter().enumerate() {
         let org_idx = idx / 2;
         write_entity(
-            &leader.addr,
+            &cluster,
+            leader.id,
             organizations[org_idx],
             vault,
             &format!("seq-key-{}", idx),
@@ -465,15 +484,16 @@ async fn test_sequence_counters_persisted_and_restored() {
     // After replication, create additional resources to verify sequences
     // didn't reset. If sequences were corrupted, these would get duplicate IDs
     // or fail.
-    let extra_org = create_organization(&leader.addr, "seq-extra-org", leader)
+    let extra_org = create_organization(&cluster, leader.id, "seq-extra-org")
         .await
         .expect("create extra org after sync");
     let extra_vault =
-        create_vault(&leader.addr, extra_org).await.expect("create extra vault after sync");
+        create_vault(&cluster, leader.id, extra_org).await.expect("create extra vault after sync");
 
     // Verify the extra vault is writable and gets a valid sequence.
     let seq = write_entity(
-        &leader.addr,
+        &cluster,
+        leader.id,
         extra_org,
         extra_vault,
         "seq-post-sync",
@@ -487,7 +507,7 @@ async fn test_sequence_counters_persisted_and_restored() {
     // Verify on a follower that client state is consistent.
     let follower = cluster.followers().into_iter().next().expect("follower");
     let client_seq =
-        get_client_state(&follower.addr, organizations[0], vaults[0], "seq-client").await;
+        get_client_state(&cluster, follower.id, organizations[0], vaults[0], "seq-client").await;
     // The client state query may fail on followers (leadership required for
     // some implementations), so we only assert if it succeeds.
     if let Ok(seq) = client_seq {
@@ -516,22 +536,18 @@ async fn test_sequence_counters_persisted_and_restored() {
 /// infrastructure rather than actual TTL expiry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_client_sequence_eviction_infrastructure() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let organization = create_organization(&leader.addr, "eviction-ns", leader)
-        .await
-        .expect("create organization");
-    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
+    let organization =
+        create_organization(&cluster, leader.id, "eviction-ns").await.expect("create organization");
+    let vault = create_vault(&cluster, leader.id, organization).await.expect("create vault");
 
     // Write with a unique client ID.
     let seq = write_entity(
-        &leader.addr,
+        &cluster,
+        leader.id,
         organization,
         vault,
         "evict-key",
@@ -543,7 +559,8 @@ async fn test_client_sequence_eviction_infrastructure() {
     assert_eq!(seq, 1);
 
     // Verify client state is persisted.
-    let client_seq = get_client_state(&leader.addr, organization, vault, "evict-client").await;
+    let client_seq =
+        get_client_state(&cluster, leader.id, organization, vault, "evict-client").await;
     if let Ok(s) = client_seq {
         assert_eq!(s, 1, "client should have sequence 1 before eviction");
     }
@@ -554,7 +571,8 @@ async fn test_client_sequence_eviction_infrastructure() {
     // infrastructure doesn't crash (actual eviction requires clock manipulation).
     for i in 0..100 {
         write_entity(
-            &leader.addr,
+            &cluster,
+            leader.id,
             organization,
             vault,
             &format!("evict-advance-{}", i),
@@ -568,7 +586,7 @@ async fn test_client_sequence_eviction_infrastructure() {
     // Verify the original client's sequence is still accessible (TTL hasn't
     // elapsed, so it shouldn't be evicted).
     let client_seq_after =
-        get_client_state(&leader.addr, organization, vault, "evict-client").await;
+        get_client_state(&cluster, leader.id, organization, vault, "evict-client").await;
     if let Ok(s) = client_seq_after {
         assert_eq!(s, 1, "client should still have sequence 1 (TTL not elapsed)");
     }
@@ -586,31 +604,27 @@ async fn test_client_sequence_eviction_infrastructure() {
 /// panic or corrupt state.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_post_eviction_retry_accepted() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let organization = create_organization(&leader.addr, "post-evict-ns", leader)
+    let organization = create_organization(&cluster, leader.id, "post-evict-ns")
         .await
         .expect("create organization");
-    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&cluster, leader.id, organization).await.expect("create vault");
 
     // Write with a specific client and key.
-    let key = uuid::Uuid::new_v4().as_bytes().to_vec();
-    let mut write_client = create_write_client(&leader.addr).await.expect("connect");
-    let request = proto::WriteRequest {
-        client_id: Some(proto::ClientId { id: "post-evict-client".to_string() }),
+    let key = Bytes::copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    let write_client = wire_write_client(&cluster, leader.id);
+    let request = ww::WriteRequest {
+        client_id: Some(ws::ClientIdMessage { id: "post-evict-client".to_string() }),
         idempotency_key: key.clone(),
-        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-        vault: Some(proto::VaultSlug { slug: vault.value() }),
-        operations: vec![proto::Operation {
-            op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
+        organization: Some(organization),
+        vault: Some(vault),
+        operations: vec![ws::Operation {
+            op: Some(ws::OperationKind::SetEntity(ws::SetEntity {
                 key: "post-evict-entity".to_string(),
-                value: b"original".to_vec(),
+                value: Bytes::from_static(b"original"),
                 expires_at: None,
                 condition: None,
             })),
@@ -618,22 +632,22 @@ async fn test_post_eviction_retry_accepted() {
         include_tx_proof: false,
         caller: None,
     };
-    let resp = write_client.write(request).await.expect("first write");
-    match resp.into_inner().result {
-        Some(proto::write_response::Result::Success(_)) => {},
+    let resp = write_client.write(request, rand::random::<u128>()).await.expect("first write");
+    match resp.result {
+        Some(ww::WriteResponseResult::Success(_)) => {},
         other => panic!("should succeed, got: {:?}", other),
     }
 
     // Retry immediately (without eviction) — should be caught by moka cache.
-    let retry = proto::WriteRequest {
-        client_id: Some(proto::ClientId { id: "post-evict-client".to_string() }),
+    let retry = ww::WriteRequest {
+        client_id: Some(ws::ClientIdMessage { id: "post-evict-client".to_string() }),
         idempotency_key: key,
-        organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-        vault: Some(proto::VaultSlug { slug: vault.value() }),
-        operations: vec![proto::Operation {
-            op: Some(proto::operation::Op::SetEntity(proto::SetEntity {
+        organization: Some(organization),
+        vault: Some(vault),
+        operations: vec![ws::Operation {
+            op: Some(ws::OperationKind::SetEntity(ws::SetEntity {
                 key: "post-evict-entity".to_string(),
-                value: b"original".to_vec(),
+                value: Bytes::from_static(b"original"),
                 expires_at: None,
                 condition: None,
             })),
@@ -641,15 +655,15 @@ async fn test_post_eviction_retry_accepted() {
         include_tx_proof: false,
         caller: None,
     };
-    let retry_resp = write_client.write(retry).await.expect("retry write");
-    match retry_resp.into_inner().result {
-        Some(proto::write_response::Result::Success(s)) => {
+    let retry_resp = write_client.write(retry, rand::random::<u128>()).await.expect("retry write");
+    match retry_resp.result {
+        Some(ww::WriteResponseResult::Success(s)) => {
             // Moka cache returns cached success.
             assert!(s.assigned_sequence > 0);
         },
-        Some(proto::write_response::Result::Error(e)) => {
+        Some(ww::WriteResponseResult::Error(e)) => {
             // AlreadyCommitted from replicated state.
-            assert_eq!(e.code(), proto::WriteErrorCode::AlreadyCommitted);
+            assert_eq!(e.code, ww::WriteErrorCode::AlreadyCommitted);
         },
         None => panic!("no result in retry response"),
     }
@@ -667,23 +681,20 @@ async fn test_post_eviction_retry_accepted() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_snapshot_install_events_best_effort() {
-    let cluster = TestCluster::new(3).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let organization = create_organization(&leader.addr, "snap-events-ns", leader)
+    let organization = create_organization(&cluster, leader.id, "snap-events-ns")
         .await
         .expect("create organization");
-    let vault = create_vault(&leader.addr, organization).await.expect("create vault");
+    let vault = create_vault(&cluster, leader.id, organization).await.expect("create vault");
 
     // Write enough data to make a meaningful snapshot.
     for i in 0..100 {
         write_entity(
-            &leader.addr,
+            &cluster,
+            leader.id,
             organization,
             vault,
             &format!("event-key-{}", i),
@@ -700,7 +711,7 @@ async fn test_snapshot_install_events_best_effort() {
 
     // Verify data is present on both followers.
     for follower in cluster.followers() {
-        let value = read_entity(&follower.addr, organization, vault, "event-key-50").await;
+        let value = read_entity(&cluster, follower.id, organization, vault, "event-key-50").await;
         assert_eq!(
             value,
             Some(b"event-value-50".to_vec()),
@@ -714,16 +725,17 @@ async fn test_snapshot_install_events_best_effort() {
 // Infrastructure
 // =============================================================================
 
-/// Verifies that all tests in this module use gRPC to interact with nodes
-/// (not direct state layer access), ensuring they exercise the full stack.
+/// Verifies that all tests in this module use the wire transport to interact
+/// with nodes (not direct state layer access), ensuring they exercise the full
+/// stack.
 ///
-/// This is a structural assertion — the test module only imports gRPC clients
-/// from `common`, not internal raft/state/store types. The fact that this
-/// module compiles without importing `inferadb_ledger_raft` internal types
-/// proves all tests use the gRPC boundary.
+/// This is a structural assertion — the test module only imports wire-protocol
+/// clients from `common`, not internal raft/state/store types. The fact that
+/// this module compiles without importing `inferadb_ledger_raft` internal types
+/// proves all tests use the wire boundary.
 #[test]
-fn test_infrastructure_uses_grpc_only() {
+fn test_infrastructure_uses_wire_only() {
     // Compile-time proof: this module has no `use inferadb_ledger_raft::log_storage`
-    // or `use inferadb_ledger_store` imports. If it compiled, we're gRPC-only.
+    // or `use inferadb_ledger_store` imports. If it compiled, we're wire-only.
     // No runtime assertion needed — compilation IS the assertion.
 }

@@ -83,11 +83,11 @@ Run through this checklist before opening a PR:
 
 This codebase is structured for AI-assisted development. Claude Code, Codex, and Cursor all have what they need to contribute safely:
 
-- **[CLAUDE.md](CLAUDE.md)** (symlinked as `AGENTS.md`) — 14 non-negotiable golden rules covering proto codegen, storage keys, PII residency, error handling, consensus I/O boundaries, and test hygiene. Read this before editing any of those surfaces.
+- **[CLAUDE.md](CLAUDE.md)** (symlinked as `AGENTS.md`) — non-negotiable golden rules covering wire protocol + `define_protocol!` macro, storage keys, PII residency, error handling, consensus I/O boundaries, and test hygiene. Read this before editing any of those surfaces.
 - **Per-crate `CLAUDE.md`** — `crates/*/CLAUDE.md` files extend the root rules with crate-specific invariants.
-- **Proactive audit agents** (`.claude/agents/`) — seven reviewers (`consensus-reviewer`, `data-residency-auditor`, `docs-drift-auditor`, `proto-reviewer`, `snafu-error-reviewer`, `test-isolation-auditor`, `unsafe-panic-auditor`) fire on matching file changes and surface violations.
-- **Task skills** (`.claude/skills/`) — `/add-new-entity`, `/add-proto-conversion`, `/add-storage-key`, `/new-rpc`, `/define-error-type`, `/use-bon-builder`, `/debug-integration-test`, `/just-ci-gate`, `/audit-claude-md`. Use these instead of improvising when their trigger applies.
-- **Hooks** (`.claude/settings.json`) — block `git commit` from agents, block edits to generated proto and `Cargo.lock`, auto-run `cargo +nightly fmt` + `cargo +1.92 check` after `.rs` edits. These exist so agents cannot silently violate golden rules.
+- **Proactive audit agents** (`.claude/agents/`) — seven reviewers (`consensus-reviewer`, `data-residency-auditor`, `documentation-reviewer`, `wire-reviewer`, `snafu-error-reviewer`, `test-isolation-auditor`, `unsafe-panic-auditor`) fire on matching file changes and surface violations.
+- **Task skills** (`.claude/skills/`) — `/add-new-entity`, `/add-storage-key`, `/new-rpc`, `/define-error-type`, `/use-bon-builder`, `/debug-integration-test`, `/just-ci-gate`, `/audit-claude-md`. Use these instead of improvising when their trigger applies.
+- **Hooks** (`.claude/settings.json`) — block `git commit` from agents, block edits to `Cargo.lock`, auto-run `cargo +nightly fmt` + `cargo +1.92 check` after `.rs` edits. These exist so agents cannot silently violate golden rules.
 
 If an agent review contradicts your judgment, surface the contradiction in the PR rather than overriding it — the audit rules exist because the class of bug has been observed at least twice.
 
@@ -97,7 +97,7 @@ Detailed conventions (toolchain invocation, identifier newtypes, storage-key fam
 
 - `cargo +1.92` for build/clippy/test, `cargo +nightly` for fmt. Never unpinned `cargo`.
 - Server crates use `snafu` only; SDK uses `thiserror`; `anyhow` is banned.
-- Internal IDs are `{Entity}Id(i64)`; external slugs are `{Entity}Slug(u64)`. Translation happens at the gRPC boundary.
+- Internal IDs are `{Entity}Id(i64)`; external slugs are `{Entity}Slug(u64)`. Translation happens at the wire-protocol boundary.
 - Storage-key prefixes: bare (primary), `_dir:`, `_idx:`, `_meta:`, `_shred:`, `_tmp:`, `_audit:`. Each has a residency tier.
 
 ## Advanced Testing
@@ -111,8 +111,6 @@ Everyday tests are covered by `just test`, `just test-integration`, and `just te
 ## Troubleshooting
 
 **`just test-integration` fails with `address already in use`.** The integration suite spawns real clusters on real ports. Parallelism is capped at 4 in the Justfile; don't override `--test-threads` upward without understanding `scripts/run-integration-tests.sh`.
-
-**`just proto` fails with "expected exactly one build output directory".** Previous build artifacts left multiple hash directories under `target/debug/build/inferadb-ledger-proto-*`. Run `cargo clean -p inferadb-ledger-proto` then `just proto` again.
 
 **Clippy complains about formatting after `just check`.** Run `just fix` to auto-apply `cargo fmt` and `cargo clippy --fix`, then rerun `just check`.
 

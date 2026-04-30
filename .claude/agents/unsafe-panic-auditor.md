@@ -33,7 +33,7 @@ These are not categorically banned but require a justifying comment or test-only
 ## Scope filtering
 
 - **In scope**: every `.rs` file under `crates/*/src/` that is not inside a `#[cfg(test)] mod tests { .. }` block, plus top-level modules named `tests.rs`.
-- **Out of scope**: `crates/*/tests/`, `crates/*/benches/`, `crates/test-utils/`, `fuzz/`, build scripts (`build.rs`), generated code under `crates/proto/src/generated/`.
+- **Out of scope**: `crates/*/tests/`, `crates/*/benches/`, `crates/test-utils/`, `fuzz/`, build scripts (`build.rs`), and macro-emitted code from the `define_protocol!` invocation in `crates/wire-services/`.
 
 Test utilities (`crates/test-utils/`) and `fuzz/` are exempt entirely — they exist to exercise failure paths, and `unwrap` / `panic` are idiomatic there.
 

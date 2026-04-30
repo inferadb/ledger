@@ -1,0 +1,25 @@
+[package]
+name = "inferadb-ledger-wire"
+description = "Custom QUIC-based wire protocol for InferaDB Ledger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["wire", "protocol", "quic", "frame"]
+categories = ["network-programming"]
+
+[dependencies]
+bytes = { workspace = true, features = ["serde"] }
+inferadb-ledger-types = { workspace = true }
+postcard.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

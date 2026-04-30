@@ -1,11 +1,11 @@
-//! Follower-side snapshot install — Stage 4 of the snapshot install path.
+//! Follower-side snapshot install.
 //!
-//! Stage 4 closes the loop opened by Stage 3's
-//! [`snapshot_streamer`](crate::snapshot_streamer): a leader streams the
-//! at-rest encrypted envelope into a `staging-{idx:020}.snap.staged` file
-//! under the receiver's per-scope snapshot directory; this module's
-//! `RaftManagerSnapshotInstaller` (crate-private) consumes those staged
-//! files and feeds the recovered LSNP-v2 plaintext through
+//! The leader streams an at-rest encrypted snapshot envelope into a
+//! `staging-{idx:020}.snap.staged` file under the receiver's per-scope snapshot
+//! directory (see `crate::wire_consensus_transport::snapshot::WireSnapshotSender`);
+//! this module's
+//! `RaftManagerSnapshotInstaller` (crate-private) consumes those staged files and
+//! feeds the recovered LSNP-v2 plaintext through
 //! [`RaftLogStore::install_snapshot`](crate::log_storage::RaftLogStore::install_snapshot).
 //!
 //! The crate-private installer implements the consensus-crate
@@ -38,28 +38,26 @@
 //! - **A. `Action::InstallSnapshot` arrives before streaming completes.** The receiver's atomic
 //!   rename hasn't landed; `list_staged` returns no match. We poll up to `staged_file_wait`
 //!   (default 5s) for the file. On timeout we drop the request; the leader's next heartbeat
-//!   re-emits `Action::SendSnapshot`, which restages the file via Stage 3 and re-emits this action.
+//!   re-emits `Action::SendSnapshot`, which restages the file and re-emits this action.
 //! - **B. Decrypt failure (wrong key, tampered envelope).** Unrecoverable for this follower. Log +
 //!   record a metric and prune the staged file. A persistent failure (operator misconfigured key
 //!   provider) surfaces through the metric.
-//! - **C. Install fails partway through.** `RaftLogStore::install_snapshot` is transactional per
-//!   the Stage 1b atomic-per-DB-commits invariant — partial success isn't possible. On failure we
-//!   leave the staged file in place for the leader's retry; do NOT advance `last_applied`.
+//! - **C. Install fails partway through.** `RaftLogStore::install_snapshot` is transactional —
+//!   partial success isn't possible. On failure we leave the staged file in place for the leader's
+//!   retry; do NOT advance `last_applied`.
 //! - **D. Idempotent re-install for same index.** `ConsensusState::handle_snapshot_installed` is
 //!   idempotent — repeated calls for the same `last_included_index` are no-ops. The shard-side
 //!   `Action::InstallSnapshot` emission also short-circuits when `last_included_index <=
 //!   last_snapshot_index`.
 //! - **E. Cross-scope install attempt.** `RaftLogStore::install_snapshot` rejects with
-//!   `SnapshotError::ScopeMismatch` before any data is written (Stage 1b's defense-in-depth); the
-//!   error surfaces through the apply-command oneshot and we drop + log + metric.
+//!   `SnapshotError::ScopeMismatch` before any data is written (defense-in-depth); the error
+//!   surfaces through the apply-command oneshot and we drop + log + metric.
 //!
 //! ## Drop-and-let-Raft-retry
 //!
-//! Mirrors the Stage 3 sender contract: any failure is a logged + metric'd
-//! drop. The leader's heartbeat replicator re-emits
-//! [`Action::SendSnapshot`](inferadb_ledger_consensus::action::Action::SendSnapshot)
-//! on the next cycle; that action streams the file again (Stage 3) and the
-//! receiver's accept emits a fresh
+//! Any failure is a logged + metric'd drop. The leader's heartbeat replicator re-emits
+//! [`Action::SendSnapshot`](inferadb_ledger_consensus::action::Action::SendSnapshot) on the next
+//! cycle; that action streams the file again and the receiver emits a fresh
 //! [`Action::InstallSnapshot`](inferadb_ledger_consensus::action::Action::InstallSnapshot).
 //! No explicit retry state in the reactor.
 
@@ -220,7 +218,7 @@ pub enum InstallError {
 /// Follower-side snapshot installer bound to a [`RaftManager`].
 ///
 /// Sister of `RaftManagerWakeNotifier`, `RaftManagerSnapshotCoordinator`,
-/// and `RaftManagerSnapshotSender`: holds an
+/// and `WireSnapshotSender`: holds an
 /// `Arc<Mutex<Weak<RaftManager>>>` shared with the manager, which
 /// bootstrap fills via [`RaftManager::install_self_weak`] immediately
 /// after wrapping the manager in `Arc`.

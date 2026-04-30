@@ -1156,9 +1156,6 @@ fn default_event_overflow_behavior() -> EventOverflowBehavior {
 /// batch, so one fsync covers every event emitted during the flush
 /// window.
 ///
-/// See `docs/superpowers/specs/2026-04-19-sprint-1b4-handler-event-batching-design.md`
-/// for the full design.
-///
 /// # Example
 ///
 /// ```no_run

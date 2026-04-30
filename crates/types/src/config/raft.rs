@@ -510,7 +510,7 @@ fn default_ttl_seconds() -> i64 {
 // HibernationConfig
 // =========================================================================
 
-/// Vault hibernation policy (Phase 7 / O1).
+/// Vault hibernation policy for idle vault Raft groups.
 ///
 /// Idle vault Raft groups transition to a dormant lifecycle state when they
 /// have not seen activity in `idle_secs`. The dormant state populates the
@@ -520,8 +520,7 @@ fn default_ttl_seconds() -> i64 {
 ///
 /// The policy is **disabled by default**. Operators opt in by setting
 /// `enabled = true` (or via the `--vault-hibernation` /
-/// `INFERADB__LEDGER__VAULT_HIBERNATION=true` server flag) — same
-/// disciplined-default pattern as P9 rate-limiting.
+/// `INFERADB__LEDGER__VAULT_HIBERNATION=true` server flag).
 ///
 /// # Validation Rules
 ///

@@ -1,161 +1,59 @@
-//! Structured error details for gRPC responses.
+//! Structured error-context builders for the bridged tonic surface.
 //!
-//! Encodes [`proto::ErrorDetails`] into `Status::details` bytes so SDK clients
-//! can parse error codes, retryability, and recovery guidance without string
-//! matching. Backward-compatible: clients that ignore `details` still see the
-//! human-readable `Status.message`.
+//! [`build_error_details`] returns a [`WireError`] so the rest of the
+//! services crate stays wire-shaped on the error path. Surviving tonic-
+//! side callers compose with [`wire_helpers::wire_error_to_tonic_status`]
+//! when they still need a `tonic::Status`.
 
 use std::collections::HashMap;
 
-use inferadb_ledger_proto::proto;
-use inferadb_ledger_types::DiagnosticCode;
+use inferadb_ledger_wire::{ErrorCode, WireError};
 
-/// `ErrorDetails.context` key for the current Raft leader's node ID (numeric string).
-pub(crate) const LEADER_ID_KEY: &str = "leader_id";
-/// `ErrorDetails.context` key for the current Raft leader's endpoint URI.
-pub(crate) const LEADER_ENDPOINT_KEY: &str = "leader_endpoint";
-/// `ErrorDetails.context` key for the Raft term the leader was observed in (numeric string).
-pub(crate) const LEADER_TERM_KEY: &str = "leader_term";
-/// `ErrorDetails.context` key for the organization id the leader is for
-/// (numeric string; `"0"` for the data-region group).
+/// Builds a [`WireError`] with the structured fields the SDK reads on the
+/// error path.
 ///
-/// Distinct from the consensus-layer `ConsensusStateId` (an opaque seahash) — the
-/// organization id is what the SDK uses for routing and what its
-/// `RegionLeaderCache` keys on. Data-region groups emit `"0"`; per-
-/// organization groups emit the organization's id.
-pub(crate) const LEADER_SHARD_KEY: &str = "leader_shard";
-/// `ErrorDetails.context` key for the vault id the leader is for
-/// (numeric string; absent when the rejecting shard is not vault-scoped).
-///
-/// Per-vault Raft groups under the per-organization group (Phase 6 of the
-/// per-vault consensus rollout) emit the vault's internal id here so the
-/// SDK's `VaultLeaderCache` can key on `(region, organization_id, vault_id)`
-/// rather than just `(region, organization_id)`. Region- and org-scoped
-/// rejections omit this key — its absence signals "no vault-level routing
-/// applies" and the SDK falls back to the org-level cache entry.
-pub(crate) const LEADER_VAULT_KEY: &str = "leader_vault";
-/// `ErrorDetails.context` key for the organization slug (Snowflake u64) the
-/// leader is for. Emitted alongside [`LEADER_SHARD_KEY`] (the internal
-/// `OrganizationId(i64)`) so the SDK — which only knows external slugs —
-/// can re-key its caches by `OrganizationSlug` without a lookup.
-///
-/// Absent when the rejection has no organization context (e.g. cross-region
-/// redirects without per-shard identity) or when the server can't translate
-/// the internal id to a slug at the rejection site.
-pub(crate) const LEADER_ORGANIZATION_SLUG_KEY: &str = "leader_organization_slug";
-/// `ErrorDetails.context` key for the vault slug (Snowflake u64) the leader
-/// is for. Emitted alongside [`LEADER_VAULT_KEY`] (the internal `VaultId(i64)`)
-/// so the SDK's `VaultLeaderCache` can key on `(OrganizationSlug, VaultSlug)`
-/// — the identifier space the SDK actually has at hand. Absent when the
-/// rejection is not vault-scoped or the slug isn't known at the rejection
-/// site.
-pub(crate) const LEADER_VAULT_SLUG_KEY: &str = "leader_vault_slug";
-
-/// Builds an [`ErrorDetails`] proto message from error attributes.
-///
-/// Used by service helpers ([`super::helpers::check_rate_limit`],
-/// [`super::helpers::validate_operations`]) to construct structured error
-/// details that are encoded into `Status::with_details()`. The generic
-/// fallback path in [`super::metadata::status_with_correlation`] covers
-/// error paths that don't build explicit details.
+/// The `error_code` numeric field (e.g. `3203` for `AppInvalidArgument`)
+/// is encoded as `context["error_code"]` — same key the wire-native
+/// helpers in [`super::helpers`] use. Surviving tonic-shaped callers
+/// compose this with [`super::wire_helpers::wire_error_to_tonic_status`]
+/// to land back on a `tonic::Status` carrying a JSON-encoded `WireError`
+/// in `Status::details()`.
 pub(crate) fn build_error_details(
     error_code: u16,
     is_retryable: bool,
     retry_after_ms: Option<i32>,
     context: HashMap<String, String>,
     suggested_action: Option<&str>,
-) -> proto::ErrorDetails {
-    proto::ErrorDetails {
-        error_code: error_code.to_string(),
+) -> WireError {
+    let code = if is_retryable { ErrorCode::RateLimited } else { ErrorCode::FailedPrecondition };
+    let mut ctx = std::collections::BTreeMap::new();
+    for (k, v) in context {
+        ctx.insert(k, v);
+    }
+    super::wire_helpers::build_wire_error(
+        code,
+        String::new(),
+        error_code.to_string(),
         is_retryable,
-        retry_after_ms,
-        context,
-        suggested_action: suggested_action.map(String::from),
-    }
-}
-
-/// Builds an [`ErrorDetails`] proto for a `NotLeader` rejection, carrying the
-/// current known leader identity so the client can redirect without issuing
-/// a separate `ResolveRegionLeader` RPC.
-///
-/// Hint keys written into `context`:
-/// - `leader_id` — numeric string (u64)
-/// - `leader_endpoint` — full URI (e.g. `"http://10.0.2.5:5000"`)
-/// - `leader_term` — numeric string (u64)
-/// - `leader_shard` — numeric string (organization id; `"0"` for the data-region group)
-/// - `leader_vault` — numeric string (vault id; absent when the rejecting shard is not
-///   vault-scoped)
-/// - `leader_organization_slug` — numeric string (Snowflake u64); absent when the slug isn't known
-///   at the rejection site
-/// - `leader_vault_slug` — numeric string (Snowflake u64); absent when the rejecting shard is not
-///   vault-scoped or when the slug isn't known
-///
-/// Any argument may be `None` when the server has no information for that
-/// field; the key is simply omitted. A missing `leader_vault` key is the
-/// signal to legacy SDKs (and the org-level cache path) that the rejection
-/// is not vault-scoped. The slug fields are field-additive on the wire —
-/// older SDKs ignore them; legacy servers don't emit them and the new SDK
-/// falls back to the region path.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn build_not_leader_details(
-    leader_id: Option<u64>,
-    leader_endpoint: Option<&str>,
-    leader_term: Option<u64>,
-    leader_shard: Option<u64>,
-    leader_vault: Option<u64>,
-    leader_organization_slug: Option<u64>,
-    leader_vault_slug: Option<u64>,
-) -> proto::ErrorDetails {
-    let mut context = HashMap::new();
-    if let Some(id) = leader_id {
-        context.insert(LEADER_ID_KEY.to_owned(), id.to_string());
-    }
-    if let Some(ep) = leader_endpoint.filter(|s| !s.is_empty()) {
-        context.insert(LEADER_ENDPOINT_KEY.to_owned(), ep.to_owned());
-    }
-    if let Some(term) = leader_term {
-        context.insert(LEADER_TERM_KEY.to_owned(), term.to_string());
-    }
-    if let Some(shard) = leader_shard {
-        context.insert(LEADER_SHARD_KEY.to_owned(), shard.to_string());
-    }
-    if let Some(vault) = leader_vault {
-        context.insert(LEADER_VAULT_KEY.to_owned(), vault.to_string());
-    }
-    if let Some(org_slug) = leader_organization_slug {
-        context.insert(LEADER_ORGANIZATION_SLUG_KEY.to_owned(), org_slug.to_string());
-    }
-    if let Some(vault_slug) = leader_vault_slug {
-        context.insert(LEADER_VAULT_SLUG_KEY.to_owned(), vault_slug.to_string());
-    }
-
-    proto::ErrorDetails {
-        error_code: DiagnosticCode::ConsensusNotLeader.as_u16().to_string(),
-        is_retryable: true,
-        retry_after_ms: None,
-        context,
-        suggested_action: Some(
-            "Retry against the indicated leader; update your region leader cache".to_owned(),
-        ),
-    }
+        retry_after_ms.and_then(|v| u64::try_from(v.max(0)).ok()).unwrap_or(0),
+        ctx,
+        suggested_action.unwrap_or(""),
+    )
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::disallowed_methods)]
 mod tests {
-    use prost::Message;
-
     use super::*;
 
     #[test]
     fn build_error_details_basic() {
         let details =
             build_error_details(3203, false, None, HashMap::new(), Some("Fix parameters"));
-        assert_eq!(details.error_code, "3203");
-        assert!(!details.is_retryable);
-        assert_eq!(details.retry_after_ms, None);
-        assert!(details.context.is_empty());
-        assert_eq!(details.suggested_action.as_deref(), Some("Fix parameters"));
+        assert_eq!(details.context.get("error_code").map(String::as_str), Some("3203"));
+        assert!(!details.retryable);
+        assert_eq!(details.retry_after_ms, 0);
+        assert_eq!(details.suggested_action, "Fix parameters");
     }
 
     #[test]
@@ -164,184 +62,30 @@ mod tests {
         context.insert("organization".to_owned(), "42".to_owned());
 
         let details = build_error_details(3204, true, Some(1000), context, None);
-        assert_eq!(details.error_code, "3204");
-        assert!(details.is_retryable);
-        assert_eq!(details.retry_after_ms, Some(1000));
+        assert_eq!(details.context.get("error_code").map(String::as_str), Some("3204"));
+        assert!(details.retryable);
+        assert_eq!(details.retry_after_ms, 1000);
         assert_eq!(details.context.get("organization").unwrap(), "42");
-        assert_eq!(details.suggested_action, None);
+        assert_eq!(details.suggested_action, "");
     }
 
     #[test]
-    fn error_details_encode_decode_roundtrip() {
+    fn build_error_details_round_trip_through_status() {
+        // Bridge round-trip — the WireError survives Status::with_details
+        // → tonic_status_to_wire_error byte-symmetrically because the
+        // bridge JSON-encodes the entire WireError.
         let mut context = HashMap::new();
         context.insert("key".to_owned(), "value".to_owned());
 
         let original = build_error_details(1101, false, None, context, Some("Run integrity check"));
 
-        let encoded = original.encode_to_vec();
-        let decoded = proto::ErrorDetails::decode(encoded.as_slice()).unwrap();
+        let status = super::super::wire_helpers::wire_error_to_tonic_status(original);
+        let decoded = super::super::wire_helpers::tonic_status_to_wire_error(status);
 
-        assert_eq!(decoded.error_code, "1101");
-        assert!(!decoded.is_retryable);
-        assert_eq!(decoded.retry_after_ms, None);
+        assert_eq!(decoded.context.get("error_code").map(String::as_str), Some("1101"));
+        assert!(!decoded.retryable);
+        assert_eq!(decoded.retry_after_ms, 0);
         assert_eq!(decoded.context.get("key").unwrap(), "value");
-        assert_eq!(decoded.suggested_action.as_deref(), Some("Run integrity check"));
-    }
-
-    #[test]
-    fn build_error_details_all_fields_populated() {
-        let mut context = HashMap::new();
-        context.insert("organization".to_owned(), "42".to_owned());
-        context.insert("level".to_owned(), "backpressure".to_owned());
-
-        let details =
-            build_error_details(3204, true, Some(500), context, Some("Reduce request rate"));
-
-        // Encode and decode to verify wire format fidelity
-        let encoded = details.encode_to_vec();
-        let decoded = proto::ErrorDetails::decode(encoded.as_slice()).unwrap();
-
-        assert_eq!(decoded.error_code, "3204");
-        assert!(decoded.is_retryable);
-        assert_eq!(decoded.retry_after_ms, Some(500));
-        assert_eq!(decoded.context.len(), 2);
-        assert_eq!(decoded.context.get("organization").unwrap(), "42");
-        assert_eq!(decoded.context.get("level").unwrap(), "backpressure");
-        assert_eq!(decoded.suggested_action.as_deref(), Some("Reduce request rate"));
-    }
-
-    #[test]
-    fn build_error_details_empty_details() {
-        let details = build_error_details(0, false, None, HashMap::new(), None);
-
-        let encoded = details.encode_to_vec();
-        let decoded = proto::ErrorDetails::decode(encoded.as_slice()).unwrap();
-
-        assert_eq!(decoded.error_code, "0");
-        assert!(!decoded.is_retryable);
-        assert_eq!(decoded.retry_after_ms, None);
-        assert!(decoded.context.is_empty());
-        assert_eq!(decoded.suggested_action, None);
-    }
-
-    #[test]
-    fn build_not_leader_details_all_fields() {
-        let details = build_not_leader_details(
-            Some(42),
-            Some("http://10.0.2.5:5000"),
-            Some(7),
-            Some(5),
-            Some(99),
-            Some(1234),
-            Some(5678),
-        );
-        assert_eq!(details.error_code, "2000"); // ConsensusNotLeader
-        assert!(details.is_retryable);
-        assert_eq!(details.context.get("leader_id").unwrap(), "42");
-        assert_eq!(details.context.get("leader_endpoint").unwrap(), "http://10.0.2.5:5000");
-        assert_eq!(details.context.get("leader_term").unwrap(), "7");
-        assert_eq!(details.context.get("leader_shard").unwrap(), "5");
-        assert_eq!(details.context.get("leader_vault").unwrap(), "99");
-        assert_eq!(details.context.get("leader_organization_slug").unwrap(), "1234");
-        assert_eq!(details.context.get("leader_vault_slug").unwrap(), "5678");
-        assert!(details.suggested_action.as_deref().unwrap().contains("leader"));
-    }
-
-    #[test]
-    fn build_not_leader_details_partial_fields() {
-        let details = build_not_leader_details(Some(42), None, None, None, None, None, None);
-        assert!(details.context.contains_key("leader_id"));
-        assert!(!details.context.contains_key("leader_endpoint"));
-        assert!(!details.context.contains_key("leader_term"));
-        assert!(!details.context.contains_key("leader_shard"));
-        assert!(!details.context.contains_key("leader_vault"));
-        assert!(!details.context.contains_key("leader_organization_slug"));
-        assert!(!details.context.contains_key("leader_vault_slug"));
-    }
-
-    #[test]
-    fn build_not_leader_details_no_hints() {
-        let details = build_not_leader_details(None, None, None, None, None, None, None);
-        assert!(details.context.is_empty());
-        assert!(details.is_retryable);
-    }
-
-    #[test]
-    fn build_not_leader_details_empty_endpoint_omitted() {
-        let details =
-            build_not_leader_details(Some(42), Some(""), Some(7), Some(0), None, None, None);
-        assert!(!details.context.contains_key("leader_endpoint"));
-        assert!(details.context.contains_key("leader_id"));
-        assert!(details.context.contains_key("leader_term"));
-        assert_eq!(details.context.get("leader_shard").unwrap(), "0");
-        assert!(!details.context.contains_key("leader_vault"));
-    }
-
-    #[test]
-    fn build_not_leader_details_omits_vault_when_none() {
-        // Region- and org-scoped rejections must NOT emit the leader_vault
-        // key — its absence is the signal to the SDK that no vault-level
-        // routing applies.
-        let details = build_not_leader_details(
-            Some(1),
-            Some("http://x:5000"),
-            Some(3),
-            Some(12),
-            None,
-            None,
-            None,
-        );
-        assert!(!details.context.contains_key("leader_vault"));
-        assert!(!details.context.contains_key("leader_vault_slug"));
-        assert_eq!(details.context.get("leader_shard").unwrap(), "12");
-    }
-
-    #[test]
-    fn build_not_leader_details_emits_vault_when_some() {
-        let details = build_not_leader_details(
-            Some(1),
-            Some("http://x:5000"),
-            Some(3),
-            Some(12),
-            Some(77),
-            Some(99),
-            Some(101),
-        );
-        assert_eq!(details.context.get("leader_vault").unwrap(), "77");
-        assert_eq!(details.context.get("leader_organization_slug").unwrap(), "99");
-        assert_eq!(details.context.get("leader_vault_slug").unwrap(), "101");
-    }
-
-    #[test]
-    fn build_not_leader_details_encode_decode() {
-        let details = build_not_leader_details(
-            Some(1),
-            Some("http://x:5000"),
-            Some(3),
-            Some(12),
-            Some(45),
-            Some(67),
-            Some(89),
-        );
-        let encoded = details.encode_to_vec();
-        let decoded = proto::ErrorDetails::decode(encoded.as_slice()).unwrap();
-        assert_eq!(decoded.context.get("leader_id").unwrap(), "1");
-        assert_eq!(decoded.context.get("leader_endpoint").unwrap(), "http://x:5000");
-        assert_eq!(decoded.context.get("leader_term").unwrap(), "3");
-        assert_eq!(decoded.context.get("leader_shard").unwrap(), "12");
-        assert_eq!(decoded.context.get("leader_vault").unwrap(), "45");
-        assert_eq!(decoded.context.get("leader_organization_slug").unwrap(), "67");
-        assert_eq!(decoded.context.get("leader_vault_slug").unwrap(), "89");
-    }
-
-    #[test]
-    fn build_not_leader_details_slug_fields_independent_from_id_fields() {
-        // Slugs may be present without their corresponding ID fields and
-        // vice versa — both pairs are independently optional.
-        let details = build_not_leader_details(None, None, None, None, None, Some(11), Some(22));
-        assert!(!details.context.contains_key("leader_shard"));
-        assert!(!details.context.contains_key("leader_vault"));
-        assert_eq!(details.context.get("leader_organization_slug").unwrap(), "11");
-        assert_eq!(details.context.get("leader_vault_slug").unwrap(), "22");
+        assert_eq!(decoded.suggested_action, "Run integrity check");
     }
 }

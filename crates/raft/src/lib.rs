@@ -1,29 +1,76 @@
-//! Raft consensus infrastructure for InferaDB Ledger.
+//! Orchestration layer between the consensus engine and the gRPC service layer.
 //!
-//! Provides:
-//! - Consensus engine integration with inferadb-ledger-store log storage
-//! - State machine apply path via
-//!   [`CommittedEntry`](inferadb_ledger_consensus::committed::CommittedEntry)
-//! - Transaction batching, rate limiting, and background jobs
+//! This crate is **not** Raft internals — those live in `inferadb-ledger-consensus`.
+//! It turns committed proposals into state mutations, manages the lifecycle of Raft
+//! groups at each tier, runs long-lived background jobs, and coordinates across nodes.
+//!
+//! # Four-Tier Architecture
+//!
+//! Every cluster runs four distinct Raft tiers:
+//!
+//! | Tier | Type | Scope | Request type |
+//! |------|------|-------|--------------|
+//! | Cluster control plane | [`raft_manager::SystemGroup`] | One per cluster (`GLOBAL` region) | `SystemRequest` |
+//! | Regional control plane | [`raft_manager::RegionGroup`] | One per data region | `RegionRequest` |
+//! | Organization data plane | [`raft_manager::OrganizationGroup`] | One per org per region | `OrganizationRequest` |
+//! | Vault data plane | [`raft_manager::VaultGroup`] | One per vault | `OrganizationRequest` (vault-scoped variants) |
+//!
+//! Groups at each tier own disjoint operation sets and route through disjoint request
+//! enums. Cross-tier routing is a compile error. Per-organization and per-vault groups
+//! run under [`LeadershipMode::Delegated`](inferadb_ledger_consensus::LeadershipMode):
+//! org groups follow the region leader; vault groups follow the parent org leader.
+//!
+//! # Apply Pipeline
+//!
+//! The [`apply_pool`] distributes committed
+//! [`CommittedBatch`](inferadb_ledger_consensus::committed::CommittedBatch)es from the consensus
+//! reactor across a fixed-size pool of [`apply_worker`]s. Each worker is typed to its tier's
+//! request enum — cross-tier misrouting is rejected at compile time. Committed entries flow:
+//! `Reactor → ApplyPool → ApplyWorker → RaftLogStore → StateLayer`.
+//!
+//! # Membership Cascade
+//!
+//! When a voter joins or leaves a region, [`region_membership_watcher`] observes the
+//! region-group shard state, propagates the change to the parent org group, and enqueues
+//! one [`membership_queue::MembershipChangeRequest`] per child vault into a bounded,
+//! rate-limited [`membership_queue::MembershipQueue`]. The
+//! [`region_membership_watcher::MembershipDispatcher`] drains the queue under a concurrency
+//! cap and timeout, preventing snapshot storms at scale.
+//!
+//! # Saga Orchestrator
+//!
+//! [`saga_orchestrator::SagaOrchestrator`] drives cross-organization operations using
+//! an eventual-consistency model. PII for in-flight sagas is stored only at the
+//! `_tmp:saga_pii:{saga_id}` key (Regional tier, TTL-bound); completed sagas leave
+//! only a global-tier audit record.
+//!
+//! # Durability Contract
+//!
+//! Writes are WAL-durable on response. The four per-region databases (state.db, raft.db,
+//! blocks.db, events.db) materialize lazily via [`state_checkpointer::StateCheckpointer`]
+//! (per-region, ~500ms default cadence). On crash, [`log_storage::RaftLogStore`] replays
+//! the `(applied_durable, last_committed]` WAL window before the apply worker starts.
+//! Handler-phase events batched via the [`event_writer`] flush queue are not WAL-backed;
+//! they land durably on the next checkpointer tick.
 //!
 //! # Public API
 //!
 //! The stable public API surface consists of:
-//! - `trace_context` — distributed tracing propagation helpers
 //! - [`metrics`] — Prometheus metric constants and recording helpers
+//! - [`cardinality`] — cardinality-safe metric label helpers
 //!
-//! All other modules and re-exports are server-internal infrastructure
-//! hidden from documentation. They may change without notice.
+//! All other modules are server-internal infrastructure marked `#[doc(hidden)]`.
+//! They may change without notice.
 //!
-//! ## Security Model
+//! # Security Model
 //!
-//! Ledger runs behind WireGuard VPN. Authentication and authorization are handled
-//! by Engine/Control services upstream. Ledger trusts all incoming requests.
+//! Ledger runs behind WireGuard VPN. Authentication and authorization are handled by
+//! the Engine/Control services upstream. Ledger trusts all incoming gRPC requests.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
-// gRPC services return tonic::Status (176 bytes) - this is standard practice for gRPC error
-// handling
+// Wire-shaped errors carry per-RPC details (correlation IDs, leader hints) that exceed clippy's
+// large-result threshold; the alternative would be heap-allocating every Result.
 #![allow(clippy::result_large_err)]
 
 // ---------------------------------------------------------------------------
@@ -53,8 +100,6 @@ pub mod batching;
 pub mod commit_dispatcher;
 #[doc(hidden)]
 pub mod consensus_handle;
-#[doc(hidden)]
-pub mod consensus_transport;
 #[doc(hidden)]
 pub mod deadline;
 #[doc(hidden)]
@@ -143,10 +188,6 @@ pub mod snapshot_key_provider;
 #[doc(hidden)]
 pub mod snapshot_persister;
 #[doc(hidden)]
-pub mod snapshot_receiver;
-#[doc(hidden)]
-pub mod snapshot_streamer;
-#[doc(hidden)]
 pub mod state_checkpointer;
 #[doc(hidden)]
 pub mod state_root_verifier;
@@ -158,6 +199,8 @@ pub mod ttl_gc;
 pub mod types;
 #[doc(hidden)]
 pub mod user_retention;
+#[doc(hidden)]
+pub mod wire_consensus_transport;
 
 // ---------------------------------------------------------------------------
 // Server infrastructure re-exports — consumed by the server crate for
@@ -180,8 +223,6 @@ pub use block_compaction::BlockCompactor;
 pub use commit_dispatcher::CommitDispatcher;
 #[doc(hidden)]
 pub use consensus_handle::{ConsensusHandle, HandleError, ResponseMap, SpilloverMap};
-#[doc(hidden)]
-pub use consensus_transport::GrpcConsensusTransport;
 #[doc(hidden)]
 pub use events_gc::EventsGarbageCollector;
 #[doc(hidden)]
@@ -210,8 +251,8 @@ pub use peer_address_map::PeerAddressMap;
 pub use post_erasure_compaction::PostErasureCompactionJob;
 #[doc(hidden)]
 pub use raft_manager::{
-    InnerGroup, OrganizationGroup, RaftManager, RaftManagerConfig, RegionConfig, RegionGroup,
-    SystemGroup, SystemStateReader, VaultGroup, VaultLifecycleState,
+    ConsensusTransportImpl, InnerGroup, OrganizationGroup, RaftManager, RaftManagerConfig,
+    RegionConfig, RegionGroup, SystemGroup, SystemStateReader, VaultGroup, VaultLifecycleState,
 };
 #[doc(hidden)]
 pub use rate_limit::RateLimiter;

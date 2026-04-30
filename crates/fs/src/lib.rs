@@ -1,52 +1,78 @@
-//! File sync primitive for InferaDB Ledger.
+//! Platform-specific file-system syscall wrappers for InferaDB Ledger.
 //!
-//! This crate is the **only** place in the InferaDB Ledger workspace that is
-//! permitted to use `unsafe` code. It wraps `fcntl(F_BARRIERFSYNC)` on Apple
-//! platforms, which no audited safe-syscall crate (`rustix`, `nix`) currently
-//! exposes. All `unsafe` blocks are isolated here, documented with `SAFETY:`
-//! comments, and subject to manual review by the `unsafe-panic-auditor`
-//! agent (which allowlists this crate).
+//! This crate is the **only** location in the InferaDB Ledger workspace
+//! permitted to use `unsafe` code (workspace golden rule 8 exception).
+//! All `unsafe` blocks are confined to this file, map to a single syscall
+//! each, carry `SAFETY:` comments, and are subject to manual review via the
+//! `unsafe-panic-auditor` agent allowlist.
 //!
-//! # Durability semantics
+//! The crate exists because two syscalls needed by the storage layer lack
+//! wrappers in any audited safe-syscall crate as of this writing:
 //!
-//! [`sync`] issues a *barrier fsync*: the data is written in order and
-//! reaches the device write cache, but is not forced to non-volatile
-//! storage. This survives process crash and kernel panic. It may lose the
-//! last few seconds of writes under sudden power loss on hardware without
-//! power-loss-protection capacitors.
+//! - `fcntl(F_BARRIERFSYNC)` on Apple platforms — Apple's ordered-write primitive, substantially
+//!   faster than `F_FULLFSYNC` on APFS SSDs. Neither `rustix` nor `nix` expose a safe wrapper for
+//!   this command.
+//! - `posix_fadvise(POSIX_FADV_DONTNEED)` on Linux — page-cache eviction hint used by the vault
+//!   hibernation path. `rustix` gates this behind unstable feature flags.
 //!
-//! - **Apple** (`target_vendor = "apple"`): `fcntl(F_BARRIERFSYNC)` — the this crate's sole
-//!   `unsafe` block.
-//! - **Linux / other Unix**: `fdatasync` via [`File::sync_data`] (already has barrier semantics at
-//!   the VFS layer on ext4/xfs/btrfs with default mount options).
+//! Confining both blocks here prevents `unsafe` from spreading across the
+//! workspace while keeping the storage layer's hot paths optimal.
+//!
+//! # Barrier-fsync semantics
+//!
+//! [`sync`] issues a *barrier fsync*: writes reach the device write cache in
+//! program order, but are not forced to non-volatile storage. This guarantees
+//! durability across process crash and kernel panic. Under sudden power loss
+//! on hardware without power-loss-protection capacitors, the last few seconds
+//! of writes may be lost.
+//!
+//! Platform dispatch:
+//!
+//! - **Apple** (`target_vendor = "apple"`): `fcntl(F_BARRIERFSYNC)` — this crate's first `unsafe`
+//!   block.
+//! - **Linux / other Unix**: [`File::sync_data`] (`fdatasync`), which already carries barrier
+//!   semantics at the VFS layer on ext4, xfs, and btrfs with default mount options.
 //! - **Windows / other**: [`File::sync_data`].
 //!
 //! See `docs/architecture/durability.md` for the operator-facing durability
-//! matrix, and `crates/fs/CLAUDE.md` for the escalation rationale
-//! behind this crate's `unsafe` exception to the workspace-wide ban.
+//! matrix.
 //!
 //! # Page-cache eviction
 //!
-//! [`evict_page_cache`] hints to the OS that the file's pages can be dropped
-//! from the page cache. Used by the O6 vault hibernation path to release
-//! per-vault DB memory pressure when a vault transitions to `Dormant`.
-//! Cross-platform best-effort:
+//! [`evict_page_cache`] hints to the OS that the file's pages may be dropped
+//! from the page cache. The vault hibernation path calls this when a vault
+//! transitions to `Dormant` to release per-vault DB memory pressure.
 //!
-//! - **Linux** (`target_os = "linux"`): `posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)` — drops the
-//!   cached pages for the file.
-//! - **Apple / Windows / other**: no-op success. macOS does not expose `posix_fadvise` and
-//!   `fcntl(F_NOCACHE)` only affects future I/O; truly dropping cached pages on macOS requires
-//!   `mmap` + `madvise`, which is out of scope for a single-syscall wrapper. The hibernation
-//!   contract tolerates a no-op — the operator-visible win is a Linux-deployment memory-pressure
-//!   win, not a hard correctness requirement.
+//! Platform dispatch:
+//!
+//! - **Linux** (`target_os = "linux"`): `posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)` — this
+//!   crate's second `unsafe` block. Drops all cached pages for the file; subsequent reads
+//!   re-populate from disk.
+//! - **Apple / Windows / other**: no-op success. macOS does not expose `posix_fadvise`, and
+//!   `fcntl(F_NOCACHE)` only suppresses caching for future I/O without evicting already-resident
+//!   pages. Truly dropping cached pages on macOS requires `mmap` + `madvise`, which is outside the
+//!   scope of a single-syscall wrapper. The hibernation contract tolerates a no-op here; the
+//!   memory-pressure benefit is a Linux-deployment win, not a hard correctness requirement.
 
 use std::{fs::File, io};
 
-/// Syncs `file` to persistent storage with barrier semantics.
+/// Syncs `file` to the device write cache with barrier ordering guarantees.
 ///
-/// Returns `Ok(())` on success or the underlying [`io::Error`] on failure.
+/// Barrier semantics mean that writes issued before this call are ordered
+/// ahead of writes issued after it and are visible to the device write cache,
+/// but are not forced to non-volatile storage. This is sufficient to survive
+/// process crash and kernel panic; it is not sufficient to survive sudden
+/// power loss on hardware without power-loss-protection capacitors.
 ///
-/// See module docs for the exact semantics per platform.
+/// # Platform
+///
+/// - **Apple** (`target_vendor = "apple"`): delegates to `sync_barrier_apple`, which calls
+///   `fcntl(F_BARRIERFSYNC)` via an `unsafe` block (see its `SAFETY:` comment).
+/// - **All other targets**: calls [`File::sync_data`] (`fdatasync`).
+///
+/// # Errors
+///
+/// Returns the [`io::Error`] from the underlying syscall on failure.
 pub fn sync(file: &File) -> io::Result<()> {
     #[cfg(target_vendor = "apple")]
     {
@@ -58,35 +84,58 @@ pub fn sync(file: &File) -> io::Result<()> {
     }
 }
 
+/// Issues `fcntl(F_BARRIERFSYNC)` on `file` (Apple platforms only).
+///
+/// `F_BARRIERFSYNC` flushes dirty pages to the device write cache in program
+/// order without waiting for non-volatile commit, making it substantially
+/// faster than `F_FULLFSYNC` on APFS SSDs while still preventing write
+/// reordering across the call.
+///
+/// # Safety
+///
+/// The `unsafe` block calls `libc::fcntl(fd, libc::F_BARRIERFSYNC)`.
+///
+/// Preconditions that make this sound:
+///
+/// 1. **Valid open fd**: `fd` is obtained from [`AsRawFd::as_raw_fd`] on a `&File` whose borrow
+///    (`file`) is held for the duration of this call. The fd cannot be closed or reused while the
+///    reference is live.
+/// 2. **No aliasing**: `libc::fcntl` with `F_BARRIERFSYNC` reads no userspace memory beyond the
+///    integer `fd` argument. There are no pointer arguments and no shared mutable state touched by
+///    this call.
+/// 3. **Thread safety**: `fcntl` with `F_BARRIERFSYNC` is documented by Apple as safe to call
+///    concurrently on separate file descriptors. Concurrent calls on the *same* fd are also safe —
+///    the syscall is idempotent with respect to ordering.
+/// 4. **Error handling**: on failure the syscall returns `-1` and sets the thread-local `errno`. We
+///    immediately call [`io::Error::last_os_error`] before any other syscall could overwrite
+///    `errno`.
 #[cfg(target_vendor = "apple")]
 fn sync_barrier_apple(file: &File) -> io::Result<()> {
     use std::os::fd::AsRawFd;
     let fd = file.as_raw_fd();
-    // SAFETY: `fd` is a valid open file descriptor borrowed from `file`,
-    // whose lifetime outlives this call (`&File` is held). `libc::fcntl`
-    // with `F_BARRIERFSYNC` is a pure syscall that reads no userspace
-    // memory beyond the fd argument and returns an integer; there is no
-    // aliasing, lifetime, or thread-safety concern. On error the syscall
-    // returns -1 with `errno` set, which we propagate via
-    // `io::Error::last_os_error()`.
+    // SAFETY: see function-level `# Safety` doc above.
     let rc = unsafe { libc::fcntl(fd, libc::F_BARRIERFSYNC) };
     if rc == -1 { Err(io::Error::last_os_error()) } else { Ok(()) }
 }
 
-/// Hints to the OS that `file`'s cached pages may be dropped from the page
-/// cache.
+/// Hints to the OS that `file`'s pages may be dropped from the page cache.
 ///
-/// Best-effort across platforms:
+/// This is a best-effort, idempotent operation. Callers must not rely on
+/// eviction actually occurring; the OS may ignore the hint.
 ///
-/// - **Linux**: `posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)` — drops the cached pages for this
-///   file from the kernel's page cache. Subsequent reads re-populate from disk.
-/// - **Apple / Windows / other**: success no-op. macOS does not expose `posix_fadvise`, and
-///   `fcntl(F_NOCACHE)` only suppresses caching for future I/O — it does not evict already-cached
-///   pages without an mmap roundtrip. This is documented and acceptable; see module docs.
+/// # Platform
 ///
-/// Idempotent. Returns `Ok(())` even when the platform has no eviction
-/// path; failures from the underlying syscall on supported platforms are
-/// propagated as [`io::Error`].
+/// - **Linux** (`target_os = "linux"`): delegates to `evict_page_cache_linux`, which calls
+///   `posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)` via an `unsafe` block (see its `SAFETY:`
+///   comment). Covers the entire file (offset `0`, length `0` means "to end of file" per POSIX).
+///   Subsequent reads re-populate the page cache from disk.
+/// - **Apple / Windows / other**: returns `Ok(())` immediately without performing any syscall. See
+///   module docs for why a no-op is acceptable.
+///
+/// # Errors
+///
+/// On Linux, propagates the [`io::Error`] from `posix_fadvise` on failure.
+/// On all other platforms, always returns `Ok(())`.
 pub fn evict_page_cache(file: &File) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {
@@ -99,19 +148,36 @@ pub fn evict_page_cache(file: &File) -> io::Result<()> {
     }
 }
 
+/// Issues `posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)` on `file` (Linux only).
+///
+/// Advises the kernel that the entire file's pages are no longer needed and
+/// may be reclaimed from the page cache. The kernel is free to ignore the
+/// hint; callers must tolerate a no-op.
+///
+/// # Safety
+///
+/// The `unsafe` block calls
+/// `libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_DONTNEED)`.
+///
+/// Preconditions that make this sound:
+///
+/// 1. **Valid open fd**: `fd` is obtained from [`AsRawFd::as_raw_fd`] on a `&File` whose borrow
+///    (`file`) is held for the duration of this call. The fd cannot be closed or reused while the
+///    reference is live.
+/// 2. **No aliasing**: `posix_fadvise` is a pure syscall that accepts an fd, two `off_t` range
+///    arguments, and an `int` advice constant. It reads no userspace memory. There are no pointer
+///    arguments.
+/// 3. **Thread safety**: `posix_fadvise` is safe to call concurrently on separate or the same file
+///    descriptor; the advice is advisory and does not mutate kernel structures in a way that
+///    requires external synchronization from userspace.
+/// 4. **Error handling**: unlike most POSIX syscalls, `posix_fadvise` returns the error number
+///    directly as a positive integer on failure — it does *not* return `-1` and set `errno`. We map
+///    a non-zero return directly to [`io::Error::from_raw_os_error`].
 #[cfg(target_os = "linux")]
 fn evict_page_cache_linux(file: &File) -> io::Result<()> {
     use std::os::fd::AsRawFd;
     let fd = file.as_raw_fd();
-    // SAFETY: `fd` is a valid open file descriptor borrowed from `file`,
-    // whose lifetime outlives this call (`&File` is held).
-    // `libc::posix_fadvise` is a pure syscall that takes the fd, an offset,
-    // a length, and an advice constant; passing `(0, 0, POSIX_FADV_DONTNEED)`
-    // means "the entire file from offset 0". The kernel reads no userspace
-    // memory beyond the fd argument. There is no aliasing, lifetime, or
-    // thread-safety concern. On error `posix_fadvise` returns the errno
-    // value directly (it does NOT set the global `errno` and does NOT
-    // return -1), so we map a non-zero return into an `io::Error::from_raw_os_error`.
+    // SAFETY: see function-level `# Safety` doc above.
     let rc = unsafe { libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_DONTNEED) };
     if rc == 0 { Ok(()) } else { Err(io::Error::from_raw_os_error(rc)) }
 }

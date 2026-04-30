@@ -10,19 +10,14 @@ mod harness;
 mod workloads;
 
 /// Top-level error for the profile binary.
-///
-/// The enum is extended as subsystems are introduced; Task 2 seeded it empty,
-/// Task 6 adds the harness-bootstrap variant, Suite B adds the metrics-JSON
-/// emission path.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum MainError {
     #[snafu(display("harness bootstrap failed: {source}"))]
     Harness {
         /// Boxed to keep `Result<(), MainError>` small — `HarnessError` wraps
-        /// `SdkError`, which is ~200 bytes, and main's error return tripped
-        /// clippy `result_large_err` unboxed. Precedent:
-        /// `crates/state/src/system/service/mod.rs`.
+        /// `SdkError`, which is ~200 bytes, and the unboxed return trips
+        /// clippy `result_large_err`.
         source: Box<harness::HarnessError>,
         #[snafu(implicit)]
         location: snafu::Location,

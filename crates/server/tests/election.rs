@@ -19,7 +19,7 @@ use crate::common::TestCluster;
 /// Tests that a single-node cluster immediately elects itself as leader.
 #[tokio::test]
 async fn test_single_node_self_election() {
-    let cluster = TestCluster::new(1).await;
+    let cluster = TestCluster::with_wire_transport_and_size(0, 1).await;
 
     // Get the actual node ID (Snowflake ID)
     let node = &cluster.nodes()[0];
@@ -35,7 +35,7 @@ async fn test_single_node_self_election() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_three_node_leader_election() {
-    let cluster = TestCluster::new(3).await;
+    let cluster = TestCluster::with_wire_transport_and_size(0, 3).await;
 
     // Get the actual node IDs (Snowflake IDs)
     let node_ids: Vec<u64> = cluster.nodes().iter().map(|n| n.id).collect();
@@ -69,7 +69,7 @@ async fn test_three_node_leader_election() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_term_agreement() {
-    let cluster = TestCluster::new(3).await;
+    let cluster = TestCluster::with_wire_transport_and_size(0, 3).await;
     let _leader_id = cluster.wait_for_leader().await;
 
     // Give a moment for term to propagate
@@ -95,7 +95,7 @@ async fn test_term_agreement() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_leader_term_dominance() {
-    let cluster = TestCluster::new(3).await;
+    let cluster = TestCluster::with_wire_transport_and_size(0, 3).await;
     let leader_id = cluster.wait_for_leader().await;
 
     // Get leader node by ID (more reliable than leader() which depends on is_leader())

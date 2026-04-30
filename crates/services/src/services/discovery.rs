@@ -1,22 +1,20 @@
 //! Peer discovery and system state for cluster coordination.
 //!
-//! Provides peer discovery and system state information for cluster coordination.
+//! Backs the wire-protocol `SystemDiscoveryService` — peer announcements,
+//! peer listing, system state queries, region leader resolution, and the
+//! `WatchLeader` server-streaming RPC. The wire-trait implementation lives
+//! in [`super::discovery_wire`]; this module owns the [`DiscoveryService`]
+//! type and its non-RPC helpers (`is_voter`, `is_cache_stale`,
+//! `get_leader_hint`, `resolve_region_leader_impl`, `validate_peer_addresses`).
 //!
-//! Peer addresses must be private/WireGuard IPs. Public IPs are rejected to
-//! ensure cluster traffic stays within the private network.
+//! Peer addresses must be private or WireGuard IPs. Public IPs are rejected
+//! to ensure cluster traffic stays within the private network.
 
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::Arc,
 };
 
-use inferadb_ledger_proto::proto::{
-    AnnouncePeerRequest, AnnouncePeerResponse, GetPeersRequest, GetPeersResponse,
-    GetSystemStateRequest, GetSystemStateResponse, LeaderUpdate, NodeId, NodeInfo,
-    OrganizationRegistry, OrganizationSlug, PeerInfo, ResolveRegionLeaderRequest,
-    ResolveRegionLeaderResponse, WatchLeaderRequest,
-    system_discovery_service_server::SystemDiscoveryService,
-};
 use inferadb_ledger_raft::{
     ConsensusHandle, log_storage::AppliedStateAccessor, peer_tracker::PeerTracker,
     raft_manager::RaftManager,
@@ -24,8 +22,7 @@ use inferadb_ledger_raft::{
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
 use parking_lot::RwLock;
-use tokio_stream::wrappers::ReceiverStream;
-use tonic::{Request, Response, Status};
+use tonic::Status;
 
 use super::metadata::ensure_endpoint_url;
 
@@ -148,7 +145,7 @@ fn validate_private_ip(addr: &str) -> Result<(), String> {
 ///
 /// All addresses must be private/WireGuard IPs.
 #[allow(clippy::result_large_err)] // tonic::Status is external, can't box it
-fn validate_peer_addresses(addresses: &[String]) -> Result<(), Status> {
+pub(super) fn validate_peer_addresses(addresses: &[String]) -> Result<(), Status> {
     if addresses.is_empty() {
         return Err(Status::invalid_argument("Peer must have at least one address"));
     }
@@ -170,24 +167,24 @@ const DEFAULT_LEARNER_CACHE_TTL: std::time::Duration = std::time::Duration::from
 #[builder(on(_, required))]
 pub struct DiscoveryService {
     /// Consensus handle for leadership and term queries.
-    handle: Arc<ConsensusHandle>,
+    pub(super) handle: Arc<ConsensusHandle>,
     /// State layer for organization registry access.
     #[allow(dead_code)] // retained to maintain Arc reference count
     state: Arc<StateLayer<FileBackend>>,
     /// Accessor for applied state (organization registry).
-    applied_state: AppliedStateAccessor,
+    pub(super) applied_state: AppliedStateAccessor,
     /// Tracks when peers were last seen.
     #[builder(default = RwLock::new(PeerTracker::new()))]
-    peer_tracker: RwLock<PeerTracker>,
+    pub(super) peer_tracker: RwLock<PeerTracker>,
     /// This node's ID for voter/learner checks (optional for backward compatibility).
     #[builder(default)]
-    node_id: Option<inferadb_ledger_raft::types::LedgerNodeId>,
+    pub(super) node_id: Option<inferadb_ledger_raft::types::LedgerNodeId>,
     /// Timestamp of last state update (for learner staleness checks).
     #[builder(default = RwLock::new(std::time::Instant::now()))]
-    last_state_update: RwLock<std::time::Instant>,
+    pub(super) last_state_update: RwLock<std::time::Instant>,
     /// Learner cache TTL (stale after this duration).
     #[builder(default = DEFAULT_LEARNER_CACHE_TTL)]
-    learner_cache_ttl: std::time::Duration,
+    pub(super) learner_cache_ttl: std::time::Duration,
     /// Geographic region this node belongs to.
     ///
     /// Included in system state responses for peer region awareness.
@@ -196,13 +193,12 @@ pub struct DiscoveryService {
     region: inferadb_ledger_types::Region,
     /// Raft manager for membership queries that need node addresses.
     #[builder(default)]
-    #[allow(dead_code)]
-    raft_manager: Option<Arc<RaftManager>>,
+    pub(super) raft_manager: Option<Arc<RaftManager>>,
     /// Shared peer address map for resolving peer network addresses.
     ///
     /// Updated by `announce_peer` and used by discovery RPCs.
     #[builder(default)]
-    peer_addresses: Option<inferadb_ledger_raft::PeerAddressMap>,
+    pub(super) peer_addresses: Option<inferadb_ledger_raft::PeerAddressMap>,
 }
 
 impl DiscoveryService {
@@ -217,7 +213,7 @@ impl DiscoveryService {
     ///
     /// Returns true if this node is in the voter set, or if node_id is not
     /// configured (assume voter behavior as fallback).
-    fn is_voter(&self) -> bool {
+    pub(super) fn is_voter(&self) -> bool {
         let Some(node_id) = self.node_id else {
             // No node_id configured, assume voter (skip staleness checks)
             return true;
@@ -233,7 +229,7 @@ impl DiscoveryService {
     /// Checks if the local state cache is stale (for learners).
     ///
     /// Voters always have fresh state; learners check time since last update.
-    fn is_cache_stale(&self) -> bool {
+    pub(super) fn is_cache_stale(&self) -> bool {
         if self.is_voter() {
             // Voters always have authoritative state
             return false;
@@ -245,7 +241,7 @@ impl DiscoveryService {
     }
 
     /// Returns the current leader's node ID (for forwarding from stale learners).
-    fn get_leader_hint(&self) -> Option<String> {
+    pub(super) fn get_leader_hint(&self) -> Option<String> {
         self.handle.current_leader().map(|id| id.to_string())
     }
 
@@ -290,7 +286,7 @@ impl DiscoveryService {
     /// repeatedly populated with the GLOBAL endpoint and writes to a
     /// data region looped on `Not the leader for this region` until the
     /// retry budget exhausted.
-    fn resolve_region_leader_impl(
+    pub(super) fn resolve_region_leader_impl(
         &self,
         region: inferadb_ledger_types::Region,
     ) -> std::result::Result<(String, u64, u32), Status> {
@@ -336,257 +332,6 @@ impl DiscoveryService {
 
         // Recommend a short TTL since leadership can change on election.
         Ok((endpoint, current_term, 10))
-    }
-}
-
-#[tonic::async_trait]
-impl SystemDiscoveryService for DiscoveryService {
-    async fn get_peers(
-        &self,
-        request: Request<GetPeersRequest>,
-    ) -> Result<Response<GetPeersResponse>, Status> {
-        let _req = request.into_inner();
-
-        let current_term = self.handle.current_term();
-        let state = self.handle.shard_state();
-
-        let peers: Vec<PeerInfo> = state
-            .voters
-            .iter()
-            .chain(state.learners.iter())
-            .filter_map(|node_id| {
-                let addr_with_port = self.peer_addresses.as_ref()?.get(node_id.0)?;
-                // Split "host:port" into address and port components.
-                let (host, port_str) = addr_with_port.rsplit_once(':')?;
-                let grpc_port: u32 = port_str.parse().ok()?;
-                Some(PeerInfo {
-                    node_id: Some(NodeId { id: node_id.0.to_string() }),
-                    addresses: vec![host.to_string()],
-                    grpc_port,
-                    last_seen: None,
-                })
-            })
-            .collect();
-
-        Ok(Response::new(GetPeersResponse { peers, system_version: current_term }))
-    }
-
-    async fn announce_peer(
-        &self,
-        request: Request<AnnouncePeerRequest>,
-    ) -> Result<Response<AnnouncePeerResponse>, Status> {
-        let req = request.into_inner();
-
-        // Validate the peer info
-        let peer = req.peer.ok_or_else(|| Status::invalid_argument("Missing peer info"))?;
-
-        let node_id =
-            peer.node_id.as_ref().ok_or_else(|| Status::invalid_argument("Missing node_id"))?;
-
-        // Validate gRPC port
-        if peer.grpc_port == 0 || peer.grpc_port > 65535 {
-            return Err(Status::invalid_argument(format!(
-                "Invalid gRPC port: {}. Must be 1-65535",
-                peer.grpc_port
-            )));
-        }
-
-        // Validate addresses are private/WireGuard IPs
-        validate_peer_addresses(&peer.addresses)?;
-
-        // Record that we've seen this peer
-        {
-            let mut tracker = self.peer_tracker.write();
-            tracker.record_seen(&node_id.id);
-        }
-
-        // Update the shared peer address map so other services can resolve
-        // this peer's address for forwarding and health checks.
-        if let Some(ref peer_addresses) = self.peer_addresses
-            && let (Ok(parsed_id), Some(first_addr)) =
-                (node_id.id.parse::<u64>(), peer.addresses.first())
-        {
-            let address = format!("{first_addr}:{}", peer.grpc_port);
-            peer_addresses.insert(parsed_id, address);
-        }
-
-        tracing::info!(
-            node_id = %node_id.id,
-            addresses = ?peer.addresses,
-            grpc_port = peer.grpc_port,
-            "Peer announced"
-        );
-
-        Ok(Response::new(AnnouncePeerResponse { accepted: true }))
-    }
-
-    async fn get_system_state(
-        &self,
-        request: Request<GetSystemStateRequest>,
-    ) -> Result<Response<GetSystemStateResponse>, Status> {
-        let req = request.into_inner();
-
-        // Check learner staleness.
-        // If this is a learner with stale cache, return error with leader hint.
-        if self.is_cache_stale() {
-            let leader_hint = self.get_leader_hint();
-            return Err(Status::unavailable(format!(
-                "Learner cache is stale. Retry with leader: {}",
-                leader_hint.unwrap_or_else(|| "unknown".to_string())
-            )));
-        }
-
-        // Get current system version (Raft term)
-        let current_version = self.handle.current_term();
-
-        // If client already has current version, return empty response
-        if req.if_version_greater_than >= current_version {
-            return Ok(Response::new(GetSystemStateResponse {
-                version: current_version,
-                nodes: vec![],
-                organizations: vec![],
-            }));
-        }
-
-        let state = self.handle.shard_state();
-
-        // Build node list from voters that have announced their addresses.
-        let nodes: Vec<NodeInfo> = state
-            .voters
-            .iter()
-            .chain(state.learners.iter())
-            .filter_map(|node_id| {
-                let addr_with_port = self.peer_addresses.as_ref()?.get(node_id.0)?;
-                let (host, port_str) = addr_with_port.rsplit_once(':')?;
-                let grpc_port: u32 = port_str.parse().ok()?;
-                Some(NodeInfo {
-                    node_id: Some(NodeId { id: node_id.0.to_string() }),
-                    addresses: vec![host.to_string()],
-                    grpc_port,
-                    last_heartbeat: None,
-                    joined_at: None,
-                    region: inferadb_ledger_types::Region::GLOBAL.as_str().to_string(),
-                })
-            })
-            .collect();
-
-        // Member node IDs for the organization registry entries.
-        let member_nodes: Vec<NodeId> =
-            state.voters.iter().map(|n| NodeId { id: n.0.to_string() }).collect();
-
-        let organizations: Vec<OrganizationRegistry> = self
-            .applied_state
-            .list_organizations()
-            .into_iter()
-            .map(|ns| {
-                let status = crate::proto_compat::organization_status_to_proto(ns.status);
-                OrganizationRegistry {
-                    slug: Some(OrganizationSlug {
-                        slug: self
-                            .applied_state
-                            .resolve_id_to_slug(ns.organization)
-                            .map_or(ns.organization.value() as u64, |s| s.value()),
-                    }),
-                    name: String::new(),
-                    region: inferadb_ledger_types::Region::GLOBAL.as_str().to_string(),
-                    members: member_nodes.clone(),
-                    status: status.into(),
-                    config_version: current_version,
-                    created_at: None,
-                }
-            })
-            .collect();
-
-        Ok(Response::new(GetSystemStateResponse { version: current_version, nodes, organizations }))
-    }
-
-    async fn resolve_region_leader(
-        &self,
-        request: Request<ResolveRegionLeaderRequest>,
-    ) -> Result<Response<ResolveRegionLeaderResponse>, Status> {
-        let req = request.into_inner();
-
-        let region = inferadb_ledger_proto::convert::region_from_str(&req.region)?;
-
-        let (endpoint, raft_term, ttl_seconds) = self.resolve_region_leader_impl(region)?;
-
-        Ok(Response::new(ResolveRegionLeaderResponse { endpoint, raft_term, ttl_seconds }))
-    }
-
-    type WatchLeaderStream = ReceiverStream<Result<LeaderUpdate, Status>>;
-
-    async fn watch_leader(
-        &self,
-        request: Request<WatchLeaderRequest>,
-    ) -> Result<Response<Self::WatchLeaderStream>, Status> {
-        let req = request.into_inner();
-
-        // Validate region — reject unrecognized values.
-        let region = inferadb_ledger_proto::convert::region_from_str(&req.region)?;
-
-        // Subscribe to the requested region's leader watch — not the GLOBAL
-        // group's. Under multi-tier consensus the GLOBAL leader and the
-        // data-region leader can live on different nodes; subscribing to
-        // GLOBAL would feed the SDK's region-leader cache the GLOBAL
-        // endpoint and override hints applied via `apply_region_leader_hint`,
-        // making `Not the leader for this region` retries unrecoverable
-        // until the retry budget exhausted.
-        //
-        // Falls back to the embedded GLOBAL handle when no `RaftManager`
-        // is wired (single-region setups) or when the requested region is
-        // not yet registered locally.
-        let mut state_rx = if let Some(manager) = &self.raft_manager
-            && region != inferadb_ledger_types::Region::GLOBAL
-            && let Ok(region_group) = manager.get_region_group(region)
-        {
-            region_group.handle().state_watch()
-        } else {
-            self.handle.state_watch()
-        };
-        let peer_addresses = self.peer_addresses.clone();
-
-        // Bounded channel — if the client cannot keep up we drop the stream
-        // and let the client reconnect. Capacity of 16 is generous for a
-        // push feed whose expected rate is at most a few updates per second
-        // even during rapid re-elections.
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<LeaderUpdate, Status>>(16);
-
-        tokio::spawn(async move {
-            // Emit initial state immediately.
-            let initial = make_leader_update(&state_rx.borrow(), peer_addresses.as_ref());
-            if tx.send(Ok(initial)).await.is_err() {
-                return;
-            }
-
-            // Stream subsequent leader changes.
-            while state_rx.changed().await.is_ok() {
-                let update = make_leader_update(&state_rx.borrow(), peer_addresses.as_ref());
-                if tx.send(Ok(update)).await.is_err() {
-                    break;
-                }
-            }
-        });
-
-        Ok(Response::new(ReceiverStream::new(rx)))
-    }
-}
-
-/// Builds a `LeaderUpdate` message from a shard state snapshot and the
-/// shared peer address map.
-fn make_leader_update(
-    state: &inferadb_ledger_consensus::leadership::ShardState,
-    peer_addresses: Option<&inferadb_ledger_raft::PeerAddressMap>,
-) -> LeaderUpdate {
-    match state.leader {
-        Some(leader) => {
-            let endpoint = peer_addresses
-                .and_then(|m| m.get(leader.0))
-                .map(ensure_endpoint_url)
-                .unwrap_or_default();
-            let leader_node_id = if endpoint.is_empty() { 0 } else { leader.0 };
-            LeaderUpdate { endpoint, raft_term: state.term, leader_node_id }
-        },
-        None => LeaderUpdate { endpoint: String::new(), raft_term: state.term, leader_node_id: 0 },
     }
 }
 

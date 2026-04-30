@@ -29,11 +29,15 @@ mod dr_scheduler;
 mod node_id;
 mod placement;
 mod shutdown;
+mod tls;
+mod wire_client;
 
 use std::{io::IsTerminal, net::SocketAddr};
 
 use clap::Parser;
-use config::{Cli, CliCommand, Config, ConfigAction, LogFormat, RestoreAction, VaultsAction};
+use config::{
+    AdminAction, Cli, CliCommand, Config, ConfigAction, LogFormat, RestoreAction, VaultsAction,
+};
 use inferadb_ledger_raft::otel;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
@@ -71,30 +75,21 @@ async fn main() -> Result<(), ServerError> {
                 },
             },
             CliCommand::Init { host } => {
-                // Connect to the target node and send InitCluster RPC.
-                let endpoint = format!("http://{}", host);
-                let channel = tonic::transport::Channel::from_shared(endpoint)
-                    .map_err(|e| {
-                        ServerError::Server(Box::new(std::io::Error::other(format!(
-                            "invalid host address '{}': {}",
-                            host, e
-                        ))))
-                    })?
-                    .connect()
-                    .await
-                    .map_err(|e| {
-                        ServerError::Server(Box::new(std::io::Error::other(format!(
-                            "failed to connect to {}: {}",
-                            host, e
-                        ))))
-                    })?;
-
-                let mut client =
-                    inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::new(
-                        channel,
-                    );
-                let response = client
-                    .init_cluster(inferadb_ledger_proto::proto::InitClusterRequest {})
+                // Connect to the target node over the wire transport and send
+                // InitCluster RPC.
+                let tls = cli.config.tls();
+                let client = wire_client::build_admin_client(&host, tls).map_err(|e| {
+                    ServerError::Server(Box::new(std::io::Error::other(e.to_string())))
+                })?;
+                let resp = client
+                    .init_cluster(
+                        inferadb_ledger_wire::services::admin::InitClusterRequest {},
+                        // request_id: any non-zero value the server treats as
+                        // an idempotency token. `1` is fine — InitCluster is a
+                        // one-shot per cluster lifetime and the server's
+                        // already_initialized flag covers retries.
+                        1,
+                    )
                     .await
                     .map_err(|e| {
                         ServerError::Server(Box::new(std::io::Error::other(format!(
@@ -103,7 +98,6 @@ async fn main() -> Result<(), ServerError> {
                         ))))
                     })?;
 
-                let resp = response.into_inner();
                 if resp.already_initialized {
                     println!("Cluster already initialized. cluster_id={}", resp.cluster_id);
                 } else {
@@ -117,7 +111,12 @@ async fn main() -> Result<(), ServerError> {
                 },
             },
             CliCommand::Vaults { action, host } => {
-                return handle_vaults_command(action, host).await;
+                let tls = cli.config.tls();
+                return handle_vaults_command(action, host, tls).await;
+            },
+            CliCommand::Admin { action } => {
+                let tls = cli.config.tls();
+                return handle_admin_command(action, tls).await;
             },
         }
     }
@@ -546,41 +545,35 @@ fn handle_restore_apply(
     Ok(())
 }
 
-/// Dispatches a `vaults` subcommand to the appropriate `AdminService` RPC.
+/// Dispatches a `vaults` subcommand to the appropriate `AdminService` RPC
+/// over the wire transport.
 ///
 /// All variants connect to the `--host` node and surface per-vault Raft
 /// group state to the operator. The CLI is intentionally thin — formatting
 /// happens here, the server-side handlers in
 /// `crates/services/src/services/admin.rs` do the work.
-async fn handle_vaults_command(action: VaultsAction, host: String) -> Result<(), ServerError> {
-    let endpoint = format!("http://{}", host);
-    let channel = tonic::transport::Channel::from_shared(endpoint)
-        .map_err(|e| {
-            ServerError::Server(Box::new(std::io::Error::other(format!(
-                "invalid host address '{}': {}",
-                host, e
-            ))))
-        })?
-        .connect()
-        .await
-        .map_err(|e| {
-            ServerError::Server(Box::new(std::io::Error::other(format!(
-                "failed to connect to {}: {}",
-                host, e
-            ))))
-        })?;
+async fn handle_vaults_command(
+    action: VaultsAction,
+    host: String,
+    tls: config::TlsConfig,
+) -> Result<(), ServerError> {
+    use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+    use inferadb_ledger_wire::services::admin as wadmin;
 
-    let mut client =
-        inferadb_ledger_proto::proto::admin_service_client::AdminServiceClient::new(channel);
+    let client = wire_client::build_admin_client(&host, tls)
+        .map_err(|e| ServerError::Server(Box::new(std::io::Error::other(e.to_string()))))?;
 
     match action {
         VaultsAction::List { org } => {
-            let response = client
-                .admin_list_vaults(inferadb_ledger_proto::proto::AdminListVaultsRequest {
-                    organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                        slug: org,
-                    }),
-                })
+            let resp = client
+                .admin_list_vaults(
+                    wadmin::AdminListVaultsRequest {
+                        organization: Some(OrganizationSlug::new(org)),
+                    },
+                    // request_id: synthesise from the org slug so retries
+                    // dedupe at the server.
+                    u128::from(org),
+                )
                 .await
                 .map_err(|e| {
                     ServerError::Server(Box::new(std::io::Error::other(format!(
@@ -588,17 +581,17 @@ async fn handle_vaults_command(action: VaultsAction, host: String) -> Result<(),
                         e
                     ))))
                 })?;
-            let resp = response.into_inner();
             print_vaults_list(&resp);
         },
         VaultsAction::Show { org, vault } => {
-            let response = client
-                .show_vault(inferadb_ledger_proto::proto::ShowVaultRequest {
-                    organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                        slug: org,
-                    }),
-                    vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
-                })
+            let resp = client
+                .show_vault(
+                    wadmin::ShowVaultRequest {
+                        organization: Some(OrganizationSlug::new(org)),
+                        vault: Some(VaultSlug::new(vault)),
+                    },
+                    u128::from(vault),
+                )
                 .await
                 .map_err(|e| {
                     ServerError::Server(Box::new(std::io::Error::other(format!(
@@ -606,17 +599,17 @@ async fn handle_vaults_command(action: VaultsAction, host: String) -> Result<(),
                         e
                     ))))
                 })?;
-            let resp = response.into_inner();
             print_vault_show(&resp);
         },
         VaultsAction::Repair { org, vault } => {
-            let response = client
-                .repair_vault(inferadb_ledger_proto::proto::RepairVaultRequest {
-                    organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                        slug: org,
-                    }),
-                    vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault }),
-                })
+            let resp = client
+                .repair_vault(
+                    wadmin::RepairVaultRequest {
+                        organization: Some(OrganizationSlug::new(org)),
+                        vault: Some(VaultSlug::new(vault)),
+                    },
+                    u128::from(vault),
+                )
                 .await
                 .map_err(|e| {
                     ServerError::Server(Box::new(std::io::Error::other(format!(
@@ -624,7 +617,6 @@ async fn handle_vaults_command(action: VaultsAction, host: String) -> Result<(),
                         e
                     ))))
                 })?;
-            let resp = response.into_inner();
             println!("status:  {}", resp.status);
             println!("message: {}", resp.message);
         },
@@ -634,7 +626,7 @@ async fn handle_vaults_command(action: VaultsAction, host: String) -> Result<(),
 }
 
 /// Renders an `AdminListVaultsResponse` as a human-readable table.
-fn print_vaults_list(resp: &inferadb_ledger_proto::proto::AdminListVaultsResponse) {
+fn print_vaults_list(resp: &inferadb_ledger_wire::services::admin::AdminListVaultsResponse) {
     if resp.vaults.is_empty() {
         println!(
             "No vaults found on this node for the requested organization. Hit a region voter \
@@ -647,11 +639,13 @@ fn print_vaults_list(resp: &inferadb_ledger_proto::proto::AdminListVaultsRespons
         "VAULT_SLUG", "STATUS", "LEADER", "VOTERS", "LEARN", "LAST_APPLIED"
     );
     for v in &resp.vaults {
-        let slug = v.slug.as_ref().map_or(0, |s| s.slug);
+        let slug = v.slug.map_or(0, |s| s.value());
+        // `last_activity` is UNIX nanoseconds on the wire; the legacy proto
+        // surface emitted seconds. Convert to seconds for parity with the
+        // historical CLI output, falling back to `-` when unset.
         let last_activity = v
             .last_activity
-            .as_ref()
-            .map(|t| t.seconds.to_string())
+            .map(|nanos| (nanos / 1_000_000_000).to_string())
             .unwrap_or_else(|| "-".to_owned());
         println!(
             "{:<22} {:<8} {:<10} {:<8} {:<8} {:<14} {}",
@@ -667,22 +661,23 @@ fn print_vaults_list(resp: &inferadb_ledger_proto::proto::AdminListVaultsRespons
 }
 
 /// Renders a `ShowVaultResponse` as JSON for tooling-friendly consumption.
-fn print_vault_show(resp: &inferadb_ledger_proto::proto::ShowVaultResponse) {
+fn print_vault_show(resp: &inferadb_ledger_wire::services::admin::ShowVaultResponse) {
     let info = resp.info.as_ref();
-    let slug = info.and_then(|i| i.slug.as_ref()).map_or(0, |s| s.slug);
+    let slug = info.and_then(|i| i.slug).map_or(0, |s| s.value());
     let status = info.map_or("", |i| i.status.as_str());
     let leader = info.map_or(0, |i| i.leader_node_id);
     let voter_count = info.map_or(0, |i| i.voter_count);
     let learner_count = info.map_or(0, |i| i.learner_count);
     let last_applied = info.map_or(0, |i| i.last_applied_index);
+    // Wire types use UNIX nanoseconds; CLI output preserves the historical
+    // seconds-resolution rendering.
     let last_activity = info
-        .and_then(|i| i.last_activity.as_ref())
-        .map(|t| t.seconds.to_string())
+        .and_then(|i| i.last_activity)
+        .map(|nanos| (nanos / 1_000_000_000).to_string())
         .unwrap_or_else(|| "null".to_owned());
     let pending_membership = resp
         .pending_membership_started_at
-        .as_ref()
-        .map(|t| t.seconds.to_string())
+        .map(|nanos| (nanos / 1_000_000_000).to_string())
         .unwrap_or_else(|| "null".to_owned());
 
     let voters: Vec<String> = resp.voters.iter().map(|v| v.to_string()).collect();
@@ -705,6 +700,319 @@ fn print_vault_show(resp: &inferadb_ledger_proto::proto::ShowVaultResponse) {
     println!("  \"last_activity_unix_secs\": {},", last_activity);
     println!("  \"pending_membership_started_unix_secs\": {}", pending_membership);
     println!("}}");
+}
+
+/// Dispatches an `admin` subcommand to the appropriate wire-protocol RPC.
+///
+/// Each variant connects to the operator-supplied `--host` over QUIC + TLS,
+/// issues a single RPC against one of `AdminService`, `UserService`,
+/// `VaultService`, `WriteService`, or `ReadService`, and prints the
+/// response as pretty-printed JSON on stdout. RPC failures surface as
+/// free-form text on stderr via `ServerError::Server`.
+///
+/// The CLI is intentionally thin: server-side handlers in
+/// `crates/services/src/services/` do all validation, authorization,
+/// and Raft routing.
+async fn handle_admin_command(
+    action: AdminAction,
+    tls: config::TlsConfig,
+) -> Result<(), ServerError> {
+    use inferadb_ledger_types::{OrganizationSlug, UserSlug, VaultSlug};
+    use inferadb_ledger_wire::services::{
+        admin as wadmin, read as wread, shared as wshared, user as wuser, vault as wvault,
+        write as wwrite,
+    };
+
+    match action {
+        AdminAction::ClusterInfo { host } => {
+            let client = wire_client::build_admin_client(&host, tls).map_err(io_other)?;
+            let resp = client
+                .get_cluster_info(wadmin::GetClusterInfoRequest {}, request_id())
+                .await
+                .map_err(|e| rpc_failure("GetClusterInfo", e))?;
+            print_json(&resp)
+        },
+        AdminAction::NodeInfo { host } => {
+            let client = wire_client::build_admin_client(&host, tls).map_err(io_other)?;
+            let resp = client
+                .get_node_info(wadmin::GetNodeInfoRequest {}, request_id())
+                .await
+                .map_err(|e| rpc_failure("GetNodeInfo", e))?;
+            print_json(&resp)
+        },
+        AdminAction::JoinCluster { host, node_id, address } => {
+            let client = wire_client::build_admin_client(&host, tls).map_err(io_other)?;
+            let resp = client
+                .join_cluster(wadmin::JoinClusterRequest { node_id, address }, request_id())
+                .await
+                .map_err(|e| rpc_failure("JoinCluster", e))?;
+            print_json(&resp)
+        },
+        AdminAction::LeaveCluster { host, node_id } => {
+            let client = wire_client::build_admin_client(&host, tls).map_err(io_other)?;
+            let resp = client
+                .leave_cluster(wadmin::LeaveClusterRequest { node_id }, request_id())
+                .await
+                .map_err(|e| rpc_failure("LeaveCluster", e))?;
+            print_json(&resp)
+        },
+        AdminAction::TransferLeadership { host, target_node_id, timeout_ms } => {
+            let client = wire_client::build_admin_client(&host, tls).map_err(io_other)?;
+            let resp = client
+                .transfer_leadership(
+                    wadmin::TransferLeadershipRequest { target_node_id, timeout_ms },
+                    request_id(),
+                )
+                .await
+                .map_err(|e| rpc_failure("TransferLeadership", e))?;
+            print_json(&resp)
+        },
+        AdminAction::ProvisionRegion {
+            host,
+            name,
+            protected,
+            requires_residency,
+            retention_days,
+        } => {
+            let client = wire_client::build_admin_client(&host, tls).map_err(io_other)?;
+            let resp = client
+                .provision_region(
+                    wadmin::ProvisionRegionRequest {
+                        name,
+                        protected,
+                        requires_residency,
+                        retention_days,
+                    },
+                    request_id(),
+                )
+                .await
+                .map_err(|e| rpc_failure("ProvisionRegion", e))?;
+            print_json(&resp)
+        },
+        AdminAction::InitiateEmailVerification { host, email, region } => {
+            let client = wire_client::build_user_client(&host, tls).map_err(io_other)?;
+            let resp = client
+                .initiate_email_verification(
+                    wuser::InitiateEmailVerificationRequest { email, region },
+                    request_id(),
+                )
+                .await
+                .map_err(|e| rpc_failure("InitiateEmailVerification", e))?;
+            print_json(&resp)
+        },
+        AdminAction::VerifyEmailCode { host, email, code, region } => {
+            let client = wire_client::build_user_client(&host, tls).map_err(io_other)?;
+            let resp = client
+                .verify_email_code(
+                    wuser::VerifyEmailCodeRequest { email, code, region },
+                    request_id(),
+                )
+                .await
+                .map_err(|e| rpc_failure("VerifyEmailCode", e))?;
+            print_json(&resp)
+        },
+        AdminAction::CompleteRegistration {
+            host,
+            onboarding_token,
+            email,
+            region,
+            name,
+            organization_name,
+        } => {
+            let client = wire_client::build_user_client(&host, tls).map_err(io_other)?;
+            let resp = client
+                .complete_registration(
+                    wuser::CompleteRegistrationRequest {
+                        onboarding_token,
+                        email,
+                        region,
+                        name,
+                        organization_name,
+                    },
+                    request_id(),
+                )
+                .await
+                .map_err(|e| rpc_failure("CompleteRegistration", e))?;
+            print_json(&resp)
+        },
+        AdminAction::CreateVault { host, organization, caller, slug, replication_factor } => {
+            let client = wire_client::build_vault_client(&host, tls).map_err(io_other)?;
+            let resp = client
+                .create_vault(
+                    wvault::CreateVaultRequest {
+                        organization: Some(OrganizationSlug::new(organization)),
+                        replication_factor,
+                        initial_nodes: Vec::new(),
+                        retention_policy: None,
+                        caller: Some(UserSlug::new(caller)),
+                        slug: slug.map(VaultSlug::new),
+                    },
+                    request_id(),
+                )
+                .await
+                .map_err(|e| rpc_failure("CreateVault", e))?;
+            print_json(&resp)
+        },
+        AdminAction::Write { host, organization, vault, caller, key, value, idempotency_key } => {
+            let idempotency_bytes = parse_idempotency_key(idempotency_key.as_deref())?;
+            let client = wire_client::build_write_client(&host, tls).map_err(io_other)?;
+            let resp = client
+                .write(
+                    wwrite::WriteRequest {
+                        organization: Some(OrganizationSlug::new(organization)),
+                        vault: Some(VaultSlug::new(vault)),
+                        client_id: None,
+                        idempotency_key: idempotency_bytes,
+                        operations: vec![wshared::Operation {
+                            op: Some(wshared::OperationKind::SetEntity(wshared::SetEntity {
+                                key,
+                                value: bytes::Bytes::from(value.into_bytes()),
+                                expires_at: None,
+                                condition: None,
+                            })),
+                        }],
+                        include_tx_proof: false,
+                        caller: Some(UserSlug::new(caller)),
+                    },
+                    request_id(),
+                )
+                .await
+                .map_err(|e| rpc_failure("Write", e))?;
+            print_json(&resp)
+        },
+        AdminAction::Read { host, organization, vault, caller, key, consistency } => {
+            let consistency = parse_consistency(&consistency)?;
+            let client = wire_client::build_read_client(&host, tls).map_err(io_other)?;
+            let resp = client
+                .read(
+                    wread::ReadRequest {
+                        organization: Some(OrganizationSlug::new(organization)),
+                        vault: Some(VaultSlug::new(vault)),
+                        key,
+                        consistency,
+                        caller: Some(UserSlug::new(caller)),
+                    },
+                    request_id(),
+                )
+                .await
+                .map_err(|e| rpc_failure("Read", e))?;
+            print_json(&resp)
+        },
+        AdminAction::ListEntities { host, organization, vault, caller, key_prefix, limit } => {
+            let client = wire_client::build_read_client(&host, tls).map_err(io_other)?;
+            let resp = client
+                .list_entities(
+                    wread::ListEntitiesRequest {
+                        organization: Some(OrganizationSlug::new(organization)),
+                        key_prefix,
+                        at_height: None,
+                        include_expired: false,
+                        limit,
+                        page_token: String::new(),
+                        consistency: wshared::ReadConsistency::Eventual,
+                        vault: Some(VaultSlug::new(vault)),
+                        caller: Some(UserSlug::new(caller)),
+                    },
+                    request_id(),
+                )
+                .await
+                .map_err(|e| rpc_failure("ListEntities", e))?;
+            print_json(&resp)
+        },
+        AdminAction::GetTip { host, organization, vault } => {
+            let client = wire_client::build_read_client(&host, tls).map_err(io_other)?;
+            let resp = client
+                .get_tip(
+                    wread::GetTipRequest {
+                        organization: organization.map(OrganizationSlug::new),
+                        vault: vault.map(VaultSlug::new),
+                    },
+                    request_id(),
+                )
+                .await
+                .map_err(|e| rpc_failure("GetTip", e))?;
+            print_json(&resp)
+        },
+    }
+}
+
+/// Generate a fresh `request_id` for a CLI-issued RPC.
+///
+/// The wire macro requires every RPC to carry a `u128` request id (used
+/// server-side as an idempotency token in dispatch). The CLI is one-shot
+/// per invocation, so a random id per call is sufficient — repeated CLI
+/// invocations are independent operator actions and should not dedupe.
+fn request_id() -> u128 {
+    let bytes: [u8; 16] = rand::random();
+    u128::from_le_bytes(bytes)
+}
+
+/// Convert a `CliWireClientError` into the binary's top-level
+/// `ServerError::Server` variant.
+fn io_other(e: wire_client::CliWireClientError) -> ServerError {
+    ServerError::Server(Box::new(std::io::Error::other(e.to_string())))
+}
+
+/// Wrap an `RpcError` from a wire-protocol client call with operator-friendly
+/// context naming the RPC that failed.
+fn rpc_failure(rpc: &str, err: inferadb_ledger_wire_transport::RpcError) -> ServerError {
+    ServerError::Server(Box::new(std::io::Error::other(format!("{rpc} RPC failed: {err}"))))
+}
+
+/// Print a serializable response as pretty JSON on stdout.
+fn print_json<T: serde::Serialize>(value: &T) -> Result<(), ServerError> {
+    let s = serde_json::to_string_pretty(value).map_err(|e| {
+        ServerError::Server(Box::new(std::io::Error::other(format!(
+            "failed to serialize response as JSON: {e}"
+        ))))
+    })?;
+    println!("{s}");
+    Ok(())
+}
+
+/// Parse an optional hex-encoded 16-byte idempotency key, falling back to
+/// a fresh random UUID v4 when omitted.
+fn parse_idempotency_key(input: Option<&str>) -> Result<bytes::Bytes, ServerError> {
+    match input {
+        None => {
+            let uuid = uuid::Uuid::new_v4();
+            Ok(bytes::Bytes::copy_from_slice(uuid.as_bytes()))
+        },
+        Some(s) => {
+            let trimmed = s.trim_start_matches("0x");
+            if trimmed.len() != 32 {
+                return Err(ServerError::Server(Box::new(std::io::Error::other(format!(
+                    "--idempotency-key must be 32 hex chars (16 bytes); got {} chars",
+                    trimmed.len()
+                )))));
+            }
+            let mut buf = [0u8; 16];
+            for (i, byte) in buf.iter_mut().enumerate() {
+                let pair = &trimmed[i * 2..i * 2 + 2];
+                *byte = u8::from_str_radix(pair, 16).map_err(|e| {
+                    ServerError::Server(Box::new(std::io::Error::other(format!(
+                        "--idempotency-key contains non-hex characters: {e}"
+                    ))))
+                })?;
+            }
+            Ok(bytes::Bytes::copy_from_slice(&buf))
+        },
+    }
+}
+
+/// Map a CLI consistency string ("eventual" / "linearizable") to the
+/// wire `ReadConsistency` enum.
+fn parse_consistency(
+    input: &str,
+) -> Result<inferadb_ledger_wire::services::shared::ReadConsistency, ServerError> {
+    use inferadb_ledger_wire::services::shared::ReadConsistency;
+    match input.to_ascii_lowercase().as_str() {
+        "eventual" => Ok(ReadConsistency::Eventual),
+        "linearizable" | "linear" => Ok(ReadConsistency::Linearizable),
+        other => Err(ServerError::Server(Box::new(std::io::Error::other(format!(
+            "--consistency must be 'eventual' or 'linearizable'; got '{other}'"
+        ))))),
+    }
 }
 
 /// Initializes the Prometheus metrics exporter.

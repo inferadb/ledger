@@ -1,24 +1,33 @@
-//! Three-tier consensus integration tests (Phase B.1).
+//! Three-tier consensus integration tests.
 //!
-//! Validates the observable behaviors of the three-tier Raft topology that
-//! B.1 introduced: `SystemGroup` (cluster control plane) → `RegionGroup`
-//! (regional control plane and unified leader) → `OrganizationGroup`
-//! (per-organization data plane).
+//! Validates the observable behaviors of the three-tier Raft topology:
+//! `SystemGroup` (cluster control plane) → `RegionGroup` (regional control
+//! plane and unified leader) → `OrganizationGroup` (per-organization data
+//! plane).
 //!
-//! Each test names the B.1 invariant it exercises. Under Phase A's
-//! single-shard-per-region model every assertion here either (a) was not
-//! testable — because per-organization Raft groups didn't exist — or (b)
-//! would have failed, because `route_organization` and
-//! `lookup_by_consensus_shard` resolved everything to
-//! `(region, OrganizationId::new(0))` instead of per-org groups.
+//! These tests exercise invariants that rely on per-organization Raft groups
+//! existing as distinct types from the regional control-plane group. Assertions
+//! use `route_organization` and `lookup_by_consensus_shard` to verify routing
+//! resolves to per-org groups rather than to `(region, OrganizationId::new(0))`.
+//!
+//! F.1.f.2.Stage1e Wave 4: migrated from the legacy tonic helpers
+//! (`create_read_client` / `create_write_client` /
+//! `create_test_organization` / `create_test_vault`) to their
+//! wire-protocol siblings (`wire_read_client` / `wire_write_client` /
+//! `wire_create_test_organization` / `wire_create_test_vault`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
 use std::time::Duration;
 
+use bytes::Bytes;
 use inferadb_ledger_types::{OrganizationId, OrganizationSlug, Region, VaultSlug};
+use inferadb_ledger_wire::services::{read as wr, shared as ws, write as ww};
 
-use crate::common::{TestCluster, TestNode, create_read_client, create_write_client};
+use crate::common::{
+    TestCluster, TestNode, wire_create_test_organization, wire_create_test_vault, wire_read_client,
+    wire_write_client,
+};
 
 // ============================================================================
 // Test Helpers
@@ -27,20 +36,21 @@ use crate::common::{TestCluster, TestNode, create_read_client, create_write_clie
 /// Creates an organization via the production saga pipeline and returns its
 /// external slug.
 async fn create_organization(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     name: &str,
-    node: &TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
-    let (slug, _admin) = crate::common::create_test_organization(addr, name, node).await?;
+    let (slug, _admin) = wire_create_test_organization(cluster, node_id, name).await?;
     Ok(slug)
 }
 
 /// Creates a vault inside an organization.
 async fn create_vault(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     org: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
-    crate::common::create_test_vault(addr, org).await
+    wire_create_test_vault(cluster, node_id, org).await
 }
 
 /// Resolves an external `OrganizationSlug` to its internal
@@ -59,62 +69,56 @@ fn resolve_org_id(node: &TestNode, slug: OrganizationSlug) -> OrganizationId {
 /// Writes `(key, value)` into `(org, vault)` and returns the committed
 /// block height.
 async fn write_entity(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     org: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
     value: &[u8],
 ) -> Result<u64, Box<dyn std::error::Error>> {
-    let mut client = create_write_client(addr).await?;
-    let request = inferadb_ledger_proto::proto::WriteRequest {
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: org.value() }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
-        client_id: Some(inferadb_ledger_proto::proto::ClientId {
-            id: "three-tier-test".to_string(),
-        }),
-        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        operations: vec![inferadb_ledger_proto::proto::Operation {
-            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
-                inferadb_ledger_proto::proto::SetEntity {
-                    key: key.to_string(),
-                    value: value.to_vec(),
-                    expires_at: None,
-                    condition: None,
-                },
-            )),
+    let client = wire_write_client(cluster, node_id);
+    let request = ww::WriteRequest {
+        organization: Some(org),
+        vault: Some(vault),
+        client_id: Some(ws::ClientIdMessage { id: "three-tier-test".to_string() }),
+        idempotency_key: Bytes::copy_from_slice(uuid::Uuid::new_v4().as_bytes()),
+        operations: vec![ws::Operation {
+            op: Some(ws::OperationKind::SetEntity(ws::SetEntity {
+                key: key.to_string(),
+                value: Bytes::copy_from_slice(value),
+                expires_at: None,
+                condition: None,
+            })),
         }],
         include_tx_proof: false,
         caller: None,
     };
-    let response = client.write(request).await?.into_inner();
+    let response = client.write(request, rand::random::<u128>()).await?;
     match response.result {
-        Some(inferadb_ledger_proto::proto::write_response::Result::Success(s)) => {
-            Ok(s.block_height)
-        },
-        Some(inferadb_ledger_proto::proto::write_response::Result::Error(e)) => {
-            Err(format!("write error: {:?}", e).into())
-        },
+        Some(ww::WriteResponseResult::Success(s)) => Ok(s.block_height),
+        Some(ww::WriteResponseResult::Error(e)) => Err(format!("write error: {:?}", e).into()),
         None => Err("no result in write response".into()),
     }
 }
 
 /// Reads a key from `(org, vault)`.
 async fn read_entity(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     org: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
 ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
-    let mut client = create_read_client(addr).await?;
-    let request = inferadb_ledger_proto::proto::ReadRequest {
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug { slug: org.value() }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
+    let client = wire_read_client(cluster, node_id);
+    let request = wr::ReadRequest {
+        organization: Some(org),
+        vault: Some(vault),
         key: key.to_string(),
-        consistency: 0, // EVENTUAL
+        consistency: ws::ReadConsistency::Eventual,
         caller: None,
     };
-    let response = client.read(request).await?.into_inner();
-    Ok(response.value)
+    let response = client.read(request, rand::random::<u128>()).await?;
+    Ok(response.value.map(|b| b.to_vec()))
 }
 
 // ============================================================================
@@ -126,17 +130,16 @@ async fn read_entity(
 /// distinct from the data-region group at `OrganizationId::new(0)` and with
 /// a distinct consensus shard.
 ///
-/// Pre-B.1.8 this would have failed: `route_organization` resolved every
-/// organization to the region's shard-0 group, so the "new org group" did
-/// not exist as a separate object.
+/// Regression: without per-organization routing, `route_organization` resolved
+/// every organization to the region's shard-0 group, so the "new org group"
+/// did not exist as a separate object.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_per_organization_group_materializes() {
-    let cluster = TestCluster::new(1).await;
-    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     assert!(cluster.wait_for_leaders(Duration::from_secs(10)).await, "leaders elected");
     let node = cluster.any_node();
 
-    let org_slug = create_organization(&node.addr, "materialize-org", node)
+    let org_slug = create_organization(&cluster, node.id, "materialize-org")
         .await
         .expect("create organization");
     let org_id = resolve_org_id(node, org_slug);
@@ -164,29 +167,28 @@ async fn test_per_organization_group_materializes() {
 }
 
 // ============================================================================
-// Per-organization isolation (B.1.1 storage + B.1.8 routing)
+// Per-organization isolation (storage + routing)
 // ============================================================================
 
 /// Writes to organization A with the same `(vault, key)` as organization B
-/// remain invisible across the boundary — B.1 gives each organization its
-/// own Raft group and storage path.
+/// remain invisible across the boundary — each organization has its own Raft
+/// group and storage path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_per_organization_isolation() {
-    let cluster = TestCluster::new(1).await;
-    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     assert!(cluster.wait_for_leaders(Duration::from_secs(10)).await, "leaders elected");
     let node = cluster.any_node();
 
-    let org_a = create_organization(&node.addr, "iso-a", node).await.expect("create A");
-    let org_b = create_organization(&node.addr, "iso-b", node).await.expect("create B");
-    let vault_a = create_vault(&node.addr, org_a).await.expect("vault A");
-    let vault_b = create_vault(&node.addr, org_b).await.expect("vault B");
+    let org_a = create_organization(&cluster, node.id, "iso-a").await.expect("create A");
+    let org_b = create_organization(&cluster, node.id, "iso-b").await.expect("create B");
+    let vault_a = create_vault(&cluster, node.id, org_a).await.expect("vault A");
+    let vault_b = create_vault(&cluster, node.id, org_b).await.expect("vault B");
 
-    write_entity(&node.addr, org_a, vault_a, "k", b"value-a").await.expect("write A");
-    write_entity(&node.addr, org_b, vault_b, "k", b"value-b").await.expect("write B");
+    write_entity(&cluster, node.id, org_a, vault_a, "k", b"value-a").await.expect("write A");
+    write_entity(&cluster, node.id, org_b, vault_b, "k", b"value-b").await.expect("write B");
 
-    let from_a = read_entity(&node.addr, org_a, vault_a, "k").await.expect("read A");
-    let from_b = read_entity(&node.addr, org_b, vault_b, "k").await.expect("read B");
+    let from_a = read_entity(&cluster, node.id, org_a, vault_a, "k").await.expect("read A");
+    let from_b = read_entity(&cluster, node.id, org_b, vault_b, "k").await.expect("read B");
     assert_eq!(from_a, Some(b"value-a".to_vec()), "A sees its own write");
     assert_eq!(from_b, Some(b"value-b".to_vec()), "B sees its own write");
 
@@ -215,18 +217,17 @@ async fn test_per_organization_isolation() {
 /// a watcher propagates the region's leader into each per-org shard via
 /// `ConsensusState::adopt_leader`.
 ///
-/// Pre-B.1.7 this would have been indeterminate — per-org groups ran
-/// their own election timers, so different orgs could momentarily disagree
-/// on the leader even within the same region.
+/// Regression: without delegated leadership, per-org groups ran their own
+/// election timers, so different orgs could momentarily disagree on the leader
+/// even within the same region.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_delegated_leadership_follows_region() {
-    let cluster = TestCluster::new(3).await;
-    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     assert!(cluster.wait_for_leaders(Duration::from_secs(10)).await, "leaders elected");
     let leader = cluster.leader().expect("has leader");
 
-    let org_a = create_organization(&leader.addr, "delegated-a", leader).await.expect("create A");
-    let org_b = create_organization(&leader.addr, "delegated-b", leader).await.expect("create B");
+    let org_a = create_organization(&cluster, leader.id, "delegated-a").await.expect("create A");
+    let org_b = create_organization(&cluster, leader.id, "delegated-b").await.expect("create B");
 
     // The `Delegated` watcher runs asynchronously after bootstrap, so poll
     // every node until all per-org groups agree with the region's leader.
@@ -273,12 +274,11 @@ async fn test_delegated_leadership_follows_region() {
 /// engine on a node that hosts multiple per-organization groups.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_consensus_shard_lookup_roundtrip() {
-    let cluster = TestCluster::new(1).await;
-    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     assert!(cluster.wait_for_leaders(Duration::from_secs(10)).await, "leaders elected");
     let node = cluster.any_node();
 
-    let org = create_organization(&node.addr, "shard-lookup", node).await.expect("create org");
+    let org = create_organization(&cluster, node.id, "shard-lookup").await.expect("create org");
     let org_id = resolve_org_id(node, org);
 
     let direct = node.manager.route_organization(org_id).expect("per-org group");
@@ -308,15 +308,15 @@ async fn test_consensus_shard_lookup_roundtrip() {
 /// does not serialize incorrectly when multiple creations race.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_organization_creation() {
-    let cluster = TestCluster::new(1).await;
-    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     assert!(cluster.wait_for_leaders(Duration::from_secs(10)).await, "leaders elected");
     let leader = cluster.leader().expect("has leader");
-    let addr = leader.addr.as_str();
 
+    let cluster_ref = &cluster;
+    let leader_id = leader.id;
     let futures = (0..5).map(|i| {
         let name = format!("concurrent-{i}");
-        async move { create_organization(addr, &name, leader).await }
+        async move { create_organization(cluster_ref, leader_id, &name).await }
     });
     let results: Vec<_> = futures::future::join_all(futures).await;
 
@@ -349,9 +349,7 @@ async fn test_concurrent_organization_creation() {
 /// create or alter any group in R2.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_cross_region_independence() {
-    let cluster = TestCluster::new(1).await;
-    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region us-east-va");
-    cluster.create_data_region(Region::US_WEST_OR).await.expect("create data region us-west-or");
+    let cluster = TestCluster::with_wire_transport(2).await;
     assert!(cluster.wait_for_leaders(Duration::from_secs(10)).await, "leaders elected");
     let node = cluster.any_node();
 
@@ -372,7 +370,7 @@ async fn test_cross_region_independence() {
     // not add any group in region B.
     let before_b: usize =
         node.manager.list_organization_groups().iter().filter(|(r, _)| *r == region_b).count();
-    let _ = create_organization(&node.addr, "cross-region", node).await.expect("create org");
+    let _ = create_organization(&cluster, node.id, "cross-region").await.expect("create org");
     let after_b: usize =
         node.manager.list_organization_groups().iter().filter(|(r, _)| *r == region_b).count();
     assert_eq!(
@@ -392,20 +390,19 @@ async fn test_cross_region_independence() {
 /// leader transfer cascades to every organization without per-org
 /// elections.
 ///
-/// Pre-B.1.7 this would have failed: each per-org group would have run
-/// its own election timer, so leadership transfer would only move the
-/// region group, leaving per-org groups stuck on the old leader until
-/// their timers fired.
+/// Regression: without the `adopt_leader` watcher, each per-org group would
+/// have run its own election timer, so leadership transfer would only move the
+/// region group, leaving per-org groups stuck on the old leader until their
+/// timers fired.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_region_leader_transfer_cascades_to_per_org_groups() {
-    let cluster = TestCluster::new(3).await;
-    cluster.create_data_region(Region::US_EAST_VA).await.expect("create data region");
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     assert!(cluster.wait_for_leaders(Duration::from_secs(10)).await, "leaders elected");
     let leader = cluster.leader().expect("has leader");
 
     // Create two organizations so the region hosts >1 per-org group.
-    let org_a = create_organization(&leader.addr, "xfer-a", leader).await.expect("create A");
-    let org_b = create_organization(&leader.addr, "xfer-b", leader).await.expect("create B");
+    let org_a = create_organization(&cluster, leader.id, "xfer-a").await.expect("create A");
+    let org_b = create_organization(&cluster, leader.id, "xfer-b").await.expect("create B");
     let id_a = resolve_org_id(leader, org_a);
     let id_b = resolve_org_id(leader, org_b);
 

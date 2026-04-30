@@ -51,7 +51,7 @@ const fn default_otel_shutdown_timeout_ms() -> u64 {
 ///
 /// # Environment Variables
 ///
-/// ```bash
+/// ```text
 /// INFERADB__LEDGER__LOGGING__OTEL__ENABLED=true
 /// INFERADB__LEDGER__LOGGING__OTEL__ENDPOINT=http://localhost:4317
 /// INFERADB__LEDGER__LOGGING__OTEL__TRANSPORT=grpc

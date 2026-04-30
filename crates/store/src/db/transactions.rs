@@ -605,11 +605,9 @@ impl<'db, B: StorageBackend> WriteTransaction<'db, B> {
     /// during graceful shutdown.
     ///
     /// Intended only for callers whose writes are reconstructible from
-    /// the WAL on crash recovery — see the "API surface and
-    /// commit-durability classification" table in
-    /// `docs/superpowers/specs/2026-04-19-sprint-1b2-apply-batching-design.md`.
-    /// Callers that need strict on-disk durability on return (e.g.
-    /// `save_vote`) MUST use [`WriteTransaction::commit`] instead.
+    /// the WAL on crash recovery. Callers that need strict on-disk
+    /// durability on return (e.g. `save_vote`) MUST use
+    /// [`WriteTransaction::commit`] instead.
     ///
     /// # Errors
     ///

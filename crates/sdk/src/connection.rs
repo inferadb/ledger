@@ -1,14 +1,18 @@
-//! Connection pool and channel management.
+//! Connection pool and wire-client management.
 //!
-//! Manages tonic gRPC channels with lazy connection establishment,
-//! health checking, and endpoint configuration.
+//! [`ConnectionPool`] manages `N` independent
+//! [`WireClient`](inferadb_ledger_wire_transport::WireClient) handles
+//! (configurable via
+//! [`ClientConfig::connection_pool_size`](crate::ClientConfig::connection_pool_size))
+//! and round-robins requests across them. Each `WireClient` owns its own
+//! QUIC endpoint; the QUIC + auth handshake is deferred to the first
+//! [`WireClient::acquire`] inside an op.
 //!
-//! # Architecture
-//!
-//! The [`ConnectionPool`] wraps a tonic [`Channel`] with:
-//! - **Lazy connection**: Channel is established on first use, not at construction
-//! - **Shared ownership**: The channel is wrapped in `Arc<RwLock<...>>` for thread-safe access
-//! - **Configurable settings**: Timeouts, keepalive, compression from [`ClientConfig`]
+//! Connection establishment is lazy. Cache invalidation
+//! (leader-hint redirect, [`ConnectionPool::reset`]) is a no-op on the
+//! wire-client side — `WireClient` reconnects internally on demand — and
+//! gateway-channel state lives behind a single optional slot for region
+//! resolution.
 //!
 //! # Example
 //!
@@ -23,21 +27,22 @@
 //!     .build()?;
 //!
 //! let pool = ConnectionPool::new(config);
-//! let channel = pool.get_channel().await?;
+//! let _wire = pool.cached_wire_client();
 //! # Ok(())
 //! # }
 //! ```
 
 use std::{
+    net::SocketAddr,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
 };
 
+use bytes::Bytes;
+use inferadb_ledger_wire_transport::WireClient;
 use parking_lot::RwLock;
-use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 
 use crate::{
     config::ClientConfig,
@@ -45,41 +50,23 @@ use crate::{
     server::{ServerSelector, ServerSource},
 };
 
-/// HTTP/2 keep-alive interval for idle connections.
-const HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
-
-/// HTTP/2 keep-alive timeout.
-const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// TCP keepalive interval.
-const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
-
-/// Manages tonic gRPC channels with lazy connection establishment.
+/// Manages [`WireClient`] handles with lazy QUIC handshake.
 ///
-/// Provides lazy connection establishment and thread-safe channel sharing.
-/// The underlying tonic [`Channel`] is cheap to clone (it shares the HTTP/2
-/// connection internally), so this pool caches a single channel that can
-/// be cloned by multiple callers.
-#[derive(Debug, Clone)]
+/// Provides a fixed-size, round-robin pool of independent
+/// [`WireClient`]s. The QUIC + auth handshake itself is deferred to the
+/// first [`WireClient::acquire`] inside an op — this struct only
+/// materializes the per-endpoint client objects.
+#[derive(Clone)]
 pub struct ConnectionPool {
-    /// Lazily-initialized pool of tonic `Channel`s for the active endpoint.
-    ///
-    /// When the pool is empty, no connection has been established yet and
-    /// the next call to [`get_channel`](Self::get_channel) will populate
-    /// it. When non-empty, calls to [`get_channel`](Self::get_channel)
-    /// round-robin across the pool entries via [`Self::next_channel_idx`].
-    ///
-    /// Pool size is governed by [`ClientConfig::connection_pool_size`];
-    /// the default of 1 preserves the historical single-Channel
-    /// behavior. Sizes >1 materialize N independent tonic Channels (each
-    /// with its own tower `Buffer` mpsc worker, hyper HTTP/2 connection,
-    /// and TCP socket) so frame dispatch parallelism scales with pool
-    /// size — the per-Channel `Buffer` is the dispatch bottleneck above
-    /// roughly 24-30k ops/s on loopback.
-    channels: Arc<RwLock<Vec<Channel>>>,
+    /// Pool of wire-transport [`WireClient`] handles, one per configured
+    /// endpoint. Construction at pool-build time ensures every
+    /// [`Self::cached_wire_client`] call hits a populated slot or returns
+    /// `None` (when wire-client construction failed at build time, the
+    /// dispatch site surfaces a clean [`SdkError::Config`]).
+    wire_clients: Vec<Arc<WireClient>>,
 
-    /// Round-robin cursor across [`Self::channels`].
-    next_channel_idx: Arc<AtomicUsize>,
+    /// Round-robin cursor across [`Self::wire_clients`].
+    next_client_idx: Arc<AtomicUsize>,
 
     /// Client configuration for connection settings.
     config: ClientConfig,
@@ -103,79 +90,136 @@ pub struct ConnectionPool {
     /// vault-scoped hints carry their own routing information independent
     /// of region selection. Capacity comes from `ClientConfig::vault_cache_capacity`.
     vault_cache: Arc<crate::vault_resolver::VaultLeaderCache>,
-
-    /// Gateway channel kept alive as fallback for region resolution.
-    gateway_channel: Arc<RwLock<Option<Channel>>>,
-
-    /// Background leader-watch task handle and its cancellation token.
-    ///
-    /// Lazily populated on first `get_or_create_gateway_channel` call when
-    /// `region_cache` is `Some`. Shared across pool clones so the task
-    /// outlives any individual clone but is cancelled when the last clone
-    /// drops (`Arc` strong count reaches 1 in `Drop`).
-    leader_watcher: Arc<parking_lot::Mutex<Option<LeaderWatcherHandle>>>,
 }
 
-/// Background leader-watch task handle held by [`ConnectionPool`].
-#[derive(Debug)]
-struct LeaderWatcherHandle {
-    cancel: tokio_util::sync::CancellationToken,
-    handle: tokio::task::JoinHandle<()>,
+/// Build one [`WireClient`] per configured endpoint, sharing the same
+/// bridged [`rustls::ClientConfig`] across all of them.
+///
+/// `auth_payload` is materialized from the SDK's existing client-id field
+/// for now (no dedicated bearer-token slot exists yet); per-request token
+/// rotation is out of scope for F.1.e.1 and would require a separate
+/// auth-design pass. UDS endpoints (URL starting with `/`) error out at
+/// `parse_wire_endpoint` — the wire transport is QUIC-only and the
+/// `ClientConfig` validator rejects this combination at build time, but
+/// dynamic-endpoint paths can sneak around that check.
+fn build_wire_clients(config: &ClientConfig) -> Result<Vec<Arc<WireClient>>> {
+    let endpoints: Vec<String> = match config.servers() {
+        ServerSource::Static(endpoints) => endpoints.clone(),
+        // For DNS / file sources the resolver populates `dynamic_endpoints`
+        // post-construction, after the pool has already been built. Today
+        // those paths surface a config error at the dispatch site rather
+        // than an empty wire pool — wire+DNS plumbing is a separate task.
+        ServerSource::Dns(_) | ServerSource::File(_) => Vec::new(),
+    };
+
+    let crypto = crate::tls_bridge::bridge_sdk_tls_to_wire(config.tls())?;
+
+    // Bearer-token plumbing is deferred to a separate auth task; for
+    // now every wire client sends an empty auth payload, matching the
+    // server-side `PermissiveVerifier` shape used in tests.
+    let auth_payload = Bytes::new();
+
+    let mut clients = Vec::with_capacity(endpoints.len());
+    for endpoint_url in &endpoints {
+        let (server_addr, server_name) = parse_wire_endpoint(endpoint_url)?;
+        let quic = inferadb_ledger_wire_transport::tls::client_config(crypto.clone());
+        let wire_config = inferadb_ledger_wire_transport::client::ClientConfig {
+            server_addr,
+            server_name,
+            quic,
+            auth_payload: auth_payload.clone(),
+            connect_timeout: config.connect_timeout(),
+        };
+        let client = WireClient::new(wire_config).map_err(|e| SdkError::Connection {
+            message: format!("failed to build wire client for {endpoint_url}: {e}"),
+        })?;
+        clients.push(Arc::new(client));
+    }
+    Ok(clients)
 }
 
-impl Drop for LeaderWatcherHandle {
-    fn drop(&mut self) {
-        // Cancel cooperatively first; if the task is blocked on an RPC that
-        // doesn't observe cancellation before the pool is dropped, abort
-        // as a fallback so we don't leak the task.
-        self.cancel.cancel();
-        self.handle.abort();
+/// Parse an SDK endpoint URL into `(SocketAddr, server_name)` as expected
+/// by [`inferadb_ledger_wire_transport::client::ClientConfig`].
+///
+/// Accepts `http://host:port`, `https://host:port`, or bare `host:port`.
+/// Hostname-form URLs are resolved synchronously via
+/// [`std::net::ToSocketAddrs`] so the resulting `WireClient` has a
+/// concrete `SocketAddr` to dial. UDS paths (leading `/`) error out here.
+fn parse_wire_endpoint(url: &str) -> Result<(SocketAddr, String)> {
+    if url.starts_with('/') {
+        return Err(SdkError::Config {
+            message: format!(
+                "UDS endpoint {url} is not supported on the wire transport (QUIC-only)"
+            ),
+        });
+    }
+
+    // Strip scheme.
+    let host_port =
+        url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).unwrap_or(url);
+
+    // Strip a trailing path component if present — `host:port/path` is
+    // permissible but the wire transport only consumes `host:port`.
+    let host_port = host_port.split('/').next().unwrap_or(host_port);
+
+    // Split host and port. The wire transport always requires an explicit
+    // port; URL parsing of the form `https://host` (no port) is rejected
+    // here rather than silently defaulting to a wrong-port dial.
+    let (host, _port) = host_port.rsplit_once(':').ok_or_else(|| SdkError::InvalidUrl {
+        url: url.to_owned(),
+        message: "wire endpoint must be host:port".to_owned(),
+    })?;
+
+    use std::net::ToSocketAddrs;
+    let mut addrs = host_port.to_socket_addrs().map_err(|e| SdkError::InvalidUrl {
+        url: url.to_owned(),
+        message: format!("failed to resolve {host_port}: {e}"),
+    })?;
+    let server_addr = addrs.next().ok_or_else(|| SdkError::InvalidUrl {
+        url: url.to_owned(),
+        message: format!("no socket addresses for {host_port}"),
+    })?;
+    Ok((server_addr, host.to_owned()))
+}
+
+// Manual `Debug` impl: [`WireClient`] does not implement `Debug` (it
+// holds a `quinn::Endpoint` and an internal mutex), so we project the
+// pool sizes rather than reaching into individual clients. The other
+// fields use their default `Debug` projections.
+impl std::fmt::Debug for ConnectionPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionPool")
+            .field("wire_client_count", &self.wire_clients.len())
+            .field("config", &self.config)
+            .field("dynamic_endpoints", &self.dynamic_endpoints)
+            .field("selector", &self.selector)
+            .field("circuit_breaker", &self.circuit_breaker)
+            .field("region_cache", &self.region_cache)
+            .field("vault_cache", &self.vault_cache)
+            .finish_non_exhaustive()
     }
 }
 
 impl ConnectionPool {
     /// Creates a new connection pool with the given configuration.
     ///
-    /// The pool does not establish a connection immediately; the connection
-    /// is lazily created on the first call to [`get_channel`](Self::get_channel).
+    /// The per-endpoint [`WireClient`] vec is materialized eagerly; the
+    /// QUIC + auth handshake itself is deferred to the first
+    /// [`WireClient::acquire`] inside an op. A failure during wire-client
+    /// construction (e.g. missing CA cert, unparseable endpoint URL) is
+    /// captured and surfaced from the first [`Self::cached_wire_client`]
+    /// dispatch attempt rather than from the constructor — the pool
+    /// itself remains infallible to keep test scaffolding and
+    /// [`crate::LedgerClient::new`] simple.
     #[must_use]
     pub fn new(config: ClientConfig) -> Self {
-        let circuit_breaker = config
-            .circuit_breaker()
-            .map(|cb_config| crate::circuit_breaker::CircuitBreaker::new(cb_config.clone()));
-
-        let region_cache = config.preferred_region().map(|r| {
-            let cache = Arc::new(crate::region_resolver::RegionLeaderCache::with_ttls(
-                r,
-                config.region_leader_soft_ttl(),
-                config.region_leader_hard_ttl(),
-            ));
-            cache.set_metrics(Arc::clone(config.metrics()));
-            cache
-        });
-
-        let vault_cache = Arc::new(crate::vault_resolver::VaultLeaderCache::with_capacity(
-            config.vault_cache_capacity(),
-        ));
-        vault_cache.set_metrics(Arc::clone(config.metrics()));
-
-        Self {
-            channels: Arc::new(RwLock::new(Vec::new())),
-            next_channel_idx: Arc::new(AtomicUsize::new(0)),
-            config,
-            dynamic_endpoints: Arc::new(RwLock::new(None)),
-            selector: ServerSelector::new(),
-            circuit_breaker,
-            region_cache,
-            vault_cache,
-            gateway_channel: Arc::new(RwLock::new(None)),
-            leader_watcher: Arc::new(parking_lot::Mutex::new(None)),
-        }
+        Self::with_selector(config, ServerSelector::new())
     }
 
     /// Creates a new connection pool with a custom server selector.
     ///
     /// Use this when you want to share a selector across multiple pools.
+    /// Same construction semantics as [`Self::new`].
     #[must_use]
     pub fn with_selector(config: ClientConfig, selector: ServerSelector) -> Self {
         let circuit_breaker = config
@@ -197,423 +241,59 @@ impl ConnectionPool {
         ));
         vault_cache.set_metrics(Arc::clone(config.metrics()));
 
+        // Build wire clients eagerly. A construction failure (bad TLS,
+        // unparseable endpoint) is logged at debug level and the pool
+        // falls back to an empty wire vec; dispatch sites then surface a
+        // clean `SdkError::Config` ("wire client not configured") which
+        // is far more actionable than blowing up in `ConnectionPool::new`
+        // for test fixtures that never exercise the wire path.
+        let wire_clients = match build_wire_clients(&config) {
+            Ok(clients) => clients,
+            Err(err) => {
+                tracing::debug!(
+                    %err,
+                    "wire client pool construction failed; ops will surface SdkError::Config",
+                );
+                Vec::new()
+            },
+        };
+
         Self {
-            channels: Arc::new(RwLock::new(Vec::new())),
-            next_channel_idx: Arc::new(AtomicUsize::new(0)),
+            wire_clients,
+            next_client_idx: Arc::new(AtomicUsize::new(0)),
             config,
             dynamic_endpoints: Arc::new(RwLock::new(None)),
             selector,
             circuit_breaker,
             region_cache,
             vault_cache,
-            gateway_channel: Arc::new(RwLock::new(None)),
-            leader_watcher: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
-    /// Returns a clone of the next pooled channel via round-robin, or
-    /// `None` when the pool is empty.
+    /// Returns a round-robin-selected [`Arc<WireClient>`] when the wire
+    /// pool is non-empty; `None` otherwise (e.g. wire-client construction
+    /// failed at build time, or the configured `ServerSource` is DNS/File
+    /// and the resolver hasn't run).
     ///
-    /// Uses `Ordering::Relaxed` for the cursor — a stale read that
-    /// returns the same index twice in a row across two concurrent
-    /// callers is fine; the only invariant is "every cursor value maps
-    /// to a valid index modulo `len()`".
-    fn cached_channel(&self) -> Option<Channel> {
-        let guard = self.channels.read();
-        if guard.is_empty() {
+    /// The wire pool is materialized at construction time (one
+    /// [`WireClient`] per configured endpoint, in declaration order),
+    /// so this never blocks and never lazily reconnects — the lazy
+    /// QUIC handshake lives inside [`WireClient::acquire`] and runs on
+    /// the first per-RPC call.
+    #[must_use]
+    pub fn cached_wire_client(&self) -> Option<Arc<WireClient>> {
+        if self.wire_clients.is_empty() {
             return None;
         }
-        let idx = self.next_channel_idx.fetch_add(1, Ordering::Relaxed) % guard.len();
-        Some(guard[idx].clone())
+        let idx = self.next_client_idx.fetch_add(1, Ordering::Relaxed) % self.wire_clients.len();
+        Some(Arc::clone(&self.wire_clients[idx]))
     }
 
-    /// Returns the configured pool size, clamped to >= 1.
-    fn pool_size(&self) -> usize {
-        usize::from(self.config.connection_pool_size().max(1))
-    }
-
-    /// Replaces the pooled channels with `new_channels`, dropping the
-    /// previous pool. Resets the round-robin cursor to 0.
-    fn store_pool(&self, new_channels: Vec<Channel>) {
-        let mut guard = self.channels.write();
-        *guard = new_channels;
-        self.next_channel_idx.store(0, Ordering::Relaxed);
-    }
-
-    /// Drops every pooled channel. The next [`Self::get_channel`] call
-    /// will reconnect lazily.
-    fn clear_pool(&self) {
-        let mut guard = self.channels.write();
-        if !guard.is_empty() {
-            guard.clear();
-            self.next_channel_idx.store(0, Ordering::Relaxed);
-        }
-    }
-
-    /// Establishes `pool_size` independent channels via [`Self::create_channel`].
-    ///
-    /// Connections are created sequentially — the first connect resolves
-    /// DNS / TLS for the endpoint and the rest reuse no shared state, so
-    /// running them in parallel doesn't shorten the critical path
-    /// materially. Sequential keeps error attribution clean and avoids a
-    /// burst of concurrent SYNs against the server during cold start.
-    async fn create_channel_pool(&self) -> Result<Vec<Channel>> {
-        let pool_size = self.pool_size();
-        let mut out = Vec::with_capacity(pool_size);
-        for _ in 0..pool_size {
-            out.push(self.create_channel().await?);
-        }
-        Ok(out)
-    }
-
-    /// Establishes `pool_size` independent channels to a specific
-    /// endpoint URL (used by the region-leader cache path).
-    async fn connect_to_endpoint_pool(&self, endpoint_url: &str) -> Result<Vec<Channel>> {
-        let pool_size = self.pool_size();
-        let mut out = Vec::with_capacity(pool_size);
-        for _ in 0..pool_size {
-            out.push(self.connect_to_endpoint(endpoint_url).await?);
-        }
-        Ok(out)
-    }
-
-    /// Returns a connected channel, establishing the connection if needed.
-    ///
-    /// On first call, this method establishes a connection to the configured
-    /// endpoint(s). Subsequent calls return a clone of the next pooled
-    /// channel (which shares the underlying HTTP/2 connection).
-    ///
-    /// When `connection_pool_size > 1`, each call rotates round-robin
-    /// across the pooled channels. With pool size 1 the rotation is a
-    /// no-op and behavior matches the historical single-channel path.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - No endpoints are configured
-    /// - The endpoint URL is invalid
-    /// - Connection establishment fails
-    pub async fn get_channel(&self) -> Result<Channel> {
-        // Check circuit breaker before attempting connection
-        if let Some(ref cb) = self.circuit_breaker {
-            let endpoint = self.current_endpoint();
-            cb.check(&endpoint)?;
-        }
-
-        // Region-aware routing: if preferred_region is set, use leader cache
-        if let Some(ref cache) = self.region_cache {
-            return self.get_region_channel(cache).await;
-        }
-
-        // Fast path: pool already populated.
-        if let Some(channel) = self.cached_channel() {
-            return Ok(channel);
-        }
-
-        // Slow path: need to establish connections.
-        let endpoint = self.current_endpoint();
-        let new_channels = match self.create_channel_pool().await {
-            Ok(channels) => {
-                self.config
-                    .metrics()
-                    .record_connection(&endpoint, crate::metrics::ConnectionEvent::Connected);
-                channels
-            },
-            Err(e) => {
-                self.config
-                    .metrics()
-                    .record_connection(&endpoint, crate::metrics::ConnectionEvent::Failed);
-                return Err(e);
-            },
-        };
-
-        // Store the pool. Double-check: another task may have populated it
-        // while we waited; if so, prefer the existing pool.
-        {
-            let mut guard = self.channels.write();
-            if !guard.is_empty() {
-                let idx = self.next_channel_idx.fetch_add(1, Ordering::Relaxed) % guard.len();
-                return Ok(guard[idx].clone());
-            }
-            *guard = new_channels;
-            self.next_channel_idx.store(0, Ordering::Relaxed);
-            // Hand back the first channel directly — the cursor will
-            // advance on the next caller.
-            let chan = guard[0].clone();
-            self.next_channel_idx.fetch_add(1, Ordering::Relaxed);
-            Ok(chan)
-        }
-    }
-
-    /// Creates a new channel with all configured settings applied.
-    async fn create_channel(&self) -> Result<Channel> {
-        // Use dynamic endpoints if available, otherwise derive from config's server source
-        let endpoint_url = {
-            let dynamic = self.dynamic_endpoints.read();
-            if let Some(ref endpoints) = *dynamic {
-                endpoints.first().cloned()
-            } else {
-                // Get endpoint from server source
-                match self.config.servers() {
-                    ServerSource::Static(endpoints) => endpoints.first().cloned(),
-                    ServerSource::Dns(_) | ServerSource::File(_) => {
-                        // For DNS/File sources, dynamic endpoints should be set by the resolver
-                        None
-                    },
-                }
-            }
-        };
-
-        let Some(endpoint_url) = endpoint_url else {
-            return Err(SdkError::Connection {
-                message:
-                    "No endpoints available. For DNS/File sources, ensure the resolver has run."
-                        .to_owned(),
-            });
-        };
-
-        // Unix Domain Socket — use a UDS connector instead of TCP
-        if endpoint_url.starts_with('/') {
-            return self.create_uds_channel(&endpoint_url).await;
-        }
-
-        // Parse the endpoint URL
-        let endpoint =
-            Endpoint::try_from(endpoint_url.clone()).map_err(|_| SdkError::InvalidUrl {
-                url: endpoint_url.clone(),
-                message: "Failed to parse as tonic endpoint".to_owned(),
-            })?;
-
-        // Apply connection settings (including TLS if configured)
-        let endpoint = self.configure_endpoint(endpoint)?;
-
-        // Establish the connection
-        let channel = endpoint.connect().await?;
-
-        Ok(channel)
-    }
-
-    /// Applies configuration settings to an endpoint.
-    ///
-    /// Note: Compression is configured at the service client level, not the endpoint.
-    /// The [`compression_enabled`](Self::compression_enabled) method indicates whether
-    /// compression should be applied when creating service clients.
-    fn configure_endpoint(&self, endpoint: Endpoint) -> Result<Endpoint> {
-        let endpoint = endpoint
-            .connect_timeout(self.config.connect_timeout)
-            .timeout(self.config.timeout)
-            .tcp_nodelay(true)
-            .tcp_keepalive(Some(TCP_KEEPALIVE_INTERVAL))
-            .http2_keep_alive_interval(HTTP2_KEEPALIVE_INTERVAL)
-            .keep_alive_timeout(HTTP2_KEEPALIVE_TIMEOUT)
-            .keep_alive_while_idle(true)
-            // HTTP/2 flow-control windows. Tonic 0.14 / hyper 1.x default to
-            // 64 KiB stream + connection windows; with all 256 concurrent SDK
-            // tasks sharing one underlying connection, those defaults cap
-            // throughput at ~10k ops/s for small RPCs because the connection
-            // window saturates after the first ~64 KiB and every subsequent
-            // send waits on a `WINDOW_UPDATE` round-trip. Raising both windows
-            // lets multiplexed traffic flow without per-stream stalls. The
-            // server-side equivalents live on `Http2Config` in the types crate
-            // and must be raised in lockstep — each side's window only governs
-            // its own receive direction.
-            .initial_stream_window_size(Some(self.config.http2_initial_stream_window_bytes()))
-            .initial_connection_window_size(Some(
-                self.config.http2_initial_connection_window_bytes(),
-            ));
-
-        // Apply TLS configuration if present
-        let endpoint = if let Some(ref tls_config) = self.config.tls {
-            let tls = self.build_tls_config(tls_config)?;
-            endpoint.tls_config(tls).map_err(|e| SdkError::Connection {
-                message: format!("TLS configuration error: {e}"),
-            })?
-        } else {
-            endpoint
-        };
-
-        Ok(endpoint)
-    }
-
-    /// Builds a tonic `ClientTlsConfig` from our SDK's `TlsConfig`.
-    fn build_tls_config(&self, tls: &crate::config::TlsConfig) -> Result<ClientTlsConfig> {
-        let mut tls_config = ClientTlsConfig::new();
-
-        // Add native roots if requested
-        if tls.use_native_roots() {
-            tls_config = tls_config.with_native_roots();
-        }
-
-        // Add CA certificate if provided
-        if let Some(ca_cert) = tls.ca_cert() {
-            let pem = ca_cert.to_pem();
-            let cert = Certificate::from_pem(pem);
-            tls_config = tls_config.ca_certificate(cert);
-        }
-
-        // Add client identity for mutual TLS if provided
-        if let (Some(client_cert), Some(client_key)) = (tls.client_cert(), tls.client_key()) {
-            let cert_pem = client_cert.to_pem();
-            let identity = Identity::from_pem(cert_pem, client_key);
-            tls_config = tls_config.identity(identity);
-        }
-
-        // Set domain name override if provided
-        if let Some(domain) = tls.domain_name() {
-            tls_config = tls_config.domain_name(domain);
-        }
-
-        Ok(tls_config)
-    }
-
-    /// Gets a channel to the resolved regional leader, resolving if needed.
-    ///
-    /// When a preferred region is configured, this method manages a direct
-    /// channel to that region's Raft leader. On first call (or after cache
-    /// expiry), the leader is resolved via the gateway's `ResolveRegionLeader`
-    /// RPC. If resolution fails, falls back to the gateway channel so the
-    /// server can handle routing via forwarding.
-    async fn get_region_channel(
-        &self,
-        cache: &Arc<crate::region_resolver::RegionLeaderCache>,
-    ) -> Result<Channel> {
-        let region_label = cache.region().to_string();
-        let metrics = self.config.metrics();
-        // Check if cached leader is still usable (fresh or stale-but-usable).
-        if let Some((cached, freshness)) = cache.cached_endpoint_with_freshness() {
-            metrics.leader_cache_hit(&region_label);
-            // On stale-but-usable, opportunistically trigger a background
-            // refresh — but only if the gateway channel is already warm.
-            // If it isn't, skip the refresh; the next full resolve will
-            // reinitialize it.
-            if freshness == crate::region_resolver::CacheFreshness::StaleButUsable
-                && let Some(gateway) = self.gateway_channel.read().clone()
-            {
-                metrics.region_resolve_stale_served(&region_label);
-                cache.spawn_background_refresh(gateway);
-            }
-            if let Some(channel) = self.cached_channel() {
-                return Ok(channel);
-            }
-            let new_channels = self.connect_to_endpoint_pool(cached.as_ref()).await?;
-            // Prefer the first newly-built channel for the immediate
-            // return; the pool round-robin will pick up subsequent calls.
-            let chosen = new_channels[0].clone();
-            self.store_pool(new_channels);
-            return Ok(chosen);
-        }
-
-        // Cache miss/expired — resolve via gateway
-        metrics.leader_cache_miss(&region_label);
-        let gateway = self.get_or_create_gateway_channel().await?;
-        match cache.resolve(&gateway).await {
-            Ok(endpoint) => {
-                let new_channels = self.connect_to_endpoint_pool(&endpoint).await?;
-                let chosen = new_channels[0].clone();
-                self.store_pool(new_channels);
-                Ok(chosen)
-            },
-            Err(_) => {
-                // Resolution failed — fall back to gateway
-                tracing::warn!(
-                    region = %cache.region(),
-                    "Region leader resolution failed, falling back to gateway"
-                );
-                Ok(gateway)
-            },
-        }
-    }
-
-    /// Gets or creates the gateway channel (the originally-configured endpoint).
-    ///
-    /// The gateway channel is the generic entry point (e.g. `api.inferadb.com`)
-    /// that can forward requests to the correct regional leader server-side.
-    /// It is kept alive as a fallback when direct leader resolution fails.
-    async fn get_or_create_gateway_channel(&self) -> Result<Channel> {
-        {
-            let existing = self.gateway_channel.read().clone();
-            if let Some(channel) = existing {
-                self.ensure_leader_watcher(&channel);
-                return Ok(channel);
-            }
-        }
-        // Create gateway channel using existing create_channel logic
-        let channel = self.create_channel().await?;
-        *self.gateway_channel.write() = Some(channel.clone());
-        self.ensure_leader_watcher(&channel);
-        Ok(channel)
-    }
-
-    /// Spawns the leader-watch task on first use when a region cache is
-    /// configured. No-op when no region is preferred or the task is already
-    /// running.
-    fn ensure_leader_watcher(&self, gateway: &Channel) {
-        let Some(ref cache) = self.region_cache else {
-            return;
-        };
-        let mut slot = self.leader_watcher.lock();
-        if slot.is_some() {
-            return;
-        }
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let handle = crate::region_resolver::spawn_leader_watcher(
-            Arc::clone(cache),
-            gateway.clone(),
-            Arc::clone(self.config.metrics()),
-            cancel.clone(),
-        );
-        *slot = Some(LeaderWatcherHandle { cancel, handle });
-    }
-
-    /// Connects to a specific endpoint URL with the pool's TLS and timeout settings.
-    async fn connect_to_endpoint(&self, endpoint_url: &str) -> Result<Channel> {
-        // Unix Domain Socket — use a UDS connector instead of TCP
-        if endpoint_url.starts_with('/') {
-            return self.create_uds_channel(endpoint_url).await;
-        }
-
-        let endpoint = Endpoint::try_from(endpoint_url.to_owned()).map_err(|_| {
-            SdkError::Connection { message: format!("Invalid leader endpoint: {endpoint_url}") }
-        })?;
-        let endpoint = self.configure_endpoint(endpoint)?;
-        endpoint.connect().await.map_err(|e| SdkError::Connection {
-            message: format!("Failed to connect to region leader: {e}"),
-        })
-    }
-
-    /// Creates a gRPC channel over a Unix Domain Socket.
-    ///
-    /// Uses a dummy HTTP endpoint since tonic requires a valid URI, but the
-    /// actual transport is routed through the UDS connector. Timeouts are
-    /// applied; TLS and TCP-specific settings (nodelay, keepalive) are skipped
-    /// as they do not apply to Unix sockets.
-    async fn create_uds_channel(&self, path: &str) -> Result<Channel> {
-        let path_buf = std::path::PathBuf::from(path);
-        // Tonic requires a valid URI for the endpoint, but the connector
-        // overrides the actual transport — use a placeholder address.
-        let endpoint =
-            Endpoint::try_from("http://[::]:50051").map_err(|_| SdkError::InvalidUrl {
-                url: path.to_owned(),
-                message: "Failed to create placeholder endpoint for UDS".to_owned(),
-            })?;
-        let endpoint =
-            endpoint.connect_timeout(self.config.connect_timeout).timeout(self.config.timeout);
-
-        let channel = endpoint
-            .connect_with_connector(tower::service_fn(move |_: tonic::transport::Uri| {
-                let path = path_buf.clone();
-                async move {
-                    Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(
-                        tokio::net::UnixStream::connect(&path).await?,
-                    ))
-                }
-            }))
-            .await
-            .map_err(|e| SdkError::Connection {
-                message: format!("Failed to connect to Unix socket {path}: {e}"),
-            })?;
-
-        Ok(channel)
+    /// Returns the number of pooled wire clients. Zero when no endpoints
+    /// were supplied or wire-client construction failed.
+    #[must_use]
+    pub fn wire_client_count(&self) -> usize {
+        self.wire_clients.len()
     }
 
     /// On a `NotLeader`-like error, applies the server-provided leader hint
@@ -632,9 +312,6 @@ impl ConnectionPool {
     ///
     /// When the hint carries no usable endpoint, the corresponding cache
     /// entry is invalidated instead so the next attempt cold-resolves.
-    ///
-    /// Called by the retry loop before attempting a retry so the next attempt
-    /// targets the newly-known leader without a separate resolve round-trip.
     pub fn apply_region_leader_hint_or_invalidate(&self, err: &SdkError) {
         let hint = err.server_error_details().and_then(|d| d.leader_hint());
 
@@ -646,11 +323,6 @@ impl ConnectionPool {
             let vault = inferadb_ledger_types::VaultSlug::new(vault_slug_raw);
             if h.leader_endpoint.is_some() {
                 self.vault_cache.apply_hint(org, vault, h);
-                self.clear_pool();
-                // Use a label that captures the vault-routing axis. The
-                // existing `redirect_retry` metric is keyed by region; for
-                // per-vault redirects we synthesize a region-like label
-                // when no preferred region is set.
                 let label = self
                     .region_cache
                     .as_ref()
@@ -660,7 +332,6 @@ impl ConnectionPool {
             }
             // Hint had vault context but no endpoint — purge the entry.
             self.vault_cache.invalidate(org, vault);
-            self.clear_pool();
             return;
         }
 
@@ -674,86 +345,18 @@ impl ConnectionPool {
         match hint {
             Some(ref h) if h.leader_endpoint.is_some() => {
                 cache.apply_hint(h);
-                self.clear_pool();
-                // Hint applied — a redirect occurred; record it so operators
-                // can observe redirect cost (cold-start vs. warm path).
                 self.config.metrics().redirect_retry(&cache.region().to_string());
             },
             _ => {
                 cache.invalidate();
-                self.clear_pool();
             },
         }
     }
 
     /// Returns a reference to the per-vault leader cache.
-    ///
-    /// Always present — every `ConnectionPool` carries a vault cache so
-    /// vault-scoped routing works whether or not a `preferred_region` is
-    /// configured.
     #[must_use]
     pub fn vault_cache(&self) -> &Arc<crate::vault_resolver::VaultLeaderCache> {
         &self.vault_cache
-    }
-
-    /// Selects a channel for a vault-scoped request, consulting the
-    /// per-vault leader cache first.
-    ///
-    /// Resolution order:
-    ///
-    /// 1. Vault cache hit → connect directly to the cached leader endpoint.
-    /// 2. Vault cache miss → fall through to the region-aware path (`get_channel`), which itself
-    ///    falls back to gateway resolution.
-    ///
-    /// During the gradual rollout described in the SDK CLAUDE.md, the vault
-    /// cache is empty until a `NotLeader` hint populates it. This means the
-    /// first vault-scoped request still goes through the region path; the
-    /// second and subsequent requests benefit from the cached vault leader.
-    ///
-    /// The cache is keyed on external `OrganizationSlug` / `VaultSlug` —
-    /// the identifiers the SDK actually has at hand — so call sites pass
-    /// slugs directly without any translation.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same error classes as [`Self::get_channel`]: connection,
-    /// circuit-open, configuration, and transport errors propagate directly.
-    pub async fn select_for_vault(
-        &self,
-        organization: inferadb_ledger_types::OrganizationSlug,
-        vault: inferadb_ledger_types::VaultSlug,
-    ) -> Result<Channel> {
-        // Check circuit breaker before doing anything.
-        if let Some(ref cb) = self.circuit_breaker {
-            let endpoint = self.current_endpoint();
-            cb.check(&endpoint)?;
-        }
-
-        if let Some(endpoint) = self.vault_cache.cached_endpoint(organization, vault) {
-            // Reuse a pooled channel when its endpoint matches the vault
-            // leader. The pool is shared across vault calls; if a
-            // different vault routed to a different endpoint last, we
-            // need fresh connections (the cache will replace the pool
-            // entirely on the redirect path).
-            if self.current_endpoint() == endpoint.as_ref()
-                && let Some(channel) = self.cached_channel()
-            {
-                return Ok(channel);
-            }
-            // Endpoint mismatch — connect a one-off channel for this
-            // request. We deliberately do NOT replace `self.channels`
-            // here: vault-leader endpoints diverge per-vault under the
-            // per-vault consensus model, so caching them in the
-            // round-robin pool would thrash the pool when fan-out
-            // touches many vaults. The leader cache itself (and the
-            // gateway-resolution path) populate the pool when it's the
-            // right thing to do.
-            let channel = self.connect_to_endpoint(endpoint.as_ref()).await?;
-            return Ok(channel);
-        }
-
-        // Cache miss — fall through to the existing region/gateway path.
-        self.get_channel().await
     }
 
     /// Returns the currently cached region leader endpoint, if any.
@@ -784,7 +387,10 @@ impl ConnectionPool {
 
     /// Returns whether compression is enabled for this connection.
     ///
-    /// When true, service clients should be configured with gzip compression.
+    /// The wire transport does not currently apply payload compression at
+    /// the framing layer, but consumers (e.g. discovery service) read this
+    /// flag to decide whether to set per-RPC compression hints — preserving
+    /// the historical surface so existing consumers compile unchanged.
     #[must_use]
     pub fn compression_enabled(&self) -> bool {
         self.config.compression
@@ -796,19 +402,18 @@ impl ConnectionPool {
         &self.config
     }
 
-    /// Clears every pooled channel, forcing reconnection on next use.
+    /// Records a disconnect metric event for the current endpoint.
     ///
-    /// This can be useful after network changes or when the server
-    /// indicates the connection should be reset.
+    /// `WireClient` reconnects internally on demand, so this is mainly a
+    /// recovery hook for callers that want to surface a disconnect signal
+    /// (e.g. discovery service after refreshing endpoints). The
+    /// per-endpoint `Self::wire_clients` vec is left untouched — those
+    /// handles are immutable for the pool's lifetime.
     pub fn reset(&self) {
-        let was_populated = !self.channels.read().is_empty();
-        if was_populated {
-            self.clear_pool();
-            self.config.metrics().record_connection(
-                &self.current_endpoint(),
-                crate::metrics::ConnectionEvent::Disconnected,
-            );
-        }
+        self.config.metrics().record_connection(
+            &self.current_endpoint(),
+            crate::metrics::ConnectionEvent::Disconnected,
+        );
     }
 
     /// Updates the endpoints used for connections.
@@ -817,12 +422,10 @@ impl ConnectionPool {
     /// list based on discovered peers. The new endpoints take precedence over
     /// the endpoints in the original configuration.
     ///
-    /// Note: This does not automatically reconnect. Call [`reset()`](Self::reset)
-    /// after updating endpoints to force reconnection on next use.
-    ///
-    /// # Arguments
-    ///
-    /// * `endpoints` - New endpoint URLs to use for connections
+    /// Note: This does not automatically reconnect or rebuild the wire
+    /// pool. Wire-client materialization happens at pool construction
+    /// only; updating endpoints affects metric labels and active-endpoint
+    /// reporting.
     pub fn update_endpoints(&self, endpoints: Vec<String>) {
         let mut guard = self.dynamic_endpoints.write();
         *guard = Some(endpoints);
@@ -988,15 +591,6 @@ mod tests {
     }
 
     #[test]
-    fn pool_creation_does_not_connect() {
-        let config = test_config();
-        let pool = ConnectionPool::new(config);
-
-        // Channel pool should be empty initially (lazy connection)
-        assert!(pool.channels.read().is_empty(), "pool should be empty before first use");
-    }
-
-    #[test]
     fn pool_config_accessor_returns_config() {
         let config = test_config();
         let pool = ConnectionPool::new(config.clone());
@@ -1016,55 +610,12 @@ mod tests {
     }
 
     #[test]
-    fn reset_clears_cached_channel() {
-        let config = test_config();
-        let pool = ConnectionPool::new(config);
-
-        // Initially empty
-        assert!(pool.channels.read().is_empty());
-
-        // Reset on empty pool is a no-op
-        pool.reset();
-        assert!(pool.channels.read().is_empty());
-    }
-
-    #[test]
     fn pool_stores_custom_timeouts() {
         let config = test_config_with_custom_timeouts();
         let pool = ConnectionPool::new(config);
 
         assert_eq!(pool.config().timeout(), Duration::from_secs(30));
         assert_eq!(pool.config().connect_timeout(), Duration::from_secs(10));
-    }
-
-    #[tokio::test]
-    async fn get_channel_fails_with_unreachable_endpoint() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:1"])) // Port 1 is unlikely to have a service
-            .client_id("test-client")
-            .connect_timeout(Duration::from_millis(100)) // Short timeout
-            .build()
-            .expect("valid config");
-
-        let pool = ConnectionPool::new(config);
-        let result = pool.get_channel().await;
-
-        // Connection should fail (timeout or connection refused)
-        assert!(result.is_err(), "expected connection to fail");
-    }
-
-    #[tokio::test]
-    async fn channel_is_cached_after_first_get() {
-        // This test would require a mock server, so we just verify the caching logic
-        // by checking that the channel slot is updated (we can't actually connect)
-        let config = test_config();
-        let pool = ConnectionPool::new(config);
-
-        // Before any connection attempt, the channel pool is empty
-        assert!(pool.channels.read().is_empty());
-
-        // Note: We can't test successful caching without a real/mock server
-        // The get_channel call would fail, but the caching logic is correct
     }
 
     #[test]
@@ -1180,21 +731,6 @@ mod tests {
     }
 
     #[test]
-    fn update_endpoints_then_reset_clears_channel() {
-        let config = test_config();
-        let pool = ConnectionPool::new(config);
-
-        pool.update_endpoints(vec!["http://10.0.0.1:5000".to_string()]);
-        assert_eq!(pool.active_endpoints(), vec!["http://10.0.0.1:5000".to_string()]);
-
-        // Reset clears the channel pool but keeps dynamic endpoints
-        pool.reset();
-        assert!(pool.channels.read().is_empty());
-        // Dynamic endpoints are still set
-        assert_eq!(pool.active_endpoints(), vec!["http://10.0.0.1:5000".to_string()]);
-    }
-
-    #[test]
     fn pool_clone_shares_state() {
         let config = test_config();
         let pool = ConnectionPool::new(config);
@@ -1203,64 +739,6 @@ mod tests {
         pool.update_endpoints(vec!["http://10.0.0.1:5000".to_string()]);
         // Cloned pool should see the same dynamic endpoints (Arc shared)
         assert_eq!(pool2.active_endpoints(), vec!["http://10.0.0.1:5000".to_string()]);
-    }
-
-    /// `cached_channel` returns `None` when the pool is empty and rotates
-    /// across pooled entries when populated. The cursor wraps modulo
-    /// `len()` and is independent of the original insertion order.
-    #[tokio::test]
-    async fn cached_channel_round_robins_across_pooled_entries() {
-        // Synthesize three lazy-connect channels — they never actually
-        // connect, but `Channel` is `Clone` and the pool only inspects
-        // identity via the cursor index.
-        let chans: Vec<Channel> =
-            (0..3).map(|_| Endpoint::from_static("http://127.0.0.1:1").connect_lazy()).collect();
-
-        let config = test_config();
-        let pool = ConnectionPool::new(config);
-
-        // Empty pool → None.
-        assert!(pool.cached_channel().is_none());
-
-        pool.store_pool(chans.clone());
-
-        // Eight calls over a 3-entry pool: cursor walks 0,1,2,0,1,2,0,1.
-        // We can't compare Channel identity directly (no PartialEq), but
-        // we can check the cursor advanced and stayed within bounds by
-        // observing the AtomicUsize directly.
-        for _ in 0..8 {
-            let _ = pool.cached_channel().expect("pool populated");
-        }
-        // After 8 fetches starting from cursor=0, the cursor should be 8.
-        assert_eq!(
-            pool.next_channel_idx.load(Ordering::Relaxed),
-            8,
-            "round-robin cursor should advance once per fetch"
-        );
-
-        // clear_pool resets state.
-        pool.clear_pool();
-        assert!(pool.cached_channel().is_none());
-        assert_eq!(pool.next_channel_idx.load(Ordering::Relaxed), 0);
-    }
-
-    /// `pool_size()` reads from `ClientConfig.connection_pool_size` and
-    /// clamps zero (which the builder rejects, but the field is `u8`) to
-    /// 1.
-    #[test]
-    fn pool_size_reflects_config() {
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://localhost:50051"]))
-            .client_id("test-client")
-            .connection_pool_size(4)
-            .build()
-            .expect("valid config");
-        let pool = ConnectionPool::new(config);
-        assert_eq!(pool.pool_size(), 4);
-
-        let default_config = test_config();
-        let default_pool = ConnectionPool::new(default_config);
-        assert_eq!(default_pool.pool_size(), 1);
     }
 
     /// `connection_pool_size = 0` is rejected at config build time.
@@ -1275,21 +753,9 @@ mod tests {
     }
 
     #[test]
-    fn multiple_reset_calls_are_safe() {
-        let config = test_config();
-        let pool = ConnectionPool::new(config);
-
-        // Multiple resets should be safe even with no channel
-        pool.reset();
-        pool.reset();
-        pool.reset();
-        assert!(pool.channels.read().is_empty());
-    }
-
-    #[test]
     fn apply_region_leader_hint_or_invalidate_applies_hint_when_present() {
         use inferadb_ledger_types::Region;
-        use tonic::Code;
+        use inferadb_ledger_wire::ErrorCode as Code;
 
         use crate::error::ServerErrorDetails;
 
@@ -1311,7 +777,7 @@ mod tests {
             suggested_action: None,
         };
         let err = SdkError::Rpc {
-            code: Code::Unavailable,
+            code: Code::StaleRouting,
             message: "not leader".into(),
             request_id: None,
             trace_id: None,
@@ -1330,7 +796,7 @@ mod tests {
     #[test]
     fn apply_region_leader_hint_or_invalidate_falls_back_to_invalidate() {
         use inferadb_ledger_types::Region;
-        use tonic::Code;
+        use inferadb_ledger_wire::ErrorCode as Code;
 
         let config = test_config_with_region(Region::US_EAST_VA);
         let pool = ConnectionPool::new(config);
@@ -1341,7 +807,7 @@ mod tests {
 
         // SdkError without hint (error_details = None).
         let err = SdkError::Rpc {
-            code: Code::Unavailable,
+            code: Code::StaleRouting,
             message: "no hint".into(),
             request_id: None,
             trace_id: None,
@@ -1361,7 +827,7 @@ mod tests {
         };
 
         use inferadb_ledger_types::Region;
-        use tonic::Code;
+        use inferadb_ledger_wire::ErrorCode as Code;
 
         use crate::{error::ServerErrorDetails, metrics::SdkMetrics};
 
@@ -1399,7 +865,7 @@ mod tests {
             suggested_action: None,
         };
         let err = SdkError::Rpc {
-            code: Code::Unavailable,
+            code: Code::StaleRouting,
             message: "not leader".into(),
             request_id: None,
             trace_id: None,
@@ -1423,7 +889,7 @@ mod tests {
         };
 
         use inferadb_ledger_types::Region;
-        use tonic::Code;
+        use inferadb_ledger_wire::ErrorCode as Code;
 
         use crate::metrics::SdkMetrics;
 
@@ -1452,7 +918,7 @@ mod tests {
 
         // Hintless error → invalidate path, must NOT fire redirect_retry.
         let err = SdkError::Rpc {
-            code: Code::Unavailable,
+            code: Code::StaleRouting,
             message: "no hint".into(),
             request_id: None,
             trace_id: None,
@@ -1470,14 +936,14 @@ mod tests {
 
     #[test]
     fn apply_region_leader_hint_or_invalidate_noop_when_no_region_cache() {
-        use tonic::Code;
+        use inferadb_ledger_wire::ErrorCode as Code;
 
         // Pool without a preferred region has region_cache = None.
         let config = test_config_without_region();
         let pool = ConnectionPool::new(config);
 
         let err = SdkError::Rpc {
-            code: Code::Unavailable,
+            code: Code::StaleRouting,
             message: "x".into(),
             request_id: None,
             trace_id: None,
@@ -1506,7 +972,7 @@ mod tests {
     #[test]
     fn apply_hint_with_vault_slug_routes_to_vault_cache() {
         use inferadb_ledger_types::{OrganizationSlug, Region, VaultSlug};
-        use tonic::Code;
+        use inferadb_ledger_wire::ErrorCode as Code;
 
         use crate::error::ServerErrorDetails;
 
@@ -1515,9 +981,7 @@ mod tests {
         let pool = ConnectionPool::new(config);
 
         // Hint carries leader_organization_slug + leader_vault_slug — must
-        // route to the vault cache, NOT the region cache. The legacy
-        // leader_shard / leader_vault keys are present too (informational);
-        // dispatch is driven by the slug pair.
+        // route to the vault cache, NOT the region cache.
         let details = ServerErrorDetails {
             error_code: "2000".into(),
             is_retryable: true,
@@ -1534,7 +998,7 @@ mod tests {
             suggested_action: None,
         };
         let err = SdkError::Rpc {
-            code: Code::Unavailable,
+            code: Code::StaleRouting,
             message: "not leader".into(),
             request_id: None,
             trace_id: None,
@@ -1562,14 +1026,13 @@ mod tests {
     #[test]
     fn apply_hint_with_only_legacy_vault_id_falls_through_to_region_cache() {
         use inferadb_ledger_types::{OrganizationSlug, Region, VaultSlug};
-        use tonic::Code;
+        use inferadb_ledger_wire::ErrorCode as Code;
 
         use crate::error::ServerErrorDetails;
 
         // Legacy server compat: hint carries leader_vault (internal id)
-        // but no leader_vault_slug. The SDK's VaultLeaderCache is keyed on
-        // slugs, so we cannot populate from an id-only hint. The retry must
-        // fall through to the region path instead.
+        // but no leader_vault_slug. The retry must fall through to the
+        // region path instead.
         let config = test_config_with_region(Region::US_EAST_VA);
         let pool = ConnectionPool::new(config);
 
@@ -1588,7 +1051,7 @@ mod tests {
             suggested_action: None,
         };
         let err = SdkError::Rpc {
-            code: Code::Unavailable,
+            code: Code::StaleRouting,
             message: "not leader".into(),
             request_id: None,
             trace_id: None,
@@ -1613,7 +1076,7 @@ mod tests {
     #[test]
     fn apply_hint_without_vault_id_routes_to_region_cache() {
         use inferadb_ledger_types::Region;
-        use tonic::Code;
+        use inferadb_ledger_wire::ErrorCode as Code;
 
         use crate::error::ServerErrorDetails;
 
@@ -1633,7 +1096,7 @@ mod tests {
             suggested_action: None,
         };
         let err = SdkError::Rpc {
-            code: Code::Unavailable,
+            code: Code::StaleRouting,
             message: "not leader".into(),
             request_id: None,
             trace_id: None,
@@ -1653,7 +1116,7 @@ mod tests {
     #[test]
     fn vault_hint_term_gating_drops_older_hint() {
         use inferadb_ledger_types::{OrganizationSlug, Region, VaultSlug};
-        use tonic::Code;
+        use inferadb_ledger_wire::ErrorCode as Code;
 
         use crate::error::ServerErrorDetails;
 
@@ -1676,7 +1139,7 @@ mod tests {
                 suggested_action: None,
             };
             SdkError::Rpc {
-                code: Code::Unavailable,
+                code: Code::StaleRouting,
                 message: "not leader".into(),
                 request_id: None,
                 trace_id: None,
@@ -1702,7 +1165,7 @@ mod tests {
     #[test]
     fn vault_hint_works_without_preferred_region() {
         use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
-        use tonic::Code;
+        use inferadb_ledger_wire::ErrorCode as Code;
 
         use crate::error::ServerErrorDetails;
 
@@ -1725,7 +1188,7 @@ mod tests {
             suggested_action: None,
         };
         let err = SdkError::Rpc {
-            code: Code::Unavailable,
+            code: Code::StaleRouting,
             message: "not leader".into(),
             request_id: None,
             trace_id: None,
@@ -1745,7 +1208,7 @@ mod tests {
     #[test]
     fn vault_hint_without_endpoint_invalidates_entry() {
         use inferadb_ledger_types::{OrganizationSlug, Region, VaultSlug};
-        use tonic::Code;
+        use inferadb_ledger_wire::ErrorCode as Code;
 
         use crate::error::ServerErrorDetails;
 
@@ -1768,7 +1231,7 @@ mod tests {
             suggested_action: None,
         };
         pool.apply_region_leader_hint_or_invalidate(&SdkError::Rpc {
-            code: Code::Unavailable,
+            code: Code::StaleRouting,
             message: "x".into(),
             request_id: None,
             trace_id: None,
@@ -1790,7 +1253,7 @@ mod tests {
             suggested_action: None,
         };
         pool.apply_region_leader_hint_or_invalidate(&SdkError::Rpc {
-            code: Code::Unavailable,
+            code: Code::StaleRouting,
             message: "x".into(),
             request_id: None,
             trace_id: None,
@@ -1801,29 +1264,6 @@ mod tests {
             pool.vault_cache().lookup(OrganizationSlug::new(1), VaultSlug::new(1)).is_none(),
             "endpoint-less vault hint must invalidate the entry",
         );
-    }
-
-    #[test]
-    fn select_for_vault_falls_through_on_cache_miss() {
-        use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
-
-        // No preferred region, no preseeded vault cache, dummy endpoint.
-        // We can't await connect successfully, but the call must reach the
-        // fallback path without panicking — use an unreachable endpoint
-        // and expect a Connection or Timeout error rather than success.
-        let config = ClientConfig::builder()
-            .servers(ServerSource::from_static(["http://127.0.0.1:1"]))
-            .client_id("test-client")
-            .connect_timeout(Duration::from_millis(50))
-            .build()
-            .expect("valid config");
-        let pool = ConnectionPool::new(config);
-
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        rt.block_on(async {
-            let result = pool.select_for_vault(OrganizationSlug::new(1), VaultSlug::new(1)).await;
-            assert!(result.is_err(), "fallback to unreachable endpoint should fail");
-        });
     }
 
     #[test]
@@ -1849,5 +1289,35 @@ mod tests {
             .expect("valid config");
         let pool = ConnectionPool::new(config);
         assert_eq!(pool.vault_cache().capacity(), 42);
+    }
+
+    /// `parse_wire_endpoint` produces a valid `(SocketAddr, hostname)` for
+    /// loopback URLs (which `ToSocketAddrs` can resolve synchronously).
+    #[test]
+    fn parse_wire_endpoint_loopback() {
+        let (addr, name) = parse_wire_endpoint("http://127.0.0.1:50051").expect("parses");
+        assert_eq!(addr.port(), 50051);
+        assert!(addr.ip().is_loopback());
+        assert_eq!(name, "127.0.0.1");
+    }
+
+    /// UDS-style URL is rejected with a clear error.
+    #[test]
+    fn parse_wire_endpoint_rejects_uds() {
+        let err = parse_wire_endpoint("/tmp/ledger.sock").expect_err("UDS must error");
+        match err {
+            SdkError::Config { message } => assert!(message.contains("UDS")),
+            other => panic!("expected Config error, got {other:?}"),
+        }
+    }
+
+    /// Missing port surfaces a parse-style InvalidUrl.
+    #[test]
+    fn parse_wire_endpoint_rejects_missing_port() {
+        let err = parse_wire_endpoint("http://example.com").expect_err("missing port");
+        match err {
+            SdkError::InvalidUrl { .. } => {},
+            other => panic!("expected InvalidUrl, got {other:?}"),
+        }
     }
 }

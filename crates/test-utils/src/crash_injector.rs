@@ -1,8 +1,30 @@
 //! Crash injection utilities for testing crash recovery.
 //!
-//! Provides a [`CrashInjector`] that tracks crash points during operations and
-//! triggers simulated crashes at configured points. Used to verify crash safety
-//! of the dual-slot commit protocol and other durability guarantees.
+//! Provides a [`CrashInjector`] that counts I/O hook calls during a B+ tree
+//! commit and signals the caller to abort at a precise point in the
+//! dual-slot commit protocol. The caller is responsible for acting on the
+//! signal (typically by dropping the database handle without flushing), so no
+//! `unsafe` or `panic!` is required in production code paths.
+//!
+//! # Usage pattern
+//!
+//! ```no_run
+//! use std::sync::Arc;
+//! use inferadb_ledger_test_utils::{CrashInjector, CrashPoint};
+//!
+//! let injector = CrashInjector::new(CrashPoint::BeforeFirstSync);
+//!
+//! // Perform setup writes while disarmed, then arm before the target commit.
+//! injector.arm();
+//!
+//! // In the I/O hook wired into the store backend:
+//! if injector.on_sync() {
+//!     // Simulate crash: drop DB handle, skip flush.
+//!     return;
+//! }
+//!
+//! assert!(injector.has_crashed());
+//! ```
 //!
 //! # Crash Points
 //!
@@ -15,7 +37,9 @@
 //!          BeforeFirstSync     AfterFirstSync  DuringGodByteFlip  AfterSecondSync
 //! ```
 //!
-//! Each crash point represents a different partial state that recovery must handle.
+//! Each crash point produces a different on-disk partial state that recovery
+//! must handle correctly. See each [`CrashPoint`] variant for the expected
+//! recovery behavior.
 
 use std::sync::{
     Arc,
@@ -66,13 +90,18 @@ pub enum CrashPoint {
 
 /// Tracks crash injection state for deterministic crash simulation.
 ///
-/// The injector counts sync operations and triggers a simulated crash
-/// when the configured crash point is reached. This allows tests to
-/// precisely control where in the commit sequence a "crash" occurs.
+/// Wire an `Arc<CrashInjector>` into the B+ tree store backend's I/O hooks
+/// (`on_sync`, `on_header_write`, `on_page_write`). The injector counts hook
+/// invocations and signals the caller to abort when the configured
+/// [`CrashPoint`] is reached. Call [`CrashInjector::arm`] immediately before
+/// the write under test; leave disarmed during setup to avoid interference.
+///
+/// After the crash signal fires, [`CrashInjector::has_crashed`] returns `true`
+/// and all further hook calls are no-ops.
 ///
 /// # Thread Safety
 ///
-/// All state is atomic, making `CrashInjector` safe to share across threads.
+/// All state is atomic; `Arc<CrashInjector>` is safe to share across threads.
 #[derive(Debug)]
 pub struct CrashInjector {
     /// The crash point to trigger.

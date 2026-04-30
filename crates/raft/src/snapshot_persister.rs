@@ -1,6 +1,6 @@
 //! Snapshot persistence — atomic write, encryption envelope, retention.
 //!
-//! Stage 2 of the snapshot install path. The persister consumes the in-memory
+//! Consumes the in-memory
 //! snapshot file produced by
 //! [`LedgerSnapshotBuilder::build_snapshot`](crate::log_storage::LedgerSnapshotBuilder::build_snapshot),
 //! wraps the LSNP-v2 plaintext bytes in a whole-file AES-256-GCM envelope
@@ -21,8 +21,8 @@
 //!
 //! The envelope is the **outermost** layer — `[nonce(12)][ciphertext+tag]`.
 //! The plaintext under the envelope is the LSNP-v2 file produced by the
-//! builder, including its own SHA-256 checksum trailer. Stage 4's receiver
-//! install decrypts the envelope first, then runs
+//! builder, including its own SHA-256 checksum trailer. The follower-side
+//! installer (see [`crate::snapshot_installer`]) decrypts the envelope first, then runs
 //! [`SnapshotReader::verify_checksum`](crate::snapshot::SnapshotReader::verify_checksum)
 //! on the recovered plaintext. When [`SnapshotKeyProvider::snapshot_key`]
 //! returns `None` the persister writes the plaintext file unwrapped — only
@@ -79,17 +79,12 @@ const SNAPSHOT_FILE_SUFFIX: &str = ".snap";
 /// Suffix applied to in-progress snapshot writes before the atomic rename.
 const SNAPSHOT_TEMP_SUFFIX: &str = ".tmp";
 
-/// Suffix applied to staged snapshot files received from the leader during
-/// Stage 3 wire transfer. Distinguishes incoming-from-leader files from the
-/// `*.snap` files written by [`SnapshotPersister::persist`] on the local
-/// node, so Stage 4's installer can find streamed files without confusing
-/// them for locally produced snapshots.
+/// Suffix applied to staged snapshot files received from the leader.
+///
+/// Distinguishes incoming-from-leader files from the `*.snap` files written by
+/// [`SnapshotPersister::persist`] on the local node, so the installer can find
+/// streamed files without confusing them for locally produced snapshots.
 const SNAPSHOT_STAGED_SUFFIX: &str = ".snap.staged";
-
-/// Suffix applied to in-progress staged-snapshot writes before the atomic
-/// rename to `*.snap.staged`. The receiver appends data chunks here and
-/// renames in place when the footer's CRC validates.
-const SNAPSHOT_STAGED_TEMP_SUFFIX: &str = ".snap.staging";
 
 /// Persisted snapshot metadata returned from [`SnapshotPersister::persist`]
 /// and the listing helpers.
@@ -123,8 +118,8 @@ pub struct PersistedSnapshotMeta {
 /// Output of [`SnapshotPersister::load`].
 ///
 /// Carries the recovered LSNP-v2 plaintext bytes (the persister has already
-/// stripped the encryption envelope when one was present). Stage 4's receiver
-/// install consumes this via
+/// stripped the encryption envelope when one was present). The follower-side
+/// installer (see [`crate::snapshot_installer`]) consumes this via
 /// [`SnapshotReader`](crate::snapshot::SnapshotReader).
 #[derive(Debug)]
 pub struct DecryptedSnapshot {
@@ -134,13 +129,12 @@ pub struct DecryptedSnapshot {
     pub meta: PersistedSnapshotMeta,
 }
 
-/// Metadata for a snapshot file staged by the receiver-side handler during
-/// Stage 3 wire transfer.
+/// Metadata for a snapshot file staged by the receiver-side streaming handler.
 ///
 /// Staged files live in the same per-scope directory as locally persisted
 /// snapshots but use the `.snap.staged` suffix so they don't intermix with
-/// `*.snap` files. Stage 4's install path consumes these via
-/// [`SnapshotPersister::list_staged`].
+/// `*.snap` files. The installer (see [`crate::snapshot_installer`]) consumes
+/// these via [`SnapshotPersister::list_staged`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedSnapshotMeta {
     /// The snapshot's scope (org or vault).
@@ -153,9 +147,10 @@ pub struct StagedSnapshotMeta {
     /// Size of the staged file in bytes (encrypted envelope intact —
     /// receiver-side install decrypts on consumption).
     pub size_bytes: u64,
-    /// Absolute path to the staged file. Stage 4 reads this, decrypts via
-    /// the [`SnapshotKeyProvider`], runs the LSNP-v2 verifier, and installs
-    /// via [`RaftLogStore::install_snapshot`](crate::log_storage::RaftLogStore::install_snapshot).
+    /// Absolute path to the staged file. The follower-side installer reads this,
+    /// decrypts via the [`SnapshotKeyProvider`], runs the LSNP-v2 verifier, and
+    /// installs via
+    /// [`RaftLogStore::install_snapshot`](crate::log_storage::RaftLogStore::install_snapshot).
     pub path: PathBuf,
 }
 
@@ -270,10 +265,9 @@ impl SnapshotPersister {
         }
     }
 
-    /// Returns the per-scope snapshot key provider configured at
-    /// construction.
+    /// Returns the per-scope snapshot key provider configured at construction.
     ///
-    /// Stage 4's installer uses this to decrypt staged snapshot envelopes
+    /// The follower-side installer uses this to decrypt staged snapshot envelopes
     /// before passing the recovered LSNP-v2 plaintext to
     /// [`RaftLogStore::install_snapshot`](crate::log_storage::RaftLogStore::install_snapshot).
     pub fn snapshot_key_provider(&self) -> &Arc<dyn SnapshotKeyProvider> {
@@ -436,10 +430,10 @@ impl SnapshotPersister {
                 size_bytes: metadata.len(),
                 path,
                 // Listing does not crack the file open; encrypted-or-not is
-                // unknown without inspecting the bytes. Stage 4's receiver
-                // install resolves this by attempting decrypt with the
-                // scope's key — a `None` key + ciphertext-shaped file is
-                // a configuration error surfaced there, not here.
+                // unknown without inspecting the bytes. The installer resolves
+                // this by attempting decrypt with the scope's key — a `None`
+                // key + ciphertext-shaped file is a configuration error
+                // surfaced there, not here.
                 encrypted: self
                     .snapshot_key_provider
                     .snapshot_key(&region, scope.organization_id(), scope.vault_id())
@@ -556,8 +550,8 @@ impl SnapshotPersister {
     ///
     /// Unlike [`Self::load`], this method does NOT decrypt — the wire
     /// protocol carries the at-rest envelope and the follower decrypts on
-    /// install (Stage 4). Skipping decrypt here keeps leader-side cost
-    /// dominated by the streaming I/O rather than per-snapshot decrypt.
+    /// install (see [`crate::snapshot_installer`]). Skipping decrypt here keeps
+    /// leader-side cost dominated by streaming I/O rather than per-snapshot decrypt.
     ///
     /// # Errors
     ///
@@ -593,49 +587,19 @@ impl SnapshotPersister {
     /// Returns the staging path the receiver writes to for a streamed
     /// snapshot at `(region, scope, index)`.
     ///
-    /// Stage 3 receiver-side: the staging file uses the `.snap.staged`
-    /// suffix to keep streamed files separate from locally persisted
-    /// `*.snap` files. Stage 4 consumes via [`Self::list_staged`].
+    /// The staging file uses the `.snap.staged` suffix to keep streamed files
+    /// separate from locally persisted `*.snap` files. The installer
+    /// (see [`crate::snapshot_installer`]) discovers them via [`Self::list_staged`].
     pub(crate) fn staged_path(&self, region: Region, scope: SnapshotScope, index: u64) -> PathBuf {
         let dir = self.scope_dir(region, scope);
         staged_snapshot_path(&dir, index)
     }
 
-    /// Returns the temp path the receiver writes data chunks into before
-    /// the footer-validated atomic rename to the `.snap.staged` file.
-    pub(crate) fn staging_temp_path(
-        &self,
-        region: Region,
-        scope: SnapshotScope,
-        leader_term: u64,
-        index: u64,
-    ) -> PathBuf {
-        let dir = self.scope_dir(region, scope);
-        staging_temp_path(&dir, leader_term, index)
-    }
-
-    /// Ensures the staging directory exists for `(region, scope)`.
+    /// Lists staged snapshots for `(region, scope)`, sorted ascending by `index`.
     ///
-    /// Receiver-side helper: must be called before opening the temp file,
-    /// since the per-vault subdirectory may not exist on a fresh node that
-    /// has never persisted a local snapshot for the scope.
-    pub(crate) async fn ensure_staging_dir(
-        &self,
-        region: Region,
-        scope: SnapshotScope,
-    ) -> Result<PathBuf, PersistError> {
-        let dir = self.scope_dir(region, scope);
-        ensure_dir(&dir).await?;
-        Ok(dir)
-    }
-
-    /// Lists staged snapshots for `(region, scope)`, sorted ascending by
-    /// `index`. Returns an empty `Vec` when the scope's directory does not
-    /// exist or contains no staged files.
-    ///
-    /// Stage 4's install path discovers streamed snapshots via this
-    /// listing. Stage 3 (this dispatch) only writes them; consumption is
-    /// out of scope.
+    /// Returns an empty `Vec` when the scope's directory does not exist or contains
+    /// no staged files. The follower-side installer (see [`crate::snapshot_installer`])
+    /// discovers streamed snapshots via this listing.
     ///
     /// # Errors
     ///
@@ -686,9 +650,10 @@ impl SnapshotPersister {
         Ok(metas)
     }
 
-    /// Removes a staged snapshot file. Used by Stage 4's installer after
-    /// successfully consuming a staged file, and by the receiver's failure
-    /// path when the CRC footer rejects the stream.
+    /// Removes a staged snapshot file.
+    ///
+    /// Called by the installer after successfully consuming a staged file, and
+    /// by the receiver's failure path when the CRC footer rejects the stream.
     ///
     /// Returns `Ok(())` whether the file existed or not — this is a
     /// best-effort cleanup helper.
@@ -800,19 +765,6 @@ fn staged_snapshot_path(dir: &Path, index: u64) -> PathBuf {
         index,
         width = SNAPSHOT_INDEX_PAD_WIDTH,
         suffix = SNAPSHOT_STAGED_SUFFIX,
-    ))
-}
-
-/// Builds the in-progress staging temp path. Carries `leader_term` so two
-/// overlapping streams from different leaders cannot collide on the same
-/// temp file (they would still race on the final `.snap.staged`, but only
-/// one rename wins; the loser deletes its own temp).
-fn staging_temp_path(dir: &Path, leader_term: u64, index: u64) -> PathBuf {
-    dir.join(format!(
-        "staging-{leader_term:020}-{:0width$}{suffix}",
-        index,
-        width = SNAPSHOT_INDEX_PAD_WIDTH,
-        suffix = SNAPSHOT_STAGED_TEMP_SUFFIX,
     ))
 }
 
@@ -1229,16 +1181,13 @@ mod tests {
         let persister = make_persister(dir.path(), Arc::new(NoopSnapshotKeyProvider), 100);
         let scope = org_scope();
         let staged = persister.staged_path(TEST_REGION, scope, 42);
-        let staging_temp = persister.staging_temp_path(TEST_REGION, scope, 7, 42);
         // Staged final files end in `.snap.staged` to keep them
-        // distinct from `*.snap` files written by `persist`.
+        // distinct from `*.snap` files written by `persist`. The wire
+        // transport's snapshot receiver writes its in-progress temp file
+        // with a `.partial` suffix (see
+        // `crates/wire-transport/src/snapshot_stream.rs`), which is
+        // also disjoint from `.snap.staged`.
         assert!(staged.to_string_lossy().ends_with(".snap.staged"));
-        assert!(staging_temp.to_string_lossy().ends_with(".snap.staging"));
-        // The staging temp embeds the leader_term + index so concurrent
-        // streams from different leaders cannot collide on a single
-        // temp file.
-        assert!(staging_temp.to_string_lossy().contains("00000000000000000007-"));
-        assert!(staging_temp.to_string_lossy().contains("00000000000000000042"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

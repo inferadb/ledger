@@ -1,20 +1,23 @@
-//! SDK-specific error types with recovery context.
+//! Error types for SDK operations.
 //!
-//! Provides a two-tier error model:
-//! - **Transport errors**: Connection failures, timeouts, gRPC status codes
-//! - **Domain errors**: Idempotency errors, CAS failures
+//! [`SdkError`] is the single error type returned by all SDK operations.
+//! Use [`SdkError::is_retryable`] to decide whether to retry an operation,
+//! and [`SdkError::server_error_details`] to access structured error context
+//! decoded from the wire protocol's error frame.
 //!
-//! Errors include retryability classification and recovery context.
+//! See the [`SdkError`] recovery table for a per-variant breakdown of
+//! retryability and recommended handling.
 
 use inferadb_ledger_types::Region;
-use tonic::Code;
+use inferadb_ledger_wire::ErrorCode;
+use inferadb_ledger_wire_transport::TransportError;
 
 /// Result type alias for SDK operations.
 pub type Result<T> = std::result::Result<T, SdkError>;
 
 /// Format an RPC error message with optional correlation IDs.
 fn format_rpc_error(
-    code: &Code,
+    code: &ErrorCode,
     message: &str,
     request_id: &Option<String>,
     trace_id: &Option<String>,
@@ -62,39 +65,33 @@ fn format_idempotency(
     s
 }
 
-/// Extracts a string metadata value from a gRPC status metadata map.
-fn extract_metadata(metadata: &tonic::metadata::MetadataMap, key: &str) -> Option<String> {
-    metadata.get(key).and_then(|v| v.to_str().ok()).map(String::from)
-}
-
-/// Converts a gRPC status code to a short snake_case label for metrics.
-fn code_to_label(code: Code) -> &'static str {
+/// Converts a wire-protocol error code to a short snake_case label for metrics.
+fn code_to_label(code: ErrorCode) -> &'static str {
     match code {
-        Code::Ok => "ok",
-        Code::Cancelled => "cancelled",
-        Code::Unknown => "unknown",
-        Code::InvalidArgument => "invalid_argument",
-        Code::DeadlineExceeded => "deadline_exceeded",
-        Code::NotFound => "not_found",
-        Code::AlreadyExists => "already_exists",
-        Code::PermissionDenied => "permission_denied",
-        Code::ResourceExhausted => "resource_exhausted",
-        Code::FailedPrecondition => "failed_precondition",
-        Code::Aborted => "aborted",
-        Code::OutOfRange => "out_of_range",
-        Code::Unimplemented => "unimplemented",
-        Code::Internal => "internal",
-        Code::Unavailable => "unavailable",
-        Code::DataLoss => "data_loss",
-        Code::Unauthenticated => "unauthenticated",
+        ErrorCode::NotFound => "not_found",
+        ErrorCode::AlreadyExists => "already_exists",
+        ErrorCode::FailedPrecondition => "failed_precondition",
+        ErrorCode::PermissionDenied => "permission_denied",
+        ErrorCode::InvalidArgument => "invalid_argument",
+        ErrorCode::Internal => "internal",
+        ErrorCode::Unauthenticated => "unauthenticated",
+        ErrorCode::RateLimited => "rate_limited",
+        ErrorCode::Expired => "expired",
+        ErrorCode::TooManyAttempts => "too_many_attempts",
+        ErrorCode::InvitationRateLimited => "invitation_rate_limited",
+        ErrorCode::InvitationAlreadyResolved => "invitation_already_resolved",
+        ErrorCode::InvitationEmailMismatch => "invitation_email_mismatch",
+        ErrorCode::InvitationAlreadyMember => "invitation_already_member",
+        ErrorCode::InvitationDuplicatePending => "invitation_duplicate_pending",
+        ErrorCode::StaleRouting => "stale_routing",
+        ErrorCode::Deprecated => "deprecated",
     }
 }
 
-/// Structured error details decoded from gRPC `Status.details` bytes.
+/// Structured error details decoded from a wire-protocol error frame.
 ///
-/// When the server attaches an `ErrorDetails` proto message to a gRPC error,
-/// the SDK decodes it and makes it available on `SdkError::Rpc` and
-/// `SdkError::RateLimited` variants.
+/// When the server attaches structured context to a wire error, the SDK
+/// surfaces it on `SdkError::Rpc` and `SdkError::RateLimited` variants.
 ///
 /// # Example
 ///
@@ -127,11 +124,16 @@ pub struct ServerErrorDetails {
     pub suggested_action: Option<String>,
 }
 
-/// A hint about the current Raft leader for a region, extracted from server
-/// `ErrorDetails` on a `NotLeader` response.
+/// A hint about the current Raft leader, extracted from server `ErrorDetails`
+/// on a `NotLeader` response.
 ///
-/// Any field may be `None` if the server did not know (or did not include) it.
-/// Returned by [`ServerErrorDetails::leader_hint`].
+/// All fields are optional. The server omits fields it does not know; any
+/// `None` field should be treated as "unknown". Returned by
+/// [`ServerErrorDetails::leader_hint`].
+///
+/// The SDK uses this hint to update its [`RegionLeaderCache`](crate::RegionLeaderCache)
+/// and [`VaultLeaderCache`](crate::VaultLeaderCache) before the next retry,
+/// avoiding a full resolve round-trip.
 ///
 /// # Example
 ///
@@ -143,73 +145,52 @@ pub struct ServerErrorDetails {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaderHint {
-    /// Leader node ID if known.
+    /// Leader node ID, if known.
     pub leader_id: Option<u64>,
-    /// Leader endpoint URI if known (e.g. `"http://10.0.2.5:5000"`).
+    /// Leader endpoint URI, if known (e.g. `"http://10.0.2.5:5000"`).
     pub leader_endpoint: Option<String>,
     /// Raft term the leader was last observed in, if known.
+    ///
+    /// Cache writes are term-gated: a hint with a lower term than what is
+    /// currently cached is ignored to prevent stale redirects.
     pub term: Option<u64>,
-    /// Organization id the leader is for, if known.
+    /// Internal organization ID the leader is for, if known.
     ///
-    /// Each `(region, organization_id)` runs an independent Raft group
-    /// under the three-tier topology — the data-region group at
-    /// `OrganizationId(0)` plus one per active organization — so
-    /// leadership is per-`(region, organization_id)`. A future SDK
-    /// enhancement keys its `RegionLeaderCache` on
-    /// `(region, organization_id)` rather than just region; until then,
-    /// the SDK retries against the hinted endpoint and bounces once if
-    /// the resolved cache leader does not match the requested
-    /// organization.
+    /// Populated by the server when the rejection is scoped to a known
+    /// organization. The SDK exposes this for consumer logging and
+    /// correlation; the leader caches themselves are keyed by slug
+    /// (see [`organization_slug`](Self::organization_slug)), so the
+    /// internal ID is not used for routing decisions.
     pub organization_id: Option<u64>,
-    /// Vault id the leader is for, if known.
+    /// Internal vault ID the leader is for, if known.
     ///
-    /// Set only when the rejection came from a per-vault Raft group; the
-    /// region- / org-level call sites omit this field. The forthcoming
-    /// `VaultLeaderCache` keys on `(region, organization_id, vault_id)`
-    /// — a `Some` value here is the trigger to update the per-vault
-    /// cache; a `None` value means the cache update should fall back to
-    /// the org-level entry.
-    ///
-    /// Backward-compat: legacy servers that pre-date this field (or
-    /// rejections from non-vault scopes) leave this `None`. The SDK's
-    /// existing region-level retry path remains correct in both cases.
+    /// `None` for region- and org-scoped rejections, and for legacy servers
+    /// that pre-date this field. When present, the SDK uses it together with
+    /// [`organization_id`](Self::organization_id) to update the per-vault
+    /// leader cache entry.
     pub vault_id: Option<u64>,
-    /// Organization slug (Snowflake u64) the leader is for, if known.
+    /// Organization Snowflake slug the leader is for, if known.
     ///
-    /// The SDK only ever has external slugs in hand — `OrganizationSlug`
-    /// — and the `VaultLeaderCache` is keyed on
-    /// `(OrganizationSlug, VaultSlug)`, so populating this field from the
-    /// server-side hint avoids a slug→id round trip. Legacy servers that
-    /// pre-date the `leader_organization_slug` key emit nothing; the
-    /// SDK's retry path falls through to the region-level cache in that
-    /// case.
+    /// Populated from the server-side hint when available. Used to key the
+    /// [`VaultLeaderCache`](crate::VaultLeaderCache) without a slug-to-ID
+    /// round-trip. `None` for legacy servers that pre-date this field.
     pub organization_slug: Option<u64>,
-    /// Vault slug (Snowflake u64) the leader is for, if known.
+    /// Vault Snowflake slug the leader is for, if known.
     ///
-    /// Paired with [`Self::organization_slug`] to drive the SDK's
-    /// `VaultLeaderCache` directly. `None` for region- / org-scoped
-    /// rejections, for legacy servers, and for the vault-scoped sites
-    /// that don't have slugs in scope (raft-internal callers).
+    /// Paired with [`organization_slug`](Self::organization_slug) to update
+    /// the [`VaultLeaderCache`](crate::VaultLeaderCache). `None` for region-
+    /// and org-scoped rejections, and for legacy servers that pre-date this
+    /// field.
     pub vault_slug: Option<u64>,
 }
 
 impl ServerErrorDetails {
-    /// Extracts a leader hint from the `context` map if any of the well-known
-    /// keys (`leader_id`, `leader_endpoint`, `leader_term`, `leader_shard`,
-    /// `leader_vault`, `leader_organization_slug`, `leader_vault_slug`) are
-    /// present and parseable.
+    /// Extracts a leader hint from the structured context map.
     ///
-    /// Empty-string endpoints are treated as absent to prevent dialing an
-    /// empty URI.
-    ///
-    /// Returns `None` when no hint fields are present or parseable. A missing
-    /// `leader_vault` key (the common case for region- and org-scoped
-    /// rejections, and for legacy servers that pre-date the field) leaves
-    /// `vault_id = None` — the SDK falls back to its org-level cache entry
-    /// in that case. The `*_slug` keys are field-additive; legacy servers
-    /// that pre-date them leave both slug fields `None` and the SDK's
-    /// `VaultLeaderCache` (keyed on `(OrganizationSlug, VaultSlug)`)
-    /// silently falls through to the region path.
+    /// Returns `None` when no recognized hint fields are present or parseable.
+    /// Empty-string endpoint values are treated as absent to prevent dialing
+    /// an empty URI. Any field that is missing or not parseable is left as
+    /// `None` in the returned [`LeaderHint`].
     #[must_use]
     pub fn leader_hint(&self) -> Option<LeaderHint> {
         let leader_id = self.context.get("leader_id").and_then(|s| s.parse().ok());
@@ -254,8 +235,8 @@ impl ServerErrorDetails {
 /// | Variant              | Retryable | Recovery Action                                             |
 /// | -------------------- | --------- | ----------------------------------------------------------- |
 /// | `Connection`         | Yes       | Check network connectivity; server may be starting up       |
-/// | `Transport`          | Yes       | TLS or HTTP/2 failure; verify certificates and connectivity |
-/// | `Rpc`                | Depends   | Check `is_retryable()`; see gRPC code for details           |
+/// | `Transport`          | Yes       | TLS or QUIC failure; verify certificates and connectivity   |
+/// | `Rpc`                | Depends   | Check `is_retryable()`; see error code for details          |
 /// | `RateLimited`        | Yes       | Wait for `retry_after` duration before retrying             |
 /// | `RetryExhausted`     | No        | All retries failed; check `attempt_history` for root cause  |
 /// | `Config`             | No        | Fix configuration and recreate the client                   |
@@ -284,40 +265,40 @@ pub enum SdkError {
         message: String,
     },
 
-    /// Transport-level error (HTTP/2 framing, TLS handshake).
+    /// Transport-level error (QUIC connection, TLS handshake, codec).
     ///
     /// **Recovery**: Retryable. Verify TLS certificates are valid and the
-    /// server supports HTTP/2. Network issues typically resolve on retry.
+    /// network path supports QUIC (UDP). Network issues typically resolve on retry.
     #[error("Transport error: {source}")]
     Transport {
-        /// Underlying transport error.
-        source: tonic::transport::Error,
+        /// Underlying wire-transport error.
+        source: TransportError,
     },
 
-    /// gRPC RPC error with status code and optional correlation IDs.
+    /// RPC error with wire error code and optional correlation IDs.
     ///
-    /// When the server populates `x-request-id` and `x-trace-id` in response
-    /// metadata, these fields are extracted automatically by `From<tonic::Status>`.
-    /// Operators can use them to correlate SDK errors with server-side canonical log lines.
+    /// When the server populates `request_id` / `trace_id` in the response
+    /// frame header, these fields are extracted into the error so operators
+    /// can correlate SDK errors with server-side canonical log lines.
     #[error("{}", format_rpc_error(code, message, request_id, trace_id))]
     Rpc {
-        /// gRPC status code.
-        code: Code,
+        /// Wire-protocol error code.
+        code: ErrorCode,
         /// Error message from server.
         message: String,
         /// Server-assigned request ID for log correlation.
         request_id: Option<String>,
         /// Distributed trace ID for cross-service correlation.
         trace_id: Option<String>,
-        /// Structured error details decoded from gRPC `Status.details`.
+        /// Structured error details decoded from the wire error frame.
         error_details: Option<Box<ServerErrorDetails>>,
     },
 
     /// Rate limit exceeded.
     ///
-    /// Returned when the server responds with `RESOURCE_EXHAUSTED` and includes
-    /// a `retry-after-ms` trailing metadata value. The `retry_after` duration
-    /// tells the caller how long to wait before retrying.
+    /// Returned when the server responds with [`ErrorCode::RateLimited`] and
+    /// includes a non-zero `retry_after_ms`. The `retry_after` duration tells
+    /// the caller how long to wait before retrying.
     #[error("{}", format_rate_limited(message, retry_after, request_id, trace_id))]
     RateLimited {
         /// Human-readable rate limit message from server.
@@ -328,7 +309,7 @@ pub enum SdkError {
         request_id: Option<String>,
         /// Distributed trace ID for cross-service correlation.
         trace_id: Option<String>,
-        /// Structured error details decoded from gRPC `Status.details`.
+        /// Structured error details decoded from the wire error frame.
         error_details: Option<Box<ServerErrorDetails>>,
     },
 
@@ -507,17 +488,18 @@ impl SdkError {
     /// Returns true if the error is transient and the operation should be retried.
     ///
     /// Retryable errors:
-    /// - `UNAVAILABLE`: Server temporarily unreachable
-    /// - `DEADLINE_EXCEEDED`: Request timed out
-    /// - `RESOURCE_EXHAUSTED`: Rate limited (but prefer `RateLimited` variant's `retry_after`)
-    /// - `ABORTED`: Transaction conflict (retry may succeed)
+    /// - [`ErrorCode::StaleRouting`]: Leader changed, redirect and retry
+    /// - [`ErrorCode::RateLimited`] / [`ErrorCode::TooManyAttempts`] /
+    ///   [`ErrorCode::InvitationRateLimited`]: Rate-limited (but prefer `RateLimited` variant's
+    ///   `retry_after`)
     /// - `RateLimited`: Explicitly rate-limited with retry-after hint
-    /// - Transport errors (network issues)
+    /// - Transport / Connection errors (network issues)
+    /// - Timeouts and stream disconnects
     ///
     /// Non-retryable errors:
-    /// - `INVALID_ARGUMENT`: Request is malformed
-    /// - `PERMISSION_DENIED`: Authentication/authorization failure
-    /// - `UNAUTHENTICATED`: Missing credentials
+    /// - [`ErrorCode::InvalidArgument`]: Request is malformed
+    /// - [`ErrorCode::PermissionDenied`]: Authorization failure
+    /// - [`ErrorCode::Unauthenticated`]: Missing/invalid credentials
     /// - `Idempotency`: Idempotency key reused with different payload
     /// - `AlreadyCommitted`: Operation already succeeded
     #[must_use]
@@ -530,10 +512,10 @@ impl SdkError {
             Self::RateLimited { .. } => true, // Retry after suggested delay
             Self::Rpc { code, .. } => matches!(
                 code,
-                Code::Unavailable
-                    | Code::DeadlineExceeded
-                    | Code::ResourceExhausted
-                    | Code::Aborted
+                ErrorCode::StaleRouting
+                    | ErrorCode::RateLimited
+                    | ErrorCode::TooManyAttempts
+                    | ErrorCode::InvitationRateLimited
             ),
             // Non-retryable
             Self::Config { .. } => false,
@@ -556,10 +538,10 @@ impl SdkError {
     /// conflict — the precondition check failed because the entity was
     /// modified since it was last read.
     ///
-    /// This matches only [`Code::FailedPrecondition`], which the server
+    /// This matches only [`ErrorCode::FailedPrecondition`], which the server
     /// returns when a [`SetCondition`](crate::SetCondition) evaluates to
     /// false. Use this to distinguish CAS conflicts from other error types
-    /// without importing [`tonic::Code`] at call sites.
+    /// without importing [`ErrorCode`] at call sites.
     ///
     /// # Examples
     ///
@@ -573,7 +555,7 @@ impl SdkError {
     /// ```
     #[must_use]
     pub fn is_cas_conflict(&self) -> bool {
-        matches!(self, Self::Rpc { code: Code::FailedPrecondition, .. })
+        matches!(self, Self::Rpc { code: ErrorCode::FailedPrecondition, .. })
     }
 
     /// Returns a short classification string for this error, suitable for
@@ -603,12 +585,12 @@ impl SdkError {
         }
     }
 
-    /// Returns the gRPC status code if this is an RPC or rate-limited error.
+    /// Returns the wire error code if this is an RPC or rate-limited error.
     #[must_use]
-    pub fn code(&self) -> Option<Code> {
+    pub fn code(&self) -> Option<ErrorCode> {
         match self {
             Self::Rpc { code, .. } => Some(*code),
-            Self::RateLimited { .. } => Some(Code::ResourceExhausted),
+            Self::RateLimited { .. } => Some(ErrorCode::RateLimited),
             _ => None,
         }
     }
@@ -635,7 +617,7 @@ impl SdkError {
 
     /// Returns structured error details from the server, if available.
     ///
-    /// Error details are decoded from gRPC `Status.details` bytes. They
+    /// Error details are decoded from the wire-protocol error frame. They
     /// contain the server's error code, retryability hint, and optional
     /// recovery guidance. Returns `None` for non-RPC errors or when the
     /// server didn't attach details.
@@ -650,112 +632,6 @@ impl SdkError {
     }
 }
 
-impl From<tonic::transport::Error> for SdkError {
-    fn from(source: tonic::transport::Error) -> Self {
-        Self::Transport { source }
-    }
-}
-
-impl From<tonic::Status> for SdkError {
-    fn from(status: tonic::Status) -> Self {
-        let metadata = status.metadata();
-        let request_id = extract_metadata(metadata, "x-request-id");
-        let trace_id = extract_metadata(metadata, "x-trace-id");
-
-        // Decode structured error details from Status.details bytes
-        let error_details = decode_error_details(status.details()).map(Box::new);
-
-        // Check for rate limiting: RESOURCE_EXHAUSTED + retry-after-ms metadata
-        if status.code() == Code::ResourceExhausted
-            && let Some(retry_after_str) = extract_metadata(metadata, "retry-after-ms")
-            && let Ok(ms) = retry_after_str.parse::<u64>()
-        {
-            return Self::RateLimited {
-                message: status.message().to_owned(),
-                retry_after: std::time::Duration::from_millis(ms),
-                request_id,
-                trace_id,
-                error_details,
-            };
-        }
-
-        // Check for organization migration: FAILED_PRECONDITION + error code 3106
-        if status.code() == Code::FailedPrecondition
-            && let Some(ref details) = error_details
-            && details.error_code == "3106"
-        {
-            let source_region = details
-                .context
-                .get("source_region")
-                .and_then(|s| s.parse::<Region>().ok())
-                .unwrap_or(Region::GLOBAL);
-            let target_region = details
-                .context
-                .get("target_region")
-                .and_then(|s| s.parse::<Region>().ok())
-                .unwrap_or(Region::GLOBAL);
-            let retry_after_ms = details.retry_after_ms.unwrap_or(30_000).max(0) as u64;
-            return Self::OrganizationMigrating {
-                source_region,
-                target_region,
-                retry_after: std::time::Duration::from_millis(retry_after_ms),
-            };
-        }
-
-        // Check for user migration: FAILED_PRECONDITION + error code 3107
-        if status.code() == Code::FailedPrecondition
-            && let Some(ref details) = error_details
-            && details.error_code == "3107"
-        {
-            let source_region = details
-                .context
-                .get("source_region")
-                .and_then(|s| s.parse::<Region>().ok())
-                .unwrap_or(Region::GLOBAL);
-            let target_region = details
-                .context
-                .get("target_region")
-                .and_then(|s| s.parse::<Region>().ok())
-                .unwrap_or(Region::GLOBAL);
-            let retry_after_ms = details.retry_after_ms.unwrap_or(30_000).max(0) as u64;
-            return Self::UserMigrating {
-                source_region,
-                target_region,
-                retry_after: std::time::Duration::from_millis(retry_after_ms),
-            };
-        }
-
-        Self::Rpc {
-            code: status.code(),
-            message: status.message().to_owned(),
-            request_id,
-            trace_id,
-            error_details,
-        }
-    }
-}
-
-/// Decodes [`ServerErrorDetails`] from gRPC `Status.details` bytes.
-///
-/// Returns `None` if the bytes are empty or cannot be decoded as an
-/// `ErrorDetails` proto message.
-fn decode_error_details(details: &[u8]) -> Option<ServerErrorDetails> {
-    if details.is_empty() {
-        return None;
-    }
-    use inferadb_ledger_proto::proto::ErrorDetails;
-    use prost::Message;
-
-    let decoded = ErrorDetails::decode(details).ok()?;
-    Some(ServerErrorDetails {
-        error_code: decoded.error_code,
-        is_retryable: decoded.is_retryable,
-        retry_after_ms: decoded.retry_after_ms,
-        context: decoded.context,
-        suggested_action: decoded.suggested_action,
-    })
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
@@ -768,52 +644,41 @@ mod tests {
             // Retryable RPC codes
             (
                 SdkError::Rpc {
-                    code: Code::Unavailable,
-                    message: "down".into(),
+                    code: ErrorCode::StaleRouting,
+                    message: "leader moved".into(),
                     request_id: None,
                     trace_id: None,
                     error_details: None,
                 },
                 true,
-                "Rpc/Unavailable",
+                "Rpc/StaleRouting",
             ),
             (
                 SdkError::Rpc {
-                    code: Code::DeadlineExceeded,
-                    message: "timeout".into(),
-                    request_id: None,
-                    trace_id: None,
-                    error_details: None,
-                },
-                true,
-                "Rpc/DeadlineExceeded",
-            ),
-            (
-                SdkError::Rpc {
-                    code: Code::ResourceExhausted,
+                    code: ErrorCode::RateLimited,
                     message: "limited".into(),
                     request_id: None,
                     trace_id: None,
                     error_details: None,
                 },
                 true,
-                "Rpc/ResourceExhausted",
+                "Rpc/RateLimited",
             ),
             (
                 SdkError::Rpc {
-                    code: Code::Aborted,
-                    message: "conflict".into(),
+                    code: ErrorCode::TooManyAttempts,
+                    message: "too many".into(),
                     request_id: None,
                     trace_id: None,
                     error_details: None,
                 },
                 true,
-                "Rpc/Aborted",
+                "Rpc/TooManyAttempts",
             ),
             // Non-retryable RPC codes
             (
                 SdkError::Rpc {
-                    code: Code::InvalidArgument,
+                    code: ErrorCode::InvalidArgument,
                     message: "bad".into(),
                     request_id: None,
                     trace_id: None,
@@ -824,7 +689,7 @@ mod tests {
             ),
             (
                 SdkError::Rpc {
-                    code: Code::PermissionDenied,
+                    code: ErrorCode::PermissionDenied,
                     message: "denied".into(),
                     request_id: None,
                     trace_id: None,
@@ -835,7 +700,7 @@ mod tests {
             ),
             (
                 SdkError::Rpc {
-                    code: Code::Unauthenticated,
+                    code: ErrorCode::Unauthenticated,
                     message: "noauth".into(),
                     request_id: None,
                     trace_id: None,
@@ -846,7 +711,7 @@ mod tests {
             ),
             (
                 SdkError::Rpc {
-                    code: Code::NotFound,
+                    code: ErrorCode::NotFound,
                     message: "missing".into(),
                     request_id: None,
                     trace_id: None,
@@ -857,7 +722,7 @@ mod tests {
             ),
             (
                 SdkError::Rpc {
-                    code: Code::Internal,
+                    code: ErrorCode::Internal,
                     message: "err".into(),
                     request_id: None,
                     trace_id: None,
@@ -936,20 +801,20 @@ mod tests {
         }
     }
 
-    /// code() returns the gRPC code for Rpc/RateLimited, None for other variants.
+    /// code() returns the wire ErrorCode for Rpc/RateLimited, None for other variants.
     #[test]
     fn test_code_accessor() {
         // Rpc variant returns its code
         let err = SdkError::Rpc {
-            code: Code::NotFound,
+            code: ErrorCode::NotFound,
             message: "not found".to_owned(),
             request_id: None,
             trace_id: None,
             error_details: None,
         };
-        assert_eq!(err.code(), Some(Code::NotFound));
+        assert_eq!(err.code(), Some(ErrorCode::NotFound));
 
-        // RateLimited maps to ResourceExhausted
+        // RateLimited maps to ErrorCode::RateLimited
         let err = SdkError::RateLimited {
             message: "throttled".into(),
             retry_after: std::time::Duration::from_secs(1),
@@ -957,7 +822,7 @@ mod tests {
             trace_id: None,
             error_details: None,
         };
-        assert_eq!(err.code(), Some(Code::ResourceExhausted));
+        assert_eq!(err.code(), Some(ErrorCode::RateLimited));
 
         // Non-RPC variants return None
         let err = SdkError::Timeout { duration_ms: 1000 };
@@ -973,49 +838,6 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("tx-abc"));
         assert!(msg.contains("100"));
-    }
-
-    /// Table-driven test: From<tonic::Status> maps all gRPC codes to correct SdkError::Rpc
-    /// variant and preserves the message string.
-    #[test]
-    fn test_from_tonic_status_all_codes() {
-        // (status, expected_code, expected_retryable)
-        let cases: Vec<(tonic::Status, Code, bool)> = vec![
-            (tonic::Status::ok("success"), Code::Ok, false),
-            (tonic::Status::cancelled("cancelled"), Code::Cancelled, false),
-            (tonic::Status::unknown("unknown"), Code::Unknown, false),
-            (tonic::Status::invalid_argument("bad"), Code::InvalidArgument, false),
-            (tonic::Status::deadline_exceeded("timeout"), Code::DeadlineExceeded, true),
-            (tonic::Status::not_found("missing"), Code::NotFound, false),
-            (tonic::Status::already_exists("dup"), Code::AlreadyExists, false),
-            (tonic::Status::permission_denied("denied"), Code::PermissionDenied, false),
-            (tonic::Status::resource_exhausted("quota"), Code::ResourceExhausted, true),
-            (tonic::Status::failed_precondition("precond"), Code::FailedPrecondition, false),
-            (tonic::Status::aborted("aborted"), Code::Aborted, true),
-            (tonic::Status::out_of_range("range"), Code::OutOfRange, false),
-            (tonic::Status::unimplemented("noimpl"), Code::Unimplemented, false),
-            (tonic::Status::internal("internal"), Code::Internal, false),
-            (tonic::Status::unavailable("down"), Code::Unavailable, true),
-            (tonic::Status::data_loss("lost"), Code::DataLoss, false),
-            (tonic::Status::unauthenticated("noauth"), Code::Unauthenticated, false),
-        ];
-
-        for (status, expected_code, expected_retryable) in cases {
-            let msg = status.message().to_owned();
-            let err: SdkError = status.into();
-            match &err {
-                SdkError::Rpc { code, message, .. } => {
-                    assert_eq!(*code, expected_code, "code mismatch for {expected_code:?}");
-                    assert_eq!(message, &msg, "message not preserved for {expected_code:?}");
-                },
-                _ => panic!("Expected Rpc variant for {expected_code:?}, got {err:?}"),
-            }
-            assert_eq!(
-                err.is_retryable(),
-                expected_retryable,
-                "retryable mismatch for {expected_code:?}"
-            );
-        }
     }
 
     /// Unavailable variant (not Rpc) includes message in display.
@@ -1040,7 +862,7 @@ mod tests {
     #[test]
     fn test_rpc_error_with_correlation_ids() {
         let err = SdkError::Rpc {
-            code: Code::Internal,
+            code: ErrorCode::Internal,
             message: "server error".to_owned(),
             request_id: Some("req-123".to_owned()),
             trace_id: Some("trace-abc".to_owned()),
@@ -1056,7 +878,7 @@ mod tests {
     #[test]
     fn test_rpc_error_without_correlation_ids() {
         let err = SdkError::Rpc {
-            code: Code::Internal,
+            code: ErrorCode::Internal,
             message: "server error".to_owned(),
             request_id: None,
             trace_id: None,
@@ -1067,74 +889,6 @@ mod tests {
         let display = format!("{err}");
         assert!(!display.contains("[request_id="));
         assert!(!display.contains("[trace_id="));
-    }
-
-    #[test]
-    fn test_from_tonic_status_extracts_metadata() {
-        let mut status = tonic::Status::internal("server error");
-        status.metadata_mut().insert("x-request-id", "req-456".parse().unwrap());
-        status.metadata_mut().insert("x-trace-id", "trace-def".parse().unwrap());
-        let err: SdkError = status.into();
-        match &err {
-            SdkError::Rpc { request_id, trace_id, .. } => {
-                assert_eq!(request_id.as_deref(), Some("req-456"));
-                assert_eq!(trace_id.as_deref(), Some("trace-def"));
-            },
-            _ => panic!("Expected Rpc variant"),
-        }
-    }
-
-    #[test]
-    fn test_from_tonic_status_no_metadata() {
-        let status = tonic::Status::internal("no metadata");
-        let err: SdkError = status.into();
-        assert_eq!(err.request_id(), None);
-        assert_eq!(err.trace_id(), None);
-    }
-
-    #[test]
-    fn test_rate_limited_from_resource_exhausted_with_retry_after() {
-        let mut status = tonic::Status::resource_exhausted("rate limit exceeded");
-        status.metadata_mut().insert("retry-after-ms", "5000".parse().unwrap());
-        let err: SdkError = status.into();
-        match &err {
-            SdkError::RateLimited { message, retry_after, .. } => {
-                assert_eq!(message, "rate limit exceeded");
-                assert_eq!(*retry_after, std::time::Duration::from_millis(5000));
-            },
-            _ => panic!("Expected RateLimited variant, got {:?}", err),
-        }
-        assert!(err.is_retryable());
-        assert_eq!(err.code(), Some(Code::ResourceExhausted));
-    }
-
-    #[test]
-    fn test_rate_limited_with_correlation_ids() {
-        let mut status = tonic::Status::resource_exhausted("throttled");
-        status.metadata_mut().insert("retry-after-ms", "1000".parse().unwrap());
-        status.metadata_mut().insert("x-request-id", "req-789".parse().unwrap());
-        status.metadata_mut().insert("x-trace-id", "trace-ghi".parse().unwrap());
-        let err: SdkError = status.into();
-        assert_eq!(err.request_id(), Some("req-789"));
-        assert_eq!(err.trace_id(), Some("trace-ghi"));
-        let display = format!("{err}");
-        assert!(display.contains("retry after 1000ms"));
-        assert!(display.contains("[request_id=req-789]"));
-    }
-
-    #[test]
-    fn test_resource_exhausted_without_retry_after_is_rpc() {
-        let status = tonic::Status::resource_exhausted("no retry-after");
-        let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::Rpc { code: Code::ResourceExhausted, .. }));
-    }
-
-    #[test]
-    fn test_resource_exhausted_with_invalid_retry_after_is_rpc() {
-        let mut status = tonic::Status::resource_exhausted("bad value");
-        status.metadata_mut().insert("retry-after-ms", "not-a-number".parse().unwrap());
-        let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::Rpc { code: Code::ResourceExhausted, .. }));
     }
 
     #[test]
@@ -1195,250 +949,13 @@ mod tests {
         assert!(display.contains("retry after 2500ms"));
     }
 
-    // --- ErrorDetails decoding tests ---
-
-    /// Builds a tonic::Status with binary-encoded ErrorDetails in its details field.
-    fn status_with_error_details(
-        code: Code,
-        message: &str,
-        error_code: &str,
-        is_retryable: bool,
-        retry_after_ms: Option<i32>,
-        context: std::collections::HashMap<String, String>,
-        suggested_action: Option<&str>,
-    ) -> tonic::Status {
-        use inferadb_ledger_proto::proto::ErrorDetails;
-        use prost::Message;
-
-        let details = ErrorDetails {
-            error_code: error_code.to_owned(),
-            is_retryable,
-            retry_after_ms,
-            context,
-            suggested_action: suggested_action.map(String::from),
-        };
-        let encoded = details.encode_to_vec();
-        tonic::Status::with_details(tonic::Code::from(code as i32), message, encoded.into())
-    }
-
-    #[test]
-    fn test_decode_error_details_from_rpc_status() {
-        let status = status_with_error_details(
-            Code::InvalidArgument,
-            "key too long",
-            "3203",
-            false,
-            None,
-            std::collections::HashMap::new(),
-            Some("Fix the request parameters"),
-        );
-        let err: SdkError = status.into();
-        let details = err.server_error_details().expect("should have details");
-        assert_eq!(details.error_code, "3203");
-        assert!(!details.is_retryable);
-        assert_eq!(details.retry_after_ms, None);
-        assert!(details.context.is_empty());
-        assert_eq!(details.suggested_action.as_deref(), Some("Fix the request parameters"));
-    }
-
-    #[test]
-    fn test_decode_error_details_with_retry_and_context() {
-        let mut context = std::collections::HashMap::new();
-        context.insert("organization_id".to_owned(), "42".to_owned());
-        context.insert("level".to_owned(), "backpressure".to_owned());
-
-        let mut status = status_with_error_details(
-            Code::ResourceExhausted,
-            "rate limit exceeded",
-            "3204",
-            true,
-            Some(500),
-            context,
-            Some("Reduce request rate"),
-        );
-        // Add retry-after-ms metadata to trigger RateLimited variant
-        status.metadata_mut().insert("retry-after-ms", "500".parse().unwrap());
-
-        let err: SdkError = status.into();
-        assert!(matches!(err, SdkError::RateLimited { .. }));
-
-        let details = err.server_error_details().expect("should have details");
-        assert_eq!(details.error_code, "3204");
-        assert!(details.is_retryable);
-        assert_eq!(details.retry_after_ms, Some(500));
-        assert_eq!(details.context.get("organization_id").unwrap(), "42");
-        assert_eq!(details.context.get("level").unwrap(), "backpressure");
-        assert_eq!(details.suggested_action.as_deref(), Some("Reduce request rate"));
-    }
-
-    #[test]
-    fn test_decode_error_details_consensus_unavailable() {
-        let status = status_with_error_details(
-            Code::Unavailable,
-            "not leader",
-            "2000",
-            true,
-            None,
-            std::collections::HashMap::new(),
-            Some("Retry against a different node"),
-        );
-        let err: SdkError = status.into();
-        let details = err.server_error_details().expect("should have details");
-        assert_eq!(details.error_code, "2000");
-        assert!(details.is_retryable);
-        assert_eq!(details.suggested_action.as_deref(), Some("Retry against a different node"));
-    }
-
-    #[test]
-    fn test_no_error_details_when_status_has_no_details() {
-        let status = tonic::Status::internal("plain error");
-        let err: SdkError = status.into();
-        assert!(err.server_error_details().is_none());
-    }
-
-    #[test]
-    fn test_no_error_details_on_non_rpc_errors() {
-        let err = SdkError::Timeout { duration_ms: 5000 };
-        assert!(err.server_error_details().is_none());
-
-        let err = SdkError::Config { message: "bad config".to_owned() };
-        assert!(err.server_error_details().is_none());
-
-        let err = SdkError::Cancelled;
-        assert!(err.server_error_details().is_none());
-    }
-
-    #[test]
-    fn test_decode_error_details_invalid_bytes_returns_none() {
-        // Status with garbage details bytes — use Vec<u8>.into() to get Bytes
-        let garbage: Vec<u8> = b"not a valid proto".to_vec();
-        let status =
-            tonic::Status::with_details(tonic::Code::Internal, "corrupted", garbage.into());
-        let err: SdkError = status.into();
-        // prost may partially decode garbage — the point is it doesn't panic.
-        // The result may be Some (partial decode) or None (decode error).
-        // Either way, the conversion must not panic.
-        let _ = err.server_error_details();
-    }
-
-    #[test]
-    fn test_error_details_roundtrip_all_fields() {
-        use inferadb_ledger_proto::proto::ErrorDetails;
-        use prost::Message;
-
-        // Build server-side details
-        let mut context = std::collections::HashMap::new();
-        context.insert("key1".to_owned(), "val1".to_owned());
-        context.insert("key2".to_owned(), "val2".to_owned());
-
-        let server_details = ErrorDetails {
-            error_code: "3204".to_owned(),
-            is_retryable: true,
-            retry_after_ms: Some(1500),
-            context,
-            suggested_action: Some("Wait and retry".to_owned()),
-        };
-
-        // Encode into Status
-        let encoded = server_details.encode_to_vec();
-        let status = tonic::Status::with_details(
-            tonic::Code::ResourceExhausted,
-            "throttled",
-            encoded.into(),
-        );
-
-        // SDK decodes
-        let err: SdkError = status.into();
-        let decoded = err.server_error_details().expect("should decode");
-
-        assert_eq!(decoded.error_code, "3204");
-        assert!(decoded.is_retryable);
-        assert_eq!(decoded.retry_after_ms, Some(1500));
-        assert_eq!(decoded.context.len(), 2);
-        assert_eq!(decoded.context.get("key1").unwrap(), "val1");
-        assert_eq!(decoded.context.get("key2").unwrap(), "val2");
-        assert_eq!(decoded.suggested_action.as_deref(), Some("Wait and retry"));
-    }
-
-    // --- Migrating variant deserialization tests ---
-
-    #[test]
-    fn test_organization_migrating_from_status() {
-        use inferadb_ledger_proto::proto::ErrorDetails;
-        use prost::Message;
-
-        let mut context = std::collections::HashMap::new();
-        context.insert("source_region".to_owned(), "us-east-va".to_owned());
-        context.insert("target_region".to_owned(), "ie-east-dublin".to_owned());
-
-        let details = ErrorDetails {
-            error_code: "3106".to_owned(),
-            is_retryable: true,
-            retry_after_ms: Some(15_000),
-            context,
-            suggested_action: None,
-        };
-        let encoded = details.encode_to_vec();
-        let status = tonic::Status::with_details(
-            tonic::Code::FailedPrecondition,
-            "organization is migrating",
-            encoded.into(),
-        );
-
-        let err: SdkError = status.into();
-        match &err {
-            SdkError::OrganizationMigrating { source_region, target_region, retry_after } => {
-                assert_eq!(*source_region, Region::US_EAST_VA);
-                assert_eq!(*target_region, Region::IE_EAST_DUBLIN);
-                assert_eq!(*retry_after, std::time::Duration::from_millis(15_000));
-            },
-            _ => panic!("Expected OrganizationMigrating variant, got {:?}", err),
-        }
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn test_user_migrating_from_status() {
-        use inferadb_ledger_proto::proto::ErrorDetails;
-        use prost::Message;
-
-        let mut context = std::collections::HashMap::new();
-        context.insert("source_region".to_owned(), "us-east-va".to_owned());
-        context.insert("target_region".to_owned(), "ie-east-dublin".to_owned());
-
-        let details = ErrorDetails {
-            error_code: "3107".to_owned(),
-            is_retryable: true,
-            retry_after_ms: Some(20_000),
-            context,
-            suggested_action: None,
-        };
-        let encoded = details.encode_to_vec();
-        let status = tonic::Status::with_details(
-            tonic::Code::FailedPrecondition,
-            "user is migrating",
-            encoded.into(),
-        );
-
-        let err: SdkError = status.into();
-        match &err {
-            SdkError::UserMigrating { source_region, target_region, retry_after } => {
-                assert_eq!(*source_region, Region::US_EAST_VA);
-                assert_eq!(*target_region, Region::IE_EAST_DUBLIN);
-                assert_eq!(*retry_after, std::time::Duration::from_millis(20_000));
-            },
-            _ => panic!("Expected UserMigrating variant, got {:?}", err),
-        }
-        assert!(err.is_retryable());
-    }
-
     /// Table-driven: is_cas_conflict() only true for FailedPrecondition RPC errors.
     #[test]
     fn test_is_cas_conflict_all_cases() {
         let cases: Vec<(SdkError, bool, &str)> = vec![
             (
                 SdkError::Rpc {
-                    code: Code::FailedPrecondition,
+                    code: ErrorCode::FailedPrecondition,
                     message: "cond".into(),
                     request_id: None,
                     trace_id: None,
@@ -1449,18 +966,7 @@ mod tests {
             ),
             (
                 SdkError::Rpc {
-                    code: Code::Aborted,
-                    message: "abort".into(),
-                    request_id: None,
-                    trace_id: None,
-                    error_details: None,
-                },
-                false,
-                "Aborted",
-            ),
-            (
-                SdkError::Rpc {
-                    code: Code::NotFound,
+                    code: ErrorCode::NotFound,
                     message: "nf".into(),
                     request_id: None,
                     trace_id: None,

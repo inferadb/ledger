@@ -1,7 +1,7 @@
 //! Audit event types for querying and ingesting events.
 
-use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use inferadb_ledger_wire::services::events as wire_events;
 
 /// Identifies which InferaDB component is the source of ingested events.
 ///
@@ -58,12 +58,14 @@ pub enum EventScope {
 }
 
 impl EventScope {
-    /// Converts from protobuf enum value.
-    pub(crate) fn from_proto(value: i32) -> Self {
-        match proto::EventScope::try_from(value) {
-            Ok(proto::EventScope::System) => Self::System,
-            Ok(proto::EventScope::Organization) => Self::Organization,
-            _ => Self::System,
+    /// Converts from the wire-protocol enum.
+    ///
+    /// Unknown / `Unspecified` collapses to [`Self::System`].
+    pub(crate) fn from_wire(value: wire_events::EventScope) -> Self {
+        match value {
+            wire_events::EventScope::System => Self::System,
+            wire_events::EventScope::Organization => Self::Organization,
+            wire_events::EventScope::Unspecified => Self::System,
         }
     }
 }
@@ -90,33 +92,41 @@ pub enum EventOutcome {
 }
 
 impl EventOutcome {
-    pub(crate) fn from_proto(
-        value: i32,
+    /// Converts from the wire-protocol enum + the per-outcome auxiliary
+    /// fields the wire `EventEntry` carries alongside it.
+    ///
+    /// `Unspecified` collapses to [`Self::Success`] as the safe default.
+    pub(crate) fn from_wire(
+        value: wire_events::EventOutcome,
         error_code: Option<String>,
         error_detail: Option<String>,
         denial_reason: Option<String>,
     ) -> Self {
-        match proto::EventOutcome::try_from(value) {
-            Ok(proto::EventOutcome::Success) => Self::Success,
-            Ok(proto::EventOutcome::Failed) => Self::Failed {
+        match value {
+            wire_events::EventOutcome::Success => Self::Success,
+            wire_events::EventOutcome::Failed => Self::Failed {
                 code: error_code.unwrap_or_default(),
                 detail: error_detail.unwrap_or_default(),
             },
-            Ok(proto::EventOutcome::Denied) => {
+            wire_events::EventOutcome::Denied => {
                 Self::Denied { reason: denial_reason.unwrap_or_default() }
             },
-            _ => Self::Success,
+            wire_events::EventOutcome::Unspecified => Self::Success,
         }
     }
 
-    pub(crate) fn to_proto(&self) -> (i32, Option<String>, Option<String>, Option<String>) {
+    /// Converts to the wire-protocol enum and its per-outcome auxiliary
+    /// fields. Mirrors [`Self::to_proto`] for the wire transport.
+    pub(crate) fn to_wire(
+        &self,
+    ) -> (wire_events::EventOutcome, Option<String>, Option<String>, Option<String>) {
         match self {
-            Self::Success => (proto::EventOutcome::Success as i32, None, None, None),
+            Self::Success => (wire_events::EventOutcome::Success, None, None, None),
             Self::Failed { code, detail } => {
-                (proto::EventOutcome::Failed as i32, Some(code.clone()), Some(detail.clone()), None)
+                (wire_events::EventOutcome::Failed, Some(code.clone()), Some(detail.clone()), None)
             },
             Self::Denied { reason } => {
-                (proto::EventOutcome::Denied as i32, None, None, Some(reason.clone()))
+                (wire_events::EventOutcome::Denied, None, None, Some(reason.clone()))
             },
         }
     }
@@ -140,11 +150,14 @@ pub enum EventEmissionPath {
 }
 
 impl EventEmissionPath {
-    pub(crate) fn from_proto(value: i32) -> Self {
-        match proto::EventEmissionPath::try_from(value) {
-            Ok(proto::EventEmissionPath::EmissionPathApplyPhase) => Self::ApplyPhase,
-            Ok(proto::EventEmissionPath::EmissionPathHandlerPhase) => Self::HandlerPhase,
-            _ => Self::ApplyPhase,
+    /// Converts from the wire-protocol enum.
+    ///
+    /// `Unspecified` collapses to [`Self::ApplyPhase`] as the safe default.
+    pub(crate) fn from_wire(value: wire_events::EventEmissionPath) -> Self {
+        match value {
+            wire_events::EventEmissionPath::ApplyPhase => Self::ApplyPhase,
+            wire_events::EventEmissionPath::HandlerPhase => Self::HandlerPhase,
+            wire_events::EventEmissionPath::Unspecified => Self::ApplyPhase,
         }
     }
 }
@@ -194,39 +207,46 @@ pub struct SdkEventEntry {
 }
 
 impl SdkEventEntry {
-    /// Creates from protobuf response.
-    pub(crate) fn from_proto(proto: proto::EventEntry) -> Self {
-        let timestamp = proto
-            .timestamp
-            .map(|ts| {
-                chrono::DateTime::from_timestamp(ts.seconds, u32::try_from(ts.nanos).unwrap_or(0))
-                    .unwrap_or(chrono::DateTime::UNIX_EPOCH)
-            })
+    /// Creates from a wire-protocol response.
+    ///
+    /// Mirrors [`Self::from_proto`] for the wire transport. The wire
+    /// `EventEntry` carries `timestamp` as UNIX nanoseconds (a single
+    /// `u64`, not a split seconds/nanos `Timestamp`); we project it back
+    /// into a `chrono::DateTime<Utc>` via `from_timestamp_nanos`. Wire
+    /// `details` is a `BTreeMap` and widens to the domain type's
+    /// `HashMap`. The wire-only `expires_at` field is intentionally
+    /// dropped — the SDK domain type does not surface it.
+    pub(crate) fn from_wire(entry: wire_events::EventEntry) -> Self {
+        // Wire `timestamp` is u64 UNIX nanoseconds; chrono's nanos
+        // constructor takes i64 (capped at ~year 2262), so any value
+        // outside i64 range collapses to UNIX_EPOCH rather than panicking.
+        let timestamp = i64::try_from(entry.timestamp)
+            .map(chrono::DateTime::from_timestamp_nanos)
             .unwrap_or(chrono::DateTime::UNIX_EPOCH);
 
         Self {
-            event_id: proto.event_id,
-            source_service: proto.source_service,
-            event_type: proto.event_type,
+            event_id: entry.event_id.to_vec(),
+            source_service: entry.source_service,
+            event_type: entry.event_type,
             timestamp,
-            scope: EventScope::from_proto(proto.scope),
-            action: proto.action,
-            emission_path: EventEmissionPath::from_proto(proto.emission_path),
-            principal: proto.principal,
-            organization: OrganizationSlug::new(proto.organization.map_or(0, |o| o.slug)),
-            vault: proto.vault.map(|v| VaultSlug::new(v.slug)),
-            outcome: EventOutcome::from_proto(
-                proto.outcome,
-                proto.error_code,
-                proto.error_detail,
-                proto.denial_reason,
+            scope: EventScope::from_wire(entry.scope),
+            action: entry.action,
+            emission_path: EventEmissionPath::from_wire(entry.emission_path),
+            principal: entry.principal,
+            organization: entry.organization.unwrap_or_else(|| OrganizationSlug::new(0)),
+            vault: entry.vault,
+            outcome: EventOutcome::from_wire(
+                entry.outcome,
+                entry.error_code,
+                entry.error_detail,
+                entry.denial_reason,
             ),
-            details: proto.details,
-            block_height: proto.block_height,
-            node_id: proto.node_id,
-            trace_id: proto.trace_id,
-            correlation_id: proto.correlation_id,
-            operations_count: proto.operations_count,
+            details: entry.details.into_iter().collect(),
+            block_height: entry.block_height,
+            node_id: entry.node_id,
+            trace_id: entry.trace_id,
+            correlation_id: entry.correlation_id,
+            operations_count: entry.operations_count,
         }
     }
 
@@ -285,8 +305,8 @@ pub struct EventFilter {
     actions: Vec<String>,
     event_type_prefix: Option<String>,
     principal: Option<String>,
-    outcome: Option<proto::EventOutcome>,
-    emission_path: Option<proto::EventEmissionPath>,
+    outcome: Option<wire_events::EventOutcome>,
+    emission_path: Option<wire_events::EventEmissionPath>,
     correlation_id: Option<String>,
     vault: Option<VaultSlug>,
 }
@@ -329,25 +349,25 @@ impl EventFilter {
 
     /// Filters to successful events only.
     pub fn outcome_success(mut self) -> Self {
-        self.outcome = Some(proto::EventOutcome::Success);
+        self.outcome = Some(wire_events::EventOutcome::Success);
         self
     }
 
     /// Filters to failed events only.
     pub fn outcome_failed(mut self) -> Self {
-        self.outcome = Some(proto::EventOutcome::Failed);
+        self.outcome = Some(wire_events::EventOutcome::Failed);
         self
     }
 
     /// Filters to denied events only.
     pub fn outcome_denied(mut self) -> Self {
-        self.outcome = Some(proto::EventOutcome::Denied);
+        self.outcome = Some(wire_events::EventOutcome::Denied);
         self
     }
 
     /// Filters to apply-phase events only (deterministic, replicated).
     pub fn apply_phase_only(mut self) -> Self {
-        self.emission_path = Some(proto::EventEmissionPath::EmissionPathApplyPhase);
+        self.emission_path = Some(wire_events::EventEmissionPath::ApplyPhase);
         self
     }
 
@@ -364,7 +384,7 @@ impl EventFilter {
     /// [`LedgerClient::list_events`](crate::LedgerClient::list_events)
     /// for the read-after-write caveat.
     pub fn handler_phase_only(mut self) -> Self {
-        self.emission_path = Some(proto::EventEmissionPath::EmissionPathHandlerPhase);
+        self.emission_path = Some(wire_events::EventEmissionPath::HandlerPhase);
         self
     }
 
@@ -385,23 +405,38 @@ impl EventFilter {
         self
     }
 
-    pub(crate) fn to_proto(&self) -> proto::EventFilter {
-        proto::EventFilter {
-            start_time: self.start_time.map(|dt| prost_types::Timestamp {
-                seconds: dt.timestamp(),
-                nanos: dt.timestamp_subsec_nanos() as i32,
-            }),
-            end_time: self.end_time.map(|dt| prost_types::Timestamp {
-                seconds: dt.timestamp(),
-                nanos: dt.timestamp_subsec_nanos() as i32,
-            }),
+    /// Projects the filter into the wire-protocol shape.
+    ///
+    /// Wire timestamps are single-`u64` UNIX nanoseconds (not split
+    /// seconds/nanos `Timestamp`s), so we collapse via
+    /// [`chrono::DateTime::timestamp_nanos_opt`]; `None` from chrono (only
+    /// for far-future / pre-epoch dates outside i64 nanos range) drops the
+    /// bound silently.
+    ///
+    /// `outcome` / `emission_path` use the wire enums directly; an absent
+    /// builder selection ("match any") collapses to the `Unspecified`
+    /// variant on the wire side.
+    pub(crate) fn to_wire(&self) -> wire_events::EventFilter {
+        let start_time = self
+            .start_time
+            .and_then(|dt| dt.timestamp_nanos_opt())
+            .and_then(|n| u64::try_from(n).ok());
+        let end_time = self
+            .end_time
+            .and_then(|dt| dt.timestamp_nanos_opt())
+            .and_then(|n| u64::try_from(n).ok());
+        wire_events::EventFilter {
+            start_time,
+            end_time,
             actions: self.actions.clone(),
             event_type_prefix: self.event_type_prefix.clone(),
             principal: self.principal.clone(),
-            outcome: self.outcome.map_or(0, |o| o as i32),
-            emission_path: self.emission_path.map_or(0, |e| e as i32),
+            outcome: self.outcome.unwrap_or(wire_events::EventOutcome::Unspecified),
+            emission_path: self
+                .emission_path
+                .unwrap_or(wire_events::EventEmissionPath::Unspecified),
             correlation_id: self.correlation_id.clone(),
-            vault: self.vault.map(|slug| proto::VaultSlug { slug: slug.value() }),
+            vault: self.vault,
         }
     }
 }
@@ -488,20 +523,28 @@ impl SdkIngestEventEntry {
         self
     }
 
-    pub(crate) fn into_proto(self) -> proto::IngestEventEntry {
-        let (outcome, error_code, error_detail, denial_reason) = self.outcome.to_proto();
-        proto::IngestEventEntry {
+    /// Projects the entry into the wire-protocol shape.
+    ///
+    /// Wire details are stored as `BTreeMap` (sorted, postcard-friendly);
+    /// we narrow from the domain `HashMap` via `collect`. The wire
+    /// `timestamp` is `Option<u64>` UNIX nanoseconds — same caveat as
+    /// [`EventFilter::to_wire`] for far-future dates outside i64 nanos
+    /// range.
+    pub(crate) fn into_wire(self) -> wire_events::IngestEventEntry {
+        let (outcome, error_code, error_detail, denial_reason) = self.outcome.to_wire();
+        let timestamp = self
+            .timestamp
+            .and_then(|dt| dt.timestamp_nanos_opt())
+            .and_then(|n| u64::try_from(n).ok());
+        wire_events::IngestEventEntry {
             event_type: self.event_type,
             principal: self.principal,
             outcome,
-            details: self.details,
+            details: self.details.into_iter().collect(),
             trace_id: self.trace_id,
             correlation_id: self.correlation_id,
-            vault: self.vault.map(|v| proto::VaultSlug { slug: v.value() }),
-            timestamp: self.timestamp.map(|dt| prost_types::Timestamp {
-                seconds: dt.timestamp(),
-                nanos: dt.timestamp_subsec_nanos() as i32,
-            }),
+            vault: self.vault,
+            timestamp,
             error_code,
             error_detail,
             denial_reason,

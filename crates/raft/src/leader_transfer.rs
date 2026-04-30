@@ -70,24 +70,6 @@ pub enum LeaderTransferError {
         /// The configured timeout duration.
         timeout: Duration,
     },
-    /// Failed to connect to the target node.
-    #[snafu(display("Failed to connect to target node: {source}"))]
-    Connection {
-        /// The underlying transport error.
-        source: tonic::transport::Error,
-        /// Source location for debugging.
-        #[snafu(implicit)]
-        location: snafu::Location,
-    },
-    /// gRPC error from the target node.
-    #[snafu(display("gRPC error from target: {source}"))]
-    Rpc {
-        /// The underlying gRPC status error.
-        source: tonic::Status,
-        /// Source location for debugging.
-        #[snafu(implicit)]
-        location: snafu::Location,
-    },
 }
 
 /// RAII guard that resets the transfer lock on drop.

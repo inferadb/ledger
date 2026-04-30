@@ -53,6 +53,11 @@ pub(super) fn truncate_hash(hash: &str) -> String {
     if hash.len() <= 16 { hash.to_string() } else { hash[..16].to_string() }
 }
 
+/// Encodes a byte slice as lowercase hex.
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Accesses the current task-local request context, if one exists.
 ///
 /// Provides safe access to the request context from anywhere
@@ -374,33 +379,66 @@ impl RequestContext {
         ctx
     }
 
-    /// Creates a context for a gRPC handler.
+    /// Creates a context for a wire-protocol handler.
     ///
-    /// Extracts transport metadata (SDK version, source IP) and trace context
-    /// (W3C traceparent) from the request. Emits a gRPC request metric and
-    /// the canonical log line on Drop.
+    /// Mirror of [`from_request`](Self::from_request) that reads
+    /// request-scoped fields from a [`inferadb_ledger_wire::RequestContext`]
+    /// — the wire frame's per-RPC context object built by the dispatcher
+    /// (Phase 0.0.B `build_request_context`) — instead of from a
+    /// `tonic::Request<T>`. Emits a gRPC request metric and the canonical
+    /// log line on Drop.
+    ///
+    /// Field population mirrors `from_request` field-for-field where the
+    /// wire context exposes an equivalent: `request_id` from
+    /// `wire_ctx.request_id` (UUID-derived), `sdk_version` from
+    /// `wire_ctx.sdk_version`, source IP from `wire_ctx.forwarded_for`,
+    /// trace context from `wire_ctx.trace_id` / `span_id` / `trace_flags`.
+    /// All-zero trace IDs are treated as "no trace" — the field is left
+    /// unset rather than emitting a `00000000…` log entry.
     ///
     /// # Arguments
     ///
-    /// * `service` - The gRPC service name (e.g., `"WriteService"`).
-    /// * `method` - The gRPC method name (e.g., `"write"`).
-    /// * `request` - The tonic request to extract metadata from.
-    /// * `event_handle` - Optional trait-erased event handle for business event emission.
+    /// * `service` — The gRPC service name (e.g., `"WriteService"`).
+    /// * `method` — The gRPC method name (e.g., `"write"`).
+    /// * `wire_ctx` — Per-RPC wire context produced by the dispatcher.
+    /// * `event_handle` — Optional trait-erased event handle for business event emission.
     #[must_use]
-    pub fn from_request<T>(
+    pub fn from_wire_context(
         service: &'static str,
         method: &'static str,
-        request: &tonic::Request<T>,
+        wire_ctx: &inferadb_ledger_wire::RequestContext,
         event_handle: Option<Arc<dyn crate::event_writer::EventEmitter>>,
     ) -> Self {
         let mut ctx = Self::new(service, method);
         ctx.emit_grpc_metric = true;
         ctx.event_handle = event_handle;
-        ctx.extract_transport_metadata(request.metadata());
 
-        let trace_ctx =
-            inferadb_ledger_types::trace_context::extract_or_generate(request.metadata());
-        ctx.set_trace_context_from(&trace_ctx);
+        // Use the wire-frame `request_id` so log correlation, response-frame
+        // headers, and any cross-frame replay all key on the same value.
+        ctx.request_id = Uuid::from_u128(wire_ctx.request_id);
+
+        if let Some(ref version) = wire_ctx.sdk_version {
+            ctx.set_sdk_version(version);
+        }
+        // Wire `forwarded_for` already represents a single (first-hop) IP —
+        // the bridge in `crates/services/src/services/wire_helpers.rs`
+        // strips the proxy chain on the way through, so we trust it here.
+        if let Some(ref ip) = wire_ctx.forwarded_for {
+            ctx.set_source_ip(ip);
+        }
+
+        // Trace context: when the wire frame carries a non-zero trace ID,
+        // emit it on the log line. Otherwise leave the fields unset — same
+        // semantics as the tonic path's `extract_or_generate` returning a
+        // brand-new context, except we explicitly skip emitting an
+        // all-zeros placeholder.
+        if wire_ctx.trace_id != [0u8; 16] {
+            ctx.set_trace_id(hex_encode(&wire_ctx.trace_id));
+        }
+        if wire_ctx.span_id != [0u8; 8] {
+            ctx.set_span_id(hex_encode(&wire_ctx.span_id));
+        }
+        ctx.trace_flags = Some(wire_ctx.trace_flags);
 
         ctx
     }
@@ -757,27 +795,6 @@ impl RequestContext {
         self.source_ip = Some(truncate_string(ip, 45)); // IPv6 max length
     }
 
-    /// Extracts SDK version and source IP from gRPC request metadata.
-    ///
-    /// Reads:
-    /// - `x-sdk-version` header for the client SDK version
-    /// - `x-forwarded-for` header for the client source IP (behind load balancers)
-    pub fn extract_transport_metadata(&mut self, metadata: &tonic::metadata::MetadataMap) {
-        if let Some(version) = metadata.get("x-sdk-version")
-            && let Ok(v) = version.to_str()
-        {
-            self.set_sdk_version(v);
-        }
-        if let Some(forwarded_for) = metadata.get("x-forwarded-for")
-            && let Ok(ips) = forwarded_for.to_str()
-        {
-            // x-forwarded-for may contain multiple IPs; take the first (client IP)
-            if let Some(client_ip) = ips.split(',').next() {
-                self.set_source_ip(client_ip.trim());
-            }
-        }
-    }
-
     // === Tracing Context ===
 
     /// Sets the W3C trace ID (32 hex chars).
@@ -884,6 +901,15 @@ impl RequestContext {
     /// Sets the event handle for handler-phase event emission.
     pub fn set_event_handle(&mut self, handle: Arc<dyn crate::event_writer::EventEmitter>) {
         self.event_handle = Some(handle);
+    }
+
+    /// Toggles the gRPC request metric emitted on Drop.
+    ///
+    /// Tonic-shaped builders (in `inferadb-ledger-services`) set this when
+    /// constructing a context from a `tonic::Request<T>`; the in-crate
+    /// constructors leave it `false` for non-RPC contexts.
+    pub fn set_emit_grpc_metric(&mut self, enabled: bool) {
+        self.emit_grpc_metric = enabled;
     }
 
     // =========================================================================
@@ -1693,28 +1719,6 @@ mod tests {
         assert_eq!(ctx.source_ip.as_deref(), Some("192.168.1.1"));
     }
 
-    #[test]
-    fn extract_transport_metadata_from_grpc() {
-        let mut ctx = RequestContext::new("S", "m");
-        ctx.suppress_emission();
-        let mut metadata = tonic::metadata::MetadataMap::new();
-        metadata.insert("x-sdk-version", "2.0.0".parse().unwrap());
-        metadata.insert("x-forwarded-for", "10.0.0.1, 10.0.0.2".parse().unwrap());
-        ctx.extract_transport_metadata(&metadata);
-        assert_eq!(ctx.sdk_version.as_deref(), Some("2.0.0"));
-        assert_eq!(ctx.source_ip.as_deref(), Some("10.0.0.1"));
-    }
-
-    #[test]
-    fn extract_transport_metadata_missing_headers() {
-        let mut ctx = RequestContext::new("S", "m");
-        ctx.suppress_emission();
-        let metadata = tonic::metadata::MetadataMap::new();
-        ctx.extract_transport_metadata(&metadata);
-        assert!(ctx.sdk_version.is_none());
-        assert!(ctx.source_ip.is_none());
-    }
-
     // ── Trace context setters ──
 
     #[test]
@@ -1984,33 +1988,6 @@ mod tests {
         assert_eq!(entry.trace_id.as_deref(), Some("abc123"));
         assert_eq!(entry.details.get("level").map(String::as_str), Some("organization"));
         assert_eq!(entry.action, EventAction::RequestRateLimited);
-    }
-
-    // ── from_request constructor ──
-
-    #[test]
-    fn from_request_extracts_metadata() {
-        use tonic::metadata::MetadataValue;
-
-        let mut request = tonic::Request::new(());
-        request.metadata_mut().insert("x-sdk-version", MetadataValue::from_static("3.0.0"));
-        request.metadata_mut().insert(
-            "traceparent",
-            MetadataValue::from_static("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"),
-        );
-
-        let mut ctx = RequestContext::from_request("ReadService", "get", &request, None);
-        assert_eq!(ctx.service, "ReadService");
-        assert_eq!(ctx.method, "get");
-        assert!(ctx.emit_grpc_metric);
-        assert!(ctx.event_handle.is_none());
-        assert_eq!(ctx.sdk_version.as_deref(), Some("3.0.0"));
-        assert_eq!(ctx.trace_id.as_deref(), Some("0af7651916cd43dd8448eb211c80319c"),);
-        assert!(ctx.span_id.is_some());
-        assert_eq!(ctx.parent_span_id.as_deref(), Some("b7ad6b7169203331"),);
-        assert_eq!(ctx.trace_flags, Some(0x01));
-
-        ctx.suppress_emission();
     }
 
     #[test]

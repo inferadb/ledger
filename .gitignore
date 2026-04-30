@@ -11,3 +11,5 @@ fuzz/target/
 .claude/scheduled_tasks.lock
 /cargo-flamegraph.trace
 tasks/
+docs/audits/
+docs/superpowers/

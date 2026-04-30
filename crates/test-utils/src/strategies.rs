@@ -249,6 +249,11 @@ pub fn arb_vault_block() -> impl Strategy<Value = VaultBlock> {
 }
 
 /// Generates an arbitrary [`VaultEntry`] with height 0-999,999 and 0-2 transactions.
+///
+/// `organization_slug` and `vault_slug` are set to zero. These fields carry
+/// external-facing Snowflake IDs that are not part of the core Merkle
+/// chain; tests that depend on slug values should override them after
+/// construction.
 pub fn arb_vault_entry() -> impl Strategy<Value = VaultEntry> {
     (
         arb_organization_id(),
@@ -367,7 +372,8 @@ pub fn arb_event_emission() -> impl Strategy<Value = EventEmission> {
 /// Generates an arbitrary [`EventEntry`] for property-based testing.
 ///
 /// Produces well-formed entries with valid scope-action alignment and
-/// realistic field values. Reusable across Tasks 2–9.
+/// realistic field values. The `scope` field is derived from `action` via
+/// [`EventAction::scope`], so `scope` and `action` are always consistent.
 pub fn arb_event_entry() -> impl Strategy<Value = EventEntry> {
     // Split into two groups of <= 12 elements each (proptest tuple limit).
     let core = (

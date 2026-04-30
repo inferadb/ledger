@@ -1,24 +1,18 @@
-//! Decoupled apply workers — one per Raft tier.
+//! Typed apply workers — one per Raft tier.
 //!
-//! Each tier in the B.1 three-tier model has its own typed apply pipeline:
+//! Each tier has its own apply pipeline, parameterised by its request enum:
 //!
-//! - [`SystemApplyWorker`] applies [`SystemRequest`](crate::types::SystemRequest) committed entries
-//!   against the `(GLOBAL, 0)` [`OrganizationGroup`](crate::raft_manager::OrganizationGroup) (the
-//!   cluster control-plane group until B.1.6 ships a distinct SystemGroup storage path).
-//! - [`RegionApplyWorker`] applies [`RegionRequest`](crate::types::RegionRequest) committed entries
-//!   against per-region `(region, 0)`
-//!   [`OrganizationGroup`](crate::raft_manager::OrganizationGroup)s (the regional control-plane
-//!   group until B.1.6 ships a distinct RegionGroup storage path).
+//! - [`SystemApplyWorker`] applies [`SystemRequest`](crate::types::SystemRequest) entries for the
+//!   cluster control-plane group (`GLOBAL, 0`).
+//! - [`RegionApplyWorker`] applies [`RegionRequest`](crate::types::RegionRequest) entries for
+//!   per-region control-plane groups (`(region, 0)`).
 //! - [`OrganizationApplyWorker`] applies [`OrganizationRequest`](crate::types::OrganizationRequest)
-//!   committed entries against a per-organization
-//!   [`OrganizationGroup`](crate::raft_manager::OrganizationGroup) via
-//!   [`RaftLogStore::apply_committed_entries`].
+//!   entries for per-organization data-plane groups (`(region, org_id > 0)`) via
+//!   [`log_storage::RaftLogStore::apply_committed_entries`](crate::log_storage::RaftLogStore).
 //!
-//! Tier discipline: each apply worker is typed to its tier's request enum
-//! via the generic [`ApplyWorker<R>`] parameter. Cross-tier misrouting is a
-//! compile error — `SystemApplyWorker` cannot be handed an
-//! `OrganizationRequest`-bearing batch because the decode type is fixed at
-//! construction.
+//! Tier discipline: cross-tier misrouting is a compile error. `SystemApplyWorker` cannot
+//! receive an `OrganizationRequest`-bearing batch because the decode type is fixed at
+//! construction by the [`ApplyWorker<R>`] type parameter.
 
 use std::{marker::PhantomData, time::Instant};
 
@@ -49,16 +43,15 @@ pub type OrganizationApplyWorker = ApplyWorker<crate::types::OrganizationRequest
 ///
 /// Receives committed entry batches from the consensus reactor and applies
 /// them to the tier-specific state machine via
-/// [`RaftLogStore::apply_committed_entries::<R>`]. The `R` type parameter
+/// `RaftLogStore::apply_committed_entries::<R>`. The `R` type parameter
 /// enforces compile-time tier discipline: the wire decoder, the apply
 /// dispatch, and the response fan-out all share the same `R` — there is
 /// no runtime branching on a shared wrapper enum.
 ///
-/// Construction picks the right `R`: `(GLOBAL, 0)` gets
-/// `ApplyWorker::<SystemRequest>`; `(region, 0)` for region != GLOBAL gets
-/// `ApplyWorker::<SystemRequest>` (B.1 transitional — RegionRequest routing
-/// pending B.1.6); `(region, org_id > 0)` gets
-/// `ApplyWorker::<OrganizationRequest>`.
+/// Use the typed aliases instead of constructing this directly:
+/// - [`SystemApplyWorker`] for the cluster control-plane group `(GLOBAL, 0)`
+/// - [`RegionApplyWorker`] for a regional control-plane group `(region, 0)`
+/// - [`OrganizationApplyWorker`] for a per-organization group `(region, org_id > 0)`
 pub struct ApplyWorker<R: ApplyableRequest> {
     store: RaftLogStore<FileBackend>,
     response_map: ResponseMap,
@@ -109,13 +102,11 @@ impl<R: ApplyableRequest> ApplyWorker<R> {
     /// Runs the apply loop until the commit channel is closed (engine
     /// shutdown).
     ///
-    /// `ctrl_rx` is the per-shard out-of-band [`ApplyCommand`] channel
-    /// drained alongside `rx` via `tokio::select!`. Stage 4's
-    /// `RaftManagerSnapshotInstaller` emits
-    /// [`ApplyCommand::InstallSnapshot`](crate::apply_command::ApplyCommand::InstallSnapshot)
-    /// here so the install happens on the same task that owns the
-    /// `RaftLogStore` — preventing any race between an in-flight batch
-    /// apply and a snapshot install.
+    /// `ctrl_rx` is the per-shard out-of-band [`ApplyCommand`] channel drained alongside `rx`
+    /// via `tokio::select!`. [`crate::snapshot_installer`]'s `RaftManagerSnapshotInstaller`
+    /// emits [`ApplyCommand::InstallSnapshot`](crate::apply_command::ApplyCommand::InstallSnapshot)
+    /// here so the install happens on the same task that owns the `RaftLogStore`, preventing
+    /// any race between an in-flight batch apply and a snapshot install.
     pub async fn run(
         mut self,
         mut rx: mpsc::Receiver<CommittedBatch>,
@@ -194,13 +185,10 @@ impl<R: ApplyableRequest> ApplyWorker<R> {
                 batch_size,
                 apply_latency,
             );
-            // Phase 7 / O3 per-vault + org rollup. The org rollup
-            // (`org_apply_throughput_ops_total`) is always-on; the
-            // per-vault apply latency histogram is gated on
-            // `metrics::vault_metrics_enabled()`. `vault_id` is `Some`
-            // only for per-vault Raft groups (Path A); org-scoped
-            // groups (`OrganizationGroup`, control-plane groups) drive
-            // the rollup with `None`.
+            // Record per-vault and org-rollup throughput metrics.
+            // `org_apply_throughput_ops_total` is always-on; per-vault apply latency
+            // is gated on `metrics::vault_metrics_enabled()`. `vault_id` is `Some`
+            // only for vault-tier Raft groups; org-scoped groups emit the rollup with `None`.
             metrics::record_vault_apply_batch(
                 &self.region,
                 &self.shard,
@@ -226,11 +214,9 @@ impl<R: ApplyableRequest> ApplyWorker<R> {
                 },
             };
 
-            // Response fan-out (3 sub-phases: remove-waiters, lock-free
-            // send, spillover-insert). Phase instrumentation lumps them
-            // together — internal split is not separately actionable
-            // because the lock-free send dominates unless contention is
-            // pathological, and the map locks are acquired only in
+            // Response fan-out: remove waiters from the map, deliver lock-free,
+            // then batch-insert any spillover. The lock-free send dominates
+            // unless contention is pathological; map locks are only held for
             // short critical sections between sends.
             let fanout_start = Instant::now();
             let mut to_send: Vec<(
@@ -249,14 +235,13 @@ impl<R: ApplyableRequest> ApplyWorker<R> {
                 }
             }
 
-            // Phase 2: lock-free delivery. Channel sends don't need any
-            // crate-internal lock, so proposers racing to register can
-            // acquire `response_map` here without contention.
+            // Lock-free delivery — no crate-internal lock needed, so proposers racing to
+            // register can acquire `response_map` without contention.
             for (tx, response) in to_send {
                 let _ = tx.send(response);
             }
 
-            // Phase 3: batch-insert spillover under a single `spillover` lock.
+            // Batch-insert spillover under a single `spillover` lock.
             if !to_spillover.is_empty() {
                 let mut spillover = self.spillover.lock();
                 for (index, response) in to_spillover {

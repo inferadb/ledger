@@ -9,7 +9,6 @@
 //! - [`query`]: Entities, relationships, operations, pagination
 //! - [`read`]: Read consistency levels and write results
 //! - [`schema`]: Schema versioning and deployment
-//! - [`streaming`]: Block announcement streams
 //! - [`verified_read`]: Merkle proofs, block headers, chain proofs
 
 pub mod admin;
@@ -20,5 +19,4 @@ pub mod invitation;
 pub mod query;
 pub mod read;
 pub mod schema;
-pub mod streaming;
 pub mod verified_read;

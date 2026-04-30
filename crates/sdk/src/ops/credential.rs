@@ -1,12 +1,10 @@
 //! Credential CRUD, TOTP verification, and recovery code operations.
 
-use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{UserCredentialId, UserSlug};
 
 use crate::{
     LedgerClient,
     error::Result,
-    proto_util::missing_response_field,
     types::credential::{
         CredentialData, CredentialType, PasskeyCredentialInfo, RecoveryCodeResult,
         UserCredentialInfo,
@@ -31,40 +29,23 @@ impl LedgerClient {
         data: CredentialData,
     ) -> Result<UserCredentialInfo> {
         let name = name.into();
-        let credential_type_i32 = CredentialType::from_data(&data).to_proto_i32();
-        let proto_data = match &data {
-            CredentialData::Passkey(pk) => {
-                proto::create_user_credential_request::Data::Passkey(pk.to_proto())
-            },
-            CredentialData::Totp(totp) => {
-                proto::create_user_credential_request::Data::Totp(totp.to_proto())
-            },
-            CredentialData::RecoveryCode(rc) => {
-                proto::create_user_credential_request::Data::RecoveryCode(rc.to_proto())
-            },
-        };
         let pool = self.pool.clone();
         self.call_with_retry("create_user_credential", || {
             let pool = pool.clone();
             let name = name.clone();
-            let proto_data = proto_data.clone();
+            let data = data.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_user_client);
-
-                let request = proto::CreateUserCredentialRequest {
-                    user: Some(proto::UserSlug { slug: user.value() }),
-                    credential_type: credential_type_i32,
-                    name: name.clone(),
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                    data: Some(proto_data.clone()),
-                };
-
-                let response =
-                    client.create_user_credential(tonic::Request::new(request)).await?.into_inner();
-
-                response.credential.as_ref().map(UserCredentialInfo::from_proto).ok_or_else(|| {
-                    missing_response_field("credential", "CreateUserCredentialResponse")
-                })
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::credential::create_user_credential(
+                    wire_client,
+                    request_id,
+                    caller,
+                    user,
+                    name,
+                    data,
+                )
+                .await
             }
         })
         .await
@@ -79,23 +60,20 @@ impl LedgerClient {
         user: UserSlug,
         credential_type: Option<CredentialType>,
     ) -> Result<Vec<UserCredentialInfo>> {
-        let type_filter = credential_type.map(|ct| ct.to_proto_i32());
         let pool = self.pool.clone();
         self.call_with_retry("list_user_credentials", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_user_client);
-
-                let request = proto::ListUserCredentialsRequest {
-                    user: Some(proto::UserSlug { slug: user.value() }),
-                    credential_type: type_filter,
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                let response =
-                    client.list_user_credentials(tonic::Request::new(request)).await?.into_inner();
-
-                Ok(response.credentials.iter().map(UserCredentialInfo::from_proto).collect())
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::credential::list_user_credentials(
+                    wire_client,
+                    request_id,
+                    caller,
+                    user,
+                    credential_type,
+                )
+                .await
             }
         })
         .await
@@ -114,30 +92,25 @@ impl LedgerClient {
         enabled: Option<bool>,
         passkey_data: Option<PasskeyCredentialInfo>,
     ) -> Result<UserCredentialInfo> {
-        let passkey_proto = passkey_data.as_ref().map(|pk| pk.to_proto());
         let pool = self.pool.clone();
         self.call_with_retry("update_user_credential", || {
             let pool = pool.clone();
             let name = name.clone();
-            let passkey_proto = passkey_proto.clone();
+            let passkey_data = passkey_data.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_user_client);
-
-                let request = proto::UpdateUserCredentialRequest {
-                    user: Some(proto::UserSlug { slug: user.value() }),
-                    credential_id: credential_id.value(),
-                    name: name.clone(),
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::credential::update_user_credential(
+                    wire_client,
+                    request_id,
+                    caller,
+                    user,
+                    credential_id,
+                    name,
                     enabled,
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                    passkey: passkey_proto.clone(),
-                };
-
-                let response =
-                    client.update_user_credential(tonic::Request::new(request)).await?.into_inner();
-
-                response.credential.as_ref().map(UserCredentialInfo::from_proto).ok_or_else(|| {
-                    missing_response_field("credential", "UpdateUserCredentialResponse")
-                })
+                    passkey_data,
+                )
+                .await
             }
         })
         .await
@@ -156,17 +129,16 @@ impl LedgerClient {
         self.call_with_retry("delete_user_credential", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_user_client);
-
-                let request = proto::DeleteUserCredentialRequest {
-                    user: Some(proto::UserSlug { slug: user.value() }),
-                    credential_id: credential_id.value(),
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                client.delete_user_credential(tonic::Request::new(request)).await?;
-
-                Ok(())
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::credential::delete_user_credential(
+                    wire_client,
+                    request_id,
+                    caller,
+                    user,
+                    credential_id,
+                )
+                .await
             }
         })
         .await
@@ -192,18 +164,16 @@ impl LedgerClient {
             let pool = pool.clone();
             let primary_method = primary_method.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_user_client);
-
-                let request = proto::CreateTotpChallengeRequest {
-                    user: Some(proto::UserSlug { slug: user.value() }),
-                    primary_method: primary_method.clone(),
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                let response =
-                    client.create_totp_challenge(tonic::Request::new(request)).await?.into_inner();
-
-                Ok(response.challenge_nonce)
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::credential::create_totp_challenge(
+                    wire_client,
+                    request_id,
+                    caller,
+                    user,
+                    primary_method,
+                )
+                .await
             }
         })
         .await
@@ -227,23 +197,17 @@ impl LedgerClient {
             let challenge_nonce = challenge_nonce.clone();
             let totp_code = totp_code.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_user_client);
-
-                let request = proto::VerifyTotpRequest {
-                    user: Some(proto::UserSlug { slug: user.value() }),
-                    totp_code: totp_code.clone(),
-                    challenge_nonce: challenge_nonce.clone(),
-                    credential_used: None,
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                let response = client.verify_totp(tonic::Request::new(request)).await?.into_inner();
-
-                let tokens = response
-                    .tokens
-                    .ok_or_else(|| missing_response_field("tokens", "VerifyTotpResponse"))?;
-
-                Ok(crate::token::TokenPair::from_proto(tokens))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::credential::verify_totp(
+                    wire_client,
+                    request_id,
+                    caller,
+                    user,
+                    totp_code,
+                    challenge_nonce,
+                )
+                .await
             }
         })
         .await
@@ -271,27 +235,17 @@ impl LedgerClient {
             let challenge_nonce = challenge_nonce.clone();
             let code = code.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_user_client);
-
-                let request = proto::ConsumeRecoveryCodeRequest {
-                    user: Some(proto::UserSlug { slug: user.value() }),
-                    code: code.clone(),
-                    challenge_nonce: challenge_nonce.clone(),
-                    credential_used: None,
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                let response =
-                    client.consume_recovery_code(tonic::Request::new(request)).await?.into_inner();
-
-                let tokens = response.tokens.ok_or_else(|| {
-                    missing_response_field("tokens", "ConsumeRecoveryCodeResponse")
-                })?;
-
-                Ok(RecoveryCodeResult {
-                    tokens: crate::token::TokenPair::from_proto(tokens),
-                    remaining_codes: response.remaining_codes,
-                })
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::credential::consume_recovery_code(
+                    wire_client,
+                    request_id,
+                    caller,
+                    user,
+                    code,
+                    challenge_nonce,
+                )
+                .await
             }
         })
         .await

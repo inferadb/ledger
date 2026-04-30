@@ -12,10 +12,8 @@
 
 use std::{
     collections::HashMap,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
-
-use prost_types::Timestamp;
 
 /// Default staleness threshold: peers not seen in 1 hour are considered stale.
 pub const DEFAULT_STALENESS_THRESHOLD: Duration = Duration::from_secs(60 * 60);
@@ -74,24 +72,15 @@ impl PeerTracker {
         self.last_seen.insert(node_id.to_string(), Instant::now());
     }
 
-    /// Returns the last seen timestamp for a peer as a proto Timestamp.
+    /// Returns the last seen timestamp for a peer as a wall-clock `SystemTime`.
     ///
     /// Returns None if the peer has never been seen.
-    pub fn get_last_seen(&self, node_id: &str) -> Option<Timestamp> {
+    pub fn get_last_seen(&self, node_id: &str) -> Option<SystemTime> {
         self.last_seen.get(node_id).map(|instant| {
             // Convert Instant to wall-clock time
             let elapsed_since_seen = instant.elapsed();
-            let now = std::time::SystemTime::now();
-            let seen_time = now - elapsed_since_seen;
-
-            // Convert to proto Timestamp
-            match seen_time.duration_since(std::time::UNIX_EPOCH) {
-                Ok(duration) => Timestamp {
-                    seconds: duration.as_secs() as i64,
-                    nanos: duration.subsec_nanos() as i32,
-                },
-                Err(_) => Timestamp { seconds: 0, nanos: 0 },
-            }
+            let now = SystemTime::now();
+            now - elapsed_since_seen
         })
     }
 
@@ -294,6 +283,7 @@ mod tests {
 
         tracker.record_seen("node-1");
         let ts = tracker.get_last_seen("node-1").unwrap();
+        let ts_secs = ts.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
 
         // Timestamp should be recent (within last minute)
         let now =
@@ -301,9 +291,9 @@ mod tests {
                 as i64;
 
         assert!(
-            ts.seconds >= now - 60 && ts.seconds <= now + 1,
+            ts_secs >= now - 60 && ts_secs <= now + 1,
             "Timestamp should be within last minute: got {}, now {}",
-            ts.seconds,
+            ts_secs,
             now
         );
     }

@@ -2,12 +2,9 @@
 
 use std::fmt;
 
-use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{
     OrganizationSlug, Region, TeamSlug, UserEmailId, UserRole, UserSlug, UserStatus, VaultSlug,
 };
-
-use crate::proto_util::{proto_timestamp_to_system_time, region_from_proto_str};
 
 /// Status of an organization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -41,18 +38,6 @@ impl OrganizationStatus {
             Self::Deleted => "deleted",
         }
     }
-
-    /// Converts from protobuf enum value.
-    pub(crate) fn from_proto(value: i32) -> Self {
-        match proto::OrganizationStatus::try_from(value) {
-            Ok(proto::OrganizationStatus::Active) => OrganizationStatus::Active,
-            Ok(proto::OrganizationStatus::Provisioning) => OrganizationStatus::Provisioning,
-            Ok(proto::OrganizationStatus::Migrating) => OrganizationStatus::Migrating,
-            Ok(proto::OrganizationStatus::Suspended) => OrganizationStatus::Suspended,
-            Ok(proto::OrganizationStatus::Deleted) => OrganizationStatus::Deleted,
-            _ => OrganizationStatus::Unspecified,
-        }
-    }
 }
 
 impl fmt::Display for OrganizationStatus {
@@ -82,24 +67,6 @@ impl OrganizationTier {
             Self::Free => "free",
             Self::Launch => "launch",
             Self::Scale => "scale",
-        }
-    }
-
-    /// Converts from protobuf enum value.
-    pub(crate) fn from_proto(value: i32) -> Self {
-        match proto::OrganizationTier::try_from(value) {
-            Ok(proto::OrganizationTier::Launch) => OrganizationTier::Launch,
-            Ok(proto::OrganizationTier::Scale) => OrganizationTier::Scale,
-            _ => OrganizationTier::Free,
-        }
-    }
-
-    /// Converts to protobuf enum value.
-    pub(crate) fn to_proto(self) -> i32 {
-        match self {
-            OrganizationTier::Free => proto::OrganizationTier::Free.into(),
-            OrganizationTier::Launch => proto::OrganizationTier::Launch.into(),
-            OrganizationTier::Scale => proto::OrganizationTier::Scale.into(),
         }
     }
 }
@@ -134,16 +101,6 @@ impl VaultStatus {
             Self::Active => "active",
             Self::ReadOnly => "read_only",
             Self::Deleted => "deleted",
-        }
-    }
-
-    /// Converts from protobuf enum value.
-    pub(crate) fn from_proto(value: i32) -> Self {
-        match proto::VaultStatus::try_from(value) {
-            Ok(proto::VaultStatus::Active) => VaultStatus::Active,
-            Ok(proto::VaultStatus::ReadOnly) => VaultStatus::ReadOnly,
-            Ok(proto::VaultStatus::Deleted) => VaultStatus::Deleted,
-            _ => VaultStatus::Unspecified,
         }
     }
 }
@@ -233,25 +190,6 @@ pub struct BlindingKeyRotationStatus {
     pub entries_rehashed: u64,
     /// Whether the rotation is already complete (true if zero entries).
     pub complete: bool,
-}
-
-/// Status of a blinding key rehash operation.
-///
-/// Returned by
-/// [`LedgerClient::get_blinding_key_rehash_status`](crate::LedgerClient::get_blinding_key_rehash_status).
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct BlindingKeyRehashStatus {
-    /// Total email hash entries to re-hash.
-    pub total_entries: u64,
-    /// Entries re-hashed across all regions.
-    pub entries_rehashed: u64,
-    /// Whether the rotation is fully complete.
-    pub complete: bool,
-    /// Per-region progress: region name to entries re-hashed in that region.
-    pub per_region_progress: std::collections::HashMap<String, u64>,
-    /// Currently active blinding key version.
-    pub active_key_version: u32,
 }
 
 /// Verification code returned by
@@ -355,22 +293,6 @@ impl OrganizationMemberRole {
             Self::Member => "member",
         }
     }
-
-    /// Converts from protobuf enum value.
-    pub(crate) fn from_proto(value: i32) -> Self {
-        match proto::OrganizationMemberRole::try_from(value) {
-            Ok(proto::OrganizationMemberRole::Admin) => OrganizationMemberRole::Admin,
-            _ => OrganizationMemberRole::Member,
-        }
-    }
-
-    /// Converts to protobuf enum value.
-    pub(crate) fn to_proto(self) -> i32 {
-        match self {
-            OrganizationMemberRole::Admin => proto::OrganizationMemberRole::Admin.into(),
-            OrganizationMemberRole::Member => proto::OrganizationMemberRole::Member.into(),
-        }
-    }
 }
 
 impl fmt::Display for OrganizationMemberRole {
@@ -391,17 +313,6 @@ pub struct OrganizationMemberInfo {
     pub joined_at: Option<std::time::SystemTime>,
 }
 
-impl OrganizationMemberInfo {
-    /// Converts from protobuf message.
-    pub(crate) fn from_proto(member: &proto::OrganizationMember) -> Self {
-        Self {
-            user: UserSlug::new(member.user.map_or(0, |u| u.slug)),
-            role: OrganizationMemberRole::from_proto(member.role),
-            joined_at: member.joined_at.as_ref().and_then(proto_timestamp_to_system_time),
-        }
-    }
-}
-
 /// Role within a team.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -419,22 +330,6 @@ impl TeamMemberRole {
         match self {
             Self::Manager => "manager",
             Self::Member => "member",
-        }
-    }
-
-    /// Converts from protobuf enum value.
-    pub(crate) fn from_proto(value: i32) -> Self {
-        match proto::OrganizationTeamMemberRole::try_from(value) {
-            Ok(proto::OrganizationTeamMemberRole::Manager) => TeamMemberRole::Manager,
-            _ => TeamMemberRole::Member,
-        }
-    }
-
-    /// Converts to protobuf enum value.
-    pub(crate) fn to_proto(self) -> proto::OrganizationTeamMemberRole {
-        match self {
-            TeamMemberRole::Manager => proto::OrganizationTeamMemberRole::Manager,
-            TeamMemberRole::Member => proto::OrganizationTeamMemberRole::Member,
         }
     }
 }
@@ -457,17 +352,6 @@ pub struct TeamMemberInfo {
     pub joined_at: Option<std::time::SystemTime>,
 }
 
-impl TeamMemberInfo {
-    /// Converts from protobuf message.
-    pub(crate) fn from_proto(member: &proto::OrganizationTeamMember) -> Self {
-        Self {
-            user: UserSlug::new(member.user.map_or(0, |u| u.slug)),
-            role: TeamMemberRole::from_proto(member.role),
-            joined_at: member.joined_at.as_ref().and_then(proto_timestamp_to_system_time),
-        }
-    }
-}
-
 /// Information about an organization team.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -484,20 +368,6 @@ pub struct TeamInfo {
     pub created_at: Option<std::time::SystemTime>,
     /// When the team was last updated.
     pub updated_at: Option<std::time::SystemTime>,
-}
-
-impl TeamInfo {
-    /// Converts from protobuf message.
-    pub(crate) fn from_proto(team: &proto::OrganizationTeam) -> Self {
-        Self {
-            slug: TeamSlug::new(team.slug.map_or(0, |s| s.slug)),
-            organization: OrganizationSlug::new(team.organization.map_or(0, |n| n.slug)),
-            name: team.name.clone(),
-            members: team.members.iter().map(TeamMemberInfo::from_proto).collect(),
-            created_at: team.created_at.as_ref().and_then(proto_timestamp_to_system_time),
-            updated_at: team.updated_at.as_ref().and_then(proto_timestamp_to_system_time),
-        }
-    }
 }
 
 /// Information about an organization.
@@ -535,59 +405,6 @@ pub struct OrganizationDeleteInfo {
     pub retention_days: u32,
 }
 
-impl OrganizationInfo {
-    /// Constructs from the fields shared by all organization response protos.
-    pub(crate) fn from_fields(
-        slug: Option<proto::OrganizationSlug>,
-        name: String,
-        region: String,
-        member_nodes: Vec<proto::NodeId>,
-        config_version: u64,
-        status: i32,
-        tier: i32,
-        members: &[proto::OrganizationMember],
-    ) -> Self {
-        Self {
-            slug: OrganizationSlug::new(slug.map_or(0, |n| n.slug)),
-            name,
-            region: region_from_proto_str(&region).unwrap_or(Region::GLOBAL),
-            member_nodes: member_nodes.into_iter().map(|n| n.id).collect(),
-            config_version,
-            status: OrganizationStatus::from_proto(status),
-            tier: OrganizationTier::from_proto(tier),
-            members: members.iter().map(OrganizationMemberInfo::from_proto).collect(),
-        }
-    }
-
-    /// Creates from protobuf get response.
-    pub(crate) fn from_proto(r: proto::GetOrganizationResponse) -> Self {
-        Self::from_fields(
-            r.slug,
-            r.name,
-            r.region,
-            r.member_nodes,
-            r.config_version,
-            r.status,
-            r.tier,
-            &r.members,
-        )
-    }
-
-    /// Creates from protobuf update response.
-    pub(crate) fn from_update_proto(r: proto::UpdateOrganizationResponse) -> Self {
-        Self::from_fields(
-            r.slug,
-            r.name,
-            r.region,
-            r.member_nodes,
-            r.config_version,
-            r.status,
-            r.tier,
-            &r.members,
-        )
-    }
-}
-
 /// Information about a vault.
 ///
 /// Contains metadata about a vault including its ID, current height,
@@ -611,21 +428,6 @@ pub struct VaultInfo {
     pub status: VaultStatus,
 }
 
-impl VaultInfo {
-    /// Creates from protobuf response.
-    pub(crate) fn from_proto(proto: proto::GetVaultResponse) -> Self {
-        Self {
-            organization: OrganizationSlug::new(proto.organization.map_or(0, |n| n.slug)),
-            vault: VaultSlug::new(proto.vault.map_or(0, |v| v.slug)),
-            height: proto.height,
-            state_root: proto.state_root.map(|h| h.value).unwrap_or_default(),
-            nodes: proto.nodes.into_iter().map(|n| n.id).collect(),
-            leader: proto.leader.map(|n| n.id),
-            status: VaultStatus::from_proto(proto.status),
-        }
-    }
-}
-
 /// Health status of a node or vault.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -642,18 +444,6 @@ pub enum HealthStatus {
     Unavailable,
 }
 
-impl HealthStatus {
-    /// Converts from protobuf enum value.
-    pub(crate) fn from_proto(value: i32) -> Self {
-        match proto::HealthStatus::try_from(value) {
-            Ok(proto::HealthStatus::Healthy) => HealthStatus::Healthy,
-            Ok(proto::HealthStatus::Degraded) => HealthStatus::Degraded,
-            Ok(proto::HealthStatus::Unavailable) => HealthStatus::Unavailable,
-            _ => HealthStatus::Unspecified,
-        }
-    }
-}
-
 /// Result of a health check operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -667,15 +457,6 @@ pub struct HealthCheckResult {
 }
 
 impl HealthCheckResult {
-    /// Creates from protobuf response.
-    pub(crate) fn from_proto(proto: proto::HealthCheckResponse) -> Self {
-        Self {
-            status: HealthStatus::from_proto(proto.status),
-            message: proto.message,
-            details: proto.details,
-        }
-    }
-
     /// Returns true if the status is healthy.
     pub fn is_healthy(&self) -> bool {
         self.status == HealthStatus::Healthy

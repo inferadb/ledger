@@ -1,14 +1,11 @@
 //! Multi-DB backup archive format primitives.
 //!
-//! Implements the on-disk format described in
-//! `docs/superpowers/specs/2026-04-24-multi-db-backup-archive-format.md`:
-//! a single `tar` stream compressed with `zstd`, carrying a JSON manifest
-//! followed by every per-organization database file (control-plane
-//! `_meta.db` / `raft.db` / `blocks.db` / `events.db` and every per-vault
-//! `state.db` / `raft.db` / `blocks.db` / `events.db`).
+//! A single `zstd`-compressed `tar` stream carrying a JSON manifest followed by
+//! every per-organization database file (control-plane `_meta.db` / `raft.db` /
+//! `blocks.db` / `events.db` and every per-vault `state.db` / `raft.db` /
+//! `blocks.db` / `events.db`).
 //!
-//! This module is the format-only surface (Slice 1 of the multi-DB backup
-//! work). It exposes:
+//! Exposes:
 //!
 //! - [`BackupManifest`] / [`DbEntry`] — manifest schema + serde.
 //! - [`build_archive`] — streaming archive build over [`Write`].

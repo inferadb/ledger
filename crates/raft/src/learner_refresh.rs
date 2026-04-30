@@ -19,9 +19,8 @@
 
 use std::{sync::Arc, time::Duration};
 
-use inferadb_ledger_proto::proto::{
-    GetSystemStateRequest, system_discovery_service_client::SystemDiscoveryServiceClient,
-};
+use inferadb_ledger_wire::services::discovery::GetSystemStateRequest;
+use inferadb_ledger_wire_services::SystemDiscoveryServiceClient;
 use parking_lot::RwLock;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
@@ -163,24 +162,23 @@ impl LearnerRefreshJob {
     ) -> Result<bool, String> {
         debug!(voter_id, voter_addr, "Attempting to refresh state from voter");
 
-        // Obtain the voter's peer connection from the shared registry.
-        // HTTP/2 multiplexes all subsystems over one channel per peer.
-        let peer = self
+        // Resolve the voter's wire client through the shared registry. The
+        // wire-aware cache keys on `(node_id, addr)`; concurrent learner
+        // refreshes coalesce onto a single `Arc<WireClient>` per peer.
+        let wire_client = self
             .registry
-            .get_or_register(voter_id, voter_addr)
+            .wire_client_for(voter_id, voter_addr)
             .await
             .map_err(|e| format!("register voter {voter_id} ({voter_addr}): {e}"))?;
-        let mut client = SystemDiscoveryServiceClient::new(peer.channel());
+        let client = SystemDiscoveryServiceClient::new(wire_client);
 
-        // Request system state from voter
-        // Use if_version_greater_than=0 to always get full state
-        let request = tonic::Request::new(GetSystemStateRequest { if_version_greater_than: 0 });
+        // Request system state from voter — `if_version_greater_than=0`
+        // always returns the full state. The framing layer assigns its own
+        // internal correlation; pass zero here.
+        let request = GetSystemStateRequest { if_version_greater_than: 0 };
 
-        let response = client
-            .get_system_state(request)
-            .await
-            .map_err(|e| format!("RPC failed: {}", e))?
-            .into_inner();
+        let response =
+            client.get_system_state(request, 0).await.map_err(|e| format!("RPC failed: {e}"))?;
 
         // Update cache if voter's state is newer
         let mut cache = self.cached_state.write();

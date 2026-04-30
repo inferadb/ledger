@@ -1,0 +1,5 @@
+error[E0412]: cannot find type `NotARealType` in this scope
+  --> tests/trybuild/unknown_request_type.rs:13:26
+   |
+13 |         rpc 0x0100 hello(NotARealType) -> proto::Resp;
+   |                          ^^^^^^^^^^^^ not found in this scope

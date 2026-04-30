@@ -1,6 +1,5 @@
 //! Node and vault health check operations.
 
-use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
 
 use crate::{
@@ -16,17 +15,13 @@ impl LedgerClient {
 
     /// Checks node-level health.
     ///
-    /// Returns `true` if the node is healthy and has a leader elected.
-    /// This is a simple health check suitable for load balancer probes.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the node is healthy, `false` if degraded.
+    /// Returns `true` if the node is healthy and has a leader elected, or
+    /// `false` if degraded. This is a simple health check suitable for load
+    /// balancer probes. An unavailable node returns an error, not `false`.
     ///
     /// # Errors
     ///
     /// Returns an error if the node is unavailable or connection fails.
-    /// Note: An unavailable node returns an error, not `false`.
     ///
     /// # Example
     ///
@@ -58,12 +53,9 @@ impl LedgerClient {
 
     /// Returns detailed node-level health information.
     ///
-    /// Returns full health check result including status, message, and details.
-    /// Use this for monitoring and diagnostics that need more than a simple boolean.
-    ///
-    /// # Returns
-    ///
-    /// Returns a [`HealthCheckResult`] with status, message, and details.
+    /// Returns a [`HealthCheckResult`](crate::HealthCheckResult) with full
+    /// status, message, and details map. Use this for monitoring and diagnostics
+    /// that need more than a simple boolean.
     ///
     /// # Errors
     ///
@@ -89,13 +81,9 @@ impl LedgerClient {
         self.call_with_retry("health_check_detailed", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_health_client);
-
-                let request = proto::HealthCheckRequest { organization: None, vault: None };
-
-                let response = client.check(tonic::Request::new(request)).await?.into_inner();
-
-                Ok(HealthCheckResult::from_proto(response))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::health::check_health(wire_client, request_id).await
             }
         })
         .await
@@ -103,17 +91,9 @@ impl LedgerClient {
 
     /// Checks health of a specific vault.
     ///
-    /// Returns detailed health information for a specific vault, including
-    /// block height, health status, and any divergence information.
-    ///
-    /// # Arguments
-    ///
-    /// * `organization` - Organization slug (external identifier).
-    /// * `vault` - Vault slug (external identifier).
-    ///
-    /// # Returns
-    ///
-    /// Returns a [`HealthCheckResult`] with vault-specific health information.
+    /// Returns a [`HealthCheckResult`](crate::HealthCheckResult) with
+    /// vault-specific health information including block height, status, and
+    /// any divergence data.
     ///
     /// # Errors
     ///
@@ -144,16 +124,15 @@ impl LedgerClient {
         self.call_with_retry("health_check_vault", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_health_client);
-
-                let request = proto::HealthCheckRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    vault: Some(proto::VaultSlug { slug: vault.value() }),
-                };
-
-                let response = client.check(tonic::Request::new(request)).await?.into_inner();
-
-                Ok(HealthCheckResult::from_proto(response))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::health::check_health_vault(
+                    wire_client,
+                    request_id,
+                    organization,
+                    vault,
+                )
+                .await
             }
         })
         .await

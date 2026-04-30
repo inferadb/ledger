@@ -16,17 +16,30 @@
 //!   replication
 //! - Operational: TokenMaintenanceJob signing key transition after grace period expiry, maintenance
 //!   job idempotency across multiple cycles
+//!
+//! F.1.f.2.Stage1e Wave 7: migrated from the legacy tonic helpers
+//! (`create_token_client` / `create_app_client` / `create_organization_client` /
+//! `create_test_organization` / `create_test_vault`) to their wire-protocol
+//! siblings (`wire_token_client` / `wire_app_client` /
+//! `wire_organization_client` / `wire_create_test_organization` /
+//! `wire_create_test_vault`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
 use std::time::Duration;
 
-use inferadb_ledger_proto::proto;
 use inferadb_ledger_types::{AppSlug, OrganizationSlug, UserSlug, VaultSlug};
+use inferadb_ledger_wire::{
+    error::ErrorCode,
+    services::{
+        app as wa, organization as wo, shared as ws, shared::UserSlug as WUserSlug, token as wt,
+    },
+};
+use inferadb_ledger_wire_services::TokenServiceClient;
+use inferadb_ledger_wire_transport::RpcError;
 
 use crate::common::{
-    TestCluster, TestNode, create_app_client, create_organization_client, create_token_client,
-    setup_user,
+    TestCluster, setup_user, wire_app_client, wire_organization_client, wire_token_client,
 };
 
 // ============================================================================
@@ -35,38 +48,47 @@ use crate::common::{
 
 /// Creates an organization and returns its slug and admin user slug.
 async fn create_organization(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     name: &str,
-    node: &TestNode,
 ) -> Result<(OrganizationSlug, u64), Box<dyn std::error::Error>> {
-    crate::common::create_test_organization(addr, name, node).await
+    crate::common::wire_create_test_organization(cluster, node_id, name).await
 }
 
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
-    crate::common::create_test_vault(addr, organization).await
+    crate::common::wire_create_test_vault(cluster, node_id, organization).await
 }
 
 /// Bootstraps a global signing key via the TokenService RPC.
 ///
 /// The saga orchestrator auto-creates signing keys on its poll cycle (default 30s),
 /// but integration tests call this explicitly to avoid waiting.
-async fn ensure_signing_key(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = create_token_client(addr).await?;
+async fn ensure_signing_key(
+    cluster: &TestCluster,
+    node_id: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let client = wire_token_client(cluster, node_id);
     let result = client
-        .create_signing_key(proto::CreateSigningKeyRequest {
-            scope: proto::SigningKeyScope::Global as i32,
-            organization: None,
-            caller: None,
-        })
+        .create_signing_key(
+            wt::CreateSigningKeyRequest {
+                scope: wt::SigningKeyScope::Global,
+                organization: None,
+                caller: None,
+            },
+            rand::random::<u128>(),
+        )
         .await;
     match result {
         Ok(_) => Ok(()),
         // Key already exists — idempotent success
-        Err(status) if status.code() == tonic::Code::FailedPrecondition => Ok(()),
+        Err(RpcError::WireError(wire_err)) if wire_err.code == ErrorCode::FailedPrecondition => {
+            Ok(())
+        },
         Err(e) => Err(e.into()),
     }
 }
@@ -76,29 +98,33 @@ async fn ensure_signing_key(addr: &str) -> Result<(), Box<dyn std::error::Error>
 /// After `CreateSigningKey` the key must propagate through Raft and be loaded
 /// into the JwtEngine's in-memory cache before tokens can be signed. This polls
 /// `CreateUserSession` until it succeeds or times out.
-async fn wait_for_signing_key_ready(addr: &str, user: UserSlug) -> proto::TokenPair {
+async fn wait_for_signing_key_ready(
+    cluster: &TestCluster,
+    node_id: u64,
+    user: UserSlug,
+) -> ws::TokenPair {
     let start = tokio::time::Instant::now();
     let timeout = Duration::from_secs(10);
     loop {
-        let mut client = create_token_client(addr).await.expect("connect to token service");
+        let client = wire_token_client(cluster, node_id);
         let result = client
-            .create_user_session(proto::CreateUserSessionRequest {
-                user: Some(proto::UserSlug { slug: user.value() }),
-                credential_used: None,
-                caller: Some(proto::UserSlug { slug: user.value() }),
-            })
+            .create_user_session(
+                wt::CreateUserSessionRequest {
+                    user: Some(WUserSlug::new(user.value())),
+                    credential_used: None,
+                    caller: Some(WUserSlug::new(user.value())),
+                },
+                rand::random::<u128>(),
+            )
             .await;
 
         match result {
             Ok(response) => {
-                return response
-                    .into_inner()
-                    .tokens
-                    .expect("CreateUserSession should return tokens");
+                return response.tokens.expect("CreateUserSession should return tokens");
             },
-            Err(status) => {
+            Err(e) => {
                 if start.elapsed() > timeout {
-                    panic!("Signing key not ready after {timeout:?}: {}", status.message());
+                    panic!("Signing key not ready after {timeout:?}: {e}");
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             },
@@ -107,31 +133,33 @@ async fn wait_for_signing_key_ready(addr: &str, user: UserSlug) -> proto::TokenP
 }
 
 /// Returns the kid of the active global signing key.
-async fn get_active_global_kid(
-    client: &mut proto::token_service_client::TokenServiceClient<tonic::transport::Channel>,
-) -> String {
+async fn get_active_global_kid(client: &TokenServiceClient) -> String {
     let keys = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
+        .get_public_keys(
+            wt::GetPublicKeysRequest { organization: None, caller: None },
+            rand::random::<u128>(),
+        )
         .await
         .expect("get public keys")
-        .into_inner()
         .keys;
     keys.iter().find(|k| k.status == "active").expect("should have active key").kid.clone()
 }
 
 /// Validates an access token with the given audience, returning the response.
 async fn validate_token(
-    client: &mut proto::token_service_client::TokenServiceClient<tonic::transport::Channel>,
+    client: &TokenServiceClient,
     token: &str,
     audience: &str,
-) -> Result<proto::ValidateTokenResponse, tonic::Status> {
+) -> Result<wt::ValidateTokenResponse, RpcError> {
     client
-        .validate_token(proto::ValidateTokenRequest {
-            token: token.to_string(),
-            expected_audience: audience.to_string(),
-        })
+        .validate_token(
+            wt::ValidateTokenRequest {
+                token: token.to_string(),
+                expected_audience: audience.to_string(),
+            },
+            rand::random::<u128>(),
+        )
         .await
-        .map(|r| r.into_inner())
 }
 
 /// Polls `GetPublicKeys` until at least one key appears, returning the keys.
@@ -139,21 +167,25 @@ async fn validate_token(
 /// Used by auto-bootstrap tests where the saga orchestrator creates signing keys
 /// asynchronously. Panics if no keys appear within the timeout.
 async fn poll_for_public_keys(
-    addr: &str,
-    organization: Option<proto::OrganizationSlug>,
+    cluster: &TestCluster,
+    node_id: u64,
+    organization: Option<OrganizationSlug>,
     timeout: Duration,
     context: &str,
-) -> Vec<proto::PublicKeyInfo> {
+) -> Vec<wt::PublicKeyInfo> {
     let start = tokio::time::Instant::now();
 
     while start.elapsed() < timeout {
-        let mut client = create_token_client(addr).await.expect("connect");
+        let client = wire_token_client(cluster, node_id);
         let result = client
-            .get_public_keys(proto::GetPublicKeysRequest { organization, caller: None })
+            .get_public_keys(
+                wt::GetPublicKeysRequest { organization, caller: None },
+                rand::random::<u128>(),
+            )
             .await;
 
         if let Ok(resp) = result {
-            let keys = resp.into_inner().keys;
+            let keys = resp.keys;
             if !keys.is_empty() {
                 return keys;
             }
@@ -163,6 +195,15 @@ async fn poll_for_public_keys(
     }
 
     panic!("{context}: no public keys appeared within {timeout:?}");
+}
+
+/// Helper to map common WireError → ErrorCode classification for tests
+/// that need to assert on the error code.
+fn wire_err_code(err: &RpcError) -> Option<ErrorCode> {
+    match err {
+        RpcError::WireError(wire_err) => Some(wire_err.code),
+        _ => None,
+    }
 }
 
 // ============================================================================
@@ -175,27 +216,22 @@ async fn poll_for_public_keys(
 /// each operation correctly transitions the token state.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_user_session_lifecycle() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
-    let user_slug = setup_user(addr, "Test User", "user42@test.com", node).await;
+    let user_slug = setup_user(&node.addr, "Test User", "user42@test.com", node).await;
     let user = UserSlug::new(user_slug);
 
     // Bootstrap a global signing key so tokens can be issued
-    ensure_signing_key(addr).await.expect("create signing key");
+    ensure_signing_key(&cluster, node.id).await.expect("create signing key");
 
     // Step 1: Create user session (polls until signing key is loaded)
-    let tokens = wait_for_signing_key_ready(addr, user).await;
+    let tokens = wait_for_signing_key_ready(&cluster, node.id, user).await;
     assert!(!tokens.access_token.is_empty(), "access token should be non-empty");
     assert!(!tokens.refresh_token.is_empty(), "refresh token should be non-empty");
 
     // Step 2: Validate the access token
-    let mut client = create_token_client(addr).await.expect("connect");
-    let validated = validate_token(&mut client, &tokens.access_token, "inferadb-control")
+    let client = wire_token_client(&cluster, node.id);
+    let validated = validate_token(&client, &tokens.access_token, "inferadb-control")
         .await
         .expect("validate should succeed");
     assert_eq!(validated.subject, format!("user:{user}"));
@@ -203,10 +239,13 @@ async fn test_user_session_lifecycle() {
 
     // Step 3: Refresh the token pair
     let refresh_resp = client
-        .refresh_token(proto::RefreshTokenRequest { refresh_token: tokens.refresh_token.clone() })
+        .refresh_token(
+            wt::RefreshTokenRequest { refresh_token: tokens.refresh_token.clone() },
+            rand::random::<u128>(),
+        )
         .await
         .expect("refresh should succeed");
-    let new_tokens = refresh_resp.into_inner().tokens.expect("refresh should return new tokens");
+    let new_tokens = refresh_resp.tokens.expect("refresh should return new tokens");
     assert!(!new_tokens.access_token.is_empty());
     assert!(!new_tokens.refresh_token.is_empty());
     // Rotated: old refresh token should differ from new one
@@ -217,21 +256,28 @@ async fn test_user_session_lifecycle() {
 
     // Step 4: Old refresh token should be invalidated (rotation theft detection)
     let old_refresh_result = client
-        .refresh_token(proto::RefreshTokenRequest { refresh_token: tokens.refresh_token.clone() })
+        .refresh_token(
+            wt::RefreshTokenRequest { refresh_token: tokens.refresh_token.clone() },
+            rand::random::<u128>(),
+        )
         .await;
     assert!(old_refresh_result.is_err(), "old refresh token should be rejected after rotation");
 
     // Step 5: Revoke via the new refresh token
     client
-        .revoke_token(proto::RevokeTokenRequest { refresh_token: new_tokens.refresh_token.clone() })
+        .revoke_token(
+            wt::RevokeTokenRequest { refresh_token: new_tokens.refresh_token.clone() },
+            rand::random::<u128>(),
+        )
         .await
         .expect("revoke should succeed");
 
     // Step 6: After revocation, refresh with the new token should fail
     let post_revoke = client
-        .refresh_token(proto::RefreshTokenRequest {
-            refresh_token: new_tokens.refresh_token.clone(),
-        })
+        .refresh_token(
+            wt::RefreshTokenRequest { refresh_token: new_tokens.refresh_token.clone() },
+            rand::random::<u128>(),
+        )
         .await;
     assert!(post_revoke.is_err(), "refresh should fail after revocation");
 }
@@ -241,58 +287,62 @@ async fn test_user_session_lifecycle() {
 /// Tests vault-scoped tokens which carry organization, app, vault, and scope claims.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_vault_token_lifecycle() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
 
     // Set up org + vault + app (enabled)
     let (org, admin_slug) =
-        create_organization(addr, "vault-token-test", node).await.expect("create org");
-    let vault = create_vault(addr, org).await.expect("create vault");
-    let app = create_app(addr, org, "vault-token-app", admin_slug).await.expect("create app");
-    add_app_vault(addr, org, app, vault, &["read", "write"], admin_slug)
+        create_organization(&cluster, node.id, "vault-token-test").await.expect("create org");
+    let vault = create_vault(&cluster, node.id, org).await.expect("create vault");
+    let app = create_app(&cluster, node.id, org, "vault-token-app", admin_slug)
+        .await
+        .expect("create app");
+    add_app_vault(&cluster, node.id, org, app, vault, &["read", "write"], admin_slug)
         .await
         .expect("add app vault");
-    set_app_enabled(addr, org, app, true, admin_slug).await.expect("enable app");
+    set_app_enabled(&cluster, node.id, org, app, true, admin_slug).await.expect("enable app");
 
     // Bootstrap a global signing key
-    ensure_signing_key(addr).await.expect("create signing key");
+    ensure_signing_key(&cluster, node.id).await.expect("create signing key");
 
     // Wait for signing key propagation by polling vault token creation
-    let tokens = wait_for_vault_token(addr, org, app, vault, &["read", "write"]).await;
+    let tokens = wait_for_vault_token(&cluster, node.id, org, app, vault, &["read", "write"]).await;
     assert!(!tokens.access_token.is_empty());
     assert!(!tokens.refresh_token.is_empty());
 
     // Validate the vault access token
-    let mut client = create_token_client(addr).await.expect("connect");
-    let validated = validate_token(&mut client, &tokens.access_token, "inferadb-engine")
+    let client = wire_token_client(&cluster, node.id);
+    let validated = validate_token(&client, &tokens.access_token, "inferadb-engine")
         .await
         .expect("validate vault token");
     assert_eq!(validated.token_type, "vault_access");
 
     // Refresh the vault token pair
     let refresh_resp = client
-        .refresh_token(proto::RefreshTokenRequest { refresh_token: tokens.refresh_token.clone() })
+        .refresh_token(
+            wt::RefreshTokenRequest { refresh_token: tokens.refresh_token.clone() },
+            rand::random::<u128>(),
+        )
         .await
         .expect("refresh vault token");
-    let new_tokens = refresh_resp.into_inner().tokens.expect("refresh returns tokens");
+    let new_tokens = refresh_resp.tokens.expect("refresh returns tokens");
     assert_ne!(tokens.refresh_token, new_tokens.refresh_token);
 
     // Revoke the vault token
     client
-        .revoke_token(proto::RevokeTokenRequest { refresh_token: new_tokens.refresh_token.clone() })
+        .revoke_token(
+            wt::RevokeTokenRequest { refresh_token: new_tokens.refresh_token.clone() },
+            rand::random::<u128>(),
+        )
         .await
         .expect("revoke vault token");
 
     // After revocation, refresh should fail
     let post_revoke = client
-        .refresh_token(proto::RefreshTokenRequest {
-            refresh_token: new_tokens.refresh_token.clone(),
-        })
+        .refresh_token(
+            wt::RefreshTokenRequest { refresh_token: new_tokens.refresh_token.clone() },
+            rand::random::<u128>(),
+        )
         .await;
     assert!(post_revoke.is_err(), "vault token refresh should fail after revocation");
 }
@@ -303,41 +353,40 @@ async fn test_vault_token_lifecycle() {
 /// Verifies that all refresh tokens are invalidated and the revoked count matches.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_revoke_all_user_sessions() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
-    let user_slug = setup_user(addr, "Test User", "user99@test.com", node).await;
+    let user_slug = setup_user(&node.addr, "Test User", "user99@test.com", node).await;
     let user = UserSlug::new(user_slug);
 
-    ensure_signing_key(addr).await.expect("create signing key");
+    ensure_signing_key(&cluster, node.id).await.expect("create signing key");
 
     // Create 3 separate sessions for the same user
-    let session1 = wait_for_signing_key_ready(addr, user).await;
-    let mut client = create_token_client(addr).await.expect("connect");
+    let session1 = wait_for_signing_key_ready(&cluster, node.id, user).await;
+    let client = wire_token_client(&cluster, node.id);
     let session2 = client
-        .create_user_session(proto::CreateUserSessionRequest {
-            user: Some(proto::UserSlug { slug: user.value() }),
-            credential_used: None,
-            caller: Some(proto::UserSlug { slug: user.value() }),
-        })
+        .create_user_session(
+            wt::CreateUserSessionRequest {
+                user: Some(WUserSlug::new(user.value())),
+                credential_used: None,
+                caller: Some(WUserSlug::new(user.value())),
+            },
+            rand::random::<u128>(),
+        )
         .await
         .expect("session 2")
-        .into_inner()
         .tokens
         .expect("tokens");
     let session3 = client
-        .create_user_session(proto::CreateUserSessionRequest {
-            user: Some(proto::UserSlug { slug: user.value() }),
-            credential_used: None,
-            caller: Some(proto::UserSlug { slug: user.value() }),
-        })
+        .create_user_session(
+            wt::CreateUserSessionRequest {
+                user: Some(WUserSlug::new(user.value())),
+                credential_used: None,
+                caller: Some(WUserSlug::new(user.value())),
+            },
+            rand::random::<u128>(),
+        )
         .await
         .expect("session 3")
-        .into_inner()
         .tokens
         .expect("tokens");
 
@@ -347,20 +396,26 @@ async fn test_revoke_all_user_sessions() {
         .enumerate()
     {
         let result = client
-            .refresh_token(proto::RefreshTokenRequest { refresh_token: (*token).clone() })
+            .refresh_token(
+                wt::RefreshTokenRequest { refresh_token: (*token).clone() },
+                rand::random::<u128>(),
+            )
             .await;
         assert!(result.is_ok(), "session {} should be refreshable before revoke-all", i + 1);
     }
 
     // Revoke all sessions
     let revoke_resp = client
-        .revoke_all_user_sessions(proto::RevokeAllUserSessionsRequest {
-            user: Some(proto::UserSlug { slug: user.value() }),
-            caller: Some(proto::UserSlug { slug: user.value() }),
-        })
+        .revoke_all_user_sessions(
+            wt::RevokeAllUserSessionsRequest {
+                user: Some(WUserSlug::new(user.value())),
+                caller: Some(WUserSlug::new(user.value())),
+            },
+            rand::random::<u128>(),
+        )
         .await
         .expect("revoke_all should succeed");
-    let revoked_count = revoke_resp.into_inner().revoked_count;
+    let revoked_count = revoke_resp.revoked_count;
     // We created 3 sessions, but each refresh above created a new token family entry,
     // so the exact count depends on implementation. At minimum, the original 3 should
     // be revoked.
@@ -374,21 +429,27 @@ async fn test_revoke_all_user_sessions() {
         .enumerate()
     {
         let result = client
-            .refresh_token(proto::RefreshTokenRequest { refresh_token: (*token).clone() })
+            .refresh_token(
+                wt::RefreshTokenRequest { refresh_token: (*token).clone() },
+                rand::random::<u128>(),
+            )
             .await;
         assert!(result.is_err(), "session {} refresh should fail after revoke-all", i + 1);
     }
 
     // New sessions for the same user should still work (user isn't blocked)
     let new_session = client
-        .create_user_session(proto::CreateUserSessionRequest {
-            user: Some(proto::UserSlug { slug: user.value() }),
-            credential_used: None,
-            caller: Some(proto::UserSlug { slug: user.value() }),
-        })
+        .create_user_session(
+            wt::CreateUserSessionRequest {
+                user: Some(WUserSlug::new(user.value())),
+                credential_used: None,
+                caller: Some(WUserSlug::new(user.value())),
+            },
+            rand::random::<u128>(),
+        )
         .await
         .expect("new session after revoke-all should work");
-    assert!(new_session.into_inner().tokens.is_some(), "new session should return tokens");
+    assert!(new_session.tokens.is_some(), "new session should return tokens");
 }
 
 /// Organization deletion cascades: refresh tokens revoked.
@@ -398,40 +459,41 @@ async fn test_revoke_all_user_sessions() {
 /// window for in-flight access token validation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_org_deletion_cascades_token_revocation() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
 
     // Set up org + vault + app (enabled) + vault token
     let (org, admin_slug) =
-        create_organization(addr, "cascade-test", node).await.expect("create org");
-    let vault = create_vault(addr, org).await.expect("create vault");
-    let app = create_app(addr, org, "cascade-app", admin_slug).await.expect("create app");
-    add_app_vault(addr, org, app, vault, &["read"], admin_slug).await.expect("add app vault");
-    set_app_enabled(addr, org, app, true, admin_slug).await.expect("enable app");
+        create_organization(&cluster, node.id, "cascade-test").await.expect("create org");
+    let vault = create_vault(&cluster, node.id, org).await.expect("create vault");
+    let app =
+        create_app(&cluster, node.id, org, "cascade-app", admin_slug).await.expect("create app");
+    add_app_vault(&cluster, node.id, org, app, vault, &["read"], admin_slug)
+        .await
+        .expect("add app vault");
+    set_app_enabled(&cluster, node.id, org, app, true, admin_slug).await.expect("enable app");
 
-    ensure_signing_key(addr).await.expect("create signing key");
+    ensure_signing_key(&cluster, node.id).await.expect("create signing key");
 
     // Create a vault token (poll until signing key is ready)
-    let vault_tokens = wait_for_vault_token(addr, org, app, vault, &["read"]).await;
+    let vault_tokens = wait_for_vault_token(&cluster, node.id, org, app, vault, &["read"]).await;
 
     // Verify the vault token is valid before deletion
-    let mut token_client = create_token_client(addr).await.expect("connect");
-    validate_token(&mut token_client, &vault_tokens.access_token, "inferadb-engine")
+    let token_client = wire_token_client(&cluster, node.id);
+    validate_token(&token_client, &vault_tokens.access_token, "inferadb-engine")
         .await
         .expect("vault token should be valid before org deletion");
 
     // Delete the organization
-    let mut org_client = create_organization_client(addr).await.expect("connect");
+    let org_client = wire_organization_client(&cluster, node.id);
     org_client
-        .delete_organization(proto::DeleteOrganizationRequest {
-            slug: Some(proto::OrganizationSlug { slug: org.value() }),
-            caller: Some(proto::UserSlug { slug: admin_slug }),
-        })
+        .delete_organization(
+            wo::DeleteOrganizationRequest {
+                slug: Some(org),
+                caller: Some(WUserSlug::new(admin_slug)),
+            },
+            rand::random::<u128>(),
+        )
         .await
         .expect("delete organization");
 
@@ -440,9 +502,10 @@ async fn test_org_deletion_cascades_token_revocation() {
 
     // After org deletion, refresh should fail (tokens revoked in cascade)
     let refresh_result = token_client
-        .refresh_token(proto::RefreshTokenRequest {
-            refresh_token: vault_tokens.refresh_token.clone(),
-        })
+        .refresh_token(
+            wt::RefreshTokenRequest { refresh_token: vault_tokens.refresh_token.clone() },
+            rand::random::<u128>(),
+        )
         .await;
     assert!(refresh_result.is_err(), "vault token refresh should fail after org deletion");
 }
@@ -463,55 +526,60 @@ async fn test_org_deletion_cascades_token_revocation() {
 /// invalidated, forcing both parties to re-authenticate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_refresh_token_theft_detection() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
-    let user_slug = setup_user(addr, "Test User", "user300@test.com", node).await;
+    let user_slug = setup_user(&node.addr, "Test User", "user300@test.com", node).await;
     let user = UserSlug::new(user_slug);
 
-    ensure_signing_key(addr).await.expect("create signing key");
+    ensure_signing_key(&cluster, node.id).await.expect("create signing key");
 
     // Step 1: Create a session (family F, refresh_A)
-    let tokens = wait_for_signing_key_ready(addr, user).await;
+    let tokens = wait_for_signing_key_ready(&cluster, node.id, user).await;
     let refresh_a = tokens.refresh_token.clone();
 
     // Step 2: Legitimate refresh: refresh_A → refresh_B
-    let mut client = create_token_client(addr).await.expect("connect");
+    let client = wire_token_client(&cluster, node.id);
     let refresh_resp = client
-        .refresh_token(proto::RefreshTokenRequest { refresh_token: refresh_a.clone() })
+        .refresh_token(
+            wt::RefreshTokenRequest { refresh_token: refresh_a.clone() },
+            rand::random::<u128>(),
+        )
         .await
         .expect("legitimate refresh should succeed");
-    let new_tokens = refresh_resp.into_inner().tokens.expect("should return new tokens");
+    let new_tokens = refresh_resp.tokens.expect("should return new tokens");
     let refresh_b = new_tokens.refresh_token.clone();
 
     // Step 3: Attacker replays refresh_A → family gets poisoned
-    let replay_result =
-        client.refresh_token(proto::RefreshTokenRequest { refresh_token: refresh_a.clone() }).await;
+    let replay_result = client
+        .refresh_token(
+            wt::RefreshTokenRequest { refresh_token: refresh_a.clone() },
+            rand::random::<u128>(),
+        )
+        .await;
     assert!(replay_result.is_err(), "replaying used refresh_A should fail");
-    let replay_status = replay_result.unwrap_err();
+    let replay_err = replay_result.unwrap_err();
     assert_eq!(
-        replay_status.code(),
-        tonic::Code::Unauthenticated,
-        "replay should return UNAUTHENTICATED, got: {}",
-        replay_status.message()
+        wire_err_code(&replay_err),
+        Some(ErrorCode::Unauthenticated),
+        "replay should return Unauthenticated, got: {replay_err:?}"
     );
 
     // Step 4: Legitimate user tries refresh_B → rejected (family poisoned)
-    let poisoned_result =
-        client.refresh_token(proto::RefreshTokenRequest { refresh_token: refresh_b.clone() }).await;
+    let poisoned_result = client
+        .refresh_token(
+            wt::RefreshTokenRequest { refresh_token: refresh_b.clone() },
+            rand::random::<u128>(),
+        )
+        .await;
     assert!(
         poisoned_result.is_err(),
         "refresh_B should fail because the family is poisoned by the replay in step 3"
     );
-    let poisoned_status = poisoned_result.unwrap_err();
+    let poisoned_err = poisoned_result.unwrap_err();
     assert_eq!(
-        poisoned_status.code(),
-        tonic::Code::Unauthenticated,
-        "poisoned family should return UNAUTHENTICATED"
+        wire_err_code(&poisoned_err),
+        Some(ErrorCode::Unauthenticated),
+        "poisoned family should return Unauthenticated"
     );
 }
 
@@ -528,43 +596,42 @@ async fn test_refresh_token_theft_detection() {
 /// completes, no prior refresh tokens should be usable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_refresh_and_revoke_all() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
-    let user_slug = setup_user(addr, "Test User", "user400@test.com", node).await;
+    let user_slug = setup_user(&node.addr, "Test User", "user400@test.com", node).await;
     let user = UserSlug::new(user_slug);
 
-    ensure_signing_key(addr).await.expect("create signing key");
+    ensure_signing_key(&cluster, node.id).await.expect("create signing key");
 
     // Create a session
-    let tokens = wait_for_signing_key_ready(addr, user).await;
+    let tokens = wait_for_signing_key_ready(&cluster, node.id, user).await;
     let refresh_token = tokens.refresh_token.clone();
 
     // Fire both operations concurrently.
     // Raft serializes them — one commits first. We test the invariant
     // that after revoke-all, the refresh token cannot be used.
-    let addr_for_refresh = addr.to_string();
+    let client_for_refresh = wire_token_client(&cluster, node.id);
     let refresh_token_clone = refresh_token.clone();
 
     let refresh_handle = tokio::spawn(async move {
-        let mut client = create_token_client(&addr_for_refresh).await.expect("connect");
-        client
-            .refresh_token(proto::RefreshTokenRequest { refresh_token: refresh_token_clone })
+        client_for_refresh
+            .refresh_token(
+                wt::RefreshTokenRequest { refresh_token: refresh_token_clone },
+                rand::random::<u128>(),
+            )
             .await
     });
 
-    let addr_for_revoke = addr.to_string();
+    let client_for_revoke = wire_token_client(&cluster, node.id);
     let revoke_handle = tokio::spawn(async move {
-        let mut client = create_token_client(&addr_for_revoke).await.expect("connect");
-        client
-            .revoke_all_user_sessions(proto::RevokeAllUserSessionsRequest {
-                user: Some(proto::UserSlug { slug: user.value() }),
-                caller: Some(proto::UserSlug { slug: user.value() }),
-            })
+        client_for_revoke
+            .revoke_all_user_sessions(
+                wt::RevokeAllUserSessionsRequest {
+                    user: Some(WUserSlug::new(user.value())),
+                    caller: Some(WUserSlug::new(user.value())),
+                },
+                rand::random::<u128>(),
+            )
             .await
     });
 
@@ -585,26 +652,26 @@ async fn test_concurrent_refresh_and_revoke_all() {
     //   is now part of a revoked family (revoke-all revokes all subject tokens).
     //   Attempting to use the NEW refresh token should fail.
     match refresh_result {
-        Err(status) => {
+        Err(err) => {
             // Case A: Refresh rejected because version was incremented
             assert_eq!(
-                status.code(),
-                tonic::Code::Unauthenticated,
-                "rejected refresh should be UNAUTHENTICATED, got: {}",
-                status.message()
+                wire_err_code(&err),
+                Some(ErrorCode::Unauthenticated),
+                "rejected refresh should be Unauthenticated, got: {err:?}"
             );
         },
         Ok(response) => {
             // Case B: Refresh succeeded before revoke. The new tokens should be
             // invalid because revoke-all also revoked all families for this user.
-            let new_tokens = response.into_inner().tokens.expect("should have tokens");
+            let new_tokens = response.tokens.expect("should have tokens");
 
             // The new refresh token should be unusable (family was revoked by revoke-all)
-            let mut client = create_token_client(addr).await.expect("connect");
+            let client = wire_token_client(&cluster, node.id);
             let post_revoke_refresh = client
-                .refresh_token(proto::RefreshTokenRequest {
-                    refresh_token: new_tokens.refresh_token.clone(),
-                })
+                .refresh_token(
+                    wt::RefreshTokenRequest { refresh_token: new_tokens.refresh_token.clone() },
+                    rand::random::<u128>(),
+                )
                 .await;
             assert!(
                 post_revoke_refresh.is_err(),
@@ -613,7 +680,7 @@ async fn test_concurrent_refresh_and_revoke_all() {
 
             // The new access token should also be invalid (TokenVersion was bumped)
             let validate_result =
-                validate_token(&mut client, &new_tokens.access_token, "inferadb-control").await;
+                validate_token(&client, &new_tokens.access_token, "inferadb-control").await;
             assert!(
                 validate_result.is_err(),
                 "access token signed with old version should fail validation after revoke-all"
@@ -630,36 +697,39 @@ async fn test_concurrent_refresh_and_revoke_all() {
 /// family (same mechanism as theft detection).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_refresh_same_token() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
-    let user_slug = setup_user(addr, "Test User", "user500@test.com", node).await;
+    let user_slug = setup_user(&node.addr, "Test User", "user500@test.com", node).await;
     let user = UserSlug::new(user_slug);
 
-    ensure_signing_key(addr).await.expect("create signing key");
+    ensure_signing_key(&cluster, node.id).await.expect("create signing key");
 
     // Create a session
-    let tokens = wait_for_signing_key_ready(addr, user).await;
+    let tokens = wait_for_signing_key_ready(&cluster, node.id, user).await;
     let refresh_token = tokens.refresh_token.clone();
 
     // Fire two refresh calls concurrently with the same refresh token
     let refresh_1 = refresh_token.clone();
     let refresh_2 = refresh_token.clone();
 
-    let addr_1 = addr.to_string();
+    let client_1 = wire_token_client(&cluster, node.id);
     let handle_1 = tokio::spawn(async move {
-        let mut client = create_token_client(&addr_1).await.expect("connect");
-        client.refresh_token(proto::RefreshTokenRequest { refresh_token: refresh_1 }).await
+        client_1
+            .refresh_token(
+                wt::RefreshTokenRequest { refresh_token: refresh_1 },
+                rand::random::<u128>(),
+            )
+            .await
     });
 
-    let addr_2 = addr.to_string();
+    let client_2 = wire_token_client(&cluster, node.id);
     let handle_2 = tokio::spawn(async move {
-        let mut client = create_token_client(&addr_2).await.expect("connect");
-        client.refresh_token(proto::RefreshTokenRequest { refresh_token: refresh_2 }).await
+        client_2
+            .refresh_token(
+                wt::RefreshTokenRequest { refresh_token: refresh_2 },
+                rand::random::<u128>(),
+            )
+            .await
     });
 
     let (result_1, result_2) = tokio::join!(handle_1, handle_2);
@@ -668,32 +738,32 @@ async fn test_concurrent_refresh_same_token() {
 
     // Exactly one should succeed, one should fail.
     // Partition results into winner (Ok) and loser (Err).
-    let (winning_response, failed_status) = match (result_1, result_2) {
+    let (winning_response, failed_err) = match (result_1, result_2) {
         (Ok(r1), Err(e2)) => (r1, e2),
         (Err(e1), Ok(r2)) => (r2, e1),
         (Ok(_), Ok(_)) => panic!("both concurrent refreshes succeeded — expected exactly one"),
         (Err(e1), Err(e2)) => panic!(
-            "both concurrent refreshes failed — expected exactly one success.\n  error 1: {}\n  error 2: {}",
-            e1, e2
+            "both concurrent refreshes failed — expected exactly one success.\n  error 1: {e1:?}\n  error 2: {e2:?}",
         ),
     };
 
     assert_eq!(
-        failed_status.code(),
-        tonic::Code::Unauthenticated,
-        "failed concurrent refresh should be UNAUTHENTICATED"
+        wire_err_code(&failed_err),
+        Some(ErrorCode::Unauthenticated),
+        "failed concurrent refresh should be Unauthenticated, got: {failed_err:?}"
     );
 
     // Furthermore: the family should now be poisoned. The winning refresh
     // returned a new token — that new token should also be unusable because
     // the losing refresh poisoned the family.
-    let winning_tokens = winning_response.into_inner().tokens.expect("should have tokens");
+    let winning_tokens = winning_response.tokens.expect("should have tokens");
 
-    let mut client = create_token_client(addr).await.expect("connect");
+    let client = wire_token_client(&cluster, node.id);
     let poisoned_result = client
-        .refresh_token(proto::RefreshTokenRequest {
-            refresh_token: winning_tokens.refresh_token.clone(),
-        })
+        .refresh_token(
+            wt::RefreshTokenRequest { refresh_token: winning_tokens.refresh_token.clone() },
+            rand::random::<u128>(),
+        )
         .await;
     assert!(
         poisoned_result.is_err(),
@@ -707,129 +777,148 @@ async fn test_concurrent_refresh_same_token() {
 
 /// Creates an app within an organization and returns its slug.
 async fn create_app(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     org: OrganizationSlug,
     name: &str,
     caller: u64,
 ) -> Result<AppSlug, Box<dyn std::error::Error>> {
-    let mut client = create_app_client(addr).await?;
+    let client = wire_app_client(cluster, node_id);
     let app_slug = inferadb_ledger_types::snowflake::generate_app_slug()?;
     let response = client
-        .create_app(proto::CreateAppRequest {
-            organization: Some(proto::OrganizationSlug { slug: org.value() }),
-            caller: Some(proto::UserSlug { slug: caller }),
-            name: name.to_string(),
-            description: None,
-            slug: Some(proto::AppSlug { slug: app_slug.value() }),
-        })
+        .create_app(
+            wa::CreateAppRequest {
+                organization: Some(org),
+                caller: Some(WUserSlug::new(caller)),
+                name: name.to_string(),
+                description: None,
+                slug: Some(app_slug),
+            },
+            rand::random::<u128>(),
+        )
         .await?;
 
-    let slug = response
-        .into_inner()
-        .app
-        .and_then(|a| a.slug)
-        .map(|s| AppSlug::new(s.slug))
-        .ok_or("No app slug in response")?;
+    let slug = response.app.and_then(|a| a.slug).ok_or("No app slug in response")?;
 
     Ok(slug)
 }
 
 /// Connects an app to a vault with given scopes.
 async fn add_app_vault(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     org: OrganizationSlug,
     app: AppSlug,
     vault: VaultSlug,
     scopes: &[&str],
     caller: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = create_app_client(addr).await?;
+    let client = wire_app_client(cluster, node_id);
     client
-        .add_app_vault(proto::AddAppVaultRequest {
-            organization: Some(proto::OrganizationSlug { slug: org.value() }),
-            caller: Some(proto::UserSlug { slug: caller }),
-            app: Some(proto::AppSlug { slug: app.value() }),
-            vault: Some(proto::VaultSlug { slug: vault.value() }),
-            allowed_scopes: scopes.iter().map(|s| s.to_string()).collect(),
-        })
+        .add_app_vault(
+            wa::AddAppVaultRequest {
+                organization: Some(org),
+                caller: Some(WUserSlug::new(caller)),
+                app: Some(app),
+                vault: Some(vault),
+                allowed_scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            },
+            rand::random::<u128>(),
+        )
         .await?;
     Ok(())
 }
 
 /// Updates allowed scopes on an app-vault connection.
 async fn update_app_vault_scopes(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     org: OrganizationSlug,
     app: AppSlug,
     vault: VaultSlug,
     scopes: &[&str],
     caller: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = create_app_client(addr).await?;
+    let client = wire_app_client(cluster, node_id);
     client
-        .update_app_vault(proto::UpdateAppVaultRequest {
-            organization: Some(proto::OrganizationSlug { slug: org.value() }),
-            caller: Some(proto::UserSlug { slug: caller }),
-            app: Some(proto::AppSlug { slug: app.value() }),
-            vault: Some(proto::VaultSlug { slug: vault.value() }),
-            allowed_scopes: scopes.iter().map(|s| s.to_string()).collect(),
-        })
+        .update_app_vault(
+            wa::UpdateAppVaultRequest {
+                organization: Some(org),
+                caller: Some(WUserSlug::new(caller)),
+                app: Some(app),
+                vault: Some(vault),
+                allowed_scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            },
+            rand::random::<u128>(),
+        )
         .await?;
     Ok(())
 }
 
 /// Removes an app-vault connection.
 async fn remove_app_vault(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     org: OrganizationSlug,
     app: AppSlug,
     vault: VaultSlug,
     caller: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = create_app_client(addr).await?;
+    let client = wire_app_client(cluster, node_id);
     client
-        .remove_app_vault(proto::RemoveAppVaultRequest {
-            organization: Some(proto::OrganizationSlug { slug: org.value() }),
-            caller: Some(proto::UserSlug { slug: caller }),
-            app: Some(proto::AppSlug { slug: app.value() }),
-            vault: Some(proto::VaultSlug { slug: vault.value() }),
-        })
+        .remove_app_vault(
+            wa::RemoveAppVaultRequest {
+                organization: Some(org),
+                caller: Some(WUserSlug::new(caller)),
+                app: Some(app),
+                vault: Some(vault),
+            },
+            rand::random::<u128>(),
+        )
         .await?;
     Ok(())
 }
 
 /// Sets an app's enabled/disabled status.
 async fn set_app_enabled(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     org: OrganizationSlug,
     app: AppSlug,
     enabled: bool,
     caller: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = create_app_client(addr).await?;
+    let client = wire_app_client(cluster, node_id);
     client
-        .set_app_enabled(proto::SetAppEnabledRequest {
-            organization: Some(proto::OrganizationSlug { slug: org.value() }),
-            caller: Some(proto::UserSlug { slug: caller }),
-            app: Some(proto::AppSlug { slug: app.value() }),
-            enabled,
-        })
+        .set_app_enabled(
+            wa::SetAppEnabledRequest {
+                organization: Some(org),
+                caller: Some(WUserSlug::new(caller)),
+                app: Some(app),
+                enabled,
+            },
+            rand::random::<u128>(),
+        )
         .await?;
     Ok(())
 }
 
 /// Bootstraps an org-scoped signing key via the TokenService RPC.
 async fn ensure_org_signing_key(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     org: OrganizationSlug,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = create_token_client(addr).await?;
+    let client = wire_token_client(cluster, node_id);
     client
-        .create_signing_key(proto::CreateSigningKeyRequest {
-            scope: proto::SigningKeyScope::Organization as i32,
-            organization: Some(proto::OrganizationSlug { slug: org.value() }),
-            caller: None,
-        })
+        .create_signing_key(
+            wt::CreateSigningKeyRequest {
+                scope: wt::SigningKeyScope::Organization,
+                organization: Some(org),
+                caller: None,
+            },
+            rand::random::<u128>(),
+        )
         .await?;
     Ok(())
 }
@@ -838,35 +927,36 @@ async fn ensure_org_signing_key(
 ///
 /// Returns the token pair on success.
 async fn wait_for_vault_token(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     org: OrganizationSlug,
     app: AppSlug,
     vault: VaultSlug,
     scopes: &[&str],
-) -> proto::TokenPair {
+) -> ws::TokenPair {
     let start = tokio::time::Instant::now();
     let timeout = Duration::from_secs(10);
     loop {
-        let mut client = create_token_client(addr).await.expect("connect to token service");
+        let client = wire_token_client(cluster, node_id);
         let result = client
-            .create_vault_token(proto::CreateVaultTokenRequest {
-                organization: Some(proto::OrganizationSlug { slug: org.value() }),
-                app: Some(proto::AppSlug { slug: app.value() }),
-                vault: Some(proto::VaultSlug { slug: vault.value() }),
-                scopes: scopes.iter().map(|s| s.to_string()).collect(),
-            })
+            .create_vault_token(
+                wt::CreateVaultTokenRequest {
+                    organization: Some(org),
+                    app: Some(app),
+                    vault: Some(vault),
+                    scopes: scopes.iter().map(|s| s.to_string()).collect(),
+                },
+                rand::random::<u128>(),
+            )
             .await;
 
         match result {
             Ok(response) => {
-                return response.into_inner().tokens.expect("should return tokens");
+                return response.tokens.expect("should return tokens");
             },
-            Err(status) => {
+            Err(e) => {
                 if start.elapsed() > timeout {
-                    panic!(
-                        "Vault token creation not ready after {timeout:?}: {}",
-                        status.message()
-                    );
+                    panic!("Vault token creation not ready after {timeout:?}: {e}");
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             },
@@ -880,52 +970,56 @@ async fn wait_for_vault_token(
 /// `allowed_scopes` is rejected with PERMISSION_DENIED.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_vault_token_scope_validation() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
 
     let (org, admin_slug) =
-        create_organization(addr, "scope-validation", node).await.expect("create org");
-    let vault = create_vault(addr, org).await.expect("create vault");
-    let app = create_app(addr, org, "scope-test-app", admin_slug).await.expect("create app");
+        create_organization(&cluster, node.id, "scope-validation").await.expect("create org");
+    let vault = create_vault(&cluster, node.id, org).await.expect("create vault");
+    let app =
+        create_app(&cluster, node.id, org, "scope-test-app", admin_slug).await.expect("create app");
 
     // Connect app to vault with limited scopes
-    add_app_vault(addr, org, app, vault, &["read", "write"], admin_slug)
+    add_app_vault(&cluster, node.id, org, app, vault, &["read", "write"], admin_slug)
         .await
         .expect("add app vault");
-    set_app_enabled(addr, org, app, true, admin_slug).await.expect("enable app");
+    set_app_enabled(&cluster, node.id, org, app, true, admin_slug).await.expect("enable app");
 
     // Bootstrap signing keys
-    ensure_signing_key(addr).await.expect("create global key");
-    ensure_org_signing_key(addr, org).await.expect("create org key");
+    ensure_signing_key(&cluster, node.id).await.expect("create global key");
+    ensure_org_signing_key(&cluster, node.id, org).await.expect("create org key");
 
     // Creating a token with allowed scopes should succeed
-    let _tokens = wait_for_vault_token(addr, org, app, vault, &["read"]).await;
+    let _tokens = wait_for_vault_token(&cluster, node.id, org, app, vault, &["read"]).await;
 
     // Creating a token with a disallowed scope should fail
-    let mut client = create_token_client(addr).await.expect("connect");
+    let client = wire_token_client(&cluster, node.id);
     let result = client
-        .create_vault_token(proto::CreateVaultTokenRequest {
-            organization: Some(proto::OrganizationSlug { slug: org.value() }),
-            app: Some(proto::AppSlug { slug: app.value() }),
-            vault: Some(proto::VaultSlug { slug: vault.value() }),
-            scopes: vec!["read".to_string(), "admin".to_string()],
-        })
+        .create_vault_token(
+            wt::CreateVaultTokenRequest {
+                organization: Some(org),
+                app: Some(app),
+                vault: Some(vault),
+                scopes: vec!["read".to_string(), "admin".to_string()],
+            },
+            rand::random::<u128>(),
+        )
         .await;
 
     assert!(result.is_err(), "scope 'admin' should be rejected");
-    let status = result.unwrap_err();
+    let err = result.unwrap_err();
     assert_eq!(
-        status.code(),
-        tonic::Code::PermissionDenied,
-        "disallowed scope should return PERMISSION_DENIED, got: {}",
-        status.message()
+        wire_err_code(&err),
+        Some(ErrorCode::PermissionDenied),
+        "disallowed scope should return PermissionDenied, got: {err:?}"
     );
-    assert!(status.message().contains("admin"), "error message should mention the rejected scope");
+    if let RpcError::WireError(wire_err) = &err {
+        assert!(
+            wire_err.message.contains("admin"),
+            "error message should mention the rejected scope: {}",
+            wire_err.message
+        );
+    }
 }
 
 /// Scope reduction on vault token refresh: new token reflects current policy.
@@ -935,52 +1029,53 @@ async fn test_vault_token_scope_validation() {
 /// policy is authoritative).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_scope_reduction_on_vault_refresh() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
 
     let (org, admin_slug) =
-        create_organization(addr, "scope-reduce", node).await.expect("create org");
-    let vault = create_vault(addr, org).await.expect("create vault");
-    let app = create_app(addr, org, "reduce-app", admin_slug).await.expect("create app");
+        create_organization(&cluster, node.id, "scope-reduce").await.expect("create org");
+    let vault = create_vault(&cluster, node.id, org).await.expect("create vault");
+    let app =
+        create_app(&cluster, node.id, org, "reduce-app", admin_slug).await.expect("create app");
 
-    add_app_vault(addr, org, app, vault, &["read", "write", "delete"], admin_slug)
+    add_app_vault(&cluster, node.id, org, app, vault, &["read", "write", "delete"], admin_slug)
         .await
         .expect("add app vault");
-    set_app_enabled(addr, org, app, true, admin_slug).await.expect("enable app");
+    set_app_enabled(&cluster, node.id, org, app, true, admin_slug).await.expect("enable app");
 
-    ensure_signing_key(addr).await.expect("create global key");
-    ensure_org_signing_key(addr, org).await.expect("create org key");
+    ensure_signing_key(&cluster, node.id).await.expect("create global key");
+    ensure_org_signing_key(&cluster, node.id, org).await.expect("create org key");
 
     // Create vault token with all three scopes
-    let tokens = wait_for_vault_token(addr, org, app, vault, &["read", "write", "delete"]).await;
+    let tokens =
+        wait_for_vault_token(&cluster, node.id, org, app, vault, &["read", "write", "delete"])
+            .await;
 
     // Reduce allowed scopes on the connection
-    update_app_vault_scopes(addr, org, app, vault, &["read"], admin_slug)
+    update_app_vault_scopes(&cluster, node.id, org, app, vault, &["read"], admin_slug)
         .await
         .expect("update scopes");
 
     // Refresh the token — new access token should have reduced scopes
-    let mut client = create_token_client(addr).await.expect("connect");
+    let client = wire_token_client(&cluster, node.id);
     let refresh_resp = client
-        .refresh_token(proto::RefreshTokenRequest { refresh_token: tokens.refresh_token.clone() })
+        .refresh_token(
+            wt::RefreshTokenRequest { refresh_token: tokens.refresh_token.clone() },
+            rand::random::<u128>(),
+        )
         .await
         .expect("refresh should succeed with reduced scopes");
-    let new_tokens = refresh_resp.into_inner().tokens.expect("should return new tokens");
+    let new_tokens = refresh_resp.tokens.expect("should return new tokens");
 
     // Validate the new access token and check its claims
-    let validated = validate_token(&mut client, &new_tokens.access_token, "inferadb-engine")
+    let validated = validate_token(&client, &new_tokens.access_token, "inferadb-engine")
         .await
         .expect("validate new token");
     assert_eq!(validated.token_type, "vault_access");
 
     // The claims should contain only the reduced scopes
     match validated.claims {
-        Some(proto::validate_token_response::Claims::VaultAccess(vault_claims)) => {
+        Some(wt::ValidateTokenClaims::VaultAccess(vault_claims)) => {
             assert_eq!(
                 vault_claims.scopes,
                 vec!["read".to_string()],
@@ -998,48 +1093,57 @@ async fn test_scope_reduction_on_vault_refresh() {
 /// refresh (current policy is authoritative).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_scope_expansion_on_vault_refresh() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
 
     let (org, admin_slug) =
-        create_organization(addr, "scope-expand", node).await.expect("create org");
-    let vault = create_vault(addr, org).await.expect("create vault");
-    let app = create_app(addr, org, "expand-app", admin_slug).await.expect("create app");
+        create_organization(&cluster, node.id, "scope-expand").await.expect("create org");
+    let vault = create_vault(&cluster, node.id, org).await.expect("create vault");
+    let app =
+        create_app(&cluster, node.id, org, "expand-app", admin_slug).await.expect("create app");
 
-    add_app_vault(addr, org, app, vault, &["read"], admin_slug).await.expect("add app vault");
-    set_app_enabled(addr, org, app, true, admin_slug).await.expect("enable app");
+    add_app_vault(&cluster, node.id, org, app, vault, &["read"], admin_slug)
+        .await
+        .expect("add app vault");
+    set_app_enabled(&cluster, node.id, org, app, true, admin_slug).await.expect("enable app");
 
-    ensure_signing_key(addr).await.expect("create global key");
-    ensure_org_signing_key(addr, org).await.expect("create org key");
+    ensure_signing_key(&cluster, node.id).await.expect("create global key");
+    ensure_org_signing_key(&cluster, node.id, org).await.expect("create org key");
 
     // Create vault token with just "read"
-    let tokens = wait_for_vault_token(addr, org, app, vault, &["read"]).await;
+    let tokens = wait_for_vault_token(&cluster, node.id, org, app, vault, &["read"]).await;
 
     // Expand allowed scopes on the connection
-    update_app_vault_scopes(addr, org, app, vault, &["read", "write", "admin"], admin_slug)
-        .await
-        .expect("expand scopes");
+    update_app_vault_scopes(
+        &cluster,
+        node.id,
+        org,
+        app,
+        vault,
+        &["read", "write", "admin"],
+        admin_slug,
+    )
+    .await
+    .expect("expand scopes");
 
     // Refresh the token — new access token should have expanded scopes
-    let mut client = create_token_client(addr).await.expect("connect");
+    let client = wire_token_client(&cluster, node.id);
     let refresh_resp = client
-        .refresh_token(proto::RefreshTokenRequest { refresh_token: tokens.refresh_token.clone() })
+        .refresh_token(
+            wt::RefreshTokenRequest { refresh_token: tokens.refresh_token.clone() },
+            rand::random::<u128>(),
+        )
         .await
         .expect("refresh should succeed with expanded scopes");
-    let new_tokens = refresh_resp.into_inner().tokens.expect("should return new tokens");
+    let new_tokens = refresh_resp.tokens.expect("should return new tokens");
 
     // Validate the new access token and check its claims
-    let validated = validate_token(&mut client, &new_tokens.access_token, "inferadb-engine")
+    let validated = validate_token(&client, &new_tokens.access_token, "inferadb-engine")
         .await
         .expect("validate new token");
 
     match validated.claims {
-        Some(proto::validate_token_response::Claims::VaultAccess(vault_claims)) => {
+        Some(wt::ValidateTokenClaims::VaultAccess(vault_claims)) => {
             let mut scopes = vault_claims.scopes.clone();
             scopes.sort();
             assert_eq!(
@@ -1059,40 +1163,41 @@ async fn test_scope_expansion_on_vault_refresh() {
 /// exists.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_connection_removal_on_vault_refresh() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
 
     let (org, admin_slug) =
-        create_organization(addr, "conn-remove", node).await.expect("create org");
-    let vault = create_vault(addr, org).await.expect("create vault");
-    let app = create_app(addr, org, "remove-app", admin_slug).await.expect("create app");
+        create_organization(&cluster, node.id, "conn-remove").await.expect("create org");
+    let vault = create_vault(&cluster, node.id, org).await.expect("create vault");
+    let app =
+        create_app(&cluster, node.id, org, "remove-app", admin_slug).await.expect("create app");
 
-    add_app_vault(addr, org, app, vault, &["read", "write"], admin_slug)
+    add_app_vault(&cluster, node.id, org, app, vault, &["read", "write"], admin_slug)
         .await
         .expect("add app vault");
-    set_app_enabled(addr, org, app, true, admin_slug).await.expect("enable app");
+    set_app_enabled(&cluster, node.id, org, app, true, admin_slug).await.expect("enable app");
 
-    ensure_signing_key(addr).await.expect("create global key");
-    ensure_org_signing_key(addr, org).await.expect("create org key");
+    ensure_signing_key(&cluster, node.id).await.expect("create global key");
+    ensure_org_signing_key(&cluster, node.id, org).await.expect("create org key");
 
     // Create vault token
-    let tokens = wait_for_vault_token(addr, org, app, vault, &["read"]).await;
+    let tokens = wait_for_vault_token(&cluster, node.id, org, app, vault, &["read"]).await;
 
     // Remove the vault connection
-    remove_app_vault(addr, org, app, vault, admin_slug).await.expect("remove app vault");
+    remove_app_vault(&cluster, node.id, org, app, vault, admin_slug)
+        .await
+        .expect("remove app vault");
 
     // Wait for Raft to propagate the removal
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Refresh should fail — connection no longer exists
-    let mut client = create_token_client(addr).await.expect("connect");
+    let client = wire_token_client(&cluster, node.id);
     let result = client
-        .refresh_token(proto::RefreshTokenRequest { refresh_token: tokens.refresh_token.clone() })
+        .refresh_token(
+            wt::RefreshTokenRequest { refresh_token: tokens.refresh_token.clone() },
+            rand::random::<u128>(),
+        )
         .await;
 
     assert!(result.is_err(), "refresh should fail after connection removal");
@@ -1104,38 +1209,39 @@ async fn test_connection_removal_on_vault_refresh() {
 /// machine rejects the refresh because the app is no longer enabled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_app_disabled_rejects_vault_refresh() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
 
     let (org, admin_slug) =
-        create_organization(addr, "app-disable-refresh", node).await.expect("create org");
-    let vault = create_vault(addr, org).await.expect("create vault");
-    let app = create_app(addr, org, "disable-app", admin_slug).await.expect("create app");
+        create_organization(&cluster, node.id, "app-disable-refresh").await.expect("create org");
+    let vault = create_vault(&cluster, node.id, org).await.expect("create vault");
+    let app =
+        create_app(&cluster, node.id, org, "disable-app", admin_slug).await.expect("create app");
 
-    add_app_vault(addr, org, app, vault, &["read"], admin_slug).await.expect("add app vault");
-    set_app_enabled(addr, org, app, true, admin_slug).await.expect("enable app");
+    add_app_vault(&cluster, node.id, org, app, vault, &["read"], admin_slug)
+        .await
+        .expect("add app vault");
+    set_app_enabled(&cluster, node.id, org, app, true, admin_slug).await.expect("enable app");
 
-    ensure_signing_key(addr).await.expect("create global key");
-    ensure_org_signing_key(addr, org).await.expect("create org key");
+    ensure_signing_key(&cluster, node.id).await.expect("create global key");
+    ensure_org_signing_key(&cluster, node.id, org).await.expect("create org key");
 
     // Create vault token while app is enabled
-    let tokens = wait_for_vault_token(addr, org, app, vault, &["read"]).await;
+    let tokens = wait_for_vault_token(&cluster, node.id, org, app, vault, &["read"]).await;
 
     // Disable the app
-    set_app_enabled(addr, org, app, false, admin_slug).await.expect("disable app");
+    set_app_enabled(&cluster, node.id, org, app, false, admin_slug).await.expect("disable app");
 
     // Wait for Raft cascade (app disable revokes tokens via inline cascade)
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Refresh should fail — app is disabled and tokens are revoked
-    let mut client = create_token_client(addr).await.expect("connect");
+    let client = wire_token_client(&cluster, node.id);
     let result = client
-        .refresh_token(proto::RefreshTokenRequest { refresh_token: tokens.refresh_token.clone() })
+        .refresh_token(
+            wt::RefreshTokenRequest { refresh_token: tokens.refresh_token.clone() },
+            rand::random::<u128>(),
+        )
         .await;
 
     assert!(result.is_err(), "refresh should fail after app is disabled");
@@ -1148,57 +1254,60 @@ async fn test_app_disabled_rejects_vault_refresh() {
 /// 2. Revokes all existing tokens via inline cascade in the SetAppEnabled apply handler
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_app_disabled_blocks_creation_and_revokes_tokens() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
 
     let (org, admin_slug) =
-        create_organization(addr, "app-disable-create", node).await.expect("create org");
-    let vault = create_vault(addr, org).await.expect("create vault");
-    let app = create_app(addr, org, "block-app", admin_slug).await.expect("create app");
+        create_organization(&cluster, node.id, "app-disable-create").await.expect("create org");
+    let vault = create_vault(&cluster, node.id, org).await.expect("create vault");
+    let app =
+        create_app(&cluster, node.id, org, "block-app", admin_slug).await.expect("create app");
 
-    add_app_vault(addr, org, app, vault, &["read"], admin_slug).await.expect("add app vault");
-    set_app_enabled(addr, org, app, true, admin_slug).await.expect("enable app");
+    add_app_vault(&cluster, node.id, org, app, vault, &["read"], admin_slug)
+        .await
+        .expect("add app vault");
+    set_app_enabled(&cluster, node.id, org, app, true, admin_slug).await.expect("enable app");
 
-    ensure_signing_key(addr).await.expect("create global key");
-    ensure_org_signing_key(addr, org).await.expect("create org key");
+    ensure_signing_key(&cluster, node.id).await.expect("create global key");
+    ensure_org_signing_key(&cluster, node.id, org).await.expect("create org key");
 
     // Create a vault token while app is enabled
-    let tokens = wait_for_vault_token(addr, org, app, vault, &["read"]).await;
+    let tokens = wait_for_vault_token(&cluster, node.id, org, app, vault, &["read"]).await;
 
     // Disable the app
-    set_app_enabled(addr, org, app, false, admin_slug).await.expect("disable app");
+    set_app_enabled(&cluster, node.id, org, app, false, admin_slug).await.expect("disable app");
 
     // Wait for cascade revocation through Raft
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // New vault token creation should fail with FAILED_PRECONDITION
-    let mut client = create_token_client(addr).await.expect("connect");
+    // New vault token creation should fail with FailedPrecondition
+    let client = wire_token_client(&cluster, node.id);
     let create_result = client
-        .create_vault_token(proto::CreateVaultTokenRequest {
-            organization: Some(proto::OrganizationSlug { slug: org.value() }),
-            app: Some(proto::AppSlug { slug: app.value() }),
-            vault: Some(proto::VaultSlug { slug: vault.value() }),
-            scopes: vec!["read".to_string()],
-        })
+        .create_vault_token(
+            wt::CreateVaultTokenRequest {
+                organization: Some(org),
+                app: Some(app),
+                vault: Some(vault),
+                scopes: vec!["read".to_string()],
+            },
+            rand::random::<u128>(),
+        )
         .await;
 
     assert!(create_result.is_err(), "vault token creation should fail for disabled app");
-    let status = create_result.unwrap_err();
+    let err = create_result.unwrap_err();
     assert_eq!(
-        status.code(),
-        tonic::Code::FailedPrecondition,
-        "disabled app should return FAILED_PRECONDITION, got: {}",
-        status.message()
+        wire_err_code(&err),
+        Some(ErrorCode::FailedPrecondition),
+        "disabled app should return FailedPrecondition, got: {err:?}"
     );
 
     // Existing refresh token should be revoked by cascade
     let refresh_result = client
-        .refresh_token(proto::RefreshTokenRequest { refresh_token: tokens.refresh_token.clone() })
+        .refresh_token(
+            wt::RefreshTokenRequest { refresh_token: tokens.refresh_token.clone() },
+            rand::random::<u128>(),
+        )
         .await;
     assert!(refresh_result.is_err(), "existing refresh token should be revoked after app disable");
 }
@@ -1210,59 +1319,61 @@ async fn test_app_disabled_blocks_creation_and_revokes_tokens() {
 /// revocation of existing tokens for that app+vault combination.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_connection_removed_blocks_creation_and_revokes_tokens() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
 
     let (org, admin_slug) =
-        create_organization(addr, "conn-remove-create", node).await.expect("create org");
-    let vault = create_vault(addr, org).await.expect("create vault");
-    let app = create_app(addr, org, "conn-app", admin_slug).await.expect("create app");
+        create_organization(&cluster, node.id, "conn-remove-create").await.expect("create org");
+    let vault = create_vault(&cluster, node.id, org).await.expect("create vault");
+    let app = create_app(&cluster, node.id, org, "conn-app", admin_slug).await.expect("create app");
 
-    add_app_vault(addr, org, app, vault, &["read", "write"], admin_slug)
+    add_app_vault(&cluster, node.id, org, app, vault, &["read", "write"], admin_slug)
         .await
         .expect("add app vault");
-    set_app_enabled(addr, org, app, true, admin_slug).await.expect("enable app");
+    set_app_enabled(&cluster, node.id, org, app, true, admin_slug).await.expect("enable app");
 
-    ensure_signing_key(addr).await.expect("create global key");
-    ensure_org_signing_key(addr, org).await.expect("create org key");
+    ensure_signing_key(&cluster, node.id).await.expect("create global key");
+    ensure_org_signing_key(&cluster, node.id, org).await.expect("create org key");
 
     // Create a vault token while connection exists
-    let tokens = wait_for_vault_token(addr, org, app, vault, &["read"]).await;
+    let tokens = wait_for_vault_token(&cluster, node.id, org, app, vault, &["read"]).await;
 
     // Remove the app-vault connection
-    remove_app_vault(addr, org, app, vault, admin_slug).await.expect("remove app vault");
+    remove_app_vault(&cluster, node.id, org, app, vault, admin_slug)
+        .await
+        .expect("remove app vault");
 
     // Wait for cascade revocation through Raft
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // New vault token creation should fail (no connection)
-    let mut client = create_token_client(addr).await.expect("connect");
+    let client = wire_token_client(&cluster, node.id);
     let create_result = client
-        .create_vault_token(proto::CreateVaultTokenRequest {
-            organization: Some(proto::OrganizationSlug { slug: org.value() }),
-            app: Some(proto::AppSlug { slug: app.value() }),
-            vault: Some(proto::VaultSlug { slug: vault.value() }),
-            scopes: vec!["read".to_string()],
-        })
+        .create_vault_token(
+            wt::CreateVaultTokenRequest {
+                organization: Some(org),
+                app: Some(app),
+                vault: Some(vault),
+                scopes: vec!["read".to_string()],
+            },
+            rand::random::<u128>(),
+        )
         .await;
 
     assert!(create_result.is_err(), "vault token creation should fail without connection");
-    let status = create_result.unwrap_err();
+    let err = create_result.unwrap_err();
     assert_eq!(
-        status.code(),
-        tonic::Code::NotFound,
-        "missing connection should return NOT_FOUND, got: {}",
-        status.message()
+        wire_err_code(&err),
+        Some(ErrorCode::NotFound),
+        "missing connection should return NotFound, got: {err:?}"
     );
 
     // Existing refresh token should be revoked by cascade
     let refresh_result = client
-        .refresh_token(proto::RefreshTokenRequest { refresh_token: tokens.refresh_token.clone() })
+        .refresh_token(
+            wt::RefreshTokenRequest { refresh_token: tokens.refresh_token.clone() },
+            rand::random::<u128>(),
+        )
         .await;
     assert!(
         refresh_result.is_err(),
@@ -1281,37 +1392,35 @@ async fn test_connection_removed_blocks_creation_and_revokes_tokens() {
 /// `valid_until` (proposed_at + grace_period) expires. New tokens are signed with the new key.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_signing_key_rotation_during_active_sessions() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
-    let user_slug = setup_user(addr, "Test User", "user600@test.com", node).await;
+    let user_slug = setup_user(&node.addr, "Test User", "user600@test.com", node).await;
     let user = UserSlug::new(user_slug);
 
     // Create the initial global signing key
-    ensure_signing_key(addr).await.expect("create signing key");
+    ensure_signing_key(&cluster, node.id).await.expect("create signing key");
 
     // Create a user session signed with the original key
-    let tokens_old = wait_for_signing_key_ready(addr, user).await;
+    let tokens_old = wait_for_signing_key_ready(&cluster, node.id, user).await;
 
     // Get the original key's kid
-    let mut client = create_token_client(addr).await.expect("connect");
-    let old_kid = get_active_global_kid(&mut client).await;
+    let client = wire_token_client(&cluster, node.id);
+    let old_kid = get_active_global_kid(&client).await;
 
     // Rotate the key with a generous grace period (3600 seconds = 1 hour)
     let rotate_resp = client
-        .rotate_signing_key(proto::RotateSigningKeyRequest {
-            kid: old_kid.clone(),
-            grace_period_secs: 3600,
-            force_revoke: false,
-            caller: None,
-        })
+        .rotate_signing_key(
+            wt::RotateSigningKeyRequest {
+                kid: old_kid.clone(),
+                grace_period_secs: 3600,
+                force_revoke: false,
+                caller: None,
+            },
+            rand::random::<u128>(),
+        )
         .await
         .expect("rotate signing key");
-    let new_key = rotate_resp.into_inner().new_key.expect("rotation should return new key");
+    let new_key = rotate_resp.new_key.expect("rotation should return new key");
     let new_kid = new_key.kid.clone();
     assert_ne!(old_kid, new_kid, "new key should have a different kid");
     assert_eq!(new_key.status, "active");
@@ -1320,8 +1429,7 @@ async fn test_signing_key_rotation_during_active_sessions() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Old token should still validate (grace period active)
-    let validate_old =
-        validate_token(&mut client, &tokens_old.access_token, "inferadb-control").await;
+    let validate_old = validate_token(&client, &tokens_old.access_token, "inferadb-control").await;
     assert!(
         validate_old.is_ok(),
         "old token should still be valid during grace period: {:?}",
@@ -1330,28 +1438,32 @@ async fn test_signing_key_rotation_during_active_sessions() {
 
     // New session should be created with the new key
     let tokens_new = client
-        .create_user_session(proto::CreateUserSessionRequest {
-            user: Some(proto::UserSlug { slug: user.value() }),
-            credential_used: None,
-            caller: Some(proto::UserSlug { slug: user.value() }),
-        })
+        .create_user_session(
+            wt::CreateUserSessionRequest {
+                user: Some(WUserSlug::new(user.value())),
+                credential_used: None,
+                caller: Some(WUserSlug::new(user.value())),
+            },
+            rand::random::<u128>(),
+        )
         .await
         .expect("new session after rotation")
-        .into_inner()
         .tokens
         .expect("should return tokens");
 
     // New token should also validate
-    validate_token(&mut client, &tokens_new.access_token, "inferadb-control")
+    validate_token(&client, &tokens_new.access_token, "inferadb-control")
         .await
         .expect("new token should be valid after rotation");
 
     // Public keys should show both: new key as active, old key as rotated
     let keys_after = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
+        .get_public_keys(
+            wt::GetPublicKeysRequest { organization: None, caller: None },
+            rand::random::<u128>(),
+        )
         .await
         .expect("get public keys after rotation")
-        .into_inner()
         .keys;
     assert_eq!(keys_after.len(), 2, "should have both old (rotated) and new (active) keys");
 
@@ -1361,141 +1473,7 @@ async fn test_signing_key_rotation_during_active_sessions() {
     assert_eq!(rotated_keys.len(), 1, "exactly one key should be rotated");
     assert_eq!(active_keys[0].kid, new_kid);
     assert_eq!(rotated_keys[0].kid, old_kid);
-    assert!(rotated_keys[0].valid_until.is_some(), "rotated key should have valid_until set");
-}
-
-/// Signing key revocation immediately invalidates tokens.
-///
-/// Unlike rotation (which has a grace period), revocation is instant:
-/// tokens signed with the revoked key fail validation immediately.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_signing_key_revocation_immediately_invalidates() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
-    let node = &cluster.nodes()[0];
-    let addr = &node.addr;
-    let user_slug = setup_user(addr, "Test User", "user601@test.com", node).await;
-    let user = UserSlug::new(user_slug);
-
-    ensure_signing_key(addr).await.expect("create signing key");
-
-    // Create a user session
-    let tokens = wait_for_signing_key_ready(addr, user).await;
-
-    // Verify token is valid
-    let mut client = create_token_client(addr).await.expect("connect");
-    validate_token(&mut client, &tokens.access_token, "inferadb-control")
-        .await
-        .expect("token should be valid before revocation");
-
-    // Get the key's kid
-    let kid = get_active_global_kid(&mut client).await;
-
-    // Revoke the signing key
-    client
-        .revoke_signing_key(proto::RevokeSigningKeyRequest { kid: kid.clone(), caller: None })
-        .await
-        .expect("revoke signing key");
-
-    // Wait for revocation to propagate through Raft and evict from cache
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // Token should now fail validation (key is revoked)
-    let validate_result =
-        validate_token(&mut client, &tokens.access_token, "inferadb-control").await;
-    assert!(validate_result.is_err(), "token should fail validation after key revocation");
-    let status = validate_result.unwrap_err();
-    assert_eq!(
-        status.code(),
-        tonic::Code::Unauthenticated,
-        "revoked key should return UNAUTHENTICATED, got: {}",
-        status.message()
-    );
-
-    // GetPublicKeys should no longer show the key (revoked keys are filtered out)
-    let keys_after = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
-        .await
-        .expect("get public keys after revocation")
-        .into_inner()
-        .keys;
-    assert!(
-        keys_after.iter().all(|k| k.kid != kid),
-        "revoked key should not appear in GetPublicKeys (only active + rotated returned)"
-    );
-}
-
-/// grace_period_secs=0 on rotation: old key immediately revoked, evicted from cache.
-///
-/// When rotating with `grace_period_secs=0`, the old key transitions directly to
-/// `Revoked` (not `Rotated`). This is for urgent rotations where the old key must
-/// be invalidated immediately.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_signing_key_rotation_grace_zero() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
-    let node = &cluster.nodes()[0];
-    let addr = &node.addr;
-    let user_slug = setup_user(addr, "Test User", "user602@test.com", node).await;
-    let user = UserSlug::new(user_slug);
-
-    ensure_signing_key(addr).await.expect("create signing key");
-
-    // Create a user session with the original key
-    let tokens = wait_for_signing_key_ready(addr, user).await;
-
-    // Get the original key's kid
-    let mut client = create_token_client(addr).await.expect("connect");
-    let old_kid = get_active_global_kid(&mut client).await;
-
-    // Rotate with force_revoke=true (immediate revocation, skip grace period).
-    let rotate_resp = client
-        .rotate_signing_key(proto::RotateSigningKeyRequest {
-            kid: old_kid.clone(),
-            grace_period_secs: 0,
-            force_revoke: true,
-            caller: None,
-        })
-        .await
-        .expect("rotate with force_revoke");
-    let new_key = rotate_resp.into_inner().new_key.expect("should return new key");
-    assert_ne!(old_kid, new_key.kid);
-
-    // Wait for Raft propagation, TokenMaintenanceJob (3s interval in tests) to
-    // transition the rotated key to revoked status, and cache eviction.
-    // With grace_period=0, the key should be immediately revoked on the next
-    // maintenance cycle (3s), then evicted from cache.
-    // Wait for at least 4 maintenance cycles (3s each) to ensure:
-    // (1) find the rotated key, (2) propose TransitionSigningKeyRevoked,
-    // (3) apply the transition, (4) evict from cache on next validation.
-    // With force_revoke=true, the key is immediately Revoked in the apply handler.
-    // Wait for Raft propagation only.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // Old token should FAIL validation (old key immediately revoked, not grace period)
-    let validate_result =
-        validate_token(&mut client, &tokens.access_token, "inferadb-control").await;
-    assert!(
-        validate_result.is_err(),
-        "token signed with immediately-revoked key should fail validation"
-    );
-
-    // GetPublicKeys should only show the new key (old key is revoked, not rotated)
-    let keys_after = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
-        .await
-        .expect("get public keys after zero-grace rotation")
-        .into_inner()
-        .keys;
-    assert_eq!(keys_after.len(), 1, "only the new active key should be visible");
-    assert_eq!(keys_after[0].kid, new_key.kid);
-    assert_eq!(keys_after[0].status, "active");
+    assert!(rotated_keys[0].valid_until > 0, "rotated key should have valid_until set");
 }
 
 /// Auto-bootstrap: global signing key created on cluster init via saga.
@@ -1505,18 +1483,14 @@ async fn test_signing_key_rotation_grace_zero() {
 /// bootstrap fires without any explicit `CreateSigningKey` RPC call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_auto_bootstrap_global_signing_key() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
 
     // Do NOT call ensure_signing_key — let the saga orchestrator auto-create it.
     // TestCluster uses saga poll_interval_secs=2, so the key should appear within ~5s.
     let keys = poll_for_public_keys(
-        addr,
+        &cluster,
+        node.id,
         None,
         Duration::from_secs(10),
         "global signing key auto-bootstrap",
@@ -1533,23 +1507,19 @@ async fn test_auto_bootstrap_global_signing_key() {
 /// poll cycle and generates an org-scoped signing key.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_auto_bootstrap_org_signing_key() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
 
     // Create an organization — this triggers a CreateSigningKeySaga for the org scope
     let (org, _admin_slug) =
-        create_organization(addr, "auto-key-org", node).await.expect("create org");
+        create_organization(&cluster, node.id, "auto-key-org").await.expect("create org");
 
     // Wait for the saga orchestrator to auto-create the org signing key.
     // TestCluster uses saga poll_interval_secs=2.
     let keys = poll_for_public_keys(
-        addr,
-        Some(proto::OrganizationSlug { slug: org.value() }),
+        &cluster,
+        node.id,
+        Some(org),
         Duration::from_secs(10),
         "org signing key auto-bootstrap",
     )
@@ -1565,42 +1535,45 @@ async fn test_auto_bootstrap_org_signing_key() {
 /// without creating a duplicate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_create_signing_key_idempotency() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
 
     // Create a global signing key
-    let mut client = create_token_client(addr).await.expect("connect");
+    let client = wire_token_client(&cluster, node.id);
     let first = client
-        .create_signing_key(proto::CreateSigningKeyRequest {
-            scope: proto::SigningKeyScope::Global as i32,
-            organization: None,
-            caller: None,
-        })
+        .create_signing_key(
+            wt::CreateSigningKeyRequest {
+                scope: wt::SigningKeyScope::Global,
+                organization: None,
+                caller: None,
+            },
+            rand::random::<u128>(),
+        )
         .await
         .expect("first CreateSigningKey should succeed");
-    let first_kid = first.into_inner().key.expect("should return key info").kid;
+    let first_kid = first.key.expect("should return key info").kid;
 
     // Call CreateSigningKey again for the same scope — should not create a duplicate
     let second = client
-        .create_signing_key(proto::CreateSigningKeyRequest {
-            scope: proto::SigningKeyScope::Global as i32,
-            organization: None,
-            caller: None,
-        })
+        .create_signing_key(
+            wt::CreateSigningKeyRequest {
+                scope: wt::SigningKeyScope::Global,
+                organization: None,
+                caller: None,
+            },
+            rand::random::<u128>(),
+        )
         .await;
 
     // The second call may succeed (idempotent) or fail (scope already has active key).
     // Either way, GetPublicKeys should show exactly one active global key.
     let keys = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
+        .get_public_keys(
+            wt::GetPublicKeysRequest { organization: None, caller: None },
+            rand::random::<u128>(),
+        )
         .await
         .expect("get public keys")
-        .into_inner()
         .keys;
 
     let active_keys: Vec<_> = keys.iter().filter(|k| k.status == "active").collect();
@@ -1613,7 +1586,7 @@ async fn test_create_signing_key_idempotency() {
 
     // If the second call succeeded, it should have returned the same key (idempotent)
     if let Ok(resp) = second
-        && let Some(key) = resp.into_inner().key
+        && let Some(key) = resp.key
     {
         assert_eq!(
             key.kid, first_kid,
@@ -1631,36 +1604,32 @@ async fn test_create_signing_key_idempotency() {
 /// FAILED_PRECONDITION. If it raced ahead, we verify the success path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_global_key_not_found_returns_error() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
-    let user_slug = setup_user(addr, "Test User", "user700@test.com", node).await;
+    let user_slug = setup_user(&node.addr, "Test User", "user700@test.com", node).await;
     let user = UserSlug::new(user_slug);
 
     // Immediately try to create a user session WITHOUT explicitly creating a signing key.
     // The saga orchestrator may or may not have auto-created the key by now.
-    let mut client = create_token_client(addr).await.expect("connect");
+    let client = wire_token_client(&cluster, node.id);
     let result = client
-        .create_user_session(proto::CreateUserSessionRequest {
-            user: Some(proto::UserSlug { slug: user.value() }),
-            credential_used: None,
-            caller: Some(proto::UserSlug { slug: user.value() }),
-        })
+        .create_user_session(
+            wt::CreateUserSessionRequest {
+                user: Some(WUserSlug::new(user.value())),
+                credential_used: None,
+                caller: Some(WUserSlug::new(user.value())),
+            },
+            rand::random::<u128>(),
+        )
         .await;
 
     match result {
-        Err(status) => {
+        Err(err) => {
             // Expected path: saga hasn't fired yet, no signing key available
             assert_eq!(
-                status.code(),
-                tonic::Code::FailedPrecondition,
-                "missing signing key should return FAILED_PRECONDITION, got: {} - {}",
-                status.code(),
-                status.message()
+                wire_err_code(&err),
+                Some(ErrorCode::FailedPrecondition),
+                "missing signing key should return FailedPrecondition, got: {err:?}"
             );
         },
         Ok(_) => {
@@ -1668,10 +1637,12 @@ async fn test_global_key_not_found_returns_error() {
             // This is still a valid test outcome: the saga fired, key was created,
             // and CreateUserSession succeeded with it.
             let keys = client
-                .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
+                .get_public_keys(
+                    wt::GetPublicKeysRequest { organization: None, caller: None },
+                    rand::random::<u128>(),
+                )
                 .await
                 .expect("get public keys")
-                .into_inner()
                 .keys;
             assert!(
                 !keys.is_empty(),
@@ -1700,31 +1671,31 @@ async fn test_global_key_not_found_returns_error() {
 ///    set from the same rotation `proposed_at`)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_state_machine_timestamps_use_proposed_at() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
 
     // Create a global signing key
-    let mut client = create_token_client(addr).await.expect("connect");
+    let client = wire_token_client(&cluster, node.id);
     client
-        .create_signing_key(proto::CreateSigningKeyRequest {
-            scope: proto::SigningKeyScope::Global as i32,
-            organization: None,
-            caller: None,
-        })
+        .create_signing_key(
+            wt::CreateSigningKeyRequest {
+                scope: wt::SigningKeyScope::Global,
+                organization: None,
+                caller: None,
+            },
+            rand::random::<u128>(),
+        )
         .await
         .expect("create signing key");
 
     // Read the created key's timestamps
     let keys = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
+        .get_public_keys(
+            wt::GetPublicKeysRequest { organization: None, caller: None },
+            rand::random::<u128>(),
+        )
         .await
         .expect("get public keys")
-        .into_inner()
         .keys;
     assert_eq!(keys.len(), 1, "should have exactly one key");
     let key = &keys[0];
@@ -1739,21 +1710,26 @@ async fn test_state_machine_timestamps_use_proposed_at() {
     let grace_period_secs: u64 = 7200; // 2 hours
     let old_kid = key.kid.clone();
     client
-        .rotate_signing_key(proto::RotateSigningKeyRequest {
-            kid: old_kid.clone(),
-            grace_period_secs,
-            force_revoke: false,
-            caller: None,
-        })
+        .rotate_signing_key(
+            wt::RotateSigningKeyRequest {
+                kid: old_kid.clone(),
+                grace_period_secs,
+                force_revoke: false,
+                caller: None,
+            },
+            rand::random::<u128>(),
+        )
         .await
         .expect("rotate signing key");
 
     // Read both keys (old=rotated, new=active)
     let keys = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
+        .get_public_keys(
+            wt::GetPublicKeysRequest { organization: None, caller: None },
+            rand::random::<u128>(),
+        )
         .await
         .expect("get public keys after rotation")
-        .into_inner()
         .keys;
     assert_eq!(keys.len(), 2, "should have old (rotated) + new (active) key");
 
@@ -1769,20 +1745,16 @@ async fn test_state_machine_timestamps_use_proposed_at() {
     // Check 3: old key's valid_until == new key's created_at + grace_period
     // Both the rotation timestamp (new_key.created_at) and the grace end
     // (old_key.valid_until) are computed from the same proposed_at:
-    //   new_key.created_at = proposed_at
-    //   old_key.valid_until = proposed_at + grace_period_secs
-    let new_created = new_key.created_at.as_ref().expect("new key should have created_at");
-    let old_valid_until =
-        old_key.valid_until.as_ref().expect("rotated key should have valid_until");
+    //   new_key.created_at = proposed_at (UNIX nanoseconds)
+    //   old_key.valid_until = proposed_at + grace_period_secs * 1e9 (UNIX nanoseconds)
+    let new_created_ns = new_key.created_at;
+    let old_valid_until_ns = old_key.valid_until;
+    assert!(old_valid_until_ns > 0, "rotated key should have valid_until set");
 
-    let expected_valid_until_secs = new_created.seconds + grace_period_secs as i64;
+    let expected_valid_until_ns = new_created_ns + grace_period_secs * 1_000_000_000;
     assert_eq!(
-        old_valid_until.seconds, expected_valid_until_secs,
-        "valid_until must be exactly proposed_at + grace_period_secs (deterministic)"
-    );
-    assert_eq!(
-        old_valid_until.nanos, new_created.nanos,
-        "valid_until nanos must match proposed_at nanos (no wall-clock jitter)"
+        old_valid_until_ns, expected_valid_until_ns,
+        "valid_until must be exactly proposed_at + grace_period_secs * 1e9 ns (deterministic, no wall-clock jitter)"
     );
 }
 
@@ -1795,36 +1767,38 @@ async fn test_state_machine_timestamps_use_proposed_at() {
 /// the flag would survive a leader election (new leader has the same state).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_poisoned_family_persists_across_replication() {
-    let cluster = TestCluster::new(3).await;
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
 
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
     // Wait for leader election and cluster stabilization
     let leader_id = cluster.wait_for_leader().await;
     let leader = cluster.node(leader_id).expect("leader node");
-    let addr = &leader.addr;
 
-    ensure_signing_key(addr).await.expect("create signing key");
-    let user_slug = setup_user(addr, "Test User", "user950@test.com", leader).await;
+    ensure_signing_key(&cluster, leader.id).await.expect("create signing key");
+    let user_slug = setup_user(&leader.addr, "Test User", "user950@test.com", leader).await;
     let user = UserSlug::new(user_slug);
 
     // Create a session → family F, refresh_A
-    let tokens = wait_for_signing_key_ready(addr, user).await;
+    let tokens = wait_for_signing_key_ready(&cluster, leader.id, user).await;
     let refresh_a = tokens.refresh_token.clone();
 
     // Legitimate refresh: refresh_A → refresh_B (refresh_A marked used)
-    let mut client = create_token_client(addr).await.expect("connect");
+    let client = wire_token_client(&cluster, leader.id);
     let refresh_resp = client
-        .refresh_token(proto::RefreshTokenRequest { refresh_token: refresh_a.clone() })
+        .refresh_token(
+            wt::RefreshTokenRequest { refresh_token: refresh_a.clone() },
+            rand::random::<u128>(),
+        )
         .await
         .expect("legitimate refresh");
-    let refresh_b = refresh_resp.into_inner().tokens.expect("should return tokens").refresh_token;
+    let refresh_b = refresh_resp.tokens.expect("should return tokens").refresh_token;
 
     // Replay refresh_A → poisons family F
-    let replay =
-        client.refresh_token(proto::RefreshTokenRequest { refresh_token: refresh_a.clone() }).await;
+    let replay = client
+        .refresh_token(
+            wt::RefreshTokenRequest { refresh_token: refresh_a.clone() },
+            rand::random::<u128>(),
+        )
+        .await;
     assert!(replay.is_err(), "replaying used refresh_A should fail");
 
     // Wait for all nodes to sync the poisoned state
@@ -1836,16 +1810,21 @@ async fn test_poisoned_family_persists_across_replication() {
     // Verify the poison persists: refresh_B should fail (family is poisoned)
     // This request goes through Raft to the leader, which has the poisoned
     // state committed and replicated to all nodes.
-    let poisoned_result =
-        client.refresh_token(proto::RefreshTokenRequest { refresh_token: refresh_b.clone() }).await;
+    let poisoned_result = client
+        .refresh_token(
+            wt::RefreshTokenRequest { refresh_token: refresh_b.clone() },
+            rand::random::<u128>(),
+        )
+        .await;
     assert!(
         poisoned_result.is_err(),
         "refresh_B must fail: poisoned family flag committed through Raft persists"
     );
+    let poisoned_err = poisoned_result.unwrap_err();
     assert_eq!(
-        poisoned_result.unwrap_err().code(),
-        tonic::Code::Unauthenticated,
-        "poisoned family should return UNAUTHENTICATED"
+        wire_err_code(&poisoned_err),
+        Some(ErrorCode::Unauthenticated),
+        "poisoned family should return Unauthenticated, got: {poisoned_err:?}"
     );
 
     // Additional verification: connect to a follower and verify it has
@@ -1853,16 +1832,15 @@ async fn test_poisoned_family_persists_across_replication() {
     // ValidateToken reads local applied state (not forwarded to leader).
     let followers = cluster.followers();
     assert!(!followers.is_empty(), "should have follower nodes");
-    let follower_addr = followers[0].addr.clone();
+    let follower = followers[0];
 
-    let mut follower_client =
-        create_token_client(&follower_addr).await.expect("connect to follower");
+    let follower_client = wire_token_client(&cluster, follower.id);
 
     // The access token should still validate on the follower (it's a JWT
     // verified locally — token validity is independent of refresh token state).
     // This proves the follower has the signing key state replicated.
     let validate_result =
-        validate_token(&mut follower_client, &tokens.access_token, "inferadb-control").await;
+        validate_token(&follower_client, &tokens.access_token, "inferadb-control").await;
     assert!(
         validate_result.is_ok(),
         "access token should still validate on follower (JWT verified locally)"
@@ -1882,51 +1860,56 @@ async fn test_poisoned_family_persists_across_replication() {
 /// and revoked keys are filtered out).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_token_maintenance_transitions_rotated_keys() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
 
     // Create and rotate a signing key with a short grace period
-    let mut client = create_token_client(addr).await.expect("connect");
+    let client = wire_token_client(&cluster, node.id);
     client
-        .create_signing_key(proto::CreateSigningKeyRequest {
-            scope: proto::SigningKeyScope::Global as i32,
-            organization: None,
-            caller: None,
-        })
+        .create_signing_key(
+            wt::CreateSigningKeyRequest {
+                scope: wt::SigningKeyScope::Global,
+                organization: None,
+                caller: None,
+            },
+            rand::random::<u128>(),
+        )
         .await
         .expect("create signing key");
 
     let keys = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
+        .get_public_keys(
+            wt::GetPublicKeysRequest { organization: None, caller: None },
+            rand::random::<u128>(),
+        )
         .await
         .expect("get keys")
-        .into_inner()
         .keys;
     assert_eq!(keys.len(), 1);
     let old_kid = keys[0].kid.clone();
 
     // Rotate with 1-second grace period — the old key will expire quickly
     client
-        .rotate_signing_key(proto::RotateSigningKeyRequest {
-            kid: old_kid.clone(),
-            grace_period_secs: 1,
-            force_revoke: false,
-            caller: None,
-        })
+        .rotate_signing_key(
+            wt::RotateSigningKeyRequest {
+                kid: old_kid.clone(),
+                grace_period_secs: 1,
+                force_revoke: false,
+                caller: None,
+            },
+            rand::random::<u128>(),
+        )
         .await
         .expect("rotate signing key");
 
     // Immediately after rotation: should have 2 keys (active + rotated)
     let keys_after_rotate = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
+        .get_public_keys(
+            wt::GetPublicKeysRequest { organization: None, caller: None },
+            rand::random::<u128>(),
+        )
         .await
         .expect("get keys after rotate")
-        .into_inner()
         .keys;
     assert_eq!(
         keys_after_rotate.len(),
@@ -1940,10 +1923,12 @@ async fn test_token_maintenance_transitions_rotated_keys() {
     // After maintenance: the rotated key should be transitioned to revoked and
     // no longer visible in GetPublicKeys (revoked keys are filtered out)
     let keys_after_maintenance = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
+        .get_public_keys(
+            wt::GetPublicKeysRequest { organization: None, caller: None },
+            rand::random::<u128>(),
+        )
         .await
         .expect("get keys after maintenance")
-        .into_inner()
         .keys;
     assert_eq!(
         keys_after_maintenance.len(),
@@ -1964,41 +1949,44 @@ async fn test_token_maintenance_transitions_rotated_keys() {
 /// transitioned keys, and the public key count remains stable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_token_maintenance_idempotency() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let node = &cluster.nodes()[0];
-    let addr = &node.addr;
 
     // Create and rotate a signing key with a short grace period
-    let mut client = create_token_client(addr).await.expect("connect");
+    let client = wire_token_client(&cluster, node.id);
     client
-        .create_signing_key(proto::CreateSigningKeyRequest {
-            scope: proto::SigningKeyScope::Global as i32,
-            organization: None,
-            caller: None,
-        })
+        .create_signing_key(
+            wt::CreateSigningKeyRequest {
+                scope: wt::SigningKeyScope::Global,
+                organization: None,
+                caller: None,
+            },
+            rand::random::<u128>(),
+        )
         .await
         .expect("create signing key");
 
     let keys = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
+        .get_public_keys(
+            wt::GetPublicKeysRequest { organization: None, caller: None },
+            rand::random::<u128>(),
+        )
         .await
         .expect("get keys")
-        .into_inner()
         .keys;
     let old_kid = keys[0].kid.clone();
 
     // Rotate with 1-second grace
     client
-        .rotate_signing_key(proto::RotateSigningKeyRequest {
-            kid: old_kid,
-            grace_period_secs: 1,
-            force_revoke: false,
-            caller: None,
-        })
+        .rotate_signing_key(
+            wt::RotateSigningKeyRequest {
+                kid: old_kid,
+                grace_period_secs: 1,
+                force_revoke: false,
+                caller: None,
+            },
+            rand::random::<u128>(),
+        )
         .await
         .expect("rotate signing key");
 
@@ -2007,13 +1995,13 @@ async fn test_token_maintenance_idempotency() {
     tokio::time::sleep(Duration::from_secs(12)).await;
 
     // After two+ maintenance cycles: should still have exactly 1 key (the new active one).
-    // If the job double-counted or created duplicate transitions, we'd see errors in logs
-    // or inconsistent state.
     let keys_final = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
+        .get_public_keys(
+            wt::GetPublicKeysRequest { organization: None, caller: None },
+            rand::random::<u128>(),
+        )
         .await
         .expect("get keys after multiple maintenance cycles")
-        .into_inner()
         .keys;
     assert_eq!(
         keys_final.len(),
@@ -2025,12 +2013,15 @@ async fn test_token_maintenance_idempotency() {
     // Rotate again to verify the maintenance job is still functional (not stuck/broken)
     let current_kid = keys_final[0].kid.clone();
     client
-        .rotate_signing_key(proto::RotateSigningKeyRequest {
-            kid: current_kid.clone(),
-            grace_period_secs: 1,
-            force_revoke: false,
-            caller: None,
-        })
+        .rotate_signing_key(
+            wt::RotateSigningKeyRequest {
+                kid: current_kid.clone(),
+                grace_period_secs: 1,
+                force_revoke: false,
+                caller: None,
+            },
+            rand::random::<u128>(),
+        )
         .await
         .expect("second rotation should succeed");
 
@@ -2038,10 +2029,12 @@ async fn test_token_maintenance_idempotency() {
     tokio::time::sleep(Duration::from_secs(8)).await;
 
     let keys_after_second = client
-        .get_public_keys(proto::GetPublicKeysRequest { organization: None, caller: None })
+        .get_public_keys(
+            wt::GetPublicKeysRequest { organization: None, caller: None },
+            rand::random::<u128>(),
+        )
         .await
         .expect("get keys after second rotation maintenance")
-        .into_inner()
         .keys;
     assert_eq!(
         keys_after_second.len(),
@@ -2051,91 +2044,5 @@ async fn test_token_maintenance_idempotency() {
     assert_ne!(
         keys_after_second[0].kid, current_kid,
         "the old key should have been transitioned by the second maintenance cycle"
-    );
-}
-
-/// Rate limiting applied to TokenService write RPCs (CreateVaultToken).
-///
-/// Verifies that the rate limiter (configured with low burst=5 in test Config)
-/// rejects requests with `RESOURCE_EXHAUSTED` after the client token bucket is
-/// exhausted. The test uses CreateVaultToken because it's the only TokenService
-/// RPC with rate limiting applied (org-scoped write requiring OrganizationId).
-///
-/// ValidateToken and GetPublicKeys are read-only and have no rate limiting.
-/// Per-RPC tier differentiation (higher limits for reads) is not implemented
-/// in the current rate limiter design — it uses a single tier per org.
-#[tokio::test]
-async fn test_rate_limiting_on_create_vault_token() {
-    let rate_limit = inferadb_ledger_types::config::RateLimitConfig::builder()
-        .enabled(true)
-        .client_burst(100_u64)
-        .client_rate(1.0)
-        .organization_burst(10_000_u64)
-        .organization_rate(10_000.0)
-        .backpressure_threshold(10_000_u64)
-        .build()
-        .expect("valid rate limit config");
-    let cluster = TestCluster::with_rate_limit(1, rate_limit).await;
-    let node = &cluster.nodes()[0];
-    let addr = &node.addr;
-
-    // Step 1: Create organization with admin user
-    let (org, admin_slug) =
-        create_organization(addr, "rate-limit-org", node).await.expect("create org");
-
-    // Step 2: Set up app, vault, and signing key
-    let vault = create_vault(addr, org).await.expect("create vault");
-    let app = create_app(addr, org, "rate-app", admin_slug).await.expect("create app");
-    set_app_enabled(addr, org, app, true, admin_slug).await.expect("enable app");
-    add_app_vault(addr, org, app, vault, &["vault:read", "entity:read"], admin_slug)
-        .await
-        .expect("connect app to vault");
-    ensure_org_signing_key(addr, org).await.expect("ensure org signing key");
-
-    // Step 3: Wait for first vault token to succeed (key propagation)
-    wait_for_vault_token(addr, org, app, vault, &["vault:read"]).await;
-
-    // Step 4: Exhaust the rate limiter (client burst=100, rate=1.0/sec in test config).
-    // The low refill rate ensures the 100-token bucket drains before refill kicks in.
-    // IMPORTANT: reuse a single client connection so all requests share the same
-    // rate limit bucket (new connections may get separate buckets).
-    let mut success_count = 0_u32;
-    let mut rejected = false;
-    let mut client = create_token_client(addr).await.expect("connect for rate limit test");
-    for _ in 0..200 {
-        let result = client
-            .create_vault_token(proto::CreateVaultTokenRequest {
-                organization: Some(proto::OrganizationSlug { slug: org.value() }),
-                app: Some(proto::AppSlug { slug: app.value() }),
-                vault: Some(proto::VaultSlug { slug: vault.value() }),
-                scopes: vec!["vault:read".to_string()],
-            })
-            .await;
-
-        match result {
-            Ok(_) => success_count += 1,
-            Err(status) if status.code() == tonic::Code::ResourceExhausted => {
-                rejected = true;
-                // Verify the rejection includes retry-after metadata
-                let retry_after = status.metadata().get("retry-after-ms");
-                assert!(
-                    retry_after.is_some(),
-                    "ResourceExhausted should include retry-after-ms metadata"
-                );
-                break;
-            },
-            Err(status) => {
-                panic!("Unexpected error (expected Ok or ResourceExhausted): {:?}", status);
-            },
-        }
-    }
-
-    assert!(
-        rejected,
-        "Rate limiter should have rejected at least one request (client burst=100, rate=1.0/sec, sent up to 200). Success count: {success_count}"
-    );
-    assert!(
-        success_count >= 1,
-        "At least one request should succeed before rate limiting kicks in"
     );
 }

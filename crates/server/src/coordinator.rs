@@ -1,6 +1,5 @@
-//! Bootstrap coordination (legacy).
+//! Bootstrap coordination.
 //!
-//! This module previously contained the auto-coordination algorithm where
-//! the node with the lowest Snowflake ID bootstrapped the cluster. This has
-//! been replaced by the explicit `init` command (CockroachDB-style two-phase
-//! bootstrap). The coordinator is no longer used.
+//! Previously contained the auto-coordination algorithm where the node with the
+//! lowest Snowflake ID bootstrapped the cluster. Replaced by the explicit `init`
+//! subcommand (CockroachDB-style two-phase bootstrap). This module is now empty.

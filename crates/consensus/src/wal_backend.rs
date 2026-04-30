@@ -1,5 +1,14 @@
 //! WAL backend trait for injectable persistence.
-//! Implementations provided in Phase 3.
+//!
+//! [`WalBackend`] abstracts over the concrete WAL storage layer so the
+//! reactor can swap implementations — production uses
+//! [`wal::segmented::SegmentedWalBackend`](crate::wal::segmented::SegmentedWalBackend),
+//! tests and simulation use
+//! [`wal::InMemoryWalBackend`](crate::wal::InMemoryWalBackend).
+//!
+//! Also defines [`CheckpointFrame`] and [`WalFrame`], the two record types
+//! written to the WAL, and [`FsyncPhase`], which governs whether fsync
+//! completes synchronously in the reactor loop or asynchronously.
 
 use std::sync::Arc;
 

@@ -1,0 +1,55 @@
+[package]
+name = "inferadb-ledger-wire-transport"
+description = "QUIC-based wire transport for the InferaDB Ledger custom protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["wire", "transport", "quic", "quinn"]
+categories = ["network-programming"]
+
+[features]
+# Exposes `tls::rustls_client_crypto_skip_verify`, a `ServerCertVerifier` that
+# accepts any peer certificate. Used by integration tests so rcgen-generated
+# self-signed certs work without bundling a CA. NEVER enable in production
+# builds — a misconfigured client with this feature is wide open to MITM.
+insecure-skip-verify = []
+
+[dependencies]
+inferadb-ledger-wire = { workspace = true }
+async-stream.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+crc32fast.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+postcard.workspace = true
+quinn.workspace = true
+rand.workspace = true
+rustls.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+rcgen.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time", "test-util"] }
+
+# Integration tests under `tests/` need the public-API surface to expose
+# `tls::rustls_client_crypto_skip_verify`. Inline `#[cfg(test)]` modules see
+# it via the `cfg(test)` arm of the gating attribute, but integration tests
+# compile against the lib without `cfg(test)` set, so the
+# `insecure-skip-verify` feature must be enabled explicitly. Listed via
+# `required-features` so `cargo test` skips silently when the feature is
+# absent rather than failing to compile.
+[[test]]
+name = "integration"
+required-features = ["insecure-skip-verify"]
+
+[lints]
+workspace = true

@@ -1612,8 +1612,9 @@ impl<C: Clock + Clone, R: RngSource, W: WalBackend, T: NetworkTransport> Reactor
                 } => {
                     // Stage 4: dispatch to the snapshot installer. The
                     // installer resolves the shard ID to its scope, locates
-                    // the staged file written by Stage 3's
-                    // `snapshot_receiver`, decrypts via the
+                    // the staged file written by the wire transport's
+                    // snapshot sub-protocol (`crates/wire-transport/src/
+                    // snapshot_stream.rs`), decrypts via the
                     // `SnapshotKeyProvider`, and feeds the plaintext to
                     // `RaftLogStore::install_snapshot`. On completion the
                     // installer calls back into

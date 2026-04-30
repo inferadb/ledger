@@ -1,7 +1,5 @@
 //! Read consistency and write success types.
 
-use inferadb_ledger_proto::proto;
-
 /// Consistency level for read operations.
 ///
 /// Controls whether reads are served from any replica (eventual) or must
@@ -15,16 +13,6 @@ pub enum ReadConsistency {
     Eventual,
     /// Reads from leader (strong consistency, higher latency).
     Linearizable,
-}
-
-impl ReadConsistency {
-    /// Converts to protobuf enum value.
-    pub(crate) fn to_proto(self) -> proto::ReadConsistency {
-        match self {
-            ReadConsistency::Eventual => proto::ReadConsistency::Eventual,
-            ReadConsistency::Linearizable => proto::ReadConsistency::Linearizable,
-        }
-    }
 }
 
 /// Result of a successful write operation.

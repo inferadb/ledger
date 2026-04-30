@@ -64,6 +64,56 @@ pub enum LogFormat {
     Auto,
 }
 
+/// Which client-facing transport [`crate::bootstrap::bootstrap_node`] binds.
+///
+/// F.1.b adds a parallel wire-transport bind path on top of the existing
+/// tonic gRPC server. Both transports compose the same
+/// [`inferadb_ledger_services::server::ServiceBundle`] (per F.1.a); the only
+/// difference is which listener handles client traffic. F.1.d flipped the
+/// default to [`Self::Wire`] and wired operator-facing TLS plumbing via
+/// [`TlsConfig`]; the legacy tonic surface remains reachable behind
+/// `--transport=grpc` until F.1.f deletes it.
+///
+/// This setting is restart-only — flipping it at runtime would require
+/// rebinding listeners mid-process, which is out of scope.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportKind {
+    /// In-house QUIC wire transport. Operators must supply
+    /// [`TlsConfig::cert_path`] + [`TlsConfig::key_path`] for the bind to
+    /// succeed. Single-variant placeholder retained for forward compatibility.
+    #[default]
+    Wire,
+}
+
+/// Operator-supplied TLS material for the wire transport.
+///
+/// Required when [`Config::transport`] is [`TransportKind::Wire`] (the
+/// F.1.d default); ignored when the operator opts back to
+/// `TransportKind::Grpc`. Both [`Self::cert_path`] and [`Self::key_path`]
+/// must be present for a valid wire bind — bootstrap returns
+/// [`crate::bootstrap::BootstrapError::Config`] otherwise.
+///
+/// All three fields are restart-only — bootstrap reads them once before
+/// the [`inferadb_ledger_services::LedgerServer`] starts, builds a
+/// [`rustls::ServerConfig`] via
+/// [`crate::tls::load_wire_tls_server_config`], and installs it through
+/// [`inferadb_ledger_services::LedgerServer::with_wire_tls_config`].
+/// Inter-node Raft re-uses the same cert chain as the trust anchor for
+/// outgoing peer dials (see [`crate::tls::load_wire_tls_client_config`]).
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct TlsConfig {
+    /// Path to the PEM-encoded server certificate chain (leaf first).
+    pub cert_path: Option<PathBuf>,
+    /// Path to the PEM-encoded server private key (PKCS#8 / RSA / EC).
+    pub key_path: Option<PathBuf>,
+    /// SNI / cert-verification name peers expect when dialing this node.
+    /// When unset, defaults to `"localhost"` for loopback and dev fixtures;
+    /// production deployments should set this to the cluster-wide common
+    /// name baked into the cert SAN list.
+    pub server_name: Option<String>,
+}
+
 /// Configuration for the InferaDB Ledger server.
 ///
 /// Configuration can be provided via command-line arguments or environment variables.
@@ -550,6 +600,53 @@ pub struct Config {
     #[serde(default)]
     pub socket: Option<PathBuf>,
 
+    // === Transport ===
+    /// Which client-facing transport to bind: tonic gRPC or QUIC wire.
+    ///
+    /// F.1.d defaults to [`TransportKind::Wire`]. Operators on the legacy
+    /// tonic path opt out via `--transport grpc` (or
+    /// `INFERADB__LEDGER__TRANSPORT=grpc`) until F.1.f removes the surface.
+    /// On the wire path, `--tls-cert` and `--tls-key` are required;
+    /// bootstrap returns [`crate::bootstrap::BootstrapError::Config`] when
+    /// either is absent.
+    #[arg(
+        long = "transport",
+        env = "INFERADB__LEDGER__TRANSPORT",
+        value_enum,
+        default_value = "wire"
+    )]
+    #[serde(default)]
+    #[builder(default)]
+    pub transport: TransportKind,
+
+    // === TLS ===
+    /// Path to the PEM-encoded server certificate chain for the wire
+    /// transport (and inter-node Raft trust anchor).
+    ///
+    /// Required when [`Self::transport`] is [`TransportKind::Wire`];
+    /// ignored on `--transport grpc`.
+    #[arg(long = "tls-cert", env = "INFERADB__LEDGER__TLS__CERT_PATH")]
+    #[serde(default)]
+    pub tls_cert_path: Option<PathBuf>,
+
+    /// Path to the PEM-encoded server private key for the wire transport.
+    ///
+    /// Required when [`Self::transport`] is [`TransportKind::Wire`];
+    /// ignored on `--transport grpc`.
+    #[arg(long = "tls-key", env = "INFERADB__LEDGER__TLS__KEY_PATH")]
+    #[serde(default)]
+    pub tls_key_path: Option<PathBuf>,
+
+    /// SNI / cert-verification name peers expect when dialing this node
+    /// over the wire transport.
+    ///
+    /// Optional: when unset, falls back to `"localhost"` (suitable for
+    /// loopback / dev fixtures). Production deployments should set this
+    /// to the cluster-wide common name baked into the cert SAN list.
+    #[arg(long = "tls-server-name", env = "INFERADB__LEDGER__TLS__SERVER_NAME")]
+    #[serde(default)]
+    pub tls_server_name: Option<String>,
+
     // === Bootstrap Initialization Timeout ===
     /// How long a fresh node waits for an `InitCluster` RPC before returning an error, in seconds.
     ///
@@ -619,6 +716,10 @@ impl Default for Config {
             token_maintenance_interval_secs: default_token_maintenance_interval_secs(),
             email_blinding_key: None,
             socket: None,
+            transport: TransportKind::default(),
+            tls_cert_path: None,
+            tls_key_path: None,
+            tls_server_name: None,
             init_wait_timeout_secs: default_init_wait_timeout_secs(),
         }
     }
@@ -645,6 +746,7 @@ impl Config {
             data_dir: Some(data_dir),
             dev: false,
             logging: LoggingConfig::for_test(),
+            transport: TransportKind::Wire,
             ..Self::default()
         }
     }
@@ -718,6 +820,22 @@ impl Config {
     pub fn resolve_data_dir(&self) -> Result<PathBuf, ConfigError> {
         let mode = self.storage_mode()?;
         mode.resolve_data_dir().map_err(Into::into)
+    }
+
+    /// Returns the [`TlsConfig`] derived from the operator's
+    /// `--tls-cert` / `--tls-key` / `--tls-server-name` flags.
+    ///
+    /// Callers that need to inspect TLS material (notably bootstrap) read
+    /// through this accessor so the field shape stays opaque to the
+    /// surrounding code; future TLS additions (mTLS client roots, cert
+    /// rotation) extend the struct without churning every call site.
+    #[must_use]
+    pub fn tls(&self) -> TlsConfig {
+        TlsConfig {
+            cert_path: self.tls_cert_path.clone(),
+            key_path: self.tls_key_path.clone(),
+            server_name: self.tls_server_name.clone(),
+        }
     }
 
     /// Returns the node ID for this server.
@@ -847,7 +965,7 @@ pub enum CliCommand {
         #[command(subcommand)]
         action: RestoreAction,
     },
-    /// Per-vault inspection and repair commands (Phase 7 / O4).
+    /// Per-vault inspection and repair commands.
     ///
     /// Connects to a running node and queries its `AdminService` for
     /// per-vault Raft group state. Hit a region voter for the org to
@@ -861,12 +979,25 @@ pub enum CliCommand {
         #[arg(long = "host", global = true, default_value = "127.0.0.1:9090")]
         host: String,
     },
+    /// Admin / operator RPC family used by shell test scripts and one-off
+    /// operator workflows.
+    ///
+    /// Each subcommand wraps a single wire-protocol RPC against the
+    /// `--host` node and prints the response as JSON to stdout. Failures
+    /// surface as free-form error text on stderr with a non-zero exit
+    /// code. Unlike `vaults`, the admin family fans out across multiple
+    /// services (Admin / User / Vault / Write / Read) — every subcommand
+    /// dials the same node over the same QUIC + TLS transport.
+    Admin {
+        /// Admin action to perform.
+        #[command(subcommand)]
+        action: AdminAction,
+    },
 }
 
 /// Restore subcommand actions.
 ///
-/// The `apply` action is the offline half of the two-phase restore
-/// designed in `docs/superpowers/specs/2026-04-24-multi-db-backup-archive-format.md`:
+/// The `apply` action is the offline half of the two-phase restore workflow:
 /// the online `RestoreBackup` RPC stages an archive into
 /// `{data_dir}/.restore-staging/...`, and `restore apply` swaps that
 /// staging tree onto the live data directory while the node is stopped.
@@ -942,6 +1073,243 @@ pub enum VaultsAction {
     },
 }
 
+/// Admin RPC actions exposed by the `admin` CLI subcommand.
+///
+/// Each variant wraps a single wire-protocol RPC. Every variant accepts
+/// `--host <ADDR>` (default `127.0.0.1:9090`) and emits the RPC response
+/// as pretty-printed JSON on stdout. Slug arguments are passed as
+/// decimal `u64` Snowflake IDs (e.g. `--organization 123456789012345678`).
+#[derive(Debug, clap::Subcommand)]
+pub enum AdminAction {
+    /// Fetch cluster membership and current leader/term via
+    /// `AdminService::GetClusterInfo`.
+    ClusterInfo {
+        /// Address of the node to query (e.g., "node1:9090").
+        #[arg(long = "host", default_value = "127.0.0.1:9090")]
+        host: String,
+    },
+    /// Fetch the target node's identity, term, and cluster membership
+    /// status via `AdminService::GetNodeInfo`.
+    NodeInfo {
+        /// Address of the node to query.
+        #[arg(long = "host", default_value = "127.0.0.1:9090")]
+        host: String,
+    },
+    /// Add a node to the cluster via `AdminService::JoinCluster`.
+    JoinCluster {
+        /// Address of the cluster leader.
+        #[arg(long = "host", default_value = "127.0.0.1:9090")]
+        host: String,
+        /// Numeric node id of the joiner.
+        #[arg(long = "node-id")]
+        node_id: u64,
+        /// Wire address of the joiner (e.g. "node3:9090").
+        #[arg(long = "address")]
+        address: String,
+    },
+    /// Remove a node from the cluster via `AdminService::LeaveCluster`.
+    LeaveCluster {
+        /// Address of the cluster leader.
+        #[arg(long = "host", default_value = "127.0.0.1:9090")]
+        host: String,
+        /// Numeric node id to remove.
+        #[arg(long = "node-id")]
+        node_id: u64,
+    },
+    /// Transfer Raft leadership to the supplied target via
+    /// `AdminService::TransferLeadership`.
+    TransferLeadership {
+        /// Address of the current leader.
+        #[arg(long = "host", default_value = "127.0.0.1:9090")]
+        host: String,
+        /// Numeric node id of the desired new leader.
+        #[arg(long = "target-node-id")]
+        target_node_id: u64,
+        /// Server-side wait, in milliseconds, before declaring the
+        /// transfer failed. Defaults to 10000.
+        #[arg(long = "timeout-ms", default_value_t = 10_000)]
+        timeout_ms: u32,
+    },
+    /// Provision a new data region via `AdminService::ProvisionRegion`.
+    ProvisionRegion {
+        /// Address of any cluster-membership node.
+        #[arg(long = "host", default_value = "127.0.0.1:9090")]
+        host: String,
+        /// Region name (canonical slug, e.g. `us-east-va`).
+        #[arg(long = "name")]
+        name: String,
+        /// Mark the region as protected (refuses placement migrations).
+        #[arg(long = "protected", default_value_t = false)]
+        protected: bool,
+        /// Mark the region as residency-locked (PII never leaves).
+        #[arg(long = "requires-residency", default_value_t = false)]
+        requires_residency: bool,
+        /// Per-region block retention policy in days. Defaults to 90.
+        #[arg(long = "retention-days", default_value_t = 90)]
+        retention_days: u32,
+    },
+    /// Issue a new email-verification challenge via
+    /// `UserService::InitiateEmailVerification` and return the code that
+    /// would have been emailed (dev / test only).
+    InitiateEmailVerification {
+        /// Address of any user-region node.
+        #[arg(long = "host", default_value = "127.0.0.1:9090")]
+        host: String,
+        /// Email address to verify.
+        #[arg(long = "email")]
+        email: String,
+        /// Region the user lives in.
+        #[arg(long = "region")]
+        region: String,
+    },
+    /// Verify a previously-issued email code via
+    /// `UserService::VerifyEmailCode`. Returns either a session token,
+    /// onboarding token, or TOTP-required marker depending on user
+    /// state.
+    VerifyEmailCode {
+        /// Address of the same user-region node.
+        #[arg(long = "host", default_value = "127.0.0.1:9090")]
+        host: String,
+        /// Email address being verified.
+        #[arg(long = "email")]
+        email: String,
+        /// Code received from `initiate-email-verification`.
+        #[arg(long = "code")]
+        code: String,
+        /// Region the user lives in.
+        #[arg(long = "region")]
+        region: String,
+    },
+    /// Complete a new-user registration via
+    /// `UserService::CompleteRegistration` using the onboarding token
+    /// returned by `verify-email-code`.
+    CompleteRegistration {
+        /// Address of the same user-region node.
+        #[arg(long = "host", default_value = "127.0.0.1:9090")]
+        host: String,
+        /// Onboarding token from `verify-email-code`.
+        #[arg(long = "onboarding-token")]
+        onboarding_token: String,
+        /// Verified email address.
+        #[arg(long = "email")]
+        email: String,
+        /// Region the user lives in.
+        #[arg(long = "region")]
+        region: String,
+        /// User's display name.
+        #[arg(long = "name")]
+        name: String,
+        /// Default-organization name to provision for the user.
+        #[arg(long = "organization-name")]
+        organization_name: String,
+    },
+    /// Create a vault via `VaultService::CreateVault`.
+    CreateVault {
+        /// Address of the org's region leader.
+        #[arg(long = "host", default_value = "127.0.0.1:9090")]
+        host: String,
+        /// External organization slug (Snowflake u64).
+        #[arg(long = "organization")]
+        organization: u64,
+        /// External user slug of the caller (vault owner).
+        #[arg(long = "caller")]
+        caller: u64,
+        /// Optional pre-allocated vault slug. When omitted the server
+        /// allocates a fresh Snowflake.
+        #[arg(long = "slug")]
+        slug: Option<u64>,
+        /// Replication factor for the new vault. Defaults to 1.
+        #[arg(long = "replication-factor", default_value_t = 1)]
+        replication_factor: u32,
+    },
+    /// Issue a single-`Set`-op write via `WriteService::Write`.
+    ///
+    /// Generates a random 16-byte UUID idempotency key when
+    /// `--idempotency-key` is omitted.
+    Write {
+        /// Address of the vault leader.
+        #[arg(long = "host", default_value = "127.0.0.1:9090")]
+        host: String,
+        /// External organization slug.
+        #[arg(long = "organization")]
+        organization: u64,
+        /// External vault slug.
+        #[arg(long = "vault")]
+        vault: u64,
+        /// External user slug of the caller.
+        #[arg(long = "caller")]
+        caller: u64,
+        /// Entity key to set.
+        #[arg(long = "key")]
+        key: String,
+        /// Entity value (UTF-8 string written as raw bytes).
+        #[arg(long = "value")]
+        value: String,
+        /// Hex-encoded 16-byte idempotency key. Random UUID v4 is used
+        /// when omitted.
+        #[arg(long = "idempotency-key")]
+        idempotency_key: Option<String>,
+    },
+    /// Read an entity via `ReadService::Read`.
+    Read {
+        /// Address of any read replica for the vault.
+        #[arg(long = "host", default_value = "127.0.0.1:9090")]
+        host: String,
+        /// External organization slug.
+        #[arg(long = "organization")]
+        organization: u64,
+        /// External vault slug.
+        #[arg(long = "vault")]
+        vault: u64,
+        /// External user slug of the caller.
+        #[arg(long = "caller")]
+        caller: u64,
+        /// Entity key to read.
+        #[arg(long = "key")]
+        key: String,
+        /// Read consistency level (`eventual` or `linearizable`).
+        /// Defaults to `eventual`.
+        #[arg(long = "consistency", default_value = "eventual")]
+        consistency: String,
+    },
+    /// List entities matching an optional prefix via
+    /// `ReadService::ListEntities`.
+    ListEntities {
+        /// Address of any read replica for the vault.
+        #[arg(long = "host", default_value = "127.0.0.1:9090")]
+        host: String,
+        /// External organization slug.
+        #[arg(long = "organization")]
+        organization: u64,
+        /// External vault slug.
+        #[arg(long = "vault")]
+        vault: u64,
+        /// External user slug of the caller.
+        #[arg(long = "caller")]
+        caller: u64,
+        /// Optional key prefix filter. Defaults to empty (all keys).
+        #[arg(long = "key-prefix", default_value = "")]
+        key_prefix: String,
+        /// Page size limit. Defaults to 100.
+        #[arg(long = "limit", default_value_t = 100)]
+        limit: u32,
+    },
+    /// Fetch the current chain tip via `ReadService::GetTip`.
+    GetTip {
+        /// Address of any read replica for the vault.
+        #[arg(long = "host", default_value = "127.0.0.1:9090")]
+        host: String,
+        /// External organization slug. When omitted, returns the
+        /// system-vault tip.
+        #[arg(long = "organization")]
+        organization: Option<u64>,
+        /// External vault slug. When omitted, returns the org's default
+        /// vault tip.
+        #[arg(long = "vault")]
+        vault: Option<u64>,
+    },
+}
+
 /// Configuration subcommand actions.
 #[derive(Debug, clap::Subcommand)]
 pub enum ConfigAction {
@@ -988,6 +1356,29 @@ mod tests {
         assert!(matches!(config.storage_mode(), Err(ConfigError::NoStorageMode)));
         // listen is None by default, so is_localhost_only returns false
         assert!(!config.is_localhost_only());
+    }
+
+    #[test]
+    fn default_transport_is_wire() {
+        // F.1.d default flip: every operator who hasn't explicitly opted
+        // out via `--transport=grpc` runs on the wire path.
+        assert_eq!(TransportKind::default(), TransportKind::Wire);
+        assert_eq!(Config::default().transport, TransportKind::Wire);
+    }
+
+    #[test]
+    fn default_tls_paths_are_unset() {
+        // Operators must explicitly supply `--tls-cert` / `--tls-key`
+        // for the wire bind; the default Config carries no TLS material.
+        let config = Config::default();
+        assert!(config.tls_cert_path.is_none());
+        assert!(config.tls_key_path.is_none());
+        assert!(config.tls_server_name.is_none());
+
+        let tls = config.tls();
+        assert!(tls.cert_path.is_none());
+        assert!(tls.key_path.is_none());
+        assert!(tls.server_name.is_none());
     }
 
     #[test]

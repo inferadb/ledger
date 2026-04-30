@@ -9,30 +9,36 @@
 
 use std::time::Duration;
 
-use tonic::Status;
+use inferadb_ledger_wire::{ErrorCode, WireError};
 
 /// Waits until the local applied index reaches the target committed index.
 ///
 /// Returns `Ok(())` once the applied index (observed via the watch channel)
-/// reaches or exceeds `target_index`. Returns an error if the timeout expires
-/// or the watch channel is closed.
+/// reaches or exceeds `target_index`. Returns a [`WireError`] if the timeout
+/// expires or the watch channel is closed.
 ///
 /// # Errors
 ///
-/// - `Status::deadline_exceeded` if the timeout elapses before the index is reached.
-/// - `Status::internal` if the watch channel sender is dropped.
+/// - [`ErrorCode::FailedPrecondition`] (with a `deadline_exceeded` message) if the timeout elapses
+///   before the index is reached.
+/// - [`ErrorCode::Internal`] if the watch channel sender is dropped.
 pub async fn wait_for_apply(
     watch: &mut tokio::sync::watch::Receiver<u64>,
     target_index: u64,
     timeout: Duration,
-) -> Result<(), Status> {
+) -> Result<(), WireError> {
     if *watch.borrow() >= target_index {
         return Ok(());
     }
     tokio::time::timeout(timeout, watch.wait_for(|&idx| idx >= target_index))
         .await
-        .map_err(|_| Status::deadline_exceeded("Timed out waiting for apply"))?
-        .map_err(|_| Status::internal("Applied index watch closed"))?;
+        .map_err(|_| {
+            WireError::new(
+                ErrorCode::FailedPrecondition,
+                "deadline_exceeded: timed out waiting for apply",
+            )
+        })?
+        .map_err(|_| WireError::new(ErrorCode::Internal, "applied index watch closed"))?;
     Ok(())
 }
 
@@ -68,8 +74,8 @@ mod tests {
         let (_tx, mut rx) = tokio::sync::watch::channel(0u64);
         let result = wait_for_apply(&mut rx, 100, Duration::from_millis(10)).await;
         assert!(result.is_err());
-        let status = result.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::FailedPrecondition);
     }
 
     #[tokio::test]
@@ -78,7 +84,7 @@ mod tests {
         drop(tx);
         let result = wait_for_apply(&mut rx, 10, Duration::from_millis(100)).await;
         assert!(result.is_err());
-        let status = result.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::Internal);
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::Internal);
     }
 }

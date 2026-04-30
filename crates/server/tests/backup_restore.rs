@@ -1,6 +1,6 @@
 //! Backup end-to-end integration tests.
 //!
-//! Exercises the multi-DB archive backup path through the gRPC Admin
+//! Exercises the multi-DB archive backup path through the wire Admin
 //! service:
 //!
 //! - `CreateBackup` produces a `.tar.zst` archive with a populated manifest (region, organization,
@@ -16,12 +16,23 @@
 //! Full restore (stop → swap → start) is the operator workflow exercised
 //! by the `inferadb-ledger restore apply` CLI; these tests verify the
 //! primitives that workflow composes.
+//!
+//! F.1.f.2.Stage1e Wave 5: migrated from the legacy tonic helpers
+//! (`create_admin_client` / `create_read_client` / `create_write_client` /
+//! `create_test_organization` / `create_test_vault`) to their wire-protocol
+//! siblings (`wire_admin_client` / `wire_read_client` / `wire_write_client` /
+//! `wire_create_test_organization` / `wire_create_test_vault`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
+use bytes::Bytes;
 use inferadb_ledger_types::{OrganizationSlug, VaultSlug};
+use inferadb_ledger_wire::services::{admin as wa, read as wr, shared as ws, write as ww};
 
-use crate::common::{TestCluster, create_admin_client, create_write_client};
+use crate::common::{
+    TestCluster, wire_admin_client, wire_create_test_organization, wire_create_test_vault,
+    wire_read_client, wire_write_client,
+};
 
 // ============================================================================
 // Test Helpers
@@ -29,110 +40,102 @@ use crate::common::{TestCluster, create_admin_client, create_write_client};
 
 /// Creates an organization and returns its slug.
 async fn create_organization(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     name: &str,
-    node: &crate::common::TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
-    let (slug, _admin) = crate::common::create_test_organization(addr, name, node).await?;
+    let (slug, _admin) = wire_create_test_organization(cluster, node_id, name).await?;
     Ok(slug)
 }
 
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
-    crate::common::create_test_vault(addr, organization).await
+    wire_create_test_vault(cluster, node_id, organization).await
 }
 
 /// Writes an entity and returns the block height.
 async fn write_entity(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     organization: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
     value: &[u8],
 ) -> Result<u64, Box<dyn std::error::Error>> {
-    let mut client = create_write_client(addr).await?;
+    let client = wire_write_client(cluster, node_id);
 
-    let request = inferadb_ledger_proto::proto::WriteRequest {
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: organization.value(),
-        }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
-        client_id: Some(inferadb_ledger_proto::proto::ClientId {
-            id: "backup-test-client".to_string(),
-        }),
-        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        operations: vec![inferadb_ledger_proto::proto::Operation {
-            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
-                inferadb_ledger_proto::proto::SetEntity {
-                    key: key.to_string(),
-                    value: value.to_vec(),
-                    expires_at: None,
-                    condition: None,
-                },
-            )),
+    let request = ww::WriteRequest {
+        organization: Some(organization),
+        vault: Some(vault),
+        client_id: Some(ws::ClientIdMessage { id: "backup-test-client".to_string() }),
+        idempotency_key: Bytes::copy_from_slice(uuid::Uuid::new_v4().as_bytes()),
+        operations: vec![ws::Operation {
+            op: Some(ws::OperationKind::SetEntity(ws::SetEntity {
+                key: key.to_string(),
+                value: Bytes::copy_from_slice(value),
+                expires_at: None,
+                condition: None,
+            })),
         }],
         include_tx_proof: false,
         caller: None,
     };
 
-    let response = client.write(request).await?.into_inner();
+    let response = client.write(request, rand::random::<u128>()).await?;
     match response.result {
-        Some(inferadb_ledger_proto::proto::write_response::Result::Success(s)) => {
-            Ok(s.block_height)
-        },
-        Some(inferadb_ledger_proto::proto::write_response::Result::Error(e)) => {
-            Err(format!("Write error: {:?}", e).into())
-        },
+        Some(ww::WriteResponseResult::Success(s)) => Ok(s.block_height),
+        Some(ww::WriteResponseResult::Error(e)) => Err(format!("Write error: {:?}", e).into()),
         None => Err("No result in write response".into()),
     }
 }
 
 /// Creates a backup of `organization` and returns the response.
 async fn create_backup(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     organization: OrganizationSlug,
     tag: Option<&str>,
-) -> Result<inferadb_ledger_proto::proto::CreateBackupResponse, Box<dyn std::error::Error>> {
-    let mut client = create_admin_client(addr).await?;
+) -> Result<wa::CreateBackupResponse, Box<dyn std::error::Error>> {
+    let client = wire_admin_client(cluster, node_id);
 
-    let request = inferadb_ledger_proto::proto::CreateBackupRequest {
+    let request = wa::CreateBackupRequest {
         tag: tag.map(|t| t.to_string()),
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: organization.value(),
-        }),
+        organization: Some(organization),
     };
 
-    let response = client.create_backup(request).await?.into_inner();
+    let response = client.create_backup(request, rand::random::<u128>()).await?;
     Ok(response)
 }
 
 /// Lists backups and returns the list.
 async fn list_backups(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     limit: u32,
-) -> Result<Vec<inferadb_ledger_proto::proto::BackupInfo>, Box<dyn std::error::Error>> {
-    let mut client = create_admin_client(addr).await?;
+) -> Result<Vec<wa::BackupInfo>, Box<dyn std::error::Error>> {
+    let client = wire_admin_client(cluster, node_id);
 
-    let request = inferadb_ledger_proto::proto::ListBackupsRequest { limit };
+    let request = wa::ListBackupsRequest { limit };
 
-    let response = client.list_backups(request).await?.into_inner();
+    let response = client.list_backups(request, rand::random::<u128>()).await?;
     Ok(response.backups)
 }
 
 /// Stages a backup for restore and returns the response.
 async fn restore_backup(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     backup_id: &str,
-) -> Result<inferadb_ledger_proto::proto::RestoreBackupResponse, Box<dyn std::error::Error>> {
-    let mut client = create_admin_client(addr).await?;
+) -> Result<wa::RestoreBackupResponse, Box<dyn std::error::Error>> {
+    let client = wire_admin_client(cluster, node_id);
 
-    let request =
-        inferadb_ledger_proto::proto::RestoreBackupRequest { backup_id: backup_id.to_string() };
+    let request = wa::RestoreBackupRequest { backup_id: backup_id.to_string() };
 
-    let response = client.restore_backup(request).await?.into_inner();
+    let response = client.restore_backup(request, rand::random::<u128>()).await?;
     Ok(response)
 }
 
@@ -144,22 +147,19 @@ async fn restore_backup(
 /// org's DB files plus all of its vaults' DB files.
 #[tokio::test]
 async fn admin_create_backup_produces_valid_archive() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let org_slug = create_organization(&leader.addr, "backup-archive", leader)
+    let org_slug = create_organization(&cluster, leader.id, "backup-archive")
         .await
         .expect("create organization");
-    let vault = create_vault(&leader.addr, org_slug).await.expect("create vault");
+    let vault = create_vault(&cluster, leader.id, org_slug).await.expect("create vault");
 
     for i in 0..3 {
         write_entity(
-            &leader.addr,
+            &cluster,
+            leader.id,
             org_slug,
             vault,
             &format!("key-{}", i),
@@ -170,7 +170,7 @@ async fn admin_create_backup_produces_valid_archive() {
     }
 
     let response =
-        create_backup(&leader.addr, org_slug, Some("manual")).await.expect("create backup");
+        create_backup(&cluster, leader.id, org_slug, Some("manual")).await.expect("create backup");
 
     assert!(!response.backup_id.is_empty(), "backup should have an id");
     assert!(response.size_bytes > 0, "archive should have non-zero size");
@@ -195,34 +195,32 @@ async fn admin_create_backup_produces_valid_archive() {
         "checksums must use blake3 prefix",
     );
     let manifest_org = manifest.organization.as_ref().expect("manifest carries org slug");
-    assert_eq!(manifest_org.slug, org_slug.value(), "manifest org slug matches request");
+    assert_eq!(manifest_org.value(), org_slug.value(), "manifest org slug matches request");
 }
 
 /// `RestoreBackup` stages a previously-created archive into the
 /// `.restore-staging/` tree, returning the staging path and manifest.
 #[tokio::test]
 async fn admin_restore_backup_stages_archive() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let org_slug = create_organization(&leader.addr, "backup-restore-stage", leader)
+    let org_slug = create_organization(&cluster, leader.id, "backup-restore-stage")
         .await
         .expect("create organization");
-    let vault = create_vault(&leader.addr, org_slug).await.expect("create vault");
-    write_entity(&leader.addr, org_slug, vault, "stage-key", b"stage-value")
+    let vault = create_vault(&cluster, leader.id, org_slug).await.expect("create vault");
+    write_entity(&cluster, leader.id, org_slug, vault, "stage-key", b"stage-value")
         .await
         .expect("write entity");
 
-    let backup =
-        create_backup(&leader.addr, org_slug, Some("stage-test")).await.expect("create backup");
+    let backup = create_backup(&cluster, leader.id, org_slug, Some("stage-test"))
+        .await
+        .expect("create backup");
 
-    let response =
-        restore_backup(&leader.addr, &backup.backup_id).await.expect("restore (stage) backup");
+    let response = restore_backup(&cluster, leader.id, &backup.backup_id)
+        .await
+        .expect("restore (stage) backup");
 
     assert!(!response.staging_dir.is_empty(), "response carries staging_dir");
     assert!(
@@ -234,29 +232,26 @@ async fn admin_restore_backup_stages_archive() {
     assert_eq!(manifest.schema_version, 1);
     assert!(!manifest.dbs.is_empty(), "manifest should list staged DB files");
     let manifest_org = manifest.organization.as_ref().expect("manifest carries org slug");
-    assert_eq!(manifest_org.slug, org_slug.value());
+    assert_eq!(manifest_org.value(), org_slug.value());
 }
 
 /// Tests `CreateBackup` → `ListBackups` round-trip: every created
 /// archive shows up in the list response with a populated manifest.
 #[tokio::test]
 async fn test_backup_create_and_list_metadata() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let org_slug = create_organization(&leader.addr, "backup-metadata", leader)
+    let org_slug = create_organization(&cluster, leader.id, "backup-metadata")
         .await
         .expect("create organization");
-    let vault = create_vault(&leader.addr, org_slug).await.expect("create vault");
+    let vault = create_vault(&cluster, leader.id, org_slug).await.expect("create vault");
 
     for i in 0..5 {
         write_entity(
-            &leader.addr,
+            &cluster,
+            leader.id,
             org_slug,
             vault,
             &format!("key-{}", i),
@@ -266,20 +261,21 @@ async fn test_backup_create_and_list_metadata() {
         .expect("write entity");
     }
 
-    let backup =
-        create_backup(&leader.addr, org_slug, Some("test-snapshot")).await.expect("create backup");
+    let backup = create_backup(&cluster, leader.id, org_slug, Some("test-snapshot"))
+        .await
+        .expect("create backup");
 
     assert!(!backup.backup_id.is_empty(), "backup should have an ID");
     assert!(backup.size_bytes > 0, "backup should have non-zero size");
     assert!(!backup.backup_path.is_empty(), "backup should have a path");
 
-    let backups = list_backups(&leader.addr, 10).await.expect("list backups");
+    let backups = list_backups(&cluster, leader.id, 10).await.expect("list backups");
     assert!(!backups.is_empty(), "should have at least one backup");
 
     let our_backup = backups.iter().find(|b| b.backup_id == backup.backup_id);
     assert!(our_backup.is_some(), "our backup should appear in list");
     let info = our_backup.unwrap();
-    assert!(info.created_at.is_some(), "should have creation timestamp");
+    assert!(info.created_at > 0, "should have creation timestamp");
     assert!(info.manifest.is_some(), "list entry should carry parsed manifest");
 }
 
@@ -288,36 +284,54 @@ async fn test_backup_create_and_list_metadata() {
 /// while writers continue to issue requests.
 #[tokio::test]
 async fn test_backup_during_active_writes() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let org_slug = create_organization(&leader.addr, "backup-concurrent", leader)
+    let org_slug = create_organization(&cluster, leader.id, "backup-concurrent")
         .await
         .expect("create organization");
-    let vault = create_vault(&leader.addr, org_slug).await.expect("create vault");
+    let vault = create_vault(&cluster, leader.id, org_slug).await.expect("create vault");
 
     for i in 0..3 {
-        write_entity(&leader.addr, org_slug, vault, &format!("initial-{}", i), b"initial-value")
-            .await
-            .expect("write initial entity");
+        write_entity(
+            &cluster,
+            leader.id,
+            org_slug,
+            vault,
+            &format!("initial-{}", i),
+            b"initial-value",
+        )
+        .await
+        .expect("write initial entity");
     }
 
-    let addr = leader.addr.clone();
+    // Concurrent writes via a separate write client (no &cluster reference across tasks)
+    let write_client_concurrent = wire_write_client(&cluster, leader.id);
     let write_handle = tokio::spawn(async move {
         for i in 0..5 {
-            let _ =
-                write_entity(&addr, org_slug, vault, &format!("concurrent-{}", i), b"concurrent")
-                    .await;
+            let request = ww::WriteRequest {
+                organization: Some(org_slug),
+                vault: Some(vault),
+                client_id: Some(ws::ClientIdMessage { id: "backup-test-client".to_string() }),
+                idempotency_key: Bytes::copy_from_slice(uuid::Uuid::new_v4().as_bytes()),
+                operations: vec![ws::Operation {
+                    op: Some(ws::OperationKind::SetEntity(ws::SetEntity {
+                        key: format!("concurrent-{}", i),
+                        value: Bytes::from_static(b"concurrent"),
+                        expires_at: None,
+                        condition: None,
+                    })),
+                }],
+                include_tx_proof: false,
+                caller: None,
+            };
+            let _ = write_client_concurrent.write(request, rand::random::<u128>()).await;
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     });
 
-    let backup = create_backup(&leader.addr, org_slug, Some("during-writes"))
+    let backup = create_backup(&cluster, leader.id, org_slug, Some("during-writes"))
         .await
         .expect("backup during writes should succeed");
 
@@ -333,21 +347,17 @@ async fn test_backup_during_active_writes() {
 /// respects the limit parameter.
 #[tokio::test]
 async fn test_backup_list_with_limit() {
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
     let mut backup_ids = Vec::new();
     for i in 0..3 {
-        let org_slug = create_organization(&leader.addr, &format!("backup-limit-{i}"), leader)
+        let org_slug = create_organization(&cluster, leader.id, &format!("backup-limit-{i}"))
             .await
             .expect("create organization");
-        let vault = create_vault(&leader.addr, org_slug).await.expect("create vault");
-        write_entity(&leader.addr, org_slug, vault, &format!("data-{}", i), b"v")
+        let vault = create_vault(&cluster, leader.id, org_slug).await.expect("create vault");
+        write_entity(&cluster, leader.id, org_slug, vault, &format!("data-{}", i), b"v")
             .await
             .expect("write entity");
 
@@ -357,7 +367,7 @@ async fn test_backup_list_with_limit() {
         // filename.
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
-        let backup = create_backup(&leader.addr, org_slug, Some(&format!("backup-{i}")))
+        let backup = create_backup(&cluster, leader.id, org_slug, Some(&format!("backup-{i}")))
             .await
             .expect("create backup");
         backup_ids.push(backup.backup_id);
@@ -365,7 +375,7 @@ async fn test_backup_list_with_limit() {
 
     let all = tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
-            let backups = list_backups(&leader.addr, 0).await.expect("list all");
+            let backups = list_backups(&cluster, leader.id, 0).await.expect("list all");
             if backups.len() >= 3 {
                 return backups;
             }
@@ -377,32 +387,31 @@ async fn test_backup_list_with_limit() {
 
     assert!(all.len() >= 3, "should have at least 3 backups, got {}", all.len());
 
-    let limited = list_backups(&leader.addr, 2).await.expect("list limited");
+    let limited = list_backups(&cluster, leader.id, 2).await.expect("list limited");
     assert!(limited.len() <= 2, "limit should be respected, got {}", limited.len());
 }
 
-/// Reads `key` from `(organization, vault)` via the gRPC Read service.
+/// Reads `key` from `(organization, vault)` via the wire Read service.
 /// Returns the value bytes on hit, `None` on miss.
 async fn read_entity(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     organization: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
 ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
-    let mut client = crate::common::create_read_client(addr).await?;
+    let client = wire_read_client(cluster, node_id);
 
-    let request = inferadb_ledger_proto::proto::ReadRequest {
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: organization.value(),
-        }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
+    let request = wr::ReadRequest {
+        organization: Some(organization),
+        vault: Some(vault),
         key: key.to_string(),
-        consistency: 0,
+        consistency: ws::ReadConsistency::Eventual,
         caller: None,
     };
 
-    let response = client.read(request).await?.into_inner();
-    Ok(response.value)
+    let response = client.read(request, rand::random::<u128>()).await?;
+    Ok(response.value.map(|b| b.to_vec()))
 }
 
 /// End-to-end backup → restore round-trip.
@@ -427,27 +436,23 @@ async fn test_backup_restore_round_trip_with_data_integrity() {
     use inferadb_ledger_raft::backup::{BackupManager, apply_staged_restore};
     use inferadb_ledger_types::{OrganizationId, Region, config::BackupConfig};
 
-    let cluster = TestCluster::new(1).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport(1).await;
     let _leader_id = cluster.wait_for_leader().await;
     let leader = cluster.leader().expect("should have leader");
 
-    let org_slug = create_organization(&leader.addr, "backup-roundtrip", leader)
+    let org_slug = create_organization(&cluster, leader.id, "backup-roundtrip")
         .await
         .expect("create organization");
-    let vault = create_vault(&leader.addr, org_slug).await.expect("create vault");
+    let vault = create_vault(&cluster, leader.id, org_slug).await.expect("create vault");
 
     // Phase 1: write 5 entities and prove they're readable through the live node.
     let entries: Vec<(String, Vec<u8>)> =
         (0..5).map(|i| (format!("rt-key-{i}"), format!("rt-value-{i}").into_bytes())).collect();
     for (key, value) in &entries {
-        write_entity(&leader.addr, org_slug, vault, key, value).await.expect("write entity");
+        write_entity(&cluster, leader.id, org_slug, vault, key, value).await.expect("write entity");
     }
     for (key, value) in &entries {
-        let actual = read_entity(&leader.addr, org_slug, vault, key)
+        let actual = read_entity(&cluster, leader.id, org_slug, vault, key)
             .await
             .expect("read entity")
             .expect("entity exists pre-backup");
@@ -455,8 +460,9 @@ async fn test_backup_restore_round_trip_with_data_integrity() {
     }
 
     // Phase 2: take the backup. Capture archive path + manifest.
-    let backup =
-        create_backup(&leader.addr, org_slug, Some("roundtrip")).await.expect("create backup");
+    let backup = create_backup(&cluster, leader.id, org_slug, Some("roundtrip"))
+        .await
+        .expect("create backup");
     let archive_path = std::path::PathBuf::from(&backup.backup_path);
     assert!(archive_path.exists(), "archive should exist on disk: {}", archive_path.display());
 

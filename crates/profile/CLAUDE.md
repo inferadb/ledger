@@ -15,7 +15,7 @@ Profiling workload driver. An SDK-consumer CLI that connects to a running ledger
 ## Local Golden Rules
 
 1. **Deterministic load shape.** Workloads must generate load that's shape-stable across runs — fixed concurrency, fixed key-space size, no randomized think-time. Flamegraphs are compared across runs; variance in the driver pollutes the signal.
-2. **No server/state internal deps.** Only `inferadb-ledger-sdk` and `inferadb-ledger-types`. Treat the cluster as a black-box gRPC endpoint. Depending on server internals re-couples what profiling is meant to measure.
+2. **No server/state internal deps.** Only `inferadb-ledger-sdk` and `inferadb-ledger-types`. Treat the cluster as a black-box wire-protocol endpoint. Depending on server internals re-couples what profiling is meant to measure.
 3. **External slugs only.** `OrganizationSlug(u64)`, `VaultSlug(u64)`, `UserSlug(u64)` — never internal `*Id(i64)`. This crate is a consumer; identity discipline matches the SDK boundary (root rule 11).
 4. **snafu, not thiserror.** This is not the SDK. Server-adjacent crates use snafu (root rule 7).
 

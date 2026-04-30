@@ -14,17 +14,30 @@ use inferadb_ledger_raft::{
 use inferadb_ledger_state::StateLayer;
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{OrganizationId, Region, VaultId};
-use tonic::Status;
+use inferadb_ledger_wire::{ErrorCode, WireError};
 
-/// Serializes a `RaftPayload<R>` to postcard bytes.
+use crate::services::{error_classify, wire_helpers};
+
+/// Serializes a `RaftPayload<R>` to postcard bytes, returning a wire-shaped
+/// error on failure.
 ///
-/// Used by the typed helpers in [`ServiceContext`] to serialize
-/// tier-specific payloads for proposal.
-pub(crate) fn serialize_payload<R: serde::Serialize>(
+/// Used by the wire-bound propose pipeline in
+/// [`super::services::service_infra::ServiceContext`] so the path never
+/// round-trips through `tonic::Status`.
+pub(crate) fn serialize_payload_wire<R: serde::Serialize>(
     payload: RaftPayload<R>,
-) -> Result<Vec<u8>, Status> {
-    postcard::to_allocvec(&payload)
-        .map_err(|e| Status::internal(format!("payload serialization failed: {e}")))
+) -> Result<Vec<u8>, WireError> {
+    postcard::to_allocvec(&payload).map_err(|e| {
+        crate::services::wire_helpers::build_wire_error(
+            ErrorCode::Internal,
+            format!("payload serialization failed: {e}"),
+            "",
+            false,
+            0,
+            std::collections::BTreeMap::new(),
+            "",
+        )
+    })
 }
 
 /// Simplified Raft metrics for vault genesis blocks and service context.
@@ -55,23 +68,24 @@ pub struct LedgerRaftMetrics {
 /// ## Bytes-oriented interface
 ///
 /// The primary proposal methods accept pre-serialized `postcard(RaftPayload<R>)`
-/// bytes. Typed service helpers call [`serialize_payload`] to produce bytes from
-/// a `RaftPayload<SystemRequest>` / `RaftPayload<OrganizationRequest>` etc.,
-/// then call these methods. This decouples the serialization type from the trait
-/// and avoids generic methods (which are incompatible with `dyn` trait objects).
+/// bytes. Typed service helpers call [`serialize_payload_wire`] to produce
+/// bytes from a `RaftPayload<SystemRequest>` / `RaftPayload<OrganizationRequest>`
+/// etc., then call these methods. This decouples the serialization type from
+/// the trait and avoids generic methods (which are incompatible with `dyn`
+/// trait objects).
 #[tonic::async_trait]
 pub trait ProposalService: Send + Sync {
     /// Proposes pre-serialized `postcard(RaftPayload<R>)` bytes to the default
     /// (GLOBAL) Raft group.
     ///
     /// Submits bytes through Raft with the given `caller` stamped into the
-    /// payload at serialization time by the caller (via [`serialize_payload`]).
-    /// Returns the committed response or a gRPC status error.
+    /// payload at serialization time by the caller (via [`serialize_payload_wire`]).
+    /// Returns the committed response or a wire-shaped error.
     async fn propose_bytes(
         &self,
         bytes: Vec<u8>,
         timeout: Duration,
-    ) -> Result<LedgerResponse, Status>;
+    ) -> Result<LedgerResponse, WireError>;
 
     /// Proposes pre-serialized `postcard(RaftPayload<R>)` bytes to a specific
     /// region's Raft group.
@@ -90,7 +104,7 @@ pub trait ProposalService: Send + Sync {
         region: Region,
         bytes: Vec<u8>,
         timeout: Duration,
-    ) -> Result<LedgerResponse, Status>;
+    ) -> Result<LedgerResponse, WireError>;
 
     /// Proposes pre-serialized `postcard(RaftPayload<OrganizationRequest>)` bytes
     /// to a specific organization's per-org Raft group.
@@ -109,7 +123,7 @@ pub trait ProposalService: Send + Sync {
         organization: OrganizationId,
         bytes: Vec<u8>,
         timeout: Duration,
-    ) -> Result<LedgerResponse, Status>;
+    ) -> Result<LedgerResponse, WireError>;
 
     /// Proposes pre-serialized `postcard(RaftPayload<OrganizationRequest>)` bytes
     /// to a specific vault's per-vault Raft shard.
@@ -120,7 +134,7 @@ pub trait ProposalService: Send + Sync {
     /// [`ConsensusHandle`](inferadb_ledger_raft::ConsensusHandle). Used by gRPC
     /// handlers that target vault-scoped variants (`Write`, `BatchWrite`,
     /// `IngestExternalEvents`) — the vault-scoped apply path on the vault
-    /// shard runs the variant validation gate added by P2c.1.
+    /// shard runs the per-vault tier-validation gate.
     ///
     /// `vault_id` is the internal `VaultId` resolved at the handler via
     /// `SlugResolver`. It is the routing key used to locate the
@@ -148,7 +162,7 @@ pub trait ProposalService: Send + Sync {
         vault_slug: Option<u64>,
         bytes: Vec<u8>,
         timeout: Duration,
-    ) -> Result<LedgerResponse, Status>;
+    ) -> Result<LedgerResponse, WireError>;
 
     /// Proposes a typed `OrganizationRequest` to a specific vault's per-vault
     /// Raft shard, automatically piggybacking any pending state-root
@@ -177,12 +191,12 @@ pub trait ProposalService: Send + Sync {
     /// when the call site doesn't have slugs in scope.
     ///
     /// Returns:
-    /// - `UNAVAILABLE` (with `LeaderHint` `ErrorDetails`) when the vault group is not registered on
-    ///   this node, or when the local node is not the leader for the vault.
-    /// - `DEADLINE_EXCEEDED` on Raft proposal timeout (also stamps the
+    /// - `StaleRouting` (with `LeaderHint` context) when the vault group is not registered on this
+    ///   node, or when the local node is not the leader for the vault.
+    /// - `FailedPrecondition` on Raft proposal timeout (also stamps the
     ///   `record_raft_proposal_timeout` metric).
-    /// - The classified `tonic::Status` for any other consensus error (mirroring
-    ///   `classify_raft_error`).
+    /// - The classified [`WireError`] for any other consensus error (via
+    ///   [`crate::services::error_classify::classify_raft_error_wire`]).
     #[allow(clippy::too_many_arguments)]
     async fn propose_organization_request_to_vault(
         &self,
@@ -194,14 +208,14 @@ pub trait ProposalService: Send + Sync {
         request: OrganizationRequest,
         caller: u64,
         timeout: Duration,
-    ) -> Result<LedgerResponse, Status>;
+    ) -> Result<LedgerResponse, WireError>;
 
     /// Returns the state layer for a specific region's Raft group.
     ///
     /// Enables direct reads from a region's state without proposing through
     /// Raft. Used by handlers that read onboarding accounts, user profiles,
     /// or other regional data.
-    fn regional_state(&self, region: Region) -> Result<Arc<StateLayer<FileBackend>>, Status>;
+    fn regional_state(&self, region: Region) -> Result<Arc<StateLayer<FileBackend>>, WireError>;
 
     /// Returns current Raft metrics for the GLOBAL group.
     ///
@@ -213,85 +227,153 @@ pub trait ProposalService: Send + Sync {
 }
 
 /// Forwards a GLOBAL Raft proposal to the actual GLOBAL leader via the
-/// internal `RegionalProposal` RPC.
+/// internal `RegionalProposal` RPC over the wire transport.
 ///
 /// Used as a `NotLeader` recovery path inside [`RaftProposalService::propose_bytes`]
 /// so multi-tier writes (e.g. `CreateVault`'s per-org propose followed by a
 /// GLOBAL `RegisterVaultDirectoryEntry`) succeed when the gRPC handler runs
 /// on a node that is the per-org leader but not the GLOBAL leader. The
-/// receiving handler ([`crate::services::raft::RaftService::regional_proposal`])
-/// authenticates the caller via the cluster peer-address map and proposes
-/// the bytes against its local GLOBAL group.
+/// receiving handler authenticates the caller via the cluster peer-address
+/// map and proposes the bytes against its local GLOBAL group.
 ///
-/// Returns a `tonic::Status` mirroring what a local propose would have
-/// produced — the calling gRPC handler is unaware whether the proposal
-/// committed locally or through a forwarded round-trip.
+/// Returns a [`WireError`] mirroring what a local propose would have produced
+/// — the calling handler is unaware whether the proposal committed locally
+/// or through a forwarded round-trip.
 async fn forward_global_proposal(
     manager: Option<&Arc<RaftManager>>,
     handle: &Arc<ConsensusHandle>,
     bytes: Vec<u8>,
     timeout: Duration,
-) -> Result<LedgerResponse, Status> {
+) -> Result<LedgerResponse, WireError> {
     let Some(manager) = manager else {
         // Single-region setup with no manager wired — fall back to the
         // original NotLeader semantics so the SDK can retry on a leader
         // it discovers via `ResolveRegionLeader` / `WatchLeader`.
-        return Err(consensus_error_to_status(
+        return Err(consensus_error_to_wire_error(
             inferadb_ledger_consensus::ConsensusError::NotLeader,
         ));
     };
 
-    let leader_id = handle
-        .current_leader()
-        .ok_or_else(|| Status::unavailable("GLOBAL proposal: no known leader to forward to"))?;
+    let leader_id = handle.current_leader().ok_or_else(|| {
+        wire_helpers::build_wire_error(
+            ErrorCode::StaleRouting,
+            "GLOBAL proposal: no known leader to forward to",
+            "",
+            false,
+            0,
+            std::collections::BTreeMap::new(),
+            "",
+        )
+    })?;
     let leader_addr = manager.peer_addresses().get(leader_id).ok_or_else(|| {
-        Status::unavailable(format!(
-            "GLOBAL proposal: no address for leader {leader_id} in peer registry"
-        ))
+        wire_helpers::build_wire_error(
+            ErrorCode::StaleRouting,
+            format!("GLOBAL proposal: no address for leader {leader_id} in peer registry"),
+            "",
+            false,
+            0,
+            std::collections::BTreeMap::new(),
+            "",
+        )
     })?;
 
-    let peer = manager
-        .registry()
-        .get_or_register(leader_id, &leader_addr)
-        .await
-        .map_err(|e| Status::unavailable(format!("register GLOBAL leader peer: {e}")))?;
-    let mut client = peer.raft_client();
+    // Resolve the leader's wire client through the shared registry. The
+    // wire-aware cache keys on `(node_id, addr)` and shares a single QUIC
+    // connection across every subsystem (Raft replication, saga forwarding,
+    // snapshots, etc.).
+    let wire_client =
+        manager.registry().wire_client_for(leader_id, &leader_addr).await.map_err(|e| {
+            wire_helpers::build_wire_error(
+                ErrorCode::StaleRouting,
+                format!("register GLOBAL leader peer: {e}"),
+                "",
+                false,
+                0,
+                std::collections::BTreeMap::new(),
+                "",
+            )
+        })?;
+    let client = inferadb_ledger_wire_services::RaftServiceClient::new(wire_client);
 
-    let rpc_request = tonic::Request::new(inferadb_ledger_proto::proto::RegionalProposalRequest {
+    let rpc_request = inferadb_ledger_wire::services::raft::RegionalProposalRequest {
         region: Some(Region::GLOBAL.as_str().to_string()),
-        request_payload: bytes,
+        request_payload: bytes::Bytes::from(bytes),
         caller: 0,
         timeout_ms: u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX),
-    });
+    };
 
-    let result = client
-        .regional_proposal(rpc_request)
-        .await
-        .map_err(|e| Status::unavailable(format!("forward GLOBAL proposal: {e}")))?;
-    let result = result.into_inner();
+    let result = client.regional_proposal(rpc_request, 0).await.map_err(|e| {
+        wire_helpers::build_wire_error(
+            ErrorCode::StaleRouting,
+            format!("forward GLOBAL proposal: {e}"),
+            "",
+            false,
+            0,
+            std::collections::BTreeMap::new(),
+            "",
+        )
+    })?;
 
     if result.status_code != 0 {
-        return Err(Status::new(tonic::Code::from_i32(result.status_code), result.error_message));
+        let code = grpc_code_to_wire(result.status_code);
+        return Err(wire_helpers::build_wire_error(
+            code,
+            result.error_message,
+            "",
+            false,
+            0,
+            std::collections::BTreeMap::new(),
+            "",
+        ));
     }
 
-    inferadb_ledger_types::decode::<LedgerResponse>(&result.response_payload)
-        .map_err(|e| Status::internal(format!("decode forwarded GLOBAL response: {e}")))
+    inferadb_ledger_types::decode::<LedgerResponse>(&result.response_payload).map_err(|e| {
+        wire_helpers::build_wire_error(
+            ErrorCode::Internal,
+            format!("decode forwarded GLOBAL response: {e}"),
+            "",
+            false,
+            0,
+            std::collections::BTreeMap::new(),
+            "",
+        )
+    })
 }
 
 /// Converts a [`ConsensusError`](inferadb_ledger_consensus::ConsensusError) into
-/// the appropriate [`tonic::Status`] using the error's structured `grpc_code()`.
-pub(crate) fn consensus_error_to_status(err: inferadb_ledger_consensus::ConsensusError) -> Status {
+/// a [`WireError`] using the error's structured `grpc_code()` mapping.
+///
+/// Replaces the previous `ConsensusError` → `tonic::Status` → `WireError`
+/// round-trip with a single direct hop.
+pub(crate) fn consensus_error_to_wire_error(
+    err: inferadb_ledger_consensus::ConsensusError,
+) -> WireError {
     let message = format!("Raft error: {err}");
-    let code = match err.grpc_code() {
-        3 => tonic::Code::InvalidArgument,
-        6 => tonic::Code::AlreadyExists,
-        8 => tonic::Code::ResourceExhausted,
-        9 => tonic::Code::FailedPrecondition,
-        13 => tonic::Code::Internal,
-        14 => tonic::Code::Unavailable,
-        _ => tonic::Code::Internal,
-    };
-    Status::new(code, message)
+    let code = grpc_code_to_wire(err.grpc_code());
+    wire_helpers::build_wire_error(
+        code,
+        message,
+        "",
+        false,
+        0,
+        std::collections::BTreeMap::new(),
+        "",
+    )
+}
+
+/// Maps a numeric gRPC status code (returned by
+/// [`inferadb_ledger_consensus::ConsensusError::grpc_code`]) into the
+/// closest wire [`ErrorCode`].
+fn grpc_code_to_wire(code: i32) -> ErrorCode {
+    match code {
+        3 => ErrorCode::InvalidArgument,
+        6 => ErrorCode::AlreadyExists,
+        8 => ErrorCode::RateLimited,
+        9 => ErrorCode::FailedPrecondition,
+        14 => ErrorCode::StaleRouting,
+        // 13 (Internal) and any unknown code map to Internal.
+        _ => ErrorCode::Internal,
+    }
 }
 
 /// Production [`ProposalService`] backed by [`ConsensusHandle`] and [`RaftManager`].
@@ -313,13 +395,65 @@ impl RaftProposalService {
     }
 }
 
+/// Wire-shaped builder for the rich `NotLeader` hint payload. Delegates to
+/// [`crate::services::metadata::not_leader_wire_error_from_handle`] so all
+/// not-leader rejections share the same context-key shape the SDK reads.
+fn not_leader_wire_error(
+    handle: &inferadb_ledger_raft::ConsensusHandle,
+    peer_addresses: Option<&inferadb_ledger_raft::PeerAddressMap>,
+    message: impl Into<String>,
+    leader_vault: Option<u64>,
+    leader_organization_slug: Option<u64>,
+    leader_vault_slug: Option<u64>,
+) -> WireError {
+    crate::services::metadata::not_leader_wire_error_from_handle(
+        handle,
+        peer_addresses,
+        message,
+        leader_vault,
+        leader_organization_slug,
+        leader_vault_slug,
+    )
+}
+
+/// Wire-shaped builder for the `DEADLINE_EXCEEDED`-equivalent error returned
+/// when a Raft proposal times out. Mirrors the previous
+/// `Status::deadline_exceeded(...)` paths — the wire side maps timeouts to
+/// [`ErrorCode::FailedPrecondition`] (the canonical-form image of
+/// `Code::DeadlineExceeded` under `tonic_code_to_wire`).
+fn raft_timeout_wire_error(message: impl Into<String>) -> WireError {
+    wire_helpers::build_wire_error(
+        ErrorCode::FailedPrecondition,
+        message,
+        "",
+        false,
+        0,
+        std::collections::BTreeMap::new(),
+        "",
+    )
+}
+
+/// Wire-shaped builder for the `INTERNAL` error returned when a `HandleError`
+/// surfaces a non-`Consensus`, non-`Timeout` failure (e.g. transport).
+fn raft_internal_wire_error(error: impl std::fmt::Display) -> WireError {
+    wire_helpers::build_wire_error(
+        ErrorCode::Internal,
+        error.to_string(),
+        "",
+        false,
+        0,
+        std::collections::BTreeMap::new(),
+        "",
+    )
+}
+
 #[tonic::async_trait]
 impl ProposalService for RaftProposalService {
     async fn propose_bytes(
         &self,
         bytes: Vec<u8>,
         timeout: Duration,
-    ) -> Result<LedgerResponse, Status> {
+    ) -> Result<LedgerResponse, WireError> {
         match self.handle.propose_bytes_and_wait(bytes.clone(), timeout).await {
             Ok(response) => Ok(response),
             Err(HandleError::Consensus { source, .. })
@@ -341,15 +475,17 @@ impl ProposalService for RaftProposalService {
                 // request `region` field is GLOBAL).
                 forward_global_proposal(self.manager.as_ref(), &self.handle, bytes, timeout).await
             },
-            Err(HandleError::Consensus { source, .. }) => Err(consensus_error_to_status(source)),
+            Err(HandleError::Consensus { source, .. }) => {
+                Err(consensus_error_to_wire_error(source))
+            },
             Err(HandleError::Timeout { .. }) => {
                 inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
-                Err(Status::deadline_exceeded(format!(
+                Err(raft_timeout_wire_error(format!(
                     "Raft proposal timed out after {}ms",
                     timeout.as_millis()
                 )))
             },
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(raft_internal_wire_error(e)),
         }
     }
 
@@ -358,9 +494,17 @@ impl ProposalService for RaftProposalService {
         region: Region,
         bytes: Vec<u8>,
         timeout: Duration,
-    ) -> Result<LedgerResponse, Status> {
+    ) -> Result<LedgerResponse, WireError> {
         let manager = self.manager.as_ref().ok_or_else(|| {
-            Status::failed_precondition("Regional proposals require RaftManager configuration")
+            wire_helpers::build_wire_error(
+                ErrorCode::FailedPrecondition,
+                "Regional proposals require RaftManager configuration",
+                "",
+                false,
+                0,
+                std::collections::BTreeMap::new(),
+                "",
+            )
         })?;
 
         // Look up the region group. If the region doesn't exist, return
@@ -370,10 +514,18 @@ impl ProposalService for RaftProposalService {
         let region_group = match manager.get_region_group(region) {
             Ok(group) => group,
             Err(_) => {
-                return Err(Status::failed_precondition(format!(
-                    "Region {region} is not active on this node; create it explicitly \
-                     via AdminService::create_data_region before proposing writes"
-                )));
+                return Err(wire_helpers::build_wire_error(
+                    ErrorCode::FailedPrecondition,
+                    format!(
+                        "Region {region} is not active on this node; create it explicitly via \
+                         AdminService::create_data_region before proposing writes"
+                    ),
+                    "",
+                    false,
+                    0,
+                    std::collections::BTreeMap::new(),
+                    "",
+                ));
             },
         };
 
@@ -382,7 +534,7 @@ impl ProposalService for RaftProposalService {
         // hint to retry directly against the within-region leader without going
         // through a server-side forwarding hop.
         if !region_group.handle().is_leader() {
-            return Err(super::services::metadata::not_leader_status_from_handle(
+            return Err(not_leader_wire_error(
                 region_group.handle().as_ref(),
                 Some(manager.peer_addresses()),
                 format!("Not the leader for region {region}"),
@@ -400,7 +552,7 @@ impl ProposalService for RaftProposalService {
                 // Leadership changed between the check above and the propose.
                 // Rare but possible — belt-and-suspenders to still surface the
                 // NotLeader hint when the consensus engine rejects post-check.
-                Err(super::services::metadata::not_leader_status_from_handle(
+                Err(not_leader_wire_error(
                     region_group.handle().as_ref(),
                     Some(manager.peer_addresses()),
                     format!("Not the leader for region {region} (lost leadership mid-propose)"),
@@ -409,15 +561,17 @@ impl ProposalService for RaftProposalService {
                     None,
                 ))
             },
-            Err(HandleError::Consensus { source, .. }) => Err(consensus_error_to_status(source)),
+            Err(HandleError::Consensus { source, .. }) => {
+                Err(consensus_error_to_wire_error(source))
+            },
             Err(HandleError::Timeout { .. }) => {
                 inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
-                Err(Status::deadline_exceeded(format!(
+                Err(raft_timeout_wire_error(format!(
                     "Regional Raft proposal timed out after {}ms (region: {region})",
                     timeout.as_millis()
                 )))
             },
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(raft_internal_wire_error(e)),
         }
     }
 
@@ -427,21 +581,35 @@ impl ProposalService for RaftProposalService {
         organization: OrganizationId,
         bytes: Vec<u8>,
         timeout: Duration,
-    ) -> Result<LedgerResponse, Status> {
+    ) -> Result<LedgerResponse, WireError> {
         let manager = self.manager.as_ref().ok_or_else(|| {
-            Status::failed_precondition(
+            wire_helpers::build_wire_error(
+                ErrorCode::FailedPrecondition,
                 "Per-organization proposals require RaftManager configuration",
+                "",
+                false,
+                0,
+                std::collections::BTreeMap::new(),
+                "",
             )
         })?;
 
         let org_group = manager.route_organization(organization).ok_or_else(|| {
-            Status::unavailable(format!(
-                "Organization {organization} is not active on this node in region {region}"
-            ))
+            wire_helpers::build_wire_error(
+                ErrorCode::StaleRouting,
+                format!(
+                    "Organization {organization} is not active on this node in region {region}"
+                ),
+                "",
+                false,
+                0,
+                std::collections::BTreeMap::new(),
+                "",
+            )
         })?;
 
         if !org_group.handle().is_leader() {
-            return Err(super::services::metadata::not_leader_status_from_handle(
+            return Err(not_leader_wire_error(
                 org_group.handle().as_ref(),
                 Some(manager.peer_addresses()),
                 format!("Not the leader for organization {organization} in region {region}"),
@@ -456,26 +624,29 @@ impl ProposalService for RaftProposalService {
             Err(HandleError::Consensus { source, .. })
                 if source.to_string().contains("Not the leader") =>
             {
-                Err(super::services::metadata::not_leader_status_from_handle(
+                Err(not_leader_wire_error(
                     org_group.handle().as_ref(),
                     Some(manager.peer_addresses()),
                     format!(
-                        "Not the leader for organization {organization} in region {region} (lost leadership mid-propose)"
+                        "Not the leader for organization {organization} in region {region} (lost \
+                         leadership mid-propose)"
                     ),
                     None,
                     None,
                     None,
                 ))
             },
-            Err(HandleError::Consensus { source, .. }) => Err(consensus_error_to_status(source)),
+            Err(HandleError::Consensus { source, .. }) => {
+                Err(consensus_error_to_wire_error(source))
+            },
             Err(HandleError::Timeout { .. }) => {
                 inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
-                Err(Status::deadline_exceeded(format!(
+                Err(raft_timeout_wire_error(format!(
                     "Org Raft proposal timed out after {}ms (org: {organization}, region: {region})",
                     timeout.as_millis()
                 )))
             },
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(raft_internal_wire_error(e)),
         }
     }
 
@@ -488,17 +659,33 @@ impl ProposalService for RaftProposalService {
         vault_slug: Option<u64>,
         bytes: Vec<u8>,
         timeout: Duration,
-    ) -> Result<LedgerResponse, Status> {
+    ) -> Result<LedgerResponse, WireError> {
         let manager = self.manager.as_ref().ok_or_else(|| {
-            Status::failed_precondition("Per-vault proposals require RaftManager configuration")
+            wire_helpers::build_wire_error(
+                ErrorCode::FailedPrecondition,
+                "Per-vault proposals require RaftManager configuration",
+                "",
+                false,
+                0,
+                std::collections::BTreeMap::new(),
+                "",
+            )
         })?;
 
         let vault_group =
             manager.get_vault_group(region, organization, vault_id).map_err(|_| {
-                Status::unavailable(format!(
-                    "Vault {vault_id} (organization {organization}) is not active on this \
-                     node in region {region}"
-                ))
+                wire_helpers::build_wire_error(
+                    ErrorCode::StaleRouting,
+                    format!(
+                        "Vault {vault_id} (organization {organization}) is not active on this \
+                         node in region {region}"
+                    ),
+                    "",
+                    false,
+                    0,
+                    std::collections::BTreeMap::new(),
+                    "",
+                )
             })?;
 
         // Phase 7 / O1: record activity on the vault. Wakes a `Dormant`
@@ -511,12 +698,12 @@ impl ProposalService for RaftProposalService {
         // VaultId is i64 (Snowflake-positive); cast preserves the value.
         let vault_hint = Some(vault_id.value() as u64);
         if !vault_group.handle().is_leader() {
-            return Err(super::services::metadata::not_leader_status_from_handle(
+            return Err(not_leader_wire_error(
                 vault_group.handle().as_ref(),
                 Some(manager.peer_addresses()),
                 format!(
-                    "Not the leader for vault {vault_id} (organization {organization}) in \
-                     region {region}"
+                    "Not the leader for vault {vault_id} (organization {organization}) in region \
+                     {region}"
                 ),
                 vault_hint,
                 organization_slug,
@@ -529,28 +716,30 @@ impl ProposalService for RaftProposalService {
             Err(HandleError::Consensus { source, .. })
                 if source.to_string().contains("Not the leader") =>
             {
-                Err(super::services::metadata::not_leader_status_from_handle(
+                Err(not_leader_wire_error(
                     vault_group.handle().as_ref(),
                     Some(manager.peer_addresses()),
                     format!(
-                        "Not the leader for vault {vault_id} (organization {organization}) \
-                         in region {region} (lost leadership mid-propose)"
+                        "Not the leader for vault {vault_id} (organization {organization}) in \
+                         region {region} (lost leadership mid-propose)"
                     ),
                     vault_hint,
                     organization_slug,
                     vault_slug,
                 ))
             },
-            Err(HandleError::Consensus { source, .. }) => Err(consensus_error_to_status(source)),
+            Err(HandleError::Consensus { source, .. }) => {
+                Err(consensus_error_to_wire_error(source))
+            },
             Err(HandleError::Timeout { .. }) => {
                 inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
-                Err(Status::deadline_exceeded(format!(
+                Err(raft_timeout_wire_error(format!(
                     "Vault Raft proposal timed out after {}ms (vault: {vault_id}, org: \
                      {organization}, region: {region})",
                     timeout.as_millis()
                 )))
             },
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => Err(raft_internal_wire_error(e)),
         }
     }
 
@@ -564,34 +753,49 @@ impl ProposalService for RaftProposalService {
         request: OrganizationRequest,
         caller: u64,
         timeout: Duration,
-    ) -> Result<LedgerResponse, Status> {
+    ) -> Result<LedgerResponse, WireError> {
         let manager = self.manager.as_ref().ok_or_else(|| {
-            Status::failed_precondition("Per-vault proposals require RaftManager configuration")
+            wire_helpers::build_wire_error(
+                ErrorCode::FailedPrecondition,
+                "Per-vault proposals require RaftManager configuration",
+                "",
+                false,
+                0,
+                std::collections::BTreeMap::new(),
+                "",
+            )
         })?;
 
         let vault_group =
             manager.get_vault_group(region, organization, vault_id).map_err(|_| {
-                Status::unavailable(format!(
-                    "Vault {vault_id} (organization {organization}) is not active on this \
-                     node in region {region}"
-                ))
+                wire_helpers::build_wire_error(
+                    ErrorCode::StaleRouting,
+                    format!(
+                        "Vault {vault_id} (organization {organization}) is not active on this \
+                         node in region {region}"
+                    ),
+                    "",
+                    false,
+                    0,
+                    std::collections::BTreeMap::new(),
+                    "",
+                )
             })?;
 
         // Phase 7 / O1: record activity on the vault. Wakes a `Dormant`
         // vault back to `Active` synchronously before the proposal
-        // proceeds. See `propose_to_vault_bytes` above for the
-        // rationale.
+        // proceeds. See `propose_to_vault_bytes` above for the rationale.
         vault_group.touch_activity();
 
         // VaultId is i64 (Snowflake-positive); cast preserves the value.
         let vault_hint = Some(vault_id.value() as u64);
         if !vault_group.handle().is_leader() {
-            return Err(super::services::metadata::not_leader_status_from_handle(
+            return Err(not_leader_wire_error(
                 vault_group.handle().as_ref(),
                 Some(manager.peer_addresses()),
                 format!(
-                    "Not the leader for vault {vault_id} (organization {organization}) in \
-                     region {region}"
+                    "Not the leader for vault {vault_id} (organization {organization}) in region \
+                     {region}"
                 ),
                 vault_hint,
                 organization_slug,
@@ -601,25 +805,25 @@ impl ProposalService for RaftProposalService {
 
         inferadb_ledger_raft::metrics::record_raft_proposal();
 
-        // Prefer the per-vault batch writer when present so concurrent writes
-        // to the same vault amortize the WAL fsync cost. The batch writer's
-        // `submit_fn` (in `raft_manager.rs::start_vault_group`) drains the
-        // commitment buffer and constructs the `RaftPayload` itself — we
-        // simply hand it the typed request and await the batched result.
+        // Prefer the per-vault batch writer when present so concurrent
+        // writes to the same vault amortize the WAL fsync cost. The
+        // batch writer's `submit_fn` (in
+        // `raft_manager.rs::start_vault_group`) drains the commitment
+        // buffer and constructs the `RaftPayload` itself — we simply
+        // hand it the typed request and await the batched result.
         if let Some(batch_handle) = vault_group.batch_handle() {
             let receiver = batch_handle.submit(request);
             return match tokio::time::timeout(timeout, receiver).await {
                 Ok(Ok(Ok(response))) => Ok(response),
                 Ok(Ok(Err(batch_err))) => {
-                    let message = batch_err.to_string();
-                    Err(inferadb_ledger_raft::error::classify_raft_error(&message))
+                    Err(error_classify::classify_raft_error_wire(&batch_err.to_string()))
                 },
-                Ok(Err(_dropped)) => Err(inferadb_ledger_raft::error::classify_raft_error(
-                    "Batch writer dropped response",
-                )),
+                Ok(Err(_dropped)) => {
+                    Err(error_classify::classify_raft_error_wire("Batch writer dropped response"))
+                },
                 Err(_elapsed) => {
                     inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
-                    Err(Status::deadline_exceeded(format!(
+                    Err(raft_timeout_wire_error(format!(
                         "Raft proposal timed out after {}ms",
                         timeout.as_millis()
                     )))
@@ -629,8 +833,8 @@ impl ProposalService for RaftProposalService {
 
         // Fallback: direct propose through the vault's consensus handle.
         // Drain the commitment buffer and wrap the request in a one-shot
-        // `RaftPayload` — same shape the batch writer's `submit_fn` produces,
-        // but unbatched.
+        // `RaftPayload` — same shape the batch writer's `submit_fn`
+        // produces, but unbatched.
         let commitments = std::mem::take(
             &mut *vault_group.commitment_buffer().lock().unwrap_or_else(|e| e.into_inner()),
         );
@@ -646,12 +850,12 @@ impl ProposalService for RaftProposalService {
             Err(HandleError::Consensus { source, .. })
                 if source.to_string().contains("Not the leader") =>
             {
-                Err(super::services::metadata::not_leader_status_from_handle(
+                Err(not_leader_wire_error(
                     vault_group.handle().as_ref(),
                     Some(manager.peer_addresses()),
                     format!(
-                        "Not the leader for vault {vault_id} (organization {organization}) \
-                         in region {region} (lost leadership mid-propose)"
+                        "Not the leader for vault {vault_id} (organization {organization}) in \
+                         region {region} (lost leadership mid-propose)"
                     ),
                     vault_hint,
                     organization_slug,
@@ -659,31 +863,43 @@ impl ProposalService for RaftProposalService {
                 ))
             },
             Err(HandleError::Consensus { source, .. }) => {
-                let message = source.to_string();
-                Err(inferadb_ledger_raft::error::classify_raft_error(&message))
+                Err(error_classify::classify_raft_error_wire(&source.to_string()))
             },
             Err(HandleError::Timeout { .. }) => {
                 inferadb_ledger_raft::metrics::record_raft_proposal_timeout();
-                Err(Status::deadline_exceeded(format!(
+                Err(raft_timeout_wire_error(format!(
                     "Vault Raft proposal timed out after {}ms (vault: {vault_id}, org: \
                      {organization}, region: {region})",
                     timeout.as_millis()
                 )))
             },
-            Err(e) => {
-                let message = e.to_string();
-                Err(inferadb_ledger_raft::error::classify_raft_error(&message))
-            },
+            Err(e) => Err(error_classify::classify_raft_error_wire(&e.to_string())),
         }
     }
 
-    fn regional_state(&self, region: Region) -> Result<Arc<StateLayer<FileBackend>>, Status> {
+    fn regional_state(&self, region: Region) -> Result<Arc<StateLayer<FileBackend>>, WireError> {
         let manager = self.manager.as_ref().ok_or_else(|| {
-            Status::failed_precondition("Regional state access requires RaftManager configuration")
+            wire_helpers::build_wire_error(
+                ErrorCode::FailedPrecondition,
+                "Regional state access requires RaftManager configuration",
+                "",
+                false,
+                0,
+                std::collections::BTreeMap::new(),
+                "",
+            )
         })?;
 
         let region_group = manager.get_region_group(region).map_err(|e| {
-            Status::unavailable(format!("Region {region} is not active on this node: {e}"))
+            wire_helpers::build_wire_error(
+                ErrorCode::StaleRouting,
+                format!("Region {region} is not active on this node: {e}"),
+                "",
+                false,
+                0,
+                std::collections::BTreeMap::new(),
+                "",
+            )
         })?;
 
         Ok(region_group.state().clone())
@@ -714,8 +930,8 @@ pub(crate) mod mock {
     use inferadb_ledger_state::StateLayer;
     use inferadb_ledger_store::FileBackend;
     use inferadb_ledger_types::{OrganizationId, Region, VaultId};
+    use inferadb_ledger_wire::{ErrorCode, WireError};
     use parking_lot::Mutex;
-    use tonic::Status;
 
     use super::ProposalService;
 
@@ -726,11 +942,11 @@ pub(crate) mod mock {
     /// Proposals are stored as raw bytes (`postcard(RaftPayload<R>)`).
     /// Use [`decode_proposals`](Self::decode_proposals) to deserialize.
     pub(crate) struct MockProposalService {
-        responses: Mutex<VecDeque<Result<LedgerResponse, Status>>>,
-        regional_responses: Mutex<VecDeque<Result<LedgerResponse, Status>>>,
-        organization_responses: Mutex<VecDeque<Result<LedgerResponse, Status>>>,
-        vault_responses: Mutex<VecDeque<Result<LedgerResponse, Status>>>,
-        typed_vault_responses: Mutex<VecDeque<Result<LedgerResponse, Status>>>,
+        responses: Mutex<VecDeque<Result<LedgerResponse, WireError>>>,
+        regional_responses: Mutex<VecDeque<Result<LedgerResponse, WireError>>>,
+        organization_responses: Mutex<VecDeque<Result<LedgerResponse, WireError>>>,
+        vault_responses: Mutex<VecDeque<Result<LedgerResponse, WireError>>>,
+        typed_vault_responses: Mutex<VecDeque<Result<LedgerResponse, WireError>>>,
         /// Captured global proposals as raw `postcard(RaftPayload<R>)` bytes.
         proposals: Mutex<Vec<Vec<u8>>>,
         /// Captured regional proposals as raw bytes with (region, bytes).
@@ -764,33 +980,40 @@ pub(crate) mod mock {
             }
         }
 
-        /// Enqueues a response for the next `propose_bytes()` call.
-        pub(crate) fn enqueue(&self, response: Result<LedgerResponse, Status>) {
+        /// Enqueues a [`WireError`]-shaped response for the next
+        /// `propose_bytes()` call.
+        pub(crate) fn enqueue_wire_error(&self, response: Result<LedgerResponse, WireError>) {
             self.responses.lock().push_back(response);
+        }
+
+        /// Convenience wrapper for [`Self::enqueue_wire_error`] when the
+        /// caller only ever stages successful responses.
+        pub(crate) fn enqueue(&self, response: Result<LedgerResponse, WireError>) {
+            self.enqueue_wire_error(response);
         }
 
         /// Enqueues a response for the next `propose_to_region_bytes()` call.
         #[allow(dead_code)]
-        pub(crate) fn enqueue_regional(&self, response: Result<LedgerResponse, Status>) {
+        pub(crate) fn enqueue_regional(&self, response: Result<LedgerResponse, WireError>) {
             self.regional_responses.lock().push_back(response);
         }
 
         /// Enqueues a response for the next `propose_to_organization_bytes()` call.
         #[allow(dead_code)]
-        pub(crate) fn enqueue_organization(&self, response: Result<LedgerResponse, Status>) {
+        pub(crate) fn enqueue_organization(&self, response: Result<LedgerResponse, WireError>) {
             self.organization_responses.lock().push_back(response);
         }
 
         /// Enqueues a response for the next `propose_to_vault_bytes()` call.
         #[allow(dead_code)]
-        pub(crate) fn enqueue_vault(&self, response: Result<LedgerResponse, Status>) {
+        pub(crate) fn enqueue_vault(&self, response: Result<LedgerResponse, WireError>) {
             self.vault_responses.lock().push_back(response);
         }
 
         /// Enqueues a response for the next
         /// `propose_organization_request_to_vault()` call.
         #[allow(dead_code)]
-        pub(crate) fn enqueue_typed_vault(&self, response: Result<LedgerResponse, Status>) {
+        pub(crate) fn enqueue_typed_vault(&self, response: Result<LedgerResponse, WireError>) {
             self.typed_vault_responses.lock().push_back(response);
         }
 
@@ -900,18 +1123,25 @@ pub(crate) mod mock {
         }
     }
 
+    /// Builds a generic `Internal` `WireError` for the mock's "no response
+    /// enqueued" path. Pulled out as a free fn so each impl arm reads the
+    /// same way.
+    fn mock_internal_err(message: &str) -> WireError {
+        WireError::new(ErrorCode::Internal, message.to_string())
+    }
+
     #[tonic::async_trait]
     impl ProposalService for MockProposalService {
         async fn propose_bytes(
             &self,
             bytes: Vec<u8>,
             _timeout: Duration,
-        ) -> Result<LedgerResponse, Status> {
+        ) -> Result<LedgerResponse, WireError> {
             self.proposals.lock().push(bytes);
             self.responses
                 .lock()
                 .pop_front()
-                .unwrap_or_else(|| Err(Status::internal("no mock response enqueued")))
+                .unwrap_or_else(|| Err(mock_internal_err("no mock response enqueued")))
         }
 
         async fn propose_to_region_bytes(
@@ -919,12 +1149,12 @@ pub(crate) mod mock {
             region: Region,
             bytes: Vec<u8>,
             _timeout: Duration,
-        ) -> Result<LedgerResponse, Status> {
+        ) -> Result<LedgerResponse, WireError> {
             self.regional_proposals.lock().push((region, bytes));
             self.regional_responses
                 .lock()
                 .pop_front()
-                .unwrap_or_else(|| Err(Status::internal("no mock regional response enqueued")))
+                .unwrap_or_else(|| Err(mock_internal_err("no mock regional response enqueued")))
         }
 
         async fn propose_to_organization_bytes(
@@ -933,12 +1163,12 @@ pub(crate) mod mock {
             organization: OrganizationId,
             bytes: Vec<u8>,
             _timeout: Duration,
-        ) -> Result<LedgerResponse, Status> {
+        ) -> Result<LedgerResponse, WireError> {
             self.organization_proposals.lock().push((region, organization, bytes));
             self.organization_responses
                 .lock()
                 .pop_front()
-                .unwrap_or_else(|| Err(Status::internal("no mock organization response enqueued")))
+                .unwrap_or_else(|| Err(mock_internal_err("no mock organization response enqueued")))
         }
 
         async fn propose_to_vault_bytes(
@@ -950,12 +1180,12 @@ pub(crate) mod mock {
             _vault_slug: Option<u64>,
             bytes: Vec<u8>,
             _timeout: Duration,
-        ) -> Result<LedgerResponse, Status> {
+        ) -> Result<LedgerResponse, WireError> {
             self.vault_proposals.lock().push((region, organization, vault_id, bytes));
             self.vault_responses
                 .lock()
                 .pop_front()
-                .unwrap_or_else(|| Err(Status::internal("no mock vault response enqueued")))
+                .unwrap_or_else(|| Err(mock_internal_err("no mock vault response enqueued")))
         }
 
         async fn propose_organization_request_to_vault(
@@ -968,7 +1198,7 @@ pub(crate) mod mock {
             request: OrganizationRequest,
             caller: u64,
             _timeout: Duration,
-        ) -> Result<LedgerResponse, Status> {
+        ) -> Result<LedgerResponse, WireError> {
             self.typed_vault_proposals.lock().push((
                 region,
                 organization,
@@ -979,14 +1209,18 @@ pub(crate) mod mock {
             self.typed_vault_responses
                 .lock()
                 .pop_front()
-                .unwrap_or_else(|| Err(Status::internal("no mock typed-vault response enqueued")))
+                .unwrap_or_else(|| Err(mock_internal_err("no mock typed-vault response enqueued")))
         }
 
-        fn regional_state(&self, region: Region) -> Result<Arc<StateLayer<FileBackend>>, Status> {
+        fn regional_state(
+            &self,
+            region: Region,
+        ) -> Result<Arc<StateLayer<FileBackend>>, WireError> {
             self.regional_state_layer.lock().clone().ok_or_else(|| {
-                Status::failed_precondition(format!(
-                    "MockProposalService: no regional state configured for {region}"
-                ))
+                WireError::new(
+                    ErrorCode::FailedPrecondition,
+                    format!("MockProposalService: no regional state configured for {region}"),
+                )
             })
         }
 
@@ -1038,7 +1272,7 @@ pub(crate) mod mock {
             let result = mock.propose_bytes(bytes, Duration::from_secs(5)).await;
 
             assert!(result.is_err());
-            assert_eq!(result.unwrap_err().code(), tonic::Code::Internal);
+            assert_eq!(result.unwrap_err().code, inferadb_ledger_wire::ErrorCode::Internal);
         }
 
         #[tokio::test]
@@ -1046,7 +1280,7 @@ pub(crate) mod mock {
             let mock = MockProposalService::new();
             let result = mock.regional_state(Region::GLOBAL);
             let err = result.err().expect("expected error");
-            assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(err.code, ErrorCode::FailedPrecondition);
         }
 
         #[test]
@@ -1096,8 +1330,10 @@ mod tests {
         let (svc, _manager, _temp) = create_raft_proposal_service().await;
 
         match svc.regional_state(Region::US_EAST_VA) {
-            Err(err) => assert_eq!(err.code(), tonic::Code::Unavailable),
-            Ok(_) => panic!("Expected UNAVAILABLE error"),
+            // Wire-side analogue of gRPC `Unavailable` (see
+            // `wire_helpers::wire_code_to_tonic`).
+            Err(err) => assert_eq!(err.code, inferadb_ledger_wire::ErrorCode::StaleRouting),
+            Ok(_) => panic!("Expected StaleRouting error"),
         }
     }
 
@@ -1117,8 +1353,10 @@ mod tests {
         let svc = RaftProposalService::new(system.handle().clone(), None);
 
         match svc.regional_state(Region::GLOBAL) {
-            Err(err) => assert_eq!(err.code(), tonic::Code::FailedPrecondition),
-            Ok(_) => panic!("Expected FAILED_PRECONDITION error"),
+            Err(err) => {
+                assert_eq!(err.code, inferadb_ledger_wire::ErrorCode::FailedPrecondition)
+            },
+            Ok(_) => panic!("Expected FailedPrecondition error"),
         }
     }
 
@@ -1156,7 +1394,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(err.code, inferadb_ledger_wire::ErrorCode::FailedPrecondition);
     }
 
     #[tokio::test]
@@ -1177,7 +1415,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(err.code, inferadb_ledger_wire::ErrorCode::FailedPrecondition);
     }
 
     #[tokio::test]
@@ -1210,7 +1448,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(err.code(), tonic::Code::Unavailable);
+        // Unknown vault on a configured manager surfaces as `StaleRouting`
+        // — the wire-level analogue of gRPC `Unavailable` (see
+        // `wire_helpers::wire_code_to_tonic`).
+        assert_eq!(err.code, inferadb_ledger_wire::ErrorCode::StaleRouting);
     }
 
     #[tokio::test]
@@ -1246,6 +1487,6 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(err.code, inferadb_ledger_wire::ErrorCode::FailedPrecondition);
     }
 }

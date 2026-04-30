@@ -1,23 +1,14 @@
 //! Per-organization database file layout management.
 //!
-//! Each organization (Raft group, in the B.1 three-tier model) gets isolated
-//! database files under a dedicated directory. Routing is by `OrganizationId`
-//! — the organization id IS the storage key. No hash function, no fixed shard
-//! count.
+//! Each organization gets isolated database files under a dedicated directory.
+//! Routing is by `OrganizationId` — the organization ID is the storage key.
+//! No hash function, no fixed shard count.
 //!
-//! This commit (B.1.1 — storage layout migration) handles only the path
-//! scheme + the `ShardIdx → OrganizationId` rename. The three peer-group
-//! distinction (`SystemGroup` / `RegionGroup` / `OrganizationGroup`) and its
-//! storage shapes (system + organization carry blocks.db; region group does
-//! not) land in B.1.3. For now this module manages a uniform per-organization
-//! storage shape (state, blocks, events, raft + WAL); the region group's
-//! `_meta/` subdirectory will be introduced in B.1.3.
-//!
-//! ## On-disk layout (B.1.1)
+//! ## On-disk layout
 //!
 //! ```text
 //! {data_dir}/
-//! ├── node_id                          # node identity (unchanged)
+//! ├── node_id                          # node identity
 //! ├── global/                          # GLOBAL region — hosts the system org only
 //! │   └── 0/                           # system org (OrganizationId(0))
 //! │       ├── state.db                 # cluster directory, signing keys, refresh tokens
@@ -34,21 +25,17 @@
 //! │   │   └── wal/
 //! │   ├── {organization_id_b}/
 //! │   │   └── ...
-//! │   └── _meta/                       # added in B.1.3 — region group state
+//! │   └── _meta/                       # region group state
 //! ├── snapshots/                       # per-organization snapshot directories
 //! │   ├── global/0/
 //! │   └── {region}/{organization_id}/
 //! └── keys/                            # per-region RMK storage (managed by RegionKeyManager)
 //! ```
 //!
-//! Notes on the path scheme:
-//! - The data-region parent directory is `{data_dir}/{region}/` directly — no intermediate
-//!   `regions/` directory. Operators reading `ls` of the data dir see one directory per region
-//!   (plus `global/`, `snapshots/`, `keys/`). Cleaner mental model than the Phase A
-//!   `regions/{region}/` nesting.
-//! - GLOBAL keeps the top-level `global/` name (rather than collapsing into the data-region scheme)
-//!   because the system org is structurally special: it is the cluster control plane and is
-//!   bootstrapped before any data regions exist.
+//! The data-region parent directory is `{data_dir}/{region}/` directly — no
+//! intermediate `regions/` subdirectory. `GLOBAL` keeps the top-level `global/`
+//! name because the system org is the cluster control plane and is bootstrapped
+//! before any data regions exist.
 
 use std::{
     collections::HashMap,
@@ -116,18 +103,16 @@ pub enum RegionStorageError {
         message: String,
     },
 
-    /// Slice 2b legacy detection: the pre-Slice-2b per-organization
-    /// layout held a singleton `state.db` file alongside `blocks.db` /
-    /// `_meta.db` / `raft.db`. Slice 2b of per-vault consensus replaces
-    /// that file with a `state/` directory holding one
-    /// `vault-{vault_id}.db` per vault. A data_dir carrying the old
-    /// `state.db` file at this path is rejected — migration is not
-    /// supported.
+    /// Legacy on-disk layout detected: a singleton `state.db` file was
+    /// found where the current layout expects a `state/` directory. The
+    /// current layout stores per-vault state under
+    /// `state/vault-{vault_id}/state.db`; a flat `state.db` file at the
+    /// organization root indicates an old pre-migration data directory.
+    /// Migration is not supported — wipe the data directory and restart.
     #[snafu(display(
-        "Legacy per-org state.db layout detected at {state_db_path} for organization \
+        "Legacy per-org state.db file detected at {state_db_path} for organization \
          {organization_id} in region {region}. This build requires the per-vault state.db \
-         layout introduced by spec 2026-04-23-per-vault-consensus.md (Slice 2b). Wipe the \
-         data directory and restart."
+         layout. Wipe the data directory and restart."
     ))]
     LegacyPerOrgStateDb {
         /// The region the organization belongs to.
@@ -138,19 +123,18 @@ pub enum RegionStorageError {
         state_db_path: String,
     },
 
-    /// P2b.0 legacy detection: between Slice 2b and P2b.0 the per-vault
-    /// state DB lived as a flat file at
-    /// `{state_dir}/vault-{vault_id}.db`. P2b.0 moves it into a
-    /// per-vault directory at `{state_dir}/vault-{vault_id}/state.db`
-    /// so future slices can add `raft.db` / `blocks.db` / `events.db`
-    /// alongside. A data_dir carrying the old flat layout is rejected —
-    /// migration is not supported; operators must wipe the data
-    /// directory and restart.
+    /// Legacy on-disk layout detected: a flat `vault-{id}.db` file was
+    /// found directly inside `state/`. The current layout stores each
+    /// vault's state DB at `state/vault-{id}/state.db` — inside a
+    /// per-vault subdirectory that also holds the vault's `raft.db`,
+    /// `blocks.db`, and `events.db`. A flat file at the old path
+    /// indicates a pre-migration data directory. Migration is not
+    /// supported; wipe the data directory and restart.
     #[snafu(display(
         "Legacy flat-file vault state layout detected at {path} for organization \
          {organization_id} in region {region}. This build requires the per-vault directory \
-         form introduced by spec 2026-04-23-per-vault-consensus.md (P2b.0). Data migration \
-         is not supported; wipe the data directory and restart."
+         layout (`state/vault-{{id}}/state.db`). Data migration is not supported; wipe the \
+         data directory and restart."
     ))]
     LegacyVaultLayout {
         /// The region the organization belongs to.
@@ -175,37 +159,26 @@ pub enum RegionStorageError {
 /// consumed by the consensus engine's `Adaptor`.
 ///
 /// Higher-level wrappers ([`StateLayer`](inferadb_ledger_state::StateLayer),
-/// [`BlockArchive`](inferadb_ledger_state::BlockArchive)) are created from
-/// these raw handles in
-/// [`RegionGroup`](crate::raft_manager::RegionGroup) (which is renamed to
-/// `OrganizationGroup` in B.1.3).
-///
-/// **Naming note.** This struct retains its B.1.1 transitional name
-/// `RegionStorage` to keep the diff scoped. B.1.3 renames it to
-/// `OrganizationStorage` alongside the broader `RegionGroup → OrganizationGroup`
-/// type rename.
+/// [`BlockArchive`](inferadb_ledger_state::BlockArchive)) are constructed from
+/// these raw handles in [`crate::raft_manager`].
 pub struct RegionStorage {
     /// Region this organization belongs to.
     region: Region,
     /// Organization this storage belongs to.
     organization_id: OrganizationId,
-    /// The `state/` directory holding per-vault subdirectories
-    /// (`vault-{vault_id}/`). Slice 2b replaced the singleton `state.db`
-    /// file with one file per vault under `state/`; P2b.0 drops each
-    /// vault's `state.db` into its own subdirectory so future slices
-    /// can add per-vault `raft.db` / `blocks.db` / `events.db`
-    /// alongside. The per-org `StateLayer`'s factory resolves each
-    /// vault's state DB path via [`RegionStorage::vault_db_path`]
-    /// (which composes `state_dir.join("vault-{id}").join("state.db")`)
-    /// and creates the parent `vault-{id}/` directory lazily on first
-    /// reference.
+    /// The `state/` directory holding per-vault subdirectories (`vault-{vault_id}/`).
+    ///
+    /// Each vault's `state.db` lives at `state/vault-{id}/state.db`. The per-org
+    /// `StateLayer`'s factory resolves each vault's state DB path via
+    /// [`RegionStorage::vault_db_path`] and creates the `vault-{id}/` parent
+    /// directory lazily on first reference.
     state_dir: PathBuf,
-    /// Per-organization coordination database (`_meta.db`) introduced by
-    /// Slice 1 of per-vault consensus. Owns the `_meta:last_applied`
-    /// crash-recovery sentinel; syncs **after** every per-vault state
-    /// DB / raft.db / blocks.db / events.db in the checkpointer +
-    /// shutdown fsync order so the sentinel on disk never outruns the
-    /// entity data it references.
+    /// Per-organization coordination database (`_meta.db`).
+    ///
+    /// Owns the `_meta:last_applied` crash-recovery sentinel. Synced after every
+    /// per-vault state DB / raft.db / blocks.db / events.db in the checkpointer and
+    /// shutdown fsync order so the sentinel on disk never outruns the entity data it
+    /// references.
     meta_db: Arc<Database<FileBackend>>,
     /// Blocks database (historical blockchain data for this organization).
     blocks_db: Arc<Database<FileBackend>>,
@@ -259,10 +232,8 @@ impl RegionStorage {
     /// closure passed to [`StateLayer::new`] — the factory calls this
     /// helper to derive the file path, then opens (or creates) the DB.
     ///
-    /// P2b.0 migrates the per-vault state DB from the flat
-    /// `vault-{id}.db` file form down into a `vault-{id}/` directory so
-    /// future slices (P2b.2+) can add `raft.db`, `blocks.db`, and
-    /// `events.db` alongside it for per-vault consensus.
+    /// The state DB lives inside a per-vault subdirectory alongside the
+    /// vault's `raft.db`, `blocks.db`, and `events.db`.
     pub fn vault_db_path(&self, vault_id: inferadb_ledger_types::VaultId) -> PathBuf {
         self.vault_dir(vault_id).join("state.db")
     }
@@ -270,12 +241,11 @@ impl RegionStorage {
     /// Composes the on-disk directory for a single vault's per-vault
     /// files (`{state_dir}/vault-{vault_id}/`).
     ///
-    /// Introduced by P2b.0: the directory holds `state.db` today and
-    /// will hold the per-vault `raft.db`, `blocks.db`, and `events.db`
-    /// in later slices of the per-vault consensus plan. The directory
-    /// is created lazily by the factory closure immediately before it
-    /// opens the first per-vault file (state.db) — no eager creation
-    /// per vault at `open_organization` time.
+    /// The directory holds `state.db`, `raft.db`, `blocks.db`, and
+    /// `events.db` for the vault. It is created lazily by the factory
+    /// closure immediately before it opens the first per-vault file
+    /// (`state.db`) — no eager creation per vault at
+    /// `open_organization` time.
     pub fn vault_dir(&self, vault_id: inferadb_ledger_types::VaultId) -> PathBuf {
         self.state_dir.join(format!("vault-{}", vault_id.value()))
     }
@@ -290,11 +260,6 @@ impl RegionStorage {
 /// Lays out one directory per `(Region, OrganizationId)` pair under the data
 /// directory. Tracks which `(region, organization)` storage handles are
 /// currently open and prevents double-opening.
-///
-/// **Naming note.** Retains its B.1.1 transitional name `RegionStorageManager`
-/// alongside `RegionStorage` for diff scoping. B.1.3's broader rename pass
-/// renames it to `OrganizationStorageManager` (or absorbs it into the new
-/// per-tier storage manager triplet — TBD during B.1.3 implementation).
 pub struct RegionStorageManager {
     /// Root data directory.
     data_dir: PathBuf,
@@ -358,15 +323,12 @@ impl RegionStorageManager {
 
     /// Composes the on-disk path of a vault's per-vault `blocks.db`
     /// (`{data_dir}/{region}/{org_id}/state/vault-{vault_id}/blocks.db`).
-    /// Sibling of [`RegionStorage::vault_db_path`] (state.db) and the
-    /// per-vault `raft.db` composed inline by
-    /// [`RaftManager::start_vault_group`](crate::raft_manager::RaftManager::start_vault_group).
     ///
-    /// Phase 4.1 of per-vault consensus: each vault owns its own Merkle
-    /// chain stored in its own `blocks.db`. Append-blocks land in the
-    /// per-vault file, so the vault's chain is genuinely scoped to its
-    /// own apply pipeline rather than sharing the parent organization's
-    /// chain.
+    /// Sibling of [`RegionStorage::vault_db_path`] (state.db) and the per-vault `raft.db`
+    /// composed inline by
+    /// [`RaftManager::start_vault_group`](crate::raft_manager::RaftManager::start_vault_group).
+    /// Each vault owns its own Merkle chain; append-blocks land in the per-vault file so
+    /// the vault's chain is scoped to its own apply pipeline.
     pub fn vault_blocks_db_path(
         &self,
         region: Region,
@@ -381,17 +343,15 @@ impl RegionStorageManager {
 
     /// Composes the on-disk path of a vault's per-vault `events.db`
     /// (`{data_dir}/{region}/{org_id}/state/vault-{vault_id}/events.db`).
-    /// Sibling of [`Self::vault_blocks_db_path`] (blocks.db),
-    /// [`RegionStorage::vault_db_path`] (state.db), and the per-vault
-    /// `raft.db` composed inline by
+    ///
+    /// Sibling of [`Self::vault_blocks_db_path`] (blocks.db), [`RegionStorage::vault_db_path`]
+    /// (state.db), and the per-vault `raft.db` composed inline by
     /// [`RaftManager::start_vault_group`](crate::raft_manager::RaftManager::start_vault_group).
     ///
-    /// Phase 4.2 of per-vault consensus: each vault owns its own
-    /// apply-phase audit log stored in its own `events.db`. Vault-scoped
-    /// emissions (Write, BatchWrite, IngestExternalEvents) land in the
-    /// per-vault file; org-scoped emissions (CreateVault,
-    /// AddOrganizationMember, etc.) continue to land in the parent
-    /// organization's `events.db`.
+    /// Each vault owns its own apply-phase audit log. Vault-scoped emissions (Write,
+    /// BatchWrite, IngestExternalEvents) land in the per-vault file; org-scoped emissions
+    /// (CreateVault, AddOrganizationMember, etc.) land in the parent organization's
+    /// `events.db`.
     pub fn vault_events_db_path(
         &self,
         region: Region,
@@ -458,13 +418,11 @@ impl RegionStorageManager {
             ),
         })?;
 
-        // Slice 2b legacy detection: the per-vault consensus layout
-        // replaces the pre-Slice-2b per-org `state.db` **file** with a
-        // `state/` **directory** holding one `vault-{id}.db` per vault.
-        // If we find `state.db` as a file at the old path, the data_dir
-        // was written by a pre-Slice-2b build — refuse to boot before
-        // opening any DB so the apply pipeline never observes the
-        // conflicting layout.
+        // Legacy-layout detection: the current per-vault layout uses a
+        // `state/` directory; if a singleton `state.db` file is found at
+        // the old path, the data directory was written by a pre-migration
+        // build — refuse to boot before opening any DB so the apply
+        // pipeline never observes the conflicting layout.
         //
         // Runs BEFORE anything touches state.db on disk: opening a legacy
         // file would need to be unwound on detection, and opening the
@@ -479,7 +437,7 @@ impl RegionStorageManager {
             });
         }
 
-        // P2b.0: the per-vault state DBs live under
+        // Per-vault state DBs live under
         // `{organization_dir}/state/vault-{id}/state.db`. Create the
         // parent `state/` directory eagerly so the per-vault factory
         // (closure supplied to `StateLayer::new`) can assume it exists;
@@ -492,17 +450,14 @@ impl RegionStorageManager {
             message: format!("failed to create state directory {}: {e}", state_dir.display()),
         })?;
 
-        // P2b.0 legacy detection: between Slice 2b and P2b.0 the
-        // per-vault state DB lived as a flat file at
-        // `{state_dir}/vault-{id}.db`. P2b.0 moves each vault's
-        // state.db down one level into `{state_dir}/vault-{id}/`. If
-        // we find any `vault-{id}.db` **file** directly inside
-        // `state_dir`, the data_dir was written by a pre-P2b.0 build —
-        // refuse to boot before any vault DB is opened so a partial
-        // migration can't race and double-open a file under a stale
-        // path. The check scans `state_dir` itself (not
-        // `organization_dir`) because only `state_dir` contains the
-        // `vault-*` naming convention.
+        // Legacy flat-file vault detection: the current layout stores each
+        // vault's state DB at `{state_dir}/vault-{id}/state.db`. If a
+        // `vault-{id}.db` file appears directly inside `state_dir`, the
+        // data directory was written by a pre-migration build — refuse to
+        // boot before any vault DB is opened so a partial migration can't
+        // race and double-open a file under a stale path. The check scans
+        // `state_dir` itself (not `organization_dir`) because only
+        // `state_dir` contains the `vault-*` naming convention.
         let state_entries =
             std::fs::read_dir(&state_dir).map_err(|e| RegionStorageError::Storage {
                 region,
@@ -539,18 +494,11 @@ impl RegionStorageManager {
 
         // Open or create the per-organization meta database.
         //
-        // `_meta.db` was introduced by Slice 1 of per-vault consensus — it
-        // owns the `_meta:last_applied` crash-recovery sentinel (previously
-        // bundled into state.db's Entities table). Opening this DB here
-        // ensures every call path that consumes `state_dir()` also has
-        // `meta_db()` available without a second discovery step.
-        //
-        // Slice 2b retires the pre-Slice-1 in-state.db legacy detector:
-        // under the new layout `state.db` as a file is caught by
-        // `LegacyPerOrgStateDb` above, and there is no singleton
-        // `state.db` left to probe for the old sentinel. A freshly-
-        // created `_meta.db` stays pristine until the apply path
-        // records its first sentinel.
+        // `_meta.db` owns the `_meta:last_applied` crash-recovery sentinel.
+        // Opening this DB here ensures every call path that consumes
+        // `state_dir()` also has `meta_db()` available without a second
+        // discovery step. A freshly-created `_meta.db` stays pristine until
+        // the apply path records its first sentinel.
         let meta_db_path = organization_dir.join("_meta.db");
         let meta_db = open_or_create_db(&meta_db_path, region, organization_id)?;
         let meta_db = Arc::new(meta_db);
@@ -766,7 +714,7 @@ impl RegionStorageManager {
             if organization_id == OrganizationId::new(0) {
                 continue;
             }
-            // Strict P2b.0 layout check: the per-org directory must have
+            // Per-vault layout check: the per-org directory must have
             // a `state/` subdirectory.
             if !path.join("state").is_dir() {
                 tracing::debug!(
@@ -807,14 +755,6 @@ fn open_or_create_db(
         message: format!("failed to open database {}: {e}", path.display()),
     })
 }
-
-// Slice 2b retires `detect_legacy_layout` (the Slice 1 detector for an
-// old `_meta:last_applied` sentinel buried inside state.db's Entities
-// table). The new per-vault layout removes the singleton `state.db`
-// file; the Slice 2b legacy detector inlined above (`LegacyPerOrgStateDb`)
-// catches the pre-Slice-2b layout before any Database is opened. With
-// no singleton `state.db`, there is no artefact left to probe for the
-// old sentinel, so the Slice 1 detector is moot.
 
 // ============================================================================
 // Tests
@@ -901,10 +841,9 @@ mod tests {
         assert_eq!(storage.region(), Region::GLOBAL);
         assert_eq!(storage.organization_id(), SYSTEM_ORG);
 
-        // Verify directory structure under the P2b.0 layout: `state/`
-        // is a directory (per-vault `vault-{id}/` subdirs land inside
-        // via the factory on first open), blocks.db / events.db are
-        // files at the org root.
+        // Verify directory structure: `state/` is a directory
+        // (per-vault `vault-{id}/` subdirs land inside via the factory
+        // on first open), blocks.db / events.db are files at the org root.
         let org_dir = temp.path().join("global").join("0");
         assert!(org_dir.exists());
         assert!(
@@ -913,7 +852,7 @@ mod tests {
         );
         assert!(
             !org_dir.join("state.db").exists(),
-            "pre-Slice-2b state.db singleton must not be created"
+            "state.db file must not be created at the organization root"
         );
         assert!(org_dir.join("blocks.db").exists());
         assert!(org_dir.join("events.db").exists());
@@ -1074,11 +1013,10 @@ mod tests {
             .open_organization(Region::US_EAST_VA, OrganizationId::new(42))
             .expect("open us-east-va org");
 
-        // Slice 2b: each org's state lives under its own `state/`
-        // directory; the per-vault DB is opened lazily by the StateLayer
-        // factory, not by `RegionStorage`. This test only needs to
-        // confirm the two orgs have disjoint on-disk homes, which the
-        // existing blocks.db write lock can prove.
+        // Each org's state lives under its own `state/` directory; the
+        // per-vault DB is opened lazily by the StateLayer factory, not by
+        // `RegionStorage`. This test confirms the two orgs have disjoint
+        // on-disk homes via the blocks.db write lock.
         let write_a = storage_a.blocks_db().write();
         let write_b = storage_b.blocks_db().write();
 
@@ -1205,14 +1143,13 @@ mod tests {
     }
 
     // ========================================================================
-    // Slice 2b legacy-layout detection
+    // Legacy-layout detection
     // ========================================================================
 
-    /// Under the Slice 2b per-vault layout, the pre-Slice-2b singleton
-    /// `state.db` file is illegal. If `open_organization` finds such a
-    /// file at the old path, it must refuse to boot with
-    /// `LegacyPerOrgStateDb` — before creating `state/` or opening
-    /// blocks.db / _meta.db / events.db.
+    /// A singleton `state.db` file at the organization root is illegal
+    /// under the current per-vault layout. If `open_organization` finds
+    /// such a file, it must return `LegacyPerOrgStateDb` — before
+    /// creating `state/` or opening blocks.db / _meta.db / events.db.
     #[test]
     fn test_open_organization_refuses_pre_slice_2b_state_db_file() {
         let temp = TestDir::new();
@@ -1246,9 +1183,8 @@ mod tests {
         }
     }
 
-    /// A `state/` subdirectory (the new layout marker) must not be
-    /// mistaken for the legacy `state.db` file — `open_organization`
-    /// should succeed.
+    /// A `state/` subdirectory must not be mistaken for the legacy
+    /// `state.db` file — `open_organization` should succeed.
     #[test]
     fn test_open_organization_state_directory_is_not_legacy() {
         let temp = TestDir::new();
@@ -1257,22 +1193,18 @@ mod tests {
         let org = OrganizationId::new(44);
         let org_dir = mgr.organization_dir(Region::US_EAST_VA, org);
         std::fs::create_dir_all(&org_dir).expect("create org dir");
-        // Pre-create `state/` as a directory (what Slice 2b wants).
+        // Pre-create `state/` as a directory (the expected per-vault layout).
         std::fs::create_dir_all(org_dir.join("state")).expect("pre-create state/ dir");
-        // And pre-create the `state.db` path **as a directory**, not a
-        // file, to confirm the detector is strictly file-based.
-        // (Intentionally skipped — the detector uses `is_file()`, so a
-        // directory at that path would be treated as absent.)
+        // The detector uses `is_file()`, so a directory at the `state.db`
+        // path is treated as absent — no false positive.
 
         mgr.open_organization(Region::US_EAST_VA, org)
             .expect("open with pre-existing state/ directory");
     }
 
-    /// P2b.0 moves per-vault state DBs from
-    /// `{state_dir}/vault-{id}.db` (flat file) to
-    /// `{state_dir}/vault-{id}/state.db` (nested inside per-vault
-    /// directory). `open_organization` must refuse to boot on the old
-    /// flat layout — no migration is supported.
+    /// A flat `vault-{id}.db` file directly inside `state/` is a legacy
+    /// artifact from a pre-migration data directory. `open_organization`
+    /// must return `LegacyVaultLayout` — no migration is supported.
     #[test]
     fn test_open_organization_refuses_pre_p2b0_flat_vault_db_file() {
         let temp = TestDir::new();
@@ -1283,8 +1215,8 @@ mod tests {
         let state_dir = org_dir.join("state");
         std::fs::create_dir_all(&state_dir).expect("create state/ dir");
 
-        // Simulate a pre-P2b.0 data_dir: a flat `vault-{id}.db` file
-        // sitting directly inside `state/`.
+        // Simulate a legacy data directory: a flat `vault-{id}.db` file
+        // sitting directly inside `state/` rather than inside `vault-{id}/`.
         std::fs::write(state_dir.join("vault-1.db"), b"legacy-flat-vault-state-bytes")
             .expect("create legacy flat vault-1.db file");
 
@@ -1303,9 +1235,8 @@ mod tests {
         }
     }
 
-    /// A `vault-{id}/` **directory** inside `state/` (the P2b.0 layout
-    /// marker) must not be mistaken for the legacy flat file — the
-    /// detector is strictly file-based.
+    /// A `vault-{id}/` directory inside `state/` must not be mistaken
+    /// for the legacy flat file — the detector is strictly file-based.
     #[test]
     fn test_open_organization_vault_directory_is_not_legacy() {
         let temp = TestDir::new();
@@ -1320,8 +1251,8 @@ mod tests {
             .expect("open with pre-existing vault-{id}/ directory");
     }
 
-    /// Confirms `vault_db_path` returns the P2b.0 nested form and the
-    /// `vault_dir` helper returns the matching parent directory.
+    /// Confirms `vault_db_path` returns the nested per-vault form and
+    /// `vault_dir` returns the matching parent directory.
     #[test]
     fn test_vault_db_path_returns_nested_per_vault_form() {
         let temp = TestDir::new();
@@ -1334,7 +1265,7 @@ mod tests {
         let path = storage.vault_db_path(vault);
         assert!(
             path.ends_with("state/vault-42/state.db"),
-            "vault_db_path must be nested under vault-{{id}}/ per P2b.0: {}",
+            "vault_db_path must be nested under vault-{{id}}/: {}",
             path.display()
         );
 
@@ -1361,9 +1292,9 @@ mod tests {
         let meta_db_path = temp.path().join("us-east-va").join("99").join("_meta.db");
         assert!(meta_db_path.exists(), "meta.db must be created alongside the state/ dir");
 
-        // And `state/` must be a directory (Slice 2b layout marker).
+        // `state/` must be a directory.
         let state_dir = temp.path().join("us-east-va").join("99").join("state");
-        assert!(state_dir.is_dir(), "state/ must be a directory under Slice 2b");
+        assert!(state_dir.is_dir(), "state/ must be a directory under the per-vault layout");
 
         // Round-trip: meta_db() returns a usable handle.
         assert!(storage.meta_db().read().is_ok());

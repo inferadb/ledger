@@ -8,6 +8,12 @@
 //! - Read consistency after failover
 //! - Behavior during in-flight writes when leader crashes
 //! - State machine determinism under chaos conditions
+//!
+//! F.1.f.2.Stage1e Wave 5: migrated from the legacy tonic helpers
+//! (`create_read_client` / `create_write_client` /
+//! `create_test_organization` / `create_test_vault`) to their wire-protocol
+//! siblings (`wire_read_client` / `wire_write_client` /
+//! `wire_create_test_organization` / `wire_create_test_vault`).
 
 #![allow(
     clippy::unwrap_used,
@@ -19,11 +25,15 @@
 
 use std::{collections::HashSet, time::Duration};
 
-use inferadb_ledger_proto::proto::{ClientId, ReadRequest, WriteRequest};
+use bytes::Bytes;
 use inferadb_ledger_types::{OrganizationSlug, Region, VaultSlug};
+use inferadb_ledger_wire::services::{read as wr, shared as ws, write as ww};
 use serial_test::serial;
 
-use crate::common::{TestCluster, TestNode, create_read_client, create_write_client};
+use crate::common::{
+    TestCluster, wire_create_test_organization, wire_create_test_vault, wire_read_client,
+    wire_write_client,
+};
 
 // =============================================================================
 // Test Helpers
@@ -31,20 +41,21 @@ use crate::common::{TestCluster, TestNode, create_read_client, create_write_clie
 
 /// Creates an organization and returns its slug.
 async fn create_organization(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     name: &str,
-    node: &TestNode,
 ) -> Result<OrganizationSlug, Box<dyn std::error::Error>> {
-    let (slug, _admin) = crate::common::create_test_organization(addr, name, node).await?;
+    let (slug, _admin) = wire_create_test_organization(cluster, node_id, name).await?;
     Ok(slug)
 }
 
 /// Creates a vault in an organization and returns its slug.
 async fn create_vault(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     organization: OrganizationSlug,
 ) -> Result<VaultSlug, Box<dyn std::error::Error>> {
-    crate::common::create_test_vault(addr, organization).await
+    wire_create_test_vault(cluster, node_id, organization).await
 }
 
 /// Helper to create a write request with a single SetEntity operation.
@@ -54,23 +65,19 @@ fn make_write_request(
     key: &str,
     value: &[u8],
     client_id: &str,
-) -> WriteRequest {
-    WriteRequest {
-        organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-            slug: organization.value(),
-        }),
-        vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
-        client_id: Some(ClientId { id: client_id.to_string() }),
-        idempotency_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
-        operations: vec![inferadb_ledger_proto::proto::Operation {
-            op: Some(inferadb_ledger_proto::proto::operation::Op::SetEntity(
-                inferadb_ledger_proto::proto::SetEntity {
-                    key: key.to_string(),
-                    value: value.to_vec(),
-                    condition: None,
-                    expires_at: None,
-                },
-            )),
+) -> ww::WriteRequest {
+    ww::WriteRequest {
+        organization: Some(organization),
+        vault: Some(vault),
+        client_id: Some(ws::ClientIdMessage { id: client_id.to_string() }),
+        idempotency_key: Bytes::copy_from_slice(uuid::Uuid::new_v4().as_bytes()),
+        operations: vec![ws::Operation {
+            op: Some(ws::OperationKind::SetEntity(ws::SetEntity {
+                key: key.to_string(),
+                value: Bytes::copy_from_slice(value),
+                condition: None,
+                expires_at: None,
+            })),
         }],
         include_tx_proof: false,
         caller: None,
@@ -78,37 +85,37 @@ fn make_write_request(
 }
 
 /// Extracts block_height from a WriteResponse, panics if not a success.
-fn extract_block_height(response: inferadb_ledger_proto::proto::WriteResponse) -> u64 {
+fn extract_block_height(response: ww::WriteResponse) -> u64 {
     match response.result {
-        Some(inferadb_ledger_proto::proto::write_response::Result::Success(s)) => s.block_height,
-        Some(inferadb_ledger_proto::proto::write_response::Result::Error(e)) => {
-            panic!("write failed: {:?}", e)
-        },
+        Some(ww::WriteResponseResult::Success(s)) => s.block_height,
+        Some(ww::WriteResponseResult::Error(e)) => panic!("write failed: {:?}", e),
         None => panic!("no result in response"),
     }
 }
 
 /// Helper to read an entity and return its value.
 async fn read_entity(
-    addr: &str,
+    cluster: &TestCluster,
+    node_id: u64,
     organization: OrganizationSlug,
     vault: VaultSlug,
     key: &str,
 ) -> Option<Vec<u8>> {
-    let mut client = create_read_client(addr).await.ok()?;
+    let client = wire_read_client(cluster, node_id);
     let response = client
-        .read(ReadRequest {
-            organization: Some(inferadb_ledger_proto::proto::OrganizationSlug {
-                slug: organization.value(),
-            }),
-            vault: Some(inferadb_ledger_proto::proto::VaultSlug { slug: vault.value() }),
-            key: key.to_string(),
-            consistency: 0, // EVENTUAL (default)
-            caller: None,
-        })
+        .read(
+            wr::ReadRequest {
+                organization: Some(organization),
+                vault: Some(vault),
+                key: key.to_string(),
+                consistency: ws::ReadConsistency::Eventual,
+                caller: None,
+            },
+            rand::random::<u128>(),
+        )
         .await
         .ok()?;
-    response.into_inner().value
+    response.value.map(|b| b.to_vec())
 }
 
 /// Tests that a committed write survives leader failover.
@@ -118,36 +125,33 @@ async fn read_entity(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_committed_write_survives_leader_crash() {
-    let cluster = TestCluster::new(3).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");
-    let leader_addr = &leader.addr;
 
     // ORG-ISOLATION: two orgs + two vaults. Writes go to alpha; beta must stay
     // empty on every node.
     let org_alpha =
-        create_organization(leader_addr, "crash-ns-a", leader).await.expect("create org alpha");
-    let vault_alpha = create_vault(leader_addr, org_alpha).await.expect("create vault alpha");
+        create_organization(&cluster, leader.id, "crash-ns-a").await.expect("create org alpha");
+    let vault_alpha =
+        create_vault(&cluster, leader.id, org_alpha).await.expect("create vault alpha");
     let org_beta =
-        create_organization(leader_addr, "crash-ns-b", leader).await.expect("create org beta");
-    let vault_beta = create_vault(leader_addr, org_beta).await.expect("create vault beta");
+        create_organization(&cluster, leader.id, "crash-ns-b").await.expect("create org beta");
+    let vault_beta = create_vault(&cluster, leader.id, org_beta).await.expect("create vault beta");
 
     // Wait for orgs/vaults to replicate
     cluster.wait_for_sync(Duration::from_secs(2)).await;
 
     // Write some data through the leader (alpha only)
-    let mut client = create_write_client(leader_addr).await.expect("connect to leader");
+    let client = wire_write_client(&cluster, leader.id);
 
     let client_id = format!("test-client-{}", leader_id);
     let write_req =
         make_write_request(org_alpha, vault_alpha, "chaos-key", b"chaos-value", &client_id);
 
-    let response = client.write(write_req).await.expect("write should succeed").into_inner();
+    let response =
+        client.write(write_req, rand::random::<u128>()).await.expect("write should succeed");
     let block_height = extract_block_height(response);
     assert!(block_height > 0, "write should be committed");
 
@@ -166,12 +170,12 @@ async fn test_committed_write_survives_leader_crash() {
     // Read from a follower to verify the write was replicated
     let followers = cluster.followers();
     let follower = followers.first().expect("should have follower");
-    let value = read_entity(&follower.addr, org_alpha, vault_alpha, "chaos-key").await;
+    let value = read_entity(&cluster, follower.id, org_alpha, vault_alpha, "chaos-key").await;
     assert_eq!(value, Some(b"chaos-value".to_vec()), "follower should have the committed write");
 
     // Isolation: org_beta must not see the alpha write on any node.
     for node in cluster.nodes() {
-        let value = read_entity(&node.addr, org_beta, vault_beta, "chaos-key").await;
+        let value = read_entity(&cluster, node.id, org_beta, vault_beta, "chaos-key").await;
         assert_eq!(value, None, "node {} org_beta must not see alpha's write", node.id);
     }
 }
@@ -186,30 +190,27 @@ async fn test_committed_write_survives_leader_crash() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_read_consistency_after_leader_change() {
-    let cluster = TestCluster::new(3).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     let initial_leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(initial_leader_id).expect("leader exists");
 
     // ORG-ISOLATION: alpha receives writes, beta must stay empty.
-    let org_alpha = create_organization(&leader.addr, "read-consistency-ns-a", leader)
+    let org_alpha = create_organization(&cluster, leader.id, "read-consistency-ns-a")
         .await
         .expect("create org alpha");
-    let vault_alpha = create_vault(&leader.addr, org_alpha).await.expect("create vault alpha");
-    let org_beta = create_organization(&leader.addr, "read-consistency-ns-b", leader)
+    let vault_alpha =
+        create_vault(&cluster, leader.id, org_alpha).await.expect("create vault alpha");
+    let org_beta = create_organization(&cluster, leader.id, "read-consistency-ns-b")
         .await
         .expect("create org beta");
-    let vault_beta = create_vault(&leader.addr, org_beta).await.expect("create vault beta");
+    let vault_beta = create_vault(&cluster, leader.id, org_beta).await.expect("create vault beta");
 
     // Wait for org/vault to replicate
     cluster.wait_for_sync(Duration::from_secs(2)).await;
 
     // Write data through the initial leader (alpha only)
-    let mut client = create_write_client(&leader.addr).await.expect("connect to leader");
+    let client = wire_write_client(&cluster, leader.id);
 
     let client_id = format!("test-client-{}", initial_leader_id);
 
@@ -222,7 +223,7 @@ async fn test_read_consistency_after_leader_change() {
             format!("value-{}", i).as_bytes(),
             &client_id,
         );
-        client.write(write_req).await.expect("write should succeed");
+        client.write(write_req, rand::random::<u128>()).await.expect("write should succeed");
     }
 
     // Wait for replication (global + data region + per-org groups)
@@ -234,7 +235,7 @@ async fn test_read_consistency_after_leader_change() {
     for node in cluster.nodes() {
         for i in 0..5 {
             let value =
-                read_entity(&node.addr, org_alpha, vault_alpha, &format!("key-{}", i)).await;
+                read_entity(&cluster, node.id, org_alpha, vault_alpha, &format!("key-{}", i)).await;
             assert_eq!(
                 value,
                 Some(format!("value-{}", i).into_bytes()),
@@ -244,7 +245,7 @@ async fn test_read_consistency_after_leader_change() {
             );
 
             let beta_value =
-                read_entity(&node.addr, org_beta, vault_beta, &format!("key-{}", i)).await;
+                read_entity(&cluster, node.id, org_beta, vault_beta, &format!("key-{}", i)).await;
             assert_eq!(beta_value, None, "node {} beta must not see alpha key-{}", node.id, i);
         }
     }
@@ -258,38 +259,35 @@ async fn test_read_consistency_after_leader_change() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_sequential_writes_readable_on_three_node_cluster() {
-    let cluster = TestCluster::new(3).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");
 
     // ORG-ISOLATION: two orgs. Writes go to alpha; beta stays empty.
     let org_alpha =
-        create_organization(&leader.addr, "one-down-ns-a", leader).await.expect("create org alpha");
-    let vault_alpha = create_vault(&leader.addr, org_alpha).await.expect("create vault alpha");
+        create_organization(&cluster, leader.id, "one-down-ns-a").await.expect("create org alpha");
+    let vault_alpha =
+        create_vault(&cluster, leader.id, org_alpha).await.expect("create vault alpha");
     let org_beta =
-        create_organization(&leader.addr, "one-down-ns-b", leader).await.expect("create org beta");
-    let vault_beta = create_vault(&leader.addr, org_beta).await.expect("create vault beta");
+        create_organization(&cluster, leader.id, "one-down-ns-b").await.expect("create org beta");
+    let vault_beta = create_vault(&cluster, leader.id, org_beta).await.expect("create vault beta");
 
     // Write through the leader (alpha only)
-    let mut client = create_write_client(&leader.addr).await.expect("connect to leader");
+    let client = wire_write_client(&cluster, leader.id);
 
     let client_id = format!("test-client-{}", leader_id);
     let write_req = make_write_request(org_alpha, vault_alpha, "key-1", b"value1", &client_id);
-    client.write(write_req).await.expect("write should succeed");
+    client.write(write_req, rand::random::<u128>()).await.expect("write should succeed");
 
     let write_req = make_write_request(org_alpha, vault_alpha, "key-2", b"value2", &client_id);
-    client.write(write_req).await.expect("write should succeed");
+    client.write(write_req, rand::random::<u128>()).await.expect("write should succeed");
 
     cluster.wait_for_organizations_synced(Region::US_EAST_VA, Duration::from_secs(5)).await;
 
     // Verify both writes are readable on alpha
-    let value1 = read_entity(&leader.addr, org_alpha, vault_alpha, "key-1").await;
-    let value2 = read_entity(&leader.addr, org_alpha, vault_alpha, "key-2").await;
+    let value1 = read_entity(&cluster, leader.id, org_alpha, vault_alpha, "key-1").await;
+    let value2 = read_entity(&cluster, leader.id, org_alpha, vault_alpha, "key-2").await;
 
     assert_eq!(value1, Some(b"value1".to_vec()));
     assert_eq!(value2, Some(b"value2".to_vec()));
@@ -297,13 +295,13 @@ async fn test_sequential_writes_readable_on_three_node_cluster() {
     // Isolation: beta must not see the keys on any node.
     for node in cluster.nodes() {
         assert_eq!(
-            read_entity(&node.addr, org_beta, vault_beta, "key-1").await,
+            read_entity(&cluster, node.id, org_beta, vault_beta, "key-1").await,
             None,
             "node {} beta must not see alpha key-1",
             node.id
         );
         assert_eq!(
-            read_entity(&node.addr, org_beta, vault_beta, "key-2").await,
+            read_entity(&cluster, node.id, org_beta, vault_beta, "key-2").await,
             None,
             "node {} beta must not see alpha key-2",
             node.id
@@ -318,29 +316,25 @@ async fn test_sequential_writes_readable_on_three_node_cluster() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_deterministic_block_height_across_nodes() {
-    let cluster = TestCluster::new(3).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");
 
     // ORG-ISOLATION: two orgs — writes go to alpha, beta stays empty.
-    let org_alpha = create_organization(&leader.addr, "det-height-ns-a", leader)
+    let org_alpha = create_organization(&cluster, leader.id, "det-height-ns-a")
         .await
         .expect("create org alpha");
-    let vault_alpha = create_vault(&leader.addr, org_alpha).await.expect("create vault alpha");
-    let org_beta = create_organization(&leader.addr, "det-height-ns-b", leader)
-        .await
-        .expect("create org beta");
-    let vault_beta = create_vault(&leader.addr, org_beta).await.expect("create vault beta");
+    let vault_alpha =
+        create_vault(&cluster, leader.id, org_alpha).await.expect("create vault alpha");
+    let org_beta =
+        create_organization(&cluster, leader.id, "det-height-ns-b").await.expect("create org beta");
+    let vault_beta = create_vault(&cluster, leader.id, org_beta).await.expect("create vault beta");
 
     // Wait for org/vault to replicate
     cluster.wait_for_sync(Duration::from_secs(2)).await;
 
-    let mut client = create_write_client(&leader.addr).await.expect("connect to leader");
+    let client = wire_write_client(&cluster, leader.id);
 
     let client_id = format!("test-client-{}", leader_id);
 
@@ -354,7 +348,7 @@ async fn test_deterministic_block_height_across_nodes() {
             &(i as u32).to_le_bytes(),
             &client_id,
         );
-        client.write(write_req).await.expect("write should succeed");
+        client.write(write_req, rand::random::<u128>()).await.expect("write should succeed");
     }
 
     // Wait for replication to complete (global + data region + per-org groups)
@@ -374,7 +368,7 @@ async fn test_deterministic_block_height_across_nodes() {
 
     // Isolation: beta must not see alpha's writes on any node.
     for node in cluster.nodes() {
-        let value = read_entity(&node.addr, org_beta, vault_beta, "det-key-0").await;
+        let value = read_entity(&cluster, node.id, org_beta, vault_beta, "det-key-0").await;
         assert_eq!(value, None, "node {} beta must not see alpha's det-key-0", node.id);
     }
 }
@@ -386,21 +380,16 @@ async fn test_deterministic_block_height_across_nodes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_concurrent_writes_all_applied() {
-    let cluster = TestCluster::new(3).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");
-    let leader_addr = leader.addr.clone();
 
     // Create organization and vault
-    let organization = create_organization(&leader_addr, "concurrent-ns", leader)
+    let organization = create_organization(&cluster, leader.id, "concurrent-ns")
         .await
         .expect("create organization");
-    let vault = create_vault(&leader_addr, organization).await.expect("create vault");
+    let vault = create_vault(&cluster, leader.id, organization).await.expect("create vault");
 
     // Spawn multiple concurrent writers
     let mut handles = vec![];
@@ -408,9 +397,8 @@ async fn test_concurrent_writes_all_applied() {
     let writes_per_client = 3u64;
 
     for client_num in 0..num_clients {
-        let addr = leader_addr.clone();
+        let client = wire_write_client(&cluster, leader.id);
         let handle = tokio::spawn(async move {
-            let mut client = create_write_client(&addr).await.expect("connect to leader");
             let client_id = format!("client-{}", client_num);
 
             for seq in 0..writes_per_client {
@@ -418,7 +406,10 @@ async fn test_concurrent_writes_all_applied() {
                 let value = format!("value-{}-{}", client_num, seq);
                 let write_req =
                     make_write_request(organization, vault, &key, value.as_bytes(), &client_id);
-                client.write(write_req).await.expect("write should succeed");
+                client
+                    .write(write_req, rand::random::<u128>())
+                    .await
+                    .expect("write should succeed");
             }
         });
         handles.push(handle);
@@ -441,7 +432,7 @@ async fn test_concurrent_writes_all_applied() {
             let key = format!("concurrent-{}-{}", client_num, seq);
             let expected_value = format!("value-{}-{}", client_num, seq);
 
-            let value = read_entity(&any_node.addr, organization, vault, &key).await;
+            let value = read_entity(&cluster, any_node.id, organization, vault, &key).await;
             if value == Some(expected_value.into_bytes()) {
                 found_count += 1;
             }
@@ -462,24 +453,21 @@ async fn test_concurrent_writes_all_applied() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_rapid_writes_no_data_loss() {
-    let cluster = TestCluster::new(3).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");
 
     // ORG-ISOLATION: alpha receives all rapid writes, beta stays empty.
     let org_alpha =
-        create_organization(&leader.addr, "rapid-ns-a", leader).await.expect("create org alpha");
-    let vault_alpha = create_vault(&leader.addr, org_alpha).await.expect("create vault alpha");
+        create_organization(&cluster, leader.id, "rapid-ns-a").await.expect("create org alpha");
+    let vault_alpha =
+        create_vault(&cluster, leader.id, org_alpha).await.expect("create vault alpha");
     let org_beta =
-        create_organization(&leader.addr, "rapid-ns-b", leader).await.expect("create org beta");
-    let vault_beta = create_vault(&leader.addr, org_beta).await.expect("create vault beta");
+        create_organization(&cluster, leader.id, "rapid-ns-b").await.expect("create org beta");
+    let vault_beta = create_vault(&cluster, leader.id, org_beta).await.expect("create vault beta");
 
-    let mut client = create_write_client(&leader.addr).await.expect("connect to leader");
+    let client = wire_write_client(&cluster, leader.id);
 
     let client_id = format!("rapid-client-{}", leader_id);
     let num_writes = 50u64;
@@ -493,7 +481,7 @@ async fn test_rapid_writes_no_data_loss() {
             &(i as u32).to_le_bytes(),
             &client_id,
         );
-        client.write(write_req).await.expect("write should succeed");
+        client.write(write_req, rand::random::<u128>()).await.expect("write should succeed");
     }
 
     // Wait for all writes to replicate
@@ -504,7 +492,7 @@ async fn test_rapid_writes_no_data_loss() {
     let mut found_count = 0u64;
     for i in 0..num_writes {
         let value =
-            read_entity(&leader.addr, org_alpha, vault_alpha, &format!("rapid-{}", i)).await;
+            read_entity(&cluster, leader.id, org_alpha, vault_alpha, &format!("rapid-{}", i)).await;
         if value.is_some() {
             found_count += 1;
         }
@@ -520,7 +508,7 @@ async fn test_rapid_writes_no_data_loss() {
     for node in cluster.nodes() {
         for i in [0u64, 25, 49] {
             let value =
-                read_entity(&node.addr, org_beta, vault_beta, &format!("rapid-{}", i)).await;
+                read_entity(&cluster, node.id, org_beta, vault_beta, &format!("rapid-{}", i)).await;
             assert_eq!(value, None, "node {} beta must not see alpha rapid-{}", node.id, i);
         }
     }
@@ -532,24 +520,21 @@ async fn test_rapid_writes_no_data_loss() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_term_agreement_maintained() {
-    let cluster = TestCluster::new(3).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     let leader_id = cluster.wait_for_leader().await;
 
     // ORG-ISOLATION: alpha gets writes, beta stays empty.
     let leader = cluster.leader().expect("should have leader");
     let org_alpha =
-        create_organization(&leader.addr, "term-ns-a", leader).await.expect("create org alpha");
-    let vault_alpha = create_vault(&leader.addr, org_alpha).await.expect("create vault alpha");
+        create_organization(&cluster, leader.id, "term-ns-a").await.expect("create org alpha");
+    let vault_alpha =
+        create_vault(&cluster, leader.id, org_alpha).await.expect("create vault alpha");
     let org_beta =
-        create_organization(&leader.addr, "term-ns-b", leader).await.expect("create org beta");
-    let vault_beta = create_vault(&leader.addr, org_beta).await.expect("create vault beta");
+        create_organization(&cluster, leader.id, "term-ns-b").await.expect("create org beta");
+    let vault_beta = create_vault(&cluster, leader.id, org_beta).await.expect("create vault beta");
 
     // Submit some writes to exercise the cluster (alpha only)
-    let mut client = create_write_client(&leader.addr).await.expect("connect to leader");
+    let client = wire_write_client(&cluster, leader.id);
 
     let client_id = format!("term-test-{}", leader_id);
     for i in 0..5u64 {
@@ -560,7 +545,7 @@ async fn test_term_agreement_maintained() {
             b"value",
             &client_id,
         );
-        client.write(write_req).await.expect("write should succeed");
+        client.write(write_req, rand::random::<u128>()).await.expect("write should succeed");
     }
 
     // Check that all nodes are on the same term
@@ -574,7 +559,7 @@ async fn test_term_agreement_maintained() {
     // Isolation: beta must not see any alpha writes on any node.
     cluster.wait_for_organizations_synced(Region::US_EAST_VA, Duration::from_secs(5)).await;
     for node in cluster.nodes() {
-        let value = read_entity(&node.addr, org_beta, vault_beta, "term-key-0").await;
+        let value = read_entity(&cluster, node.id, org_beta, vault_beta, "term-key-0").await;
         assert_eq!(value, None, "node {} beta must not see alpha term-key-0", node.id);
     }
 }
@@ -586,40 +571,36 @@ async fn test_term_agreement_maintained() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn test_key_overwrite_consistency() {
-    let cluster = TestCluster::new(3).await;
-    cluster
-        .create_data_region(inferadb_ledger_types::Region::US_EAST_VA)
-        .await
-        .expect("create data region");
+    let cluster = TestCluster::with_wire_transport_and_size(1, 3).await;
     let leader_id = cluster.wait_for_leader().await;
 
     let leader = cluster.node(leader_id).expect("leader exists");
 
     // ORG-ISOLATION: two orgs. Overwrite happens in alpha; beta must not see it.
-    let org_alpha = create_organization(&leader.addr, "overwrite-ns-a", leader)
-        .await
-        .expect("create org alpha");
-    let vault_alpha = create_vault(&leader.addr, org_alpha).await.expect("create vault alpha");
+    let org_alpha =
+        create_organization(&cluster, leader.id, "overwrite-ns-a").await.expect("create org alpha");
+    let vault_alpha =
+        create_vault(&cluster, leader.id, org_alpha).await.expect("create vault alpha");
     let org_beta =
-        create_organization(&leader.addr, "overwrite-ns-b", leader).await.expect("create org beta");
-    let vault_beta = create_vault(&leader.addr, org_beta).await.expect("create vault beta");
+        create_organization(&cluster, leader.id, "overwrite-ns-b").await.expect("create org beta");
+    let vault_beta = create_vault(&cluster, leader.id, org_beta).await.expect("create vault beta");
 
     // Wait for org/vault to replicate
     cluster.wait_for_sync(Duration::from_secs(2)).await;
 
-    let mut client = create_write_client(&leader.addr).await.expect("connect to leader");
+    let client = wire_write_client(&cluster, leader.id);
 
     let client_id = format!("overwrite-test-{}", leader_id);
 
     // Write initial value (alpha)
     let write_req =
         make_write_request(org_alpha, vault_alpha, "overwrite-key", b"initial", &client_id);
-    client.write(write_req).await.expect("initial write");
+    client.write(write_req, rand::random::<u128>()).await.expect("initial write");
 
     // Overwrite with new value (alpha)
     let write_req =
         make_write_request(org_alpha, vault_alpha, "overwrite-key", b"updated", &client_id);
-    client.write(write_req).await.expect("overwrite");
+    client.write(write_req, rand::random::<u128>()).await.expect("overwrite");
 
     // Wait for replication (global + data region + per-org groups)
     cluster.wait_for_sync(Duration::from_secs(5)).await;
@@ -627,10 +608,11 @@ async fn test_key_overwrite_consistency() {
 
     // All nodes should see the updated value on alpha AND no value on beta.
     for node in cluster.nodes() {
-        let value = read_entity(&node.addr, org_alpha, vault_alpha, "overwrite-key").await;
+        let value = read_entity(&cluster, node.id, org_alpha, vault_alpha, "overwrite-key").await;
         assert_eq!(value, Some(b"updated".to_vec()), "node {} should have updated value", node.id);
 
-        let beta_value = read_entity(&node.addr, org_beta, vault_beta, "overwrite-key").await;
+        let beta_value =
+            read_entity(&cluster, node.id, org_beta, vault_beta, "overwrite-key").await;
         assert_eq!(beta_value, None, "node {} beta must not see alpha's overwrite-key", node.id);
     }
 }

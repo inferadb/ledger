@@ -23,7 +23,7 @@ use crate::common::TestCluster;
 /// for production multi-region deployments.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unprotected_region_auto_joins_every_node() {
-    let cluster = TestCluster::new(3).await;
+    let cluster = TestCluster::with_wire_transport_and_size(0, 3).await;
 
     cluster
         .create_data_region_with_protection(inferadb_ledger_types::Region::US_EAST_VA, false)
@@ -46,7 +46,7 @@ async fn unprotected_region_auto_joins_every_node() {
 /// entry persists in GLOBAL state but no per-node Raft group materialises.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn protected_region_skipped_without_opt_in() {
-    let cluster = TestCluster::new(3).await;
+    let cluster = TestCluster::with_wire_transport_and_size(0, 3).await;
 
     cluster
         .create_data_region_with_protection(inferadb_ledger_types::Region::IE_EAST_DUBLIN, true)
@@ -69,7 +69,7 @@ async fn protected_region_skipped_without_opt_in() {
 /// previously-skipped protected region and starts it on that node only.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn protected_region_started_after_node_opts_in_on_restart() {
-    let cluster = TestCluster::new(3).await;
+    let cluster = TestCluster::with_wire_transport_and_size(0, 3).await;
     let region = inferadb_ledger_types::Region::IE_EAST_DUBLIN;
 
     cluster

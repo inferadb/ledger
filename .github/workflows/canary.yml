@@ -61,10 +61,12 @@ jobs:
               - 'crates/types/**'
               - 'crates/store/**'
               - 'crates/state/**'
-              - 'crates/proto/**'
               - 'crates/raft/**'
               - 'crates/sdk/**'
-              - 'proto/**'
+              - 'crates/wire/**'
+              - 'crates/wire-macro/**'
+              - 'crates/wire-services/**'
+              - 'crates/wire-transport/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
             server:
@@ -469,7 +471,7 @@ jobs:
 
           # Update inter-crate dependency versions to use exact prerelease version
           # (semver ranges like ^0.1.0 don't match prereleases)
-          for crate in inferadb-ledger-types inferadb-ledger-store inferadb-ledger-state inferadb-ledger-proto inferadb-ledger-raft inferadb-ledger-services inferadb-ledger-sdk; do
+          for crate in inferadb-ledger-types inferadb-ledger-store inferadb-ledger-state inferadb-ledger-raft inferadb-ledger-wire inferadb-ledger-wire-macro inferadb-ledger-wire-services inferadb-ledger-wire-transport inferadb-ledger-services inferadb-ledger-sdk; do
             sed -i "s/\(${crate} = { version = \)\"[^\"]*\"/\1\"=${CRATE_VERSION}\"/" Cargo.toml
           done
 
@@ -516,7 +518,7 @@ jobs:
             return 1
           }
 
-          CRATES=(inferadb-ledger-types inferadb-ledger-proto inferadb-ledger-sdk)
+          CRATES=(inferadb-ledger-types inferadb-ledger-sdk)
           LAST_INDEX=$(( ${#CRATES[@]} - 1 ))
 
           for i in "${!CRATES[@]}"; do

@@ -1,0 +1,5 @@
+error: rpc opcode 0x0200 is outside service `Foo` range (0x0100..=0x01ff)
+ --> tests/trybuild/opcode_out_of_service_range.rs:6:13
+  |
+6 |         rpc 0x0200 oops(R) -> S;
+  |             ^^^^^^

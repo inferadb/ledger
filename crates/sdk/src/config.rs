@@ -44,8 +44,19 @@ const DEFAULT_HTTP2_INITIAL_CONNECTION_WINDOW_BYTES: u32 = 8 * 1024 * 1024;
 
 /// Configuration for the Ledger SDK client.
 ///
-/// Constructed via [`ClientConfig::builder()`](ClientConfig::builder) which validates all fields at
-/// build time.
+/// All fields are validated at build time. Construct via [`ClientConfig::builder()`].
+///
+/// # Example
+///
+/// ```no_run
+/// use inferadb_ledger_sdk::{ClientConfig, ServerSource};
+///
+/// let config = ClientConfig::builder()
+///     .servers(ServerSource::from_static(["http://localhost:50051"]))
+///     .client_id("my-service")
+///     .build()
+///     .expect("valid config");
+/// ```
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
     /// Server source for discovering cluster servers.
@@ -166,47 +177,40 @@ pub struct ClientConfig {
 
 #[bon]
 impl ClientConfig {
-    /// Creates a new client configuration with validation.
+    /// Creates a new client configuration.
     ///
-    /// # Arguments
-    ///
-    /// * `servers` - Server source for discovering cluster servers.
-    /// * `client_id` - Unique client identifier for idempotency tracking.
-    /// * `timeout` - Request timeout. Default: 30 seconds.
-    /// * `connect_timeout` - Connection establishment timeout. Default: 5 seconds.
-    /// * `retry_policy` - Retry policy for transient failures. Default: 3 attempts with exponential
-    ///   backoff.
-    /// * `compression` - Enable gzip compression for requests. Default: false.
-    /// * `tls` - TLS configuration for secure connections.
+    /// `servers` and `client_id` are required. All other parameters have
+    /// sensible defaults.
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - Static endpoints are empty or invalid
-    /// - Timeout is zero
-    /// - Connect timeout is zero
-    /// - Client ID is empty
-    /// - TLS configuration is invalid
+    /// Returns [`SdkError::Config`] if:
+    /// - `servers` is [`ServerSource::Static`] with an empty or malformed endpoint list.
+    /// - `client_id` is empty.
+    /// - `timeout` or `connect_timeout` is zero.
+    /// - `region_leader_hard_ttl` is less than `region_leader_soft_ttl`.
+    /// - `http2_initial_stream_window_bytes` is below the RFC 9113 minimum (65,535).
+    /// - `http2_initial_connection_window_bytes` is less than `http2_initial_stream_window_bytes`.
+    /// - `connection_pool_size` is zero.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use inferadb_ledger_sdk::{ClientConfig, TlsConfig, ServerSource};
-    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use inferadb_ledger_sdk::{ClientConfig, ServerSource};
     /// // Static endpoints
     /// let config = ClientConfig::builder()
     ///     .servers(ServerSource::from_static(["http://localhost:50051"]))
     ///     .client_id("my-client")
-    ///     .build()?;
+    ///     .build()
+    ///     .expect("valid config");
     ///
-    /// // DNS discovery
+    /// // DNS discovery (Kubernetes headless service)
     /// use inferadb_ledger_sdk::DnsConfig;
     /// let config = ClientConfig::builder()
     ///     .servers(ServerSource::dns(DnsConfig::builder().domain("ledger.default.svc").build()))
     ///     .client_id("my-client")
-    ///     .build()?;
-    /// # Ok(())
-    /// # }
+    ///     .build()
+    ///     .expect("valid config");
     /// ```
     #[builder]
     pub fn new(
@@ -282,6 +286,17 @@ impl ClientConfig {
         if connection_pool_size == 0 {
             return Err(SdkError::Config {
                 message: "connection_pool_size must be >= 1".to_owned(),
+            });
+        }
+
+        // Wire transport is QUIC-only and does not support UDS endpoints.
+        // Reject the combination at build time so the failure surfaces
+        // early with a clear remediation hint.
+        if let ServerSource::Static(ref endpoints) = servers
+            && endpoints.iter().any(|url| url.starts_with('/'))
+        {
+            return Err(SdkError::Config {
+                message: "UDS endpoints are not supported (wire transport is QUIC-only)".to_owned(),
             });
         }
 
@@ -417,7 +432,7 @@ impl ClientConfig {
         self.vault_cache_capacity
     }
 
-    /// Returns the configured number of pooled tonic Channels.
+    /// Returns the configured number of pooled wire clients.
     #[must_use]
     pub fn connection_pool_size(&self) -> u8 {
         self.connection_pool_size
@@ -441,7 +456,29 @@ const fn default_jitter() -> f64 {
     0.25
 }
 
-/// Retry policy with exponential backoff and jitter.
+/// Retry policy for transient failures.
+///
+/// Implements exponential backoff with jitter. Each failed attempt waits
+/// `initial_backoff * multiplier^(attempt - 1)`, capped at `max_backoff`,
+/// with ±`jitter` random variation applied.
+///
+/// The default policy (5 attempts, 100 ms initial backoff, 10 s cap, ×2
+/// multiplier, 0.25 jitter) handles cold-start leader-redirect routing
+/// plus several transient-failure retries. Use [`RetryPolicy::no_retry`]
+/// to disable retries entirely.
+///
+/// # Example
+///
+/// ```no_run
+/// use std::time::Duration;
+/// use inferadb_ledger_sdk::RetryPolicy;
+///
+/// let policy = RetryPolicy::builder()
+///     .max_attempts(10)
+///     .initial_backoff(Duration::from_millis(50))
+///     .max_backoff(Duration::from_secs(30))
+///     .build();
+/// ```
 #[derive(Debug, Clone, bon::Builder, serde::Serialize, serde::Deserialize)]
 #[builder(derive(Debug))]
 pub struct RetryPolicy {
@@ -550,10 +587,11 @@ fn validate_url(url: &str) -> Result<()> {
 /// Default peer discovery refresh interval (60 seconds).
 const DEFAULT_DISCOVERY_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Configuration for peer discovery.
+/// Configuration for background peer discovery.
 ///
-/// When enabled, the SDK periodically queries the cluster for peer information
-/// and updates its endpoint list for failover and load distribution.
+/// When enabled, the SDK periodically queries the cluster for the current
+/// peer list and updates its endpoint set for failover and load distribution.
+/// Discovery is disabled by default.
 ///
 /// # Example
 ///

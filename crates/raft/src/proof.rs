@@ -1,20 +1,22 @@
-//! Merkle proof utilities for converting between internal and proto formats.
+//! Merkle proof utilities returning wire types directly.
 //!
 //! Provides helpers for:
-//! - Converting `inferadb_ledger_types::merkle::MerkleProof` to proto `MerkleProof`
+//! - Converting `inferadb_ledger_types::merkle::MerkleProof` to wire `MerkleProof`
 //! - Generating transaction proofs from transaction lists
 //! - Fetching blocks and generating proofs with proper error handling
+//! - Generating and verifying state proofs
 
 use std::sync::Arc;
 
-use inferadb_ledger_proto::proto;
+use bytes::Bytes;
 use inferadb_ledger_state::BlockArchive;
 use inferadb_ledger_store::FileBackend;
 use inferadb_ledger_types::{
     OrganizationId, OrganizationSlug, Transaction, VaultId, VaultSlug,
     hash::{Hash, hash_eq, tx_hash},
-    merkle::MerkleTree,
+    merkle::{MerkleProof as InternalMerkleProof, MerkleTree},
 };
+use inferadb_ledger_wire::services::shared as ws;
 use snafu::{ResultExt, Snafu};
 
 // ============================================================================
@@ -91,9 +93,9 @@ pub type Result<T> = std::result::Result<T, ProofError>;
 /// Generated proof data including block header and transaction proof.
 pub struct WriteProof {
     /// Block header for client verification.
-    pub block_header: proto::BlockHeader,
+    pub block_header: ws::BlockHeader,
     /// Merkle proof for the transaction.
-    pub tx_proof: proto::MerkleProof,
+    pub tx_proof: ws::MerkleProof,
 }
 
 /// Generates a write proof by fetching the committed block from the archive.
@@ -142,25 +144,28 @@ pub fn generate_write_proof(
         });
     }
 
-    // Build block header from vault entry
+    // Build wire block header from vault entry. The wire `timestamp` field is
+    // a `u64` of UNIX nanoseconds; mirror the proto-side timestamp encoding.
     let block_hash = inferadb_ledger_types::vault_entry_hash(entry);
-    let block_header = proto::BlockHeader {
+    let timestamp_ns: u64 = {
+        let secs = block.timestamp.timestamp();
+        let nanos = block.timestamp.timestamp_subsec_nanos() as u64;
+        if secs < 0 { 0 } else { (secs as u64).saturating_mul(1_000_000_000).saturating_add(nanos) }
+    };
+    let block_header = ws::BlockHeader {
         height: entry.vault_height,
-        organization: Some(proto::OrganizationSlug {
-            slug: org_slug.map_or(entry.organization.value() as u64, |s| s.value()),
-        }),
-        vault: Some(proto::VaultSlug { slug: vault_slug.map_or(0, |s| s.value()) }),
-        previous_hash: Some(proto::Hash { value: entry.previous_vault_hash.to_vec() }),
-        tx_merkle_root: Some(proto::Hash { value: entry.tx_merkle_root.to_vec() }),
-        state_root: Some(proto::Hash { value: entry.state_root.to_vec() }),
-        timestamp: Some(prost_types::Timestamp {
-            seconds: block.timestamp.timestamp(),
-            nanos: block.timestamp.timestamp_subsec_nanos() as i32,
-        }),
-        leader_id: Some(proto::NodeId { id: block.leader_id.to_string() }),
+        organization: Some(OrganizationSlug::new(
+            org_slug.map_or(entry.organization.value() as u64, |s| s.value()),
+        )),
+        vault: Some(VaultSlug::new(vault_slug.map_or(0, |s| s.value()))),
+        previous_hash: Some(hash_to_wire(&entry.previous_vault_hash)),
+        tx_merkle_root: Some(hash_to_wire(&entry.tx_merkle_root)),
+        state_root: Some(hash_to_wire(&entry.state_root)),
+        timestamp: timestamp_ns,
+        leader_id: Some(inferadb_ledger_types::NodeId::new(block.leader_id.to_string())),
         term: block.term,
         committed_index: block.committed_index,
-        block_hash: Some(proto::Hash { value: block_hash.to_vec() }),
+        block_hash: Some(hash_to_wire(&block_hash)),
     };
 
     // Generate transaction proof
@@ -180,10 +185,7 @@ pub fn generate_write_proof(
 /// Generates a Merkle proof for a transaction at the given index.
 ///
 /// Returns `None` if the index is out of bounds or the transaction list is empty.
-pub fn generate_tx_proof(
-    transactions: &[Transaction],
-    tx_index: usize,
-) -> Option<proto::MerkleProof> {
+pub fn generate_tx_proof(transactions: &[Transaction], tx_index: usize) -> Option<ws::MerkleProof> {
     if transactions.is_empty() || tx_index >= transactions.len() {
         return None;
     }
@@ -195,7 +197,7 @@ pub fn generate_tx_proof(
     let tree = MerkleTree::from_leaves(&leaves);
     let internal_proof = tree.proof(tx_index)?;
 
-    Some((&internal_proof).into())
+    Some(internal_merkle_proof_to_wire(&internal_proof))
 }
 
 /// Generates a Merkle proof for a transaction by its ID.
@@ -205,9 +207,42 @@ pub fn generate_tx_proof(
 pub fn generate_tx_proof_by_id(
     transactions: &[Transaction],
     tx_id: &[u8; 16],
-) -> Option<proto::MerkleProof> {
+) -> Option<ws::MerkleProof> {
     let tx_index = transactions.iter().position(|tx| &tx.id == tx_id)?;
     generate_tx_proof(transactions, tx_index)
+}
+
+// ============================================================================
+// Wire conversion helpers (formerly proto conversion)
+// ============================================================================
+
+/// Build a wire [`ws::Hash`] from an internal 32-byte digest.
+fn hash_to_wire(h: &Hash) -> ws::Hash {
+    ws::Hash { value: Bytes::copy_from_slice(h) }
+}
+
+/// Convert an internal [`InternalMerkleProof`] to a wire [`ws::MerkleProof`].
+///
+/// The internal format stores raw sibling hashes with the `leaf_index` to
+/// determine direction; the wire format explicitly encodes direction for
+/// each sibling.
+fn internal_merkle_proof_to_wire(internal: &InternalMerkleProof) -> ws::MerkleProof {
+    let mut index = internal.leaf_index;
+    let mut siblings = Vec::with_capacity(internal.proof_hashes.len());
+
+    for hash in &internal.proof_hashes {
+        // If current index is even (left child), sibling is on the right.
+        // If current index is odd (right child), sibling is on the left.
+        let direction =
+            if index.is_multiple_of(2) { ws::Direction::Right } else { ws::Direction::Left };
+
+        siblings.push(ws::MerkleSibling { hash: Some(hash_to_wire(hash)), direction });
+
+        // Move up to parent index.
+        index /= 2;
+    }
+
+    ws::MerkleProof { leaf_hash: Some(hash_to_wire(&internal.leaf_hash)), siblings }
 }
 
 // ============================================================================
@@ -235,30 +270,30 @@ pub fn generate_state_proof(
     entity: &inferadb_ledger_types::Entity,
     bucket_roots: &[Hash; 256],
     block_height: u64,
-) -> proto::StateProof {
+) -> ws::StateProof {
     let entity_bucket_id = bucket_id(&entity.key) as u32;
 
     // Collect other bucket roots (excluding the entity's bucket)
-    let mut other_bucket_roots: Vec<proto::Hash> = Vec::with_capacity(255);
+    let mut other_bucket_roots: Vec<ws::Hash> = Vec::with_capacity(255);
     for (i, root) in bucket_roots.iter().enumerate() {
         if i != entity_bucket_id as usize {
-            other_bucket_roots.push(proto::Hash { value: root.to_vec() });
+            other_bucket_roots.push(hash_to_wire(root));
         }
     }
 
     // Compute state root from all bucket roots
     let state_root = sha256_concat(bucket_roots);
 
-    proto::StateProof {
-        key: entity.key.clone(),
-        value: entity.value.clone(),
+    ws::StateProof {
+        key: Bytes::copy_from_slice(&entity.key),
+        value: Bytes::copy_from_slice(&entity.value),
         expires_at: entity.expires_at,
         version: entity.version,
         bucket_id: entity_bucket_id,
-        bucket_root: Some(proto::Hash { value: bucket_roots[entity_bucket_id as usize].to_vec() }),
+        bucket_root: Some(hash_to_wire(&bucket_roots[entity_bucket_id as usize])),
         other_bucket_roots,
         block_height,
-        state_root: Some(proto::Hash { value: state_root.to_vec() }),
+        state_root: Some(hash_to_wire(&state_root)),
     }
 }
 
@@ -298,7 +333,7 @@ pub enum StateProofVerification {
 /// which is expensive. For most use cases, trusting the bucket_root and verifying
 /// the state_root is sufficient.
 pub fn verify_state_proof(
-    proof: &proto::StateProof,
+    proof: &ws::StateProof,
     expected_state_root: &Hash,
 ) -> StateProofVerification {
     // 1. Verify bucket_id matches key
@@ -354,8 +389,8 @@ pub fn verify_state_proof(
 #[allow(clippy::unwrap_used, clippy::disallowed_methods)]
 mod tests {
     use chrono::Utc;
-    use inferadb_ledger_proto::proto::Direction;
     use inferadb_ledger_types::ClientId;
+    use inferadb_ledger_wire::services::shared::Direction;
 
     use super::*;
 
@@ -376,7 +411,7 @@ mod tests {
 
         // Single tx: leaf_hash should be the tx hash
         assert!(proof.leaf_hash.is_some());
-        assert_eq!(proof.leaf_hash.as_ref().unwrap().value, tx_hash(&txs[0]).to_vec());
+        assert_eq!(proof.leaf_hash.as_ref().unwrap().value.as_ref(), tx_hash(&txs[0]).as_slice());
 
         // Single tx: no siblings needed
         assert!(proof.siblings.is_empty());
@@ -388,18 +423,21 @@ mod tests {
 
         // Proof for first tx
         let proof0 = generate_tx_proof(&txs, 0).unwrap();
-        assert_eq!(proof0.leaf_hash.as_ref().unwrap().value, tx_hash(&txs[0]).to_vec());
+        assert_eq!(proof0.leaf_hash.as_ref().unwrap().value.as_ref(), tx_hash(&txs[0]).as_slice());
         assert_eq!(proof0.siblings.len(), 1);
         // tx[0] is left child, so sibling (tx[1]) is on the right
-        assert_eq!(proof0.siblings[0].direction(), Direction::Right);
-        assert_eq!(proof0.siblings[0].hash.as_ref().unwrap().value, tx_hash(&txs[1]).to_vec());
+        assert_eq!(proof0.siblings[0].direction, Direction::Right);
+        assert_eq!(
+            proof0.siblings[0].hash.as_ref().unwrap().value.as_ref(),
+            tx_hash(&txs[1]).as_slice()
+        );
 
         // Proof for second tx
         let proof1 = generate_tx_proof(&txs, 1).unwrap();
-        assert_eq!(proof1.leaf_hash.as_ref().unwrap().value, tx_hash(&txs[1]).to_vec());
+        assert_eq!(proof1.leaf_hash.as_ref().unwrap().value.as_ref(), tx_hash(&txs[1]).as_slice());
         assert_eq!(proof1.siblings.len(), 1);
         // tx[1] is right child, so sibling (tx[0]) is on the left
-        assert_eq!(proof1.siblings[0].direction(), Direction::Left);
+        assert_eq!(proof1.siblings[0].direction, Direction::Left);
     }
 
     #[test]
@@ -419,7 +457,7 @@ mod tests {
         let target_id = [2u8; 16];
 
         let proof = generate_tx_proof_by_id(&txs, &target_id).unwrap();
-        assert_eq!(proof.leaf_hash.as_ref().unwrap().value, tx_hash(&txs[1]).to_vec());
+        assert_eq!(proof.leaf_hash.as_ref().unwrap().value.as_ref(), tx_hash(&txs[1]).as_slice());
     }
 
     #[test]
@@ -471,8 +509,8 @@ mod tests {
 
         let proof = generate_state_proof(&entity, &bucket_roots, 100);
 
-        assert_eq!(proof.key, b"test_key");
-        assert_eq!(proof.value, b"test_value");
+        assert_eq!(proof.key.as_ref(), b"test_key");
+        assert_eq!(proof.value.as_ref(), b"test_value");
         assert_eq!(proof.expires_at, 0);
         assert_eq!(proof.version, 1);
         assert_eq!(proof.block_height, 100);
@@ -481,7 +519,10 @@ mod tests {
 
         // Verify state_root matches computed value
         let expected_state_root = sha256_concat(&bucket_roots);
-        assert_eq!(proof.state_root.as_ref().unwrap().value, expected_state_root.to_vec());
+        assert_eq!(
+            proof.state_root.as_ref().unwrap().value.as_ref(),
+            expected_state_root.as_slice()
+        );
     }
 
     #[test]

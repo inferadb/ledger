@@ -1,34 +1,22 @@
 //! Vault CRUD operations.
 
-use inferadb_ledger_proto::proto;
-use inferadb_ledger_types::{OrganizationSlug, UserSlug, VaultSlug};
-
-use crate::{
-    LedgerClient,
-    error::Result,
-    types::admin::{VaultInfo, VaultStatus},
+use inferadb_ledger_types::{
+    BlockRetentionMode, BlockRetentionPolicy, OrganizationSlug, UserSlug, VaultSlug,
 };
+
+use crate::{LedgerClient, error::Result, types::admin::VaultInfo};
 
 impl LedgerClient {
     /// Creates a new vault in an organization.
     ///
-    /// Creates a vault within the specified organization. The vault slug
-    /// (external identifier) is assigned by the leader and returned in the response.
-    ///
-    /// # Arguments
-    ///
-    /// * `caller` - Identity of the user performing this operation (external slug).
-    /// * `organization` - Organization slug (external identifier).
-    ///
-    /// # Returns
-    ///
-    /// Returns [`VaultInfo`] containing the new vault's metadata.
+    /// Creates a vault within `organization` and returns [`VaultInfo`]
+    /// containing the new vault's metadata. The vault slug is assigned by
+    /// the leader and included in the response.
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - Connection fails after retry attempts
-    /// - The organization does not exist
+    /// Returns an error if connection fails after retry attempts or the
+    /// organization does not exist.
     ///
     /// # Example
     ///
@@ -47,42 +35,17 @@ impl LedgerClient {
         caller: UserSlug,
         organization: OrganizationSlug,
     ) -> Result<VaultInfo> {
-        // Generate the vault slug once, outside the retry loop. Every
-        // retry for this logical call reuses it so the server's
-        // per-org CreateVault idempotency (keyed on slug) returns the
-        // same VaultId instead of creating a duplicate body on
-        // response-lost-in-flight.
-        let vault_slug = inferadb_ledger_types::snowflake::generate_vault_slug().map_err(|e| {
-            crate::error::SdkError::Config { message: format!("generate vault slug: {e}") }
-        })?;
         let pool = self.pool.clone();
+        // The wire op generates its own vault slug internally — same
+        // idempotency contract (one slug per logical call, reused across
+        // retries) — so we simply forward.
         self.call_with_retry("create_vault", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_vault_client);
-
-                let request = proto::CreateVaultRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    replication_factor: 0,  // Use default
-                    initial_nodes: vec![],  // Auto-assigned
-                    retention_policy: None, // Default: FULL
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                    slug: Some(proto::VaultSlug { slug: vault_slug.value() }),
-                };
-
-                let response =
-                    client.create_vault(tonic::Request::new(request)).await?.into_inner();
-
-                let genesis = response.genesis.unwrap_or_default();
-                Ok(VaultInfo {
-                    organization,
-                    vault: VaultSlug::new(response.vault.map_or(0, |v| v.slug)),
-                    height: genesis.height,
-                    state_root: genesis.state_root.map(|h| h.value).unwrap_or_default(),
-                    nodes: vec![],
-                    leader: None,
-                    status: VaultStatus::Active,
-                })
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::vault::create_vault(wire_client, request_id, caller, organization)
+                    .await
             }
         })
         .await
@@ -90,21 +53,13 @@ impl LedgerClient {
 
     /// Returns information about a vault.
     ///
-    /// # Arguments
-    ///
-    /// * `caller` - Identity of the user performing this operation (external slug).
-    /// * `organization` - Organization slug (external identifier).
-    /// * `vault` - Vault slug (external identifier).
-    ///
-    /// # Returns
-    ///
-    /// Returns [`VaultInfo`] containing vault metadata.
+    /// Returns [`VaultInfo`] containing vault metadata for `vault` in
+    /// `organization`.
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - Connection fails after retry attempts
-    /// - The organization or vault does not exist
+    /// Returns an error if connection fails after retry attempts or the
+    /// organization or vault does not exist.
     ///
     /// # Example
     ///
@@ -128,17 +83,16 @@ impl LedgerClient {
         self.call_with_retry("get_vault", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_vault_client);
-
-                let request = proto::GetVaultRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    vault: Some(proto::VaultSlug { slug: vault.value() }),
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                let response = client.get_vault(tonic::Request::new(request)).await?.into_inner();
-
-                Ok(VaultInfo::from_proto(response))
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::vault::get_vault(
+                    wire_client,
+                    request_id,
+                    caller,
+                    organization,
+                    vault,
+                )
+                .await
             }
         })
         .await
@@ -146,21 +100,12 @@ impl LedgerClient {
 
     /// Lists vaults on this node.
     ///
-    /// Returns a paginated list of vaults that this node is hosting or
-    /// participating in. Pass the returned `next_page_token` into subsequent
-    /// calls to retrieve further pages.
-    ///
-    /// # Arguments
-    ///
-    /// * `caller` - Identity of the user performing this operation (external slug).
-    /// * `page_size` - Maximum items per page (0 = server default).
-    /// * `page_token` - Opaque cursor from a previous response, or `None` for the first page.
-    /// * `organization` - Optional organization filter.
-    ///
-    /// # Returns
-    ///
-    /// A tuple of `(vaults, next_page_token)`. When `next_page_token`
-    /// is `None`, there are no more pages.
+    /// Returns a paginated list of vaults this node hosts or participates in.
+    /// `page_size` is the maximum items per page (0 = server default). Pass
+    /// `page_token` from a previous response to fetch the next page; pass
+    /// `None` for the first page. Supply `organization` to filter by a
+    /// specific organization. Returns a tuple `(vaults, next_page_token)`
+    /// where `next_page_token` is `None` when there are no more pages.
     ///
     /// # Errors
     ///
@@ -191,20 +136,17 @@ impl LedgerClient {
             let pool = pool.clone();
             let page_token = page_token.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_vault_client);
-
-                let request = proto::ListVaultsRequest {
-                    page_token: page_token.clone(),
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::vault::list_vaults(
+                    wire_client,
+                    request_id,
+                    caller,
                     page_size,
-                    organization: organization.map(|o| proto::OrganizationSlug { slug: o.value() }),
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                let response = client.list_vaults(tonic::Request::new(request)).await?.into_inner();
-
-                let vaults = response.vaults.into_iter().map(VaultInfo::from_proto).collect();
-
-                Ok((vaults, response.next_page_token))
+                    page_token,
+                    organization,
+                )
+                .await
             }
         })
         .await
@@ -212,18 +154,11 @@ impl LedgerClient {
 
     /// Deletes a vault from an organization.
     ///
-    /// # Arguments
-    ///
-    /// * `caller` - Identity of the user performing this operation (external slug).
-    /// * `organization` - Organization slug (external identifier).
-    /// * `vault` - Vault slug (external identifier).
-    ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - Connection fails after retry attempts
-    /// - The organization or vault does not exist
-    /// - The vault has active data preventing deletion
+    /// Returns an error if connection fails after retry attempts, the
+    /// organization or vault does not exist, or the vault has active data
+    /// preventing deletion.
     ///
     /// # Example
     ///
@@ -246,50 +181,59 @@ impl LedgerClient {
         self.call_with_retry("delete_vault", || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_vault_client);
-
-                let request = proto::DeleteVaultRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    vault: Some(proto::VaultSlug { slug: vault.value() }),
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                client.delete_vault(tonic::Request::new(request)).await?;
-
-                Ok(())
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::vault::delete_vault(
+                    wire_client,
+                    request_id,
+                    caller,
+                    organization,
+                    vault,
+                )
+                .await
             }
         })
         .await
     }
 
     /// Updates vault metadata (retention policy).
-    ///
-    /// # Arguments
-    ///
-    /// * `caller` - Identity of the user performing this operation (external slug).
     pub async fn update_vault(
         &self,
         caller: UserSlug,
         organization: OrganizationSlug,
         vault: VaultSlug,
-        retention_policy: Option<proto::BlockRetentionPolicy>,
+        retention_policy: Option<BlockRetentionPolicy>,
     ) -> Result<()> {
         let pool = self.pool.clone();
-        self.call_with_retry("update_vault", || {
+        self.call_with_retry("update_vault", move || {
             let pool = pool.clone();
             async move {
-                let mut client = crate::connected_client!(pool, create_vault_client);
-
-                let request = proto::UpdateVaultRequest {
-                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-                    vault: Some(proto::VaultSlug { slug: vault.value() }),
-                    retention_policy,
-                    caller: Some(proto::UserSlug { slug: caller.value() }),
-                };
-
-                client.update_vault(tonic::Request::new(request)).await?;
-
-                Ok(())
+                // Translate domain BlockRetentionPolicy → wire equivalent.
+                // The wire `mode` is `Option<BlockRetentionMode>`; the
+                // domain enum has only `Full` / `Compacted` (no
+                // `Unspecified`), so we always emit `Some(...)`.
+                let wire_retention = retention_policy.as_ref().map(|p| {
+                    use inferadb_ledger_wire::services::shared as ws;
+                    let mode = match p.mode {
+                        BlockRetentionMode::Full => ws::BlockRetentionMode::Full,
+                        BlockRetentionMode::Compacted => ws::BlockRetentionMode::Compacted,
+                    };
+                    ws::BlockRetentionPolicy {
+                        mode: Some(mode),
+                        retention_blocks: Some(p.retention_blocks),
+                    }
+                });
+                let wire_client = crate::connected_wire_client!(pool);
+                let request_id: u128 = rand::random();
+                crate::ops_wire::vault::update_vault(
+                    wire_client,
+                    request_id,
+                    caller,
+                    organization,
+                    vault,
+                    wire_retention,
+                )
+                .await
             }
         })
         .await

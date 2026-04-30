@@ -1,10 +1,9 @@
-//! Smoke test for the B.1 `TestCluster` helpers.
+//! Smoke test for the `TestCluster` on-demand consensus helpers.
 //!
-//! Exercises the post-bootstrap on-demand region + organization creation
-//! path added as part of B.1 Task 13. The legacy `with_data_regions`
-//! bootstrap remains exercised by every other integration test; this file
-//! exists purely to verify the new helper surface works end-to-end against
-//! a multi-node cluster driven entirely through consensus.
+//! Exercises the post-bootstrap on-demand region + organization creation path.
+//! The legacy `with_data_regions` bootstrap remains exercised by every other
+//! integration test; this file verifies the helper surface that drives region
+//! and organization creation entirely through cluster consensus.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 

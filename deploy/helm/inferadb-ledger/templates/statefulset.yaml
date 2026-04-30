@@ -106,20 +106,24 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          # Probes use tcpSocket (not grpc) — the wire-protocol binary
+          # serves QUIC over UDP and exposes a minimal TCP listener for K8s
+          # probes (crates/server/src/health_probe.rs). tcpSocket succeeds
+          # iff TCP handshake completes; richer signaling is not required.
           startupProbe:
-            grpc:
+            tcpSocket:
               port: 50051
             initialDelaySeconds: {{ .Values.probes.startup.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.startup.periodSeconds }}
             failureThreshold: {{ .Values.probes.startup.failureThreshold }}
           livenessProbe:
-            grpc:
+            tcpSocket:
               port: 50051
             initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
             failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
           readinessProbe:
-            grpc:
+            tcpSocket:
               port: 50051
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}

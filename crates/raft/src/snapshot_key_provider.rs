@@ -12,20 +12,11 @@
 //! can be encrypted under independent keys.
 //!
 //! Two implementations ship with the trait:
-//! - [`NoopSnapshotKeyProvider`] — always returns `None`. Stage 2's persister will skip the
-//!   encryption envelope when the provider returns `None`; valid only for tests / unencrypted
+//! - [`NoopSnapshotKeyProvider`] — always returns `None`. The snapshot persister skips the
+//!   encryption envelope when the provider returns `None`; valid only for tests or unencrypted
 //!   local-dev configurations.
 //! - [`InMemorySnapshotKeyProvider`] — a `HashMap` of keys behind a `RwLock`. Suitable for tests
 //!   and single-node deployments.
-//!
-//! # Stage 1a scaffolding
-//!
-//! This module exists to thread a typed key provider through
-//! [`RaftManagerConfig`](crate::raft_manager::RaftManagerConfig) ->
-//! [`RaftLogStore`](crate::log_storage::RaftLogStore) ->
-//! [`LedgerSnapshotBuilder`](crate::log_storage::LedgerSnapshotBuilder)
-//! ahead of the Stage 1b builder bifurcation and Stage 2 persister wiring.
-//! No call site dereferences the provider yet.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -39,11 +30,10 @@ pub trait SnapshotKeyProvider: std::fmt::Debug + Send + Sync + 'static {
     /// Returns the encryption key for a snapshot in the given scope.
     ///
     /// `vault_id = None` denotes an org-level snapshot; `vault_id = Some(_)`
-    /// denotes a per-vault snapshot. Returning `None` means the snapshot in
-    /// this scope is unencrypted — the Stage 2 persister will write the
-    /// snapshot in plaintext when this returns `None`. Plaintext snapshots
-    /// are valid only for tests and explicitly unencrypted local-dev
-    /// configurations.
+    /// denotes a per-vault snapshot. Returning `None` means the snapshot for
+    /// this scope is unencrypted — the persister writes the snapshot in
+    /// plaintext. Plaintext snapshots are valid only for tests and explicitly
+    /// unencrypted local-dev configurations.
     fn snapshot_key(
         &self,
         region: &Region,

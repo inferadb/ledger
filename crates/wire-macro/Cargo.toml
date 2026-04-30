@@ -1,0 +1,33 @@
+[package]
+name = "inferadb-ledger-wire-macro"
+description = "Procedural macros for the InferaDB Ledger custom wire protocol DSL"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["wire", "macro", "proc-macro", "dsl"]
+categories = ["development-tools::procedural-macro-helpers"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true
+
+[dev-dependencies]
+trybuild.workspace = true
+inferadb-ledger-wire = { workspace = true }
+inferadb-ledger-wire-transport = { workspace = true }
+bytes.workspace = true
+postcard.workspace = true
+serde = { workspace = true, features = ["derive"] }
+futures.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util", "sync"] }
+tokio-util = { workspace = true, features = ["rt"] }
+
+[lints]
+workspace = true

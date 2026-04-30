@@ -2,69 +2,12 @@
 //!
 //! Injects `x-request-id` and `x-trace-id` into response metadata, ensuring
 //! that both successful responses and error statuses carry correlation IDs for
-//! debugging and SDK error enrichment. Also attaches structured
-//! [`ErrorDetails`](inferadb_ledger_proto::proto::ErrorDetails) to error statuses for
-//! machine-readable error handling.
+//! debugging and SDK error enrichment. Also attaches a JSON-encoded
+//! [`WireError`](inferadb_ledger_wire::WireError) payload to error statuses
+//! (via [`wire_helpers::wire_error_to_tonic_status`](super::wire_helpers::wire_error_to_tonic_status))
+//! for machine-readable error handling on the bridged tonic surface.
 
-use std::collections::HashMap;
-
-use inferadb_ledger_proto::proto;
-use prost::Message;
-use tonic::{Response, Status};
-
-/// Injects `x-request-id` and `x-trace-id` correlation metadata into a gRPC response.
-///
-/// Called on every successful response to propagate server-generated correlation IDs
-/// back to the SDK, where they are extracted and attached to `SdkError` variants.
-pub(crate) fn response_with_correlation<T>(
-    body: T,
-    request_id: &uuid::Uuid,
-    trace_id: &str,
-) -> Response<T> {
-    let mut response = Response::new(body);
-    if let Ok(val) = tonic::metadata::MetadataValue::try_from(&request_id.to_string()) {
-        response.metadata_mut().insert("x-request-id", val);
-    }
-    if let Ok(val) = tonic::metadata::MetadataValue::try_from(trace_id) {
-        response.metadata_mut().insert("x-trace-id", val);
-    }
-    response
-}
-
-/// Injects correlation metadata and structured error details into a gRPC error `Status`.
-///
-/// Ensures that even error responses carry:
-/// 1. Correlation IDs (`x-request-id`, `x-trace-id`) for SDK error enrichment.
-/// 2. Binary-encoded [`ErrorDetails`] in `Status.details` for machine-readable error handling
-///    (error code, retryability, recovery guidance).
-///
-/// If the status already has non-empty details (set by specialized error builders
-/// in [`super::error_details`]), those are preserved. Otherwise, a generic
-/// `ErrorDetails` is synthesized from the gRPC status code.
-pub(crate) fn status_with_correlation(
-    status: Status,
-    request_id: &uuid::Uuid,
-    trace_id: &str,
-) -> Status {
-    // If details are already populated (from a specialized error builder), preserve them.
-    // Otherwise, synthesize generic ErrorDetails from the gRPC code.
-    let status = if status.details().is_empty() {
-        let details = error_details_from_code(status.code());
-        let encoded = details.encode_to_vec();
-        Status::with_details(status.code(), status.message(), encoded.into())
-    } else {
-        status
-    };
-
-    let mut status = status;
-    if let Ok(val) = tonic::metadata::MetadataValue::try_from(&request_id.to_string()) {
-        status.metadata_mut().insert("x-request-id", val);
-    }
-    if let Ok(val) = tonic::metadata::MetadataValue::try_from(trace_id) {
-        status.metadata_mut().insert("x-trace-id", val);
-    }
-    status
-}
+use tonic::Status;
 
 /// Builds a `NotLeader` `Status` with leader hints attached as `ErrorDetails`.
 ///
@@ -94,17 +37,44 @@ pub(crate) fn status_with_not_leader_hint(
     leader_organization_slug: Option<u64>,
     leader_vault_slug: Option<u64>,
 ) -> Status {
-    let details = super::error_details::build_not_leader_details(
-        leader_id,
-        leader_endpoint,
-        leader_term,
-        leader_shard,
-        leader_vault,
-        leader_organization_slug,
-        leader_vault_slug,
+    use std::collections::BTreeMap;
+
+    use inferadb_ledger_types::DiagnosticCode;
+    use inferadb_ledger_wire::ErrorCode;
+
+    let mut context: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(id) = leader_id {
+        context.insert("leader_id".to_owned(), id.to_string());
+    }
+    if let Some(ep) = leader_endpoint.filter(|s| !s.is_empty()) {
+        context.insert("leader_endpoint".to_owned(), ep.to_owned());
+    }
+    if let Some(term) = leader_term {
+        context.insert("leader_term".to_owned(), term.to_string());
+    }
+    if let Some(shard) = leader_shard {
+        context.insert("leader_shard".to_owned(), shard.to_string());
+    }
+    if let Some(v) = leader_vault {
+        context.insert("leader_vault".to_owned(), v.to_string());
+    }
+    if let Some(s) = leader_organization_slug {
+        context.insert("leader_organization_slug".to_owned(), s.to_string());
+    }
+    if let Some(s) = leader_vault_slug {
+        context.insert("leader_vault_slug".to_owned(), s.to_string());
+    }
+
+    let wire_err = super::wire_helpers::build_wire_error(
+        ErrorCode::StaleRouting,
+        message,
+        DiagnosticCode::ConsensusNotLeader.as_u16().to_string(),
+        true,
+        0,
+        context,
+        "Retry against the indicated leader; update your region leader cache",
     );
-    let encoded = details.encode_to_vec();
-    Status::with_details(tonic::Code::Unavailable, message, encoded.into())
+    super::wire_helpers::wire_error_to_tonic_status(wire_err)
 }
 
 /// Builds a `NotLeader` `Status` by extracting `(leader_id, leader_endpoint, term)`
@@ -154,6 +124,97 @@ pub(crate) fn not_leader_status_from_handle(
     )
 }
 
+/// Wire-shaped sibling of [`not_leader_status_from_handle`] returning a
+/// [`WireError`](inferadb_ledger_wire::WireError) directly instead of going
+/// through `tonic::Status` + `ErrorDetails`.
+///
+/// The leader-hint context that lived in `ErrorDetails.context` is encoded
+/// into [`WireError::context`] using the same key shape (`leader_id`,
+/// `leader_endpoint`, `leader_term`, `leader_shard`, `leader_vault`,
+/// `leader_organization_slug`, `leader_vault_slug`) — the SDK reads them
+/// the same way regardless of which transport produced them.
+pub(crate) fn not_leader_wire_error_from_handle(
+    handle: &inferadb_ledger_raft::ConsensusHandle,
+    peer_addresses: Option<&inferadb_ledger_raft::PeerAddressMap>,
+    message: impl Into<String>,
+    leader_vault: Option<u64>,
+    leader_organization_slug: Option<u64>,
+    leader_vault_slug: Option<u64>,
+) -> inferadb_ledger_wire::WireError {
+    use std::collections::BTreeMap;
+
+    use inferadb_ledger_types::DiagnosticCode;
+    use inferadb_ledger_wire::ErrorCode;
+
+    let shard_state = handle.shard_state();
+    let term = handle.current_term();
+    let leader_id = shard_state.leader.map(|n| n.0);
+    let leader_endpoint =
+        leader_id.and_then(|id| peer_addresses.and_then(|m| m.get(id))).map(ensure_endpoint_url);
+    // OrganizationId is i64 (Snowflake); the leader-hint wire field is u64.
+    let leader_organization = handle.organization_id().value() as u64;
+
+    let mut context: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(id) = leader_id {
+        context.insert("leader_id".to_owned(), id.to_string());
+    }
+    if let Some(ep) = leader_endpoint.filter(|s| !s.is_empty()) {
+        context.insert("leader_endpoint".to_owned(), ep);
+    }
+    context.insert("leader_term".to_owned(), term.to_string());
+    context.insert("leader_shard".to_owned(), leader_organization.to_string());
+    if let Some(v) = leader_vault {
+        context.insert("leader_vault".to_owned(), v.to_string());
+    }
+    if let Some(s) = leader_organization_slug {
+        context.insert("leader_organization_slug".to_owned(), s.to_string());
+    }
+    if let Some(s) = leader_vault_slug {
+        context.insert("leader_vault_slug".to_owned(), s.to_string());
+    }
+
+    super::wire_helpers::build_wire_error(
+        ErrorCode::StaleRouting,
+        message,
+        DiagnosticCode::ConsensusNotLeader.as_u16().to_string(),
+        true,
+        0,
+        context,
+        "Retry against the indicated leader; update your region leader cache",
+    )
+}
+
+/// Wire-shaped sibling of [`not_leader_remote_region`] returning a
+/// [`WireError`](inferadb_ledger_wire::WireError) directly.
+#[allow(dead_code)]
+pub(crate) fn not_leader_wire_error_remote_region(
+    redirect: &super::region_resolver::RedirectInfo,
+    message: impl Into<String>,
+) -> inferadb_ledger_wire::WireError {
+    use std::collections::BTreeMap;
+
+    use inferadb_ledger_types::DiagnosticCode;
+    use inferadb_ledger_wire::ErrorCode;
+
+    let mut context: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(ref hint) = redirect.routing.leader_hint {
+        let endpoint = ensure_endpoint_url(hint.clone());
+        if !endpoint.is_empty() {
+            context.insert("leader_endpoint".to_owned(), endpoint);
+        }
+    }
+
+    super::wire_helpers::build_wire_error(
+        ErrorCode::StaleRouting,
+        message,
+        DiagnosticCode::ConsensusNotLeader.as_u16().to_string(),
+        true,
+        0,
+        context,
+        "Retry against the indicated leader; update your region leader cache",
+    )
+}
+
 /// Builds a `NotLeader` `Status` for a cross-region redirect, carrying the
 /// remote region's leader hint (if known) so the SDK can reconnect directly
 /// to the target region's leader.
@@ -199,148 +260,16 @@ pub(super) fn ensure_endpoint_url(addr: String) -> String {
     if addr.starts_with('/') || addr.contains("://") { addr } else { format!("http://{addr}") }
 }
 
-/// Synthesizes a generic `ErrorDetails` from a gRPC status code.
-///
-/// Maps each gRPC code to the most appropriate `DiagnosticCode`, retryability flag,
-/// and recovery guidance. Used as a fallback when specialized error builders
-/// weren't used at the call site.
-pub(crate) fn error_details_from_code(code: tonic::Code) -> proto::ErrorDetails {
-    use inferadb_ledger_types::DiagnosticCode;
-
-    let (error_code, is_retryable, suggested_action) = match code {
-        tonic::Code::InvalidArgument => (
-            DiagnosticCode::AppInvalidArgument,
-            false,
-            "Fix the request parameters to conform to field limits",
-        ),
-        tonic::Code::NotFound => {
-            (DiagnosticCode::AppEntityNotFound, false, "Verify the resource exists before retrying")
-        },
-        tonic::Code::AlreadyExists => (
-            DiagnosticCode::AppAlreadyCommitted,
-            false,
-            "Operation already succeeded; no retry needed",
-        ),
-        tonic::Code::ResourceExhausted => {
-            (DiagnosticCode::AppQuotaExceeded, true, "Reduce request rate or wait before retrying")
-        },
-        tonic::Code::FailedPrecondition => (
-            DiagnosticCode::AppPreconditionFailed,
-            false,
-            "Check preconditions and retry with updated values",
-        ),
-        tonic::Code::Unavailable => (
-            DiagnosticCode::ConsensusNotLeader,
-            true,
-            "Retry against a different node or wait for leader election",
-        ),
-        tonic::Code::DeadlineExceeded => {
-            (DiagnosticCode::AppInternal, true, "Increase timeout or reduce request complexity")
-        },
-        tonic::Code::Internal => {
-            (DiagnosticCode::AppInternal, false, "Check server logs for details")
-        },
-        tonic::Code::Aborted => {
-            (DiagnosticCode::AppInternal, true, "Retry the operation; conflict may have resolved")
-        },
-        _ => (DiagnosticCode::AppInternal, false, "Check server logs for details"),
-    };
-
-    proto::ErrorDetails {
-        error_code: error_code.as_u16().to_string(),
-        is_retryable,
-        retry_after_ms: None,
-        context: HashMap::new(),
-        suggested_action: Some(suggested_action.to_owned()),
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn response_with_correlation_injects_metadata() {
-        let request_id = uuid::Uuid::new_v4();
-        let response = response_with_correlation("body", &request_id, "trace-abc");
-
-        let md = response.metadata();
-        assert_eq!(md.get("x-request-id").unwrap().to_str().unwrap(), request_id.to_string());
-        assert_eq!(md.get("x-trace-id").unwrap().to_str().unwrap(), "trace-abc");
-    }
-
-    #[test]
-    fn status_with_correlation_injects_metadata_and_details() {
-        let request_id = uuid::Uuid::new_v4();
-        let status = Status::invalid_argument("bad field");
-        let enriched = status_with_correlation(status, &request_id, "trace-123");
-
-        // Verify correlation metadata
-        let md = enriched.metadata();
-        assert_eq!(md.get("x-request-id").unwrap().to_str().unwrap(), request_id.to_string());
-        assert_eq!(md.get("x-trace-id").unwrap().to_str().unwrap(), "trace-123");
-
-        // Verify binary error details
-        let details = proto::ErrorDetails::decode(enriched.details()).unwrap();
-        assert_eq!(details.error_code, "3203"); // AppInvalidArgument
-        assert!(!details.is_retryable);
-        assert!(details.suggested_action.is_some());
-    }
-
-    #[test]
-    fn status_with_correlation_preserves_existing_details() {
-        let request_id = uuid::Uuid::new_v4();
-
-        // Pre-build a status with custom details
-        let custom_details = proto::ErrorDetails {
-            error_code: "2000".to_owned(),
-            is_retryable: true,
-            retry_after_ms: Some(500),
-            context: HashMap::new(),
-            suggested_action: Some("custom action".to_owned()),
-        };
-        let encoded = custom_details.encode_to_vec();
-        let status = Status::with_details(tonic::Code::Unavailable, "not leader", encoded.into());
-
-        let enriched = status_with_correlation(status, &request_id, "trace-456");
-
-        // Should preserve the original custom details, not overwrite
-        let details = proto::ErrorDetails::decode(enriched.details()).unwrap();
-        assert_eq!(details.error_code, "2000");
-        assert!(details.is_retryable);
-        assert_eq!(details.retry_after_ms, Some(500));
-        assert_eq!(details.suggested_action.as_deref(), Some("custom action"));
-    }
-
-    #[test]
-    fn status_with_correlation_unavailable_is_retryable() {
-        let request_id = uuid::Uuid::new_v4();
-        let status = Status::unavailable("leader unknown");
-        let enriched = status_with_correlation(status, &request_id, "t");
-
-        let details = proto::ErrorDetails::decode(enriched.details()).unwrap();
-        assert!(details.is_retryable);
-    }
-
-    #[test]
-    fn status_with_correlation_resource_exhausted_is_retryable() {
-        let request_id = uuid::Uuid::new_v4();
-        let status = Status::resource_exhausted("rate limited");
-        let enriched = status_with_correlation(status, &request_id, "t");
-
-        let details = proto::ErrorDetails::decode(enriched.details()).unwrap();
-        assert!(details.is_retryable);
-    }
-
-    #[test]
-    fn status_with_correlation_deadline_exceeded_is_retryable() {
-        let request_id = uuid::Uuid::new_v4();
-        let status = Status::deadline_exceeded("timed out");
-        let enriched = status_with_correlation(status, &request_id, "t");
-
-        let details = proto::ErrorDetails::decode(enriched.details()).unwrap();
-        assert!(details.is_retryable);
+    /// Round-trip a `Status` produced by the metadata helpers back through
+    /// `tonic_status_to_wire_error` to recover the JSON-encoded context.
+    /// The bridge layer is byte-symmetric on the same hop.
+    fn decode_context(status: &Status) -> std::collections::BTreeMap<String, String> {
+        super::super::wire_helpers::tonic_status_to_wire_error(status.clone()).context
     }
 
     #[test]
@@ -357,43 +286,21 @@ mod tests {
         );
         assert_eq!(status.code(), tonic::Code::Unavailable);
 
-        let details = proto::ErrorDetails::decode(status.details()).unwrap();
-        assert!(details.is_retryable);
-        assert_eq!(details.context.get("leader_id").unwrap(), "42");
-        assert_eq!(details.context.get("leader_endpoint").unwrap(), "http://10.0.2.5:5000");
-        assert_eq!(details.context.get("leader_term").unwrap(), "7");
-        assert_eq!(details.context.get("leader_shard").unwrap(), "5");
-        assert_eq!(details.context.get("leader_vault").unwrap(), "99");
-        assert_eq!(details.context.get("leader_organization_slug").unwrap(), "123");
-        assert_eq!(details.context.get("leader_vault_slug").unwrap(), "456");
-    }
-
-    #[test]
-    fn status_with_not_leader_hint_survives_correlation() {
-        let status = status_with_not_leader_hint(
-            "not leader",
-            Some(1),
-            None,
-            None,
-            Some(0),
-            None,
-            None,
-            None,
-        );
-        let request_id = uuid::Uuid::new_v4();
-        let enriched = status_with_correlation(status, &request_id, "trace");
-
-        let details = proto::ErrorDetails::decode(enriched.details()).unwrap();
-        assert_eq!(details.context.get("leader_id").unwrap(), "1");
-        assert_eq!(details.context.get("leader_shard").unwrap(), "0");
-        assert!(!details.context.contains_key("leader_vault"));
+        let context = decode_context(&status);
+        assert_eq!(context.get("leader_id").unwrap(), "42");
+        assert_eq!(context.get("leader_endpoint").unwrap(), "http://10.0.2.5:5000");
+        assert_eq!(context.get("leader_term").unwrap(), "7");
+        assert_eq!(context.get("leader_shard").unwrap(), "5");
+        assert_eq!(context.get("leader_vault").unwrap(), "99");
+        assert_eq!(context.get("leader_organization_slug").unwrap(), "123");
+        assert_eq!(context.get("leader_vault_slug").unwrap(), "456");
     }
 
     #[test]
     fn status_with_not_leader_hint_omits_vault_when_none() {
         // Region- and org-scoped rejections pass leader_vault = None;
-        // the resulting ErrorDetails MUST omit the leader_vault key so the
-        // SDK falls back to its org-level cache.
+        // the resulting context MUST omit the leader_vault key so the SDK
+        // falls back to its org-level cache.
         let status = status_with_not_leader_hint(
             "not leader",
             Some(1),
@@ -404,10 +311,10 @@ mod tests {
             None,
             None,
         );
-        let details = proto::ErrorDetails::decode(status.details()).unwrap();
-        assert!(!details.context.contains_key("leader_vault"));
-        assert!(!details.context.contains_key("leader_vault_slug"));
-        assert_eq!(details.context.get("leader_shard").unwrap(), "3");
+        let context = decode_context(&status);
+        assert!(!context.contains_key("leader_vault"));
+        assert!(!context.contains_key("leader_vault_slug"));
+        assert_eq!(context.get("leader_shard").unwrap(), "3");
     }
 
     #[test]
@@ -428,12 +335,8 @@ mod tests {
 
         let status = not_leader_remote_region(&remote, "remote region");
         assert_eq!(status.code(), tonic::Code::Unavailable);
-        let details = proto::ErrorDetails::decode(status.details()).unwrap();
-        assert_eq!(
-            details.context.get("leader_endpoint").map(String::as_str),
-            Some("node-1:50051")
-        );
-        assert!(details.is_retryable);
+        let context = decode_context(&status);
+        assert_eq!(context.get("leader_endpoint").map(String::as_str), Some("node-1:50051"));
     }
 
     #[test]
@@ -451,18 +354,7 @@ mod tests {
 
         let status = not_leader_remote_region(&remote, "remote region");
         assert_eq!(status.code(), tonic::Code::Unavailable);
-        let details = proto::ErrorDetails::decode(status.details()).unwrap();
-        assert!(!details.context.contains_key("leader_endpoint"));
-    }
-
-    #[test]
-    fn status_with_correlation_internal_not_retryable() {
-        let request_id = uuid::Uuid::new_v4();
-        let status = Status::internal("unexpected");
-        let enriched = status_with_correlation(status, &request_id, "t");
-
-        let details = proto::ErrorDetails::decode(enriched.details()).unwrap();
-        assert!(!details.is_retryable);
-        assert_eq!(details.error_code, "3204"); // AppInternal
+        let context = decode_context(&status);
+        assert!(!context.contains_key("leader_endpoint"));
     }
 }

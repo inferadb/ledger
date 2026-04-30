@@ -1,33 +1,30 @@
 //! Per-vault leader cache for fine-grained routing.
 //!
-//! Phase 6 deliverable: with the three-tier consensus topology (system /
-//! region / per-organization Raft groups), individual vaults can have their
-//! own delegated leader. Routing every request through the region's gateway
-//! defeats the latency benefit of per-org / per-vault leadership, so the SDK
-//! caches `(organization_id, vault_id) -> leader endpoint` directly and
-//! consults that cache on the hot path.
+//! In the three-tier consensus topology (system / region / per-organization
+//! Raft groups), individual vaults can have their own delegated leader.
+//! Routing every request through the region's gateway defeats the latency
+//! benefit, so the SDK caches `(OrganizationSlug, VaultSlug) -> leader endpoint`
+//! directly and consults that cache on the hot path.
 //!
 //! # Relationship to [`crate::region_resolver::RegionLeaderCache`]
 //!
-//! The vault cache is **additive**, not a replacement. It coexists with the
-//! region cache during the rollout:
+//! The vault cache is **additive**, not a replacement:
 //!
 //! - When a `NotLeader` hint carries `vault_id`, the vault cache is updated.
-//! - When a hint omits `vault_id`, the region cache is updated (legacy / region-scoped rejections).
-//! - When the connection pool resolves a channel for a vault-scoped request, it consults the vault
-//!   cache first; on miss it falls back to the region cache, then to gateway resolution.
+//! - When a hint omits `vault_id` (region- or org-scoped rejections, legacy servers), the region
+//!   cache is updated instead.
+//! - On a vault-scoped request, the connection pool consults the vault cache first; on miss it
+//!   falls back to the region cache, then to gateway resolution.
 //!
 //! # Invariants
 //!
-//! - **Term-gated**: a hint with `term < cached.term` is dropped (root SDK golden rule 6).
-//!   Stale-leader hints from older terms must not overwrite newer cache state — letting them
-//!   through causes retry storms during leader-flap windows because each side keeps fighting to
-//!   install its own cached value.
-//! - **Bounded**: capacity is configured via `ClientConfig::vault_cache_capacity` (default 10,000).
-//!   On overflow the least-recently-used entry is evicted.
-//! - **Lock-free reads on the lookup path** in the steady state: `lookup` takes a read lock and
-//!   updates a per-entry atomic access counter, so concurrent readers never serialize on a write
-//!   lock.
+//! - **Term-gated**: a hint with `term < cached.term` is dropped. Stale-leader hints must not
+//!   overwrite newer cache state; doing so causes retry storms during leader-flap windows.
+//! - **Bounded**: capacity is configured via
+//!   [`ClientConfig::vault_cache_capacity`](crate::ClientConfig::vault_cache_capacity) (default
+//!   10,000 entries). On overflow the least-recently-used entry is evicted.
+//! - **Read-optimized**: `lookup` takes a read lock and updates a per-entry atomic access counter,
+//!   so concurrent readers do not serialize.
 
 use std::{
     sync::{

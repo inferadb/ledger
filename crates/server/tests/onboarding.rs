@@ -8,14 +8,19 @@
 //! Tests that require the `CreateOnboardingUserSaga` to complete (happy-path complete_registration,
 //! idempotent re-registration, cross-region existing user) are deferred until the saga steps
 //! are fully implemented in the orchestrator.
+//!
+//! F.1.f.2.Stage1e Wave 4: migrated from the legacy tonic helper
+//! `create_user_client` to the wire-protocol sibling `wire_user_client`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::disallowed_methods)]
 
 use std::time::Duration;
 
-use inferadb_ledger_proto::proto;
+use inferadb_ledger_wire::{error::ErrorCode, services::user as wu};
+use inferadb_ledger_wire_services::UserServiceClient;
+use inferadb_ledger_wire_transport::RpcError;
 
-use crate::common::{TestCluster, create_user_client};
+use crate::common::{TestCluster, wire_user_client};
 
 // ============================================================================
 // Test Helpers
@@ -27,46 +32,65 @@ const REGION_GLOBAL: &str = "global";
 
 /// Initiates email verification and returns the code from the response.
 async fn initiate(
-    client: &mut proto::user_service_client::UserServiceClient<tonic::transport::Channel>,
+    client: &UserServiceClient,
     email: &str,
     region: &str,
-) -> Result<String, tonic::Status> {
+) -> Result<String, RpcError> {
     let resp = client
-        .initiate_email_verification(proto::InitiateEmailVerificationRequest {
-            email: email.to_string(),
-            region: region.to_string(),
-        })
+        .initiate_email_verification(
+            wu::InitiateEmailVerificationRequest {
+                email: email.to_string(),
+                region: region.to_string(),
+            },
+            rand::random::<u128>(),
+        )
         .await?;
-    Ok(resp.into_inner().code)
+    Ok(resp.code)
 }
 
 /// Verifies an email code and returns the raw response.
 async fn verify(
-    client: &mut proto::user_service_client::UserServiceClient<tonic::transport::Channel>,
+    client: &UserServiceClient,
     email: &str,
     code: &str,
     region: &str,
-) -> Result<proto::VerifyEmailCodeResponse, tonic::Status> {
+) -> Result<wu::VerifyEmailCodeResponse, RpcError> {
     client
-        .verify_email_code(proto::VerifyEmailCodeRequest {
-            email: email.to_string(),
-            code: code.to_string(),
-            region: region.to_string(),
-        })
+        .verify_email_code(
+            wu::VerifyEmailCodeRequest {
+                email: email.to_string(),
+                code: code.to_string(),
+                region: region.to_string(),
+            },
+            rand::random::<u128>(),
+        )
         .await
-        .map(|r| r.into_inner())
 }
 
 /// Extracts the onboarding token from a VerifyEmailCodeResponse (new-user path).
-fn extract_onboarding_token(resp: &proto::VerifyEmailCodeResponse) -> &str {
+fn extract_onboarding_token(resp: &wu::VerifyEmailCodeResponse) -> &str {
     match resp.result.as_ref().expect("response should have result") {
-        proto::verify_email_code_response::Result::NewUser(new_user) => &new_user.onboarding_token,
-        proto::verify_email_code_response::Result::ExistingUser(_) => {
+        wu::VerifyEmailCodeResult::NewUser(new_user) => &new_user.onboarding_token,
+        wu::VerifyEmailCodeResult::ExistingUser(_) => {
             panic!("expected NewUser result, got ExistingUser")
         },
-        proto::verify_email_code_response::Result::TotpRequired(_) => {
+        wu::VerifyEmailCodeResult::TotpRequired(_) => {
             panic!("expected NewUser result, got TotpRequired")
         },
+    }
+}
+
+/// Asserts the error is a `WireError` with the expected code.
+fn assert_wire_code(err: &RpcError, expected: ErrorCode, label: &str) {
+    match err {
+        RpcError::WireError(wire_err) => {
+            assert_eq!(
+                wire_err.code, expected,
+                "{label}: expected {expected:?}, got {:?}: {}",
+                wire_err.code, wire_err.message
+            );
+        },
+        other => panic!("{label}: expected WireError({expected:?}), got: {other:?}"),
     }
 }
 
@@ -77,11 +101,10 @@ fn extract_onboarding_token(resp: &proto::VerifyEmailCodeResponse) -> &str {
 /// Initiate email verification returns a non-empty verification code.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_initiate_email_verification_returns_code() {
-    let cluster = TestCluster::new(1).await;
-    let addr = &cluster.nodes()[0].addr;
-    let mut client = create_user_client(addr).await.expect("connect");
+    let cluster = TestCluster::with_wire_transport(0).await;
+    let client = wire_user_client(&cluster, cluster.nodes()[0].id);
 
-    let code = initiate(&mut client, "alice@example.com", REGION_GLOBAL)
+    let code = initiate(&client, "alice@example.com", REGION_GLOBAL)
         .await
         .expect("initiate should succeed");
 
@@ -97,14 +120,11 @@ async fn test_initiate_email_verification_returns_code() {
 /// Initiating verification twice for the same email returns a code each time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_initiate_twice_returns_codes() {
-    let cluster = TestCluster::new(1).await;
-    let addr = &cluster.nodes()[0].addr;
-    let mut client = create_user_client(addr).await.expect("connect");
+    let cluster = TestCluster::with_wire_transport(0).await;
+    let client = wire_user_client(&cluster, cluster.nodes()[0].id);
 
-    let code1 =
-        initiate(&mut client, "bob@example.com", REGION_GLOBAL).await.expect("first initiate");
-    let code2 =
-        initiate(&mut client, "bob@example.com", REGION_GLOBAL).await.expect("second initiate");
+    let code1 = initiate(&client, "bob@example.com", REGION_GLOBAL).await.expect("first initiate");
+    let code2 = initiate(&client, "bob@example.com", REGION_GLOBAL).await.expect("second initiate");
 
     assert!(!code1.is_empty());
     assert!(!code2.is_empty());
@@ -117,13 +137,12 @@ async fn test_initiate_twice_returns_codes() {
 /// Verify with a correct code returns a new-user result with onboarding token.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_verify_email_code_new_user() {
-    let cluster = TestCluster::new(1).await;
-    let addr = &cluster.nodes()[0].addr;
-    let mut client = create_user_client(addr).await.expect("connect");
+    let cluster = TestCluster::with_wire_transport(0).await;
+    let client = wire_user_client(&cluster, cluster.nodes()[0].id);
 
-    let code = initiate(&mut client, "charlie@example.com", REGION_GLOBAL).await.expect("initiate");
+    let code = initiate(&client, "charlie@example.com", REGION_GLOBAL).await.expect("initiate");
 
-    let resp = verify(&mut client, "charlie@example.com", &code, REGION_GLOBAL)
+    let resp = verify(&client, "charlie@example.com", &code, REGION_GLOBAL)
         .await
         .expect("verify should succeed");
 
@@ -134,236 +153,244 @@ async fn test_verify_email_code_new_user() {
 /// Verify with a wrong code returns an error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_verify_wrong_code_rejected() {
-    let cluster = TestCluster::new(1).await;
-    let addr = &cluster.nodes()[0].addr;
-    let mut client = create_user_client(addr).await.expect("connect");
+    let cluster = TestCluster::with_wire_transport(0).await;
+    let client = wire_user_client(&cluster, cluster.nodes()[0].id);
 
-    initiate(&mut client, "dave@example.com", REGION_GLOBAL).await.expect("initiate");
+    initiate(&client, "dave@example.com", REGION_GLOBAL).await.expect("initiate");
 
-    let err = verify(&mut client, "dave@example.com", "ZZZZZZ", REGION_GLOBAL)
+    let err = verify(&client, "dave@example.com", "ZZZZZZ", REGION_GLOBAL)
         .await
         .expect_err("wrong code should fail");
 
-    // Wrong code results in an error (either NOT_FOUND, PERMISSION_DENIED, or similar)
-    assert_ne!(err.code(), tonic::Code::Ok, "wrong code should return error");
+    // Wrong code results in an error — we don't constrain the specific
+    // ErrorCode variant because the server may return NotFound,
+    // Unauthenticated, or PermissionDenied depending on the rejection path.
+    let _ = err;
 }
 
 /// Verify without prior initiate returns an error (no verification record).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_verify_without_initiate_rejected() {
-    let cluster = TestCluster::new(1).await;
-    let addr = &cluster.nodes()[0].addr;
-    let mut client = create_user_client(addr).await.expect("connect");
+    let cluster = TestCluster::with_wire_transport(0).await;
+    let client = wire_user_client(&cluster, cluster.nodes()[0].id);
 
-    let err = verify(&mut client, "nobody@example.com", "ABCDEF", REGION_GLOBAL)
+    let err = verify(&client, "nobody@example.com", "ABCDEF", REGION_GLOBAL)
         .await
         .expect_err("verify without initiate should fail");
 
-    assert_ne!(err.code(), tonic::Code::Ok);
+    // Any error is sufficient — the server may return NotFound,
+    // Unauthenticated, or PermissionDenied depending on the rejection path.
+    let _ = err;
 }
 
-/// Verify with empty code returns INVALID_ARGUMENT.
+/// Verify with empty code returns InvalidArgument.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_verify_empty_code_rejected() {
-    let cluster = TestCluster::new(1).await;
-    let addr = &cluster.nodes()[0].addr;
-    let mut client = create_user_client(addr).await.expect("connect");
+    let cluster = TestCluster::with_wire_transport(0).await;
+    let client = wire_user_client(&cluster, cluster.nodes()[0].id);
 
-    let err = verify(&mut client, "empty@example.com", "", REGION_GLOBAL)
+    let err = verify(&client, "empty@example.com", "", REGION_GLOBAL)
         .await
         .expect_err("empty code should fail");
 
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert_wire_code(&err, ErrorCode::InvalidArgument, "empty code");
 }
 
 // ============================================================================
 // Tests: Region Validation
 // ============================================================================
 
-/// Malformed region slug returns INVALID_ARGUMENT.
+/// Malformed region slug returns InvalidArgument.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_initiate_invalid_region_rejected() {
-    let cluster = TestCluster::new(1).await;
-    let addr = &cluster.nodes()[0].addr;
-    let mut client = create_user_client(addr).await.expect("connect");
+    let cluster = TestCluster::with_wire_transport(0).await;
+    let client = wire_user_client(&cluster, cluster.nodes()[0].id);
 
-    let err = initiate(&mut client, "region@example.com", "BAD_REGION")
+    let err = initiate(&client, "region@example.com", "BAD_REGION")
         .await
         .expect_err("malformed region slug should fail");
 
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
-    assert!(err.message().contains("region"), "error should mention region");
+    assert_wire_code(&err, ErrorCode::InvalidArgument, "malformed region");
+    if let RpcError::WireError(wire_err) = &err {
+        assert!(
+            wire_err.message.contains("region"),
+            "error should mention region: {}",
+            wire_err.message
+        );
+    }
 }
 
-/// Empty region returns INVALID_ARGUMENT.
+/// Empty region returns InvalidArgument.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_initiate_unspecified_region_rejected() {
-    let cluster = TestCluster::new(1).await;
-    let addr = &cluster.nodes()[0].addr;
-    let mut client = create_user_client(addr).await.expect("connect");
+    let cluster = TestCluster::with_wire_transport(0).await;
+    let client = wire_user_client(&cluster, cluster.nodes()[0].id);
 
-    let err = initiate(&mut client, "unspec@example.com", "")
+    let err = initiate(&client, "unspec@example.com", "")
         .await
         .expect_err("empty region slug should fail");
 
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert_wire_code(&err, ErrorCode::InvalidArgument, "empty region");
 }
 
 // ============================================================================
 // Tests: Input Validation
 // ============================================================================
 
-/// Empty email returns INVALID_ARGUMENT.
+/// Empty email returns InvalidArgument.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_initiate_empty_email_rejected() {
-    let cluster = TestCluster::new(1).await;
-    let addr = &cluster.nodes()[0].addr;
-    let mut client = create_user_client(addr).await.expect("connect");
+    let cluster = TestCluster::with_wire_transport(0).await;
+    let client = wire_user_client(&cluster, cluster.nodes()[0].id);
 
-    let err = initiate(&mut client, "", REGION_GLOBAL).await.expect_err("empty email should fail");
+    let err = initiate(&client, "", REGION_GLOBAL).await.expect_err("empty email should fail");
 
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert_wire_code(&err, ErrorCode::InvalidArgument, "empty email");
 }
 
-/// Invalid email format returns INVALID_ARGUMENT.
+/// Invalid email format returns InvalidArgument.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_initiate_malformed_email_rejected() {
-    let cluster = TestCluster::new(1).await;
-    let addr = &cluster.nodes()[0].addr;
-    let mut client = create_user_client(addr).await.expect("connect");
+    let cluster = TestCluster::with_wire_transport(0).await;
+    let client = wire_user_client(&cluster, cluster.nodes()[0].id);
 
-    let err = initiate(&mut client, "not-an-email", REGION_GLOBAL)
+    let err = initiate(&client, "not-an-email", REGION_GLOBAL)
         .await
         .expect_err("malformed email should fail");
 
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert_wire_code(&err, ErrorCode::InvalidArgument, "malformed email");
 }
 
 // ============================================================================
 // Tests: Complete Registration (Error Paths)
 // ============================================================================
 
-/// Complete registration with a malformed onboarding token returns INVALID_ARGUMENT.
+/// Complete registration with a malformed onboarding token returns InvalidArgument
+/// (or NotFound / PermissionDenied depending on the validator).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_complete_registration_malformed_token() {
-    let cluster = TestCluster::new(1).await;
-    let addr = &cluster.nodes()[0].addr;
-    let mut client = create_user_client(addr).await.expect("connect");
+    let cluster = TestCluster::with_wire_transport(0).await;
+    let client = wire_user_client(&cluster, cluster.nodes()[0].id);
 
     let err = client
-        .complete_registration(proto::CompleteRegistrationRequest {
-            onboarding_token: "not-a-valid-token".to_string(),
-            email: "alice@example.com".to_string(),
-            name: "Alice".to_string(),
-            organization_name: "Alice Corp".to_string(),
-            region: REGION_GLOBAL.to_string(),
-        })
+        .complete_registration(
+            wu::CompleteRegistrationRequest {
+                onboarding_token: "not-a-valid-token".to_string(),
+                email: "alice@example.com".to_string(),
+                name: "Alice".to_string(),
+                organization_name: "Alice Corp".to_string(),
+                region: REGION_GLOBAL.to_string(),
+            },
+            rand::random::<u128>(),
+        )
         .await
         .expect_err("malformed token should fail");
 
     // Should be InvalidArgument (token decode failure) or similar
-    assert!(
-        err.code() == tonic::Code::InvalidArgument
-            || err.code() == tonic::Code::NotFound
-            || err.code() == tonic::Code::PermissionDenied,
-        "expected validation error, got {:?}: {}",
-        err.code(),
-        err.message()
-    );
+    match &err {
+        RpcError::WireError(wire_err) => {
+            assert!(
+                matches!(
+                    wire_err.code,
+                    ErrorCode::InvalidArgument
+                        | ErrorCode::NotFound
+                        | ErrorCode::PermissionDenied
+                        | ErrorCode::Unauthenticated
+                ),
+                "expected validation error, got {:?}: {}",
+                wire_err.code,
+                wire_err.message,
+            );
+        },
+        other => panic!("expected WireError, got: {other:?}"),
+    }
 }
 
-/// Complete registration with empty onboarding token returns INVALID_ARGUMENT.
+/// Complete registration with empty onboarding token returns InvalidArgument.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_complete_registration_empty_token() {
-    let cluster = TestCluster::new(1).await;
-    let addr = &cluster.nodes()[0].addr;
-    let mut client = create_user_client(addr).await.expect("connect");
+    let cluster = TestCluster::with_wire_transport(0).await;
+    let client = wire_user_client(&cluster, cluster.nodes()[0].id);
 
     let err = client
-        .complete_registration(proto::CompleteRegistrationRequest {
-            onboarding_token: String::new(),
-            email: "alice@example.com".to_string(),
-            name: "Alice".to_string(),
-            organization_name: "Alice Corp".to_string(),
-            region: REGION_GLOBAL.to_string(),
-        })
+        .complete_registration(
+            wu::CompleteRegistrationRequest {
+                onboarding_token: String::new(),
+                email: "alice@example.com".to_string(),
+                name: "Alice".to_string(),
+                organization_name: "Alice Corp".to_string(),
+                region: REGION_GLOBAL.to_string(),
+            },
+            rand::random::<u128>(),
+        )
         .await
         .expect_err("empty token should fail");
 
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert_wire_code(&err, ErrorCode::InvalidArgument, "empty token");
 }
 
-/// Complete registration without prior verification returns NOT_FOUND.
+/// Complete registration without prior verification returns Unauthenticated.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_complete_registration_without_verify() {
-    let cluster = TestCluster::new(1).await;
-    let addr = &cluster.nodes()[0].addr;
-    let mut client = create_user_client(addr).await.expect("connect");
+    let cluster = TestCluster::with_wire_transport(0).await;
+    let client = wire_user_client(&cluster, cluster.nodes()[0].id);
 
     // Generate a valid-format onboarding token that doesn't match any record
     let (token, _hash) = inferadb_ledger_types::onboarding::generate_onboarding_token();
 
     let err = client
-        .complete_registration(proto::CompleteRegistrationRequest {
-            onboarding_token: token,
-            email: "unverified@example.com".to_string(),
-            name: "Nobody".to_string(),
-            organization_name: "No Corp".to_string(),
-            region: REGION_GLOBAL.to_string(),
-        })
+        .complete_registration(
+            wu::CompleteRegistrationRequest {
+                onboarding_token: token,
+                email: "unverified@example.com".to_string(),
+                name: "Nobody".to_string(),
+                organization_name: "No Corp".to_string(),
+                region: REGION_GLOBAL.to_string(),
+            },
+            rand::random::<u128>(),
+        )
         .await
         .expect_err("complete without verify should fail");
 
     // Task 4.1 unified every onboarding-auth failure mode to
     // `Unauthenticated: Authentication failed` — the specific shape (missing
     // account vs. wrong token) is deliberately not leaked over the wire.
-    assert_eq!(
-        err.code(),
-        tonic::Code::Unauthenticated,
-        "expected UNAUTHENTICATED, got {:?}: {}",
-        err.code(),
-        err.message()
-    );
+    assert_wire_code(&err, ErrorCode::Unauthenticated, "complete without verify");
 }
 
-/// Complete registration with wrong token hash returns UNAUTHENTICATED.
+/// Complete registration with wrong token hash returns Unauthenticated.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_complete_registration_wrong_token_hash() {
-    let cluster = TestCluster::new(1).await;
-    let addr = &cluster.nodes()[0].addr;
-    let mut client = create_user_client(addr).await.expect("connect");
+    let cluster = TestCluster::with_wire_transport(0).await;
+    let client = wire_user_client(&cluster, cluster.nodes()[0].id);
 
     // Initiate and verify to create an onboarding account
-    let code =
-        initiate(&mut client, "wrong-hash@example.com", REGION_GLOBAL).await.expect("initiate");
+    let code = initiate(&client, "wrong-hash@example.com", REGION_GLOBAL).await.expect("initiate");
     let resp =
-        verify(&mut client, "wrong-hash@example.com", &code, REGION_GLOBAL).await.expect("verify");
+        verify(&client, "wrong-hash@example.com", &code, REGION_GLOBAL).await.expect("verify");
     let _token = extract_onboarding_token(&resp);
 
     // Use a DIFFERENT valid token (not the one from verification)
     let (wrong_token, _) = inferadb_ledger_types::onboarding::generate_onboarding_token();
 
     let err = client
-        .complete_registration(proto::CompleteRegistrationRequest {
-            onboarding_token: wrong_token,
-            email: "wrong-hash@example.com".to_string(),
-            name: "WrongHash".to_string(),
-            organization_name: "Wrong Corp".to_string(),
-            region: REGION_GLOBAL.to_string(),
-        })
+        .complete_registration(
+            wu::CompleteRegistrationRequest {
+                onboarding_token: wrong_token,
+                email: "wrong-hash@example.com".to_string(),
+                name: "WrongHash".to_string(),
+                organization_name: "Wrong Corp".to_string(),
+                region: REGION_GLOBAL.to_string(),
+            },
+            rand::random::<u128>(),
+        )
         .await
         .expect_err("wrong token hash should fail");
 
     // Task 4.1 unified every onboarding-auth failure mode to
     // `Unauthenticated: Authentication failed`, so a wrong token hash is
     // indistinguishable from any other auth failure from the client's side.
-    assert_eq!(
-        err.code(),
-        tonic::Code::Unauthenticated,
-        "expected UNAUTHENTICATED for wrong token, got {:?}: {}",
-        err.code(),
-        err.message()
-    );
+    assert_wire_code(&err, ErrorCode::Unauthenticated, "wrong token hash");
 }
 
 // ============================================================================
@@ -373,22 +400,19 @@ async fn test_complete_registration_wrong_token_hash() {
 /// Re-verifying the same email after a successful verify produces a new onboarding token.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_reverify_produces_new_token() {
-    let cluster = TestCluster::new(1).await;
-    let addr = &cluster.nodes()[0].addr;
-    let mut client = create_user_client(addr).await.expect("connect");
+    let cluster = TestCluster::with_wire_transport(0).await;
+    let client = wire_user_client(&cluster, cluster.nodes()[0].id);
 
     // First flow
-    let code1 =
-        initiate(&mut client, "reverify@example.com", REGION_GLOBAL).await.expect("initiate 1");
+    let code1 = initiate(&client, "reverify@example.com", REGION_GLOBAL).await.expect("initiate 1");
     let resp1 =
-        verify(&mut client, "reverify@example.com", &code1, REGION_GLOBAL).await.expect("verify 1");
+        verify(&client, "reverify@example.com", &code1, REGION_GLOBAL).await.expect("verify 1");
     let token1 = extract_onboarding_token(&resp1).to_string();
 
     // Second flow (re-initiate and re-verify)
-    let code2 =
-        initiate(&mut client, "reverify@example.com", REGION_GLOBAL).await.expect("initiate 2");
+    let code2 = initiate(&client, "reverify@example.com", REGION_GLOBAL).await.expect("initiate 2");
     let resp2 =
-        verify(&mut client, "reverify@example.com", &code2, REGION_GLOBAL).await.expect("verify 2");
+        verify(&client, "reverify@example.com", &code2, REGION_GLOBAL).await.expect("verify 2");
     let token2 = extract_onboarding_token(&resp2).to_string();
 
     // Both tokens should be valid but different
@@ -428,34 +452,41 @@ fn test_domain_separation_code_hash_vs_email_hmac() {
 // Tests: Missing Blinding Key
 // ============================================================================
 
-/// When email_blinding_key is not configured, onboarding RPCs return FAILED_PRECONDITION.
+/// When email_blinding_key is not configured, onboarding RPCs return FailedPrecondition.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_missing_blinding_key_returns_failed_precondition() {
+    use inferadb_ledger_wire::{error::ErrorCode, services::user as wu};
+
     let cluster = crate::common::TestCluster::without_blinding_key(1, 1).await;
-    let addr = &cluster.nodes()[0].addr;
-    let mut client = create_user_client(addr).await.expect("connect");
+    let leader = cluster.nodes().iter().find(|n| n.is_leader()).expect("leader");
+    let client = crate::common::wire_user_client(&cluster, leader.id);
 
     // Wait for cluster to stabilize
     cluster.wait_for_leaders(Duration::from_secs(10)).await;
 
+    let request = wu::InitiateEmailVerificationRequest {
+        email: "nokey@example.com".to_string(),
+        region: "us-east-va".to_string(),
+    };
     let err = client
-        .initiate_email_verification(proto::InitiateEmailVerificationRequest {
-            email: "nokey@example.com".to_string(),
-            region: "us-east-va".to_string(),
-        })
+        .initiate_email_verification(request, 1u128)
         .await
         .expect_err("should fail without blinding key");
 
+    let wire_err = match err {
+        inferadb_ledger_wire_transport::RpcError::WireError(w) => w,
+        other => panic!("expected WireError, got {other:?}"),
+    };
     assert_eq!(
-        err.code(),
-        tonic::Code::FailedPrecondition,
-        "expected FAILED_PRECONDITION, got {:?}: {}",
-        err.code(),
-        err.message()
+        wire_err.code,
+        ErrorCode::FailedPrecondition,
+        "expected FailedPrecondition, got {:?}: {}",
+        wire_err.code,
+        wire_err.message
     );
     assert!(
-        err.message().contains("blinding key"),
+        wire_err.message.contains("blinding key"),
         "error should mention blinding key: {}",
-        err.message()
+        wire_err.message
     );
 }

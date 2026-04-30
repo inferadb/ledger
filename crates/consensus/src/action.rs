@@ -82,9 +82,10 @@ pub enum Action {
     },
     /// The leader needs to send a snapshot to a lagging follower.
     ///
-    /// The reactor delegates actual data transfer to a `SnapshotSender`
-    /// callback (registered by the raft crate). When no callback is
-    /// registered, the reactor falls back to an `InstallSnapshot` message.
+    /// The reactor delegates data transfer to a
+    /// [`SnapshotSender`](crate::snapshot_sender::SnapshotSender) callback
+    /// registered by the raft crate. When no callback is registered, the
+    /// action is dropped; the leader's next heartbeat re-emits it.
     SendSnapshot {
         /// Target peer that needs the snapshot.
         to: NodeId,
@@ -100,16 +101,15 @@ pub enum Action {
         last_included_term: u64,
     },
     /// The follower has accepted an `InstallSnapshot` message and the
-    /// reactor should install the staged snapshot file written by Stage 3's
-    /// `snapshot_receiver`.
+    /// reactor should install the staged snapshot file streamed by the
+    /// leader's [`SnapshotSender`](crate::snapshot_sender::SnapshotSender).
     ///
-    /// The reactor delegates the actual install to a `SnapshotInstaller`
-    /// callback (registered by the raft crate). When no callback is
-    /// registered, the action is dropped — the leader's heartbeat
-    /// replicator re-emits `Action::SendSnapshot` on the next cycle, which
-    /// re-stages the file via Stage 3 and re-emits this action.
-    ///
-    /// Stage 4 of the snapshot install path.
+    /// The reactor delegates the actual install to a
+    /// [`SnapshotInstaller`](crate::snapshot_installer::SnapshotInstaller)
+    /// callback registered by the raft crate. When no callback is registered,
+    /// the action is dropped — the leader's heartbeat replicator re-emits
+    /// `Action::SendSnapshot` on the next cycle, re-staging the file and
+    /// re-emitting this action.
     InstallSnapshot {
         /// ConsensusState that needs the install.
         shard: ConsensusStateId,

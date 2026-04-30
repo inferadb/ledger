@@ -173,9 +173,10 @@ where
                     p.record_failure();
                 }
 
-                // Invalidate region leader cache on UNAVAILABLE errors
+                // Invalidate region leader cache on stale-routing errors
                 // so the next attempt re-resolves via the gateway
-                if let SdkError::Rpc { code: tonic::Code::Unavailable, .. } = &err
+                if let SdkError::Rpc { code: inferadb_ledger_wire::ErrorCode::StaleRouting, .. } =
+                    &err
                     && let Some(p) = pool
                 {
                     p.apply_region_leader_hint_or_invalidate(&err);
@@ -266,7 +267,7 @@ mod tests {
         time::Duration,
     };
 
-    use tonic::Code;
+    use inferadb_ledger_wire::ErrorCode;
 
     use super::*;
     use crate::error::SdkError;
@@ -315,7 +316,7 @@ mod tests {
                 if current == 0 {
                     // First attempt fails with retryable error
                     Err(SdkError::Rpc {
-                        code: Code::Unavailable,
+                        code: ErrorCode::StaleRouting,
                         message: "temporarily unavailable".to_string(),
                         request_id: None,
                         trace_id: None,
@@ -345,7 +346,7 @@ mod tests {
                 count.fetch_add(1, Ordering::SeqCst);
                 // Always fail with retryable error
                 Err::<String, _>(SdkError::Rpc {
-                    code: Code::Unavailable,
+                    code: ErrorCode::StaleRouting,
                     message: "always unavailable".to_string(),
                     request_id: None,
                     trace_id: None,
@@ -379,7 +380,7 @@ mod tests {
                 count.fetch_add(1, Ordering::SeqCst);
                 // Fail with non-retryable error
                 Err::<String, _>(SdkError::Rpc {
-                    code: Code::InvalidArgument,
+                    code: ErrorCode::InvalidArgument,
                     message: "bad request".to_string(),
                     request_id: None,
                     trace_id: None,
@@ -392,7 +393,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         // Should NOT be RetryExhausted - should be the original error
-        assert!(matches!(err, SdkError::Rpc { code: Code::InvalidArgument, .. }));
+        assert!(matches!(err, SdkError::Rpc { code: ErrorCode::InvalidArgument, .. }));
         // Should only have been called once (no retries)
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
@@ -421,7 +422,7 @@ mod tests {
             async move {
                 count.fetch_add(1, Ordering::SeqCst);
                 Err::<String, _>(SdkError::Rpc {
-                    code: Code::Unavailable,
+                    code: ErrorCode::StaleRouting,
                     message: "unavailable".to_string(),
                     request_id: None,
                     trace_id: None,
@@ -575,7 +576,7 @@ mod tests {
             async move {
                 count.fetch_add(1, Ordering::SeqCst);
                 Err::<String, _>(SdkError::Rpc {
-                    code: Code::Unavailable,
+                    code: ErrorCode::StaleRouting,
                     message: "fail".to_string(),
                     request_id: None,
                     trace_id: None,
@@ -608,7 +609,7 @@ mod tests {
                 let current = count.fetch_add(1, Ordering::SeqCst);
                 if current == 0 {
                     Err(SdkError::Rpc {
-                        code: Code::Unavailable,
+                        code: ErrorCode::StaleRouting,
                         message: "transient".to_string(),
                         request_id: None,
                         trace_id: None,
@@ -638,7 +639,7 @@ mod tests {
             async move {
                 count.fetch_add(1, Ordering::SeqCst);
                 Err::<String, _>(SdkError::Rpc {
-                    code: Code::Unavailable,
+                    code: ErrorCode::StaleRouting,
                     message: "always fails".to_string(),
                     request_id: None,
                     trace_id: None,
@@ -665,7 +666,7 @@ mod tests {
             async move {
                 count.fetch_add(1, Ordering::SeqCst);
                 Err::<String, _>(SdkError::Rpc {
-                    code: Code::InvalidArgument,
+                    code: ErrorCode::InvalidArgument,
                     message: "bad".to_string(),
                     request_id: None,
                     trace_id: None,
@@ -676,7 +677,10 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), SdkError::Rpc { code: Code::InvalidArgument, .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            SdkError::Rpc { code: ErrorCode::InvalidArgument, .. }
+        ));
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 
@@ -738,7 +742,7 @@ mod tests {
                 let attempt = c.fetch_add(1, Ordering::SeqCst) + 1;
                 if attempt < 2 {
                     Err(SdkError::Rpc {
-                        code: tonic::Code::Unavailable,
+                        code: ErrorCode::StaleRouting,
                         message: "transient".to_owned(),
                         request_id: None,
                         trace_id: None,
@@ -764,8 +768,8 @@ mod proptest_tests {
         atomic::{AtomicU32, Ordering},
     };
 
+    use inferadb_ledger_wire::ErrorCode;
     use proptest::prelude::*;
-    use tonic::Code;
 
     use super::*;
     use crate::error::SdkError;
@@ -913,7 +917,7 @@ mod proptest_tests {
                             Ok::<_, SdkError>("success")
                         } else {
                             Err(SdkError::Rpc {
-                                code: Code::Unavailable,
+                                code: ErrorCode::StaleRouting,
                                 message: "transient".to_string(),
                                 request_id: None,
                                 trace_id: None,
@@ -970,7 +974,7 @@ mod proptest_tests {
                         let current = count.fetch_add(1, Ordering::SeqCst);
                         if current == 0 {
                             Err(SdkError::Rpc {
-                                code: Code::Unavailable,
+                                code: ErrorCode::StaleRouting,
                                 message: "transient".to_string(),
                                 request_id: None,
                                 trace_id: None,

@@ -1,7 +1,74 @@
-//! InferaDB Ledger Consensus Engine.
+//! InferaDB Ledger — custom in-house multi-shard Raft consensus engine.
 //!
-//! A purpose-built multi-shard Raft consensus engine optimized for
-//! high-frequency authorization workloads.
+//! This crate owns the full consensus stack: state machine, event loop, WAL,
+//! leader lease, snapshot pipeline, and deterministic simulation harness.
+//! It does **not** depend on openraft or any external Raft library.
+//!
+//! # Architecture
+//!
+//! ```text
+//! ┌──────────────────────────────────────────────────────┐
+//! │  ConsensusEngine  (engine.rs)                        │
+//! │  Public handle — propose, read_index, membership,    │
+//! │  snapshot callbacks, pause/resume.                   │
+//! │  Communicates with the reactor via mpsc channels.    │
+//! └────────────────────┬─────────────────────────────────┘
+//!                      │ ReactorEvent
+//! ┌────────────────────▼─────────────────────────────────┐
+//! │  Reactor  (reactor.rs)                               │
+//! │  Single tokio task. Dispatches events to shards,     │
+//! │  batches WAL writes (one fsync per batch), sends     │
+//! │  messages through NetworkTransport, and delivers     │
+//! │  CommittedBatch values to the apply worker.          │
+//! └────────────────────┬─────────────────────────────────┘
+//!                      │ Action values
+//! ┌────────────────────▼─────────────────────────────────┐
+//! │  ConsensusState  (consensus_state.rs)                │
+//! │  Pure Raft state machine for one shard. Receives     │
+//! │  events, returns Action values. Zero I/O.            │
+//! └──────────────────────────────────────────────────────┘
+//! ```
+//!
+//! # Key invariants
+//!
+//! - [`ConsensusState`] returns [`Action`] values and performs **no I/O**. Any blocking call inside
+//!   it is a correctness bug.
+//! - [`reactor::Reactor`] is the only place I/O happens. WAL writes are batched with a single
+//!   `fsync` per batch — never per proposal.
+//! - The production WAL is [`wal::segmented::SegmentedWalBackend`]: per-vault AES-256-GCM
+//!   encrypted, segmented, with CRC32 integrity per frame.
+//! - Snapshots are encrypted end-to-end via [`snapshot_crypto`] functions. Bypassing encryption
+//!   defeats per-vault key rotation.
+//! - Cross-shard state changes flow through [`ConsensusEngine`], never directly between
+//!   [`ConsensusState`] instances.
+//!
+//! # Module map
+//!
+//! | Module | Role |
+//! |---|---|
+//! | [`engine`] | [`ConsensusEngine`] — public multi-shard handle |
+//! | [`consensus_state`] | [`ConsensusState`] — pure Raft state machine |
+//! | [`reactor`] | [`reactor::Reactor`] — single-task I/O event loop |
+//! | [`action`] | [`Action`] — commands returned by the state machine |
+//! | [`wal_backend`] | [`WalBackend`] trait + [`wal_backend::CheckpointFrame`] |
+//! | [`wal`] | WAL implementations: segmented (production), encrypted, memory |
+//! | [`lease`] | [`LeaderLease`] — quorum-renewed linearizable-read lease |
+//! | [`leadership`] | [`ShardState`] — observable shard snapshot |
+//! | [`closed_ts`] | [`ClosedTimestampTracker`] — follower stale-read gating |
+//! | [`committed`] | [`CommittedBatch`] / [`CommittedEntry`] — apply-worker input |
+//! | [`idempotency`] | [`idempotency::IdempotencyCache`] — pre-deduplication before Raft log |
+//! | [`snapshot_crypto`] | AES-256-GCM snapshot envelope functions |
+//! | [`snapshot_coordinator`] | [`SnapshotCoordinator`] — async snapshot build callback |
+//! | [`snapshot_sender`] | [`SnapshotSender`] — async snapshot wire-transfer callback |
+//! | [`snapshot_installer`] | [`SnapshotInstaller`] — async snapshot install callback |
+//! | [`state_machine`] | [`StateMachine`] trait consumed by the apply worker |
+//! | [`recovery`] | WAL-based crash recovery utilities |
+//! | [`transport`] | [`NetworkTransport`] trait + in-memory test implementation |
+//! | [`simulation`] | Deterministic multi-node simulation harness (no tokio) |
+//! | [`wake`] | [`ShardWakeNotifier`] — hibernation wake-on-peer-message |
+//! | [`circuit_breaker`] | Per-shard commit-liveness circuit breaker |
+//! | [`split`] | Shard split/merge configuration and phase tracking |
+//! | [`buggify`] | Fault injection (simulation only — never in production) |
 
 #![deny(unsafe_code)]
 

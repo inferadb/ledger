@@ -43,6 +43,12 @@ log_error()   { echo -e "${_C_RED}[ERROR]${_C_NC} $*"; }
 CLUSTER_PIDS=()
 _CLUSTER_DATA_ROOT=""
 
+# Populated by bootstrap_cluster; read by callers (and any `inferadb-ledger
+# admin ...` invocation) to dial the cluster's wire (QUIC + TLS) listener.
+LEDGER_TLS_CERT=""
+LEDGER_TLS_KEY=""
+LEDGER_TLS_SERVER_NAME="localhost"
+
 cleanup_cluster() {
   local exit_code=$?
 
@@ -77,15 +83,20 @@ cleanup_cluster() {
 # Sets LEDGER_BINARY to the absolute path of the built binary.
 build_ledger_binary() {
   local profile=$1
+  # Shell-driven smoke tests dial the cluster via `admin <subcommand>`,
+  # which sends an empty `auth_payload`. The production `JwtAuthVerifier`
+  # rejects that — so test builds enable `permissive-wire-auth`, which
+  # swaps in the test stub `PermissiveVerifier`. Production release
+  # builds must NOT use this feature.
   case "$profile" in
     debug)
-      log_info "Building inferadb-ledger (debug)..."
-      cargo +1.92 build -p inferadb-ledger-server
+      log_info "Building inferadb-ledger (debug + permissive-wire-auth)..."
+      cargo +1.92 build -p inferadb-ledger-server --features permissive-wire-auth
       LEDGER_BINARY="$PWD/target/debug/inferadb-ledger"
       ;;
     release)
-      log_info "Building inferadb-ledger (release)..."
-      cargo +1.92 build --release -p inferadb-ledger-server
+      log_info "Building inferadb-ledger (release + permissive-wire-auth)..."
+      cargo +1.92 build --release -p inferadb-ledger-server --features permissive-wire-auth
       LEDGER_BINARY="$PWD/target/release/inferadb-ledger"
       ;;
     *)
@@ -105,6 +116,65 @@ build_ledger_binary() {
 # Cluster bootstrap
 # ---------------------------------------------------------------------------
 
+# Generate a self-signed PEM cert + key pair under `$1/tls/` and export
+# `LEDGER_TLS_CERT` / `LEDGER_TLS_KEY` / `LEDGER_TLS_SERVER_NAME`. The wire
+# transport (QUIC) requires `--tls-cert` / `--tls-key`, and every
+# `inferadb-ledger admin ...` invocation that dials the cluster needs the
+# same cert as its trust anchor. SANs cover `localhost`, `127.0.0.1`, and
+# `::1` so loopback dials by IP or name both verify.
+#
+# Uses the system `openssl` (BoringSSL/LibreSSL/OpenSSL — all support the
+# `-subj` + `-addext` flags emitted here). Self-signed material is
+# acceptable for local-cluster scripts; production deployments supply
+# operator certs.
+#
+# Args:
+#   1: tls_root  (e.g. "$data_root")
+generate_tls_material() {
+  local tls_root=$1
+  local tls_dir="$tls_root/tls"
+  mkdir -p "$tls_dir"
+
+  if ! command -v openssl &>/dev/null; then
+    log_error "openssl is required to generate test TLS material (install: brew install openssl)"
+    return 1
+  fi
+
+  LEDGER_TLS_CERT="$tls_dir/cert.pem"
+  LEDGER_TLS_KEY="$tls_dir/key.pem"
+
+  # The wire transport (rustls / rustls-webpki) rejects certs with
+  # `BasicConstraints: CA:TRUE` when used as the end-entity (it surfaces as
+  # `error 46: invalid peer certificate: CaUsedAsEndEntity` during the QUIC
+  # handshake). `openssl req -x509` defaults to a CA-marked self-signed cert,
+  # so override `basicConstraints` and add explicit `extendedKeyUsage` to
+  # keep the same material usable for both server-side bind and as the
+  # client-side trust anchor under `--tls-cert`.
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$LEDGER_TLS_KEY" \
+    -out "$LEDGER_TLS_CERT" -days 30 \
+    -subj "/CN=localhost" \
+    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1" \
+    -addext "basicConstraints=CA:FALSE" \
+    -addext "extendedKeyUsage=serverAuth,clientAuth" \
+    >/dev/null 2>&1 || {
+      log_error "openssl failed to generate self-signed cert in $tls_dir"
+      return 1
+    }
+
+  chmod 600 "$LEDGER_TLS_KEY"
+  export LEDGER_TLS_CERT LEDGER_TLS_KEY LEDGER_TLS_SERVER_NAME
+  log_info "Generated test TLS material at $tls_dir"
+}
+
+# Returns 0 when something is bound to the supplied UDP port, 1 otherwise.
+# The wire transport is QUIC, so the readiness signal is a UDP listener — the
+# previous `nc -z` (TCP) probe never succeeds against the in-house wire stack.
+# Args: port
+port_is_listening() {
+  local port=$1
+  [[ -n "$(lsof -ti "udp:$port" 2>/dev/null || true)" ]]
+}
+
 # Kill any leftover processes bound to the listen ports in our range.
 # Args: base_port node_count
 kill_stale_listeners() {
@@ -113,7 +183,7 @@ kill_stale_listeners() {
   local i port stale_pids
   for ((i=1; i<=node_count; i++)); do
     port=$((base_port + i - 1))
-    stale_pids=$(lsof -ti "tcp:$port" -sTCP:LISTEN 2>/dev/null || true)
+    stale_pids=$(lsof -ti "udp:$port" 2>/dev/null || true)
     if [[ -n "$stale_pids" ]]; then
       log_warn "Killing stale listener on port $port (PIDs: $stale_pids)"
       # shellcheck disable=SC2086  # intentional word-splitting of PID list
@@ -142,6 +212,8 @@ bootstrap_cluster() {
 
   kill_stale_listeners "$base_port" "$node_count"
 
+  generate_tls_material "$data_root" || return 1
+
   local blinding_key="deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
   local first_port=$base_port
   local first_addr="127.0.0.1:$first_port"
@@ -158,6 +230,9 @@ bootstrap_cluster() {
       RUST_LOG=info "$LEDGER_BINARY" \
         --listen "127.0.0.1:$port" \
         --data "$node_data" \
+        --tls-cert "$LEDGER_TLS_CERT" \
+        --tls-key "$LEDGER_TLS_KEY" \
+        --tls-server-name "$LEDGER_TLS_SERVER_NAME" \
         --email-blinding-key "$blinding_key" \
         --log-format text \
         > "$data_root/node$i.log" 2>&1 &
@@ -166,6 +241,9 @@ bootstrap_cluster() {
         --listen "127.0.0.1:$port" \
         --data "$node_data" \
         --join "$first_addr" \
+        --tls-cert "$LEDGER_TLS_CERT" \
+        --tls-key "$LEDGER_TLS_KEY" \
+        --tls-server-name "$LEDGER_TLS_SERVER_NAME" \
         --email-blinding-key "$blinding_key" \
         --log-format text \
         > "$data_root/node$i.log" 2>&1 &
@@ -182,7 +260,7 @@ bootstrap_cluster() {
     all_listening=true
     for ((i=1; i<=node_count; i++)); do
       port=$((base_port + i - 1))
-      if ! nc -z 127.0.0.1 "$port" 2>/dev/null; then
+      if ! port_is_listening "$port"; then
         all_listening=false
         break
       fi
@@ -191,7 +269,13 @@ bootstrap_cluster() {
     if [[ "$all_listening" == "true" ]]; then
       log_success "All $node_count nodes listening"
       log_info "Initializing cluster via $first_addr..."
-      if ! "$LEDGER_BINARY" init --host="$first_addr"; then
+      # TLS flags are top-level (before the `init` subcommand) on the
+      # `inferadb-ledger` binary — clap rejects them when placed after the
+      # subcommand.
+      if ! "$LEDGER_BINARY" \
+            --tls-cert "$LEDGER_TLS_CERT" \
+            --tls-server-name "$LEDGER_TLS_SERVER_NAME" \
+            init --host="$first_addr"; then
         log_error "Cluster initialization failed"
         dump_node_logs "$data_root" "$node_count" 20
         return 1
@@ -237,14 +321,10 @@ bootstrap_cluster() {
 
 # Provision a data region via `AdminService::ProvisionRegion`. Data regions
 # carry an explicit residency contract (`requires_residency`, `retention_days`).
-# This helper provisions with `requires_residency=protected` and
-# `retention_days=90` — operators needing GDPR's 30-day retention should call
-# `AdminService::SetRegionResidency` after provisioning, or invoke this RPC
-# directly with the desired values.
-# are no longer auto-created at boot — `init` only brings up the GLOBAL
-# region. Any RPC that writes to a data region (`InitiateEmailVerification`,
-# `CompleteRegistration`, `Write`, etc.) requires the region to be
-# explicitly provisioned first.
+# Data regions are not auto-created at boot — `init` only brings up the
+# GLOBAL region. Any RPC that writes to a data region
+# (`InitiateEmailVerification`, `CompleteRegistration`, `Write`, etc.)
+# requires the region to be explicitly provisioned first.
 #
 # Args:
 #   1: region_name  (e.g. "us-east-va")
@@ -265,26 +345,29 @@ provision_region() {
     log_error "provision_region: protected must be 'true' or 'false' (got: '$protected')"
     return 1
   fi
-  if ! command -v grpcurl &>/dev/null; then
-    log_error "grpcurl is required for provision_region (install: brew install grpcurl)"
-    return 1
-  fi
   if ! command -v jq &>/dev/null; then
     log_error "jq is required for provision_region (install: brew install jq)"
+    return 1
+  fi
+  if [[ -z "${LEDGER_TLS_CERT:-}" ]]; then
+    log_error "provision_region: LEDGER_TLS_CERT not set (call bootstrap_cluster first)"
     return 1
   fi
 
   local node_count=${#CLUSTER_PIDS[@]}
   local base_port
-  # Extract the FIRST endpoint's port from the exported $CLUSTER_ENDPOINTS
-  # (e.g. "http://127.0.0.1:50051,http://127.0.0.1:50052,..."). The previous
-  # `sed -n 's@.*://[^:]*:\([0-9]*\).*@\1@p'` regex was greedy on `.*://` and
-  # silently captured the LAST endpoint's port — fine on a single-endpoint
-  # string but broken when called after `bootstrap_cluster` exports a
-  # comma-separated list, leaving `provision_region` looping over ports
-  # past the cluster's range. Split on comma first, then on the last `:`.
   base_port=$(echo "$CLUSTER_ENDPOINTS" | cut -d, -f1 | sed 's@.*:@@')
   [[ -z "$base_port" ]] && { log_error "provision_region: cannot derive base port"; return 1; }
+
+  # `--protected` and `--requires-residency` are flag-style on the admin
+  # CLI. The previous `requires_residency: $protected` payload mirrored the
+  # `protected` flag verbatim, so preserve that linkage here.
+  local protected_flag=()
+  local residency_flag=()
+  if [[ "$protected" == "true" ]]; then
+    protected_flag=(--protected)
+    residency_flag=(--requires-residency)
+  fi
 
   local attempt
   local last_result=""
@@ -293,10 +376,22 @@ provision_region() {
     for ((i=0; i<node_count; i++)); do
       local addr="127.0.0.1:$((base_port + i))"
       local result
-      result=$(grpcurl -plaintext \
-        -d "{\"name\": \"$region\", \"protected\": $protected, \"requires_residency\": $protected, \"retention_days\": 90}" \
-        "$addr" \
-        ledger.v1.AdminService/ProvisionRegion 2>&1) || true
+      # TLS flags are top-level (before the `admin` subcommand). clap rejects
+      # them when placed after the subcommand.
+      # `${arr[@]+"${arr[@]}"}` is the canonical bash idiom for expanding a
+       # potentially-empty array under `set -u`. Plain `"${arr[@]}"` would
+       # trip the nounset check when `protected_flag` / `residency_flag`
+       # remain empty (the unprotected, no-residency case).
+      result=$("$LEDGER_BINARY" \
+        --tls-cert "$LEDGER_TLS_CERT" \
+        --tls-server-name "$LEDGER_TLS_SERVER_NAME" \
+        admin provision-region \
+        --host "$addr" \
+        --name "$region" \
+        --retention-days 90 \
+        ${protected_flag[@]+"${protected_flag[@]}"} \
+        ${residency_flag[@]+"${residency_flag[@]}"} \
+        2>&1) || true
       last_result="$result"
       if echo "$result" | jq -e '.name' &>/dev/null; then
         log_success "Data region $region provisioned (attempt $attempt)"

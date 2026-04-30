@@ -869,9 +869,7 @@ impl<B: StorageBackend> Database<B> {
     /// advanced the in-memory committed state beyond this snapshot without
     /// advancing the on-disk dual-slot state pointer. On crash before the
     /// next `sync_state`, the database rolls back to this snapshot id;
-    /// durability of in-flight in-memory commits is the WAL's responsibility
-    /// (see `docs/superpowers/specs/2026-04-19-sprint-1b2-apply-batching-design.md`
-    /// for the durability contract).
+    /// durability of in-flight in-memory commits is the WAL's responsibility.
     pub fn last_synced_snapshot_id(&self) -> u64 {
         self.last_synced_snapshot_id.load(Ordering::Acquire)
     }
