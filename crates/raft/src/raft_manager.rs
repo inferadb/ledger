@@ -4023,6 +4023,33 @@ impl RaftManager {
             let region_handle = region_inner.handle().clone();
             let org_handle = org_inner.handle().clone();
             let mut state_rx = region_handle.state_rx().clone();
+            // Synchronize the spawned watcher's first poll back to the
+            // caller. Without this handshake, callers can return from
+            // `start_organization_group` and observe `is_leader() == false`
+            // through `propose_to_organization_bytes` because the watcher
+            // task has not yet been scheduled to enqueue its initial
+            // `AdoptLeader` event onto the engine's reactor — the same
+            // tokio task starvation pattern documented in
+            // `docs/audits/parallel-test-flakes-2026-04-29.md` (Mode A).
+            //
+            // The handshake fires after the watcher's initial
+            // `borrow_and_update` + (optional) `adopt_leader.await`, which
+            // means the AdoptLeader event has been enqueued on the
+            // engine's bounded control inbox. The reactor still processes
+            // the event asynchronously, but that gap is one reactor tick
+            // — much narrower than the multi-millisecond unscheduled-
+            // watcher window.
+            //
+            // What this signal guarantees: the watcher has wired itself
+            // up to the parent's state watch and made its initial
+            // adoption attempt. It does NOT guarantee that the org
+            // ConsensusState has already observed itself as leader (that
+            // requires the reactor to process the AdoptLeader event and
+            // broadcast on the org's state watch). It does NOT guarantee
+            // that the parent has elected a leader yet — fresh-cluster
+            // bootstrap legitimately returns with `snap.leader == None`,
+            // and the watcher's main loop covers the first real change.
+            let (handshake_tx, handshake_rx) = tokio::sync::oneshot::channel::<()>();
             tokio::spawn(async move {
                 // Initial adoption: re-read the parent's current state
                 // and adopt without waiting for a change. Idempotent —
@@ -4035,6 +4062,11 @@ impl RaftManager {
                 if let Some(leader) = snap.leader {
                     let _ = org_handle.adopt_leader(leader, snap.term).await;
                 }
+                // Signal initial setup complete. The receiver may already
+                // have been dropped on the timeout arm below; we don't
+                // care about delivery — only that the send happens after
+                // the initial adoption attempt.
+                let _ = handshake_tx.send(());
                 while state_rx.changed().await.is_ok() {
                     let snap = state_rx.borrow().clone();
                     if let Some(leader) = snap.leader
@@ -4044,6 +4076,22 @@ impl RaftManager {
                     }
                 }
             });
+            // Bounded wait so a stuck watcher doesn't block organization
+            // bring-up forever — graceful degradation under pathological
+            // starvation. The only realistic miss path is the engine /
+            // reactor having torn down between spawn and first poll, in
+            // which case the watcher exits anyway and the org group is
+            // about to be torn down with it.
+            const HANDSHAKE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+            if tokio::time::timeout(HANDSHAKE_DEADLINE, handshake_rx).await.is_err() {
+                warn!(
+                    region = region.as_str(),
+                    organization_id = organization_id.value(),
+                    "Delegated leadership watcher first-poll handshake timed out — \
+                     proceeding without explicit synchronization. \
+                     `is_leader()` may briefly return false to clients.",
+                );
+            }
         }
 
         // Spawn the per-org vault-lifecycle watcher. Drains the vault

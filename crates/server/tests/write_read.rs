@@ -292,7 +292,7 @@ async fn test_three_node_write_replication() {
     let region = inferadb_ledger_types::Region::US_EAST_VA;
     let org_id = resolve_org_id(leader, organization);
     let _vault_id =
-        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(15))
+        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(30))
             .await;
 
     let mut client = create_write_client(&leader.addr).await.expect("connect to leader");

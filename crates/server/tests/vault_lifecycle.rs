@@ -103,7 +103,7 @@ async fn test_create_vault_brings_vault_group_live_on_all_voters() {
     // fire-and-forget through the `VaultCreationRequest` channel, so
     // we cannot assume synchronous propagation from the gRPC return.
     let vault_id =
-        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(15))
+        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(30))
             .await;
 
     // Final assertions — primary test contract.
@@ -171,7 +171,7 @@ async fn test_vault_shard_lookup_resolves_to_parent_org_group_on_every_voter() {
     let org_id = resolve_org_id(leader, org_slug);
     crate::common::create_test_vault(&leader.addr, org_slug).await.expect("create vault");
     let vault_id =
-        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(15))
+        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(30))
             .await;
 
     for node in cluster.nodes() {
@@ -284,20 +284,49 @@ async fn wait_for_vault_set_on_all_voters(
 
 /// Issues a `DeleteVault` gRPC request against the cluster's leader. Mirrors
 /// the path a real SDK client would hit. Returns the response on success.
+///
+/// Retries on `NotFound` and on `Unavailable("Not the leader")`. Symmetric
+/// with `common::create_test_vault`'s retry loop. Rationale: `delete_vault`
+/// resolves the vault slug through the GLOBAL slug index, populated by a
+/// `RegisterVaultDirectoryEntry` propose that is separate from the per-org
+/// `CreateVault` propose. Under starvation the GLOBAL propagation can lag
+/// the local `CreateVault` confirmation, so a freshly-created vault may
+/// briefly look `NotFound` to a delete RPC immediately after creation.
 async fn delete_test_vault(
     addr: &str,
     organization: OrganizationSlug,
     vault: VaultSlug,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = create_vault_client(addr).await?;
-    client
-        .delete_vault(proto::DeleteVaultRequest {
-            organization: Some(proto::OrganizationSlug { slug: organization.value() }),
-            vault: Some(proto::VaultSlug { slug: vault.value() }),
-            caller: None,
-        })
-        .await?;
-    Ok(())
+    let start = tokio::time::Instant::now();
+    let timeout_dur = std::time::Duration::from_secs(15);
+
+    loop {
+        let mut client = create_vault_client(addr).await?;
+        let result = client
+            .delete_vault(proto::DeleteVaultRequest {
+                organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                vault: Some(proto::VaultSlug { slug: vault.value() }),
+                caller: None,
+            })
+            .await;
+
+        match result {
+            Ok(_) => return Ok(()),
+            Err(status)
+                if status.code() == tonic::Code::NotFound
+                    || (status.code() == tonic::Code::Unavailable
+                        && status.message().contains("Not the leader")) =>
+            {
+                if start.elapsed() > timeout_dur {
+                    return Err(
+                        format!("vault deletion failed after retry: {}", status.message()).into()
+                    );
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            },
+            Err(status) => return Err(format!("delete vault failed: {status}").into()),
+        }
+    }
 }
 
 /// Two `CreateVault` proposals against the same organization must produce
@@ -325,7 +354,7 @@ async fn test_create_multiple_vaults_in_one_org() {
     // First vault — wait for it to appear on every voter.
     crate::common::create_test_vault(&leader.addr, org_slug).await.expect("create vault 1");
     let vault_id_1 =
-        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(15))
+        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(30))
             .await;
 
     // Second vault — wait for the cardinality to grow to 2 on every voter.
@@ -436,7 +465,7 @@ async fn test_create_vault_in_second_org() {
         &cluster,
         region,
         org_a_id,
-        Duration::from_secs(15),
+        Duration::from_secs(30),
     )
     .await;
 
@@ -445,7 +474,7 @@ async fn test_create_vault_in_second_org() {
         &cluster,
         region,
         org_b_id,
-        Duration::from_secs(15),
+        Duration::from_secs(30),
     )
     .await;
 
@@ -531,7 +560,7 @@ async fn test_delete_vault_tears_down_vault_group() {
     let vault_slug =
         crate::common::create_test_vault(&leader.addr, org_slug).await.expect("create vault");
     let vault_id =
-        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(15))
+        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(30))
             .await;
 
     // Sanity: every voter has the vault group before delete.
@@ -623,7 +652,15 @@ async fn test_delete_vault_tears_down_vault_group() {
 /// (shared helper) + `start_organization_group` (per-vault sweep) must
 /// compose correctly through a real restart. No production code path is
 /// stubbed or bypassed.
-#[tokio::test]
+// Multi-thread runtime override: this test drives the only TCP + restart
+// path in the suite (`with_tcp_data_regions(3, 1)` + `graceful_restart`),
+// which compounds tokio worker starvation under cargo's parallel test
+// scheduler. `#[tokio::test]` defaults to single-worker `CurrentThread`,
+// and three full Raft nodes plus the test driver on one worker is the
+// reproduction window for the Mode A / Mode C flake class documented in
+// `docs/audits/parallel-test-flakes-2026-04-29.md`. Multi-thread keeps
+// this test starvation-tolerant without affecting the rest of the suite.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_vault_group_rehydrates_after_graceful_cluster_restart() {
     // TCP transport is required for this test: on restart, peer addresses
     // must re-populate before the per-organization rehydration sweep runs,
@@ -657,7 +694,7 @@ async fn test_vault_group_rehydrates_after_graceful_cluster_restart() {
         &cluster,
         region,
         org_id_pre,
-        std::time::Duration::from_secs(15),
+        std::time::Duration::from_secs(30),
     )
     .await;
 
@@ -805,7 +842,7 @@ async fn test_write_routes_to_vault_shard_and_lands_in_vault_state() {
     // the apply → watcher → `start_vault_group` chain. Returns the
     // internal `VaultId` every node agrees on.
     let vault_id =
-        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(15))
+        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(30))
             .await;
 
     // Capture baseline per-vault applied index on the leader's vault
@@ -928,7 +965,7 @@ async fn test_vault_hibernation_sleep_and_wake() {
 
     crate::common::create_test_vault(&leader.addr, org_slug).await.expect("create vault");
     let vault_id =
-        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(15))
+        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(30))
             .await;
 
     // Flip hibernation on with an aggressive idle window — this exercises the
@@ -1011,7 +1048,7 @@ async fn test_vault_hibernation_disabled_by_default() {
     let org_id = resolve_org_id(leader, org_slug);
     crate::common::create_test_vault(&leader.addr, org_slug).await.expect("create vault");
     let vault_id =
-        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(15))
+        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(30))
             .await;
 
     let vault_group = leader

@@ -2430,9 +2430,16 @@ pub async fn create_test_vault(
             },
             Err(status)
                 if status.code() == tonic::Code::NotFound
-                    || status.code() == tonic::Code::FailedPrecondition =>
+                    || status.code() == tonic::Code::FailedPrecondition
+                    || (status.code() == tonic::Code::Unavailable
+                        && status.message().contains("Not the leader")) =>
             {
-                // Org not yet ready — retry
+                // Org not yet ready — retry. The `Unavailable` + "Not the leader"
+                // arm matches production SDK behavior: the per-org Raft group's
+                // delegated-leader adoption watcher is `tokio::spawn`'d and may
+                // not have observed the parent region group's leader yet at the
+                // moment the saga finishes. Production clients retry through the
+                // SDK's `with_retry_cancellable`; tests must do the same.
                 if start.elapsed() > timeout_dur {
                     return Err(
                         format!("vault creation failed after retry: {}", status.message()).into()

@@ -2448,7 +2448,12 @@ mod tests {
     async fn test_bootstrap_fresh_node_waits_for_init() {
         let temp_dir = tempdir().expect("create temp dir");
         let data_dir = temp_dir.path().to_path_buf();
-        let config = Config::for_test(1, 50055, data_dir.clone());
+        // Allocate an ephemeral port from the kernel rather than hardcoding —
+        // hardcoded ports collide under cross-process parallel test runs.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+        let config = Config::for_test(1, port, data_dir.clone());
 
         // No cluster_id file — fresh node path. Without an InitCluster RPC
         // or seed discovery, the node blocks until shutdown is signaled.

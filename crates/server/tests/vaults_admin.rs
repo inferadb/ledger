@@ -104,7 +104,7 @@ async fn show_vault_returns_membership_and_lifecycle() {
     let vault_slug = create_test_vault(&leader.addr, org_slug).await.expect("create vault");
 
     let _vault_id =
-        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(15))
+        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(30))
             .await;
 
     let mut admin = create_admin_client(&leader.addr).await.expect("admin client");
@@ -146,7 +146,7 @@ async fn repair_vault_returns_noop_for_healthy_vault() {
     let vault_slug = create_test_vault(&leader.addr, org_slug).await.expect("create vault");
 
     let _vault_id =
-        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(15))
+        wait_for_vault_group_live_on_all_voters(&cluster, region, org_id, Duration::from_secs(30))
             .await;
 
     let mut admin = create_admin_client(&leader.addr).await.expect("admin client");
