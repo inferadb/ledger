@@ -130,7 +130,7 @@ serial_test = "3"
 
 
 # DNS resolver for A record discovery
-hickory-resolver = "0.25"
+hickory-resolver = "0.26"
 
 # Object Storage (S3, GCS, Azure, local)
 object_store = { version = "0.13", features = ["aws", "gcp", "azure"] }
