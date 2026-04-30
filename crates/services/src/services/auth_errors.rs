@@ -10,8 +10,11 @@
 //!
 //! # Usage
 //!
-//! ```no_run
-//! use inferadb_ledger_services::services::auth_errors::{unified_auth_error, AuthFailureReason};
+//! Both `AuthFailureReason` and `unified_auth_error` are `pub(crate)` —
+//! the example below illustrates the internal call shape, not an external API.
+//!
+//! ```text
+//! use crate::services::auth_errors::{unified_auth_error, AuthFailureReason};
 //!
 //! // Instead of: Status::unauthenticated("User not found")
 //! let err = unified_auth_error(AuthFailureReason::UserNotFound);

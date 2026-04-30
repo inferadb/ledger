@@ -2616,6 +2616,9 @@ service AppService {
   // List client assertion entries for an app.
   rpc ListAppClientAssertions(ListAppClientAssertionsRequest) returns (ListAppClientAssertionsResponse);
 
+  // Get a single client assertion entry by ID.
+  rpc GetAppClientAssertion(GetAppClientAssertionRequest) returns (GetAppClientAssertionResponse);
+
   // Create a client assertion entry. Returns the private key PEM (one-time).
   rpc CreateAppClientAssertion(CreateAppClientAssertionRequest) returns (CreateAppClientAssertionResponse);
 
@@ -2799,6 +2802,17 @@ message ListAppClientAssertionsRequest {
 
 message ListAppClientAssertionsResponse {
   repeated AppClientAssertionInfo assertions = 1;
+}
+
+message GetAppClientAssertionRequest {
+  OrganizationSlug organization = 1;
+  UserSlug caller = 2;
+  AppSlug app = 3;
+  ClientAssertionId assertion = 4;
+}
+
+message GetAppClientAssertionResponse {
+  AppClientAssertionInfo assertion = 1;
 }
 
 message CreateAppClientAssertionRequest {

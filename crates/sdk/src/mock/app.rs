@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use inferadb_ledger_proto::proto;
+use inferadb_ledger_types::{AppSlug, ClientAssertionId, OrganizationSlug};
 use tonic::{Request, Response, Status};
 
 use super::MockState;
@@ -166,6 +167,28 @@ impl proto::app_service_server::AppService for MockAppService {
         };
 
         Ok(Response::new(proto::ListAppClientAssertionsResponse { assertions: vec![assertion] }))
+    }
+
+    async fn get_app_client_assertion(
+        &self,
+        request: Request<proto::GetAppClientAssertionRequest>,
+    ) -> Result<Response<proto::GetAppClientAssertionResponse>, Status> {
+        self.state.check_injection().await?;
+
+        let req = request.into_inner();
+        let organization = OrganizationSlug::new(req.organization.map_or(0, |o| o.slug));
+        let app = AppSlug::new(req.app.map_or(0, |a| a.slug));
+        let assertion_id = ClientAssertionId::new(
+            req.assertion.ok_or_else(|| Status::invalid_argument("Missing assertion ID"))?.id,
+        );
+
+        let assertions = self.state.app_client_assertions.read();
+        let assertion = assertions
+            .get(&(organization, app, assertion_id))
+            .cloned()
+            .ok_or_else(|| Status::not_found("Client assertion not found"))?;
+
+        Ok(Response::new(proto::GetAppClientAssertionResponse { assertion: Some(assertion) }))
     }
 
     async fn create_app_client_assertion(

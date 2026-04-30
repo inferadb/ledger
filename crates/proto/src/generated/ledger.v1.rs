@@ -3134,6 +3134,22 @@ pub struct ListAppClientAssertionsResponse {
     #[prost(message, repeated, tag = "1")]
     pub assertions: ::prost::alloc::vec::Vec<AppClientAssertionInfo>,
 }
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetAppClientAssertionRequest {
+    #[prost(message, optional, tag = "1")]
+    pub organization: ::core::option::Option<OrganizationSlug>,
+    #[prost(message, optional, tag = "2")]
+    pub caller: ::core::option::Option<UserSlug>,
+    #[prost(message, optional, tag = "3")]
+    pub app: ::core::option::Option<AppSlug>,
+    #[prost(message, optional, tag = "4")]
+    pub assertion: ::core::option::Option<ClientAssertionId>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetAppClientAssertionResponse {
+    #[prost(message, optional, tag = "1")]
+    pub assertion: ::core::option::Option<AppClientAssertionInfo>,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateAppClientAssertionRequest {
     #[prost(message, optional, tag = "1")]
@@ -15839,6 +15855,33 @@ pub mod app_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Get a single client assertion entry by ID.
+        pub async fn get_app_client_assertion(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetAppClientAssertionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetAppClientAssertionResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ledger.v1.AppService/GetAppClientAssertion",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ledger.v1.AppService", "GetAppClientAssertion"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         /// Create a client assertion entry. Returns the private key PEM (one-time).
         pub async fn create_app_client_assertion(
             &mut self,
@@ -16113,6 +16156,14 @@ pub mod app_service_server {
             request: tonic::Request<super::ListAppClientAssertionsRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ListAppClientAssertionsResponse>,
+            tonic::Status,
+        >;
+        /// Get a single client assertion entry by ID.
+        async fn get_app_client_assertion(
+            &self,
+            request: tonic::Request<super::GetAppClientAssertionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetAppClientAssertionResponse>,
             tonic::Status,
         >;
         /// Create a client assertion entry. Returns the private key PEM (one-time).
@@ -16697,6 +16748,52 @@ pub mod app_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = ListAppClientAssertionsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ledger.v1.AppService/GetAppClientAssertion" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetAppClientAssertionSvc<T: AppService>(pub Arc<T>);
+                    impl<
+                        T: AppService,
+                    > tonic::server::UnaryService<super::GetAppClientAssertionRequest>
+                    for GetAppClientAssertionSvc<T> {
+                        type Response = super::GetAppClientAssertionResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetAppClientAssertionRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as AppService>::get_app_client_assertion(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetAppClientAssertionSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

@@ -188,7 +188,9 @@ done
     echo ""
     echo "| concurrency | pool_size | ops/s | p50 (µs) | p95 (µs) | p99 (µs) | p999 (µs) | errors |"
     echo "|---:|---:|---:|---:|---:|---:|---:|---:|"
-    tail -n +2 "$CSV" | while IFS=, read -r c p tput p50 p95 p99 p999 errs ops elapsed; do
+    # Columns 9 (`ops`) and 10 (`elapsed`) are read into _ops and _elapsed to
+    # silence shellcheck SC2034; they're not surfaced in this table.
+    tail -n +2 "$CSV" | while IFS=, read -r c p tput p50 p95 p99 p999 errs _ops _elapsed; do
         echo "| $c | $p | $tput | $p50 | $p95 | $p99 | $p999 | $errs |"
     done
     echo ""

@@ -378,6 +378,46 @@ impl LedgerClient {
         .await
     }
 
+    /// Fetches a single client assertion by ID.
+    ///
+    /// Returns [`SdkError::Rpc`] with `code = NotFound` when the assertion does
+    /// not exist, belongs to a different app, or its enclosing app belongs to a
+    /// different organization than the one supplied.
+    ///
+    /// [`SdkError::Rpc`]: crate::SdkError::Rpc
+    pub async fn get_app_client_assertion(
+        &self,
+        user: UserSlug,
+        organization: OrganizationSlug,
+        app: AppSlug,
+        assertion: DomainClientAssertionId,
+    ) -> Result<AppClientAssertionInfo> {
+        let pool = self.pool.clone();
+        self.call_with_retry("get_app_client_assertion", || {
+            let pool = pool.clone();
+            async move {
+                let mut client = crate::connected_client!(pool, create_app_client);
+
+                let request = proto::GetAppClientAssertionRequest {
+                    organization: Some(proto::OrganizationSlug { slug: organization.value() }),
+                    caller: Some(proto::UserSlug { slug: user.value() }),
+                    app: Some(proto::AppSlug { slug: app.value() }),
+                    assertion: Some(proto::ClientAssertionId { id: assertion.value() }),
+                };
+
+                let response = client
+                    .get_app_client_assertion(tonic::Request::new(request))
+                    .await?
+                    .into_inner();
+
+                response.assertion.as_ref().map(assertion_info_from_proto).ok_or_else(|| {
+                    missing_response_field("assertion", "GetAppClientAssertionResponse")
+                })
+            }
+        })
+        .await
+    }
+
     /// Creates a client assertion for an app. Returns the assertion metadata and private key PEM.
     ///
     /// The private key PEM is only returned on creation — it cannot be retrieved again.

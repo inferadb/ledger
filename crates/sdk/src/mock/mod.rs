@@ -81,7 +81,7 @@ use inferadb_ledger_proto::proto::{
     token_service_server::TokenServiceServer, user_service_server::UserServiceServer,
     vault_service_server::VaultServiceServer, write_service_server::WriteServiceServer,
 };
-use inferadb_ledger_types::{OrganizationSlug, Region, VaultSlug};
+use inferadb_ledger_types::{AppSlug, ClientAssertionId, OrganizationSlug, Region, VaultSlug};
 use invitation::MockInvitationService;
 use organization::MockOrganizationService;
 use parking_lot::RwLock;
@@ -188,6 +188,15 @@ struct MockState {
 
     /// Event storage
     events: RwLock<Vec<proto::EventEntry>>,
+
+    /// App client assertion storage: (org, app, assertion_id) -> info.
+    ///
+    /// Used by `get_app_client_assertion` to resolve a single assertion by ID.
+    /// The existing `list_app_client_assertions` mock returns a static
+    /// fixture and does not consult this map.
+    app_client_assertions: RwLock<
+        HashMap<(OrganizationSlug, AppSlug, ClientAssertionId), proto::AppClientAssertionInfo>,
+    >,
 }
 
 /// Member entry in mock organization storage.
@@ -664,6 +673,42 @@ impl MockLedgerServer {
         });
     }
 
+    /// Seeds an app client assertion for `get_app_client_assertion` tests.
+    ///
+    /// The mock handler returns this fixture when queried by matching
+    /// `(organization, app, assertion_id)`, and `Status::not_found` otherwise.
+    ///
+    /// # Arguments
+    ///
+    /// * `organization` - Organization slug.
+    /// * `app` - App slug.
+    /// * `assertion_id` - Client assertion ID.
+    /// * `name` - Display name for the assertion.
+    /// * `enabled` - Whether the assertion is enabled.
+    pub fn add_app_client_assertion(
+        &self,
+        organization: OrganizationSlug,
+        app: AppSlug,
+        assertion_id: ClientAssertionId,
+        name: &str,
+        enabled: bool,
+    ) {
+        let now =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let now_proto = prost_types::Timestamp {
+            seconds: now.as_secs() as i64,
+            nanos: now.subsec_nanos() as i32,
+        };
+        let info = proto::AppClientAssertionInfo {
+            id: Some(proto::ClientAssertionId { id: assertion_id.value() }),
+            name: name.to_string(),
+            enabled,
+            expires_at: Some(now_proto),
+            created_at: Some(now_proto),
+        };
+        self.state.app_client_assertions.write().insert((organization, app, assertion_id), info);
+    }
+
     /// Adds a mock event for events tests.
     pub fn add_event(
         &self,
@@ -711,6 +756,7 @@ impl MockLedgerServer {
         self.state.user_emails.write().clear();
         self.state.invitations.write().clear();
         self.state.events.write().clear();
+        self.state.app_client_assertions.write().clear();
         self.state.unavailable_count.store(0, Ordering::SeqCst);
         self.state.delay_ms.store(0, Ordering::SeqCst);
         self.state.write_count.store(0, Ordering::SeqCst);

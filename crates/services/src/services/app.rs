@@ -15,14 +15,15 @@ use inferadb_ledger_proto::proto::{
     AppCredentialsInfo, AppInfo, AppVaultConnectionInfo, CreateAppClientAssertionRequest,
     CreateAppClientAssertionResponse, CreateAppRequest, CreateAppResponse,
     DeleteAppClientAssertionRequest, DeleteAppClientAssertionResponse, DeleteAppRequest,
-    DeleteAppResponse, GetAppClientSecretRequest, GetAppClientSecretResponse, GetAppRequest,
-    GetAppResponse, ListAppClientAssertionsRequest, ListAppClientAssertionsResponse,
-    ListAppVaultsRequest, ListAppVaultsResponse, ListAppsRequest, ListAppsResponse,
-    RemoveAppVaultRequest, RemoveAppVaultResponse, RotateAppClientSecretRequest,
-    RotateAppClientSecretResponse, SetAppClientAssertionEnabledRequest,
-    SetAppClientAssertionEnabledResponse, SetAppCredentialEnabledRequest,
-    SetAppCredentialEnabledResponse, SetAppEnabledRequest, SetAppEnabledResponse, UpdateAppRequest,
-    UpdateAppResponse, UpdateAppVaultRequest, UpdateAppVaultResponse,
+    DeleteAppResponse, GetAppClientAssertionRequest, GetAppClientAssertionResponse,
+    GetAppClientSecretRequest, GetAppClientSecretResponse, GetAppRequest, GetAppResponse,
+    ListAppClientAssertionsRequest, ListAppClientAssertionsResponse, ListAppVaultsRequest,
+    ListAppVaultsResponse, ListAppsRequest, ListAppsResponse, RemoveAppVaultRequest,
+    RemoveAppVaultResponse, RotateAppClientSecretRequest, RotateAppClientSecretResponse,
+    SetAppClientAssertionEnabledRequest, SetAppClientAssertionEnabledResponse,
+    SetAppCredentialEnabledRequest, SetAppCredentialEnabledResponse, SetAppEnabledRequest,
+    SetAppEnabledResponse, UpdateAppRequest, UpdateAppResponse, UpdateAppVaultRequest,
+    UpdateAppVaultResponse,
 };
 use inferadb_ledger_raft::types::{LedgerResponse, OrganizationRequest};
 use inferadb_ledger_state::system::{
@@ -822,6 +823,38 @@ impl proto::app_service_server::AppService for AppService {
             })
             .collect();
         Ok(Response::new(ListAppClientAssertionsResponse { assertions }))
+    }
+
+    async fn get_app_client_assertion(
+        &self,
+        request: Request<GetAppClientAssertionRequest>,
+    ) -> Result<Response<GetAppClientAssertionResponse>, Status> {
+        let inner = request.into_inner();
+        let resolver = self.resolver();
+        let org_id = resolver.extract_and_resolve(&inner.organization)?;
+        let (resolved_org, app_id) = resolver.extract_and_resolve_app(&inner.app)?;
+        if org_id != resolved_org {
+            return Err(Status::not_found("App not found in the specified organization"));
+        }
+        let assertion_id_proto = inner
+            .assertion
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("Missing assertion ID"))?;
+        let assertion_id = DomainClientAssertionId::new(assertion_id_proto.id);
+
+        let key = SystemKeys::app_assertion_key(resolved_org, app_id, assertion_id);
+        let entity = self
+            .ctx
+            .state
+            .get_entity(SYSTEM_VAULT_ID, key.as_bytes())
+            .map_err(|e| error_classify::storage_error(&e))?
+            .ok_or_else(|| Status::not_found("Client assertion not found"))?;
+        let entry = decode::<ClientAssertionEntry>(&entity.value)
+            .map_err(|e| error_classify::serialization_error(&e))?;
+
+        let name = self.load_assertion_name(resolved_org, app_id, entry.id);
+        let info = Self::assertion_to_proto(&entry, name);
+        Ok(Response::new(GetAppClientAssertionResponse { assertion: Some(info) }))
     }
 
     async fn create_app_client_assertion(

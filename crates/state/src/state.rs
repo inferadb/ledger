@@ -173,7 +173,7 @@ pub type VaultDbFactory<B> =
 /// against the local `Arc`. Transactions borrow from the `Arc`, not from
 /// the [`StateLayer`], so the two-liner pattern
 ///
-/// ```ignore
+/// ```text
 /// let db = state.db_for(vault)?;
 /// let mut txn = db.write()?;
 /// ```
@@ -425,7 +425,7 @@ impl<B: StorageBackend> StateLayer<B> {
     /// the transaction's `'_` lifetime is tied to the caller's `Arc`,
     /// not to any `RwLock` guard:
     ///
-    /// ```ignore
+    /// ```text
     /// let db = state.db_for(vault)?;
     /// let mut txn = db.write()?;
     /// // ... use txn ...
@@ -519,7 +519,7 @@ impl<B: StorageBackend> StateLayer<B> {
     // `&Database`, so the Arc must live in the caller's scope. Call sites
     // now take the two-liner:
     //
-    // ```ignore
+    // ```text
     // let db = state.db_for(vault)?;          // owned Arc
     // let mut txn = db.write().context(StoreSnafu)?;
     // // ... use txn ...
