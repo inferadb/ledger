@@ -77,7 +77,7 @@ snafu = "0.9"
 thiserror = "2"
 
 # Parallelism
-rayon = "1.10"
+rayon = "1.12"
 
 # Concurrency
 parking_lot = "0.12"
