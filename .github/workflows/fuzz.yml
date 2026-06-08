@@ -38,12 +38,12 @@ jobs:
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@fe104658747b27e96e4f7e80cd0a94068e53901d # v2.16.1
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
 
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Install nightly Rust
         run: |
@@ -56,7 +56,7 @@ jobs:
           sudo apt-get install -y -qq protobuf-compiler
 
       - name: Cache cargo-fuzz
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ${{ runner.tool_cache }}/cargo-fuzz
           key: cargo-fuzz-bin-${{ env.CARGO_FUZZ_VERSION }}
@@ -67,7 +67,7 @@ jobs:
           cargo install --root "${{ runner.tool_cache }}/cargo-fuzz" --version "$CARGO_FUZZ_VERSION" cargo-fuzz --locked
 
       - name: Cache Rust dependencies
-        uses: step-security/rust-cache@9be15b830520fab0ec3939586e917e4855cf76bd # v2.8.3
+        uses: step-security/rust-cache@851174d9a2fdc03e0896e02844dcc61d81dd7851 # v2.9.1
         with:
           shared-key: fuzz
           workspaces: fuzz
@@ -81,7 +81,7 @@ jobs:
         run: cargo +nightly fuzz run "${{ matrix.fuzz_target }}" -- -max_total_time="$FUZZ_TIME"
 
       - name: Upload artifacts on failure
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
           name: fuzz-artifacts-${{ matrix.fuzz_target }}-${{ github.sha }}
