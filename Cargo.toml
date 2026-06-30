@@ -105,7 +105,7 @@ metrics-exporter-prometheus = { version = "0.18", default-features = false, feat
 
 # OpenTelemetry (OTLP export for canonical log lines)
 opentelemetry = "0.31"
-opentelemetry_sdk = "0.31"
+opentelemetry_sdk = "0.32"
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"] }
 tracing-opentelemetry = "0.32"
 
