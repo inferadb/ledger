@@ -249,7 +249,9 @@ define_id!(
     /// # Display
     ///
     /// Formats with `org:` prefix: `org:42`.
-    OrganizationId, i64, "org"
+    OrganizationId,
+    i64,
+    "org"
 );
 
 define_slug!(
@@ -276,7 +278,9 @@ define_id!(
     /// # Display
     ///
     /// Formats with `vault:` prefix: `vault:7`.
-    VaultId, i64, "vault"
+    VaultId,
+    i64,
+    "vault"
 );
 
 define_slug!(
@@ -303,7 +307,9 @@ define_id!(
     /// # Display
     ///
     /// Formats with `user:` prefix: `user:1`.
-    UserId, i64, "user"
+    UserId,
+    i64,
+    "user"
 );
 
 define_slug!(
@@ -328,7 +334,9 @@ define_id!(
     /// # Display
     ///
     /// Formats with `email:` prefix: `email:42`.
-    UserEmailId, i64, "email"
+    UserEmailId,
+    i64,
+    "email"
 );
 
 define_id!(
@@ -344,7 +352,9 @@ define_id!(
     /// # Display
     ///
     /// Formats with `verify:` prefix: `verify:42`.
-    EmailVerifyTokenId, i64, "verify"
+    EmailVerifyTokenId,
+    i64,
+    "verify"
 );
 
 // ============================================================================
@@ -361,7 +371,9 @@ define_id!(
     /// # Display
     ///
     /// Formats with `team:` prefix: `team:3`.
-    TeamId, i64, "team"
+    TeamId,
+    i64,
+    "team"
 );
 
 impl Default for TeamId {
@@ -395,7 +407,9 @@ define_id!(
     /// # Display
     ///
     /// Formats with `app:` prefix: `app:5`.
-    AppId, i64, "app"
+    AppId,
+    i64,
+    "app"
 );
 
 impl Default for AppId {
@@ -430,7 +444,9 @@ define_id!(
     /// # Display
     ///
     /// Formats with `assertion:` prefix: `assertion:2`.
-    ClientAssertionId, i64, "assertion"
+    ClientAssertionId,
+    i64,
+    "assertion"
 );
 
 impl Default for ClientAssertionId {
@@ -448,7 +464,9 @@ define_id!(
     /// # Display
     ///
     /// Formats with `sigkey:` prefix: `sigkey:1`.
-    SigningKeyId, i64, "sigkey"
+    SigningKeyId,
+    i64,
+    "sigkey"
 );
 
 impl Default for SigningKeyId {
@@ -466,7 +484,9 @@ define_id!(
     /// # Display
     ///
     /// Formats with `rtoken:` prefix: `rtoken:42`.
-    RefreshTokenId, i64, "rtoken"
+    RefreshTokenId,
+    i64,
+    "rtoken"
 );
 
 impl Default for RefreshTokenId {
@@ -484,7 +504,9 @@ define_id!(
     /// # Display
     ///
     /// Formats with `ucred:` prefix: `ucred:1`.
-    UserCredentialId, i64, "ucred"
+    UserCredentialId,
+    i64,
+    "ucred"
 );
 
 impl Default for UserCredentialId {
@@ -502,7 +524,9 @@ define_id!(
     /// # Display
     ///
     /// Formats with `invite:` prefix: `invite:1`.
-    InviteId, i64, "invite"
+    InviteId,
+    i64,
+    "invite"
 );
 
 impl Default for InviteId {
